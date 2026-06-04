@@ -378,18 +378,18 @@ export class AcpDispatcher {
     const negotiated = Math.max(1, Math.min(requested, ACP_PROTOCOL_VERSION));
     return {
       protocolVersion: negotiated,
+      agentInfo: { name: 'qwen-code', version: '0.17.0' },
       agentCapabilities: {
         loadSession: true,
-        // Mirror acpAgent.ts promptCapabilities: #resolvePrompt handles audio
-        // blocks identically to image (both become inlineData Parts).
         promptCapabilities: {
           image: true,
           audio: true,
           embeddedContext: true,
         },
-        // Model + mode are exposed via the STANDARD `session/set_config_option`
-        // (categories `model`/`mode`); advertise that here.
-        configOptions: true,
+        sessionCapabilities: {
+          list: {},
+          resume: {},
+        },
         // Vendor extensions are advertised under `_meta` keyed by domain
         // (ACP convention, e.g. `_meta: { "zed.dev": … }`). Clients
         // feature-detect before calling `_qwen/…` methods.
@@ -740,6 +740,57 @@ export class AcpDispatcher {
 
         // STANDARD method (SDK 0.14.1, non-`unstable_`): model + mode live
         // here under categories `model`/`mode`, routed to the existing bridge
+        // Standard ACP method: set session mode (approval mode).
+        case 'session/set_mode': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const modeId = params['modeId'];
+          if (typeof modeId !== 'string') {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`modeId` is required and must be a string',
+                ),
+              );
+            }
+            return;
+          }
+          if (!APPROVAL_MODES.includes(modeId as ApprovalMode)) {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `invalid mode "${modeId}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
+                ),
+              );
+            }
+            return;
+          }
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          await this.bridge.setSessionApprovalMode(
+            sessionId,
+            modeId as ApprovalMode,
+            { persist: params['persist'] === true },
+            ctx,
+          );
+          const opts = await this.configOptionsFor(sessionId);
+          this.replySession(conn, sessionId, id, {
+            configOptions: opts ?? [],
+          });
+          return;
+        }
+
         // setters. Replaces the old vendor `_qwen/session/set_model`.
         case 'session/set_config_option': {
           const sessionId = String(params['sessionId'] ?? '');
