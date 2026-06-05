@@ -51,7 +51,7 @@ stateDiagram-v2
 
 `sessionScope: 'single'`（默认）下，bridge 的 `defaultEntry` 被所有连进来的客户端共享。`POST /session` 到来时 `defaultEntry` 已存在 → 不 spawn 新 ACP child，直接返回 `attached: true`。bridge 同步 bump `attachCount` 并把调用方的 `X-Qwen-Client-Id` 登记到 `clientIds`。
 
-`sessionScope: 'per-client'`：每次 `POST /session` 新建一个 session。仍然受 `maxSessions` 约束。
+`sessionScope: 'thread'`：每次 `POST /session` 新建一个 session。仍然受 `maxSessions` 约束。
 
 ### 身份
 

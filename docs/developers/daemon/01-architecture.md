@@ -1,7 +1,8 @@
 # Daemon 架构
+
 ## 概览
 
-一个 `qwen serve` 进程坚持 **一 daemon = 一 workspace** 的不变式。它内嵌一个 Express HTTP 服务、持有一个 `acp-bridge` 实例、拉起一个 ACP 子进程（`qwen --acp`）来跑真正的 agent 运行时。多个客户端（CLI TUI、IDE companion、IM channel 机器人、Web BFF、自定义脚本）通过 HTTP + SSE 连进来，要么共享同一个 ACP session（`sessionScope: 'single'`，默认），要么每个客户端各拿一个（`per-client`）。
+一个 `qwen serve` 进程坚持 **一 daemon = 一 workspace** 的不变式。它内嵌一个 Express HTTP 服务、持有一个 `acp-bridge` 实例、拉起一个 ACP 子进程（`qwen --acp`）来跑真正的 agent 运行时。多个客户端（CLI TUI、IDE companion、IM channel 机器人、Web BFF、自定义脚本）通过 HTTP + SSE 连进来，要么共享同一个 ACP session（`sessionScope: 'single'`，默认），要么每个客户端各拿一个（`'thread'`）。
 
 在 ACP 子进程内部，MCP server 通过 `McpTransportPool`（F2）实现工作区内共享：一对 (server name + 配置指纹) 对应一条 MCP transport，不管被几个 session 发现都只起一份。Bridge 的 `MultiClientPermissionMediator`（F3）在四种策略之一下协调多客户端的权限投票。
 

@@ -78,7 +78,7 @@
 - **Mediator policy** — `first-responder` / `designated` / `consensus` / `local-only` 之一，决定多客户端权限投票如何裁决。
 - **Originator client id** — 触发当前权限请求的那次 prompt 所用的 `X-Qwen-Client-Id`，`designated` 策略只接受这个 id 的投票。
 - **PoolEntry** — `packages/core/src/tools/mcp-pool-entry.ts`，`McpTransportPool` 里的一条记录：一条 MCP transport、引用此条目的会话引用计数、空闲 drain 定时器。
-- **Session scope** — `single`（所有客户端共享一个 ACP 会话）或 `per-client`（每客户端一个会话），默认 `single`。
+- **Session scope** — `single`（所有客户端共享一个 ACP 会话）或 `thread`（每客户端一个会话），默认 `single`。
 - **SSE** — Server-Sent Events，daemon 的出站事件通道（`GET /session/:id/events`）。
 - **Workspace** — daemon 启动时绑定的目录（`--workspace` 或 `cwd`），一个 daemon 进程 = 一个 workspace。
 
