@@ -1,4 +1,5 @@
 # TypeScript SDK Daemon 客户端
+
 ## 概览
 
 `packages/sdk-typescript/src/daemon/` 是 **TypeScript SDK 的 daemon 客户端**。任何 TypeScript / JavaScript 宿主想跟在跑的 `qwen serve` 通话都走它（CLI 自己的 TUI 适配器、channel 机器人后端、VSCode IDE companion、自定义脚本、服务端 Web BFF）。所有其他适配器都依赖它。
@@ -12,7 +13,7 @@
 | `DaemonSessionClient.ts` | session 级封装，自动跟踪 SSE 重放                                                                                            |
 | `DaemonAuthFlow.ts`      | 高层 OAuth Device Flow 助手                                                                                                  |
 | `sse.ts`                 | `parseSseStream`（NDJSON / SSE 框架解析）                                                                                    |
-| `events.ts`              | `narrowDaemonEvent`、`reduceDaemonSessionEvent`、`reduceDaemonAuthEvent`（见 [`09-event-schema.md`](./09-event-schema.md)）  |
+| `events.ts`              | `asKnownDaemonEvent`、`reduceDaemonSessionEvent`、`reduceDaemonAuthEvent`（见 [`09-event-schema.md`](./09-event-schema.md)） |
 | `types.ts`               | `DaemonCapabilities`、`DaemonSession`、`DaemonEvent`、`PermissionResponse`、`PromptResult`、MCP / agent / memory / auth 类型 |
 
 走查示例在 [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md)；本文是架构/契约参考。
@@ -119,7 +120,7 @@ interface DaemonAuthFlowHandle {
 - LF 与 CRLF 帧。
 - 缓冲溢出上限（16 MiB），防 daemon 发单个荒谬大帧的防御性边界。
 - AbortSignal 接线 —— abort 关掉流和 iterator。
-- 仅注释帧与未知 event 类型（透传为 `DaemonEvent`，SDK 消费方通过 `narrowDaemonEvent` 下游 narrow）。
+- 仅注释帧与未知 event 类型（透传为 `DaemonEvent`，SDK 消费方通过 `asKnownDaemonEvent` 下游 narrow）。
 
 ### 类型（`types.ts`）
 
@@ -171,7 +172,7 @@ sequenceDiagram
         P-->>SC: DaemonEvent
         SC->>SC: bump lastSeenEventId
         SC-->>App: DaemonEvent
-        App->>App: narrowDaemonEvent + reduce
+        App->>App: asKnownDaemonEvent + reduce
     end
 ```
 
@@ -217,7 +218,7 @@ sequenceDiagram
 
 SDK 还导出 `packages/sdk-typescript/src/daemon/ui/`，一套面向任何 UI 宿主的「daemon 事件 → transcript blocks」原语：
 
-- `normalizeDaemonEvent(evt)` 把 wire 上 29 种 typed event 映射成 29 种 UI 友好的 `DaemonUiEventType`。
+- `normalizeDaemonEvent(evt)` 把 wire 上 38 种 typed event 映射成 34 种 UI 友好的 `DaemonUiEventType`。
 - `createDaemonTranscriptState()` + `reduceDaemonTranscriptEvents(state, events)` 把 UI 事件流投到 `DaemonTranscriptBlock[]`。
 - `createDaemonTranscriptStore()` 提供 subscribe / dispatch 包装。
 - `render.ts` / `terminal.ts` 给 HTML 与终端基线渲染；`toolPreview.ts` 给 tool call 摘要。
@@ -247,7 +248,7 @@ SDK 还导出 `packages/sdk-typescript/src/daemon/ui/`，一套面向任何 UI �
 - **`fetchTimeoutMs` 是 per-call 不是连接级**。长 body 读共享定时器。流式响应必须 per-call 覆盖或把超时设 `0`。
 - **SSE 是超时绕过** —— 长 SSE 不被 `fetchTimeoutMs` 杀；用 `AbortSignal` 做调用方控制。
 - **`parseSseStream` 缓冲上限 16 MiB**，单帧大于此 iterator 中断（daemon 不会合法发那么大的帧）。
-- **`narrowDaemonEvent` 对未来事件 type 返 `kind: 'unknown'`**。SDK 消费方必须处理这条分支而不是假设联合穷举 —— 这就是向前兼容契约。
+- **`asKnownDaemonEvent` 对未识别事件 type 返回 `undefined`**。SDK 消费方必须处理这条分支而不是假设联合穷举 —— 这就是向前兼容契约。未识别事件计入 `DaemonSessionViewState.unrecognizedKnownEventCount`。
 - **`client_evicted`、`slow_client_warning`、`stream_error` 不在重放环里**。eviction 后重连从 daemon 的环重放，不会再看到 eviction 帧。
 - **`DaemonClient` 不自动重试**。网络失败以 rejection 浮上来；重连 / 重放策略是调用方的责任（`DaemonSessionClient.events()` 让重放容易，但重连仍要调用方做）。
 

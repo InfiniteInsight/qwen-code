@@ -6,7 +6,7 @@
 
 `packages/sdk-typescript/src/daemon/ui/` 是 SDK 新增的 `ui/*` 子包，把「daemon SSE 事件 → UI 可渲染 transcript blocks」这条变换链做成可复用原语：
 
-- **归一化层** (`normalizer.ts`)：把 daemon wire 上 29 种 typed event（详见 [`09-event-schema.md`](./09-event-schema.md)）映射成 UI 友好的 `DaemonUiEventType`（29 种语义事件，命名风格 `assistant.text.delta` / `tool.update` / `session.metadata.changed`）。
+- **归一化层** (`normalizer.ts`)：把 daemon wire 上 38 种 typed event（详见 [`09-event-schema.md`](./09-event-schema.md)）映射成 UI 友好的 `DaemonUiEventType`（34 种语义事件，命名风格 `assistant.text.delta` / `tool.update` / `session.metadata.changed`）。
 - **状态机** (`transcript.ts`, `store.ts`)：纯函数 reducer + 可订阅 store，把 UI 事件流投到一个有序的 `DaemonTranscriptBlock[]`。
 - **渲染器** (`render.ts`, `terminal.ts`, `toolPreview.ts`)：transcript blocks → HTML / 终端字符 / tool preview 字符串。宿主可挑用。
 - **conformance** (`conformance.ts`)：跨宿主一致性测试套件，channel / TUI / IDE 迁移到这套时用来确保渲染等价。
@@ -15,7 +15,7 @@
 
 ## 职责
 
-- 把 29 种 daemon wire event 归一成稳定 UI 词汇（`DaemonUiEventType`），让 renderer 不再去读 `rawEvent.data`。
+- 把 38 种 daemon wire event 归一成稳定 UI 词汇（`DaemonUiEventType`），让 renderer 不再去读 `rawEvent.data`。
 - 维护 daemon-monotonic SSE 游标（`eventId`）作为**主排序键**，多端 transcript 同序。
 - 用纯 reducer 投到 transcript block 列表（带 selectors 拿 pending permission / current tool / approval mode / tool progress 等）。
 - 提供 HTML 与终端两种基线渲染（宿主可自定义）。
@@ -26,44 +26,48 @@
 
 ### 包结构
 
-| 文件 | 暴露 | 用途 |
-|---|---|---|
-| `packages/sdk-typescript/src/daemon/ui/index.ts` | 子包 barrel | 唯一公开入口 |
-| `ui/types.ts` | `DaemonUiEventType`、`DaemonUiEvent*`（按 type 一类一 interface）、`DaemonTranscriptBlock`、`DaemonTranscriptState`、`DaemonUiToolProvenance`、`DAEMON_PLAN_TOOL_CALL_ID` | 全部类型 |
-| `ui/normalizer.ts` | `normalizeDaemonEvent(evt) → DaemonUiEvent`、`getSessionUpdatePayload(evt)` | wire → UI 词汇映射 |
-| `ui/transcript.ts` | `createDaemonTranscriptState()`、`appendLocalUserTranscriptMessage()`、`reduceDaemonTranscriptEvents()`、`rebuildDaemonTranscriptBlockIndex()`、selectors（见下） | 状态机 + 选择器 |
-| `ui/store.ts` | `createDaemonTranscriptStore(initial?)` | 可订阅 store 封装 reducer |
-| `ui/toolPreview.ts` | `createDaemonToolPreview(toolEvent)` | tool call summary 文案 |
-| `ui/render.ts` | `DaemonHtmlRenderOptions`、`DaemonRenderOptions` 加渲染函数 | HTML / 通用渲染 |
-| `ui/terminal.ts` | terminal 专用渲染 | 给 TUI 准备 |
-| `ui/conformance.ts` | 跨宿主一致性测试套件 | 迁移老 adapter 时用 |
-| `ui/utils.ts` | `DaemonUiContentPart` 等辅助 | 内部公用 |
+| 文件                                             | 暴露                                                                                                                                                                      | 用途                      |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `packages/sdk-typescript/src/daemon/ui/index.ts` | 子包 barrel                                                                                                                                                               | 唯一公开入口              |
+| `ui/types.ts`                                    | `DaemonUiEventType`、`DaemonUiEvent*`（按 type 一类一 interface）、`DaemonTranscriptBlock`、`DaemonTranscriptState`、`DaemonUiToolProvenance`、`DAEMON_PLAN_TOOL_CALL_ID` | 全部类型                  |
+| `ui/normalizer.ts`                               | `normalizeDaemonEvent(evt) → DaemonUiEvent`、`getSessionUpdatePayload(evt)`                                                                                               | wire → UI 词汇映射        |
+| `ui/transcript.ts`                               | `createDaemonTranscriptState()`、`appendLocalUserTranscriptMessage()`、`reduceDaemonTranscriptEvents()`、`rebuildDaemonTranscriptBlockIndex()`、selectors（见下）         | 状态机 + 选择器           |
+| `ui/store.ts`                                    | `createDaemonTranscriptStore(initial?)`                                                                                                                                   | 可订阅 store 封装 reducer |
+| `ui/toolPreview.ts`                              | `createDaemonToolPreview(toolEvent)`                                                                                                                                      | tool call summary 文案    |
+| `ui/render.ts`                                   | `DaemonHtmlRenderOptions`、`DaemonRenderOptions` 加渲染函数                                                                                                               | HTML / 通用渲染           |
+| `ui/terminal.ts`                                 | terminal 专用渲染                                                                                                                                                         | 给 TUI 准备               |
+| `ui/conformance.ts`                              | 跨宿主一致性测试套件                                                                                                                                                      | 迁移老 adapter 时用       |
+| `ui/utils.ts`                                    | `DaemonUiContentPart` 等辅助                                                                                                                                              | 内部公用                  |
 
-### `DaemonUiEventType` 词汇（29 种）
+### `DaemonUiEventType` 词汇（34 种）
 
 来自 `ui/types.ts:17-50`。按域分组：
 
 **Chat-stream（Stage 1）**
+
 - `user.text.delta`、`assistant.text.delta`、`assistant.done`、`thought.text.delta`
 - `tool.update`、`shell.output`
 - `permission.request`、`permission.resolved`
 - `model.changed`、`status`、`error`、`debug`
 
 **Session-meta**
+
 - `session.metadata.changed`、`session.approval_mode.changed`
 - `session.available_commands`、`session.state_resync_required`
 
 **Workspace（Wave 3-4）**
+
 - `workspace.memory.changed`、`workspace.agent.changed`
 - `workspace.tool.toggled`、`workspace.initialized`
 - `workspace.mcp.budget_warning`、`workspace.mcp.child_refused`
 - `workspace.mcp.server_restarted`、`workspace.mcp.server_restart_refused`
 
 **Auth flow（Wave 4 OAuth）**
+
 - `auth.device_flow.started`、`auth.device_flow.throttled`、`auth.device_flow.authorized`
 - `auth.device_flow.failed`、`auth.device_flow.cancelled`
 
-`normalizeDaemonEvent` 把 daemon wire 上的 29 种 typed event（见 [`09-event-schema.md`](./09-event-schema.md)）映射进来；未知 type 归一为 `debug`，保留 `rawEvent` 给宿主诊断。
+`normalizeDaemonEvent` 把 daemon wire 上的 38 种 typed event（见 [`09-event-schema.md`](./09-event-schema.md)）映射进来；未知 type 归一为 `debug`，保留 `rawEvent` 给宿主诊断。
 
 ### Reducer / selectors
 
@@ -75,8 +79,8 @@ const state = createDaemonTranscriptState();
 const next = reduceDaemonTranscriptEvents(state, daemonUiEvents);
 
 // selectors
-selectTranscriptBlocks(state);                         // 全部 blocks
-selectTranscriptBlocksOrderedByEventId(state);         // 按 eventId 排序（推荐主键）
+selectTranscriptBlocks(state); // 全部 blocks
+selectTranscriptBlocksOrderedByEventId(state); // 按 eventId 排序（推荐主键）
 selectPendingPermissionBlocks(state);
 selectCurrentTool(state);
 selectApprovalMode(state);
@@ -84,7 +88,7 @@ selectToolProgress(state, toolCallId);
 selectSubagentChildBlocks(state, parentBlockId);
 isSubagentChildBlock(block);
 formatBlockTimestamp(block.clientReceivedAt);
-formatMissedRange(state);                              // state_resync_required 后的 "you missed X" 文案
+formatMissedRange(state); // state_resync_required 后的 "you missed X" 文案
 ```
 
 ### Store
@@ -94,7 +98,7 @@ formatMissedRange(state);                              // state_resync_required 
 ```ts
 const store = createDaemonTranscriptStore();
 store.subscribe(() => render(store.getState()));
-store.dispatch(uiEvents);    // 内部走 reducer
+store.dispatch(uiEvents); // 内部走 reducer
 ```
 
 webui 的 `DaemonSessionProvider` 就是基于它实现 React Context（详见下面「消费方」一节）。
@@ -107,9 +111,9 @@ webui 的 `DaemonSessionProvider` 就是基于它实现 React Context（详见�
 flowchart LR
     A["daemon SSE wire frame<br/>type=session_update / permission_request / ..."]
     A --> B["DaemonClient.subscribeEvents<br/>parseSseStream"]
-    B --> C["narrowDaemonEvent<br/>(09-event-schema.md)"]
+    B --> C["asKnownDaemonEvent<br/>(09-event-schema.md)"]
     C --> D["normalizeDaemonEvent<br/>ui/normalizer.ts"]
-    D --> E["DaemonUiEvent<br/>(29 UI-friendly types)"]
+    D --> E["DaemonUiEvent<br/>(34 UI-friendly types)"]
     E --> F["reduceDaemonTranscriptEvents<br/>ui/transcript.ts"]
     F --> G["DaemonTranscriptState +<br/>DaemonTranscriptBlock[]"]
     G --> H["renderer<br/>(render.ts HTML / terminal.ts / 宿主自渲)"]
@@ -126,11 +130,11 @@ flowchart LR
 
 ### `packages/webui/src/daemon/`（[#4328](https://github.com/QwenLM/qwen-code/pull/4328) 一起落地）
 
-| 文件 | 暴露 |
-|---|---|
+| 文件                        | 暴露                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DaemonSessionProvider.tsx` | React `<DaemonSessionProvider />` Provider；`useDaemonSession()`、`useDaemonTranscriptStore()`、`useDaemonTranscriptState()`、`useDaemonTranscriptBlocks()`、`useDaemonPendingPermissions()`、`useDaemonActions()`、`useDaemonConnection()` hooks；`DaemonConnectionStatus` / `DaemonConnectionState` / `DaemonSessionContextValue` 类型 |
-| `transcriptAdapter.ts` | 把 SDK 的 `DaemonTranscriptBlock` 适配成 webui 的 `UnifiedMessage`，包括 markdown 流式 chunk 合并、tool call 摘要等 |
-| `index.ts` | 子包 barrel |
+| `transcriptAdapter.ts`      | 把 SDK 的 `DaemonTranscriptBlock` 适配成 webui 的 `UnifiedMessage`，包括 markdown 流式 chunk 合并、tool call 摘要等                                                                                                                                                                                                                      |
+| `index.ts`                  | 子包 barrel                                                                                                                                                                                                                                                                                                                              |
 
 webui 现在能直接连 daemon HTTP+SSE 跑 transcript，不再仅依赖宿主 postMessage 传 ACP 消息（老 `ACPAdapter` 路径仍保留）。
 
@@ -140,15 +144,15 @@ webui 现在能直接连 daemon HTTP+SSE 跑 transcript，不再仅依赖宿主 
 
 ## 与老 `DaemonTuiAdapter.ts` 的对比
 
-| 维度 | 老 DaemonTuiAdapter（已删） | 新共享 transcript 层 |
-|---|---|---|
-| 所在包 | `packages/cli/src/ui/daemon/` | `packages/sdk-typescript/src/daemon/ui/` |
+| 维度         | 老 DaemonTuiAdapter（已删）                                          | 新共享 transcript 层                                                 |
+| ------------ | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| 所在包       | `packages/cli/src/ui/daemon/`                                        | `packages/sdk-typescript/src/daemon/ui/`                             |
 | 公开 surface | `DaemonTuiAdapter`、`DaemonTuiUpdate`、`DaemonTuiSessionClient` 接口 | `DaemonUiEventType`、`reduceDaemonTranscriptEvents` + 一组 selectors |
-| 适用范围 | 仅 CLI Ink TUI | Web / TUI / IDE / IM 任一 UI |
-| 状态形态 | TUI 内部 update union | 纯 transcript block 列表 + state 字段 |
-| 排序 | 用 `createdAt` | 用 `eventId`（daemon-monotonic，多端同序） |
-| 未知 type | 在 `reduceDaemonEventToTuiUpdates` 里被丢 | 归一为 `debug` 事件保留 |
-| 测试 | 单包内单测 | 全局 conformance 套件确保跨宿主等价 |
+| 适用范围     | 仅 CLI Ink TUI                                                       | Web / TUI / IDE / IM 任一 UI                                         |
+| 状态形态     | TUI 内部 update union                                                | 纯 transcript block 列表 + state 字段                                |
+| 排序         | 用 `createdAt`                                                       | 用 `eventId`（daemon-monotonic，多端同序）                           |
+| 未知 type    | 在 `reduceDaemonEventToTuiUpdates` 里被丢                            | 归一为 `debug` 事件保留                                              |
+| 测试         | 单包内单测                                                           | 全局 conformance 套件确保跨宿主等价                                  |
 
 ## 依赖
 

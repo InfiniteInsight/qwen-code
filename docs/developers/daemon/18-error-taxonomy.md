@@ -1,4 +1,5 @@
 # 错误分类与修复
+
 ## 概览
 
 daemon 的失败模式刻意做成封闭联合，SDK 消费方可以穷举 switch、路由 handler 给出一致 HTTP 响应。本文按三层列每个 typed 错误：
@@ -57,6 +58,7 @@ bridge / mediator 抛的 typed class，多数路由 handler 通过 switch 给出
 | `PermissionPolicyNotImplementedError` | 500  | 请求的策略未在本 daemon 构建                                   | 升级 daemon 或改 `policy.permissionStrategy`                                                                                                                        |
 | `BridgeChannelClosedError`            | 503  | ACP child channel 在调用中关闭                                 | 重连 / 重试；查 `session_died` 找原因                                                                                                                               |
 | `BridgeTimeoutError`                  | 504  | bridge 级 wallclock 超                                         | 重试；排查底层慢                                                                                                                                                    |
+| `MissingCliEntryError`                | 500  | 找不到 `qwen` CLI 入口文件                                     | 确认 CLI 安装完整；检查 `packages/cli/index.ts` 是否存在                                                                                                            |
 
 ## Boot 时配置错误（`packages/cli/src/serve/runQwenServe.ts`）
 

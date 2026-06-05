@@ -1,4 +1,5 @@
 # 多客户端权限协调
+
 ## 概览
 
 ACP 子进程的 agent 调 `requestPermission` 时，daemon 并不会只转给某一个客户端 —— `sessionScope: 'single'` 下每个连上来的客户端都看得到这个请求，谁回复都行。没有协调器就乱套：迟到的投票无处去、两个客户端 race 同一个请求、一个流氓客户端能盖过 originator 等等。
@@ -7,7 +8,7 @@ ACP 子进程的 agent 调 `requestPermission` 时，daemon 并不会只转给�
 
 | 策略              | 裁决规则                                                                                         | 用例                                     |
 | ----------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------- |
-| `first-responder` | 第一个有效票获胜；后来的拿 `permission_already_resolved`                                         | 实时跨客户端协作 UX（默认）              |
+| `first-responder` | 第一个有效票获胜；后来的拿 `permission_already_resolved`                                         | 实时跨客户端协作 UX（**当前默认策略**）  |
 | `designated`      | 只允许 prompt 的 `originatorClientId` 裁决；其他人收 `permission_forbidden{designated_mismatch}` | per-tenant SaaS，UI surface 自己拥有审批 |
 | `consensus`       | N-of-M 法定人数（pair-token 认证），过程中 `permission_partial_vote` 让 UI 渲进度                | 企业变更评审，两名操作员需达成一致       |
 | `local-only`      | 拒绝任何非 loopback 投票，阻塞直到 loopback 客户端裁决                                           | 工作站，远程控制绝不能授予提权           |
@@ -169,6 +170,8 @@ bridge 的 session-teardown 路径永远在 channel-kill 窗口**之前**调 `fo
 | `BridgeOptions` | `permissionPolicy`、`permissionConsensusQuorum`、`permissionAudit`                                  | 程序化覆盖           |
 | 能力 tag        | `permission_mediation`（恒；`modes: ['first-responder', 'designated', 'consensus', 'local-only']`） | 构建期支持集         |
 | 能力 envelope   | `policy.permission`                                                                                 | 当前 daemon 跑的策略 |
+
+> **注**：未显式配置 `policy.permissionStrategy` 时，daemon 默认使用 `first-responder` 策略。其他三种策略（`designated`、`consensus`、`local-only`）需在 `settings.json` 中显式设置才生效。
 
 ## Consensus 法定人数：默认公式与 M=2 边界
 
