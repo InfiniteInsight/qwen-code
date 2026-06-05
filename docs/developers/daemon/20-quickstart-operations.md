@@ -52,6 +52,16 @@ QWEN_SERVE_DEBUG=1 qwen serve
 
 # 9. 关闭 F2 池（fallback per-session）
 QWEN_SERVE_NO_MCP_POOL=1 qwen serve
+
+# 10. browser webui 跨域访问
+QWEN_SERVER_TOKEN=secret \
+  qwen serve --allow-origin 'http://localhost:3000'
+
+# 11. prompt 超时限制 + SSE 空闲超时
+qwen serve --prompt-deadline-ms 300000 --writer-idle-timeout-ms 600000
+
+# 12. ACP child 空闲保活（避免反复冷启动）
+qwen serve --channel-idle-timeout-ms 60000
 ```
 
 加固 loopback 的姿势（3）下 `/demo` 会移到 `bearerAuth` 之后（`server.ts:625-626`），浏览器开就要带 token 头才能用了 —— 通常配脚本或 curl 而不是浏览器。
@@ -60,29 +70,35 @@ QWEN_SERVE_NO_MCP_POOL=1 qwen serve
 
 CLI 定义在 **`packages/cli/src/commands/serve.ts:50-147`**：
 
-| 参数 | 类型 | 默认 | 必填条件 | 作用 |
-|---|---|---|---|---|
-| `--port <n>` | number | `4170` | — | TCP 端口；`0` = OS 分配 ephemeral |
-| `--hostname <host>` | string | `127.0.0.1` | 非 loopback 必须配 token | bind 地址。loopback 集合：`127.0.0.1` `localhost` `::1` `[::1]`。`[::1]` 风格自动剥括号；`host:port` 写法直接报错让你改 `--port` |
-| `--token <s>` | string | env / 无 | 非 loopback 必填；`--require-auth` 必填 | bearer token；trim 一次。**会出现在 `/proc/<pid>/cmdline`，推荐改用 `QWEN_SERVER_TOKEN`**（boot 时 stderr 也会提示） |
-| `--max-sessions <n>` | number | `20` | — | 活动 session 上限，超额 spawn 返回 503；`0` = 不限。`NaN` / 负值 throws |
-| `--workspace <dir>` | string | `process.cwd()` | — | 绑定工作区。**必须绝对路径、必须存在、必须是目录**。boot 时 `canonicalizeWorkspace` 一次。`POST /session` 带不一致 `cwd` 时 `400 workspace_mismatch` |
-| `--max-connections <n>` | number | `256` | — | 监听级 `server.maxConnections`。`0` / `Infinity` 不限。NaN/负值 boot 失败（防 fail-OPEN） |
-| `--require-auth` | boolean | `false` | 必须配 token | bearer 扩展到 loopback **以及** `/health`。无 token 启动直接拒 |
-| `--event-ring-size <n>` | number | `8000` | — | per-session SSE 重放环深度。软上限 `MAX_EVENT_RING_SIZE = 1_000_000`；越界 boot 抛 |
-| `--http-bridge` | boolean | `true` | — | Stage 1 桥模式（一个 `qwen --acp` 子进程多路复用）。Stage 2 进程内模式还没实现，传 `--no-http-bridge` 会回退并打 stderr |
-| `--mcp-client-budget <n>` | number | 无 | `mcp-budget-mode=enforce` 时必填 | 工作区 MCP client 上限（PR 14）。必须正整数 |
-| `--mcp-budget-mode <m>` | `'enforce' \| 'warn' \| 'off'` | budget 设了默认 `warn`，否则 `off` | `enforce` 必须配 `--mcp-client-budget` | `enforce` 拒；`warn` 仅在 75% 报警；`off` 纯观测 |
+| 参数                            | 类型                           | 默认                               | 必填条件                                | 作用                                                                                                                                                 |
+| ------------------------------- | ------------------------------ | ---------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port <n>`                    | number                         | `4170`                             | —                                       | TCP 端口；`0` = OS 分配 ephemeral                                                                                                                    |
+| `--hostname <host>`             | string                         | `127.0.0.1`                        | 非 loopback 必须配 token                | bind 地址。loopback 集合：`127.0.0.1` `localhost` `::1` `[::1]`。`[::1]` 风格自动剥括号；`host:port` 写法直接报错让你改 `--port`                     |
+| `--token <s>`                   | string                         | env / 无                           | 非 loopback 必填；`--require-auth` 必填 | bearer token；trim 一次。**会出现在 `/proc/<pid>/cmdline`，推荐改用 `QWEN_SERVER_TOKEN`**（boot 时 stderr 也会提示）                                 |
+| `--max-sessions <n>`            | number                         | `20`                               | —                                       | 活动 session 上限，超额 spawn 返回 503；`0` = 不限。`NaN` / 负值 throws                                                                              |
+| `--workspace <dir>`             | string                         | `process.cwd()`                    | —                                       | 绑定工作区。**必须绝对路径、必须存在、必须是目录**。boot 时 `canonicalizeWorkspace` 一次。`POST /session` 带不一致 `cwd` 时 `400 workspace_mismatch` |
+| `--max-connections <n>`         | number                         | `256`                              | —                                       | 监听级 `server.maxConnections`。`0` / `Infinity` 不限。NaN/负值 boot 失败（防 fail-OPEN）                                                            |
+| `--require-auth`                | boolean                        | `false`                            | 必须配 token                            | bearer 扩展到 loopback **以及** `/health`。无 token 启动直接拒                                                                                       |
+| `--event-ring-size <n>`         | number                         | `8000`                             | —                                       | per-session SSE 重放环深度。软上限 `MAX_EVENT_RING_SIZE = 1_000_000`；越界 boot 抛                                                                   |
+| `--http-bridge`                 | boolean                        | `true`                             | —                                       | Stage 1 桥模式（一个 `qwen --acp` 子进程多路复用）。Stage 2 进程内模式还没实现，传 `--no-http-bridge` 会回退并打 stderr                              |
+| `--mcp-client-budget <n>`       | number                         | 无                                 | `mcp-budget-mode=enforce` 时必填        | 工作区 MCP client 上限（PR 14）。必须正整数                                                                                                          |
+| `--mcp-budget-mode <m>`         | `'enforce' \| 'warn' \| 'off'` | budget 设了默认 `warn`，否则 `off` | `enforce` 必须配 `--mcp-client-budget`  | `enforce` 拒；`warn` 仅在 75% 报警；`off` 纯观测                                                                                                     |
+| `--allow-origin <pattern>`      | string（可多次）               | 无                                 | —                                       | CORS 允许列表，替代默认 Origin 拒绝。`*` 必须配 token                                                                                                |
+| `--prompt-deadline-ms <n>`      | number                         | 无                                 | —                                       | prompt 服务端 wallclock 上限（ms），超时 abort                                                                                                       |
+| `--writer-idle-timeout-ms <n>`  | number                         | 无                                 | —                                       | per-SSE-connection 空闲超时（ms）                                                                                                                    |
+| `--channel-idle-timeout-ms <n>` | number                         | `0`                                | —                                       | 最后 session 关闭后保活 ACP child（ms），`0` = 立即回收                                                                                              |
 
 ## 4. 环境变量
 
-| Env | 等效参数 / 作用 |
-|---|---|
-| `QWEN_SERVER_TOKEN` | 等价 `--token`；`--token` 优先。boot 时 trim 一次（防 `cat token.txt` 留尾换行） |
-| `QWEN_SERVE_DEBUG` | `1` / `true` / `on` / `yes`（不区分大小写）开 stderr 详细日志 |
-| `QWEN_SERVE_NO_MCP_POOL` | `1` 完全禁工作区 MCP 池（回到 per-session `McpClientManager`，capabilities 不再广播 `mcp_workspace_pool` / `mcp_pool_restart`） |
-| `QWEN_SERVE_MCP_CLIENT_BUDGET` | 等价 `--mcp-client-budget`，daemon 通过 `BridgeOptions.childEnvOverrides` 透传给 ACP 子进程 |
-| `QWEN_SERVE_MCP_BUDGET_MODE` | 等价 `--mcp-budget-mode`，同样透传 |
+| Env                                 | 等效参数 / 作用                                                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_SERVER_TOKEN`                 | 等价 `--token`；`--token` 优先。boot 时 trim 一次（防 `cat token.txt` 留尾换行）                                                |
+| `QWEN_SERVE_DEBUG`                  | `1` / `true` / `on` / `yes`（不区分大小写）开 stderr 详细日志                                                                   |
+| `QWEN_SERVE_NO_MCP_POOL`            | `1` 完全禁工作区 MCP 池（回到 per-session `McpClientManager`，capabilities 不再广播 `mcp_workspace_pool` / `mcp_pool_restart`） |
+| `QWEN_SERVE_MCP_CLIENT_BUDGET`      | 等价 `--mcp-client-budget`，daemon 通过 `BridgeOptions.childEnvOverrides` 透传给 ACP 子进程                                     |
+| `QWEN_SERVE_MCP_BUDGET_MODE`        | 等价 `--mcp-budget-mode`，同样透传                                                                                              |
+| `QWEN_SERVE_PROMPT_DEADLINE_MS`     | env fallback for `--prompt-deadline-ms`                                                                                         |
+| `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` | env fallback for `--writer-idle-timeout-ms`                                                                                     |
 
 per-handle env override 是刻意的 —— 同进程跑两个 daemon 不会在 `process.env` 上 race（`defaultSpawnChannelFactory` 在 spawn 时刻快照 env）。
 
@@ -90,13 +106,14 @@ per-handle env override 是刻意的 —— 同进程跑两个 daemon 不会在 
 
 boot 时一次性 `loadSettings(boundWorkspace)`：
 
-| 键 | 类型 | 行为 |
-|---|---|---|
+| 键                          | 类型                                                               | 行为                                                                                                                                               |
+| --------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | 设 `BridgeOptions.permissionPolicy`。**boot 时 `validatePolicyConfig` 校验**，未知值抛 `InvalidPolicyConfigError`（boot 显式失败，而不是回退默认） |
-| `policy.consensusQuorum` | 正整数 | consensus 策略的 N。默认 `floor(M/2)+1`。非 `consensus` 策略下设了会被静默忽略 + boot 打 stderr 警告 |
-| `context.fileName` | string | 覆盖 `getCurrentGeminiMdFilename()`，影响 `POST /workspace/init` 写哪个文件 |
-| `tools.disabled` | string[] | 经 `normalizeDisabledToolList()` 归一化（trim、丢空、去重）后影响下次 ACP child spawn |
-| `tools.approvalMode` | string | session 默认 approval mode |
+| `policy.consensusQuorum`    | 正整数                                                             | consensus 策略的 N。默认 `floor(M/2)+1`。非 `consensus` 策略下设了会被静默忽略 + boot 打 stderr 警告                                               |
+| `context.fileName`          | string                                                             | 覆盖 `getCurrentGeminiMdFilename()`，影响 `POST /workspace/init` 写哪个文件                                                                        |
+| `tools.disabled`            | string[]                                                           | 经 `normalizeDisabledToolList()` 归一化（trim、丢空、去重）后影响下次 ACP child spawn                                                              |
+| `tools.approvalMode`        | string                                                             | session 默认 approval mode                                                                                                                         |
+| `telemetry`                 | object                                                             | OTel 配置：`enabled`、`otlpEndpoint`、`otlpProtocol`、per-signal endpoint 等（详见 [`17-configuration.md`](./17-configuration.md)）                |
 
 settings 读 I/O 失败（损坏 JSON 等）回退默认；`InvalidPolicyConfigError` 例外 —— 配错就直接 boot 失败。
 
@@ -104,19 +121,21 @@ settings 读 I/O 失败（损坏 JSON 等）回退默认；`InvalidPolicyConfigE
 
 `runQwenServe.ts` 故意在这些场景直接抛错而不是 fallback：
 
-| 场景 | 错误信息开头 |
-|---|---|
-| 非 loopback 没 token | `Refusing to bind … without a bearer token` |
-| `--require-auth` 没 token | `Refusing to start with --require-auth set but no bearer token` |
-| `--workspace` 不存在 / 不是目录 / 不绝对 | `Invalid --workspace ...` |
-| `--workspace` 没权限 stat | `Invalid --workspace ...: permission denied` |
-| `--mcp-client-budget` 非正整数 | `Must be a positive integer` |
-| `--mcp-budget-mode=enforce` 无 budget | `requires a positive mcpClientBudget` |
-| `--hostname` 写成 `localhost:4170` | `looks like a "host:port" combination. Use --port` |
-| `--hostname [::1]:8080` | `Invalid --hostname … brackets indicate an IPv6 literal but the value isn't a clean [addr] form` |
-| `--max-connections` NaN / 负值 | `Must be >= 0` |
-| `--event-ring-size > 1_000_000` | bridge 构造时抛 |
-| `policy.permissionStrategy` 未知值 / `policy.consensusQuorum` 非正整数 | `InvalidPolicyConfigError` |
+| 场景                                                                   | 错误信息开头                                                                                     |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 非 loopback 没 token                                                   | `Refusing to bind … without a bearer token`                                                      |
+| `--require-auth` 没 token                                              | `Refusing to start with --require-auth set but no bearer token`                                  |
+| `--workspace` 不存在 / 不是目录 / 不绝对                               | `Invalid --workspace ...`                                                                        |
+| `--workspace` 没权限 stat                                              | `Invalid --workspace ...: permission denied`                                                     |
+| `--mcp-client-budget` 非正整数                                         | `Must be a positive integer`                                                                     |
+| `--mcp-budget-mode=enforce` 无 budget                                  | `requires a positive mcpClientBudget`                                                            |
+| `--hostname` 写成 `localhost:4170`                                     | `looks like a "host:port" combination. Use --port`                                               |
+| `--hostname [::1]:8080`                                                | `Invalid --hostname … brackets indicate an IPv6 literal but the value isn't a clean [addr] form` |
+| `--max-connections` NaN / 负值                                         | `Must be >= 0`                                                                                   |
+| `--event-ring-size > 1_000_000`                                        | bridge 构造时抛                                                                                  |
+| `--allow-origin '*'` 没 token                                          | `Refusing --allow-origin '*' without a bearer token`                                             |
+| `--prompt-deadline-ms` / `--writer-idle-timeout-ms` 非正整数           | `Must be a positive integer`                                                                     |
+| `policy.permissionStrategy` 未知值 / `policy.consensusQuorum` 非正整数 | `InvalidPolicyConfigError`                                                                       |
 
 ## 7. 跑起来之后的 curl 验证清单
 
@@ -162,11 +181,11 @@ open http://127.0.0.1:4170/demo
 
 **能。** 实现在 `packages/cli/src/serve/demo.ts:8-12` —— 自包含 HTML，无外部依赖，由 `getDemoHtml(port)` 返回。
 
-| 启动姿势 | `/demo` 注册位置 | 浏览器直接打 |
-|---|---|---|
-| loopback + 无 `--require-auth` | `server.ts:611-612`，在 `bearerAuth` **之前** | ✓ 不要 token |
-| loopback + `--require-auth` | `server.ts:625-626`，在 `bearerAuth` **之后** | ✗ 浏览器很难带 Auth 头，用 curl 或 SDK |
-| 非 loopback bind | `server.ts:625-626`，在 `bearerAuth` **之后** | ✗ 同上 |
+| 启动姿势                       | `/demo` 注册位置                              | 浏览器直接打                           |
+| ------------------------------ | --------------------------------------------- | -------------------------------------- |
+| loopback + 无 `--require-auth` | `server.ts:611-612`，在 `bearerAuth` **之前** | ✓ 不要 token                           |
+| loopback + `--require-auth`    | `server.ts:625-626`，在 `bearerAuth` **之后** | ✗ 浏览器很难带 Auth 头，用 curl 或 SDK |
+| 非 loopback bind               | `server.ts:625-626`，在 `bearerAuth` **之后** | ✗ 同上                                 |
 
 CSP：`default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'`；加 `X-Frame-Options: DENY` 防被嵌入 iframe。所以页面只能 fetch `'self'`（同 daemon），不能拉外部脚本 / 样式。
 
@@ -234,13 +253,13 @@ commands/serve.ts:229              await blockForever()    // 永久阻塞，等
 
 主装配在 `server.ts` 的 `createServeApp()`，对四个模块化路由文件做外挂：
 
-| 路由 | 文件 | 关键行 |
-|---|---|---|
-| `/health`、`/demo`、`/capabilities`、所有 session 路由、device-flow、permission 投票、SSE、单服务器 MCP restart 等 | `packages/cli/src/serve/server.ts` | `611 / 641 / 962 / 1208 / 1785 / 1707 / 1631 …` |
-| `/workspace/memory`（GET/POST） | `packages/cli/src/serve/workspaceMemory.ts` | `86 / 112`；在 `server.ts:706` 挂载 |
-| `/workspace/agents` 全套 CRUD | `packages/cli/src/serve/workspaceAgents.ts` | `107 / 155 / 288 / 315 / 464`；在 `server.ts:713` 挂载 |
-| `GET /file`、`/file/bytes`、`/list`、`/glob`、`/stat` | `packages/cli/src/serve/routes/workspaceFileRead.ts` | `519-523`；在 `server.ts:753` 挂载 |
-| `POST /file/write`、`/file/edit` | `packages/cli/src/serve/routes/workspaceFileWrite.ts` | `286 / 289`；在 `server.ts:756` 挂载 |
+| 路由                                                                                                               | 文件                                                  | 关键行                                                 |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------------------------------------------------ |
+| `/health`、`/demo`、`/capabilities`、所有 session 路由、device-flow、permission 投票、SSE、单服务器 MCP restart 等 | `packages/cli/src/serve/server.ts`                    | `611 / 641 / 962 / 1208 / 1785 / 1707 / 1631 …`        |
+| `/workspace/memory`（GET/POST）                                                                                    | `packages/cli/src/serve/workspaceMemory.ts`           | `86 / 112`；在 `server.ts:706` 挂载                    |
+| `/workspace/agents` 全套 CRUD                                                                                      | `packages/cli/src/serve/workspaceAgents.ts`           | `107 / 155 / 288 / 315 / 464`；在 `server.ts:713` 挂载 |
+| `GET /file`、`/file/bytes`、`/list`、`/glob`、`/stat`                                                              | `packages/cli/src/serve/routes/workspaceFileRead.ts`  | `519-523`；在 `server.ts:753` 挂载                     |
+| `POST /file/write`、`/file/edit`                                                                                   | `packages/cli/src/serve/routes/workspaceFileWrite.ts` | `286 / 289`；在 `server.ts:756` 挂载                   |
 
 完整路由 + wire 协议看 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)；架构看 [`01-architecture.md`](./01-architecture.md)。
 
@@ -259,7 +278,7 @@ commands/serve.ts:229              await blockForever()    // 永久阻塞，等
 import { runQwenServe } from '@qwen-code/qwen-code/serve';
 
 const handle = await runQwenServe({
-  port: 0,                       // ephemeral
+  port: 0, // ephemeral
   hostname: '127.0.0.1',
   mode: 'http-bridge',
   maxSessions: 20,
@@ -267,7 +286,7 @@ const handle = await runQwenServe({
 });
 console.log(`Daemon at ${handle.url}`);
 // ... 用 handle.bridge 直接调或访问 handle.server
-await handle.close();            // 程序化关
+await handle.close(); // 程序化关
 ```
 
 或者直接拿 Express app（自己 listen）：
@@ -275,12 +294,18 @@ await handle.close();            // 程序化关
 ```ts
 import { createServeApp } from '@qwen-code/qwen-code/serve';
 
-const app = createServeApp({
-  port: 0,
-  hostname: '127.0.0.1',
-  mode: 'http-bridge',
-  maxSessions: 20,
-}, () => 0, { /* deps: bridge, fsFactory, ... */ });
+const app = createServeApp(
+  {
+    port: 0,
+    hostname: '127.0.0.1',
+    mode: 'http-bridge',
+    maxSessions: 20,
+  },
+  () => 0,
+  {
+    /* deps: bridge, fsFactory, ... */
+  },
+);
 
 const server = app.listen(0, '127.0.0.1', () => {
   console.log('listening on', server.address());

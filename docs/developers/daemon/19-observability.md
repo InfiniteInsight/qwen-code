@@ -1,13 +1,17 @@
 # 可观测性与调试
+
 ## 概览
 
-`qwen serve` **当下**带 debug 日志、结构化 preflight cell、内存权限审计环。**没有**当下提供 OpenTelemetry span、Prometheus 指标、结构化日志格式 —— 这些落在 Stage 1.5+。本文是一份针对当前 surface 的实用指南，外加排查时应当意识到的现状缺口。
+`qwen serve` 当下带 **OpenTelemetry span instrumentation**、**结构化文件日志**（`DaemonLogger`）、**per-request access-log**、debug stderr 日志、结构化 preflight cell、内存权限审计环。本文是一份针对当前 surface 的实用指南，外加排查时应当意识到的现状缺口。
 
 ## 当下有什么
 
 | Surface                                     | 位置                                            | 用途                                                                                                                                                                                                                                                 |
 | ------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `QWEN_SERVE_DEBUG` stderr 日志              | `bridge.ts:287-295` 及调用点                    | env 设 `1` / `true` / `on` / `yes`（不区分大小写），stderr 出现 `qwen serve debug: ...` 行                                                                                                                                                           |
+| OpenTelemetry span instrumentation          | `server.ts` `daemonTelemetryMiddleware`         | 每个 HTTP 请求包在 `withDaemonRequestSpan` 中；属性含 route、sessionId、clientId、status code。权限路由有独立 span。prompt lifecycle 全程 tracing。配置见 `settings.json` 的 `telemetry` 段                                                          |
+| `DaemonLogger` 结构化文件日志               | `serve/daemonLogger.ts`                         | 结构化 JSON-like 日志行写入文件（启动时打印路径 `daemon log -> <path>`）；支持 `info`/`warn`/`error` 级别，上下文含 `route`、`sessionId`、`clientId`、`childPid`、`channelId` 等结构化字段                                                           |
+| per-request access-log middleware           | `server.ts` 920-967                             | 每请求完成时记录 `method`、`path`、`status`、`durationMs`、`sessionId`、`clientId`（跳过 `GET /health` 和 heartbeat）。4xx+ 用 `warn` 级，成功用 `info` 级                                                                                           |
 | `/health`                                   | `server.ts` 路由                                | Liveness 探针；`?deep=1` 返回扩展信息                                                                                                                                                                                                                |
 | `/capabilities`                             | `server.ts` 路由                                | pre-flight feature（见 [`11-capabilities-versioning.md`](./11-capabilities-versioning.md)）                                                                                                                                                          |
 | `/workspace/preflight`                      | 路由 → `DaemonStatusProvider`                   | 结构化 readiness cell（Node 版本、CLI 入口、ripgrep、git、npm，子进程活着后多出 ACP 级 cell）                                                                                                                                                        |
@@ -21,13 +25,8 @@
 
 ## 当下**没有**什么
 
-- **没有 OpenTelemetry span / trace**。`docs/developers/development/telemetry.md` 只提到一个 daemon 相关字段（`mcp_servers`）。
 - **没有 Prometheus / metrics 端点**。没有 `process_cpu_seconds_total`、`http_requests_total`、`event_bus_queue_depth` 等。
-- **stderr 日志非结构化**。行带 `qwen serve debug:` / `qwen serve:` 前缀但是纯字符串，不是 JSON。
-- **没有 per-request `requestId` 关联**。一次 HTTP 请求的多行 debug 输出不易整组。
 - **`PermissionAuditRing` 无外部 audit sink 接线** —— 环存在，但向 SIEM / 外部存储扇出的钩子还没。
-
-Stage 1.5+ 会闭合这些缺口（issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §08 Roadmap）。
 
 ## 调试套路
 
@@ -110,28 +109,31 @@ flowchart TD
 
 ## 状态与生命周期
 
-- `QWEN_SERVE_DEBUG` 每次检查时读（`isServeDebugLoggingEnabled()`），切换不需重启 —— 但 daemon 已启动后启动日志就没了，除非启动时就配上。
+- `QWEN_SERVE_DEBUG` 每次检查时读（`isServeDebugMode()`，从 `debugMode.ts` 导出），切换不需重启 —— 但 daemon 已启动后启动日志就没了，除非启动时就配上。
 - `PermissionAuditRing` 有界（512 条，FIFO），老记录静默丢。
 - `DaemonStatusProvider` 每请求重建 cell（无缓存），preflight 不便宜，别没必要狂轮询。
 
 ## 依赖
 
-- `process.stderr.write`（无外部日志框架）。
+- `process.stderr.write`（debug stderr）。
+- `DaemonLogger`（结构化文件日志）。
+- OpenTelemetry SDK（`initializeTelemetry`、`createDaemonBridgeTelemetry`）。
 - `node:process` 看 env / 信号。
-- 当下无 OTel SDK、无 Prometheus client、无外部 sink。
 
 ## 配置
 
-| 旋钮                       | 效果                                                                |
-| -------------------------- | ------------------------------------------------------------------- |
-| `QWEN_SERVE_DEBUG`         | 开 stderr 详细（见 [`17-configuration.md`](./17-configuration.md)） |
-| `PermissionAuditRing` size | 硬编码 512，当下不可配                                              |
-| `slow_client_warning` 阈值 | `0.75` / `0.375` 硬编码在 `eventBus.ts`                             |
+| 旋钮                           | 效果                                                                              |
+| ------------------------------ | --------------------------------------------------------------------------------- |
+| `QWEN_SERVE_DEBUG`             | 开 stderr 详细（见 [`17-configuration.md`](./17-configuration.md)）               |
+| `settings.json` `telemetry` 段 | 控制 OTel 行为：`enabled`、`otlpEndpoint`、`otlpProtocol`、per-signal endpoint 等 |
+| `DaemonLogger` 日志路径        | boot 时自动生成，打印到 stderr `daemon log -> <path>`                             |
+| `PermissionAuditRing` size     | 硬编码 512，当下不可配                                                            |
+| `slow_client_warning` 阈值     | `0.75` / `0.375` 硬编码在 `eventBus.ts`                                           |
 
 ## 注意 & 已知局限
 
-- **非结构化日志**。纯文本；程序解析脆弱。别用 `stderr` grep 建 dashboard。
-- **没有 correlation id**。把「permission denied」stderr 行与触发 HTTP 请求关联是肉眼活；结构化日志在 Stage 1.5+。
+- **DaemonLogger 文件日志是结构化的**，可按 `route`/`sessionId`/`clientId` 过滤。`QWEN_SERVE_DEBUG` stderr 日志仍是非结构化纯文本。
+- **OpenTelemetry span 已包含 per-request 关联**。每个 HTTP 请求的 span 属性带 route、sessionId、clientId，可通过 trace backend 关联。
 - **`/workspace/preflight` 的 ACP 级 cell 需要 session 活着**。idle daemon 上 auth / MCP / skills / providers 都 `status: 'not_started'`，是预期不是失败。
 - **`/workspace/env` 对机密只报存在不报值**；响应不要扔到对不可信受众暴露存在性也敏感的位置。
 - **审计环是进程局部**，daemon 重启历史丢。
@@ -139,10 +141,11 @@ flowchart TD
 
 ## 参考
 
-- `packages/cli/src/serve/daemonStatusProvider.ts:41-287`
-- `packages/cli/src/serve/permissionAudit.ts:1-60`
-- `packages/acp-bridge/src/bridge.ts:287-295`（`isServeDebugLoggingEnabled`、`writeServeDebugLine`）
-- `packages/acp-bridge/src/permissionMediator.ts:80-100+`（`PermissionDecisionReason`）
+- `packages/cli/src/serve/daemonStatusProvider.ts`
+- `packages/cli/src/serve/daemonLogger.ts`（`DaemonLogger`、`buildDaemonLogLine`）
+- `packages/cli/src/serve/debugMode.ts`（`isServeDebugMode`）
+- `packages/acp-bridge/src/permissionMediator.ts`（`PermissionDecisionReason`）
+- `packages/cli/src/serve/server.ts`（`daemonTelemetryMiddleware`、access-log middleware）
 - 配置：[`17-configuration.md`](./17-configuration.md)。
 - 错误分类：[`18-error-taxonomy.md`](./18-error-taxonomy.md)。
 - 用户运维指南：[`../../users/qwen-serve.md`](../../users/qwen-serve.md)。

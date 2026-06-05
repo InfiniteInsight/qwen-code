@@ -1,4 +1,5 @@
 # 认证与安全模型
+
 ## 概览
 
 `qwen serve` 默认是本地 daemon，配错就是暴露面。安全模型**分层**，错配时 fail-closed：
@@ -6,7 +7,7 @@
 1. **绑定** — 非 loopback 绑定无 bearer token **拒启动**。
 2. **Bearer auth** — `bearerAuth` 中间件，常量时间 SHA-256 比较，覆盖除 loopback 上 `/health` 之外的每条路由（`require_auth` 把它扩展到 loopback 与 `/health`）。
 3. **Host 白名单** — loopback 上只接受 `localhost`、`127.0.0.1`、`[::1]`、`host.docker.internal`（带端口），防 DNS rebinding。
-4. **Origin 拒绝** — 任何带 `Origin` 头的请求 `403`。CLI / SDK 永远不发 `Origin`，只有浏览器发。
+4. **Origin 控制** — 默认拒绝所有带 `Origin` 头的请求（`403`）。配置 `--allow-origin <pattern>` 后切换为 CORS 允许列表模式（`allowOriginCors`），仅放行匹配的来源。
 5. **每路由 mutation gate** — Wave 4 修改类路由 opt-in，「即便 loopback 无 token 也 401」并带专有 `code: 'token_required'`。
 6. **Device-flow auth** — Provider OAuth 流的独立 surface（`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`）。
 
@@ -36,17 +37,30 @@ if (opts.requireAuth && !token) {
 }
 ```
 
-两个拒绝都是 boot-loud（stderr / 抛给嵌入方），从不静默。#3803 的威胁模型明文禁止 daemon 默默裸跑到 loopback 之外。
+此外：
+
+```ts
+if (allowOrigins?.includes('*') && !token) {
+  throw new Error("Refusing --allow-origin '*' without a bearer token. ...");
+}
+```
+
+三个拒绝都是 boot-loud（stderr / 抛给嵌入方），从不静默。#3803 的威胁模型明文禁止 daemon 默默裸跑到 loopback 之外。
 
 ### 中间件链（HTTP 请求顺序）
 
 ```mermaid
 flowchart LR
     REQ[Request] --> SO["strip same-origin Origin<br/>(demo page support)"]
-    SO --> CORS["denyBrowserOriginCors"]
-    CORS --> HA["hostAllowlist"]
-    HA --> BA["bearerAuth"]
-    BA --> ROUTE["route handler"]
+    SO --> CORS{"--allow-origin?"}
+    CORS -->|yes| AO["allowOriginCors<br/>(allowlist match)"]
+    CORS -->|no| DC["denyBrowserOriginCors<br/>(reject all Origin)"]
+    AO --> HA["hostAllowlist"]
+    DC --> HA
+    HA --> LOG["access-log middleware"]
+    LOG --> BA["bearerAuth"]
+    BA --> TEL["daemonTelemetryMiddleware<br/>(OTel span)"]
+    TEL --> ROUTE["route handler"]
     ROUTE --> MG["mutationGate (per-route opt-in)"]
     MG --> BODY["body parsing + handler"]
 ```
@@ -77,6 +91,16 @@ Host 比较**大小写不敏感** —— Express 规范 header 名但不规范�
 
 例外：demo 页的同源 XHR 由 `server.ts` 里另一个中间件先把匹配本机地址的 `Origin` 剥掉。
 
+### `allowOriginCors`（`--allow-origin` 模式）
+
+配置 `--allow-origin <pattern>` 后，`denyBrowserOriginCors` 被替换为 `allowOriginCors(parsedPatterns)`。行为：
+
+- 请求 `Origin` 匹配 pattern → 添加 `Access-Control-Allow-Origin`、`Access-Control-Allow-Headers`、`Access-Control-Allow-Methods` 头，`OPTIONS` preflight 返 `204`。
+- 请求 `Origin` 不匹配 → 返回与 deny-wall 相同的 `403 { error: 'Request denied by CORS policy' }`。
+- `--allow-origin '*'` 需要同时配 `--token`，否则 boot 拒绝（防止无认证的全开 CORS 暴露面）。
+- pattern 在 boot 时通过 `parseAllowOriginPatterns()` 验证格式。
+- `allow_origin` 能力 tag 仅在配了该参数时条件广播。
+
 ### `createMutationGate`
 
 per-route opt-in 闸门。行为矩阵：
@@ -93,7 +117,7 @@ per-route opt-in 闸门。行为矩阵：
 
 `code: 'token_required'` 与 `bearerAuth` 普通 `Unauthorized` 不同形状，SDK 据此渲染「请用 --token / --require-auth 启动 daemon」提示而不是泛 401。
 
-**Wave 4 strict 路由**：`/workspace/memory`、`/workspace/agents/*`、`/file/write`、`/file/edit`、`/workspace/tools/:name/enable`、`/workspace/mcp/:server/restart`、`/workspace/auth/device-flow`、`/workspace/init`、`/session/:id/approval-mode`。
+**Wave 4+ strict 路由**：`/workspace/memory`、`/workspace/agents/*`、`/workspace/agents/generate`、`/file/write`、`/file/edit`、`/workspace/tools/:name/enable`、`/workspace/mcp/:server/restart`、`/workspace/mcp/:server/{enable,disable,authenticate,clear-auth}`、`/workspace/mcp/servers`（POST/DELETE）、`/workspace/auth/device-flow`、`/workspace/init`、`/session/:id/approval-mode`、`/session/:id/shell`。
 
 ### `/health` 豁免
 

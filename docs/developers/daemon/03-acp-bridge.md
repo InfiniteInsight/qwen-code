@@ -1,4 +1,5 @@
 # ACP Bridge
+
 ## 概览
 
 `packages/acp-bridge/` 包是 daemon HTTP 层与 ACP 子进程之间的缝隙拥有者。它被 `packages/cli/src/serve/`（`qwen serve` daemon）消费；在 #4175 F1 step 3 中被抽取出来，让以后的消费方（`channels/base/AcpBridge.ts`、VSCode IDE companion）可以直接复用 bridge 内核而不必反向依赖 cli 包。
@@ -193,24 +194,51 @@ sequenceDiagram
 
 `BridgeOptions`（`bridgeOptions.ts:88-323`）：
 
-| 键                                            | 默认                                              | 作用                                                               |
-| --------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------ |
-| `boundWorkspace`                              | （必填）                                          | bridge 强制的规范 workspace 路径                                   |
-| `sessionScope`                                | `'single'`                                        | `'single'` 所有客户端共享一个 session；`'per-client'` 每客户端一个 |
-| `channelFactory`                              | `defaultSpawnChannelFactory`                      | 可插拔 ACP child 工厂                                              |
-| `initializeTimeoutMs`                         | `10_000`                                          | ACP `initialize` 握手超时                                          |
-| `maxSessions`                                 | `20`                                              | `byId.size` 上限；`0`/`Infinity` = 不限；NaN/负值抛错              |
-| `eventRingSize`                               | `DEFAULT_RING_SIZE`                               | 每 session 事件环；软上限 `1_000_000`                              |
-| `permissionResponseTimeoutMs`                 | `5 min`                                           | mediator 每请求 wallclock                                          |
-| `maxPendingPermissionsPerSession`             | `64`                                              | 反压                                                               |
-| `childEnvOverrides`                           | `{}`                                              | 每 handle 给 ACP child 的 env 增量 / scrub                         |
-| `persistApprovalMode`、`persistDisabledTools` | —                                                 | Wave 4 修改路由的 settings 写钩子                                  |
-| `contextFilename`                             | 从 `settings.json` 的 `context.fileName`          | 覆盖 `getCurrentGeminiMdFilename`                                  |
-| `statusProvider`                              | （无）                                            | daemon-host preflight cells                                        |
-| `fileSystem`                                  | （无）                                            | `BridgeFileSystem` adapter                                         |
-| `permissionPolicy`                            | 从 `settings.json` 的 `policy.permissionStrategy` | 四策略之一                                                         |
-| `permissionConsensusQuorum`                   | 从 `settings.json`                                | consensus 策略的 N                                                 |
-| `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`            | 接到 `PermissionAuditRing`                                         |
+| 键                                            | 默认                                              | 作用                                                           |
+| --------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------- |
+| `boundWorkspace`                              | （必填）                                          | bridge 强制的规范 workspace 路径                               |
+| `sessionScope`                                | `'single'`                                        | `'single'` 所有客户端共享一个 session；`'thread'` 每客户端一个 |
+| `channelFactory`                              | `defaultSpawnChannelFactory`                      | 可插拔 ACP child 工厂                                          |
+| `initializeTimeoutMs`                         | `10_000`                                          | ACP `initialize` 握手超时                                      |
+| `maxSessions`                                 | `20`                                              | `byId.size` 上限；`0`/`Infinity` = 不限；NaN/负值抛错          |
+| `eventRingSize`                               | `DEFAULT_RING_SIZE`                               | 每 session 事件环；软上限 `1_000_000`                          |
+| `permissionResponseTimeoutMs`                 | `5 min`                                           | mediator 每请求 wallclock                                      |
+| `maxPendingPermissionsPerSession`             | `64`                                              | 反压                                                           |
+| `childEnvOverrides`                           | `{}`                                              | 每 handle 给 ACP child 的 env 增量 / scrub                     |
+| `persistApprovalMode`、`persistDisabledTools` | —                                                 | Wave 4 修改路由的 settings 写钩子                              |
+| `contextFilename`                             | 从 `settings.json` 的 `context.fileName`          | 覆盖 `getCurrentGeminiMdFilename`                              |
+| `statusProvider`                              | （无）                                            | daemon-host preflight cells                                    |
+| `fileSystem`                                  | （无）                                            | `BridgeFileSystem` adapter                                     |
+| `permissionPolicy`                            | 从 `settings.json` 的 `policy.permissionStrategy` | 四策略之一                                                     |
+| `permissionConsensusQuorum`                   | 从 `settings.json`                                | consensus 策略的 N                                             |
+| `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`            | 接到 `PermissionAuditRing`                                     |
+| `channelIdleTimeoutMs`                        | `0`                                               | 最后 session 关闭后保活 ACP child 的毫秒数                     |
+
+## 新增 bridge 方法（daemon_mode_b_main）
+
+基础的 `spawnOrAttach`、`sendPrompt`、`cancelSession`、`respondToPermission`、`loadSession`、`resumeSession` 之外，`HttpAcpBridge` 接口现在还包含以下方法：
+
+| 方法                                                         | 作用                                   |
+| ------------------------------------------------------------ | -------------------------------------- |
+| `generateSessionRecap(sessionId, context?)`                  | 一句话 session 摘要                    |
+| `generateSessionBtw(sessionId, question, signal?, context?)` | side-question / btw                    |
+| `executeShellCommand(sessionId, command, signal?, context?)` | daemon 宿主上直接执行 shell 命令       |
+| `getSessionContextUsageStatus(sessionId, opts?)`             | context window 用量                    |
+| `getSessionSupportedCommandsStatus(sessionId)`               | 可用 slash 命令                        |
+| `getSessionTasksStatus(sessionId)`                           | 后台任务快照                           |
+| `getSessionStatsStatus(sessionId)`                           | session 使用统计                       |
+| `setSessionApprovalMode(sessionId, mode, opts, context?)`    | 修改 approval mode                     |
+| `detachClient(sessionId, clientId?)`                         | 显式解绑客户端                         |
+| `addRuntimeMcpServer(name, config, originatorClientId)`      | 运行时新增 MCP server                  |
+| `removeRuntimeMcpServer(name, originatorClientId)`           | 运行时移除 MCP server                  |
+| `manageMcpServer(serverName, action, originatorClientId)`    | enable/disable/authenticate/clear-auth |
+| `generateWorkspaceAgent(description, originatorClientId)`    | AI 生成 subagent 定义                  |
+| `preheat()`                                                  | 预热 ACP child（skip cold-start）      |
+| `getSessionLastEventId(sessionId)`                           | 获取 session 的单调事件 ID             |
+| `getWorkspaceToolsStatus()`                                  | 内建工具注册表快照                     |
+| `getWorkspaceMcpToolsStatus(serverName)`                     | 指定 MCP server 的工具列表             |
+
+此外，`BridgeSpawnRequest.sessionScope` 的 `'per-client'` 已更名为 `'thread'`。`BridgeRestoredSession` 新增 `compactedReplay`、`liveJournal`、`lastEventId` 字段。`BridgeClientRequestContext` 是贯穿 bridge 方法调用的请求上下文类型，携带 `clientId`、`fromLoopback`、`promptId`。
 
 ## 注意 & 已知局限
 

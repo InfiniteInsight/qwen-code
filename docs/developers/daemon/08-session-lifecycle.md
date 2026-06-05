@@ -1,4 +1,5 @@
 # Session 生命周期与身份
+
 ## 概览
 
 daemon **session** 是一段绑定到一个 ACP `sessionId` 的逻辑对话。bridge 为每个 session 维护一个 `SessionEntry`（见 [`03-acp-bridge.md`](./03-acp-bridge.md)），把 ACP child connection 与 HTTP 侧的簿记捆在一起：prompt FIFO、model-change FIFO、event bus、pending permission、attach 的客户端、心跳、restore 状态、终态 tombstone。
@@ -158,12 +159,61 @@ spawn 拥有者的 HTTP 响应写不出去时（TCP 在握手中途 reset），�
 - [`04-permission-mediation.md`](./04-permission-mediation.md) — originator + identity 如何驱动策略。
 - [`10-event-bus.md`](./10-event-bus.md) — 终态帧投递。
 
+## 新增 session 端点（daemon_mode_b_main）
+
+以下端点在基础生命周期之上扩展了 session 的能力：
+
+### Non-blocking Prompt（`non_blocking_prompt` 能力 tag）
+
+`POST /session/:id/prompt` 现在返回 HTTP **202** `{ promptId, lastEventId }`，不再阻塞直到 prompt 完成。实际结果通过 SSE 上的 `turn_complete` / `turn_error` 事件投递，`promptId` 字段与 202 响应关联。SDK `DaemonSessionClient.prompt()` 在有活跃事件订阅时自动走 non-blocking 路径，透明地通过 SSE 流匹配结果。
+
+### Session Recap（`session_recap` 能力 tag）
+
+`POST /session/:id/recap` —— 使用 fast model 对 session 生成一句话 "where did I leave off" 摘要。返回 `{ sessionId, recap: string | null }`，`null` 表示历史太短或模型暂时失败。best-effort。
+
+### Session BTW / Side Question（`session_btw` 能力 tag）
+
+`POST /session/:id/btw` —— 在不中断主对话流的情况下针对 session 的上下文问一个一次性问题。使用 `runForkedAgent`（cache 路径）做单 turn、无工具的 LLM 调用。返回 `{ sessionId, answer: string | null }`。有输入长度限制（`BTW_MAX_INPUT_LENGTH`）、跨 session 泄漏防护和超时处理。
+
+### Shell Command Execution
+
+`POST /session/:id/shell` —— 直接在 daemon 宿主上执行 shell 命令（不经过 LLM）。通过 session SSE bus 流式输出（`user_shell_command` / `user_shell_result` 事件），并把命令和结果注入 LLM 的聊天历史。返回 `{ exitCode, output, aborted }`。
+
+### Session Detach
+
+`POST /session/:id/detach` —— 显式解除客户端与 session 的绑定（减 `attachCount`），不关闭 session。如果没有其他 attach/subscriber 存活则回收 session。返回 204。
+
+### Batch Session Delete
+
+`POST /sessions/delete` —— 接受 `{ sessionIds: string[] }`（最多 100 个），关闭 bridge session 并删除 transcript 文件。使用 `Promise.allSettled` 保证弹性。返回 `{ removed, notFound, errors }`。
+
+### Context Usage（`session_context_usage` 能力 tag）
+
+`GET /session/:id/context-usage` —— 返回 session 的 context window 结构化使用量。`?detail=true` 返回按 tool/memory/skill 分类的细粒度用量。
+
+### Session Stats（`session_stats` 能力 tag）
+
+`GET /session/:id/stats` —— 返回 session 使用统计：模型指标（input/output tokens、cache reads/writes、total cost）、per-tool 调用次数和耗时、文件编辑次数。
+
+### Session Tasks（`session_tasks` 能力 tag）
+
+`GET /session/:id/tasks` —— 返回 session 的后台任务快照：agent 任务、shell 任务、monitor 任务及其生命周期状态。
+
+### Compacted Replay
+
+`POST /session/:id/load` 返回的 `BridgeRestoredSession` 现在包含 `compactedReplay?: BridgeEvent[]`、`liveJournal?: BridgeEvent[]`、`lastEventId?: number`。`compactedReplay` 由 `TurnBoundaryCompactionEngine` 生成：在 turn 边界折叠连续文本/思考块、工具调用序列折到最终状态、丢弃瞬态信号，产出 O(turns) 而非 O(tokens) 量级的重放日志（通常 25-30x 压缩）。
+
+### ACP Child Preheat
+
+`bridge.preheat()` —— 提前预热 ACP child 进程，让第一个 session 不付冷启动延迟。配合 `channelIdleTimeoutMs`（最后 session 关闭后保持 ACP child 存活的时间）和 skip-relaunch（新 session 到达时复用已有的空闲 child）使用。
+
 ## 配置
 
 - `BridgeOptions.maxSessions`（默认 20）。
-- `BridgeOptions.sessionScope`（默认 `'single'`）。
+- `BridgeOptions.sessionScope`（默认 `'single'`，可选 `'thread'`）。
 - `BridgeOptions.initializeTimeoutMs`（默认 10s）。
-- 能力 tag：`session_create`、`session_scope_override`、`session_load`、`unstable_session_resume`、`session_list`、`session_close`、`session_metadata`、`session_set_model`、`client_identity`、`client_heartbeat`。
+- `BridgeOptions.channelIdleTimeoutMs`（默认 0，= 立即回收 ACP child）。
+- 能力 tag：`session_create`、`session_scope_override`、`session_load`、`unstable_session_resume`、`session_list`、`session_close`、`session_metadata`、`session_set_model`、`client_identity`、`client_heartbeat`、`session_recap`、`session_btw`、`session_context_usage`、`session_tasks`、`session_stats`、`non_blocking_prompt`。
 
 ## 注意 & 已知局限
 
