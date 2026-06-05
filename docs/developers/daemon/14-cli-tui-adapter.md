@@ -45,15 +45,19 @@
 
 **Chat-stream（Stage 1）**
 
-- `user.text.delta`、`assistant.text.delta`、`assistant.done`、`thought.text.delta`
-- `tool.update`、`shell.output`
+- `user.text.delta`、`user.shell.command`、`assistant.text.delta`、`assistant.done`、`thought.text.delta`
+- `tool.update`、`shell.output`、`user.shell.output`
 - `permission.request`、`permission.resolved`
 - `model.changed`、`status`、`error`、`debug`
 
 **Session-meta**
 
 - `session.metadata.changed`、`session.approval_mode.changed`
-- `session.available_commands`、`session.state_resync_required`
+- `session.available_commands`、`session.state_resync_required`、`session.replay_complete`
+
+**Prompt lifecycle（跨客户端）**
+
+- `prompt.cancelled`、`followup.suggestion`
 
 **Workspace（Wave 3-4）**
 

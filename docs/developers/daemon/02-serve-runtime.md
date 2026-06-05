@@ -24,14 +24,15 @@
 
 **中间件** `packages/cli/src/serve/auth.ts`：
 
-| 中间件                                               | 作用                                                                                                 | 说明                                                                                                |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `denyBrowserOriginCors` / `allowOriginCors`          | 默认拒绝所有 `Origin`；配 `--allow-origin <pattern>` 后切换为 CORS 允许列表模式                      | 详见 [`12-auth-security.md`](./12-auth-security.md)                                                 |
-| `hostAllowlist(bind, getPort)`                       | Loopback 下校验 `Host` 头属于 `localhost`、`127.0.0.1`、`[::1]`、`host.docker.internal` 加端口的集合 | 防 DNS rebinding，按端口缓存，比较时大小写不敏感。                                                  |
-| `bearerAuth(token)`                                  | 用 SHA-256 + `timingSafeEqual` 常量时间比较                                                          | 无 token（loopback dev 默认）就 open passthrough，`Bearer` 大小写不敏感。                           |
-| `createMutationGate({tokenConfigured, requireAuth})` | 路由级 opt-in 闸门，对修改类路由即便在 loopback 也强制 token                                         | 返回 `401 { code: 'token_required' }`。strict 路由见 [`12-auth-security.md`](./12-auth-security.md) |
-| access-log middleware                                | 每请求完成时记录 method/path/status/durationMs 到 `DaemonLogger`                                     | 跳过 `GET /health` 和 heartbeat；4xx+ 用 `warn` 级                                                  |
-| `daemonTelemetryMiddleware`                          | 把每个 HTTP 请求包在 OpenTelemetry span（`withDaemonRequestSpan`）中                                 | 属性含 route、sessionId、clientId、status code                                                      |
+| 中间件（按注册顺序）                        | 作用                                                                                                 | 说明                                                                                           |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `denyBrowserOriginCors` / `allowOriginCors` | 默认拒绝所有 `Origin`；配 `--allow-origin <pattern>` 后切换为 CORS 允许列表模式                      | 详见 [`12-auth-security.md`](./12-auth-security.md)                                            |
+| `hostAllowlist(bind, getPort)`              | Loopback 下校验 `Host` 头属于 `localhost`、`127.0.0.1`、`[::1]`、`host.docker.internal` 加端口的集合 | 防 DNS rebinding，按端口缓存，比较时大小写不敏感。                                             |
+| access-log middleware                       | 每请求完成时记录 method/path/status/durationMs 到 `DaemonLogger`                                     | 在 `bearerAuth` **之前**注册，401 拒绝也会被日志捕获。跳过 `/health` 和 heartbeat              |
+| `bearerAuth(token)`                         | 用 SHA-256 + `timingSafeEqual` 常量时间比较                                                          | 无 token（loopback dev 默认）就 open passthrough，`Bearer` 大小写不敏感。                      |
+| `express.json({ limit: '10mb' })`           | JSON body 解析                                                                                       | 解析错返 400                                                                                   |
+| `daemonTelemetryMiddleware`                 | 把每个 HTTP 请求包在 OpenTelemetry span（`withDaemonRequestSpan`）中                                 | 属性含 route、sessionId、clientId、status code                                                 |
+| `createMutationGate`（per-route）           | 路由级 opt-in 闸门工厂，对修改类路由即便在 loopback 也强制 token                                     | 返回 `401 { code: 'token_required' }`。非全局 `app.use`，各路由按需调 `mutate({strict: true})` |
 
 **子系统**：
 

@@ -95,14 +95,14 @@ wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文
 
 ### Turn 生命周期 / 助手推送（assist）
 
-| Type                  | 方向 | 触发                                                                              | Payload 关键字段                                                                                                                                   |
-| --------------------- | ---- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt_cancelled`    | S→C  | prompt 被取消（显式 `cancelSession` 路由 **或** originator SSE 断开）             | envelope 盖 `originatorClientId`（取消方）；语义是「请求取消」而非「确认取消」。多客户端 session 中，peer 订阅者据此知道 prompt 已终止             |
-| `turn_complete`       | S→C  | 一个 turn 正常结束                                                                | `sessionId, stopReason, promptId?`。**`promptId`** 与 non-blocking prompt（202 响应）关联——SDK 通过匹配 `promptId` 将 SSE 事件与发起的 prompt 绑定 |
-| `turn_error`          | S→C  | turn 出错                                                                         | `sessionId, message, code?, promptId?`。同上 `promptId` 关联机制                                                                                   |
-| `followup_suggestion` | S→C  | end_turn 后 ACP child 生成的 ghost-text 后续建议，经 per-session SSE 转发         | `sessionId, suggestion, promptId`（wire 只带 `getFilterReason()===null` 的建议）。客户端渲染为输入占位符 ghost-text，下次 sendPrompt 时自行失效    |
-| `user_shell_command`  | S→C  | 用户通过 `POST /session/:id/shell` 发起的 shell 命令，扇出给同 session 其他订阅者 | `sessionId, command, shellId, originatorClientId?`                                                                                                 |
-| `user_shell_result`   | S→C  | 上述 shell 命令的执行结果                                                         | `sessionId, shellId, exitCode, output, aborted`                                                                                                    |
+| Type                  | 方向 | 触发                                                                              | Payload 关键字段                                                                                                                                           |
+| --------------------- | ---- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt_cancelled`    | S→C  | prompt 被取消（显式 `cancelSession` 路由 **或** originator SSE 断开）             | envelope 盖 `originatorClientId`（取消方）；语义是「请求取消」而非「确认取消」。多客户端 session 中，peer 订阅者据此知道 prompt 已终止                     |
+| `turn_complete`       | S→C  | 一个 turn 正常结束                                                                | `sessionId, stopReason, promptId?`。**`promptId`** 与 non-blocking prompt（202 响应）关联——SDK 通过匹配 `promptId` 将 SSE 事件与发起的 prompt 绑定         |
+| `turn_error`          | S→C  | turn 出错                                                                         | `sessionId, message, code?, promptId?`。同上 `promptId` 关联机制                                                                                           |
+| `followup_suggestion` | S→C  | end_turn 后 ACP child 生成的 ghost-text 后续建议，经 per-session SSE 转发         | `sessionId, suggestion, promptId`（wire 只带 `getFilterReason()===null` 的建议）。客户端渲染为输入占位符 ghost-text，下次 sendPrompt 时自行失效            |
+| `user_shell_command`  | S→C  | 用户通过 `POST /session/:id/shell` 发起的 shell 命令，扇出给同 session 其他订阅者 | `sessionId, command, shellId, originatorClientId?`。**无 typed `DaemonXxxData` 接口**——`asKnownDaemonEvent` 返回 `undefined`，由 normalizer 层 ad-hoc 解析 |
+| `user_shell_result`   | S→C  | 上述 shell 命令的执行结果                                                         | `sessionId, shellId, exitCode, output, aborted`。同上，无 typed 接口                                                                                       |
 
 ## 架构
 

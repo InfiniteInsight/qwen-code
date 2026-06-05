@@ -40,8 +40,11 @@ if (opts.requireAuth && !token) {
 此外：
 
 ```ts
-if (allowOrigins?.includes('*') && !token) {
-  throw new Error("Refusing --allow-origin '*' without a bearer token. ...");
+const parsed = parseAllowOriginPatterns(opts.allowOrigins);
+if (parsed.allowAny && !token) {
+  throw new Error(
+    "Refusing to start with --allow-origin '*' but no bearer token configured. ...",
+  );
 }
 ```
 
@@ -57,15 +60,15 @@ flowchart LR
     CORS -->|no| DC["denyBrowserOriginCors<br/>(reject all Origin)"]
     AO --> HA["hostAllowlist"]
     DC --> HA
-    HA --> LOG["access-log middleware"]
+    HA --> LOG["access-log middleware<br/>(DaemonLogger)"]
     LOG --> BA["bearerAuth"]
-    BA --> TEL["daemonTelemetryMiddleware<br/>(OTel span)"]
-    TEL --> ROUTE["route handler"]
-    ROUTE --> MG["mutationGate (per-route opt-in)"]
-    MG --> BODY["body parsing + handler"]
+    BA --> JSON["express.json<br/>(body parser)"]
+    JSON --> TEL["daemonTelemetryMiddleware<br/>(OTel span)"]
+    TEL --> MG["per-route: mutationGate<br/>(opt-in strict)"]
+    MG --> HANDLER["route handler"]
 ```
 
-（`mutationGate` 是 per-route 中间件，可以选择性 `strict: true`，详见 `packages/cli/src/serve/auth.ts:1-294`。）
+`mutationGate` 是 per-route 中间件工厂（`createMutationGate` 返回 `mutate()`），各路由在注册时调 `mutate()` 或 `mutate({strict: true})` 接入。它不是全局 `app.use()` 中间件。access-log 在 `bearerAuth` **之前**注册，这样 401 拒绝也会被日志捕获。
 
 ### `bearerAuth`
 
@@ -117,7 +120,7 @@ per-route opt-in 闸门。行为矩阵：
 
 `code: 'token_required'` 与 `bearerAuth` 普通 `Unauthorized` 不同形状，SDK 据此渲染「请用 --token / --require-auth 启动 daemon」提示而不是泛 401。
 
-**Wave 4+ strict 路由**：`/workspace/memory`、`/workspace/agents/*`、`/workspace/agents/generate`、`/file/write`、`/file/edit`、`/workspace/tools/:name/enable`、`/workspace/mcp/:server/restart`、`/workspace/mcp/:server/{enable,disable,authenticate,clear-auth}`、`/workspace/mcp/servers`（POST/DELETE）、`/workspace/auth/device-flow`、`/workspace/init`、`/session/:id/approval-mode`、`/session/:id/shell`。
+**Wave 4+ strict 路由**：`/workspace/memory`、`/workspace/agents/*`、`/workspace/agents/generate`、`/file/write`、`/file/edit`、`/workspace/tools/:name/enable`、`/workspace/mcp/:server/restart`、`/workspace/mcp/:server/{enable,disable,authenticate,clear-auth}`、`/workspace/mcp/servers`（POST/DELETE）、`/workspace/auth/device-flow`、`/workspace/init`、`/session/:id/approval-mode`。
 
 ### `/health` 豁免
 
