@@ -2921,22 +2921,19 @@ class QwenAgent implements Agent {
 
         const sourceSession = this.sessions.get(sessionId);
         if (!sourceSession) {
-          throw new RequestError(
-            -32004,
-            `Session not found: ${sessionId}`,
-            { errorKind: 'session_not_found', sessionId },
-          );
+          throw new RequestError(-32004, `Session not found: ${sessionId}`, {
+            errorKind: 'session_not_found',
+            sessionId,
+          });
         }
 
-        const recording = sourceSession
-          .getConfig()
-          .getChatRecordingService();
+        const recording = sourceSession.getConfig().getChatRecordingService();
         if (recording) {
           await recording.flush();
         }
 
-        const sessionService = new SessionService(cwd);
         const newSessionId = randomUUID();
+        const sessionService = new SessionService(cwd);
         await sessionService.forkSession(sessionId, newSessionId);
 
         let title: string;
@@ -2946,10 +2943,11 @@ class QwenAgent implements Agent {
             baseName = name.trim();
           } else {
             const existingTitle = recording?.getCurrentCustomTitle();
-            if (existingTitle) {
-              baseName = existingTitle
-                .replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-                .trim();
+            const stripped = existingTitle
+              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+              .trim();
+            if (stripped && stripped.length > 0) {
+              baseName = stripped;
             } else {
               baseName = sessionId.slice(0, 8);
             }
