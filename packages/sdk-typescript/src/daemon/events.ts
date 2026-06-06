@@ -750,6 +750,10 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
   'tool_toggled',
   DaemonToolToggledData
 >;
+export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
+  'settings_changed',
+  Record<string, unknown>
+>;
 export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
@@ -821,6 +825,7 @@ export type DaemonControlEvent =
   | DaemonPermissionForbiddenEvent
   | DaemonApprovalModeChangedEvent
   | DaemonToolToggledEvent
+  | DaemonSettingsChangedEvent
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
