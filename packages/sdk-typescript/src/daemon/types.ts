@@ -1435,7 +1435,7 @@ export type DaemonHookSource =
 
 export interface DaemonHookEntry {
   kind: 'hook';
-  eventName: string;
+  eventName: DaemonHookEventName;
   config: DaemonHookConfig;
   source: DaemonHookSource;
   matcher?: string;
