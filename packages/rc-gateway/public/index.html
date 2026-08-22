@@ -214,19 +214,14 @@
     </section>
     <section id="daemons">
       <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
-      <div
-        id="daemons-empty"
-        style="color: #888; font-size: 0.85rem"
-      >
+      <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
         (no registry — this daemon has no clients.toml, or your token lacks
         owner scope)
       </div>
       <div id="daemons-body" hidden>
         <div id="daemons-rows"></div>
         <div style="margin-top: 6px">
-          <button id="daemons-refresh-sessions">
-            Sessions on all daemons
-          </button>
+          <button id="daemons-refresh-sessions">Sessions on all daemons</button>
           <span
             id="daemons-updated"
             style="color: #888; font-size: 0.85rem"
@@ -487,6 +482,24 @@
         font-size: 0.78rem;
         word-break: break-word;
       }
+      /* Crash-recovery banner (add-mid-turn-recovery §7): non-blocking, above
+         the transcript. The unrecovered variant persists until the user's
+         next prompt is accepted; the .ok variant auto-fades after a few
+         seconds. */
+      #crash-banner {
+        margin-top: 8px;
+        padding: 6px 10px;
+        background: #241318;
+        border: 1px solid #f38ba8;
+        border-radius: 6px;
+        color: #f38ba8;
+        font-size: 0.85rem;
+      }
+      #crash-banner.ok {
+        background: #122018;
+        border-color: #a6e3a1;
+        color: #a6e3a1;
+      }
       /* Aggregated multi-daemon sessions/search rows (spec 4.5/4.6/4.7). */
       .daemon-pill {
         display: inline-block;
@@ -589,6 +602,54 @@
         curAsst = null;
         curThought = null;
       }
+      // ---- Crash-recovery banner (add-mid-turn-recovery §7) ---------------
+      // `session_interrupted` / `session_recovered` are WAL-persisted markers,
+      // so they re-render on reconnect replay. The banner is non-blocking and
+      // sits above the transcript; when the session was NOT recovered it
+      // persists until the user's next prompt is accepted (send handler) or a
+      // new watch starts (clearTranscript).
+      let crashBanner = null; // banner element, created lazily
+      let recoveredNoteTimer = null; // auto-fade timer for the recovered note
+      function ensureCrashBanner() {
+        if (!crashBanner) {
+          crashBanner = document.createElement('div');
+          crashBanner.id = 'crash-banner';
+          crashBanner.hidden = true;
+          const t = $('transcript');
+          t.parentNode.insertBefore(crashBanner, t);
+        }
+        return crashBanner;
+      }
+      function showCrashBanner(notRecovered) {
+        if (recoveredNoteTimer) {
+          clearTimeout(recoveredNoteTimer);
+          recoveredNoteTimer = null;
+        }
+        const el = ensureCrashBanner();
+        el.className = '';
+        el.textContent =
+          'Daemon crashed — this turn was interrupted' +
+          (notRecovered ? ' and not recovered' : '');
+        el.hidden = false;
+      }
+      function showRecoveredNote() {
+        if (recoveredNoteTimer) clearTimeout(recoveredNoteTimer);
+        const el = ensureCrashBanner();
+        el.className = 'ok';
+        el.textContent = 'session recovered';
+        el.hidden = false;
+        recoveredNoteTimer = setTimeout(() => {
+          el.hidden = true;
+          recoveredNoteTimer = null;
+        }, 4000);
+      }
+      function clearCrashBanner() {
+        if (recoveredNoteTimer) {
+          clearTimeout(recoveredNoteTimer);
+          recoveredNoteTimer = null;
+        }
+        if (crashBanner) crashBanner.hidden = true;
+      }
       function clearTranscript() {
         $('transcript').innerHTML = '';
         toolEls.clear();
@@ -603,6 +664,7 @@
         asstThisTurn = false;
         forkBtnEl = null;
         forkBtnTurn = -1;
+        clearCrashBanner(); // a new watch starts with no crash banner
         renderFooter();
       }
       function makeBubble(cls, roleLabel) {
@@ -808,8 +870,7 @@
           if (chain.length <= 1) return; // root session, not a fork
           const parent = chain[1];
           if (!parent || !parent.sessionId) return;
-          const name =
-            parent.title || String(parent.sessionId).slice(0, 8);
+          const name = parent.title || String(parent.sessionId).slice(0, 8);
           el.textContent = 'parent: ' + name + ' @ ' + parent.sessionId;
           el.hidden = false;
         } catch {
@@ -878,6 +939,15 @@
                 strOr(ev.data && ev.data.reason, 'client_evicted'),
               true,
             );
+          case 'session_interrupted': {
+            // Crash marker (add-mid-turn-recovery §7). The unrecovered
+            // variant persists until the next prompt is accepted.
+            const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            return showCrashBanner(d.recovered === false);
+          }
+          case 'session_recovered':
+            // Clear the crash banner; brief auto-fading note.
+            return showRecoveredNote();
           case 'model_switched': {
             // The freshest model id — update the footer directly (the daemon's
             // /context doesn't reliably carry it for env-configured models).
@@ -926,8 +996,7 @@
           mode.appendChild(o);
         }
         const note = document.createElement('span');
-        note.style.cssText =
-          'color:#9aa0a6;font-size:0.72rem;margin-left:6px';
+        note.style.cssText = 'color:#9aa0a6;font-size:0.72rem;margin-left:6px';
         btn.onclick = () =>
           doForkHere(watchedSessionId, turn, mode.value, btn, note);
         row.appendChild(btn);
@@ -1358,6 +1427,7 @@
             const json = await res.json().catch(() => ({}));
             $('prompt').value = '';
             setStatus('sent: ' + (json.stopReason || 'ok'));
+            clearCrashBanner(); // a prompt was accepted: the banner is stale
           } else if (res.status === 400) {
             setStatus('empty prompt');
           } else if (res.status === 401 || res.status === 403) {
@@ -1411,7 +1481,7 @@
           btn.style.cssText =
             'display:block;width:100%;text-align:left;margin:2px 0;' +
             'font-size:0.8rem;overflow-wrap:anywhere';
-          btn.onclick = () => startConversationIn(path);
+          btn.onclick = () => browseTo(path);
           box.appendChild(btn);
         }
       }
@@ -1583,11 +1653,20 @@
           const row = document.createElement('div');
           row.className = 'token-row';
           row.style.cursor = 'pointer';
+          row.style.cssText += 'display:flex;flex-direction:column;gap:1px';
           const label = document.createElement('span');
           const title =
             strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
           label.textContent = title + '  ·  ' + relativeTime(s.updatedAt);
           row.appendChild(label);
+          if (s.preview) {
+            const prev = document.createElement('span');
+            prev.textContent = s.preview;
+            prev.style.cssText =
+              'font-size:0.75rem;color:#888;overflow:hidden;' +
+              'text-overflow:ellipsis;white-space:nowrap;max-width:100%';
+            row.appendChild(prev);
+          }
           row.onclick = () => resumeConversation(s.sessionId, cwd);
           box.appendChild(row);
         }
@@ -2166,8 +2245,7 @@
           const obj = JSON.parse(raw);
           const list = Array.isArray(obj.daemons) ? obj.daemons : [];
           const clean = list.filter(
-            (d) =>
-              d && typeof d.name === 'string' && typeof d.url === 'string',
+            (d) => d && typeof d.name === 'string' && typeof d.url === 'string',
           );
           // "No explicit default → first entry is the default" (spec 4.1) —
           // the endpoint does NOT synthesize `default`, the client does.
@@ -2222,7 +2300,9 @@
           const detail =
             st +
             (latest && latest.status ? ' — HTTP ' + latest.status : '') +
-            (last !== undefined ? ' — last success ' + relTime(now - last) : '');
+            (last !== undefined
+              ? ' — last success ' + relTime(now - last)
+              : '');
           const dot = document.createElement('span');
           dot.style.cssText =
             'display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px';
@@ -2269,7 +2349,9 @@
           if (res.status >= 500) return { kind: 'http5xx', status: res.status };
           return { kind: 'http' + res.status, status: res.status };
         } catch (e) {
-          return { kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network' };
+          return {
+            kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network',
+          };
         }
       }
 
@@ -2406,7 +2488,7 @@
         if (actionUrl) {
           const a = document.createElement('a');
           a.href = actionUrl;
-          a.textContent = " (open " + d.name + "'s UI to re-pair)";
+          a.textContent = ' (open ' + d.name + "'s UI to re-pair)";
           row.appendChild(a);
         }
         out.appendChild(row);
@@ -2450,11 +2532,7 @@
             // host, so the link opens its /ui/).
             daemonStatusRow(d, out, 'RE-PAIR REQUIRED', base + '/ui/');
           } else if (r.status !== undefined && r.status >= 500) {
-            daemonStatusRow(
-              d,
-              out,
-              'ERROR — daemon returned ' + r.status,
-            );
+            daemonStatusRow(d, out, 'ERROR — daemon returned ' + r.status);
           } else if (r.status === 403) {
             daemonStatusRow(
               d,
@@ -2466,22 +2544,22 @@
             daemonStatusRow(
               d,
               out,
-              'UNREACHABLE — last seen ' + seen +
-                ' · if this daemon is up: origin not admitted on ' + d.name +
+              'UNREACHABLE — last seen ' +
+                seen +
+                ' · if this daemon is up: origin not admitted on ' +
+                d.name +
                 ' — owner action required: qwen-rc cors add ' +
                 location.origin,
             );
           } else {
-            daemonStatusRow(
-              d,
-              out,
-              'ERROR — daemon returned ' + r.status,
-            );
+            daemonStatusRow(d, out, 'ERROR — daemon returned ' + r.status);
           }
         });
         // Unified list, sorted by updatedAt desc ACROSS daemons (spec 4.5).
         unified.sort((a, b) =>
-          String(b.s.updatedAt || '').localeCompare(String(a.s.updatedAt || '')),
+          String(b.s.updatedAt || '').localeCompare(
+            String(a.s.updatedAt || ''),
+          ),
         );
         for (const u of unified) {
           const row = document.createElement('div');
@@ -2493,7 +2571,9 @@
             String(u.s.sessionId) +
             (u.s.title ? ' — ' + u.s.title : '') +
             '  (' +
-            String(u.s.updatedAt || '').slice(0, 16).replace('T', ' ') +
+            String(u.s.updatedAt || '')
+              .slice(0, 16)
+              .replace('T', ' ') +
             ')';
           // Spec 4.5: clicking a session navigates to that daemon's
           // /ui/session/<sid> (full navigation to the source daemon).
@@ -2512,7 +2592,8 @@
         $('daemons-updated').textContent =
           'updated ' + new Date().toLocaleTimeString();
       }
-      $('daemons-refresh-sessions').onclick = () => void runAggregatedSessions();
+      $('daemons-refresh-sessions').onclick = () =>
+        void runAggregatedSessions();
 
       loadDaemonManifest();
 
@@ -2953,8 +3034,7 @@
                 footer.style.cssText =
                   'margin-top:6px;color:#9aa0a6;font-size:0.8rem';
                 notes.forEach((n, i) => {
-                  if (i > 0)
-                    footer.appendChild(document.createTextNode(' · '));
+                  if (i > 0) footer.appendChild(document.createTextNode(' · '));
                   if (typeof n === 'string') {
                     footer.appendChild(document.createTextNode(n));
                   } else {

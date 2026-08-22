@@ -23,6 +23,8 @@ export interface SessionListItem {
   forks: string[];
   /** Last modified time (mtime) of the transcript file, ISO-8601. */
   updatedAt: string;
+  /** First user message preview (truncated to ~120 chars). Omitted when unreadable. */
+  preview?: string;
 }
 
 /** A whole `/rc/sessions` listing plus a partial-scan flag. */
@@ -211,6 +213,63 @@ export async function readSessionTitleInfo(
   }
 }
 
+const PREVIEW_MAX_CHARS = 120;
+const PREVIEW_MAX_LINES = 20;
+
+/**
+ * Reads the first user message from a transcript for a list preview.
+ * Scans up to {@link PREVIEW_MAX_LINES} JSONL lines looking for a
+ * `type === 'user'` record with `message.parts[].text`. Returns
+ * the first ~{@link PREVIEW_MAX_CHARS} chars or `null`. Never throws.
+ */
+export async function readFirstUserMessage(
+  chatsDir: string,
+  id: string,
+): Promise<string | null> {
+  let handle;
+  try {
+    handle = await open(join(chatsDir, `${id}.jsonl`), 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    if (bytesRead === 0) return null;
+    const text = buf.subarray(0, bytesRead).toString('utf8');
+    const lines = text.split('\n');
+    const limit = Math.min(lines.length, PREVIEW_MAX_LINES);
+    for (let i = 0; i < limit; i++) {
+      const line = lines[i].trim();
+      if (!line || line.indexOf('"user"') === -1) continue;
+      try {
+        const rec = JSON.parse(line) as {
+          type?: unknown;
+          message?: { parts?: Array<{ text?: unknown }> };
+        };
+        if (rec.type !== 'user') continue;
+        const parts = rec.message?.parts;
+        if (!Array.isArray(parts)) continue;
+        for (const p of parts) {
+          if (typeof p.text === 'string' && p.text.trim().length > 0) {
+            const cleaned = p.text.trim().replace(/\s+/g, ' ');
+            return cleaned.length > PREVIEW_MAX_CHARS
+              ? cleaned.slice(0, PREVIEW_MAX_CHARS) + '…'
+              : cleaned;
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
 /** A session id paired with its resolved fork parent (null = root). */
 export interface SessionEntry {
   sessionId: string;
@@ -221,6 +280,8 @@ export interface SessionEntry {
   titleSource?: 'manual' | 'auto';
   /** Last modified time (mtime) of the transcript file, ISO-8601. */
   updatedAt: string;
+  /** First user message preview. */
+  preview?: string;
 }
 
 /**
@@ -247,6 +308,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
       ...(e.title && e.titleSource ? { titleSource: e.titleSource } : {}),
       forks: [],
       updatedAt: e.updatedAt,
+      ...(e.preview ? { preview: e.preview } : {}),
     });
   }
   for (const e of entries) {
@@ -318,13 +380,14 @@ export async function listSessions(
       // Unreadable first line (e.g. EACCES) -> list it as a root, don't drop.
       parent = null;
     }
-    // Title is best-effort enrichment (never throws) — a bounded tail read.
     const info = await readSessionTitleInfo(chatsDir, id);
+    const preview = await readFirstUserMessage(chatsDir, id);
     entries.push({
       sessionId: id,
       parentSessionId: parent,
       ...(info ? { title: info.title, titleSource: info.titleSource } : {}),
       updatedAt,
+      ...(preview ? { preview } : {}),
     });
   }
 
