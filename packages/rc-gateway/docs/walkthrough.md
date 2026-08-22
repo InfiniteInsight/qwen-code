@@ -431,3 +431,82 @@ Every client will need to re-pair after a revoke-all.
 Tokens have a 180-day maximum age, with sliding renewal on active use —
 a token that's regularly used stays valid, while one that's dormant will
 eventually expire and require re-pairing.
+
+## 15. Mid-Turn Recovery
+
+When a workspace daemon dies (crash, OOM kill, `SIGKILL`), the gateway
+detects the exit, frees the pool slot, and automatically respawns the
+daemon and resumes every affected session in place — same session ids,
+gapless event stream. No manual intervention required.
+
+### What happens on a daemon crash
+
+1. **Death detection.** The pool marks the entry dead, frees the
+   `maxDaemons` cap slot, and writes a `daemon_died` audit row
+   (exit code, signal, affected session count — no workspace path).
+2. **Recovery saga.** The orchestrator respawns the workspace daemon
+   via `getOrSpawn`, then resumes each affected session sequentially
+   via `resumeSession`. If the respawn fails, all sessions are marked
+   unrecoverable.
+3. **Marker frames.** Per session, the gateway appends a
+   `session_interrupted` frame to the WAL (carrying `recovered`,
+   `hadInFlightTurn`, `exitCode`). On success it also appends
+   `session_recovered` (`tookMs`). Both frames are durable — a
+   reconnecting client replays them via the existing Last-Event-ID
+   mechanism.
+4. **Event-id continuity.** The respawned daemon's bus epoch starts
+   its ids low again. The relay renumbers them so downstream ids never
+   go backwards or collide with pre-crash WAL ids: a gapless sequence
+   for every watcher, old or new.
+5. **Recovery-pending attach.** A client that connects (or reconnects)
+   while recovery is in progress is held (no headers sent) for up to
+   60 seconds. Once the session is recovered, the WAL replays and the
+   live stream continues. If recovery fails, the WAL replays including
+   the terminal `session_interrupted { recovered: false }` marker,
+   then the stream closes.
+
+### What is NOT recovered
+
+The interrupted turn is never re-sent. The agent's in-memory context
+for that turn is lost. The user decides whether to resend the prompt —
+the web banner makes the state visible.
+
+### Web banner
+
+The phone UI shows a non-blocking banner above the transcript:
+
+- **`session_interrupted`** — "Daemon crashed — this turn was
+  interrupted" (plus "and not recovered" when `recovered: false`).
+  The unrecovered variant persists until the user's next prompt is
+  accepted.
+- **`session_recovered`** — clears the crash banner and briefly shows
+  "session recovered" (auto-fades).
+
+### Audit and notifications
+
+| Audit action          | When                             | Detail                               |
+| --------------------- | -------------------------------- | ------------------------------------ |
+| `daemon_died`         | Child process exits              | `exitCode`, `signal`, `sessionCount` |
+| `session_interrupted` | Per session, after outcome known | `outcome` (ok / failed)              |
+| `session_recovered`   | Per session, on success only     | —                                    |
+
+Push notification kinds: `session.interrupted` (bypasses quiet hours;
+owner + write scope) and `session.recovered` (owner + write + read
+scope; respects quiet hours).
+
+### Operator verification
+
+Kill a running daemon to verify recovery works end to end:
+
+```bash
+# Find the workspace daemon's PID (from the gateway's process tree)
+pgrep -P $(systemctl --user show qwen-rc-gateway -p MainPID --value) -a | grep 'qwen serve'
+
+# Kill it (SIGKILL simulates an OOM kill)
+kill -9 <pid>
+```
+
+Within a few seconds: the gateway respawns the daemon, resumes all
+sessions, and any connected SSE client sees `session_interrupted`
+followed by `session_recovered` in the stream. The audit log records
+`daemon_died`, `session_interrupted`, and `session_recovered`.
