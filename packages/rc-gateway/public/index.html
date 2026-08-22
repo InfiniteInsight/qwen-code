@@ -547,6 +547,10 @@
         ><input type="checkbox" id="raw-toggle" /> raw JSON</label
       >
     </div>
+    <div id="session-title" hidden style="
+      margin-top:4px;padding:4px 8px;font-size:0.85rem;color:#b0b8c1;
+      font-weight:600;border-bottom:1px solid #333;
+    "></div>
     <div id="lineage" hidden></div>
     <div id="transcript"></div>
     <pre id="log" style="display: none"></pre>
@@ -1268,14 +1272,27 @@
 
       let controller = null;
       let watchedSessionId = null;
+      let watchedSessionTitle = null;
       let lastSeenEventId = null;
       let watchStreamAlive = false;
+
+      function showSessionTitle(title) {
+        const el = $('session-title');
+        if (title) {
+          el.textContent = title;
+          el.hidden = false;
+        } else {
+          el.textContent = '';
+          el.hidden = true;
+        }
+      }
 
       function persistWatch() {
         if (watchedSessionId) {
           localStorage.setItem(WATCHED_KEY, JSON.stringify({
             sessionId: watchedSessionId,
             lastEventId: lastSeenEventId,
+            title: watchedSessionTitle,
           }));
         }
       }
@@ -1287,6 +1304,8 @@
 
       $('stop').onclick = () => {
         clearPersistedWatch();
+        showSessionTitle(null);
+        watchedSessionTitle = null;
         if (controller) controller.abort();
       };
 
@@ -1686,7 +1705,7 @@
               'text-overflow:ellipsis;white-space:nowrap;max-width:100%';
             row.appendChild(prev);
           }
-          row.onclick = () => resumeConversation(s.sessionId, cwd);
+          row.onclick = () => resumeConversation(s.sessionId, cwd, strOr(s.title, ''));
           box.appendChild(row);
         }
       }
@@ -1720,9 +1739,10 @@
 
       // POST /session/<id>/resume { cwd } (Bearer). On 200, hand off to the
       // SAME watch flow the New-conversation button uses.
-      async function resumeConversation(sessionId, cwd) {
+      async function resumeConversation(sessionId, cwd, title) {
         if (!token()) return setStatus('pair first');
-        setStatus('resuming…');
+        const label = title || 'session ' + sessionId.slice(0, 8);
+        setStatus('resuming ' + label + '…');
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(sessionId) + '/resume',
@@ -1737,9 +1757,8 @@
           );
           if (res.status === 200) {
             const j = await res.json();
-            $('session').value = j.sessionId;
-            setStatus('resumed ' + j.sessionId.slice(0, 8) + '…');
-            $('watch').onclick(); // connect the stream + open the composer
+            lastSeenEventId = null;
+            startWatch(j.sessionId, undefined, title);
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');
           } else if (res.status === 404) {
@@ -1757,8 +1776,9 @@
       }
 
       $('continue-last').onclick = () => {
-        if (!pastConvos.length) return; // disabled in the UI; guard direct calls too
-        resumeConversation(pastConvos[0].sessionId, pastConvosCwd);
+        if (!pastConvos.length) return;
+        const s = pastConvos[0];
+        resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''));
       };
 
       renderRecentWorkspaces();
@@ -1813,10 +1833,12 @@
         }
       };
 
-      async function startWatch(id, fromEventId) {
+      async function startWatch(id, fromEventId, title) {
         if (id !== watchedSessionId) clearIdleChips();
         watchedSessionId = id;
+        watchedSessionTitle = title || null;
         $('session').value = id;
+        showSessionTitle(watchedSessionTitle);
         controller = new AbortController();
         $('watch').disabled = true;
         $('stop').disabled = false;
@@ -2418,7 +2440,7 @@
         if (document.hidden) return;
         void pollDaemonHealths();
         if (watchedSessionId && !watchStreamAlive && token()) {
-          startWatch(watchedSessionId, lastSeenEventId);
+          startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }
       });
 
@@ -2651,10 +2673,10 @@
         const raw = localStorage.getItem(WATCHED_KEY);
         if (raw && token()) {
           try {
-            const { sessionId, lastEventId } = JSON.parse(raw);
+            const { sessionId, lastEventId, title } = JSON.parse(raw);
             if (sessionId) {
               lastSeenEventId = lastEventId ?? null;
-              startWatch(sessionId, 0);
+              startWatch(sessionId, 0, title || null);
             }
           } catch { /* corrupt entry — ignore */ }
         }
