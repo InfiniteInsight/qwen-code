@@ -553,6 +553,7 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
+      const WATCHED_KEY = 'qwen-rc:watched-session';
       const setStatus = (m) => {
         $('status').textContent = m;
       };
@@ -1267,7 +1268,25 @@
 
       let controller = null;
       let watchedSessionId = null;
+      let lastSeenEventId = null;
+      let watchStreamAlive = false;
+
+      function persistWatch() {
+        if (watchedSessionId) {
+          localStorage.setItem(WATCHED_KEY, JSON.stringify({
+            sessionId: watchedSessionId,
+            lastEventId: lastSeenEventId,
+          }));
+        }
+      }
+
+      function clearPersistedWatch() {
+        localStorage.removeItem(WATCHED_KEY);
+        lastSeenEventId = null;
+      }
+
       $('stop').onclick = () => {
+        clearPersistedWatch();
         if (controller) controller.abort();
       };
 
@@ -1794,34 +1813,41 @@
         }
       };
 
-      $('watch').onclick = async () => {
-        if (!token()) return setStatus('pair first');
-        const id = $('session').value.trim();
-        if (!id) return setStatus('enter a session id');
-        if (id !== watchedSessionId) clearIdleChips(); // drop a prior session's chips
+      async function startWatch(id, fromEventId) {
+        if (id !== watchedSessionId) clearIdleChips();
         watchedSessionId = id;
+        $('session').value = id;
         controller = new AbortController();
         $('watch').disabled = true;
         $('stop').disabled = false;
+        watchStreamAlive = false;
         setStatus('connecting…');
+        persistWatch();
         try {
+          const headers = { Authorization: 'Bearer ' + token() };
+          if (fromEventId != null) {
+            headers['Last-Event-ID'] = String(fromEventId);
+          }
           const res = await fetch(
             '/session/' + encodeURIComponent(id) + '/events',
-            {
-              headers: { Authorization: 'Bearer ' + token() },
-              signal: controller.signal,
-            },
+            { headers, signal: controller.signal },
           );
           if (!res.ok) {
-            setStatus('not authorized (' + res.status + ') — re-pair');
+            if (res.status === 401 || res.status === 403) {
+              setStatus('not authorized (' + res.status + ') — re-pair');
+              clearPersistedWatch();
+            } else {
+              setStatus('connect failed (' + res.status + ') — will retry on next visibility change');
+            }
             return;
           }
           setStatus('streaming');
+          watchStreamAlive = true;
           $('composer').style.display = '';
-          clearTranscript(); // fresh transcript for this watch session
-          void fetchContext(id); // populate the model/context/mode footer
-          void renderLineage(id); // fork-lineage breadcrumb (best-effort)
-          void refreshIdleToggle(); // reflect this session's idle-suggest state
+          if (fromEventId == null) clearTranscript();
+          void fetchContext(id);
+          void renderLineage(id);
+          void refreshIdleToggle();
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
@@ -1832,9 +1858,16 @@
             const blocks = buf.split('\n\n');
             buf = blocks.pop() || '';
             for (const block of blocks) {
-              const dataLine = block
-                .split('\n')
-                .find((l) => l.startsWith('data:'));
+              const lines = block.split('\n');
+              const idLine = lines.find((l) => l.startsWith('id:'));
+              if (idLine) {
+                const parsed = Number(idLine.slice(3).trim());
+                if (Number.isFinite(parsed)) {
+                  lastSeenEventId = parsed;
+                  persistWatch();
+                }
+              }
+              const dataLine = lines.find((l) => l.startsWith('data:'));
               if (!dataLine) continue;
               const payload = dataLine.slice(5).trim();
               let ev;
@@ -1854,8 +1887,6 @@
               ) {
                 resolveCard(ev.data.requestId);
               }
-              // Always keep the raw frame (hidden unless the raw-JSON toggle is
-              // on) and render the readable transcript view.
               log(JSON.stringify(ev));
               renderFrame(ev);
             }
@@ -1866,9 +1897,18 @@
             controller.signal.aborted ? 'stopped' : 'stream error: ' + e,
           );
         } finally {
+          watchStreamAlive = false;
           $('watch').disabled = false;
           $('stop').disabled = true;
         }
+      }
+
+      $('watch').onclick = () => {
+        if (!token()) return setStatus('pair first');
+        const id = $('session').value.trim();
+        if (!id) return setStatus('enter a session id');
+        lastSeenEventId = null;
+        startWatch(id);
       };
 
       async function enableNotifications() {
@@ -2372,8 +2412,14 @@
 
       // Spec 4.2: polling pauses while the tab is backgrounded and RESUMES on
       // visibility return (the interval alone would just keep skipping).
+      // Also reconnects the session SSE stream if it died while backgrounded
+      // (mobile screen-off kills connections).
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) void pollDaemonHealths();
+        if (document.hidden) return;
+        void pollDaemonHealths();
+        if (watchedSessionId && !watchStreamAlive && token()) {
+          startWatch(watchedSessionId, lastSeenEventId);
+        }
       });
 
       async function loadDaemonManifest() {
@@ -2596,6 +2642,23 @@
         void runAggregatedSessions();
 
       loadDaemonManifest();
+
+      // Auto-restore: if a watched session was persisted (mobile screen-off
+      // discards the page), reconnect on reload.  The DOM is empty after a
+      // full reload, so replay from event 0 to rebuild the transcript.
+      // (visibilitychange keeps the DOM intact and tails from lastSeenEventId.)
+      {
+        const raw = localStorage.getItem(WATCHED_KEY);
+        if (raw && token()) {
+          try {
+            const { sessionId, lastEventId } = JSON.parse(raw);
+            if (sessionId) {
+              lastSeenEventId = lastEventId ?? null;
+              startWatch(sessionId, 0);
+            }
+          } catch { /* corrupt entry — ignore */ }
+        }
+      }
 
       // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic
       // task.completed to the caller's OWN subscriptions. `sent` is the count
