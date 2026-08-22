@@ -1599,8 +1599,8 @@
       // fire `change`) counts as choosing a workspace the same way browsing
       // does: route it through browseTo so curDirPath updates and the
       // past-conversations refresh (renderDirList, above) fires from that one
-      // call site. A programmatic `.value =` (recent-workspace tap, "Use this
-      // folder") does NOT fire `change`, so this only reacts to real typing.
+      // call site. A programmatic `.value =` ("Use this folder") does NOT
+      // fire `change`, so this only reacts to real typing.
       $('new-session-cwd').onchange = () => {
         const p = $('new-session-cwd').value.trim();
         if (p) void browseTo(p);
