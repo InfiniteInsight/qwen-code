@@ -124,7 +124,10 @@ export type AuditAction =
   | 'session_resumed'
   | 'cors_denied'
   | 'cors_origin_admitted'
-  | 'cors_origin_removed';
+  | 'cors_origin_removed'
+  | 'daemon_died'
+  | 'session_interrupted'
+  | 'session_recovered';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -201,6 +204,9 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'cors_denied',
   'cors_origin_admitted',
   'cors_origin_removed',
+  'daemon_died',
+  'session_interrupted',
+  'session_recovered',
 ];
 
 export interface AuditEntry {
@@ -226,6 +232,8 @@ export interface AuditEntry {
   subActor?: string;
   /** Small extras (granted scopes, required scope, request path). No secrets. */
   detail?: Record<string, unknown>;
+  /** Outcome of a binary-result action (e.g. mid-turn recovery). */
+  outcome?: 'ok' | 'failed';
 }
 
 /** A persisted entry: an AuditEntry plus stamped fields. */

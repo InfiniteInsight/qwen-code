@@ -374,6 +374,9 @@ export interface GatewayApp {
   bridgeRegistry: BridgeRegistry;
   /** Per-session gateway-event fan-out (exposed for the agent lifecycle). */
   promptEvents: PromptEventBroadcaster;
+  /** Per-session prompt queue (add-mid-turn-recovery: the recovery
+   * orchestrator reads `isInFlight` for the hadInFlightTurn check). */
+  promptQueue: PromptQueue;
   /** Present only when deps.agents is supplied. */
   agentLifecycle?: AgentLifecycle;
   /** Present only when deps.review is supplied. */
@@ -632,7 +635,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       registry,
       audit,
       deps.usageBroadcaster,
-      undefined,
+      // deps.walDir keeps the route WAL-dark when the caller wires no WAL
+      // (production cli.ts passes none); tests pass one to exercise the
+      // durable replay + renumbering + marker path.
+      deps.walDir,
       promptEventBroadcaster,
     ),
   );
@@ -1379,6 +1385,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     idleToggles,
     bridgeRegistry,
     promptEvents: promptEventBroadcaster,
+    promptQueue,
     agentLifecycle,
     reviewLifecycle,
     workflowRuns,

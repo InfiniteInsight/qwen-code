@@ -965,6 +965,87 @@ rules:
     );
     expect(sent).toHaveLength(1);
   });
+
+  // --- add-mid-turn-recovery: quiet-hours bypass (design §6) ---------------
+
+  it('delivers session.interrupted during a quiet window (crash bypass)', async () => {
+    const subId = await approverWithSub();
+    await store.setQuietHours(subId, {
+      from: '09:00',
+      to: '17:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      {
+        type: 'session_interrupted',
+        data: {
+          sessionId: 's1',
+          recovered: false,
+          hadInFlightTurn: true,
+          exitCode: 1,
+        },
+      },
+      { sessionId: 's1' },
+      new Date('2026-06-10T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('session.interrupted');
+    expect(audit.calls.some((c) => c.action === 'push_suppressed')).toBe(false);
+  });
+
+  it('suppresses session.recovered during a quiet window (reason quiet_hours)', async () => {
+    const subId = await approverWithSub();
+    await store.setQuietHours(subId, {
+      from: '09:00',
+      to: '17:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      { type: 'session_recovered', data: { sessionId: 's1', tookMs: 42 } },
+      { sessionId: 's1' },
+      new Date('2026-06-10T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(0);
+    const supp = audit.calls.find((c) => c.action === 'push_suppressed');
+    expect(supp?.detail).toMatchObject({
+      kind: 'session.recovered',
+      reason: 'quiet_hours',
+      subscriptionId: subId,
+    });
+  });
+
+  it('does NOT bypass snooze for session.interrupted (only the quiet-hours gate)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/q',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const snoozeDir = mkdtempSync(join(tmpdir(), 'rc-notifier-snooze-'));
+    const snooze = await SnoozeStore.open(join(snoozeDir, 'snooze.state'));
+    await snooze.snooze(60, 'all');
+    const notifierAudit = fakeAudit();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      snooze,
+      notifierAudit,
+    );
+    await notifier.notify(
+      {
+        type: 'session_interrupted',
+        data: { sessionId: 's1', recovered: false, hadInFlightTurn: true },
+      },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(0);
+    expect(notifierAudit.calls[0]?.detail).toMatchObject({
+      kind: 'session.interrupted',
+      reason: 'snoozed',
+    });
+  });
 });
 
 describe('PushNotifier rate limit (cycle 46)', () => {

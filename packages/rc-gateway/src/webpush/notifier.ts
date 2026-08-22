@@ -42,6 +42,19 @@ export const SNOOZE_BYPASS_KINDS = new Set([
 ]);
 
 /**
+ * Kinds that bypass a subscription's quiet hours (add-mid-turn-recovery §6).
+ * Extends the snooze-bypass set with `session.interrupted`: a crashed turn is
+ * as urgent as `session.died`, but it does NOT bypass snooze (a snoozed
+ * operator has explicitly muted non-critical push; the interrupted turn is
+ * still visible via the session view + owner stream). `session.recovered`
+ * respects quiet hours.
+ */
+export const QUIET_HOURS_BYPASS_KINDS = new Set([
+  ...SNOOZE_BYPASS_KINDS,
+  'session.interrupted',
+]);
+
+/**
  * The APNs send seam the notifier drives (satisfied by `ApnsSender`). Kept
  * structural so the notifier needn't import the http2 transport. The orphan
  * guard (`isTokenLive`) and 410/400 removal + 429/5xx backoff live in the sender.
@@ -69,6 +82,11 @@ export const KIND_SCOPE: Record<string, RcScope> = {
   'review.completed': SESSION_READ,
   'review.failed': SESSION_READ,
   'session.approval_mode_changed': SESSION_READ,
+  // add-mid-turn-recovery §6: recovery markers are visible to any read-scoped
+  // client (session.interrupted additionally serves write-scoped clients per
+  // the spec table — SESSION_READ is the floor both kinds must clear).
+  'session.interrupted': SESSION_READ,
+  'session.recovered': SESSION_READ,
 };
 
 /**
@@ -300,7 +318,11 @@ export class PushNotifier {
         // CRITICAL-KIND BYPASS: policy.deny and session.died bypass quiet hours
         // so the operator is always alerted for these critical events even when
         // a device is in a quiet window (spec: add-webpush-notifications §3).
-        if (!isCriticalKind && r.quietHours) {
+        // add-mid-turn-recovery §6: session.interrupted joins the bypass set
+        // (a crashed turn is as urgent as session.died) while
+        // session.recovered respects quiet hours — hence the wider
+        // QUIET_HOURS_BYPASS_KINDS set (snooze still uses isCriticalKind).
+        if (!QUIET_HOURS_BYPASS_KINDS.has(payload.kind) && r.quietHours) {
           const window = parseTimeOfDay(r.quietHours);
           if (window && isWithinTimeOfDay(window, now)) {
             void this.audit?.record({

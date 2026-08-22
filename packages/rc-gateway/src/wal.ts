@@ -405,6 +405,33 @@ export class SessionWal {
 }
 
 // ---------------------------------------------------------------------------
+// Shared instance registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Process-wide registry of live SessionWal instances, keyed by
+ * "<dir>/<sessionId>".
+ *
+ * Every module that appends to a session's WAL (the events-route relay, the
+ * recovery marker frames) MUST obtain its instance from here. `latestId()` is
+ * in-memory per instance: two instances on the same segments diverge, and the
+ * id-continuity renumbering (add-mid-turn-recovery §4) anchors a new epoch's
+ * offset to the shared instance's `latestId()` — a stale duplicate instance
+ * would re-anchor too low and write a colliding WAL id.
+ */
+const sharedWalRegistry = new Map<string, SessionWal>();
+
+export function getSharedWal(dir: string, sessionId: string): SessionWal {
+  const key = `${dir}/${sessionId}`;
+  let wal = sharedWalRegistry.get(key);
+  if (!wal) {
+    wal = new SessionWal({ dir, sessionId });
+    sharedWalRegistry.set(key, wal);
+  }
+  return wal;
+}
+
+// ---------------------------------------------------------------------------
 // Framing helpers (exported for tests / reuse)
 // ---------------------------------------------------------------------------
 

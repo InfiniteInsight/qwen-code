@@ -137,19 +137,11 @@ describe('rewind integration', () => {
     //    carries session:read (via SCOPE_IMPLIES) and the real bearer auth
     //    resolves it.
     //
-    //    NOTE: unlike a hand-wired `createSessionEventsRoute(..., walDir)`,
-    //    createGatewayApp's own mount of GET /session/:id/events passes
-    //    `walDir: undefined` (server.ts's comment: "Omitted in production
-    //    today — ... currently-dark wiring path"). So through the REAL app,
-    //    this attach does NOT append the daemon's frames to the WAL, and a
-    //    later reconnect cannot replay a rewind marker from it either. Only
-    //    the rewind route itself is wired with `deps.walDir`. Asserting a
-    //    WAL-replay-across-rewind here would mean re-introducing a
-    //    hand-wired walDir into the events route — the same "test exercises
-    //    a path production doesn't have" defect this rewrite is fixing for
-    //    auth. So the WAL/marker assertions below are checked directly (via
-    //    decodeSegment) and via the owner-bus frame instead of via a second
-    //    SSE reconnect.
+    //    NOTE: createGatewayApp's mount of GET /session/:id/events passes
+    //    `deps.walDir`, so through the real app this attach appends the
+    //    daemon's frames 1,2 to the WAL under downstream ids 1,2. The
+    //    rewind marker below then lands at id 3, and the WAL assertions
+    //    below count all three frames (relay + marker).
     const attachRes = await fetch(`${baseUrl}/session/${SESSION_ID}/events`, {
       headers: {
         Accept: 'text/event-stream',
@@ -177,14 +169,18 @@ describe('rewind integration', () => {
     );
     expect(forbiddenRes.status).toBe(403);
     // No daemon call, no WAL marker: the write-scope attempt must be a total
-    // no-op, not a partial rewind. Through the real app the events attach
-    // above never wrote to the WAL (see note above), so the WAL is still
-    // empty at this point.
+    // no-op, not a partial rewind. The WAL holds exactly the two frames the
+    // step-1 attach relayed (see note there) — no session_rewound marker yet.
     const walAfterForbidden = new SessionWal({
       dir: walDir,
       sessionId: SESSION_ID,
     });
-    expect(walAfterForbidden.count()).toBe(0);
+    expect(walAfterForbidden.count()).toBe(2);
+    expect(
+      [...decodeSegment(join(walDir, 'wal', `${SESSION_ID}.log`))].some(
+        (f) => f.type === 'session_rewound',
+      ),
+    ).toBe(false);
     walAfterForbidden.close();
 
     // 2. Rewind to turn 1, with the OWNER token, through the real mount.
@@ -211,16 +207,18 @@ describe('rewind integration', () => {
       promptId: `${SESSION_ID}########1`,
     });
 
-    // 3. Exactly one session_rewound marker exists in the WAL (the rewind
-    //    route itself is wired with `deps.walDir`, unlike the events route).
+    // 3. Exactly one session_rewound marker exists in the WAL, at id 3:
+    //    ids 1,2 are the frames the step-1 attach relayed, and the rewind
+    //    route appends its marker after them (both routes are wired with
+    //    `deps.walDir`).
     const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
-    expect(wal.count()).toBe(1);
-    expect(wal.latestId()).toBe(1);
+    expect(wal.count()).toBe(3);
+    expect(wal.latestId()).toBe(3);
     wal.close();
     const frames = [...decodeSegment(join(walDir, 'wal', `${SESSION_ID}.log`))];
     const marker = frames.find((f) => f.type === 'session_rewound');
     expect(marker).toBeDefined();
-    expect(marker!.id).toBe(1);
+    expect(marker!.id).toBe(3);
     expect(
       (marker!.data as { toTurn: number; truncatedEventId: number }).toTurn,
     ).toBe(1);

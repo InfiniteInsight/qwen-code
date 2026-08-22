@@ -32,7 +32,7 @@ import {
 } from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { startDaemon } from './daemonSupervisor.js';
-import { DaemonPool } from './daemonPool.js';
+import { DaemonPool, type PooledDaemonSpawn } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
@@ -186,6 +186,10 @@ import {
   type DaemonRow,
 } from './daemons/daemonsCli.js';
 import { AuditLog } from './auditLog.js';
+import {
+  RecoveryOrchestrator,
+  createReportOutcome,
+} from './recovery/orchestrator.js';
 
 /**
  * Per-daemon target resolution shared by the `--daemon`-threaded commands
@@ -512,11 +516,33 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     spawn: async (cwd) => {
       const port = await getFreePort();
       const spawned = await startDaemon({ port, workspaceCwd: cwd });
-      return { client: spawned.daemon, stop: spawned.stop, workspaceCwd: cwd };
+      const out: PooledDaemonSpawn = {
+        client: spawned.daemon,
+        stop: spawned.stop,
+        workspaceCwd: cwd,
+      };
+      // add-mid-turn-recovery: wire the child's exit into the pool's death
+      // detection. `whenExited` settles (never rejects), so a daemon dying
+      // long after spawn cannot leak an unhandled rejection.
+      spawned.whenExited?.then((exit) =>
+        out.onExit?.({ code: exit.code ?? null, signal: exit.signal ?? null }),
+      );
+      return out;
     },
     maxDaemons: 3,
     idleReapMs: 15 * 60_000,
   });
+  // add-mid-turn-recovery: the boot daemon's death flows through the SAME
+  // markDead path as pooled daemons. cli.ts owns this child (the pool's
+  // spawner never saw it), so its exit is wired directly against the pool.
+  // Attach mode: `whenExited` is undefined — the gateway doesn't own a
+  // daemon it merely attached to, so there is no exit to observe.
+  handle.whenExited?.then((exit) =>
+    daemonPool.handleDaemonExit(defaultWorkspaceCwd, {
+      code: exit.code ?? null,
+      signal: exit.signal ?? null,
+    }),
+  );
   const { matcher: routing, ruleCount: routingRuleCount } =
     await loadLayeredRoutingMatcher(
       join(homedir(), '.qwen', 'rc', 'routing.yaml'),
@@ -676,6 +702,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     audit,
     ownerEvents,
     bridgeRegistry,
+    promptQueue,
     agentLifecycle,
     reviewLifecycle,
   } = createGatewayApp({
@@ -773,6 +800,33 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         }),
     },
     hookIngest: { ingestToken: hookIngestToken },
+  });
+  // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
+  // app's audit recorder (constructed inside createGatewayApp, so the pool
+  // learns about it only now).
+  daemonPool.setAudit(audit);
+
+  // add-mid-turn-recovery: wire the recovery orchestrator as the pool's
+  // onDaemonDeath hook. The orchestrator depends on the pool (getOrSpawn /
+  // resumeSession) AND the app's promptQueue (hadInFlightTurn), so it can
+  // only be built here, after both exist. reportOutcome appends the durable
+  // marker frames, publishes them on the owner stream, writes the audit rows,
+  // and fans out the push kinds. In production the session WAL is dark (no
+  // walDir is wired), so createReportOutcome skips the durable frames + owner
+  // session_event publish and only audits + pushes — the saga still runs and
+  // sessions are resumed in place.
+  const recoveryOrchestrator = new RecoveryOrchestrator({
+    pool: daemonPool,
+    promptQueue,
+    reportOutcome: createReportOutcome({
+      ownerEvents,
+      audit,
+      notifier,
+    }),
+  });
+  daemonPool.setRecoveryProvider(recoveryOrchestrator);
+  daemonPool.setOnDaemonDeath((key, sessions, exit) => {
+    void recoveryOrchestrator.recover(key, sessions, exit);
   });
 
   // Startup reconciliation (design: "Reconciliation"): running/blocked agent

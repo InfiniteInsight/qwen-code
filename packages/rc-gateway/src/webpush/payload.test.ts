@@ -12,7 +12,11 @@ import {
   MAX_PAYLOAD_BYTES,
   AGENT_EVENT_KINDS,
 } from './payload.js';
-import { KIND_SCOPE, SNOOZE_BYPASS_KINDS } from './notifier.js';
+import {
+  KIND_SCOPE,
+  SNOOZE_BYPASS_KINDS,
+  QUIET_HOURS_BYPASS_KINDS,
+} from './notifier.js';
 import { SESSION_READ } from '../scopes.js';
 
 describe('buildDigestPayload', () => {
@@ -431,5 +435,96 @@ describe('approval_mode_changed push payload', () => {
     );
     expect(p!.kind).toBe('session.approval_mode_changed');
     expect(p!.summary).toBe('Approval mode changed');
+  });
+});
+
+describe('session_interrupted push payload', () => {
+  it('maps a recovered interruption to session.interrupted with the exit code', () => {
+    const p = buildPayload(
+      {
+        type: 'session_interrupted',
+        data: {
+          sessionId: 's1',
+          recovered: true,
+          hadInFlightTurn: true,
+          exitCode: 1,
+        },
+      },
+      { sessionId: 's1', sessionName: 'My Session' },
+    );
+    expect(p).toMatchObject({
+      kind: 'session.interrupted',
+      sessionId: 's1',
+      sessionName: 'My Session',
+    });
+    expect(p!.summary).toBe('Daemon restarted; session recovered (exit 1)');
+    expect(p!.url).toBe('/ui/?session=s1');
+  });
+
+  it('omits the exit-code suffix when exitCode is absent', () => {
+    const p = buildPayload(
+      {
+        type: 'session_interrupted',
+        data: { sessionId: 's1', recovered: true, hadInFlightTurn: false },
+      },
+      { sessionId: 's1' },
+    );
+    expect(p!.kind).toBe('session.interrupted');
+    expect(p!.summary).toBe('Daemon restarted; session recovered');
+  });
+
+  it('maps an unrecovered interruption to a crash summary', () => {
+    const p = buildPayload(
+      {
+        type: 'session_interrupted',
+        data: {
+          sessionId: 's1',
+          recovered: false,
+          hadInFlightTurn: true,
+          exitCode: 137,
+        },
+      },
+      { sessionId: 's1' },
+    );
+    expect(p!.kind).toBe('session.interrupted');
+    expect(p!.summary).toBe(
+      'Daemon crashed and session was not recovered (exit 137)',
+    );
+  });
+
+  it('maps an unrecovered interruption without an exit code (signal death)', () => {
+    const p = buildPayload(
+      {
+        type: 'session_interrupted',
+        data: { sessionId: 's1', recovered: false, hadInFlightTurn: false },
+      },
+      { sessionId: 's1' },
+    );
+    expect(p!.kind).toBe('session.interrupted');
+    expect(p!.summary).toBe('Daemon crashed and session was not recovered');
+  });
+});
+
+describe('session_recovered push payload', () => {
+  it('maps to session.recovered with a fixed summary (tookMs is never shown)', () => {
+    const p = buildPayload(
+      { type: 'session_recovered', data: { sessionId: 's1', tookMs: 42 } },
+      { sessionId: 's1' },
+    );
+    expect(p).toMatchObject({
+      kind: 'session.recovered',
+      sessionId: 's1',
+    });
+    expect(p!.summary).toBe('Session recovered');
+    expect(p!.url).toBe('/ui/?session=s1');
+  });
+
+  it('scope-gates both kinds at session:read; interrupted bypasses quiet hours, recovered does not; neither bypasses snooze', () => {
+    expect(KIND_SCOPE['session.interrupted']).toBe(SESSION_READ);
+    expect(KIND_SCOPE['session.recovered']).toBe(SESSION_READ);
+    expect(SNOOZE_BYPASS_KINDS.has('session.interrupted')).toBe(false);
+    expect(SNOOZE_BYPASS_KINDS.has('session.recovered')).toBe(false);
+    expect(QUIET_HOURS_BYPASS_KINDS.has('session.interrupted')).toBe(true);
+    expect(QUIET_HOURS_BYPASS_KINDS.has('session.recovered')).toBe(false);
   });
 });

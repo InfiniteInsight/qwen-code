@@ -30,6 +30,11 @@ export interface SpawnedDaemon {
 export interface DaemonExit {
   /** Human-readable reason the daemon process ended (for diagnostics). */
   reason: string;
+  /** Exit code, when the process exited with a code (absent/undefined on a
+   * signal kill or a spawn failure; injected spawners may omit both). */
+  code?: number | null;
+  /** Signal name, when the process was killed by a signal. */
+  signal?: NodeJS.Signals | null;
 }
 
 export interface StartDaemonOptions {
@@ -69,6 +74,13 @@ export interface DaemonHandle {
   stop: () => Promise<void>;
   /** True when attached to an externally-managed daemon (`stop()` is a no-op). */
   attached: boolean;
+  /**
+   * Settles (resolves — never rejects) when the spawned daemon process
+   * terminates, carrying code/signal (add-mid-turn-recovery: the pool wires
+   * this into its death detection). Undefined in attach mode — the gateway
+   * does not own the lifecycle of a daemon it did not start.
+   */
+  whenExited?: Promise<DaemonExit>;
 }
 
 /**
@@ -167,10 +179,14 @@ function defaultSpawner(
 
   let settled = false;
   const whenExited = new Promise<DaemonExit>((resolve) => {
-    const finish = (reason: string) => {
+    const finish = (
+      reason: string,
+      code: number | null = null,
+      signal: NodeJS.Signals | null = null,
+    ) => {
       if (settled) return;
       settled = true;
-      resolve({ reason });
+      resolve({ reason, code, signal });
     };
     child.on('error', (err: Error) =>
       // e.g. ENOENT when `qwen` is not on PATH.
@@ -186,7 +202,7 @@ function defaultSpawner(
       // whole group is gone so `stop()`'s escalation isn't fooled into skipping
       // the SIGKILL.
       const waitGroup = () => {
-        if (groupGone()) finish(reason);
+        if (groupGone()) finish(reason, code, signal);
         else setTimeout(waitGroup, 50).unref?.();
       };
       waitGroup();
@@ -215,6 +231,10 @@ export async function startDaemon(
   // slow) health attempt rather than wait for health to return first.
   let exitReason: string | undefined;
   let exitSignal: Promise<'exited'> | undefined;
+  // Hoisted so the returned handle can expose `whenExited` (add-mid-turn-
+  // recovery: the pool wires the child's exit into death detection).
+  // Undefined in attach mode — no owned process.
+  let spawned: SpawnedDaemon | undefined;
   if (opts.attach) {
     daemon = new DaemonClient({
       baseUrl: opts.attach.url,
@@ -224,7 +244,7 @@ export async function startDaemon(
   } else {
     const token = randomBytes(32).toString('base64url');
     const port = opts.port ?? 0;
-    const spawned = opts.spawner
+    spawned = opts.spawner
       ? opts.spawner(token)
       : defaultSpawner(token, opts.qwenBin ?? 'qwen', port, opts.workspaceCwd);
     daemon = new DaemonClient({
@@ -290,6 +310,7 @@ export async function startDaemon(
       }
     },
     attached,
+    whenExited: spawned?.whenExited,
   };
 }
 

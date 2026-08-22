@@ -49,6 +49,13 @@ export interface StubDaemon {
     endedAt: number;
   }>;
   close: () => Promise<void>;
+  /**
+   * Simulate a hard daemon crash: immediately destroy all open connections
+   * (including live SSE streams) and then close the listener. Unlike
+   * `close()`, this never hangs with open sockets (add-mid-turn-recovery
+   * §8: "server close + synthetic onExit").
+   */
+  crash: () => Promise<void>;
 }
 
 export interface StubDaemonOptions {
@@ -137,6 +144,13 @@ export interface StubDaemonOptions {
   approvalModeBody?: unknown;
   /** Status for POST /session (default 200). Non-200 → { error }. */
   createSessionStatus?: number;
+  /**
+   * Mints the sessionId returned by POST /session (default
+   * `(n) => 'stub-agent-${n}'`). Tests that route the minted id through a
+   * gateway route that enforces `isValidSessionId` (e.g. the events route)
+   * must supply a mint returning a 32-36 char hex/dash id.
+   */
+  createSessionId?: (n: number) => string;
   /** Status for POST /session/:id/resume (default 200). Non-200 → { error }. */
   resumeSessionStatus?: number;
   /**
@@ -431,8 +445,10 @@ export async function startStubDaemon(
       return;
     }
     state.createdSessionCount += 1;
+    const mintSessionId =
+      opts.createSessionId ?? ((n: number) => `stub-agent-${n}`);
     res.status(200).json({
-      sessionId: `stub-agent-${state.createdSessionCount}`,
+      sessionId: mintSessionId(state.createdSessionCount),
       workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
       attached: false,
     });
@@ -500,5 +516,12 @@ export async function startStubDaemon(
       new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
       ),
+    crash: () =>
+      new Promise<void>((resolve, reject) => {
+        // closeAllConnections() (Node 18.2+) destroys the live SSE sockets,
+        // so close() completes without waiting for open connections.
+        server.closeAllConnections();
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
   };
 }

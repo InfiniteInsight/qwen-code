@@ -32,6 +32,9 @@ export class QueueTimeoutError extends Error {
 export class PromptQueue {
   /** Tail of the per-session Promise chain (resolves when the slot is free). */
   private readonly sessions = new Map<string, Promise<void>>();
+  /** Count of prompt turns currently holding each session's slot (add-mid-
+   * turn-recovery: the orchestrator snapshots this as `hadInFlightTurn`). */
+  private readonly holders = new Map<string, number>();
 
   /**
    * Wait for the per-session slot to become free, then acquire it.
@@ -78,8 +81,23 @@ export class PromptQueue {
       if (timer !== undefined) clearTimeout(timer);
     }
 
-    // We hold the slot — return release to the caller.
-    return release;
+    // We hold the slot — track the holder and return a release that
+    // untracks it (the caller MUST call it in a `finally` block).
+    this.holders.set(sessionId, (this.holders.get(sessionId) ?? 0) + 1);
+    return () => {
+      const n = (this.holders.get(sessionId) ?? 1) - 1;
+      if (n <= 0) this.holders.delete(sessionId);
+      else this.holders.set(sessionId, n);
+      release();
+    };
+  }
+
+  /** Whether a prompt turn currently holds the session's slot — i.e. a turn
+   * is in flight (add-mid-turn-recovery: the orchestrator snapshots this per
+   * affected session BEFORE respawning, while the in-flight prompt has not
+   * yet rejected and released its slot). */
+  isInFlight(sessionId: string): boolean {
+    return (this.holders.get(sessionId) ?? 0) > 0;
   }
 
   /** Number of sessions currently tracked (for tests / introspection). */

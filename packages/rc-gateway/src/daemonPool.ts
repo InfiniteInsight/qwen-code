@@ -23,16 +23,28 @@ import type {
   DaemonCapabilities,
   DaemonSessionSummary,
 } from '@qwen-code/sdk';
-import type {
-  DaemonRewindResult,
-  DaemonRewindSnapshotInfo,
+import {
+  DaemonTransportClosedError,
+  type DaemonRewindResult,
+  type DaemonRewindSnapshotInfo,
 } from '@qwen-code/sdk/daemon';
+import type { AuditRecorder } from './auditLog.js';
 
 /** Result of spawning a new daemon bound to a workspace. */
 export interface PooledDaemonSpawn {
   client: DaemonClient;
   stop: () => Promise<void>;
   workspaceCwd: string;
+  /** Fired exactly once when the daemon child process exits (any reason).
+   * The pool fills this at spawn time (add-mid-turn-recovery: death
+   * detection); the spawner wires the child's exit into it. */
+  onExit?: (info: DaemonExitInfo) => void;
+}
+
+/** Exit info for a daemon death, as reported by the child's exit event. */
+export interface DaemonExitInfo {
+  code: number | null;
+  signal: NodeJS.Signals | null;
 }
 
 /**
@@ -100,6 +112,10 @@ export interface SessionDaemon {
     sessionId: string,
     req: { workspaceCwd: string },
   ): Promise<DaemonRestoredSession>;
+  /** The session's recovery state (add-mid-turn-recovery §3). Optional — a
+   * plain `DaemonClient` has no recovery behind it, so the events route
+   * treats a missing implementation as `'idle'`. */
+  recoveryState?(sessionId: string): RecoveryState;
 }
 
 export interface DaemonPoolOptions {
@@ -111,6 +127,15 @@ export interface DaemonPoolOptions {
   maxDaemons?: number; // default 3
   idleReapMs?: number; // default 15*60_000
   now?: () => number; // injectable clock (default Date.now)
+  /** Invoked with the affected session ids when a daemon dies
+   * (add-mid-turn-recovery). Absent → the sessions are simply dropped
+   * (404s, as today); the `daemon_died` audit row is still written. The
+   * recovery orchestrator plugs in here. */
+  onDaemonDeath?: (
+    workspaceKey: string,
+    sessions: string[],
+    exit: DaemonExitInfo & { atMs: number },
+  ) => void;
 }
 
 interface Entry {
@@ -118,6 +143,11 @@ interface Entry {
   stop: () => Promise<void>;
   sessions: Set<string>;
   lastUsed: number;
+  /** Set by `markDead`; a second trigger (exit event + transport error
+   * racing) is a no-op. */
+  dead: boolean;
+  /** Captured by `markDead` for the death audit/hook. */
+  exit?: DaemonExitInfo & { atMs: number };
 }
 
 const DEFAULT_MAX_DAEMONS = 3;
@@ -141,6 +171,30 @@ export class WorkspacePoolFullError extends Error {
     super(`Workspace daemon pool is full (max ${maxDaemons})`);
     this.name = 'WorkspacePoolFullError';
   }
+}
+
+/** Per-session recovery state after its owning daemon died (add-mid-turn-
+ * recovery §2/§3). `'recovering'` — a recovery saga is in flight for this
+ * session (the events route holds the connection); `'recovered'` /
+ * `'unrecoverable'` — the saga finished and the outcome cache keeps the
+ * branch sticky for late reconnects; `'idle'` — no recovery involved (the
+ * default when no orchestrator is wired). */
+export type RecoveryState =
+  | 'recovering'
+  | 'recovered'
+  | 'unrecoverable'
+  | 'idle';
+
+/** Backing for {@link DaemonPool.recoveryState} — implemented by the
+ * recovery orchestrator, which owns the lock map + outcome cache (the pool
+ * cannot keep the session→state map itself: `markDead` scrubs the affected
+ * ids from `ownerOf`). Absent (never wired) → every session reports
+ * `'idle'`. */
+export interface RecoveryStateProvider {
+  recoveryState(sessionId: string): RecoveryState;
+  /** The pool reports the session live again (created/resumed), clearing
+   * any stale outcome so the events route attaches normally. */
+  sessionLive?(sessionId: string): void;
 }
 
 /**
@@ -185,6 +239,37 @@ export class DaemonPool implements SessionDaemon {
   /** Set at the top of `stopAll`; a spawn that resolves after shutdown must
    * not register itself into the (already-cleared) pool. */
   private stopped = false;
+  /** Audit sink for `daemon_died` rows (add-mid-turn-recovery), injected
+   * post-construction by cli.ts once the gateway app has built it. */
+  private audit: AuditRecorder | undefined;
+  /** Recovery-state backing (add-mid-turn-recovery), injected post-
+   * construction — the orchestrator depends on this pool, so it cannot be
+   * passed in the options. Absent → `recoveryState` reports `'idle'`. */
+  private recoveryProvider: RecoveryStateProvider | undefined;
+  /** Boot-daemon death idempotency flag — the default daemon has no Entry
+   * to carry the `dead` flag, so its double-trigger guard lives here. */
+  private defaultDead = false;
+
+  /** Wire the audit recorder in (add-mid-turn-recovery: `daemon_died`
+   * rows). Called by cli.ts after the gateway app is constructed. */
+  setAudit(recorder: AuditRecorder): void {
+    this.audit = recorder;
+  }
+
+  /** Wire the recovery-state backing (add-mid-turn-recovery). Called by the
+   * host after the orchestrator exists (it depends on this pool). Absent →
+   * `recoveryState` reports `'idle'` for every session. */
+  setRecoveryProvider(provider: RecoveryStateProvider | undefined): void {
+    this.recoveryProvider = provider;
+  }
+
+  /** Wire the recovery orchestrator's death hook (add-mid-turn-recovery).
+   * Called by cli.ts after the orchestrator exists (it depends on this
+   * pool). Absent → dead sessions are simply dropped (404s, as today);
+   * the `daemon_died` audit row is still written. */
+  setOnDaemonDeath(hook: DaemonPoolOptions['onDaemonDeath']): void {
+    this.opts.onDaemonDeath = hook;
+  }
 
   constructor(private readonly opts: DaemonPoolOptions) {
     this.now = opts.now ?? Date.now;
@@ -247,12 +332,21 @@ export class DaemonPool implements SessionDaemon {
           await s.stop().catch(() => {});
           return s.client;
         }
-        this.byWorkspace.set(key, {
+        const entry: Entry = {
           client: s.client,
           stop: s.stop,
           sessions: new Set(),
           lastUsed: this.now(),
-        });
+          dead: false,
+        };
+        // Identity-guarded exit wiring (see `markDead`'s `expectedEntry`):
+        // the callback captures THIS entry so a stale exit of a superseded
+        // entry (same key re-spawned after a death) can't kill the new one.
+        // Setting it synchronously before `byWorkspace.set` is race-free —
+        // the spawner's `whenExited` settles on a later 'exit' event, never
+        // in this microtask.
+        s.onExit = (info) => this.markDead(key, info, entry);
+        this.byWorkspace.set(key, entry);
         return s.client;
       } finally {
         // Runs on both success AND rejection — a failed spawn must not
@@ -320,7 +414,136 @@ export class DaemonPool implements SessionDaemon {
     }
   }
 
+  // -- Death detection (add-mid-turn-recovery) -------------------------
+
+  /**
+   * Report the exit of the boot (default) daemon by workspace cwd. The pool
+   * never pools the default daemon, so its death arrives here rather than
+   * through a pooled entry's `onExit`. Normalizes `workspaceCwd` so the
+   * caller can pass the raw configured value.
+   */
+  handleDaemonExit(workspaceCwd: string, info: DaemonExitInfo): void {
+    this.markDead(this.normalizeCwd(workspaceCwd), info);
+  }
+
+  /**
+   * Mark the daemon for `key` dead — idempotent (a second trigger, e.g. the
+   * exit event and a transport error racing, is a no-op):
+   *
+   * - removes the pooled entry IMMEDIATELY (frees the `maxDaemons` slot
+   *   for the recovery respawn; the zombie can no longer wedge the cap),
+   * - collects the affected session ids — `entry.sessions` ∪ the
+   *   `ownerOf` entries mapping to `key` (the union guards against an id
+   *   recorded in one structure but not the other),
+   * - scrubs them from `ownerOf` (they 404 until recovery re-registers
+   *   them via `resumeSession`),
+   * - writes ONE `daemon_died` audit row — detail
+   *   `{ exitCode, signal, sessionCount }`, no workspace path (the
+   *   session-create/resume audit rule),
+   * - hands the affected list to `opts.onDaemonDeath` (the recovery
+   *   orchestrator; absent → the sessions are simply dropped, 404s as
+   *   today — the audit row is still written).
+   *
+   * `expectedEntry` (set by the pool's own exit wiring in `getOrSpawn`)
+   * guards against a STALE exit: if the same key was re-spawned after a
+   * death, the old entry's exit event must not kill the new entry.
+   */
+  private markDead(
+    key: string,
+    info: DaemonExitInfo,
+    expectedEntry?: Entry,
+  ): void {
+    if (this.stopped) return; // shutdown: no audit, no hook
+    const entry = this.byWorkspace.get(key);
+    let exit: DaemonExitInfo & { atMs: number };
+    if (entry === undefined) {
+      // The default daemon is never pooled: its death arrives via
+      // `handleDaemonExit` (or a transport error on a default-routed call).
+      // A NON-default key with no entry is a late exit of an entry already
+      // reaped/evicted/stopped — no audit, no hook.
+      if (key !== this.defaultWorkspaceCwd) return;
+      if (this.defaultDead) return;
+      this.defaultDead = true;
+      exit = { code: info.code, signal: info.signal, atMs: this.now() };
+    } else {
+      if (entry.dead) return;
+      if (expectedEntry !== undefined && entry !== expectedEntry) return;
+      entry.dead = true;
+      exit = { code: info.code, signal: info.signal, atMs: this.now() };
+      entry.exit = exit;
+      this.byWorkspace.delete(key);
+    }
+    const affected = new Set<string>(entry ? entry.sessions : []);
+    for (const [sid, k] of this.ownerOf) {
+      if (k === key) affected.add(sid);
+    }
+    for (const sid of affected) this.ownerOf.delete(sid);
+    this.audit
+      ?.record({
+        action: 'daemon_died',
+        detail: {
+          exitCode: exit.code,
+          signal: exit.signal,
+          sessionCount: affected.size,
+        },
+      })
+      .catch(() => {});
+    this.opts.onDaemonDeath?.(key, [...affected], exit);
+  }
+
+  /** Transport trigger for a session-keyed call that threw: if it was a
+   * transport-level death error, the owning daemon is dead (covers races
+   * where the exit handler has not fired yet). */
+  private noteTransportDeath(sessionId: string, err: unknown): void {
+    const key = this.ownerOf.get(sessionId);
+    if (key !== undefined) this.noteTransportDeathByKey(key, err);
+  }
+
+  /** Transport trigger for a workspace-keyed call (create/resume/default
+   * routes) — same check, key supplied directly. */
+  private noteTransportDeathByKey(key: string, err: unknown): void {
+    if (isTransportDeathError(err)) {
+      // Transport errors carry no exit info; if the exit trigger fires
+      // later it is a no-op on this same death.
+      this.markDead(key, { code: null, signal: null });
+    }
+  }
+
+  /** Run a session-keyed pool call, marking the owning workspace dead on a
+   * transport-level error (then rethrow; routes keep their 502 mapping).
+   * The client resolves OUTSIDE the try so an `UnknownSessionError` (the
+   * 404 mapping) never touches the death trigger. */
+  private async withSessionDeathTrigger<T>(
+    sessionId: string,
+    call: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> {
+    const client = this.daemonForSession(sessionId);
+    try {
+      return await call(client);
+    } catch (err) {
+      this.noteTransportDeath(sessionId, err);
+      throw err;
+    }
+  }
+
+  /** Run a default-daemon call, marking the boot workspace dead on a
+   * transport-level error (then rethrow). */
+  private async withDefaultDeathTrigger<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (err) {
+      this.noteTransportDeathByKey(this.defaultWorkspaceCwd, err);
+      throw err;
+    }
+  }
+
   // -- Session routing ------------------------------------------------
+
+  /** The session's recovery state (add-mid-turn-recovery §3): delegated to
+   * the wired orchestrator, `'idle'` when none is wired. */
+  recoveryState(sessionId: string): RecoveryState {
+    return this.recoveryProvider?.recoveryState(sessionId) ?? 'idle';
+  }
 
   /** Resolve the owning daemon for a session id. Bumps the entry's
    * `lastUsed` (a live-referenced session never looks idle). Throws
@@ -378,7 +601,13 @@ export class DaemonPool implements SessionDaemon {
       const session = await client.createOrAttachSession(req, clientId);
       this.ownerOf.set(session.sessionId, key);
       this.byWorkspace.get(key)?.sessions.add(session.sessionId);
+      // The session is live again (add-mid-turn-recovery): clear any stale
+      // recovery outcome so the events route attaches normally.
+      this.recoveryProvider?.sessionLive?.(session.sessionId);
       return session;
+    } catch (err) {
+      this.noteTransportDeathByKey(key, err);
+      throw err;
     } finally {
       if (tracksPending) {
         const n = (this.pendingCreates.get(key) ?? 1) - 1;
@@ -420,7 +649,13 @@ export class DaemonPool implements SessionDaemon {
       });
       this.ownerOf.set(sessionId, key);
       this.byWorkspace.get(key)?.sessions.add(sessionId);
+      // The session is live again (add-mid-turn-recovery): clear any stale
+      // recovery outcome so the events route attaches normally.
+      this.recoveryProvider?.sessionLive?.(sessionId);
       return restored;
+    } catch (err) {
+      this.noteTransportDeathByKey(key, err);
+      throw err;
     } finally {
       if (tracksPending) {
         const n = (this.pendingCreates.get(key) ?? 1) - 1;
@@ -454,11 +689,16 @@ export class DaemonPool implements SessionDaemon {
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     const client = this.daemonForSession(sessionId);
-    for await (const event of client.subscribeEvents(sessionId, opts)) {
-      if (event.type === 'session_died' || event.type === 'session_closed') {
-        this.removeSession(sessionId);
+    try {
+      for await (const event of client.subscribeEvents(sessionId, opts)) {
+        if (event.type === 'session_died' || event.type === 'session_closed') {
+          this.removeSession(sessionId);
+        }
+        yield event;
       }
-      yield event;
+    } catch (err) {
+      this.noteTransportDeath(sessionId, err);
+      throw err;
     }
   }
 
@@ -468,11 +708,8 @@ export class DaemonPool implements SessionDaemon {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    return this.daemonForSession(sessionId).prompt(
-      sessionId,
-      req,
-      signal,
-      clientId,
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.prompt(sessionId, req, signal, clientId),
     );
   }
 
@@ -480,7 +717,9 @@ export class DaemonPool implements SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionContextStatus> {
-    return this.daemonForSession(sessionId).sessionContext(sessionId, clientId);
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionContext(sessionId, clientId),
+    );
   }
 
   async respondToSessionPermission(
@@ -489,16 +728,20 @@ export class DaemonPool implements SessionDaemon {
     response: PermissionResponse,
     clientId?: string,
   ): Promise<boolean> {
-    return this.daemonForSession(sessionId).respondToSessionPermission(
-      sessionId,
-      requestId,
-      response,
-      clientId,
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.respondToSessionPermission(
+        sessionId,
+        requestId,
+        response,
+        clientId,
+      ),
     );
   }
 
   async closeSession(sessionId: string, clientId?: string): Promise<void> {
-    await this.daemonForSession(sessionId).closeSession(sessionId, clientId);
+    await this.withSessionDeathTrigger(sessionId, (client) =>
+      client.closeSession(sessionId, clientId),
+    );
     this.removeSession(sessionId);
   }
 
@@ -507,26 +750,25 @@ export class DaemonPool implements SessionDaemon {
     promptId: string,
     opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
-    return this.daemonForSession(sessionId).rewindSession(
-      sessionId,
-      promptId,
-      opts,
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.rewindSession(sessionId, promptId, opts),
     );
   }
 
   async getRewindSnapshots(
     sessionId: string,
   ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }> {
-    return this.daemonForSession(sessionId).getRewindSnapshots(sessionId);
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.getRewindSnapshots(sessionId),
+    );
   }
 
   async sessionSupportedCommands(
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionSupportedCommandsStatus> {
-    return this.daemonForSession(sessionId).sessionSupportedCommands(
-      sessionId,
-      clientId,
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionSupportedCommands(sessionId, clientId),
     );
   }
 
@@ -535,10 +777,8 @@ export class DaemonPool implements SessionDaemon {
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean; clientId?: string },
   ): Promise<DaemonApprovalModeResult> {
-    return this.daemonForSession(sessionId).setSessionApprovalMode(
-      sessionId,
-      mode,
-      opts,
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.setSessionApprovalMode(sessionId, mode, opts),
     );
   }
 
@@ -547,25 +787,27 @@ export class DaemonPool implements SessionDaemon {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
-    return this.daemonForSession(sessionId).loadSession(
-      sessionId,
-      req,
-      clientId,
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.loadSession(sessionId, req, clientId),
     );
   }
 
   // -- Daemon-global (default daemon) ----------------------------------
 
   health(): Promise<{ status: string }> {
-    return this.opts.defaultDaemon.health();
+    return this.withDefaultDeathTrigger(() => this.opts.defaultDaemon.health());
   }
 
   capabilities(): Promise<DaemonCapabilities> {
-    return this.opts.defaultDaemon.capabilities();
+    return this.withDefaultDeathTrigger(() =>
+      this.opts.defaultDaemon.capabilities(),
+    );
   }
 
   listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]> {
-    return this.opts.defaultDaemon.listWorkspaceSessions(workspaceCwd);
+    return this.withDefaultDeathTrigger(() =>
+      this.opts.defaultDaemon.listWorkspaceSessions(workspaceCwd),
+    );
   }
 
   /** Live pooled daemons (excl. default). */
@@ -602,4 +844,45 @@ export class DaemonPool implements SessionDaemon {
     this.ownerOf.clear();
     this.pendingCreates.clear();
   }
+}
+
+// -- Transport-death classification (add-mid-turn-recovery) ------------
+
+/** Socket codes (found anywhere in the `cause` chain) that mean the daemon
+ * transport is gone — the process is dead or the socket was torn down. */
+const TRANSPORT_DEATH_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+]);
+
+/** Node/undici socket-teardown messages (no stable `code` property). */
+const TRANSPORT_DEATH_MESSAGE = /socket hang up|other side closed/i;
+
+/** True when `err` is a transport-level "the daemon is gone" error: the
+ * SDK's own stream-terminal error, a socket code anywhere in the `cause`
+ * chain (`fetch` wraps the socket error under a `TypeError: fetch failed`),
+ * or a socket-teardown message. Walks at most 8 `cause` hops. */
+function isTransportDeathError(err: unknown): boolean {
+  let cur: unknown = err;
+  for (
+    let depth = 0;
+    cur !== null && typeof cur === 'object' && depth < 8;
+    depth++
+  ) {
+    if (cur instanceof DaemonTransportClosedError) return true;
+    if (cur instanceof Error) {
+      // The name check covers an SDK loaded from a second copy of the
+      // package, where `instanceof` would fail.
+      if (cur.name === 'DaemonTransportClosedError') return true;
+      if (TRANSPORT_DEATH_MESSAGE.test(cur.message)) return true;
+    }
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && TRANSPORT_DEATH_CODES.has(code)) {
+      return true;
+    }
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
 }

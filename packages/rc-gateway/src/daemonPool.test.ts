@@ -9,7 +9,10 @@ import {
   DaemonPool,
   UnknownSessionError,
   WorkspacePoolFullError,
+  type DaemonExitInfo,
+  type PooledDaemonSpawn,
 } from './daemonPool.js';
+import type { AuditEntry } from './auditLog.js';
 import type { DaemonClient, DaemonEvent } from '@qwen-code/sdk';
 
 /** Default no-op event stream: yields nothing. */
@@ -753,5 +756,321 @@ describe('DaemonPool', () => {
     expect(stopped).toEqual(['/proj/late']); // stop() was invoked on it
     expect(pool.size()).toBe(0); // never registered into the cleared pool
     expect(pool.workspaces()).toEqual([]);
+  });
+});
+
+// -- Death detection (add-mid-turn-recovery) ---------------------------
+
+interface ExitHandle {
+  cwd: string;
+  fire: (info?: DaemonExitInfo) => void;
+}
+
+interface DeathHarness {
+  pool: DaemonPool;
+  /** One handle per SPAWN, in spawn order (index 0 = first spawn). */
+  exits: ExitHandle[];
+  auditRows: AuditEntry[];
+  deaths: Array<{
+    key: string;
+    sessions: string[];
+    exit: { code: number | null; signal: NodeJS.Signals | null; atMs: number };
+  }>;
+  /** Fire the LATEST spawn's exit for `cwd` (the common case). */
+  fireExit: (cwd: string, info?: DaemonExitInfo) => void;
+  /** Fire a SPECIFIC spawn's exit (e.g. a stale one, by spawn index). */
+  fireExitAt: (index: number, info?: DaemonExitInfo) => void;
+}
+
+const DEFAULT_EXIT: DaemonExitInfo = { code: null, signal: 'SIGKILL' };
+
+/** A pool whose spawn captures the pool-filled `onExit` callback (late-
+ * bound, so the pool can set it after `spawn()` resolves), an audit
+ * recorder that captures rows, and an `onDaemonDeath` hook that captures
+ * invocations. */
+function makeDeathHarness(
+  opts: {
+    now?: () => number;
+    maxDaemons?: number;
+    idleReapMs?: number;
+    client?: (cwd: string) => unknown;
+  } = {},
+): DeathHarness {
+  const exits: ExitHandle[] = [];
+  const auditRows: AuditEntry[] = [];
+  const deaths: DeathHarness['deaths'] = [];
+  const pool = new DaemonPool({
+    defaultDaemon: fakeClient('default'),
+    defaultWorkspaceCwd: '/home/evan',
+    maxDaemons: opts.maxDaemons,
+    idleReapMs: opts.idleReapMs ?? 999_999_999,
+    now: opts.now,
+    spawn: async (cwd) => {
+      const out: PooledDaemonSpawn = {
+        client: (opts.client
+          ? opts.client(cwd)
+          : fakeClient(cwd, `${cwd}-s`)) as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      };
+      exits.push({
+        cwd,
+        fire: (info = DEFAULT_EXIT) => out.onExit?.(info),
+      });
+      return out;
+    },
+    onDaemonDeath: (key, sessions, exit) => {
+      deaths.push({ key, sessions, exit });
+    },
+  });
+  pool.setAudit({
+    record: async (e) => {
+      auditRows.push(e);
+    },
+  });
+  return {
+    pool,
+    exits,
+    auditRows,
+    deaths,
+    fireExit: (cwd, info) => {
+      const idx = exits.map((e) => e.cwd).lastIndexOf(cwd);
+      if (idx >= 0) exits[idx].fire(info);
+    },
+    fireExitAt: (index, info) => exits[index]?.fire(info),
+  };
+}
+
+describe('DaemonPool death detection', () => {
+  it('removes a dead entry immediately, freeing the cap slot for a new workspace', async () => {
+    const h = makeDeathHarness({ maxDaemons: 1 });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    expect(h.pool.size()).toBe(1);
+    // At cap with the sole entry BUSY (a live session) → a new workspace
+    // would 503 while the daemon is alive.
+    await expect(h.pool.getOrSpawn('/proj/b')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    h.fireExit('/proj/a', { code: 1, signal: null });
+    expect(h.pool.size()).toBe(0); // entry removed immediately
+    // The freed slot lets a new workspace spawn.
+    const b = await h.pool.getOrSpawn('/proj/b');
+    expect((b as unknown as { tag: string }).tag).toBe('/proj/b');
+    // The death hook received the affected session; the audit row is there.
+    expect(h.deaths).toHaveLength(1);
+    expect(h.deaths[0].key).toBe('/proj/a');
+    expect(h.deaths[0].sessions).toEqual([s.sessionId]);
+    expect(h.auditRows).toHaveLength(1);
+  });
+
+  it('is idempotent under a double trigger (exit + duplicate exit): one hook, one audit row', async () => {
+    const h = makeDeathHarness();
+    await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    h.fireExit('/proj/a', { code: null, signal: 'SIGKILL' });
+    h.fireExit('/proj/a', { code: null, signal: 'SIGKILL' }); // late duplicate
+    expect(h.deaths).toHaveLength(1);
+    expect(h.auditRows).toHaveLength(1);
+    expect(h.pool.size()).toBe(0);
+  });
+
+  it('collects affected sessions as entry.sessions ∪ ownerOf (the union guards one-sided ids)', async () => {
+    const h = makeDeathHarness();
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    // An id `ownerOf` knows but the entry's `sessions` set no longer holds
+    // (one-sided recording). Reach into the private map via a cast.
+    const ownerOf = (h.pool as unknown as { ownerOf: Map<string, string> })
+      .ownerOf;
+    ownerOf.set('orphan-sess', '/proj/a');
+    h.fireExit('/proj/a', { code: null, signal: 'SIGKILL' });
+    expect(h.deaths).toHaveLength(1);
+    expect(h.deaths[0].sessions.sort()).toEqual([
+      s.sessionId, // '/proj/a-s' — '/' sorts before letters
+      'orphan-sess',
+    ]);
+    expect(h.auditRows[0].detail).toEqual({
+      exitCode: null,
+      signal: 'SIGKILL',
+      sessionCount: 2,
+    });
+    // Both ids are scrubbed: they 404 until recovery re-registers them.
+    await expect(h.pool.sessionContext(s.sessionId)).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+    await expect(h.pool.sessionContext('orphan-sess')).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
+
+  it('writes ONE daemon_died audit row: detail { exitCode, signal, sessionCount }, no workspace path', async () => {
+    const h = makeDeathHarness();
+    await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    h.fireExit('/proj/a', { code: null, signal: 'SIGKILL' });
+    expect(h.auditRows).toHaveLength(1);
+    const row = h.auditRows[0];
+    expect(row.action).toBe('daemon_died');
+    expect(row.detail).toEqual({
+      exitCode: null,
+      signal: 'SIGKILL',
+      sessionCount: 1,
+    });
+    expect(row.target).toBeUndefined();
+    expect(row.actorTokenId).toBeUndefined();
+    expect(JSON.stringify(row)).not.toContain('/proj/a'); // no path leak
+  });
+
+  it('transport trigger: ECONNREFUSED from a pooled call marks the daemon dead, and the later exit event is a no-op', async () => {
+    const h = makeDeathHarness({
+      client: (cwd) => ({
+        ...fakeClient(cwd, `${cwd}-s`),
+        async prompt() {
+          // fetch wraps the socket error under a TypeError with `cause`.
+          throw Object.assign(new TypeError('prompt: fetch failed'), {
+            cause: Object.assign(
+              new Error('connect ECONNREFUSED 127.0.0.1:4181'),
+              { code: 'ECONNREFUSED' },
+            ),
+          });
+        },
+      }),
+    });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(h.pool.prompt(s.sessionId, { prompt: [] })).rejects.toThrow(
+      /fetch failed/,
+    );
+    expect(h.pool.size()).toBe(0); // marked dead on the transport error
+    expect(h.deaths).toHaveLength(1);
+    expect(h.auditRows[0].detail).toEqual({
+      exitCode: null, // transport errors carry no exit info
+      signal: null,
+      sessionCount: 1,
+    });
+    // The (late) exit event is a no-op on the same death.
+    h.fireExit('/proj/a', { code: 137, signal: null });
+    expect(h.deaths).toHaveLength(1);
+    expect(h.auditRows).toHaveLength(1);
+  });
+
+  it('app-level (non-transport) errors do NOT mark the daemon dead', async () => {
+    const h = makeDeathHarness({
+      client: (cwd) => ({
+        ...fakeClient(cwd, `${cwd}-s`),
+        async prompt() {
+          throw new Error('session_not_found: no such session');
+        },
+      }),
+    });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(h.pool.prompt(s.sessionId, { prompt: [] })).rejects.toThrow(
+      /session_not_found/,
+    );
+    expect(h.pool.size()).toBe(1); // still alive
+    expect(h.deaths).toHaveLength(0);
+    expect(h.auditRows).toHaveLength(0);
+  });
+
+  it('boot daemon death flows through the same path: handleDaemonExit scrubs its sessions and writes the row', async () => {
+    const h = makeDeathHarness();
+    const s = await h.pool.createOrAttachSession({}); // on the default daemon
+    h.pool.handleDaemonExit('/home/evan/', { code: 1, signal: null });
+    expect(h.deaths).toHaveLength(1);
+    expect(h.deaths[0].key).toBe('/home/evan'); // normalized
+    expect(h.deaths[0].sessions).toEqual([s.sessionId]);
+    expect(h.auditRows[0].detail).toEqual({
+      exitCode: 1,
+      signal: null,
+      sessionCount: 1,
+    });
+    // The session 404s until recovery re-registers it.
+    await expect(h.pool.sessionContext(s.sessionId)).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
+
+  it('a late exit of a REAPED entry is a no-op (no audit, no hook)', async () => {
+    let t = 0;
+    const h = makeDeathHarness({ now: () => t, idleReapMs: 1000 });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await h.pool.closeSession(s.sessionId);
+    t = 10_000;
+    h.pool.reapIdle(); // graceful: stop() + entry removed
+    expect(h.pool.size()).toBe(0);
+    // The child's exit event arrives after the reap already cleaned up.
+    h.fireExit('/proj/a', { code: 0, signal: null });
+    expect(h.deaths).toHaveLength(0);
+    expect(h.auditRows).toHaveLength(0);
+  });
+
+  it('a STALE exit of a superseded entry cannot kill the respawned daemon (identity guard)', async () => {
+    const h = makeDeathHarness();
+    await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    h.fireExitAt(0, { code: 137, signal: null }); // first spawn's daemon dies
+    expect(h.pool.size()).toBe(0);
+    // Recovery respawns the same workspace → a NEW entry under the key.
+    const again = await h.pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    expect(h.pool.size()).toBe(1);
+    // The OLD entry's exit event finally lands (delayed delivery).
+    h.fireExitAt(0, { code: 137, signal: null });
+    // The NEW entry must survive: no second death, session still routed.
+    expect(h.deaths).toHaveLength(1);
+    expect(h.auditRows).toHaveLength(1);
+    expect(h.pool.size()).toBe(1);
+    const ctx = (await h.pool.sessionContext(again.sessionId)) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('/proj/a');
+  });
+
+  it('stopAll() suppresses death handling: late exits and boot exits write nothing', async () => {
+    const h = makeDeathHarness();
+    await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await h.pool.createOrAttachSession({}); // default daemon session
+    await h.pool.stopAll();
+    h.fireExit('/proj/a', { code: 1, signal: null });
+    h.pool.handleDaemonExit('/home/evan', { code: 1, signal: null });
+    expect(h.deaths).toHaveLength(0);
+    expect(h.auditRows).toHaveLength(0);
+  });
+
+  it('setOnDaemonDeath wires the hook post-construction (the cli.ts path): a later death invokes it with key/sessions/exit', async () => {
+    // Constructed WITHOUT the onDaemonDeath option — the hook arrives via
+    // the setter, as cli.ts wires the recovery orchestrator after the pool
+    // and orchestrator both exist.
+    const spawnOuts: PooledDaemonSpawn[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      idleReapMs: 999_999_999,
+      spawn: async (cwd) => {
+        const out: PooledDaemonSpawn = {
+          client: fakeClient(cwd, `${cwd}-s`) as DaemonClient,
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+        spawnOuts.push(out);
+        return out;
+      },
+    });
+    const calls: Array<{
+      key: string;
+      sessions: string[];
+      exit: {
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        atMs: number;
+      };
+    }> = [];
+    pool.setOnDaemonDeath((key, sessions, exit) => {
+      calls.push({ key, sessions, exit });
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    expect(calls).toHaveLength(0); // no death yet
+    spawnOuts[0].onExit?.({ code: 137, signal: null });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].key).toBe('/proj/a');
+    expect(calls[0].sessions).toEqual([s.sessionId]);
+    expect(calls[0].exit).toMatchObject({ code: 137, signal: null });
+    expect(typeof calls[0].exit.atMs).toBe('number');
   });
 });

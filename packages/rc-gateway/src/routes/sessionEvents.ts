@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler, Response } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import type { RecoveryState, SessionDaemon } from '../daemonPool.js';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
@@ -13,20 +13,30 @@ import type { UsageTick } from '../cost/ingester.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
 import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
-import { SessionWal } from '../wal.js';
-import type { WalFrame } from '../wal.js';
+import { getSharedWal } from '../wal.js';
+import type { SessionWal, WalFrame } from '../wal.js';
+import {
+  loadEpochState,
+  saveEpochState,
+  type EpochState,
+} from '../walEpoch.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
-/** Per-session WAL instances, keyed by sessionId. */
-const walRegistry = new Map<string, SessionWal>();
+/**
+ * Per-session id-renumbering state, keyed by "<walDir>/<sessionId>"
+ * (add-mid-turn-recovery §4). Lazily loaded from the on-disk sidecar so a
+ * gateway restart resumes the same raw→downstream id mapping.
+ */
+const epochRegistry = new Map<string, EpochState>();
 
-function getWal(sessionId: string, walDir: string): SessionWal {
-  let wal = walRegistry.get(sessionId);
-  if (!wal) {
-    wal = new SessionWal({ dir: walDir, sessionId });
-    walRegistry.set(sessionId, wal);
+function getEpochState(walDir: string, sessionId: string): EpochState {
+  const key = `${walDir}/${sessionId}`;
+  let state = epochRegistry.get(key);
+  if (!state) {
+    state = loadEpochState(walDir, sessionId);
+    epochRegistry.set(key, state);
   }
-  return wal;
+  return state;
 }
 
 /**
@@ -42,6 +52,13 @@ function getWal(sessionId: string, walDir: string): SessionWal {
  */
 /** Default grace period before an idle-but-reachable session gets its 200. */
 const DEFAULT_IDLE_ATTACH_MS = 2000;
+
+/**
+ * Default hold before a watcher on a recovering session gives up and gets its
+ * 502 (add-mid-turn-recovery §3). Independent of the saga's own pace: a stuck
+ * saga can never wedge a watcher forever.
+ */
+const DEFAULT_RECOVERY_ATTACH_MS = 60_000;
 
 type FirstFrame<T> =
   | { first: IteratorResult<T> }
@@ -83,6 +100,7 @@ export function createSessionEventsRoute(
   walDir?: string,
   promptEventBroadcaster?: PromptEventBroadcaster,
   idleAttachMs: number = DEFAULT_IDLE_ATTACH_MS,
+  recoveryAttachMs: number = DEFAULT_RECOVERY_ATTACH_MS,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -111,11 +129,76 @@ export function createSessionEventsRoute(
         ? Number(lastEventIdRaw)
         : undefined;
 
+    // Recovery-pending attach (add-mid-turn-recovery §3): while a recovery
+    // saga is in flight for this session the pool cannot resolve it (the dead
+    // entry is gone, ownerOf was scrubbed), so hold the connection — no 404,
+    // no 502, no headers yet — until the saga settles or the deadline hits.
+    // The outcome is sticky (recovered / unrecoverable), so a late reconnect
+    // lands on the right branch instead of re-holding.
+    const recoveryProbe = daemon.recoveryState?.bind(daemon);
+    if (recoveryProbe) {
+      let recoveryState: RecoveryState = recoveryProbe(sessionId);
+      if (recoveryState === 'recovering') {
+        const deadline = Date.now() + recoveryAttachMs;
+        let clientGone = false;
+        const onHoldClose = () => {
+          clientGone = true;
+        };
+        req.on('close', onHoldClose);
+        try {
+          while (recoveryProbe(sessionId) === 'recovering') {
+            if (clientGone || Date.now() >= deadline) break;
+            await new Promise((r) =>
+              setTimeout(r, Math.min(100, deadline - Date.now())),
+            );
+          }
+        } finally {
+          req.off('close', onHoldClose);
+        }
+        if (clientGone) return; // socket gone during the hold; nothing to send
+        recoveryState = recoveryProbe(sessionId);
+        if (recoveryState === 'recovering') {
+          // Deadline hit before the saga settled: the session is still
+          // unresolvable and the hold is over.
+          res.status(502).json({
+            error: 'Daemon unavailable',
+            code: 'daemon_unavailable',
+          });
+          return;
+        }
+      }
+      if (recoveryState === 'unrecoverable') {
+        // Terminal branch (§3): the session's daemon is gone for good. Serve
+        // what the WAL retains (incl. the terminal session_interrupted marker
+        // once Phase 3 lands; walDir is unwired in production today, so the
+        // common case is headers + close) and end the stream. No 412 — a dead
+        // session cannot honor a re-subscribe, so a truncated resume point is
+        // best-effort, not an error.
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        const replayed =
+          walDir !== undefined &&
+          lastEventId !== undefined &&
+          Number.isFinite(lastEventId)
+            ? getSharedWal(walDir, sessionId).replayFrom(lastEventId).events
+            : [];
+        for (const ev of replayed) writeFrame(res, ev);
+        writePresenceLeft(res, actorTokenId, 'disconnect');
+        res.end();
+        return;
+      }
+      // 'recovered' → fall through to the normal attach below (WAL replay
+      // first, as usual).
+    }
+
     // WAL replay: when a client reconnects with Last-Event-ID and we have a
     // WAL directory, attempt to serve missed events from the WAL before
     // falling through to the live daemon stream.
     if (walDir !== undefined && Number.isFinite(lastEventId)) {
-      const wal = getWal(sessionId, walDir);
+      const wal = getSharedWal(walDir, sessionId);
       const replay = wal.replayFrom(lastEventId!);
       if (replay.truncated) {
         // The resume point has fallen out of the WAL; signal the client to
@@ -179,16 +262,20 @@ export function createSessionEventsRoute(
             ) ?? (() => {});
           // Emit synthetic client_joined as the first SSE frame.
           writePresenceJoined(res, actorTokenId, req.rcClient?.scopes ?? []);
-          // Emit the WAL-replayed events first.
+          // Emit the WAL-replayed events first. They already carry final WAL
+          // ids (renumbered when they were written), so pass them through
+          // unrenumbered and without re-appending.
           for (const ev of replay.events) {
             writeFrame(res, ev);
           }
           // Then the first live frame (peeked, or awaited on idle attach) and
-          // the rest of the live stream.
+          // the rest of the live stream — renumbered + WAL-appended (§4).
+          const epoch = getEpochState(walDir, sessionId);
           const first = 'first' in attach ? attach.first : await attach.pending;
-          if (!first.done) writeFrame(res, first.value);
+          if (!first.done)
+            relayLiveFrame(res, wal, epoch, walDir, sessionId, first.value);
           for await (const ev of iterator) {
-            writeFrame(res, ev);
+            relayLiveFrame(res, wal, epoch, walDir, sessionId, ev);
           }
           // Daemon stream ended gracefully: emit client_left before closing.
           writePresenceLeft(res, actorTokenId, 'disconnect');
@@ -230,7 +317,11 @@ export function createSessionEventsRoute(
     req.on('close', () => abort.abort());
 
     // Resolve WAL instance once for appending throughout this connection.
-    const wal = walDir !== undefined ? getWal(sessionId, walDir) : undefined;
+    const wal =
+      walDir !== undefined ? getSharedWal(walDir, sessionId) : undefined;
+    // Id-renumbering state (design §4) — only meaningful with a WAL.
+    const epoch =
+      walDir !== undefined ? getEpochState(walDir, sessionId) : undefined;
 
     let attached = false;
     let unregisterUsage = (): void => {};
@@ -280,12 +371,10 @@ export function createSessionEventsRoute(
       // already out, so the watcher's composer opens immediately either way).
       const first = 'first' in attach ? attach.first : await attach.pending;
       if (!first.done) {
-        appendToWal(wal, first.value);
-        writeFrame(res, first.value);
+        relayLiveFrame(res, wal, epoch, walDir, sessionId, first.value);
       }
       for await (const ev of iterator) {
-        appendToWal(wal, ev);
-        writeFrame(res, ev);
+        relayLiveFrame(res, wal, epoch, walDir, sessionId, ev);
       }
       // Daemon stream ended gracefully: emit client_left before closing.
       writePresenceLeft(res, actorTokenId, 'disconnect');
@@ -339,6 +428,58 @@ function appendToWal(
     data: ev.data,
   };
   wal.append(frame);
+}
+
+/**
+ * Relay a live daemon frame downstream: assign it a downstream/WAL id, append
+ * it to the WAL under that id, and write it to the SSE stream
+ * (add-mid-turn-recovery §4).
+ *
+ * Id continuity: the daemon's raw ids are monotonic within one process; a frame
+ * whose raw id is not greater than the last raw id observed (`lastOutId`) is the
+ * first frame of a fresh bus epoch. On detection the offset is re-anchored so
+ * the renumbered id is exactly `wal.latestId() + 1` — gapless from the WAL's
+ * view, including marker frames appended out-of-band through the same WAL
+ * object. When no WAL is wired (or the frame has no id, i.e. a synthetic
+ * presence frame) the frame passes through raw, as before.
+ */
+function relayLiveFrame(
+  res: Response,
+  wal: SessionWal | undefined,
+  epoch: EpochState | undefined,
+  walDir: string | undefined,
+  sessionId: string,
+  ev: { id?: number; v?: number; type?: string; data?: unknown },
+): void {
+  if (ev.id === undefined) {
+    writeFrame(res, ev);
+    return;
+  }
+  if (wal === undefined || epoch === undefined || walDir === undefined) {
+    // WAL dark: raw passthrough (no renumbering anchor).
+    appendToWal(wal, ev);
+    writeFrame(res, ev);
+    return;
+  }
+  if (ev.id <= epoch.lastOutId) {
+    // New epoch: re-anchor so the first renumbered id is wal.latestId() + 1.
+    epoch.epochOffset = (wal.latestId() ?? 0) + 1 - ev.id;
+  }
+  const outId = ev.id + epoch.epochOffset;
+  epoch.lastOutId = ev.id;
+  const frame: WalFrame = {
+    id: outId,
+    v: ev.v ?? 1,
+    type: ev.type ?? 'unknown',
+    data: ev.data,
+  };
+  wal.append(frame);
+  // Persist per frame: a stale (boundary-only) lastOutId could miss a new
+  // epoch whose first id is higher than the stale value, which would corrupt
+  // the WAL with a colliding id. The WAL already does a per-frame sync write,
+  // so the sidecar write is the same cost class.
+  saveEpochState(walDir, sessionId, epoch);
+  writeFrame(res, { ...ev, id: outId });
 }
 
 function writeFrame(

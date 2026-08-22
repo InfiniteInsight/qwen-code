@@ -181,6 +181,38 @@ export function buildPayload(
     };
   }
 
+  // add-mid-turn-recovery: marker frames appended by reportOutcome after the
+  // recovery saga decides (design §2.5/§6). The interrupted push is used on
+  // the unrecovered path (quiet-hours bypass); recovered pushes
+  // session.recovered.
+  if (event.type === 'session_interrupted') {
+    const exitCode =
+      typeof data.exitCode === 'number' ? ` (exit ${data.exitCode})` : '';
+    return {
+      v: 1,
+      kind: 'session.interrupted',
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(
+        data.recovered
+          ? `Daemon restarted; session recovered${exitCode}`
+          : `Daemon crashed and session was not recovered${exitCode}`,
+      ),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
+  if (event.type === 'session_recovered') {
+    return {
+      v: 1,
+      kind: 'session.recovered',
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate('Session recovered'),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
   switch (event.type) {
     case 'permission_request': {
       const toolCall = data.toolCall as { title?: unknown } | undefined;

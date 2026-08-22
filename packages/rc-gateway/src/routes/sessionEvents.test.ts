@@ -10,6 +10,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
+import type { RecoveryState } from '../daemonPool.js';
 import { createSessionEventsRoute } from './sessionEvents.js';
 import { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
@@ -17,10 +18,11 @@ import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { TokenStore } from '../tokenStore.js';
 import { bearerResolve } from '../auth.js';
 import { SHARE, SESSION_READ, BRIDGE } from '../scopes.js';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionWal } from '../wal.js';
+import { getSharedWal, SessionWal } from '../wal.js';
+import { loadEpochState, saveEpochState } from '../walEpoch.js';
 
 // Valid session-id shapes (isValidSessionId: 32-36 hex/dash chars) — these
 // fixtures previously used arbitrary strings like 'sess-1', which the route's
@@ -48,6 +50,7 @@ async function mountGateway(
   audit?: AuditRecorder,
   walDir?: string,
   idleAttachMs?: number,
+  recoveryAttachMs?: number,
 ): Promise<string> {
   const app = express();
   app.get(
@@ -60,6 +63,7 @@ async function mountGateway(
       walDir,
       undefined,
       idleAttachMs,
+      recoveryAttachMs,
     ),
   );
   const server: Server = await new Promise((resolve) => {
@@ -536,5 +540,238 @@ describe('session-events id validation', () => {
 
     const res = await fetch(`${url}/session/${SESS}/events`);
     expect(res.status).toBe(200);
+  });
+});
+
+describe('session-events recovery-pending attach (add-mid-turn-recovery §3)', () => {
+  // The fakes attach a `recoveryState` probe to a real DaemonClient (Object
+  //.assign keeps the prototype methods the route delegates to). Without the
+  // probe the route must behave exactly as before — covered by every test
+  // above (plain DaemonClient, no recoveryState).
+
+  it('holds a recovering session until the saga settles, then attaches normally', async () => {
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'post' } }],
+    });
+    const client = new DaemonClient({ baseUrl: stub.baseUrl });
+    const state = { current: 'recovering' as RecoveryState };
+    const daemon = Object.assign(client, {
+      recoveryState: () => state.current,
+    });
+    const url = await mountGateway(
+      daemon,
+      undefined,
+      undefined,
+      undefined,
+      2000,
+    );
+    // The saga settles ~50ms into the hold.
+    setTimeout(() => {
+      state.current = 'recovered';
+    }, 50);
+
+    const res = await fetch(`${url}/session/${SESS}/events`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    const frames = await readFrames(res);
+    const daemonFrames = frames.filter((f) => f.id !== undefined);
+    expect(daemonFrames.map((f) => f.id)).toEqual(['1']);
+    expect(daemonFrames[0]!.data).toContain('"text":"post"');
+  });
+
+  it('502s daemon_unavailable when the recovery hold times out', async () => {
+    // The stub is fully healthy — if the hold ever lapsed into a live attach
+    // this would 200. It must not.
+    stub = await startStubDaemon({ frames: [], holdOpenMs: 5000 });
+    const client = new DaemonClient({ baseUrl: stub.baseUrl });
+    const daemon = Object.assign(client, {
+      recoveryState: () => 'recovering' as RecoveryState,
+    });
+    const url = await mountGateway(
+      daemon,
+      undefined,
+      undefined,
+      undefined,
+      150,
+    );
+
+    const res = await fetch(`${url}/session/${SESS}/events`, {
+      headers: { 'Last-Event-ID': '7' },
+    });
+    expect(res.status).toBe(502);
+    expect(res.headers.get('content-type')).not.toContain('text/event-stream');
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('daemon_unavailable');
+    // Pre-header 502: the upstream subscription was never attempted.
+    expect(stub.lastEventIdHeader).toBeUndefined();
+  });
+
+  it('serves an unrecoverable session as 200 + WAL replay + close, without subscribing', async () => {
+    const sessionId = '44444444444444444444444444444444';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-wal-'));
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    wal.append({ id: 1, v: 1, type: 'session_update', data: { text: 'one' } });
+    wal.append({ id: 2, v: 1, type: 'session_update', data: { text: 'two' } });
+    wal.close();
+    stub = await startStubDaemon({ frames: [], holdOpenMs: 5000 });
+    const client = new DaemonClient({ baseUrl: stub.baseUrl });
+    const daemon = Object.assign(client, {
+      recoveryState: () => 'unrecoverable' as RecoveryState,
+    });
+    const url = await mountGateway(daemon, undefined, walDir);
+
+    const res = await fetch(`${url}/session/${sessionId}/events`, {
+      headers: { 'Last-Event-ID': '1' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    const frames = await readFrames(res);
+    // Only the WAL-replayed frame after the cursor; the stream then closed.
+    const daemonFrames = frames.filter((f) => f.id !== undefined);
+    expect(daemonFrames.map((f) => f.id)).toEqual(['2']);
+    expect(daemonFrames[0]!.data).toContain('"text":"two"');
+    // The terminal branch never touches the live daemon.
+    expect(stub.lastEventIdHeader).toBeUndefined();
+    // client_left marks the close; no client_joined was sent (no attach).
+    const parsed = frames.map((f) => JSON.parse(f.data));
+    expect(parsed.some((e) => e.type === 'client_left')).toBe(true);
+    expect(parsed.some((e) => e.type === 'client_joined')).toBe(false);
+  });
+});
+
+describe('session-events id continuity / epoch renumbering (add-mid-turn-recovery §4)', () => {
+  it('renumbers a new daemon epoch onto the WAL sequence (gapless)', async () => {
+    const sessionId = '55555555555555555555555555555555';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-epoch-'));
+
+    // Epoch 1: a daemon whose bus ids run 1..3.
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'a' } },
+        { id: 2, type: 'session_update', data: { text: 'b' } },
+        { id: 3, type: 'session_update', data: { text: 'c' } },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, walDir);
+    const res1 = await fetch(`${url}/session/${sessionId}/events`);
+    expect(res1.status).toBe(200);
+    const frames1 = await readFrames(res1);
+    const epoch1 = frames1.filter((f) => f.id !== undefined);
+    // No boundary in this lifetime: raw ids pass through unchanged.
+    expect(epoch1.map((f) => f.id)).toEqual(['1', '2', '3']);
+
+    // The daemon dies and is respawned: the new bus epoch restarts at id 1.
+    await stub.close();
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'd' } },
+        { id: 2, type: 'session_update', data: { text: 'e' } },
+      ],
+    });
+    const daemon2 = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url2 = await mountGateway(daemon2, undefined, walDir);
+    // A fresh attach (no Last-Event-ID) sees the renumbered live stream.
+    const res2 = await fetch(`${url2}/session/${sessionId}/events`);
+    expect(res2.status).toBe(200);
+    const frames2 = await readFrames(res2);
+    const epoch2 = frames2.filter((f) => f.id !== undefined);
+    // offset = wal.latestId() + 1 - 1 = 3 + 1 - 1 = 3 → raw 1→4, raw 2→5.
+    expect(epoch2.map((f) => f.id)).toEqual(['4', '5']);
+
+    // The WAL sequence is gapless across the epoch boundary.
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(wal.count()).toBe(5);
+    wal.close();
+  });
+
+  it('leaves no WAL gap when a marker frame is appended out-of-band', async () => {
+    const sessionId = '66666666666666666666666666666666';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-epoch-'));
+
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'a' } },
+        { id: 2, type: 'session_update', data: { text: 'b' } },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, walDir);
+    const res1 = await fetch(`${url}/session/${sessionId}/events`);
+    expect(res1.status).toBe(200);
+    await readFrames(res1); // WAL now holds ids 1,2.
+
+    // A recovery marker lands out-of-band through the shared WAL instance —
+    // the same one the relay anchors to (Phase 3.2's reportOutcome seam).
+    const shared = getSharedWal(walDir, sessionId);
+    shared.append({
+      id: 3,
+      v: 1,
+      type: 'session_interrupted',
+      data: { sessionId, recovered: true, hadInFlightTurn: true },
+    });
+
+    // Respawned daemon: bus ids restart at 1 again.
+    await stub.close();
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'c' } },
+        { id: 2, type: 'session_update', data: { text: 'd' } },
+      ],
+    });
+    const daemon2 = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url2 = await mountGateway(daemon2, undefined, walDir);
+    const res2 = await fetch(`${url2}/session/${sessionId}/events`);
+    expect(res2.status).toBe(200);
+    const frames2 = await readFrames(res2);
+    const epoch2 = frames2.filter((f) => f.id !== undefined);
+    // offset = 3 (marker) + 1 - 1 = 3 → raw 1→4, raw 2→5: the marker's id is
+    // skipped over, not collided with.
+    expect(epoch2.map((f) => f.id)).toEqual(['4', '5']);
+
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3, 4, 5]);
+    wal.close();
+  });
+});
+
+describe('walEpoch sidecar (add-mid-turn-recovery §4)', () => {
+  const SID = '77777777777777777777777777777777';
+  const CONSERVATIVE = {
+    epochOffset: 0,
+    lastOutId: Number.MAX_SAFE_INTEGER,
+  };
+
+  it('round-trips {epochOffset, lastOutId}', () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-epoch-'));
+    mkdirSync(join(walDir, 'wal'), { recursive: true });
+    saveEpochState(walDir, SID, { epochOffset: 7, lastOutId: 42 });
+    expect(loadEpochState(walDir, SID)).toEqual({
+      epochOffset: 7,
+      lastOutId: 42,
+    });
+  });
+
+  it('falls back to the conservative state when the sidecar is missing', () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-epoch-'));
+    expect(loadEpochState(walDir, SID)).toEqual(CONSERVATIVE);
+  });
+
+  it('falls back for a torn/corrupt sidecar', () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-epoch-'));
+    mkdirSync(join(walDir, 'wal'), { recursive: true });
+    writeFileSync(join(walDir, 'wal', `${SID}.epoch.json`), '{"epochOffset":');
+    expect(loadEpochState(walDir, SID)).toEqual(CONSERVATIVE);
+  });
+
+  it('falls back when a field is not a finite number', () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-epoch-'));
+    mkdirSync(join(walDir, 'wal'), { recursive: true });
+    writeFileSync(
+      join(walDir, 'wal', `${SID}.epoch.json`),
+      '{"epochOffset":"x","lastOutId":3}',
+    );
+    expect(loadEpochState(walDir, SID)).toEqual(CONSERVATIVE);
   });
 });
