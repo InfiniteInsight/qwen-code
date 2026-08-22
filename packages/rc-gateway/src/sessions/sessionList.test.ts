@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import {
   assembleListing,
   readFirstRecord,
+  readFirstUserMessage,
   readSessionTitle,
   readSessionTitleInfo,
   listSessions,
@@ -427,5 +428,88 @@ describe('readSessionTitleInfo (titleSource)', () => {
 
   it('returns null for a missing / untitled session', async () => {
     expect(await readSessionTitleInfo(dir, ID(9))).toBeNull();
+  });
+});
+
+describe('readFirstUserMessage', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-preview-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('extracts the first user message text', async () => {
+    const lines = [
+      JSON.stringify({ type: 'system', message: { parts: [{ text: 'sys' }] } }),
+      JSON.stringify({
+        type: 'user',
+        message: { parts: [{ text: 'hello world' }] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { parts: [{ text: 'hi' }] },
+      }),
+    ].join('\n');
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
+    expect(await readFirstUserMessage(dir, ID(1))).toBe('hello world');
+  });
+
+  it('truncates long messages to 120 chars with ellipsis', async () => {
+    const long = 'a'.repeat(200);
+    const line = JSON.stringify({
+      type: 'user',
+      message: { parts: [{ text: long }] },
+    });
+    await writeFile(join(dir, `${ID(1)}.jsonl`), line);
+    const result = await readFirstUserMessage(dir, ID(1));
+    expect(result).toHaveLength(121);
+    expect(result!.endsWith('…')).toBe(true);
+  });
+
+  it('collapses whitespace in the preview', async () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: { parts: [{ text: 'hello\n  world\ttab' }] },
+    });
+    await writeFile(join(dir, `${ID(1)}.jsonl`), line);
+    expect(await readFirstUserMessage(dir, ID(1))).toBe('hello world tab');
+  });
+
+  it('skips non-user records', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'system',
+        message: { parts: [{ text: 'init' }] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { parts: [{ text: 'reply' }] },
+      }),
+    ].join('\n');
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
+    expect(await readFirstUserMessage(dir, ID(1))).toBeNull();
+  });
+
+  it('returns null for a missing file', async () => {
+    expect(await readFirstUserMessage(dir, ID(9))).toBeNull();
+  });
+
+  it('returns null for an empty file', async () => {
+    await writeFile(join(dir, `${ID(1)}.jsonl`), '');
+    expect(await readFirstUserMessage(dir, ID(1))).toBeNull();
+  });
+
+  it('skips user records with empty text', async () => {
+    const lines = [
+      JSON.stringify({ type: 'user', message: { parts: [{ text: '   ' }] } }),
+      JSON.stringify({
+        type: 'user',
+        message: { parts: [{ text: 'second' }] },
+      }),
+    ].join('\n');
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
+    expect(await readFirstUserMessage(dir, ID(1))).toBe('second');
   });
 });
