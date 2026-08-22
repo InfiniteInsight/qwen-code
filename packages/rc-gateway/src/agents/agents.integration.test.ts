@@ -23,15 +23,19 @@ let server: Server | undefined;
 let stub: StubDaemon | undefined;
 
 afterEach(async () => {
-  if (server) await new Promise<void>((r) => server!.close(() => r()));
-  if (stub) await stub.close();
+  // Force-destroy open sockets (pending prompts) so close() doesn't hang.
+  if (server) {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server!.close(() => r()));
+  }
+  if (stub) await stub.crash();
   server = undefined;
   stub = undefined;
 });
 
 describe('agent observability end-to-end (spawn → frames → cancel)', () => {
   it('drives the full lifecycle against the stub daemon', async () => {
-    stub = await startStubDaemon({ promptDelayMs: 2000 });
+    stub = await startStubDaemon({ promptDelayMs: 30_000 });
     const dir = await mkdtemp(join(tmpdir(), 'agents-e2e-'));
     const store = await TokenStore.open(join(dir, 'tokens.json'));
     const { token } = await store.issue(['owner'], 'e2e-owner');
