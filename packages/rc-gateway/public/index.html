@@ -2795,8 +2795,15 @@
           } else if (r.status === 401) {
             daemonStatusRow(d, out, 'RE-PAIR REQUIRED',
               d.url.replace(/\/+$/, '') + '/ui/');
+          } else if (r.status === 403) {
+            daemonStatusRow(d, out, 'ERROR — daemon returned 403 (token lacks owner scope)');
           } else if (r.kind === 'timeout' || r.kind === 'network') {
-            daemonStatusRow(d, out, 'UNREACHABLE');
+            const ls = lastSeen[d.url];
+            const seen = ls !== undefined ? relTime(Date.now() - ls) : 'never';
+            daemonStatusRow(d, out,
+              'UNREACHABLE — last seen ' + seen +
+              ' · if this daemon is up: origin not admitted on ' + d.name +
+              ' — owner action required: qwen-rc cors add ' + location.origin);
           } else {
             daemonStatusRow(d, out, 'ERROR — ' + (r.status || r.kind));
           }

@@ -111,6 +111,16 @@ async function runNvidiaSmi(query: string): Promise<string> {
   return stdout;
 }
 
+/**
+ * Parse a numeric CSV field, tolerating `nvidia-smi`'s `[N/A]` sentinel
+ * (emitted for some fields on MIG/passthrough GPUs) by falling back to 0
+ * instead of propagating `NaN` into the response.
+ */
+function safeNum(s: string): number {
+  const n = Number(s);
+  return Number.isNaN(n) ? 0 : n;
+}
+
 function splitCsvLine(line: string): string[] {
   return line.split(',').map((field) => field.trim());
 }
@@ -127,13 +137,13 @@ function parseGpuCsv(stdout: string): GpuInfo[] {
     const [index, name, uuid, memoryUsed, memoryTotal, utilization, temperature] =
       splitCsvLine(line);
     return {
-      index: Number(index),
+      index: safeNum(index),
       name,
       uuid,
-      memoryUsedMiB: Number(memoryUsed),
-      memoryTotalMiB: Number(memoryTotal),
-      utilizationPct: Number(utilization),
-      temperatureC: Number(temperature),
+      memoryUsedMiB: safeNum(memoryUsed),
+      memoryTotalMiB: safeNum(memoryTotal),
+      utilizationPct: safeNum(utilization),
+      temperatureC: safeNum(temperature),
       processes: [],
     };
   });
@@ -143,9 +153,9 @@ function parseProcCsv(stdout: string): RawProcess[] {
   return nonEmptyLines(stdout).map((line) => {
     const [pid, gpuUuid, gpuMemory, name] = splitCsvLine(line);
     return {
-      pid: Number(pid),
+      pid: safeNum(pid),
       gpuUuid,
-      gpuMemoryMiB: Number(gpuMemory),
+      gpuMemoryMiB: safeNum(gpuMemory),
       name,
     };
   });
