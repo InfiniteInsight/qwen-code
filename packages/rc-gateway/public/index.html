@@ -348,49 +348,6 @@
     </section>
     <div id="status"></div>
     <div id="cards"></div>
-    <section id="composer" style="display: none">
-      <textarea
-        id="prompt"
-        rows="3"
-        style="width: 100%"
-        placeholder="type a prompt to send to the watched session"
-      ></textarea>
-      <button id="send">Send</button>
-      <button id="dictate">Dictate</button>
-      <select id="dictate-lang" title="dictation language">
-        <option value="">auto</option>
-        <option value="en-US">English (US)</option>
-        <option value="en-GB">English (UK)</option>
-        <option value="es-ES">Spanish</option>
-        <option value="fr-FR">French</option>
-        <option value="de-DE">German</option>
-        <option value="pt-BR">Portuguese (BR)</option>
-        <option value="hi-IN">Hindi</option>
-        <option value="zh-CN">Chinese</option>
-        <option value="ja-JP">Japanese</option>
-      </select>
-      <label
-        title="when dictation ends on a pause, send the prompt automatically"
-        ><input id="dictate-autosend" type="checkbox" /> auto-send</label
-      >
-      <span
-        id="dictate-interim"
-        aria-live="polite"
-        style="color: #888; font-size: 0.85rem"
-      ></span>
-      <div id="idle-suggest" style="margin-top: 6px; font-size: 0.85rem">
-        <label title="next-step suggestions when this session goes idle"
-          ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
-          suggestions</label
-        >
-        <span id="idle-suggest-status" style="color: #888"></span>
-      </div>
-      <div
-        id="idle-chips"
-        aria-live="polite"
-        style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
-      ></div>
-    </section>
     <style>
       #transcript {
         display: flex;
@@ -400,6 +357,8 @@
         background: #111;
         border-radius: 6px;
         min-height: 60px;
+        max-height: 75vh;
+        overflow-y: auto;
       }
       #transcript .bubble {
         max-width: 92%;
@@ -584,6 +543,49 @@
     "></div>
     <div id="lineage" hidden></div>
     <div id="transcript"></div>
+    <section id="composer" style="display: none">
+      <textarea
+        id="prompt"
+        rows="3"
+        style="width: 100%"
+        placeholder="type a prompt to send to the watched session"
+      ></textarea>
+      <button id="send">Send</button>
+      <button id="dictate">Dictate</button>
+      <select id="dictate-lang" title="dictation language">
+        <option value="">auto</option>
+        <option value="en-US">English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="es-ES">Spanish</option>
+        <option value="fr-FR">French</option>
+        <option value="de-DE">German</option>
+        <option value="pt-BR">Portuguese (BR)</option>
+        <option value="hi-IN">Hindi</option>
+        <option value="zh-CN">Chinese</option>
+        <option value="ja-JP">Japanese</option>
+      </select>
+      <label
+        title="when dictation ends on a pause, send the prompt automatically"
+        ><input id="dictate-autosend" type="checkbox" /> auto-send</label
+      >
+      <span
+        id="dictate-interim"
+        aria-live="polite"
+        style="color: #888; font-size: 0.85rem"
+      ></span>
+      <div id="idle-suggest" style="margin-top: 6px; font-size: 0.85rem">
+        <label title="next-step suggestions when this session goes idle"
+          ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
+          suggestions</label
+        >
+        <span id="idle-suggest-status" style="color: #888"></span>
+      </div>
+      <div
+        id="idle-chips"
+        aria-live="polite"
+        style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
+      ></div>
+    </section>
     <pre id="log" style="display: none"></pre>
     <script>
       const $ = (id) => document.getElementById(id);
@@ -630,9 +632,19 @@
           : '';
       const strOr = (v, d) => (typeof v === 'string' && v ? clean(v) : d);
 
-      function scrollTranscript() {
+      let stickToBottom = true; // follow the newest content while near the bottom
+      $('transcript').addEventListener('scroll', () => {
         const el = $('transcript');
-        el.scrollTop = el.scrollHeight;
+        // "Near the bottom" = within a bubble's height of the end.
+        stickToBottom =
+          el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      });
+      function scrollTranscript(force) {
+        const el = $('transcript');
+        // A new user message (force) always jumps to the latest; otherwise
+        // only follow if the user is still near the bottom, so scrolling up
+        // to read history mid-stream doesn't yank them back down.
+        if (force || stickToBottom) el.scrollTop = el.scrollHeight;
       }
       function resetTurn() {
         curAsst = null;
@@ -701,6 +713,7 @@
         forkBtnEl = null;
         forkBtnTurn = -1;
         clearCrashBanner(); // a new watch starts with no crash banner
+        stickToBottom = true; // a new watch follows the newest content
         renderFooter();
       }
       function makeBubble(cls, roleLabel) {
@@ -721,7 +734,7 @@
       function addUser(text) {
         resetTurn();
         makeBubble('user', 'you')._body.textContent = clean(text);
-        scrollTranscript();
+        scrollTranscript(true);
       }
       function appendAssistant(text) {
         curThought = null;
