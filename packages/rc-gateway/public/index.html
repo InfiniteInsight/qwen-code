@@ -1802,7 +1802,7 @@
           if (res.status === 200) {
             const j = await res.json();
             lastSeenEventId = null;
-            startWatch(j.sessionId, undefined, title);
+            startWatch(j.sessionId, 0, title);
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');
           } else if (res.status === 404) {
