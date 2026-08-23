@@ -95,6 +95,7 @@ import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import { createPeersRoute } from './routes/peers.js';
 import type { BrowsePeers } from './routes/peers.js';
+import { createGpuRoute } from './routes/gpu.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -212,6 +213,8 @@ export interface GatewayDeps {
   policyExplain?: PolicyExplainAccess;
   /** LAN daemon discovery for GET /rc/peers. Absent → route not mounted. */
   browsePeers?: BrowsePeers;
+  /** GPU status probe for GET /rc/gpu. Absent → route not mounted. */
+  gpuProbe?: () => Promise<import('./gpu/gpuStatus.js').GpuStatusResponse>;
   /**
    * Per-sub-actor write cap within the limiter's rolling window (bridge
    * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
@@ -1179,6 +1182,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/peers',
       requireScope(OWNER, audit),
       createPeersRoute(deps.browsePeers),
+    );
+  }
+
+  // GET /rc/gpu — gateway-global (no :id), OWNER-scoped, read-only GPU
+  // status via the optional nvidia-smi probe. Mirrors the /rc/peers mount
+  // just above: no session lock, no daemon call. Absent dep (no GPU probe
+  // wired) → route not mounted at all (404, not a 503 at request time).
+  if (deps.gpuProbe) {
+    app.get(
+      '/rc/gpu',
+      requireScope(OWNER, audit),
+      createGpuRoute(deps.gpuProbe),
     );
   }
 

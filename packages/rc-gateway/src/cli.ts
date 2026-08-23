@@ -31,6 +31,7 @@ import {
   type BonjourFactory,
 } from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
+import { probeGpuStatus } from './gpu/gpuStatus.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { DaemonPool, type PooledDaemonSpawn } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
@@ -753,6 +754,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         timeoutMs,
       });
     },
+    // GET /rc/gpu: probe nvidia-smi (optional CLI dep) for live GPU status.
+    // No pidResolver override — workspace resolution via `/proc/<pid>/cwd`
+    // happens automatically inside probeGpuStatus.
+    gpuProbe: () => probeGpuStatus(),
     policyExplain: {
       policy: () => currentPolicy,
       projectRoot: () => workspaceCwd ?? process.cwd(),
