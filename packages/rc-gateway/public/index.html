@@ -222,12 +222,14 @@
         <div id="daemons-rows"></div>
         <div style="margin-top: 6px">
           <button id="daemons-refresh-sessions">Sessions on all daemons</button>
+          <button id="daemons-refresh-gpus">Refresh GPUs</button>
           <span
             id="daemons-updated"
             style="color: #888; font-size: 0.85rem"
           ></span>
         </div>
         <div id="daemons-sessions" hidden>(not fetched)</div>
+        <div id="daemons-gpus" hidden>(not fetched)</div>
       </div>
     </section>
     <section id="push-prefs">
@@ -525,6 +527,35 @@
       }
       .agg-session-row .open {
         cursor: pointer;
+      }
+      .gpu-row {
+        margin: 0.3rem 0 0.3rem 1.2rem;
+        font-size: 0.85rem;
+      }
+      .gpu-bar {
+        display: inline-block;
+        width: 120px;
+        height: 10px;
+        background: #333;
+        border-radius: 4px;
+        vertical-align: middle;
+        overflow: hidden;
+      }
+      .gpu-bar-fill {
+        height: 100%;
+        background: #4a4;
+        border-radius: 4px 0 0 4px;
+      }
+      .gpu-bar-fill.warn {
+        background: #ca0;
+      }
+      .gpu-bar-fill.crit {
+        background: #c44;
+      }
+      .gpu-proc {
+        margin-left: 1.6rem;
+        font-size: 0.8rem;
+        color: #888;
       }
     </style>
     <div
@@ -2546,6 +2577,23 @@
         }
       }
 
+      async function fetchDaemonGpu(d) {
+        try {
+          const base = d.url.replace(/\/+$/, '');
+          const isSelf = base === location.origin ||
+                         base === location.origin.replace(/\/+$/, '');
+          const url = isSelf ? '/rc/gpu' : base + '/rc/gpu';
+          const res = await fetch(url, {
+            headers: { Authorization: 'Bearer ' + token() },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (res.ok) return { ok: true, data: await res.json() };
+          return { ok: false, status: res.status };
+        } catch (e) {
+          return { ok: false, kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network' };
+        }
+      }
+
       function daemonStatusRow(d, out, detail, actionUrl) {
         const row = document.createElement('div');
         row.className = 'daemon-status-row';
@@ -2662,6 +2710,100 @@
       }
       $('daemons-refresh-sessions').onclick = () =>
         void runAggregatedSessions();
+
+      function renderDaemonGpuRows(d, gpuData, container) {
+        // Daemon header pill
+        const header = document.createElement('div');
+        header.appendChild(daemonPill(d.name));
+
+        if (!gpuData.available) {
+          const txt = document.createElement('span');
+          txt.textContent = ' no GPUs';
+          txt.style.color = '#888';
+          header.appendChild(txt);
+          container.appendChild(header);
+          return;
+        }
+
+        if (gpuData.gpus.length === 0) {
+          const txt = document.createElement('span');
+          txt.textContent = ' no GPUs detected';
+          txt.style.color = '#888';
+          header.appendChild(txt);
+          container.appendChild(header);
+          return;
+        }
+
+        container.appendChild(header);
+
+        for (const gpu of gpuData.gpus) {
+          const row = document.createElement('div');
+          row.className = 'gpu-row';
+
+          // Memory bar
+          const pct = gpu.memoryTotalMiB > 0
+            ? Math.round((gpu.memoryUsedMiB / gpu.memoryTotalMiB) * 100)
+            : 0;
+          const bar = document.createElement('span');
+          bar.className = 'gpu-bar';
+          const fill = document.createElement('span');
+          fill.className = 'gpu-bar-fill' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '');
+          fill.style.width = pct + '%';
+          bar.appendChild(fill);
+
+          // Text summary
+          const used = (gpu.memoryUsedMiB / 1024).toFixed(1);
+          const total = (gpu.memoryTotalMiB / 1024).toFixed(1);
+          const txt = document.createElement('span');
+          txt.textContent = ' GPU ' + gpu.index + ': ' + gpu.name +
+            ' — ' + used + '/' + total + ' GB (' + pct + '%) · ' +
+            gpu.temperatureC + '°C';
+
+          row.appendChild(bar);
+          row.appendChild(txt);
+          container.appendChild(row);
+
+          // Process list
+          for (const proc of gpu.processes) {
+            const procRow = document.createElement('div');
+            procRow.className = 'gpu-proc';
+            const label = proc.workspace
+              ? proc.workspace
+              : proc.name;
+            procRow.textContent = 'PID ' + proc.pid + ' · ' +
+              (proc.gpuMemoryMiB / 1024).toFixed(1) + ' GB · ' + label;
+            container.appendChild(procRow);
+          }
+        }
+      }
+
+      async function runGpuRefresh() {
+        const out = $('daemons-gpus');
+        out.hidden = false;
+        out.textContent = 'fetching…';
+        const daemons = manifestDaemons();
+        if (daemons.length === 0) {
+          out.textContent = '(no daemons registered)';
+          return;
+        }
+        const results = await Promise.all(daemons.map(fetchDaemonGpu));
+        out.textContent = '';
+        results.forEach((r, i) => {
+          const d = daemons[i];
+          if (r.ok) {
+            renderDaemonGpuRows(d, r.data, out);
+          } else if (r.status === 401) {
+            daemonStatusRow(d, out, 'RE-PAIR REQUIRED',
+              d.url.replace(/\/+$/, '') + '/ui/');
+          } else if (r.kind === 'timeout' || r.kind === 'network') {
+            daemonStatusRow(d, out, 'UNREACHABLE');
+          } else {
+            daemonStatusRow(d, out, 'ERROR — ' + (r.status || r.kind));
+          }
+        });
+      }
+
+      $('daemons-refresh-gpus').onclick = () => void runGpuRefresh();
 
       loadDaemonManifest();
 
