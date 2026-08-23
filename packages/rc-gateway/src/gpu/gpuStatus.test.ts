@@ -70,7 +70,7 @@ describe('probeGpuStatus', () => {
   });
 
   it('parses single GPU with no processes', async () => {
-    gpuStdout = '0, NVIDIA RTX 4090, GPU-abc123, 1024, 24576, 45, 38\n';
+    gpuStdout = '0, NVIDIA RTX 4090, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 1024, 24576, 45, 38\n';
     procStdout = '';
 
     const result = await probeGpuStatus();
@@ -80,7 +80,7 @@ describe('probeGpuStatus', () => {
     expect(result.gpus[0]).toEqual({
       index: 0,
       name: 'NVIDIA RTX 4090',
-      uuid: 'GPU-abc123',
+      uuid: 'GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f',
       memoryUsedMiB: 1024,
       memoryTotalMiB: 24576,
       utilizationPct: 45,
@@ -91,12 +91,12 @@ describe('probeGpuStatus', () => {
 
   it('parses multi-GPU with processes attributed to correct GPUs', async () => {
     gpuStdout =
-      '0, NVIDIA RTX 4090, GPU-abc123, 18432, 24576, 95, 72\n' +
-      '1, NVIDIA RTX 4090, GPU-def456, 512, 24576, 5, 35\n';
+      '0, NVIDIA RTX 4090, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 18432, 24576, 95, 72\n' +
+      '1, NVIDIA RTX 4090, GPU-b2a04f12-0da1-4c67-a6e0-7a2d53eb15c4, 512, 24576, 5, 35\n';
     procStdout =
-      '12345, GPU-abc123, 16384, python3\n' +
-      '12346, GPU-abc123, 2048, qwen\n' +
-      '99999, GPU-def456, 512, other-proc\n';
+      '12345, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 16384, python3\n' +
+      '12346, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 2048, qwen\n' +
+      '99999, GPU-b2a04f12-0da1-4c67-a6e0-7a2d53eb15c4, 512, other-proc\n';
 
     const pidResolver = (pid: number) =>
       pid === 12345 ? '/home/evan/projects/foo' : null;
@@ -131,8 +131,8 @@ describe('probeGpuStatus', () => {
   });
 
   it('falls back to /proc/<pid>/cwd when no resolver is given (or it returns null)', async () => {
-    gpuStdout = '0, NVIDIA RTX 4090, GPU-abc123, 1024, 24576, 45, 38\n';
-    procStdout = '12345, GPU-abc123, 1024, python3\n';
+    gpuStdout = '0, NVIDIA RTX 4090, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 1024, 24576, 45, 38\n';
+    procStdout = '12345, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 1024, python3\n';
     mockReadlinkSync.mockReturnValue('/home/evan/projects/from-proc');
 
     const result = await probeGpuStatus();
@@ -171,7 +171,7 @@ describe('probeGpuStatus', () => {
   });
 
   it('TTL cache returns cached result within window', async () => {
-    gpuStdout = '0, NVIDIA RTX 4090, GPU-abc123, 1024, 24576, 45, 38\n';
+    gpuStdout = '0, NVIDIA RTX 4090, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 1024, 24576, 45, 38\n';
     procStdout = '';
 
     const first = await probeGpuStatus();
@@ -184,7 +184,7 @@ describe('probeGpuStatus', () => {
 
   it('cache expires after TTL', async () => {
     vi.useFakeTimers();
-    gpuStdout = '0, NVIDIA RTX 4090, GPU-abc123, 1024, 24576, 45, 38\n';
+    gpuStdout = '0, NVIDIA RTX 4090, GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f, 1024, 24576, 45, 38\n';
     procStdout = '';
 
     await probeGpuStatus();

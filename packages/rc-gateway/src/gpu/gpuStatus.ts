@@ -42,7 +42,7 @@ export type PidResolver = (pid: number) => string | null;
 
 const NVIDIA_SMI = 'nvidia-smi';
 const GPU_QUERY =
-  'index,name,uuid.short,memory.used,memory.total,utilization.gpu,temperature.gpu';
+  'index,name,uuid,memory.used,memory.total,utilization.gpu,temperature.gpu';
 const PROC_QUERY = 'pid,gpu_uuid,used_gpu_memory,process_name';
 const CSV_FORMAT = '--format=csv,noheader,nounits';
 const CACHE_TTL_MS = 2000;
