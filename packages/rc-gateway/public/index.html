@@ -678,6 +678,7 @@
         $('app-body').hidden = false;
       }
       function showAuthGate() {
+        if (healthPollId) { clearInterval(healthPollId); healthPollId = null; }
         $('auth-gate').hidden = false;
         $('app-body').hidden = true;
       }
@@ -1379,9 +1380,8 @@
       // here is safe regardless of source order.
       // Tab-bar reachability dot (Task 4). ok=true → green/"reachable",
       // ok=false → red/"unreachable". Driven by the auth gate's initial
-      // capabilities check and, thereafter, by the daemon health poll for
-      // the current-origin daemon (see checkDaemonHealth/pollDaemonHealths
-      // below).
+      // capabilities check and, thereafter, by the standalone /rc/health probe
+      // in startHealthPoll().
       function setStatusDot(ok) {
         const dot = $('status-dot');
         if (!dot) return;
