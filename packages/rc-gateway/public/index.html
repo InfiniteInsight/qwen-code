@@ -96,17 +96,17 @@
     </style>
   </head>
   <body id="rc-app">
-    <h1>qwen-rc viewer</h1>
-    <section id="gw-status">
-      <button id="status-btn">Check status</button>
-      <span id="status-result">(unknown)</span>
-    </section>
-    <section>
-      <label>Pairing code <input id="code" placeholder="paste code" /></label>
-      <button id="pair">Pair</button>
-      <span id="pair-feedback" role="status" aria-live="polite"></span>
-    </section>
-    <section>
+    <div id="auth-gate">
+      <h1>qwen-rc viewer</h1>
+      <section>
+        <label>Pairing code <input id="code" placeholder="paste code" /></label>
+        <button id="pair">Pair</button>
+        <span id="pair-feedback" role="status" aria-live="polite"></span>
+      </section>
+    </div>
+    <div id="app-body" hidden>
+      <h1>qwen-rc viewer</h1>
+      <section>
       <label>Session id <input id="session" placeholder="session id" /></label>
       <button id="watch">Watch</button>
       <button id="stop" disabled>Stop</button>
@@ -587,10 +587,55 @@
       ></div>
     </section>
     <pre id="log" style="display: none"></pre>
+    </div>
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
       const WATCHED_KEY = 'qwen-rc:watched-session';
+
+      // Auth gate (add-rc-viewer-ui-reorg task 1): #auth-gate (pairing only)
+      // and #app-body (everything else) are mutually exclusive. Later tasks
+      // (tabs, pinning, status dot) live entirely inside #app-body.
+      function showApp() {
+        $('auth-gate').hidden = true;
+        $('app-body').hidden = false;
+      }
+      function showAuthGate() {
+        $('auth-gate').hidden = false;
+        $('app-body').hidden = true;
+      }
+
+      // Global 401 teardown: any 401 from THIS gateway (same-origin request)
+      // means the stored token is no longer valid — drop it and fall back to
+      // the pairing screen. Scoped to same-origin ONLY: the multi-workspace
+      // pool (add-multi-workspace-client) fetches OTHER daemons' absolute
+      // URLs and already reports their 401s as a per-row "RE-PAIR REQUIRED"
+      // status (spec 4.6) — that must NOT tear down this browser's own
+      // gateway session.
+      (function installAuthTeardown() {
+        const realFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+          const res = await realFetch(input, init);
+          if (res.status === 401) {
+            try {
+              const reqUrl = new URL(
+                typeof input === 'string' || input instanceof String
+                  ? String(input)
+                  : input.url,
+                location.href,
+              );
+              if (reqUrl.origin === location.origin) {
+                localStorage.removeItem(TOKEN_KEY);
+                showAuthGate();
+              }
+            } catch {
+              /* malformed/opaque URL — nothing to tear down */
+            }
+          }
+          return res;
+        };
+      })();
+
       const setStatus = (m) => {
         $('status').textContent = m;
       };
@@ -1121,6 +1166,40 @@
 
       const token = () => localStorage.getItem(TOKEN_KEY);
 
+      // Validate any stored token against the gateway before revealing
+      // #app-body. /rc/capabilities requires an authenticated req.rcClient
+      // and 401s otherwise, so a 200 here is proof the token still works —
+      // mere token() *presence* is not (a stale/revoked token is still a
+      // non-empty string). renderRecentWorkspaces/browseTo/loadDaemonManifest/
+      // restoreWatchedSession are function declarations defined later in this
+      // script but hoisted, and this only reaches them after the `await`
+      // below — by which point the whole script has finished executing (same
+      // reasoning doPair, further down, already relies on) — so calling them
+      // here is safe regardless of source order.
+      (async function authGate() {
+        const t = token();
+        if (!t) {
+          showAuthGate();
+          return;
+        }
+        try {
+          const res = await fetch('/rc/capabilities', {
+            headers: { Authorization: 'Bearer ' + t },
+          });
+          if (res.ok) {
+            showApp();
+            renderRecentWorkspaces();
+            void browseTo();
+            void loadDaemonManifest();
+            restoreWatchedSession();
+          } else {
+            showAuthGate();
+          }
+        } catch {
+          showAuthGate();
+        }
+      })();
+
       function urlBase64ToUint8Array(base64url) {
         const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
         const base64 = (base64url + padding)
@@ -1193,15 +1272,16 @@
           localStorage.setItem(TOKEN_KEY, data.token);
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
-          // The directory picker's initial browseTo() (fired at script load,
-          // before any token exists on a fresh device/QR pair) bails on
-          // !token() and never re-triggers on its own — so #dir-list would
-          // otherwise show "(loading…)" forever until a manual reload. Now
-          // that a token exists, populate it (this covers BOTH the QR
-          // auto-pair and the manual code+Pair-button path, since both call
-          // doPair). renderRecentWorkspaces + browseTo are function
-          // declarations defined later in this script but hoisted, so both
-          // are callable here regardless of source order.
+          showApp();
+          // authGate() (above) only populates the directory picker for a
+          // token that ALREADY existed at script load — a fresh pair (QR or
+          // manual code) has no such run, so #dir-list would otherwise show
+          // "(loading…)" forever until a manual reload. Now that a token
+          // exists, populate it (this covers BOTH the QR auto-pair and the
+          // manual code+Pair-button path, since both call doPair).
+          // renderRecentWorkspaces + browseTo are function declarations
+          // defined later in this script but hoisted, so both are callable
+          // here regardless of source order.
           renderRecentWorkspaces();
           void browseTo();
           // A fresh pair (QR or code) happens AFTER the script-load manifest
@@ -1825,8 +1905,12 @@
         resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''));
       };
 
-      renderRecentWorkspaces();
-      void browseTo(); // open the browser at the server default ($HOME)
+      // renderRecentWorkspaces() + browseTo() (open the browser at the server
+      // default $HOME) used to run unconditionally here at script-load. They
+      // now run from authGate()'s success branch (see the token() helper,
+      // above) so they never fire against a stale/invalid stored token
+      // before the auth gate has validated it. doPair() (above) still calls
+      // both directly on a fresh pair.
 
       // Create (or attach to) a daemon session, then hand off to Watch so the
       // composer opens on it immediately. `cwd` empty → the daemon's bound
@@ -2825,23 +2909,27 @@
 
       $('daemons-refresh-gpus').onclick = () => void runGpuRefresh();
 
-      loadDaemonManifest();
+      // loadDaemonManifest() and the watched-session auto-restore (below)
+      // both used to run unconditionally here at script-load. They now run
+      // from authGate()'s success branch (see the token() helper, above)
+      // instead — self-guarding on token() *presence* isn't enough, since a
+      // stale/invalid stored token would still fire these eagerly before the
+      // auth gate has validated it. See restoreWatchedSession(), used there.
 
       // Auto-restore: if a watched session was persisted (mobile screen-off
       // discards the page), reconnect on reload.  The DOM is empty after a
       // full reload, so replay from event 0 to rebuild the transcript.
       // (visibilitychange keeps the DOM intact and tails from lastSeenEventId.)
-      {
+      function restoreWatchedSession() {
         const raw = localStorage.getItem(WATCHED_KEY);
-        if (raw && token()) {
-          try {
-            const { sessionId, lastEventId, title } = JSON.parse(raw);
-            if (sessionId) {
-              lastSeenEventId = lastEventId ?? null;
-              startWatch(sessionId, 0, title || null);
-            }
-          } catch { /* corrupt entry — ignore */ }
-        }
+        if (!raw) return;
+        try {
+          const { sessionId, lastEventId, title } = JSON.parse(raw);
+          if (sessionId) {
+            lastSeenEventId = lastEventId ?? null;
+            startWatch(sessionId, 0, title || null);
+          }
+        } catch { /* corrupt entry — ignore */ }
       }
 
       // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic
@@ -3537,27 +3625,6 @@
           btn.disabled = false;
         }
       }
-      // Gateway status (cycle 74): GET /rc/health (no auth) — confirm the
-      // gateway is reachable + report paired/not-paired (token PRESENCE only,
-      // never its value). textContent-only.
-      $('status-btn').onclick = async () => {
-        const out = $('status-result');
-        out.textContent = ' checking…';
-        const paired = token() ? 'paired' : 'not paired';
-        try {
-          const res = await fetch('/rc/health');
-          if (res.ok) {
-            const b = await res.json();
-            out.textContent =
-              ' gateway: ' + (b.status || 'ok') + ' · ' + paired;
-          } else {
-            out.textContent = ' gateway: error ' + res.status + ' · ' + paired;
-          }
-        } catch (e) {
-          out.textContent = ' unreachable · ' + paired;
-        }
-      };
-
       $('list-commands').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('commands-list');
