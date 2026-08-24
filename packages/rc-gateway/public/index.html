@@ -1392,6 +1392,21 @@
           new Date().toLocaleTimeString();
       }
 
+      // Keep the dot live independent of the Daemons section (which only
+      // populates for owner tokens with a configured clients.toml — see
+      // loadDaemonManifest above). A bare, unauthenticated /rc/health probe
+      // covers every pairing, not just multi-daemon setups.
+      let healthPollId = null;
+      function startHealthPoll() {
+        if (healthPollId) return;
+        healthPollId = setInterval(() => {
+          if (document.hidden) return; // pause while backgrounded, like pollDaemonHealths
+          fetch('/rc/health', { signal: AbortSignal.timeout(10000) })
+            .then((res) => setStatusDot(res.ok))
+            .catch(() => setStatusDot(false));
+        }, 60000);
+      }
+
       (async function authGate() {
         const t = token();
         if (!t) {
@@ -1405,6 +1420,7 @@
           if (res.ok) {
             setStatusDot(true);
             showApp();
+            startHealthPoll();
             renderRecentWorkspaces();
             void browseTo();
             void loadDaemonManifest();
@@ -1418,17 +1434,6 @@
           showAuthGate();
         }
       })();
-
-      // Keep the dot live independent of the Daemons section (which only
-      // populates for owner tokens with a configured clients.toml — see
-      // loadDaemonManifest above). A bare, unauthenticated /rc/health probe
-      // covers every pairing, not just multi-daemon setups.
-      setInterval(() => {
-        if (document.hidden) return; // pause while backgrounded, like pollDaemonHealths
-        fetch('/rc/health', { signal: AbortSignal.timeout(10000) })
-          .then((res) => setStatusDot(res.ok))
-          .catch(() => setStatusDot(false));
-      }, 60000);
 
       function urlBase64ToUint8Array(base64url) {
         const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
@@ -1503,6 +1508,7 @@
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
           showApp();
+          startHealthPoll();
           // authGate() (above) only populates the directory picker for a
           // token that ALREADY existed at script load — a fresh pair (QR or
           // manual code) has no such run, so #dir-list would otherwise show
@@ -2784,12 +2790,6 @@
             const r = await checkDaemonHealth(d);
             daemonHealth.set(d.url, r);
             if (r.kind === 'ok') healthLastSuccess[d.url] = Date.now();
-            // Task 4: the current-origin daemon IS this gateway, so its
-            // result doubles as a (more frequent, when configured) update
-            // for the tab-bar status dot.
-            if (new URL(d.url).origin === location.origin) {
-              setStatusDot(r.kind === 'ok');
-            }
           }),
         );
         saveHealthLastSuccess();
