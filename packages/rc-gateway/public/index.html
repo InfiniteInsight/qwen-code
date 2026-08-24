@@ -93,6 +93,63 @@
         font-size: 0.85rem;
         overflow-wrap: anywhere;
       }
+      .tab-bar {
+        display: flex;
+        align-items: center;
+        gap: 0;
+        border-bottom: 2px solid #ccc;
+        background: #f8f8f8;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+      .tab-bar .tab {
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+        border: none;
+        border-bottom: 2px solid transparent;
+        background: none;
+        font-size: 0.9rem;
+        margin-bottom: -2px;
+      }
+      .tab-bar .tab.active {
+        border-bottom-color: #07f;
+        font-weight: 600;
+      }
+      .tab-bar .pin-cb {
+        margin-left: 4px;
+        vertical-align: middle;
+      }
+      .tab-bar .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        margin: 0 8px;
+        background: #888;
+      }
+      .tab-pane {
+        display: none;
+      }
+      .tab-pane.active {
+        display: block;
+      }
+      .pin-area details {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        margin-bottom: 0.5rem;
+        padding: 0.5rem;
+      }
+      .pin-area summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 0.9rem;
+      }
+      .tab-bar.sticky {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -106,6 +163,14 @@
     </div>
     <div id="app-body" hidden>
       <h1>qwen-rc viewer</h1>
+      <div class="tab-bar" id="tab-bar">
+        <span class="status-dot" id="status-dot" title="checking…"></span>
+        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="ops">Operations <input type="checkbox" class="pin-cb" data-pin="ops" title="Pin to Chat"></button>
+        <button class="tab" data-tab="settings">Settings <input type="checkbox" class="pin-cb" data-pin="settings" title="Pin to Chat"></button>
+        <button class="tab" data-tab="diag">Diagnostics <input type="checkbox" class="pin-cb" data-pin="diag" title="Pin to Chat"></button>
+      </div>
+      <div class="tab-pane active" id="pane-chat">
       <section>
       <label>Session id <input id="session" placeholder="session id" /></label>
       <button id="watch">Watch</button>
@@ -160,192 +225,7 @@
     <section>
       <button id="enable">Enable notifications</button>
     </section>
-    <section id="owner-events">
-      <strong>Owner event stream</strong> (live audit feed; requires owner
-      scope)
-      <div>
-        <button id="watch-events">Watch events</button>
-        <button id="stop-events" disabled>Stop</button>
-      </div>
-      <pre id="events">(not connected)</pre>
-    </section>
-    <section id="audit-log">
-      <strong>Audit log</strong> (history; requires owner scope)
-      <div>
-        <label
-          >action
-          <select id="audit-action">
-            <option value="">(any)</option>
-            <option>pairing_redeemed</option>
-            <option>token_minted</option>
-            <option>token_revoked</option>
-            <option>auth_failed</option>
-            <option>scope_denied</option>
-            <option>permission_voted</option>
-            <option>prompt_sent</option>
-            <option>push_sent</option>
-            <option>push_suppressed</option>
-            <option>policy_decision</option>
-            <option>session_list_read</option>
-          </select>
-        </label>
-        <label
-          >limit
-          <input
-            id="audit-limit"
-            type="number"
-            value="50"
-            min="1"
-            style="width: 5rem"
-        /></label>
-        <button id="audit-query">Query</button>
-      </div>
-      <pre id="audit">(not queried)</pre>
-    </section>
-    <section id="token-mgmt">
-      <strong>Tokens</strong> (active tokens; requires owner scope)
-      <div><button id="list-tokens">List tokens</button></div>
-      <div id="tokens">(not listed)</div>
-    </section>
-    <section id="session-tree">
-      <strong>Sessions</strong> (fork tree; requires owner scope)
-      <div><button id="list-sessions">List sessions</button></div>
-      <pre id="sessions">(not listed)</pre>
-    </section>
-    <section id="daemons">
-      <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
-      <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
-        (no registry — this daemon has no clients.toml, or your token lacks
-        owner scope)
-      </div>
-      <div id="daemons-body" hidden>
-        <div id="daemons-rows"></div>
-        <div style="margin-top: 6px">
-          <button id="daemons-refresh-sessions">Sessions on all daemons</button>
-          <button id="daemons-refresh-gpus">Refresh GPUs</button>
-          <span
-            id="daemons-updated"
-            style="color: #888; font-size: 0.85rem"
-          ></span>
-        </div>
-        <div id="daemons-sessions" hidden>(not fetched)</div>
-        <div id="daemons-gpus" hidden>(not fetched)</div>
-      </div>
-    </section>
-    <section id="push-prefs">
-      <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
-      scope)
-      <div>
-        <button id="list-subs">List subscriptions</button>
-        <button id="test-push-btn">Send test push</button>
-        <span id="test-push-result"></span>
-      </div>
-      <div id="subs">(not listed)</div>
-    </section>
-    <section id="search">
-      <strong>Search</strong> (transcripts; requires owner scope)
-      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
-      <div>
-        <input id="search-q" placeholder="oauth refresh AND error" />
-        <select id="search-kind">
-          <option value="all">all</option>
-          <option value="user">user</option>
-          <option value="assistant">assistant</option>
-          <option value="tool">tool</option>
-        </select>
-        <button id="search-btn">Search</button>
-      </div>
-      <div>
-        <label>since <input id="search-since" type="datetime-local" /></label>
-        <label>until <input id="search-until" type="datetime-local" /></label>
-        <label
-          title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
-          ><input id="search-rank" type="checkbox" /> rank (BM25)</label
-        >
-        <label
-          id="search-all-daemons-label"
-          title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
-          ><input id="search-all-daemons" type="checkbox" disabled /> all
-          daemons</label
-        >
-      </div>
-      <div id="search-results">(not searched)</div>
-    </section>
-    <section id="share-create">
-      <strong>Create share link</strong> (requires owner scope)
-      <div>
-        <input id="share-session" placeholder="session id" />
-        <input
-          id="share-ttl"
-          type="number"
-          placeholder="ttl (sec)"
-          value="3600"
-        />
-        <select id="share-scope">
-          <option value="view">view</option>
-          <option value="approve">approve</option>
-        </select>
-        <input id="share-max" type="number" placeholder="max uses" />
-        <button id="share-create-btn">Create</button>
-      </div>
-      <div id="share-result"></div>
-    </section>
-    <section id="share-manage">
-      <strong>Manage shares</strong> (requires owner scope)
-      <div><button id="list-shares">List shares</button></div>
-      <div id="shares-list">(not listed)</div>
-    </section>
-    <section id="commands">
-      <strong>Commands</strong> (invoke targets the watched session)
-      <div><button id="list-commands">List commands</button></div>
-      <div id="commands-list">(not listed)</div>
-    </section>
-    <section id="fork-session">
-      <strong>Fork session</strong> (requires write scope)
-      <div>
-        <input id="fork-id" placeholder="parent session id" />
-        <input id="fork-name" placeholder="optional name" />
-        <input
-          id="fork-from"
-          type="number"
-          min="0"
-          placeholder="from event (blank = full)"
-        />
-        <select id="fork-mode" title="transcript mode">
-          <option value="include" selected>include (copy)</option>
-          <option value="empty">empty (header only)</option>
-          <option value="summary" disabled>summary (unavailable)</option>
-        </select>
-        <button id="fork-btn">Fork</button>
-      </div>
-      <div id="fork-result"></div>
-    </section>
-    <section id="snooze">
-      <strong>Snooze notifications</strong> (requires owner scope)
-      <div>
-        <input
-          id="snooze-dur"
-          type="number"
-          placeholder="seconds"
-          value="3600"
-        />
-        <select id="snooze-scope">
-          <option value="all">all</option>
-          <option value="permission.required">permission.required</option>
-          <option value="task.completed">task.completed</option>
-        </select>
-        <button id="snooze-btn">Snooze</button>
-        <button id="unsnooze-btn">Unsnooze</button>
-        <button id="snooze-status-btn">Status</button>
-      </div>
-      <div id="snooze-status">(unknown)</div>
-      <div id="snooze-list"></div>
-    </section>
-    <section id="digest">
-      <strong>Missed while quiet (digest)</strong> (requires owner scope)
-      <div><button id="digest-btn">Refresh digest</button></div>
-      <div id="digest-list">(not loaded)</div>
-    </section>
+      <div class="pin-area" id="pin-area"></div>
     <div id="status"></div>
     <div id="cards"></div>
     <style>
@@ -532,11 +412,6 @@
         word-break: break-word;
       "
     ></div>
-    <div style="margin-top: 8px">
-      <label style="font-size: 0.8rem; color: #888"
-        ><input type="checkbox" id="raw-toggle" /> raw JSON</label
-      >
-    </div>
     <div id="session-title" hidden style="
       margin-top:4px;padding:4px 8px;font-size:0.85rem;color:#b0b8c1;
       font-weight:600;border-bottom:1px solid #333;
@@ -586,7 +461,209 @@
         style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
       ></div>
     </section>
+      </div>
+      <div class="tab-pane" id="pane-ops">
+    <section id="daemons">
+      <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
+      <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
+        (no registry — this daemon has no clients.toml, or your token lacks
+        owner scope)
+      </div>
+      <div id="daemons-body" hidden>
+        <div id="daemons-rows"></div>
+        <div style="margin-top: 6px">
+          <button id="daemons-refresh-sessions">Sessions on all daemons</button>
+          <button id="daemons-refresh-gpus">Refresh GPUs</button>
+          <span
+            id="daemons-updated"
+            style="color: #888; font-size: 0.85rem"
+          ></span>
+        </div>
+        <div id="daemons-sessions" hidden>(not fetched)</div>
+        <div id="daemons-gpus" hidden>(not fetched)</div>
+      </div>
+    </section>
+    <section id="session-tree">
+      <strong>Sessions</strong> (fork tree; requires owner scope)
+      <div><button id="list-sessions">List sessions</button></div>
+      <pre id="sessions">(not listed)</pre>
+    </section>
+    <section id="search">
+      <strong>Search</strong> (transcripts; requires owner scope)
+      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
+      <div>
+        <input id="search-q" placeholder="oauth refresh AND error" />
+        <select id="search-kind">
+          <option value="all">all</option>
+          <option value="user">user</option>
+          <option value="assistant">assistant</option>
+          <option value="tool">tool</option>
+        </select>
+        <button id="search-btn">Search</button>
+      </div>
+      <div>
+        <label>since <input id="search-since" type="datetime-local" /></label>
+        <label>until <input id="search-until" type="datetime-local" /></label>
+        <label
+          title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
+          ><input id="search-rank" type="checkbox" /> rank (BM25)</label
+        >
+        <label
+          id="search-all-daemons-label"
+          title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
+          ><input id="search-all-daemons" type="checkbox" disabled /> all
+          daemons</label
+        >
+      </div>
+      <div id="search-results">(not searched)</div>
+    </section>
+      </div>
+      <div class="tab-pane" id="pane-settings">
+    <section id="push-prefs">
+      <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
+      scope)
+      <div>
+        <button id="list-subs">List subscriptions</button>
+        <button id="test-push-btn">Send test push</button>
+        <span id="test-push-result"></span>
+      </div>
+      <div id="subs">(not listed)</div>
+    </section>
+    <section id="snooze">
+      <strong>Snooze notifications</strong> (requires owner scope)
+      <div>
+        <input
+          id="snooze-dur"
+          type="number"
+          placeholder="seconds"
+          value="3600"
+        />
+        <select id="snooze-scope">
+          <option value="all">all</option>
+          <option value="permission.required">permission.required</option>
+          <option value="task.completed">task.completed</option>
+        </select>
+        <button id="snooze-btn">Snooze</button>
+        <button id="unsnooze-btn">Unsnooze</button>
+        <button id="snooze-status-btn">Status</button>
+      </div>
+      <div id="snooze-status">(unknown)</div>
+      <div id="snooze-list"></div>
+    </section>
+    <section id="token-mgmt">
+      <strong>Tokens</strong> (active tokens; requires owner scope)
+      <div><button id="list-tokens">List tokens</button></div>
+      <div id="tokens">(not listed)</div>
+    </section>
+    <section id="share-create">
+      <strong>Create share link</strong> (requires owner scope)
+      <div>
+        <input id="share-session" placeholder="session id" />
+        <input
+          id="share-ttl"
+          type="number"
+          placeholder="ttl (sec)"
+          value="3600"
+        />
+        <select id="share-scope">
+          <option value="view">view</option>
+          <option value="approve">approve</option>
+        </select>
+        <input id="share-max" type="number" placeholder="max uses" />
+        <button id="share-create-btn">Create</button>
+      </div>
+      <div id="share-result"></div>
+    </section>
+    <section id="share-manage">
+      <strong>Manage shares</strong> (requires owner scope)
+      <div><button id="list-shares">List shares</button></div>
+      <div id="shares-list">(not listed)</div>
+    </section>
+    <section id="fork-session">
+      <strong>Fork session</strong> (requires write scope)
+      <div>
+        <input id="fork-id" placeholder="parent session id" />
+        <input id="fork-name" placeholder="optional name" />
+        <input
+          id="fork-from"
+          type="number"
+          min="0"
+          placeholder="from event (blank = full)"
+        />
+        <select id="fork-mode" title="transcript mode">
+          <option value="include" selected>include (copy)</option>
+          <option value="empty">empty (header only)</option>
+          <option value="summary" disabled>summary (unavailable)</option>
+        </select>
+        <button id="fork-btn">Fork</button>
+      </div>
+      <div id="fork-result"></div>
+    </section>
+      <section>
+        <strong>UI preferences</strong>
+        <div><label><input type="checkbox" id="sticky-tabs"> Sticky tab bar</label></div>
+      </section>
+      </div>
+      <div class="tab-pane" id="pane-diag">
+    <section id="owner-events">
+      <strong>Owner event stream</strong> (live audit feed; requires owner
+      scope)
+      <div>
+        <button id="watch-events">Watch events</button>
+        <button id="stop-events" disabled>Stop</button>
+      </div>
+      <pre id="events">(not connected)</pre>
+    </section>
+    <section id="audit-log">
+      <strong>Audit log</strong> (history; requires owner scope)
+      <div>
+        <label
+          >action
+          <select id="audit-action">
+            <option value="">(any)</option>
+            <option>pairing_redeemed</option>
+            <option>token_minted</option>
+            <option>token_revoked</option>
+            <option>auth_failed</option>
+            <option>scope_denied</option>
+            <option>permission_voted</option>
+            <option>prompt_sent</option>
+            <option>push_sent</option>
+            <option>push_suppressed</option>
+            <option>policy_decision</option>
+            <option>session_list_read</option>
+          </select>
+        </label>
+        <label
+          >limit
+          <input
+            id="audit-limit"
+            type="number"
+            value="50"
+            min="1"
+            style="width: 5rem"
+        /></label>
+        <button id="audit-query">Query</button>
+      </div>
+      <pre id="audit">(not queried)</pre>
+    </section>
+    <section id="digest">
+      <strong>Missed while quiet (digest)</strong> (requires owner scope)
+      <div><button id="digest-btn">Refresh digest</button></div>
+      <div id="digest-list">(not loaded)</div>
+    </section>
+    <section id="commands">
+      <strong>Commands</strong> (invoke targets the watched session)
+      <div><button id="list-commands">List commands</button></div>
+      <div id="commands-list">(not listed)</div>
+    </section>
+    <div style="margin-top: 8px">
+      <label style="font-size: 0.8rem; color: #888"
+        ><input type="checkbox" id="raw-toggle" /> raw JSON</label
+      >
+    </div>
     <pre id="log" style="display: none"></pre>
+      </div>
     </div>
     <script>
       const $ = (id) => document.getElementById(id);
@@ -604,6 +681,42 @@
         $('auth-gate').hidden = false;
         $('app-body').hidden = true;
       }
+
+      // Tab bar (add-rc-viewer-ui-reorg task 2): #app-body is split into four
+      // panes (chat/ops/settings/diag). switchTab shows the matching
+      // .tab-pane and highlights the matching .tab button; everything else
+      // is hidden via CSS (display:none), so ids stay stable and existing
+      // event handlers (which reference elements by id via `$`) keep working
+      // regardless of which pane is currently visible.
+      const TAB_IDS = ['chat', 'ops', 'settings', 'diag'];
+
+      function switchTab(tabId) {
+        for (const id of TAB_IDS) {
+          const pane = $('pane-' + id);
+          const btn = document.querySelector('.tab[data-tab="' + id + '"]');
+          if (id === tabId) {
+            pane.classList.add('active');
+            btn.classList.add('active');
+          } else {
+            pane.classList.remove('active');
+            btn.classList.remove('active');
+          }
+        }
+      }
+
+      document.getElementById('tab-bar').addEventListener('click', (e) => {
+        const tab = e.target.closest('.tab');
+        if (!tab) return;
+        // Don't switch tab when clicking the pin checkbox.
+        if (e.target.classList.contains('pin-cb')) return;
+        switchTab(tab.dataset.tab);
+      });
+
+      // Sticky tab bar (Settings > UI preferences). Not persisted — resets on
+      // reload, per the no-localStorage-for-UI-state constraint.
+      $('sticky-tabs').onchange = () => {
+        $('tab-bar').classList.toggle('sticky', $('sticky-tabs').checked);
+      };
 
       // Global 401 teardown: any 401 from THIS gateway (same-origin request)
       // means the stored token is no longer valid — drop it and fall back to
