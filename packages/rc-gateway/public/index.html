@@ -3519,6 +3519,7 @@
       document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
+          switchTab('ops');
           const box = $('search-q');
           box.scrollIntoView({ block: 'center' });
           box.focus();
