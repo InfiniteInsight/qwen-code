@@ -690,7 +690,42 @@
       // regardless of which pane is currently visible.
       const TAB_IDS = ['chat', 'ops', 'settings', 'diag'];
 
+      // Pin/collapse mechanics (task 3): a pinned tab's content lives as a
+      // collapsible <details> section inside #pin-area on the Chat tab.
+      // DOM nodes are MOVED (never cloned) between the tab pane and the
+      // pinned <details> body so event listeners, SSE connections, and form
+      // state all survive the move. pinState[tabId] holds the <details>
+      // element while pinned (null when not pinned). Pin order is fixed —
+      // Operations above Settings above Diagnostics — regardless of the
+      // order tabs were pinned in.
+      function moveChildren(source, target) {
+        while (source.firstChild) target.appendChild(source.firstChild);
+      }
+
+      const PIN_ORDER = ['ops', 'settings', 'diag'];
+      const PIN_LABELS = { ops: 'Operations', settings: 'Settings', diag: 'Diagnostics' };
+      const pinState = { ops: null, settings: null, diag: null };
+
       function switchTab(tabId) {
+        // Leaving a pinned tab: move its content back into the pin area and
+        // reveal the (previously hidden) <details> wrapper.
+        for (const id of TAB_IDS) {
+          if ($('pane-' + id).classList.contains('active') && pinState[id]) {
+            const body = pinState[id].querySelector('div');
+            moveChildren($('pane-' + id), body);
+            pinState[id].hidden = false;
+          }
+        }
+
+        // Entering a pinned tab: pull its content out of the pin area back
+        // into the tab pane for the duration of the visit, hiding the
+        // (now-empty) <details> wrapper so it isn't shown twice.
+        if (pinState[tabId]) {
+          const body = pinState[tabId].querySelector('div');
+          moveChildren(body, $('pane-' + tabId));
+          pinState[tabId].hidden = true;
+        }
+
         for (const id of TAB_IDS) {
           const pane = $('pane-' + id);
           const btn = document.querySelector('.tab[data-tab="' + id + '"]');
@@ -710,6 +745,51 @@
         // Don't switch tab when clicking the pin checkbox.
         if (e.target.classList.contains('pin-cb')) return;
         switchTab(tab.dataset.tab);
+      });
+
+      document.getElementById('tab-bar').addEventListener('change', (e) => {
+        if (!e.target.classList.contains('pin-cb')) return;
+        const tabId = e.target.dataset.pin;
+        const pinArea = $('pin-area');
+
+        if (e.target.checked) {
+          // Pin: wrap the pane's content in a <details>, move it into the
+          // pin area, and insert it in fixed pin order (not pin-click order).
+          const details = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = PIN_LABELS[tabId];
+          details.appendChild(summary);
+          const body = document.createElement('div');
+          moveChildren($('pane-' + tabId), body);
+          details.appendChild(body);
+          pinState[tabId] = details;
+
+          let insertBefore = null;
+          const myIdx = PIN_ORDER.indexOf(tabId);
+          for (let i = myIdx + 1; i < PIN_ORDER.length; i++) {
+            if (pinState[PIN_ORDER[i]]) {
+              insertBefore = pinState[PIN_ORDER[i]];
+              break;
+            }
+          }
+          if (insertBefore) pinArea.insertBefore(details, insertBefore);
+          else pinArea.appendChild(details);
+
+          // Pinning the tab currently being viewed would leave its pane
+          // active but empty — send the user back to Chat instead.
+          if ($('pane-' + tabId).classList.contains('active')) switchTab('chat');
+        } else {
+          // Unpin: move content back to its tab pane (a no-op if the pane is
+          // already showing it, i.e. the user is currently viewing this
+          // pinned tab) and drop the <details> wrapper.
+          const details = pinState[tabId];
+          if (details) {
+            const body = details.querySelector('div');
+            moveChildren(body, $('pane-' + tabId));
+            details.remove();
+            pinState[tabId] = null;
+          }
+        }
       });
 
       // Sticky tab bar (Settings > UI preferences). Not persisted — resets on
