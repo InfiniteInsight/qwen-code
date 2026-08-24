@@ -615,6 +615,11 @@
       (function installAuthTeardown() {
         const realFetch = window.fetch.bind(window);
         window.fetch = async (input, init) => {
+          // Capture the token that was current when THIS request was fired.
+          // If a concurrent re-pair (doPair -> showApp) replaces the stored
+          // token before this request's response arrives, the stale 401
+          // below must not wipe out the new, valid token.
+          const tokenAtRequest = localStorage.getItem(TOKEN_KEY);
           const res = await realFetch(input, init);
           if (res.status === 401) {
             try {
@@ -624,7 +629,10 @@
                   : input.url,
                 location.href,
               );
-              if (reqUrl.origin === location.origin) {
+              if (
+                reqUrl.origin === location.origin &&
+                localStorage.getItem(TOKEN_KEY) === tokenAtRequest
+              ) {
                 localStorage.removeItem(TOKEN_KEY);
                 showAuthGate();
               }
