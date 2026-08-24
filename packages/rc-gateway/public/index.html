@@ -1377,6 +1377,21 @@
       // below — by which point the whole script has finished executing (same
       // reasoning doPair, further down, already relies on) — so calling them
       // here is safe regardless of source order.
+      // Tab-bar reachability dot (Task 4). ok=true → green/"reachable",
+      // ok=false → red/"unreachable". Driven by the auth gate's initial
+      // capabilities check and, thereafter, by the daemon health poll for
+      // the current-origin daemon (see checkDaemonHealth/pollDaemonHealths
+      // below).
+      function setStatusDot(ok) {
+        const dot = $('status-dot');
+        if (!dot) return;
+        dot.style.background = ok ? '#2a2' : '#c33';
+        dot.title =
+          (ok ? 'Gateway reachable' : 'Gateway unreachable') +
+          ' · ' +
+          new Date().toLocaleTimeString();
+      }
+
       (async function authGate() {
         const t = token();
         if (!t) {
@@ -1388,18 +1403,32 @@
             headers: { Authorization: 'Bearer ' + t },
           });
           if (res.ok) {
+            setStatusDot(true);
             showApp();
             renderRecentWorkspaces();
             void browseTo();
             void loadDaemonManifest();
             restoreWatchedSession();
           } else {
+            setStatusDot(false);
             showAuthGate();
           }
         } catch {
+          setStatusDot(false);
           showAuthGate();
         }
       })();
+
+      // Keep the dot live independent of the Daemons section (which only
+      // populates for owner tokens with a configured clients.toml — see
+      // loadDaemonManifest above). A bare, unauthenticated /rc/health probe
+      // covers every pairing, not just multi-daemon setups.
+      setInterval(() => {
+        if (document.hidden) return; // pause while backgrounded, like pollDaemonHealths
+        fetch('/rc/health', { signal: AbortSignal.timeout(10000) })
+          .then((res) => setStatusDot(res.ok))
+          .catch(() => setStatusDot(false));
+      }, 60000);
 
       function urlBase64ToUint8Array(base64url) {
         const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
@@ -2755,6 +2784,12 @@
             const r = await checkDaemonHealth(d);
             daemonHealth.set(d.url, r);
             if (r.kind === 'ok') healthLastSuccess[d.url] = Date.now();
+            // Task 4: the current-origin daemon IS this gateway, so its
+            // result doubles as a (more frequent, when configured) update
+            // for the tab-bar status dot.
+            if (new URL(d.url).origin === location.origin) {
+              setStatusDot(r.kind === 'ok');
+            }
           }),
         );
         saveHealthLastSuccess();
