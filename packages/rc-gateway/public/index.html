@@ -110,6 +110,7 @@
         background: none;
         font-size: 0.9rem;
         margin-bottom: -2px;
+        user-select: none;
       }
       .tab-bar .tab.active {
         border-bottom-color: #07f;
@@ -165,10 +166,10 @@
       <h1>qwen-rc viewer</h1>
       <div class="tab-bar" id="tab-bar">
         <span class="status-dot" id="status-dot" title="checking…"></span>
-        <button class="tab active" data-tab="chat">Chat</button>
-        <button class="tab" data-tab="ops">Operations <input type="checkbox" class="pin-cb" data-pin="ops" title="Pin to Chat"></button>
-        <button class="tab" data-tab="settings">Settings <input type="checkbox" class="pin-cb" data-pin="settings" title="Pin to Chat"></button>
-        <button class="tab" data-tab="diag">Diagnostics <input type="checkbox" class="pin-cb" data-pin="diag" title="Pin to Chat"></button>
+        <span class="tab active" data-tab="chat" role="tab" tabindex="0">Chat</span>
+        <span class="tab" data-tab="ops" role="tab" tabindex="0">Operations <input type="checkbox" class="pin-cb" data-pin="ops" title="Pin to Chat"></span>
+        <span class="tab" data-tab="settings" role="tab" tabindex="0">Settings <input type="checkbox" class="pin-cb" data-pin="settings" title="Pin to Chat"></span>
+        <span class="tab" data-tab="diag" role="tab" tabindex="0">Diagnostics <input type="checkbox" class="pin-cb" data-pin="diag" title="Pin to Chat"></span>
       </div>
       <div class="tab-pane active" id="pane-chat">
       <section>
