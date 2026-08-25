@@ -93,20 +93,86 @@
         font-size: 0.85rem;
         overflow-wrap: anywhere;
       }
+      .tab-bar {
+        display: flex;
+        align-items: center;
+        gap: 0;
+        border-bottom: 2px solid #ccc;
+        background: #f8f8f8;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+      .tab-bar .tab {
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+        border: none;
+        border-bottom: 2px solid transparent;
+        background: none;
+        font-size: 0.9rem;
+        margin-bottom: -2px;
+        user-select: none;
+      }
+      .tab-bar .tab.active {
+        border-bottom-color: #07f;
+        font-weight: 600;
+      }
+      .tab-bar .pin-cb {
+        margin-left: 4px;
+        vertical-align: middle;
+      }
+      .tab-bar .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        margin: 0 8px;
+        background: #888;
+      }
+      .tab-pane {
+        display: none;
+      }
+      .tab-pane.active {
+        display: block;
+      }
+      .pin-area details {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        margin-bottom: 0.5rem;
+        padding: 0.5rem;
+      }
+      .pin-area summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 0.9rem;
+      }
+      .tab-bar.sticky {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+      }
     </style>
   </head>
   <body id="rc-app">
-    <h1>qwen-rc viewer</h1>
-    <section id="gw-status">
-      <button id="status-btn">Check status</button>
-      <span id="status-result">(unknown)</span>
-    </section>
-    <section>
-      <label>Pairing code <input id="code" placeholder="paste code" /></label>
-      <button id="pair">Pair</button>
-      <span id="pair-feedback" role="status" aria-live="polite"></span>
-    </section>
-    <section>
+    <div id="auth-gate">
+      <h1>qwen-rc viewer</h1>
+      <section>
+        <label>Pairing code <input id="code" placeholder="paste code" /></label>
+        <button id="pair">Pair</button>
+        <span id="pair-feedback" role="status" aria-live="polite"></span>
+      </section>
+    </div>
+    <div id="app-body" hidden>
+      <h1>qwen-rc viewer</h1>
+      <div class="tab-bar" id="tab-bar">
+        <span class="status-dot" id="status-dot" title="checking…"></span>
+        <span class="tab active" data-tab="chat" role="tab" tabindex="0">Chat</span>
+        <span class="tab" data-tab="ops" role="tab" tabindex="0">Operations <input type="checkbox" class="pin-cb" data-pin="ops" title="Pin to Chat"></span>
+        <span class="tab" data-tab="settings" role="tab" tabindex="0">Settings <input type="checkbox" class="pin-cb" data-pin="settings" title="Pin to Chat"></span>
+        <span class="tab" data-tab="diag" role="tab" tabindex="0">Diagnostics <input type="checkbox" class="pin-cb" data-pin="diag" title="Pin to Chat"></span>
+      </div>
+      <div class="tab-pane active" id="pane-chat">
+      <section>
       <label>Session id <input id="session" placeholder="session id" /></label>
       <button id="watch">Watch</button>
       <button id="stop" disabled>Stop</button>
@@ -160,192 +226,7 @@
     <section>
       <button id="enable">Enable notifications</button>
     </section>
-    <section id="owner-events">
-      <strong>Owner event stream</strong> (live audit feed; requires owner
-      scope)
-      <div>
-        <button id="watch-events">Watch events</button>
-        <button id="stop-events" disabled>Stop</button>
-      </div>
-      <pre id="events">(not connected)</pre>
-    </section>
-    <section id="audit-log">
-      <strong>Audit log</strong> (history; requires owner scope)
-      <div>
-        <label
-          >action
-          <select id="audit-action">
-            <option value="">(any)</option>
-            <option>pairing_redeemed</option>
-            <option>token_minted</option>
-            <option>token_revoked</option>
-            <option>auth_failed</option>
-            <option>scope_denied</option>
-            <option>permission_voted</option>
-            <option>prompt_sent</option>
-            <option>push_sent</option>
-            <option>push_suppressed</option>
-            <option>policy_decision</option>
-            <option>session_list_read</option>
-          </select>
-        </label>
-        <label
-          >limit
-          <input
-            id="audit-limit"
-            type="number"
-            value="50"
-            min="1"
-            style="width: 5rem"
-        /></label>
-        <button id="audit-query">Query</button>
-      </div>
-      <pre id="audit">(not queried)</pre>
-    </section>
-    <section id="token-mgmt">
-      <strong>Tokens</strong> (active tokens; requires owner scope)
-      <div><button id="list-tokens">List tokens</button></div>
-      <div id="tokens">(not listed)</div>
-    </section>
-    <section id="session-tree">
-      <strong>Sessions</strong> (fork tree; requires owner scope)
-      <div><button id="list-sessions">List sessions</button></div>
-      <pre id="sessions">(not listed)</pre>
-    </section>
-    <section id="daemons">
-      <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
-      <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
-        (no registry — this daemon has no clients.toml, or your token lacks
-        owner scope)
-      </div>
-      <div id="daemons-body" hidden>
-        <div id="daemons-rows"></div>
-        <div style="margin-top: 6px">
-          <button id="daemons-refresh-sessions">Sessions on all daemons</button>
-          <button id="daemons-refresh-gpus">Refresh GPUs</button>
-          <span
-            id="daemons-updated"
-            style="color: #888; font-size: 0.85rem"
-          ></span>
-        </div>
-        <div id="daemons-sessions" hidden>(not fetched)</div>
-        <div id="daemons-gpus" hidden>(not fetched)</div>
-      </div>
-    </section>
-    <section id="push-prefs">
-      <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
-      scope)
-      <div>
-        <button id="list-subs">List subscriptions</button>
-        <button id="test-push-btn">Send test push</button>
-        <span id="test-push-result"></span>
-      </div>
-      <div id="subs">(not listed)</div>
-    </section>
-    <section id="search">
-      <strong>Search</strong> (transcripts; requires owner scope)
-      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
-      <div>
-        <input id="search-q" placeholder="oauth refresh AND error" />
-        <select id="search-kind">
-          <option value="all">all</option>
-          <option value="user">user</option>
-          <option value="assistant">assistant</option>
-          <option value="tool">tool</option>
-        </select>
-        <button id="search-btn">Search</button>
-      </div>
-      <div>
-        <label>since <input id="search-since" type="datetime-local" /></label>
-        <label>until <input id="search-until" type="datetime-local" /></label>
-        <label
-          title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
-          ><input id="search-rank" type="checkbox" /> rank (BM25)</label
-        >
-        <label
-          id="search-all-daemons-label"
-          title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
-          ><input id="search-all-daemons" type="checkbox" disabled /> all
-          daemons</label
-        >
-      </div>
-      <div id="search-results">(not searched)</div>
-    </section>
-    <section id="share-create">
-      <strong>Create share link</strong> (requires owner scope)
-      <div>
-        <input id="share-session" placeholder="session id" />
-        <input
-          id="share-ttl"
-          type="number"
-          placeholder="ttl (sec)"
-          value="3600"
-        />
-        <select id="share-scope">
-          <option value="view">view</option>
-          <option value="approve">approve</option>
-        </select>
-        <input id="share-max" type="number" placeholder="max uses" />
-        <button id="share-create-btn">Create</button>
-      </div>
-      <div id="share-result"></div>
-    </section>
-    <section id="share-manage">
-      <strong>Manage shares</strong> (requires owner scope)
-      <div><button id="list-shares">List shares</button></div>
-      <div id="shares-list">(not listed)</div>
-    </section>
-    <section id="commands">
-      <strong>Commands</strong> (invoke targets the watched session)
-      <div><button id="list-commands">List commands</button></div>
-      <div id="commands-list">(not listed)</div>
-    </section>
-    <section id="fork-session">
-      <strong>Fork session</strong> (requires write scope)
-      <div>
-        <input id="fork-id" placeholder="parent session id" />
-        <input id="fork-name" placeholder="optional name" />
-        <input
-          id="fork-from"
-          type="number"
-          min="0"
-          placeholder="from event (blank = full)"
-        />
-        <select id="fork-mode" title="transcript mode">
-          <option value="include" selected>include (copy)</option>
-          <option value="empty">empty (header only)</option>
-          <option value="summary" disabled>summary (unavailable)</option>
-        </select>
-        <button id="fork-btn">Fork</button>
-      </div>
-      <div id="fork-result"></div>
-    </section>
-    <section id="snooze">
-      <strong>Snooze notifications</strong> (requires owner scope)
-      <div>
-        <input
-          id="snooze-dur"
-          type="number"
-          placeholder="seconds"
-          value="3600"
-        />
-        <select id="snooze-scope">
-          <option value="all">all</option>
-          <option value="permission.required">permission.required</option>
-          <option value="task.completed">task.completed</option>
-        </select>
-        <button id="snooze-btn">Snooze</button>
-        <button id="unsnooze-btn">Unsnooze</button>
-        <button id="snooze-status-btn">Status</button>
-      </div>
-      <div id="snooze-status">(unknown)</div>
-      <div id="snooze-list"></div>
-    </section>
-    <section id="digest">
-      <strong>Missed while quiet (digest)</strong> (requires owner scope)
-      <div><button id="digest-btn">Refresh digest</button></div>
-      <div id="digest-list">(not loaded)</div>
-    </section>
+      <div class="pin-area" id="pin-area"></div>
     <div id="status"></div>
     <div id="cards"></div>
     <style>
@@ -532,11 +413,6 @@
         word-break: break-word;
       "
     ></div>
-    <div style="margin-top: 8px">
-      <label style="font-size: 0.8rem; color: #888"
-        ><input type="checkbox" id="raw-toggle" /> raw JSON</label
-      >
-    </div>
     <div id="session-title" hidden style="
       margin-top:4px;padding:4px 8px;font-size:0.85rem;color:#b0b8c1;
       font-weight:600;border-bottom:1px solid #333;
@@ -586,11 +462,383 @@
         style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
       ></div>
     </section>
+      </div>
+      <div class="tab-pane" id="pane-ops">
+    <section id="daemons">
+      <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
+      <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
+        (no registry — this daemon has no clients.toml, or your token lacks
+        owner scope)
+      </div>
+      <div id="daemons-body" hidden>
+        <div id="daemons-rows"></div>
+        <div style="margin-top: 6px">
+          <button id="daemons-refresh-sessions">Sessions on all daemons</button>
+          <button id="daemons-refresh-gpus">Refresh GPUs</button>
+          <span
+            id="daemons-updated"
+            style="color: #888; font-size: 0.85rem"
+          ></span>
+        </div>
+        <div id="daemons-sessions" hidden>(not fetched)</div>
+        <div id="daemons-gpus" hidden>(not fetched)</div>
+      </div>
+    </section>
+    <section id="session-tree">
+      <strong>Sessions</strong> (fork tree; requires owner scope)
+      <div><button id="list-sessions">List sessions</button></div>
+      <pre id="sessions">(not listed)</pre>
+    </section>
+    <section id="search">
+      <strong>Search</strong> (transcripts; requires owner scope)
+      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
+      <div>
+        <input id="search-q" placeholder="oauth refresh AND error" />
+        <select id="search-kind">
+          <option value="all">all</option>
+          <option value="user">user</option>
+          <option value="assistant">assistant</option>
+          <option value="tool">tool</option>
+        </select>
+        <button id="search-btn">Search</button>
+      </div>
+      <div>
+        <label>since <input id="search-since" type="datetime-local" /></label>
+        <label>until <input id="search-until" type="datetime-local" /></label>
+        <label
+          title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
+          ><input id="search-rank" type="checkbox" /> rank (BM25)</label
+        >
+        <label
+          id="search-all-daemons-label"
+          title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
+          ><input id="search-all-daemons" type="checkbox" disabled /> all
+          daemons</label
+        >
+      </div>
+      <div id="search-results">(not searched)</div>
+    </section>
+      </div>
+      <div class="tab-pane" id="pane-settings">
+    <section id="push-prefs">
+      <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
+      scope)
+      <div>
+        <button id="list-subs">List subscriptions</button>
+        <button id="test-push-btn">Send test push</button>
+        <span id="test-push-result"></span>
+      </div>
+      <div id="subs">(not listed)</div>
+    </section>
+    <section id="snooze">
+      <strong>Snooze notifications</strong> (requires owner scope)
+      <div>
+        <input
+          id="snooze-dur"
+          type="number"
+          placeholder="seconds"
+          value="3600"
+        />
+        <select id="snooze-scope">
+          <option value="all">all</option>
+          <option value="permission.required">permission.required</option>
+          <option value="task.completed">task.completed</option>
+        </select>
+        <button id="snooze-btn">Snooze</button>
+        <button id="unsnooze-btn">Unsnooze</button>
+        <button id="snooze-status-btn">Status</button>
+      </div>
+      <div id="snooze-status">(unknown)</div>
+      <div id="snooze-list"></div>
+    </section>
+    <section id="token-mgmt">
+      <strong>Tokens</strong> (active tokens; requires owner scope)
+      <div><button id="list-tokens">List tokens</button></div>
+      <div id="tokens">(not listed)</div>
+    </section>
+    <section id="share-create">
+      <strong>Create share link</strong> (requires owner scope)
+      <div>
+        <input id="share-session" placeholder="session id" />
+        <input
+          id="share-ttl"
+          type="number"
+          placeholder="ttl (sec)"
+          value="3600"
+        />
+        <select id="share-scope">
+          <option value="view">view</option>
+          <option value="approve">approve</option>
+        </select>
+        <input id="share-max" type="number" placeholder="max uses" />
+        <button id="share-create-btn">Create</button>
+      </div>
+      <div id="share-result"></div>
+    </section>
+    <section id="share-manage">
+      <strong>Manage shares</strong> (requires owner scope)
+      <div><button id="list-shares">List shares</button></div>
+      <div id="shares-list">(not listed)</div>
+    </section>
+    <section id="fork-session">
+      <strong>Fork session</strong> (requires write scope)
+      <div>
+        <input id="fork-id" placeholder="parent session id" />
+        <input id="fork-name" placeholder="optional name" />
+        <input
+          id="fork-from"
+          type="number"
+          min="0"
+          placeholder="from event (blank = full)"
+        />
+        <select id="fork-mode" title="transcript mode">
+          <option value="include" selected>include (copy)</option>
+          <option value="empty">empty (header only)</option>
+          <option value="summary" disabled>summary (unavailable)</option>
+        </select>
+        <button id="fork-btn">Fork</button>
+      </div>
+      <div id="fork-result"></div>
+    </section>
+      <section>
+        <strong>UI preferences</strong>
+        <div><label><input type="checkbox" id="sticky-tabs"> Sticky tab bar</label></div>
+      </section>
+      </div>
+      <div class="tab-pane" id="pane-diag">
+    <section id="owner-events">
+      <strong>Owner event stream</strong> (live audit feed; requires owner
+      scope)
+      <div>
+        <button id="watch-events">Watch events</button>
+        <button id="stop-events" disabled>Stop</button>
+      </div>
+      <pre id="events">(not connected)</pre>
+    </section>
+    <section id="audit-log">
+      <strong>Audit log</strong> (history; requires owner scope)
+      <div>
+        <label
+          >action
+          <select id="audit-action">
+            <option value="">(any)</option>
+            <option>pairing_redeemed</option>
+            <option>token_minted</option>
+            <option>token_revoked</option>
+            <option>auth_failed</option>
+            <option>scope_denied</option>
+            <option>permission_voted</option>
+            <option>prompt_sent</option>
+            <option>push_sent</option>
+            <option>push_suppressed</option>
+            <option>policy_decision</option>
+            <option>session_list_read</option>
+          </select>
+        </label>
+        <label
+          >limit
+          <input
+            id="audit-limit"
+            type="number"
+            value="50"
+            min="1"
+            style="width: 5rem"
+        /></label>
+        <button id="audit-query">Query</button>
+      </div>
+      <pre id="audit">(not queried)</pre>
+    </section>
+    <section id="digest">
+      <strong>Missed while quiet (digest)</strong> (requires owner scope)
+      <div><button id="digest-btn">Refresh digest</button></div>
+      <div id="digest-list">(not loaded)</div>
+    </section>
+    <section id="commands">
+      <strong>Commands</strong> (invoke targets the watched session)
+      <div><button id="list-commands">List commands</button></div>
+      <div id="commands-list">(not listed)</div>
+    </section>
+    <div style="margin-top: 8px">
+      <label style="font-size: 0.8rem; color: #888"
+        ><input type="checkbox" id="raw-toggle" /> raw JSON</label
+      >
+    </div>
     <pre id="log" style="display: none"></pre>
+      </div>
+    </div>
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
       const WATCHED_KEY = 'qwen-rc:watched-session';
+
+      // Auth gate (add-rc-viewer-ui-reorg task 1): #auth-gate (pairing only)
+      // and #app-body (everything else) are mutually exclusive. Later tasks
+      // (tabs, pinning, status dot) live entirely inside #app-body.
+      function showApp() {
+        $('auth-gate').hidden = true;
+        $('app-body').hidden = false;
+      }
+      function showAuthGate() {
+        if (healthPollId) { clearInterval(healthPollId); healthPollId = null; }
+        $('auth-gate').hidden = false;
+        $('app-body').hidden = true;
+      }
+
+      // Tab bar (add-rc-viewer-ui-reorg task 2): #app-body is split into four
+      // panes (chat/ops/settings/diag). switchTab shows the matching
+      // .tab-pane and highlights the matching .tab button; everything else
+      // is hidden via CSS (display:none), so ids stay stable and existing
+      // event handlers (which reference elements by id via `$`) keep working
+      // regardless of which pane is currently visible.
+      const TAB_IDS = ['chat', 'ops', 'settings', 'diag'];
+
+      // Pin/collapse mechanics (task 3): a pinned tab's content lives as a
+      // collapsible <details> section inside #pin-area on the Chat tab.
+      // DOM nodes are MOVED (never cloned) between the tab pane and the
+      // pinned <details> body so event listeners, SSE connections, and form
+      // state all survive the move. pinState[tabId] holds the <details>
+      // element while pinned (null when not pinned). Pin order is fixed —
+      // Operations above Settings above Diagnostics — regardless of the
+      // order tabs were pinned in.
+      function moveChildren(source, target) {
+        while (source.firstChild) target.appendChild(source.firstChild);
+      }
+
+      const PIN_ORDER = ['ops', 'settings', 'diag'];
+      const PIN_LABELS = { ops: 'Operations', settings: 'Settings', diag: 'Diagnostics' };
+      const pinState = { ops: null, settings: null, diag: null };
+
+      function switchTab(tabId) {
+        // Leaving a pinned tab: move its content back into the pin area and
+        // reveal the (previously hidden) <details> wrapper.
+        for (const id of TAB_IDS) {
+          if ($('pane-' + id).classList.contains('active') && pinState[id]) {
+            const body = pinState[id].querySelector('div');
+            moveChildren($('pane-' + id), body);
+            pinState[id].hidden = false;
+          }
+        }
+
+        // Entering a pinned tab: pull its content out of the pin area back
+        // into the tab pane for the duration of the visit, hiding the
+        // (now-empty) <details> wrapper so it isn't shown twice.
+        if (pinState[tabId]) {
+          const body = pinState[tabId].querySelector('div');
+          moveChildren(body, $('pane-' + tabId));
+          pinState[tabId].hidden = true;
+        }
+
+        for (const id of TAB_IDS) {
+          const pane = $('pane-' + id);
+          const btn = document.querySelector('.tab[data-tab="' + id + '"]');
+          if (id === tabId) {
+            pane.classList.add('active');
+            btn.classList.add('active');
+          } else {
+            pane.classList.remove('active');
+            btn.classList.remove('active');
+          }
+        }
+      }
+
+      document.getElementById('tab-bar').addEventListener('click', (e) => {
+        const tab = e.target.closest('.tab');
+        if (!tab) return;
+        // Don't switch tab when clicking the pin checkbox.
+        if (e.target.classList.contains('pin-cb')) return;
+        switchTab(tab.dataset.tab);
+      });
+
+      document.getElementById('tab-bar').addEventListener('change', (e) => {
+        if (!e.target.classList.contains('pin-cb')) return;
+        const tabId = e.target.dataset.pin;
+        const pinArea = $('pin-area');
+
+        if (e.target.checked) {
+          // Pin: wrap the pane's content in a <details>, move it into the
+          // pin area, and insert it in fixed pin order (not pin-click order).
+          const details = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = PIN_LABELS[tabId];
+          details.appendChild(summary);
+          const body = document.createElement('div');
+          moveChildren($('pane-' + tabId), body);
+          details.appendChild(body);
+          pinState[tabId] = details;
+
+          let insertBefore = null;
+          const myIdx = PIN_ORDER.indexOf(tabId);
+          for (let i = myIdx + 1; i < PIN_ORDER.length; i++) {
+            if (pinState[PIN_ORDER[i]]) {
+              insertBefore = pinState[PIN_ORDER[i]];
+              break;
+            }
+          }
+          if (insertBefore) pinArea.insertBefore(details, insertBefore);
+          else pinArea.appendChild(details);
+
+          // Pinning the tab currently being viewed would leave its pane
+          // active but empty — send the user back to Chat instead.
+          if ($('pane-' + tabId).classList.contains('active')) switchTab('chat');
+        } else {
+          // Unpin: move content back to its tab pane (a no-op if the pane is
+          // already showing it, i.e. the user is currently viewing this
+          // pinned tab) and drop the <details> wrapper.
+          const details = pinState[tabId];
+          if (details) {
+            const body = details.querySelector('div');
+            moveChildren(body, $('pane-' + tabId));
+            details.remove();
+            pinState[tabId] = null;
+          }
+        }
+      });
+
+      // Sticky tab bar (Settings > UI preferences). Not persisted — resets on
+      // reload, per the no-localStorage-for-UI-state constraint.
+      $('sticky-tabs').onchange = () => {
+        $('tab-bar').classList.toggle('sticky', $('sticky-tabs').checked);
+      };
+
+      // Global 401 teardown: any 401 from THIS gateway (same-origin request)
+      // means the stored token is no longer valid — drop it and fall back to
+      // the pairing screen. Scoped to same-origin ONLY: the multi-workspace
+      // pool (add-multi-workspace-client) fetches OTHER daemons' absolute
+      // URLs and already reports their 401s as a per-row "RE-PAIR REQUIRED"
+      // status (spec 4.6) — that must NOT tear down this browser's own
+      // gateway session.
+      (function installAuthTeardown() {
+        const realFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+          // Capture the token that was current when THIS request was fired.
+          // If a concurrent re-pair (doPair -> showApp) replaces the stored
+          // token before this request's response arrives, the stale 401
+          // below must not wipe out the new, valid token.
+          const tokenAtRequest = localStorage.getItem(TOKEN_KEY);
+          const res = await realFetch(input, init);
+          if (res.status === 401) {
+            try {
+              const reqUrl = new URL(
+                typeof input === 'string' || input instanceof String
+                  ? String(input)
+                  : input.url,
+                location.href,
+              );
+              if (
+                reqUrl.origin === location.origin &&
+                localStorage.getItem(TOKEN_KEY) === tokenAtRequest
+              ) {
+                localStorage.removeItem(TOKEN_KEY);
+                showAuthGate();
+              }
+            } catch {
+              /* malformed/opaque URL — nothing to tear down */
+            }
+          }
+          return res;
+        };
+      })();
+
       const setStatus = (m) => {
         $('status').textContent = m;
       };
@@ -1121,6 +1369,73 @@
 
       const token = () => localStorage.getItem(TOKEN_KEY);
 
+      // Validate any stored token against the gateway before revealing
+      // #app-body. /rc/capabilities requires an authenticated req.rcClient
+      // and 401s otherwise, so a 200 here is proof the token still works —
+      // mere token() *presence* is not (a stale/revoked token is still a
+      // non-empty string). renderRecentWorkspaces/browseTo/loadDaemonManifest/
+      // restoreWatchedSession are function declarations defined later in this
+      // script but hoisted, and this only reaches them after the `await`
+      // below — by which point the whole script has finished executing (same
+      // reasoning doPair, further down, already relies on) — so calling them
+      // here is safe regardless of source order.
+      // Tab-bar reachability dot (Task 4). ok=true → green/"reachable",
+      // ok=false → red/"unreachable". Driven by the auth gate's initial
+      // capabilities check and, thereafter, by the standalone /rc/health probe
+      // in startHealthPoll().
+      function setStatusDot(ok) {
+        const dot = $('status-dot');
+        if (!dot) return;
+        dot.style.background = ok ? '#2a2' : '#c33';
+        dot.title =
+          (ok ? 'Gateway reachable' : 'Gateway unreachable') +
+          ' · ' +
+          new Date().toLocaleTimeString();
+      }
+
+      // Keep the dot live independent of the Daemons section (which only
+      // populates for owner tokens with a configured clients.toml — see
+      // loadDaemonManifest above). A bare, unauthenticated /rc/health probe
+      // covers every pairing, not just multi-daemon setups.
+      let healthPollId = null;
+      function startHealthPoll() {
+        if (healthPollId) return;
+        healthPollId = setInterval(() => {
+          if (document.hidden) return; // pause while backgrounded, like pollDaemonHealths
+          fetch('/rc/health', { signal: AbortSignal.timeout(10000) })
+            .then((res) => setStatusDot(res.ok))
+            .catch(() => setStatusDot(false));
+        }, 60000);
+      }
+
+      (async function authGate() {
+        const t = token();
+        if (!t) {
+          showAuthGate();
+          return;
+        }
+        try {
+          const res = await fetch('/rc/capabilities', {
+            headers: { Authorization: 'Bearer ' + t },
+          });
+          if (res.ok) {
+            setStatusDot(true);
+            showApp();
+            startHealthPoll();
+            renderRecentWorkspaces();
+            void browseTo();
+            void loadDaemonManifest();
+            restoreWatchedSession();
+          } else {
+            setStatusDot(false);
+            showAuthGate();
+          }
+        } catch {
+          setStatusDot(false);
+          showAuthGate();
+        }
+      })();
+
       function urlBase64ToUint8Array(base64url) {
         const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
         const base64 = (base64url + padding)
@@ -1193,15 +1508,17 @@
           localStorage.setItem(TOKEN_KEY, data.token);
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
-          // The directory picker's initial browseTo() (fired at script load,
-          // before any token exists on a fresh device/QR pair) bails on
-          // !token() and never re-triggers on its own — so #dir-list would
-          // otherwise show "(loading…)" forever until a manual reload. Now
-          // that a token exists, populate it (this covers BOTH the QR
-          // auto-pair and the manual code+Pair-button path, since both call
-          // doPair). renderRecentWorkspaces + browseTo are function
-          // declarations defined later in this script but hoisted, so both
-          // are callable here regardless of source order.
+          showApp();
+          startHealthPoll();
+          // authGate() (above) only populates the directory picker for a
+          // token that ALREADY existed at script load — a fresh pair (QR or
+          // manual code) has no such run, so #dir-list would otherwise show
+          // "(loading…)" forever until a manual reload. Now that a token
+          // exists, populate it (this covers BOTH the QR auto-pair and the
+          // manual code+Pair-button path, since both call doPair).
+          // renderRecentWorkspaces + browseTo are function declarations
+          // defined later in this script but hoisted, so both are callable
+          // here regardless of source order.
           renderRecentWorkspaces();
           void browseTo();
           // A fresh pair (QR or code) happens AFTER the script-load manifest
@@ -1825,8 +2142,12 @@
         resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''));
       };
 
-      renderRecentWorkspaces();
-      void browseTo(); // open the browser at the server default ($HOME)
+      // renderRecentWorkspaces() + browseTo() (open the browser at the server
+      // default $HOME) used to run unconditionally here at script-load. They
+      // now run from authGate()'s success branch (see the token() helper,
+      // above) so they never fire against a stale/invalid stored token
+      // before the auth gate has validated it. doPair() (above) still calls
+      // both directly on a fresh pair.
 
       // Create (or attach to) a daemon session, then hand off to Watch so the
       // composer opens on it immediately. `cwd` empty → the daemon's bound
@@ -2825,23 +3146,27 @@
 
       $('daemons-refresh-gpus').onclick = () => void runGpuRefresh();
 
-      loadDaemonManifest();
+      // loadDaemonManifest() and the watched-session auto-restore (below)
+      // both used to run unconditionally here at script-load. They now run
+      // from authGate()'s success branch (see the token() helper, above)
+      // instead — self-guarding on token() *presence* isn't enough, since a
+      // stale/invalid stored token would still fire these eagerly before the
+      // auth gate has validated it. See restoreWatchedSession(), used there.
 
       // Auto-restore: if a watched session was persisted (mobile screen-off
       // discards the page), reconnect on reload.  The DOM is empty after a
       // full reload, so replay from event 0 to rebuild the transcript.
       // (visibilitychange keeps the DOM intact and tails from lastSeenEventId.)
-      {
+      function restoreWatchedSession() {
         const raw = localStorage.getItem(WATCHED_KEY);
-        if (raw && token()) {
-          try {
-            const { sessionId, lastEventId, title } = JSON.parse(raw);
-            if (sessionId) {
-              lastSeenEventId = lastEventId ?? null;
-              startWatch(sessionId, 0, title || null);
-            }
-          } catch { /* corrupt entry — ignore */ }
-        }
+        if (!raw) return;
+        try {
+          const { sessionId, lastEventId, title } = JSON.parse(raw);
+          if (sessionId) {
+            lastSeenEventId = lastEventId ?? null;
+            startWatch(sessionId, 0, title || null);
+          }
+        } catch { /* corrupt entry — ignore */ }
       }
 
       // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic
@@ -3310,6 +3635,7 @@
       document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
+          switchTab('ops');
           const box = $('search-q');
           box.scrollIntoView({ block: 'center' });
           box.focus();
@@ -3537,27 +3863,6 @@
           btn.disabled = false;
         }
       }
-      // Gateway status (cycle 74): GET /rc/health (no auth) — confirm the
-      // gateway is reachable + report paired/not-paired (token PRESENCE only,
-      // never its value). textContent-only.
-      $('status-btn').onclick = async () => {
-        const out = $('status-result');
-        out.textContent = ' checking…';
-        const paired = token() ? 'paired' : 'not paired';
-        try {
-          const res = await fetch('/rc/health');
-          if (res.ok) {
-            const b = await res.json();
-            out.textContent =
-              ' gateway: ' + (b.status || 'ok') + ' · ' + paired;
-          } else {
-            out.textContent = ' gateway: error ' + res.status + ' · ' + paired;
-          }
-        } catch (e) {
-          out.textContent = ' unreachable · ' + paired;
-        }
-      };
-
       $('list-commands').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('commands-list');
