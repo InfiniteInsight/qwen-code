@@ -398,6 +398,18 @@
         color: #888;
       }
     </style>
+    <section id="perm-rules" hidden style="margin-top: 8px">
+      <strong>permission rules</strong>
+      <div
+        id="perm-rules-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </section>
     <div
       id="session-footer"
       style="
@@ -599,6 +611,45 @@
         <button id="fork-btn">Fork</button>
       </div>
       <div id="fork-result"></div>
+    </section>
+    <section id="ws-trust" hidden>
+      <strong>Workspace trust</strong> (reads: write scope · changes: owner
+      scope, applied by the local operator on the daemon host)
+      <div
+        id="ws-trust-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </section>
+    <section id="ws-mcp" hidden>
+      <strong>Workspace MCP servers</strong> (reads: write scope · changes:
+      owner scope)
+      <div
+        id="ws-mcp-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </section>
+    <section id="ws-tools" hidden>
+      <strong>Workspace tools</strong> (reads: write scope · changes: owner
+      scope)
+      <div
+        id="ws-tools-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
     </section>
       <section>
         <strong>UI preferences</strong>
@@ -1050,7 +1101,8 @@
       // carry _meta.usage). The running daemon doesn't expose the context-window
       // size for an env-configured model, so we show raw in/out token counts
       // (no context-fill %). The model name updates on `model_switched` too.
-      let ctxInfo = null; // { modelName, modeName, cwd }
+      let caps = null; // GET /rc/capabilities body (task #27 gating)
+      let ctxInfo = null; // { modelName, modeName, currentModeId, availableModes, cwd }
       let liveIn = 0; // last turn's prompt (input) tokens
       let liveOut = 0; // last turn's completion (output) tokens
 
@@ -1063,17 +1115,794 @@
         const f = $('session-footer');
         if (!ctxInfo) {
           f.style.display = 'none';
+          f.innerHTML = '';
           return;
         }
+        const hasModes =
+          Array.isArray(ctxInfo.availableModes) &&
+          ctxInfo.availableModes.length > 1;
         const parts = [];
         parts.push('🧠 ' + ctxInfo.modelName);
         if (liveIn > 0 || liveOut > 0) {
           parts.push(fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out');
         }
-        if (ctxInfo.modeName) parts.push(ctxInfo.modeName);
+        // The mode name renders as text only when there is no picker (a single
+        // available mode); otherwise the select below carries it.
+        if (!hasModes && ctxInfo.modeName) parts.push(ctxInfo.modeName);
         if (ctxInfo.cwd) parts.push(ctxInfo.cwd);
-        f.textContent = parts.join('   ·   ');
+        const text = document.createElement('span');
+        text.textContent = parts.join('   ·   ');
+        f.innerHTML = '';
+        f.append(text);
+        if (hasModes) {
+          const sel = document.createElement('select');
+          sel.id = 'footer-mode';
+          sel.style.marginLeft = '10px';
+          for (const m of ctxInfo.availableModes) {
+            const o = document.createElement('option');
+            o.value = m.id;
+            o.textContent = m.name;
+            if (m.id === ctxInfo.currentModeId) o.selected = true;
+            sel.appendChild(o);
+          }
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.id = 'footer-mode-persist';
+          cb.title = 'persist this mode for future sessions in this workspace';
+          const cbl = document.createElement('label');
+          cbl.style.marginLeft = '6px';
+          cbl.appendChild(cb);
+          cbl.appendChild(document.createTextNode(' persist'));
+          const note = document.createElement('span');
+          note.id = 'footer-mode-note';
+          note.style.marginLeft = '8px';
+          note.style.fontSize = '12px';
+          sel.addEventListener('change', () => changeApprovalMode(sel, cb));
+          f.append(sel, cbl, note);
+        }
         f.style.display = '';
+      }
+
+      // Approval-mode switcher (task #27): POST /session/:id/approval-mode
+      // with {mode, persist}. On 200 the response carries the effective mode
+      // plus whether the plan document was dropped out-of-band; on 4xx the
+      // select reverts to the previous mode and the daemon's error (owner
+      // scope / trust gate) is surfaced in the footer note.
+      async function changeApprovalMode(sel, persistCb) {
+        const id = watchedSessionId;
+        if (!id) return;
+        const mode = sel.value;
+        const prev = ctxInfo ? ctxInfo.currentModeId : mode;
+        const setNote = (msg) => {
+          const n = $('footer-mode-note');
+          if (n) n.textContent = msg;
+        };
+        setNote('');
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/approval-mode',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({
+                mode,
+                persist: persistCb ? !!persistCb.checked : false,
+              }),
+            },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            sel.value = prev;
+            const detail =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : (body.error || 'failed (' + res.status + ')') +
+                  (body.code ? ' (' + body.code + ')' : '');
+            setNote(detail);
+            setStatus(detail);
+            return;
+          }
+          const out = await res.json().catch(() => ({}));
+          if (ctxInfo) {
+            ctxInfo.currentModeId = out.mode || mode;
+            const m = (ctxInfo.availableModes || []).find(
+              (x) => x.id === ctxInfo.currentModeId,
+            );
+            ctxInfo.modeName = m ? m.name : ctxInfo.currentModeId;
+            renderFooter();
+          }
+          if (out.planExitedOutOfBand) {
+            addSystem(
+              'approval mode left plan — the plan document is no longer enforced',
+            );
+          }
+          setNote(
+            'mode: ' +
+              (ctxInfo ? ctxInfo.modeName : mode) +
+              (out.persisted ? ' (persisted)' : ''),
+          );
+        } catch (err) {
+          sel.value = prev;
+          const detail = 'approval mode change failed: ' + err.message;
+          setNote(detail);
+          setStatus(detail);
+        }
+      }
+
+      // ---- Permission rules (task #27) -------------------------------------
+      // Workspace/user allow-ask-deny lists from GET /rc/workspace/permissions
+      // (WRITE). Edits are full replacements of ONE list per POST (OWNER);
+      // the daemon applies them to the live ACP session, so a 409
+      // `permission_session_required` means "watch/send a session in this
+      // workspace, then retry". Chip edits mutate the in-memory copy; the
+      // list is only committed on "save".
+      let permRules = null; // { user, workspace, merged, isTrusted }
+      let permScope = 'workspace';
+
+      function permRulesGate() {
+        const wc =
+          caps && caps.remoteControl && caps.remoteControl.workspaceControl;
+        return !!(wc && wc.permissions);
+      }
+
+      function permRulesStatusEl() {
+        let st = $('perm-rules-status');
+        if (!st) {
+          st = document.createElement('span');
+          st.id = 'perm-rules-status';
+          st.style.fontSize = '12px';
+        }
+        return st;
+      }
+
+      function renderPermRulesSection() {
+        const sec = $('perm-rules');
+        if (!sec) return;
+        if (!permRulesGate()) {
+          sec.hidden = true;
+          return;
+        }
+        sec.hidden = false;
+        const body = $('perm-rules-body');
+        const prevStatus = $('perm-rules-status');
+        const prevStatusText = prevStatus ? prevStatus.textContent : '';
+        body.innerHTML = '';
+
+        const scopeRow = document.createElement('div');
+        for (const sc of ['workspace', 'user']) {
+          const cbl = document.createElement('label');
+          const rb = document.createElement('input');
+          rb.type = 'radio';
+          rb.name = 'perm-scope';
+          rb.value = sc;
+          rb.checked = permScope === sc;
+          rb.addEventListener('change', () => {
+            permScope = sc;
+            renderPermRulesSection();
+          });
+          cbl.appendChild(rb);
+          cbl.appendChild(document.createTextNode(' ' + sc + '   '));
+          scopeRow.appendChild(cbl);
+        }
+        const refresh = document.createElement('button');
+        refresh.textContent = 'refresh';
+        refresh.style.marginLeft = '12px';
+        refresh.addEventListener('click', () => loadPermRules(true));
+        const status = permRulesStatusEl();
+        status.textContent = prevStatusText;
+        scopeRow.append(refresh, document.createTextNode(' '), status);
+        body.append(scopeRow);
+
+        if (!permRules) {
+          const note = document.createElement('div');
+          note.textContent = 'loading…';
+          note.style.fontSize = '12px';
+          body.append(note);
+          return;
+        }
+        const src = permRules[permScope] || { rules: {} };
+        for (const rt of ['allow', 'ask', 'deny']) {
+          const rules = Array.isArray(src.rules[rt]) ? src.rules[rt] : [];
+          const block = document.createElement('div');
+          const head = document.createElement('div');
+          const rtLabel = document.createElement('strong');
+          rtLabel.textContent = rt;
+          head.append(rtLabel);
+          block.append(head);
+          const list = document.createElement('div');
+          list.style.display = 'flex';
+          list.style.flexWrap = 'wrap';
+          list.style.gap = '4px';
+          for (let i = 0; i < rules.length; i++) {
+            const chip = document.createElement('span');
+            chip.style.cssText =
+              'border:1px solid #333;border-radius:10px;padding:1px 8px;font-size:12px;';
+            chip.appendChild(document.createTextNode(clean(rules[i])));
+            const x = document.createElement('button');
+            x.textContent = '×';
+            x.style.marginLeft = '4px';
+            x.addEventListener('click', () => {
+              rules.splice(i, 1);
+              renderPermRulesSection();
+            });
+            chip.appendChild(x);
+            list.appendChild(chip);
+          }
+          if (!rules.length) {
+            const empty = document.createElement('span');
+            empty.textContent = '(none)';
+            empty.style.cssText = 'opacity:0.5;font-size:12px';
+            list.appendChild(empty);
+          }
+          block.append(list);
+          const addRow = document.createElement('div');
+          addRow.style.display = 'flex';
+          addRow.style.gap = '6px';
+          const inp = document.createElement('input');
+          inp.placeholder = rt + ' rule, e.g. shell(git status:*) or edit(./docs/**)';
+          inp.style.flex = '1';
+          const addBtn = document.createElement('button');
+          addBtn.textContent = 'add';
+          addBtn.addEventListener('click', () => {
+            const v = inp.value.trim();
+            if (!v) return;
+            rules.push(v);
+            renderPermRulesSection();
+          });
+          const save = document.createElement('button');
+          save.textContent = 'save ' + rt;
+          save.addEventListener('click', () => savePermRuleList(rt));
+          addRow.append(inp, addBtn, save);
+          block.append(addRow);
+          body.append(block);
+        }
+        if (permRules.isTrusted === false) {
+          const warn = document.createElement('div');
+          warn.style.cssText = 'font-size:12px;color:#ca0';
+          warn.textContent =
+            'workspace is not trusted — workspace-scoped saves will be refused';
+          body.append(warn);
+        }
+      }
+
+      async function loadPermRules(notify) {
+        if (!permRulesGate()) return;
+        try {
+          const res = await fetch('/rc/workspace/permissions', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            permRules = null;
+            const msg =
+              res.status === 401 || res.status === 403
+                ? 'requires write scope'
+                : (body.error || 'load failed') + ' (' + res.status + ')';
+            const st = permRulesStatusEl();
+            st.textContent = msg;
+            renderPermRulesSection();
+            return;
+          }
+          permRules = await res.json();
+          const st = permRulesStatusEl();
+          st.textContent = '';
+          renderPermRulesSection();
+        } catch (err) {
+          if (notify) setStatus('permission rules load failed: ' + err.message);
+        }
+      }
+
+      async function savePermRuleList(ruleType) {
+        if (!permRules) return;
+        const src = permRules[permScope] || { rules: {} };
+        const rules = Array.isArray(src.rules[ruleType]) ? src.rules[ruleType] : [];
+        const st = permRulesStatusEl();
+        st.textContent = 'saving…';
+        try {
+          const res = await fetch('/rc/workspace/permissions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ scope: permScope, ruleType, rules }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            let msg = (body.error || 'save failed') + ' (' + res.status + ')';
+            if (body.code === 'permission_session_required') {
+              msg +=
+                ' — start a session in this workspace (send a prompt), then retry';
+            } else if (body.code === 'untrusted_workspace') {
+              msg += ' — trust the workspace first (Settings tab)';
+            } else if (res.status === 401 || res.status === 403) {
+              msg = 'not authorized — needs an owner token';
+            }
+            st.textContent = msg;
+            setStatus(msg);
+            return;
+          }
+          permRules = await res.json();
+          st.textContent = 'saved';
+          renderPermRulesSection();
+        } catch (err) {
+          const msg = 'save failed: ' + err.message;
+          st.textContent = msg;
+          setStatus(msg);
+        }
+      }
+
+      // ---- Workspace trust / MCP / tools (task #27, Settings tab) ---------
+      // Capability-gated (applyWorkspaceControlGating). Reads need WRITE,
+      // mutations OWNER. Trust changes are 202-async — the LOCAL operator on
+      // the daemon host applies them, so we poll the status for a bounded
+      // window and report "still pending" when it elapses. MCP rows show
+      // name + status + transport only, never config values (secrets).
+      function wsSectionStatusEl(id) {
+        let st = $(id);
+        if (!st) {
+          st = document.createElement('span');
+          st.id = id;
+          st.style.fontSize = '12px';
+        }
+        return st;
+      }
+
+      function renderWsSectionPlaceholder(bodyId, label, loader) {
+        const body = $(bodyId);
+        if (!body) return;
+        body.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', () => loader(true));
+        body.appendChild(btn);
+      }
+
+      // GET /rc/workspace/trust — v2 preferred, v1 fallback for daemons that
+      // reject statusVersion=2 (400 invalid_status_version).
+      async function fetchWorkspaceTrust() {
+        let res = await fetch('/rc/workspace/trust?statusVersion=2', {
+          headers: { Authorization: 'Bearer ' + token() },
+        });
+        if (res.status === 400) {
+          const body = await res.json().catch(() => ({}));
+          if (body.code === 'invalid_status_version') {
+            res = await fetch('/rc/workspace/trust', {
+              headers: { Authorization: 'Bearer ' + token() },
+            });
+          }
+        }
+        return res;
+      }
+
+      async function loadWorkspaceTrust(notify) {
+        const body = $('ws-trust-body');
+        const status = wsSectionStatusEl('ws-trust-status');
+        try {
+          const res = await fetchWorkspaceTrust();
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            body.innerHTML = '';
+            status.textContent =
+              res.status === 401 || res.status === 403
+                ? 'requires write scope'
+                : (e.error || 'load failed') + ' (' + res.status + ')';
+            body.append(status);
+            return;
+          }
+          const data = await res.json();
+          body.innerHTML = '';
+          const v2 = data.v === 2;
+          const eff = data.effective || {};
+          const lines = document.createElement('div');
+          lines.style.cssText =
+            'font-family:ui-monospace,monospace;font-size:0.8rem;white-space:pre-line';
+          let txt =
+            'folder trust: ' +
+            (data.folderTrustEnabled ? 'enabled' : 'disabled') +
+            '\n';
+          if (v2) {
+            const cfg = data.configured || {};
+            txt +=
+              'configured: ' +
+              (cfg.state || '?') +
+              (cfg.explicitTrustLevel
+                ? ' (' + cfg.explicitTrustLevel + ')'
+                : '') +
+              '\n';
+            txt += 'effective: ' + (eff.state || '?') + '\n';
+            const rec = data.reconciliation;
+            if (rec) {
+              txt +=
+                'reconciliation: ' +
+                rec.state +
+                ' (rev ' +
+                String(rec.revision == null ? '?' : rec.revision) +
+                '/' +
+                String(rec.appliedRevision == null ? '?' : rec.appliedRevision) +
+                ')' +
+                (rec.error ? ' — ' + rec.error : '') +
+                '\n';
+            }
+          } else {
+            txt += 'effective: ' + (eff.state || '?') + '\n';
+            if (data.explicitTrustLevel)
+              txt += 'explicit: ' + data.explicitTrustLevel + '\n';
+            txt += 'changes require a daemon restart\n';
+          }
+          lines.textContent = txt;
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;gap:6px';
+          const reason = document.createElement('input');
+          reason.placeholder = 'reason (optional)';
+          reason.style.flex = '1';
+          const trustBtn = document.createElement('button');
+          trustBtn.textContent = 'trust';
+          const untrustBtn = document.createElement('button');
+          untrustBtn.textContent = 'untrust';
+          trustBtn.addEventListener('click', () =>
+            requestTrust('trusted', reason.value),
+          );
+          untrustBtn.addEventListener('click', () =>
+            requestTrust('untrusted', reason.value),
+          );
+          const refresh = document.createElement('button');
+          refresh.textContent = 'refresh';
+          refresh.addEventListener('click', () => loadWorkspaceTrust(false));
+          row.append(reason, trustBtn, untrustBtn, refresh);
+          body.append(lines, row, status);
+        } catch (err) {
+          body.innerHTML = '';
+          status.textContent = 'load failed: ' + err.message;
+          body.append(status);
+          if (notify) setStatus('workspace trust load failed: ' + err.message);
+        }
+      }
+
+      async function requestTrust(desiredState, reason) {
+        const status = wsSectionStatusEl('ws-trust-status');
+        status.textContent =
+          'requested — waiting for the local operator on the daemon host…';
+        try {
+          const payload = { desiredState };
+          if (reason && reason.trim()) payload.reason = reason.trim();
+          const res = await fetch('/rc/workspace/trust/request', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            // The daemon's passthrough is 403 folder_trust_disabled (not 409).
+            if (e.code === 'folder_trust_disabled') {
+              status.textContent =
+                'folder trust is disabled on the daemon host — nothing to request';
+              return;
+            }
+            const msg =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : (e.error || 'request failed') + ' (' + res.status + ')';
+            status.textContent = msg;
+            setStatus(msg);
+            return;
+          }
+          // 202: accepted; the flip happens on the daemon host. Poll for it.
+          status.textContent =
+            'accepted — pending operator confirmation on the daemon host';
+          await pollTrustFlip(desiredState, status);
+        } catch (err) {
+          status.textContent = 'request failed: ' + err.message;
+        }
+      }
+
+      async function pollTrustFlip(desiredState, status) {
+        const wantTrusted = desiredState === 'trusted';
+        for (let attempt = 0; attempt < 10; attempt++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const res = await fetchWorkspaceTrust();
+            if (!res.ok) continue;
+            const data = await res.json();
+            const eff = data.effective || {};
+            const flipped =
+              data.v === 2
+                ? eff.trusted === wantTrusted
+                : eff.state === desiredState;
+            if (flipped) {
+              status.textContent = 'workspace is now ' + desiredState;
+              loadWorkspaceTrust(false); // re-render with the fresh state
+              return;
+            }
+          } catch {
+            /* transient — keep polling */
+          }
+        }
+        status.textContent =
+          'still pending after ~20s — the local operator on the daemon host has not applied it yet';
+      }
+
+      function mcpOriginLabel(origin) {
+        switch (origin) {
+          case 'workspace_settings':
+            return 'workspace settings';
+          case 'user_settings':
+            return "the daemon host's user settings";
+          case 'project_mcp_json':
+            return 'the project .mcp.json';
+          case 'system_settings':
+            return 'system settings';
+          case 'runtime':
+            return 'runtime config';
+          case 'extension':
+            return 'an extension';
+          default:
+            return origin || 'unknown origin';
+        }
+      }
+
+      async function loadWorkspaceMcp(notify) {
+        const body = $('ws-mcp-body');
+        const status = wsSectionStatusEl('ws-mcp-status');
+        try {
+          const res = await fetch('/rc/workspace/mcp', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            body.innerHTML = '';
+            status.textContent =
+              res.status === 401 || res.status === 403
+                ? 'requires write scope'
+                : (e.error || 'load failed') + ' (' + res.status + ')';
+            body.append(status);
+            return;
+          }
+          const data = await res.json();
+          body.innerHTML = '';
+          const head = document.createElement('div');
+          head.style.cssText = 'font-size:12px;opacity:0.6';
+          head.textContent =
+            (data.initialized ? 'initialized' : 'not initialized') +
+            (data.discoveryState ? ' · ' + data.discoveryState : '');
+          const list = document.createElement('div');
+          list.style.cssText =
+            'display:flex;flex-direction:column;gap:6px';
+          const servers = Array.isArray(data.servers) ? data.servers : [];
+          if (!servers.length) {
+            const none = document.createElement('div');
+            none.textContent = '(no MCP servers)';
+            none.style.cssText = 'font-size:12px;opacity:0.5';
+            list.appendChild(none);
+          }
+          for (const s of servers) {
+            if (!s || typeof s.name !== 'string') continue;
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px';
+            const name = document.createElement('strong');
+            name.textContent = s.name;
+            const meta = document.createElement('span');
+            meta.style.cssText = 'font-size:12px;opacity:0.6';
+            meta.textContent =
+              (s.mcpStatus || 'unknown') +
+              (s.transport ? ' · ' + s.transport : '') +
+              (s.configOrigin ? ' · ' + mcpOriginLabel(s.configOrigin) : '') +
+              (s.disabled
+                ? ' · disabled' +
+                  (s.disabledReason ? ' (' + s.disabledReason + ')' : '')
+                : '');
+            const btn = document.createElement('button');
+            btn.textContent = s.disabled ? 'enable' : 'disable';
+            btn.addEventListener('click', () => toggleMcpServer(s, btn));
+            row.append(name, meta, btn);
+            list.appendChild(row);
+          }
+          const row = document.createElement('div');
+          const reloadBtn = document.createElement('button');
+          reloadBtn.textContent = 'reload MCP servers';
+          reloadBtn.addEventListener('click', () => reloadMcpServers());
+          const refresh = document.createElement('button');
+          refresh.textContent = 'refresh';
+          refresh.style.marginLeft = '6px';
+          refresh.addEventListener('click', () => loadWorkspaceMcp(false));
+          row.append(reloadBtn, refresh);
+          body.append(head, list, row, status);
+        } catch (err) {
+          body.innerHTML = '';
+          status.textContent = 'load failed: ' + err.message;
+          body.append(status);
+          if (notify) setStatus('workspace MCP load failed: ' + err.message);
+        }
+      }
+
+      async function toggleMcpServer(server, btn) {
+        btn.disabled = true;
+        const status = wsSectionStatusEl('ws-mcp-status');
+        try {
+          // The remove mutation rewrites workspace-scope settings only. For a
+          // server defined elsewhere (user/system settings, .mcp.json, an
+          // extension) it is a no-op and the reload resurrects the server, so
+          // explain instead of issuing it. Daemons that don't report
+          // configOrigin keep the legacy remove+reload behavior.
+          if (
+            !server.disabled &&
+            server.configOrigin &&
+            server.configOrigin !== 'workspace_settings'
+          ) {
+            status.textContent =
+              '"' +
+              server.name +
+              '" is defined in ' +
+              mcpOriginLabel(server.configOrigin) +
+              ' — a workspace-level remove has no effect; remove it on the daemon host (or add a workspace override)';
+            btn.disabled = false;
+            return;
+          }
+          // 'set' re-assigns the server from its (non-secret-rendered) status
+          // config; 'remove' deletes the named entry. The daemon rewrites the
+          // whole mcpServers map, so a reload follows.
+          const payload = !server.disabled
+            ? { operation: 'remove', name: server.name }
+            : { operation: 'set', name: server.name, config: server.config || {} };
+          const res = await fetch('/rc/workspace/mcp/servers', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : (e.error || 'change failed') + ' (' + res.status + ')';
+            btn.disabled = false;
+            return;
+          }
+          await reloadMcpServers();
+        } catch (err) {
+          status.textContent = 'change failed: ' + err.message;
+          btn.disabled = false;
+        }
+      }
+
+      async function reloadMcpServers() {
+        const status = wsSectionStatusEl('ws-mcp-status');
+        status.textContent = 'reloading…';
+        try {
+          const res = await fetch('/rc/workspace/mcp/reload', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent = (e.error || 'reload failed') + ' (' + res.status + ')';
+            return;
+          }
+          status.textContent = 'reloaded';
+          await loadWorkspaceMcp(false);
+        } catch (err) {
+          status.textContent = 'reload failed: ' + err.message;
+        }
+      }
+
+      async function loadWorkspaceTools(notify) {
+        const body = $('ws-tools-body');
+        const status = wsSectionStatusEl('ws-tools-status');
+        try {
+          const res = await fetch('/rc/workspace/settings', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            body.innerHTML = '';
+            status.textContent =
+              res.status === 401 || res.status === 403
+                ? 'requires write scope'
+                : (e.error || 'load failed') + ' (' + res.status + ')';
+            body.append(status);
+            return;
+          }
+          const data = await res.json();
+          body.innerHTML = '';
+          const disabled = Array.isArray(data.disabledTools)
+            ? data.disabledTools
+            : [];
+          const list = document.createElement('div');
+          list.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+          if (!disabled.length) {
+            const none = document.createElement('div');
+            none.textContent = '(no disabled tools)';
+            none.style.cssText = 'font-size:12px;opacity:0.5';
+            list.appendChild(none);
+          }
+          for (const tool of disabled) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px';
+            const name = document.createElement('strong');
+            name.textContent = tool;
+            const note = document.createElement('span');
+            note.style.cssText = 'font-size:12px;opacity:0.6';
+            note.textContent = 'disabled';
+            const btn = document.createElement('button');
+            btn.textContent = 'enable';
+            btn.addEventListener('click', () => setToolEnabled(tool, true, btn));
+            row.append(name, note, btn);
+            list.appendChild(row);
+          }
+          const addRow = document.createElement('div');
+          addRow.style.cssText = 'display:flex;gap:6px';
+          const inp = document.createElement('input');
+          inp.placeholder = 'tool name to disable, e.g. WebFetch';
+          inp.style.flex = '1';
+          const disBtn = document.createElement('button');
+          disBtn.textContent = 'disable tool';
+          disBtn.addEventListener('click', () => {
+            const v = inp.value.trim();
+            if (!v) return;
+            setToolEnabled(v, false, disBtn);
+          });
+          const refresh = document.createElement('button');
+          refresh.textContent = 'refresh';
+          refresh.addEventListener('click', () => loadWorkspaceTools(false));
+          addRow.append(inp, disBtn, refresh);
+          body.append(list, addRow, status);
+        } catch (err) {
+          body.innerHTML = '';
+          status.textContent = 'load failed: ' + err.message;
+          body.append(status);
+          if (notify) setStatus('workspace tools load failed: ' + err.message);
+        }
+      }
+
+      async function setToolEnabled(toolName, enabled, btn) {
+        btn.disabled = true;
+        const status = wsSectionStatusEl('ws-tools-status');
+        try {
+          const res = await fetch(
+            '/rc/workspace/tools/' +
+              encodeURIComponent(toolName) +
+              '/enable',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({ enabled }),
+            },
+          );
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : (e.error || 'change failed') +
+                  ' (' +
+                  res.status +
+                  ')' +
+                  (e.code === 'unknown_tool' ? ' — check the tool name' : '');
+            btn.disabled = false;
+            return;
+          }
+          status.textContent =
+            'tool ' + toolName + (enabled ? ' enabled' : ' disabled');
+          await loadWorkspaceTools(false); // re-read disabledTools
+        } catch (err) {
+          status.textContent = 'change failed: ' + err.message;
+          btn.disabled = false;
+        }
       }
 
       // A usage-bearing frame (_meta.usage) updates the live token counts. The
@@ -1125,6 +1954,11 @@
         return {
           modelName: clean(modelName),
           modeName: clean(modeName),
+          currentModeId:
+            typeof modes.currentModeId === 'string' ? modes.currentModeId : '',
+          availableModes: (modes.availableModes || [])
+            .filter((m) => m && typeof m.id === 'string')
+            .map((m) => ({ id: m.id, name: clean(m.name || m.id) })),
           cwd: clean(cwd),
         };
       }
@@ -1250,11 +2084,36 @@
             // /context doesn't reliably carry it for env-configured models).
             const mid = strOr(ev.data && ev.data.modelId, '');
             if (mid) {
-              if (!ctxInfo) ctxInfo = { modelName: '', modeName: '', cwd: '' };
+              if (!ctxInfo)
+                ctxInfo = {
+                  modelName: '',
+                  modeName: '',
+                  currentModeId: '',
+                  availableModes: [],
+                  cwd: '',
+                };
               ctxInfo.modelName = mid;
               renderFooter();
             }
             return addSystem('model switched to ' + (mid || '?'), false);
+          }
+          case 'approval_mode_changed': {
+            // The daemon publishes this on the session stream for ANY mode
+            // change (footer picker, CLI /approval-mode, plan exit) as
+            // {previous, next, persisted} — the session is implicit (this
+            // stream belongs to the watched session), so sync the footer
+            // selection whenever it fires.
+            const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            const next = strOr(d.next, '');
+            if (next && ctxInfo) {
+              ctxInfo.currentModeId = next;
+              const m = (ctxInfo.availableModes || []).find(
+                (x) => x.id === next,
+              );
+              ctxInfo.modeName = m ? m.name : next;
+              renderFooter();
+            }
+            return;
           }
           case 'turn_complete':
             // The just-finished turn is a valid fork point: place "Fork from
@@ -1408,6 +2267,38 @@
         }, 60000);
       }
 
+      // Task #27: gate the workspace-control sections on the daemon's
+      // capabilities (remoteControl.workspaceControl). A section stays
+      // hidden when its capability is false or absent (older daemons). The
+      // footer mode picker is deliberately NOT capability-gated — the mode
+      // route is always mounted; the picker appears once the context
+      // reports more than one available mode.
+      function applyWorkspaceControlGating() {
+        const wc =
+          (caps &&
+            caps.remoteControl &&
+            caps.remoteControl.workspaceControl) ||
+          {};
+        // Sections start as a Load placeholder (no auto-load — these reads
+        // hit the daemon workspace). Only seed the placeholder when the body
+        // is still empty so a re-gate never wipes loaded content.
+        const sections = {
+          'ws-trust': [wc.trust, 'ws-trust-body', 'load workspace trust', loadWorkspaceTrust],
+          'ws-mcp': [wc.mcp, 'ws-mcp-body', 'load MCP servers', loadWorkspaceMcp],
+          'ws-tools': [wc.tools, 'ws-tools-body', 'load tool settings', loadWorkspaceTools],
+        };
+        for (const [id, [on, bodyId, label, loader]] of Object.entries(sections)) {
+          const el = $(id);
+          if (el) el.hidden = !on;
+          const body = $(bodyId);
+          if (on && body && body.childElementCount === 0) {
+            renderWsSectionPlaceholder(bodyId, label, loader);
+          }
+        }
+        renderPermRulesSection();
+        if (permRulesGate()) void loadPermRules(false);
+      }
+
       (async function authGate() {
         const t = token();
         if (!t) {
@@ -1419,9 +2310,13 @@
             headers: { Authorization: 'Bearer ' + t },
           });
           if (res.ok) {
+            // Task #27: keep the body — workspaceControl gates the
+            // permission-rules / trust / MCP / tools sections.
+            caps = await res.json().catch(() => null);
             setStatusDot(true);
             showApp();
             startHealthPoll();
+            applyWorkspaceControlGating();
             renderRecentWorkspaces();
             void browseTo();
             void loadDaemonManifest();
@@ -1508,6 +2403,18 @@
           localStorage.setItem(TOKEN_KEY, data.token);
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
+          // Task #27: authGate() ran before any token existed, so fetch the
+          // capabilities now (non-fatal — without them the workspace
+          // control sections simply stay hidden).
+          try {
+            const capsRes = await fetch('/rc/capabilities', {
+              headers: { Authorization: 'Bearer ' + data.token },
+            });
+            if (capsRes.ok) caps = await capsRes.json().catch(() => null);
+          } catch {
+            /* best-effort */
+          }
+          applyWorkspaceControlGating();
           showApp();
           startHealthPoll();
           // authGate() (above) only populates the directory picker for a
@@ -2235,6 +3142,7 @@
           void fetchContext(id);
           void renderLineage(id);
           void refreshIdleToggle();
+          void loadPermRules(false); // task #27: refresh the rules for this workspace
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';

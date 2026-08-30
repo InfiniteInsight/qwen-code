@@ -2840,6 +2840,12 @@ export interface DaemonWorkspaceSettingsStatus {
     recovered: boolean;
   }>;
   settings: DaemonSettingDescriptor[];
+  /**
+   * The normalized `tools.disabled` list (empty when unset). Absent on
+   * older daemons — not a dialog setting key, so it has no
+   * `DaemonSettingDescriptor`.
+   */
+  disabledTools?: string[];
 }
 
 export interface DaemonSettingUpdateResult {

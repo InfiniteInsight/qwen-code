@@ -91,6 +91,11 @@ import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import { createRewindRoute } from './routes/rewind.js';
 import { createApprovalModeRoute } from './routes/approvalMode.js';
+import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.js';
+import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
+import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
+import { createWorkspaceToolToggleRoute } from './routes/workspaceTools.js';
+import { createWorkspaceMcpRoutes } from './routes/workspaceMcp.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import { createPeersRoute } from './routes/peers.js';
@@ -1215,6 +1220,91 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap approval-mode changes per chat user
     createApprovalModeRoute(deps.daemon, { audit }),
+  );
+
+  // /rc/workspace/* — workspace-control routes (rc-workspace-permissions).
+  // Workspace-scoped (daemon-global, no session id): same middleware chain as
+  // the session-mutation routes above MINUS `enforceSessionLock` (there is no
+  // session to lock). Scope tiering is at the mount: READS (GET) are the
+  // WRITE floor; MUTATIONS are OWNER — `requireScope` already writes the
+  // `scope_denied` audit row with the required scope, so the handlers stay
+  // scope-agnostic.
+  const workspacePermissions = createWorkspacePermissionsRoutes(deps.daemon, {
+    audit,
+  });
+  app.get(
+    '/rc/workspace/permissions',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspacePermissions.get,
+  );
+  app.post(
+    '/rc/workspace/permissions',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspacePermissions.post,
+  );
+  const workspaceTrust = createWorkspaceTrustRoutes(deps.daemon, { audit });
+  app.get(
+    '/rc/workspace/trust',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspaceTrust.get,
+  );
+  app.post(
+    '/rc/workspace/trust/request',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspaceTrust.request,
+  );
+  app.get(
+    '/rc/workspace/settings',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceSettingsRoute(deps.daemon),
+  );
+  app.post(
+    '/rc/workspace/tools/:name/enable',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceToolToggleRoute(deps.daemon, { audit }),
+  );
+  const workspaceMcp = createWorkspaceMcpRoutes(deps.daemon, { audit });
+  app.get(
+    '/rc/workspace/mcp',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspaceMcp.get,
+  );
+  app.post(
+    '/rc/workspace/mcp/reload',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspaceMcp.reload,
+  );
+  app.post(
+    '/rc/workspace/mcp/servers',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    workspaceMcp.servers,
   );
 
   if (deps.snooze) {

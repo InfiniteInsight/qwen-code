@@ -478,3 +478,29 @@ describe('POST /workspace/settings', () => {
     },
   );
 });
+
+describe('GET /workspace/settings — disabledTools', () => {
+  it('lists the normalized tools.disabled entries', async () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: {
+        tools: { disabled: [' web_fetch ', 'web_fetch', 'write_file'] },
+      },
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+    const { app } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    expect(read.status).toBe(200);
+    expect(read.body.disabledTools).toEqual(['web_fetch', 'write_file']);
+  });
+
+  it('reads as an empty array when tools.disabled is unset', async () => {
+    const { app } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    expect(read.status).toBe(200);
+    expect(read.body.disabledTools).toEqual([]);
+  });
+});
