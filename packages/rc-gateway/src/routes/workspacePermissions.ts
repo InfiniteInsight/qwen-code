@@ -4,13 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type {
   DaemonPermissionRuleType,
   DaemonPermissionScope,
+  DaemonWorkspacePermissionsStatus,
 } from '@qwen-code/sdk/daemon';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+
+/**
+ * Stable ETag for a permission-rules GET: the hash covers ONLY the mutable
+ * rule lists (`user.rules`, `workspace.rules`), excluding the derived
+ * `merged` / `isTrusted` fields so a trust flip or merge recompute can't
+ * provoke a stray 409. A POST whose `baseVersion` no longer matches the
+ * current hash is rejected with 409 `stale_base` so the UI can surface the
+ * conflict instead of clobbering.
+ */
+function permissionsVersion(data: DaemonWorkspacePermissionsStatus): string {
+  const rules = {
+    user: data.user?.rules,
+    workspace: data.workspace?.rules,
+  };
+  return createHash('sha1')
+    .update(JSON.stringify(rules), 'utf8')
+    .digest('base64url');
+}
 
 /** The daemon surface this route file needs. */
 export type WorkspacePermissionsDaemon = Pick<
@@ -124,7 +144,7 @@ export function createWorkspacePermissionsRoutes(
   const get = wrap(failed)(async (req, res) => {
     try {
       const result = await daemon.workspacePermissions();
-      res.status(200).json(result);
+      res.status(200).json({ ...result, version: permissionsVersion(result) });
     } catch (err) {
       daemonError(err, res);
     }
@@ -135,6 +155,7 @@ export function createWorkspacePermissionsRoutes(
       scope?: unknown;
       ruleType?: unknown;
       rules?: unknown;
+      baseVersion?: unknown;
     };
 
     // Fail closed on a malformed replacement: an unknown scope or rule
@@ -164,9 +185,44 @@ export function createWorkspacePermissionsRoutes(
         .json({ error: 'Invalid rules list', code: 'invalid_rules' });
       return;
     }
+    if (
+      body.baseVersion !== undefined &&
+      typeof body.baseVersion !== 'string'
+    ) {
+      res.status(400).json({
+        error: 'Invalid base version',
+        code: 'invalid_base_version',
+      });
+      return;
+    }
     const scope = body.scope;
     const ruleType = body.ruleType;
     const rules = body.rules as string[];
+    const baseVersion = body.baseVersion as string | undefined;
+
+    // Optimistic concurrency: when a `baseVersion` is supplied (from the
+    // prior GET's `version`), re-fetch the current rules and confirm the
+    // client's view is still fresh. A mismatch means another writer
+    // changed the rules in the window — reject with the current version
+    // so the caller can reload and retry instead of silently clobbering.
+    if (baseVersion !== undefined) {
+      let current: DaemonWorkspacePermissionsStatus;
+      try {
+        current = await daemon.workspacePermissions();
+      } catch (err) {
+        daemonError(err, res);
+        return;
+      }
+      const currentVersion = permissionsVersion(current);
+      if (currentVersion !== baseVersion) {
+        res.status(409).json({
+          error: 'Stale permission rules — reload and try again',
+          code: 'stale_base',
+          currentVersion,
+        });
+        return;
+      }
+    }
 
     let result;
     try {
@@ -183,7 +239,10 @@ export function createWorkspacePermissionsRoutes(
       detail: { scope, ruleType, rules },
     });
 
-    res.status(200).json(result);
+    res.status(200).json({
+      ...result,
+      version: permissionsVersion(result),
+    });
   });
 
   return { get, post };

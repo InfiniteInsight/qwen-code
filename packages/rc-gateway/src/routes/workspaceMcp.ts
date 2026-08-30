@@ -4,9 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { RequestHandler } from 'express';
+import type {
+  DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpServerStatus,
+} from '@qwen-code/sdk/daemon';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+
+/**
+ * Stable ETag for an MCP GET: hashes ONLY the mutable, persisted server
+ * state (`name`, `configOrigin`, `disabled`, `disabledReason`, `config`)
+ * while EXCLUDING all transient connection/runtime state (`mcpStatus`,
+ * `transport`, `hasOAuthTokens`, `requiresAuth`, `approvalState`,
+ * `authenticationState`, `authenticationError`, `resourceCount`) so a
+ * transport reconnect or client-count tick can't provoke a spurious 409.
+ * A POST whose `baseVersion` no longer matches the current hash is
+ * rejected with 409 `stale_base`.
+ */
+function mcpVersion(data: DaemonWorkspaceMcpStatus): string {
+  const servers: DaemonWorkspaceMcpServerStatus[] = Array.isArray(data.servers)
+    ? data.servers
+    : [];
+  const stable = servers.map((s) => ({
+    name: s.name,
+    configOrigin: s.configOrigin,
+    disabled: s.disabled,
+    disabledReason: s.disabledReason,
+    config: s.config,
+  }));
+  return createHash('sha1')
+    .update(JSON.stringify(stable), 'utf8')
+    .digest('base64url');
+}
 
 /** The daemon surface this route file needs. */
 export type WorkspaceMcpDaemon = Pick<
@@ -89,7 +120,7 @@ export function createWorkspaceMcpRoutes(
     try {
       try {
         const result = await daemon.workspaceMcp();
-        res.status(200).json(result);
+        res.status(200).json({ ...result, version: mcpVersion(result) });
       } catch (err) {
         daemonError(err, res);
       }
@@ -136,6 +167,7 @@ export function createWorkspaceMcpRoutes(
         operation?: unknown;
         name?: unknown;
         config?: unknown;
+        baseVersion?: unknown;
       };
       const operation = body.operation;
       if (operation !== 'set' && operation !== 'remove') {
@@ -153,7 +185,18 @@ export function createWorkspaceMcpRoutes(
         });
         return;
       }
+      if (
+        body.baseVersion !== undefined &&
+        typeof body.baseVersion !== 'string'
+      ) {
+        res.status(400).json({
+          error: 'Invalid base version',
+          code: 'invalid_base_version',
+        });
+        return;
+      }
       const name = body.name;
+      const baseVersion = body.baseVersion as string | undefined;
       if (
         operation === 'set' &&
         (typeof body.config !== 'object' ||
@@ -165,6 +208,31 @@ export function createWorkspaceMcpRoutes(
           code: 'invalid_config',
         });
         return;
+      }
+
+      // Optimistic concurrency: when a `baseVersion` is supplied (from the
+      // prior GET's `version`), re-fetch the current MCP status and confirm
+      // the server list the caller saw is still current. A mismatch means
+      // another writer added/removed/renamed a server in the window —
+      // reject with the current version so the caller can reload and retry
+      // instead of silently clobbering.
+      if (baseVersion !== undefined) {
+        let current: DaemonWorkspaceMcpStatus;
+        try {
+          current = await daemon.workspaceMcp();
+        } catch (err) {
+          daemonError(err, res);
+          return;
+        }
+        const currentVersion = mcpVersion(current);
+        if (currentVersion !== baseVersion) {
+          res.status(409).json({
+            error: 'Stale MCP server list — reload and try again',
+            code: 'stale_base',
+            currentVersion,
+          });
+          return;
+        }
       }
 
       let result;

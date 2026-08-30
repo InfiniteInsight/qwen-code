@@ -360,3 +360,140 @@ describe('POST /rc/workspace/mcp/servers', () => {
     expect(rows).toHaveLength(0);
   });
 });
+
+describe('POST /rc/workspace/mcp/servers — optimistic concurrency', () => {
+  // Server shape with the full persisted fields the mcpVersion hash reads,
+  // plus transient fields that MUST be excluded from the hash.
+  const baseMcp = {
+    v: 1,
+    workspaceCwd: '/stub/workspace',
+    initialized: true,
+    servers: [
+      {
+        name: 'memory',
+        mcpStatus: 'connected',
+        transport: 'stdio',
+        configOrigin: 'workspace_settings',
+        disabled: false,
+        disabledReason: undefined,
+        config: { command: 'npx', args: ['-y', 'memory-mcp'] },
+        hasOAuthTokens: false,
+        requiresAuth: false,
+        approvalState: 'approved',
+        authenticationState: 'authenticated',
+        authenticationError: undefined,
+        resourceCount: 5,
+      },
+    ],
+    clientCount: 1,
+  };
+
+  it('GET includes a version hash', async () => {
+    const ctx = await setup({ workspaceMcpResult: baseMcp });
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.version).toBe('string');
+    expect(body.version.length).toBeGreaterThan(0);
+  });
+
+  it('POST with stale baseVersion → 409 stale_base, daemon not called', async () => {
+    const ctx = await setup({ workspaceMcpResult: baseMcp });
+    const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
+      operation: 'set',
+      name: 'memory',
+      config: { command: 'uvx', args: ['memory-mcp'] },
+      baseVersion: 'stale-hash',
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe('stale_base');
+    expect(typeof body.currentVersion).toBe('string');
+    // The daemon's setWorkspaceSetting was never called — the stale base
+    // caused the request to be rejected before the mutation.
+    expect(ctx.stub.lastSetSettingBody).toBeUndefined();
+  });
+
+  it('POST with correct baseVersion → 200, server mutated', async () => {
+    const ctx = await setup({ workspaceMcpResult: baseMcp });
+    // First GET to obtain the current version hash.
+    const getRes = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    });
+    const { version } = (await getRes.json()) as { version: string };
+    expect(version.length).toBeGreaterThan(0);
+
+    // POST with the fresh baseVersion — should succeed.
+    const config = { command: 'uvx', args: ['memory-mcp'] };
+    const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
+      operation: 'set',
+      name: 'memory',
+      config,
+      baseVersion: version,
+    });
+    expect(res.status).toBe(200);
+    expect(ctx.stub.lastSetSettingBody).toMatchObject({
+      scope: 'workspace',
+      key: 'mcpServers',
+      value: config,
+      mcpServerMutation: { operation: 'set', name: 'memory' },
+    });
+  });
+
+  it('POST with non-string baseVersion → 400 invalid_base_version', async () => {
+    const ctx = await setup({ workspaceMcpResult: baseMcp });
+    for (const baseVersion of [42, true, null, [], {}]) {
+      const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
+        operation: 'set',
+        name: 'memory',
+        config: { command: 'npx' },
+        baseVersion,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('invalid_base_version');
+    }
+    expect(ctx.stub.lastSetSettingBody).toBeUndefined();
+  });
+
+  it('version is stable across transient fields (mcpStatus, clientCount)', async () => {
+    // The stub serves `opts.workspaceMcpResult` by reference, so mutating
+    // the object between requests simulates a daemon state change.
+    const mcp = JSON.parse(JSON.stringify(baseMcp));
+    const ctx = await setup({ workspaceMcpResult: mcp });
+
+    const v1 = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    // Flipping transient connection/runtime fields must NOT change the hash.
+    mcp.servers[0].mcpStatus = 'reconnecting';
+    mcp.servers[0].hasOAuthTokens = true;
+    mcp.clientCount = 99;
+
+    const v2 = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    expect(v2.version).toBe(v1.version);
+  });
+
+  it('version changes when a persisted server field changes', async () => {
+    const mcp = JSON.parse(JSON.stringify(baseMcp));
+    const ctx = await setup({ workspaceMcpResult: mcp });
+
+    const v1 = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    // Toggling `disabled` is a persisted field covered by the hash.
+    mcp.servers[0].disabled = true;
+
+    const v2 = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    expect(v2.version).not.toBe(v1.version);
+  });
+});
