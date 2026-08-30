@@ -206,3 +206,95 @@ describe('POST /rc/workspace/tools/:name/enable', () => {
     expect(rows).toHaveLength(0);
   });
 });
+
+describe('GET /rc/workspace/tools', () => {
+  function getCatalog(ctx: Ctx, token?: string) {
+    return fetch(`${ctx.baseUrl}/rc/workspace/tools`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+  }
+
+  it('write token → 200 with the daemon catalog, unchanged', async () => {
+    const ctx = await setup();
+    const res = await getCatalog(ctx, ctx.writeToken);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      v: 1,
+      tools: [
+        {
+          name: 'web_fetch',
+          displayName: 'Web Fetch',
+          disabled: false,
+          source: 'builtin',
+        },
+        {
+          name: 'write_file',
+          displayName: 'Write File',
+          disabled: true,
+          source: 'builtin',
+        },
+      ],
+    });
+  });
+
+  it('owner token → 200 (owner implies write)', async () => {
+    const ctx = await setup();
+    const res = await getCatalog(ctx, ctx.ownerToken);
+    expect(res.status).toBe(200);
+    expect((await res.json()).v).toBe(1);
+  });
+
+  it('session:read token → 403 scope_required', async () => {
+    const ctx = await setup();
+    const { token: readToken } = await ctx.store.issue(['session:read'], 'r');
+    const res = await getCatalog(ctx, readToken);
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe('scope_required');
+  });
+
+  it('no token → 401', async () => {
+    const ctx = await setup();
+    const res = await getCatalog(ctx);
+    expect(res.status).toBe(401);
+  });
+
+  it('custom catalog (MCP entry) passes through unchanged', async () => {
+    const ctx = await setup({
+      workspaceToolsResult: {
+        v: 1,
+        tools: [{ name: 'mcp__search__lookup', disabled: true, source: 'mcp' }],
+      },
+    });
+    const res = await getCatalog(ctx, ctx.writeToken);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      v: 1,
+      tools: [{ name: 'mcp__search__lookup', disabled: true, source: 'mcp' }],
+    });
+  });
+
+  it('daemon 404 → 502 tools_unsupported', async () => {
+    const ctx = await setup({ workspaceToolsStatus: 404 });
+    const res = await getCatalog(ctx, ctx.writeToken);
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('tools_unsupported');
+  });
+
+  it('daemon transport failure → 502 daemon_unavailable', async () => {
+    const ctx = await setup();
+    await ctx.stub.crash();
+    const res = await getCatalog(ctx, ctx.writeToken);
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('daemon_unavailable');
+  });
+
+  it('read-only: no workspace_tool_enabled audit row', async () => {
+    const ctx = await setup();
+    const res = await getCatalog(ctx, ctx.writeToken);
+    expect(res.status).toBe(200);
+    const rows = (await auditRows()).filter(
+      (r) => r.action === 'workspace_tool_enabled',
+    );
+    expect(rows).toHaveLength(0);
+  });
+});

@@ -2744,6 +2744,25 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
+/**
+ * One entry of the tools catalog (`GET /workspace/tools`). Built-in
+ * tools carry their display name and per-tool disabled state; names
+ * that are disabled but not in the built-in catalog are listed with
+ * `source: "mcp"` (MCP-discovered tools) or `"unknown"`.
+ */
+export interface DaemonToolCatalogEntry {
+  name: string;
+  displayName?: string;
+  disabled: boolean;
+  source: 'builtin' | 'mcp' | 'unknown';
+}
+
+/** Response body of `GET /workspace/tools`. */
+export interface DaemonToolCatalog {
+  v: 1;
+  tools: DaemonToolCatalogEntry[];
+}
+
 export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
 
 export interface DaemonSkillToggleMutationSkill {

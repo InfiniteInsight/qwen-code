@@ -417,6 +417,8 @@ export type {
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
+  DaemonToolCatalog,
+  DaemonToolCatalogEntry,
   DaemonToolToggleResult,
   DaemonSkillBatchToggleError,
   DaemonSkillBatchToggleErrorCode,

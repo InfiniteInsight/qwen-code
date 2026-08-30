@@ -171,6 +171,7 @@ import type {
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
+  DaemonToolCatalog,
   DaemonToolToggleResult,
   DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
@@ -3600,6 +3601,27 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonToolToggleResult;
+      },
+    );
+  }
+
+  /**
+   * List the workspace's tools catalog: every built-in tool with its
+   * display name and per-tool disabled state, plus any disabled
+   * MCP-discovered (`mcp__`) or unknown names, sorted by name.
+   *
+   * Pre-flight `caps.features.workspace_tool_toggle` before calling —
+   * the catalog route ships with the toggle surface.
+   */
+  async workspaceToolsCatalog(): Promise<DaemonToolCatalog> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools/catalog`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/tools/catalog');
+        }
+        return (await res.json()) as DaemonToolCatalog;
       },
     );
   }

@@ -94,7 +94,10 @@ import { createApprovalModeRoute } from './routes/approvalMode.js';
 import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.js';
 import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
 import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
-import { createWorkspaceToolToggleRoute } from './routes/workspaceTools.js';
+import {
+  createWorkspaceToolToggleRoute,
+  createWorkspaceToolsCatalogRoute,
+} from './routes/workspaceTools.js';
 import { createWorkspaceMcpRoutes } from './routes/workspaceMcp.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
@@ -1272,6 +1275,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceSettingsRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/tools',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceToolsCatalogRoute(deps.daemon),
   );
   app.post(
     '/rc/workspace/tools/:name/enable',
