@@ -55,7 +55,7 @@ describe('GET /rc/capabilities', () => {
     }
   });
 
-  it('always includes the six required remoteControl fields', async () => {
+  it('always includes the required remoteControl fields', async () => {
     const { base, close } = await mount({});
     try {
       const body = await (await fetch(`${base}/rc/capabilities`)).json();
@@ -66,6 +66,21 @@ describe('GET /rc/capabilities', () => {
       expect(rc.auditEnabled).toBe(true);
       expect(rc.walHorizonSec).toBe(86400);
       expect(rc.walMaxEvents).toBe(10000);
+    } finally {
+      await close();
+    }
+  });
+
+  it('always reports the static workspaceControl block', async () => {
+    const { base, close } = await mount({});
+    try {
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      expect(body.remoteControl.workspaceControl).toEqual({
+        permissions: true,
+        trust: true,
+        tools: true,
+        mcp: true,
+      });
     } finally {
       await close();
     }

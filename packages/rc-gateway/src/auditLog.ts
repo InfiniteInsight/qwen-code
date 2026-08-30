@@ -127,7 +127,13 @@ export type AuditAction =
   | 'cors_origin_removed'
   | 'daemon_died'
   | 'session_interrupted'
-  | 'session_recovered';
+  | 'session_recovered'
+  | 'workspace_permission_rules_set'
+  | 'workspace_trust_requested'
+  | 'workspace_tool_enabled'
+  | 'workspace_mcp_reloaded'
+  | 'workspace_mcp_server_set'
+  | 'workspace_mcp_server_removed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -207,6 +213,12 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'daemon_died',
   'session_interrupted',
   'session_recovered',
+  'workspace_permission_rules_set',
+  'workspace_trust_requested',
+  'workspace_tool_enabled',
+  'workspace_mcp_reloaded',
+  'workspace_mcp_server_set',
+  'workspace_mcp_server_removed',
 ];
 
 export interface AuditEntry {

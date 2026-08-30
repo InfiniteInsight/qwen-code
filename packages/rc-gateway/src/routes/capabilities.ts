@@ -19,6 +19,11 @@ import type { NativeShellsCapability } from '../nativePush/nativeShells.js';
  *  - `mdns` — `{ advertising, instanceName? }` (`add-mdns-discovery`); the spec's
  *    `version` is sourced from {@link RC_PROTOCOL_VERSION}, the same constant the
  *    mDNS TXT record advertises, so the two never drift.
+ *
+ * `workspaceControl` is STATIC: the `/rc/workspace/*` routes are always
+ * mounted, so the gateway always offers the surface. The flags exist so an
+ * older UI can degrade gracefully and so a future gateway can disable a
+ * sub-surface without removing the routes.
  */
 export function createCapabilityRoute(deps: {
   costTracking?: { currencyLabel: () => string };
@@ -38,6 +43,12 @@ export function createCapabilityRoute(deps: {
       auditEnabled: true,
       walHorizonSec: 86400,
       walMaxEvents: 10000,
+      workspaceControl: {
+        permissions: true,
+        trust: true,
+        tools: true,
+        mcp: true,
+      },
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

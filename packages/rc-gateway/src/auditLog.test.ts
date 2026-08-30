@@ -527,3 +527,18 @@ describe('agent-observability audit actions', () => {
     }
   });
 });
+
+describe('workspace-control audit actions (rc-workspace-permissions)', () => {
+  it('registers the six new actions in AUDIT_ACTIONS', () => {
+    for (const a of [
+      'workspace_permission_rules_set',
+      'workspace_trust_requested',
+      'workspace_tool_enabled',
+      'workspace_mcp_reloaded',
+      'workspace_mcp_server_set',
+      'workspace_mcp_server_removed',
+    ] as const) {
+      expect(AUDIT_ACTIONS).toContain(a);
+    }
+  });
+});

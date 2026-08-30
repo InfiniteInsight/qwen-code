@@ -48,6 +48,26 @@ export interface StubDaemon {
     startedAt: number;
     endedAt: number;
   }>;
+  /** Body of the most recent POST /workspace/permissions request. */
+  lastPermissionRulesBody: unknown;
+  /** Body of the most recent POST /workspace/trust/request request. */
+  lastTrustRequestBody: unknown;
+  /**
+   * Body of the most recent POST /workspace/settings request — captures
+   * `mcpServerMutation` so MCP server tests can assert the operation/name
+   * without inspecting the raw value.
+   */
+  lastSetSettingBody: unknown;
+  /** Body of the most recent POST /workspace/tools/:name/enable request. */
+  lastToolToggleBody: unknown;
+  /**
+   * `toolName` of the most recent POST /workspace/tools/:name/enable
+   * request, so per-name `toolToggleResult`/`toolToggleStatus` opts can
+   * target a specific tool.
+   */
+  lastToolToggleName: string | undefined;
+  /** Body of the most recent POST /workspace/mcp/reload request. */
+  lastMcpReloadBody: unknown;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -163,6 +183,75 @@ export interface StubDaemonOptions {
   contextStatusCode?: number;
   /** Full body to return from GET /session/:id/context (overrides the default). */
   contextStatus?: unknown;
+  /**
+   * Status for GET /workspace/permissions (default 200). Non-200 →
+   * `workspacePermissionsErrorBody ?? { error, code }`.
+   */
+  workspacePermissionsStatus?: number;
+  /** Full body for GET /workspace/permissions (overrides the default v:1 shape). */
+  workspacePermissionsResult?: unknown;
+  /** JSON body to return on a non-200 GET /workspace/permissions response. */
+  workspacePermissionsErrorBody?: unknown;
+  /**
+   * Status for POST /workspace/permissions (default 200). Non-200 →
+   * `workspacePermissionsErrorBody ?? { error, code }`.
+   */
+  setPermissionRulesStatus?: number;
+  /**
+   * Full body for POST /workspace/permissions on success (overrides the
+   * default echo shape).
+   */
+  setPermissionRulesResult?: unknown;
+  /** Status for GET /workspace/trust (default 200). Non-200 → { error, code }. */
+  workspaceTrustStatus?: number;
+  /**
+   * Full body for GET /workspace/trust. When omitted the stub derives it
+   * from `?statusVersion=2`: v:2 when requested, v:1 otherwise.
+   */
+  workspaceTrustResult?: unknown;
+  /**
+   * Status for POST /workspace/trust/request (default 202 — the daemon
+   * accepts the request and reconciles asynchronously). Non-202 →
+   * `trustRequestErrorBody ?? { error }`.
+   */
+  trustRequestStatus?: number;
+  /** Full body for POST /workspace/trust/request on success. */
+  trustRequestResult?: unknown;
+  /** JSON body to return on a non-202 POST /workspace/trust/request response. */
+  trustRequestErrorBody?: unknown;
+  /** Status for GET /workspace/settings (default 200). Non-200 → { error }. */
+  workspaceSettingsStatus?: number;
+  /** Full body for GET /workspace/settings (overrides the default v:1 shape). */
+  workspaceSettingsResult?: unknown;
+  /**
+   * Status for POST /workspace/settings (default 200). Non-200 →
+   * `setWorkspaceSettingBody ?? { error, code }`.
+   */
+  setWorkspaceSettingStatus?: number;
+  /** JSON body to return on a non-200 POST /workspace/settings response. */
+  setWorkspaceSettingBody?: unknown;
+  /** Full body for POST /workspace/settings on success (per-tool or global). */
+  setWorkspaceSettingResult?: unknown;
+  /**
+   * Status for POST /workspace/tools/:name/enable (default 200). Per-tool
+   * override via `toolToggleStatusByName` (name-keyed). Non-200 →
+   * `toolToggleBody ?? { error, code }`.
+   */
+  toolToggleStatus?: number;
+  /** Per-tool status override, keyed by tool name (wins over toolToggleStatus). */
+  toolToggleStatusByName?: Record<string, number>;
+  /** Full body for POST /workspace/tools/:name/enable on success. */
+  toolToggleResult?: { toolName: string; enabled: boolean };
+  /** JSON body to return on a non-200 tool-toggle response. */
+  toolToggleBody?: unknown;
+  /** Status for GET /workspace/mcp (default 200). Non-200 → { error }. */
+  workspaceMcpStatus?: number;
+  /** Full body for GET /workspace/mcp (overrides the default v:1 shape). */
+  workspaceMcpResult?: unknown;
+  /** Status for POST /workspace/mcp/reload (default 200). Non-200 → { error }. */
+  mcpReloadStatus?: number;
+  /** Full body for POST /workspace/mcp/reload on success. */
+  mcpReloadResult?: { accepted: boolean };
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -191,9 +280,192 @@ export async function startStubDaemon(
       startedAt: number;
       endedAt: number;
     }>,
+    lastPermissionRulesBody: undefined as unknown,
+    lastTrustRequestBody: undefined as unknown,
+    lastSetSettingBody: undefined as unknown,
+    lastToolToggleBody: undefined as unknown,
+    lastToolToggleName: undefined as string | undefined,
+    lastMcpReloadBody: undefined as unknown,
   };
   const app = express();
   app.use(express.json());
+
+  // -- Workspace control (rc-workspace-permissions) -------------------------
+  // Daemon-global endpoints (no session id). Default responses mirror the
+  // real daemon's v:1 shapes so a real DaemonClient parses them cleanly.
+
+  app.get('/workspace/permissions', (_req, res) => {
+    const status = opts.workspacePermissionsStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.workspacePermissionsErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.json(
+      opts.workspacePermissionsResult ?? {
+        v: 1,
+        user: [],
+        workspace: [],
+        merged: [],
+        isTrusted: true,
+      },
+    );
+  });
+
+  app.post('/workspace/permissions', (req, res) => {
+    state.lastPermissionRulesBody = req.body;
+    const status = opts.setPermissionRulesStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.workspacePermissionsErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const b = req.body as {
+      scope?: unknown;
+      ruleType?: unknown;
+      rules?: unknown;
+    };
+    res.json(
+      opts.setPermissionRulesResult ?? {
+        v: 1,
+        user: [],
+        workspace: [],
+        merged: Array.isArray(b.rules) ? b.rules : [],
+        isTrusted: true,
+      },
+    );
+  });
+
+  app.get('/workspace/trust', (req, res) => {
+    const status = opts.workspaceTrustStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const v2 = req.query.statusVersion === '2';
+    res.json(
+      opts.workspaceTrustResult ??
+        (v2
+          ? {
+              v: 2,
+              configured: 'trusted',
+              effective: { state: 'trusted', source: 'explicit' },
+              reconciliation: { pending: false },
+            }
+          : {
+              v: 1,
+              workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
+              folderTrustEnabled: true,
+              effective: { state: 'trusted', source: 'explicit' },
+              explicitTrustLevel: 'trusted',
+              requiresDaemonRestartForChanges: true,
+            }),
+    );
+  });
+
+  app.post('/workspace/trust/request', (req, res) => {
+    state.lastTrustRequestBody = req.body;
+    const status = opts.trustRequestStatus ?? 202;
+    if (status !== 202) {
+      res
+        .status(status)
+        .json(opts.trustRequestErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const b = req.body as { desiredState?: unknown; reason?: unknown };
+    res.status(202).json(
+      opts.trustRequestResult ?? {
+        accepted: true,
+        desiredState: b.desiredState ?? 'trusted',
+        requiresOperatorAction: true,
+      },
+    );
+  });
+
+  app.get('/workspace/settings', (_req, res) => {
+    const status = opts.workspaceSettingsStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    res.json(
+      opts.workspaceSettingsResult ?? {
+        v: 1,
+        warnings: [],
+        settings: [],
+        disabledTools: [],
+      },
+    );
+  });
+
+  app.post('/workspace/settings', (req, res) => {
+    state.lastSetSettingBody = req.body;
+    const status = opts.setWorkspaceSettingStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.setWorkspaceSettingBody ?? { error: 'stub error' });
+      return;
+    }
+    const b = req.body as { scope?: unknown; key?: unknown };
+    res.json(
+      opts.setWorkspaceSettingResult ?? {
+        key: b.key,
+        scope: b.scope,
+        value: undefined,
+        requiresRestart: false,
+      },
+    );
+  });
+
+  app.post('/workspace/tools/:name/enable', (req, res) => {
+    state.lastToolToggleBody = req.body;
+    state.lastToolToggleName = req.params.name;
+    const status =
+      opts.toolToggleStatusByName?.[req.params.name] ??
+      opts.toolToggleStatus ??
+      200;
+    if (status !== 200) {
+      res.status(status).json(opts.toolToggleBody ?? { error: 'stub error' });
+      return;
+    }
+    const b = req.body as { enabled?: unknown };
+    res.json(
+      opts.toolToggleResult ?? {
+        toolName: req.params.name,
+        enabled: typeof b.enabled === 'boolean' ? b.enabled : false,
+      },
+    );
+  });
+
+  app.get('/workspace/mcp', (_req, res) => {
+    const status = opts.workspaceMcpStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    res.json(
+      opts.workspaceMcpResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
+        initialized: true,
+        servers: [],
+        clientCount: 0,
+      },
+    );
+  });
+
+  app.post('/workspace/mcp/reload', (req, res) => {
+    state.lastMcpReloadBody = req.body;
+    const status = opts.mcpReloadStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    res.json(opts.mcpReloadResult ?? { accepted: true });
+  });
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -512,10 +784,34 @@ export async function startStubDaemon(
     get promptCallLog() {
       return state.promptCallLog;
     },
+    get lastPermissionRulesBody() {
+      return state.lastPermissionRulesBody;
+    },
+    get lastTrustRequestBody() {
+      return state.lastTrustRequestBody;
+    },
+    get lastSetSettingBody() {
+      return state.lastSetSettingBody;
+    },
+    get lastToolToggleBody() {
+      return state.lastToolToggleBody;
+    },
+    get lastToolToggleName() {
+      return state.lastToolToggleName;
+    },
+    get lastMcpReloadBody() {
+      return state.lastMcpReloadBody;
+    },
     close: () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((err) => (err ? reject(err) : resolve())),
-      ),
+      new Promise<void>((resolve, reject) => {
+        // Idempotent: crash() may already have closed the server, and a
+        // second server.close() would reject with ERR_SERVER_NOT_RUNNING.
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
     crash: () =>
       new Promise<void>((resolve, reject) => {
         // closeAllConnections() (Node 18.2+) destroys the live SSE sockets,

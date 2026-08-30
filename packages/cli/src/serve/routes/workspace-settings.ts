@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import { normalizeDisabledToolList } from '../../config/normalizeDisabledTools.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
@@ -98,6 +99,12 @@ interface SettingsResponse {
     recovered: boolean;
   }>;
   settings: SettingDescriptor[];
+  /**
+   * The normalized `tools.disabled` list (empty when unset). Not a
+   * dialog setting key, so it has no `SettingDescriptor` — remote
+   * clients (rc-gateway) read it from here.
+   */
+  disabledTools: string[];
 }
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
@@ -179,10 +186,18 @@ function buildSettingsResponse(
     });
   }
 
+  const disabledTools = normalizeDisabledToolList(
+    getNestedProperty(
+      loaded.merged as Record<string, unknown>,
+      'tools.disabled',
+    ),
+  );
+
   return {
     v: 1,
     ...(warnings.length ? { warnings } : {}),
     settings,
+    disabledTools,
   };
 }
 
