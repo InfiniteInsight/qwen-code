@@ -286,3 +286,171 @@ describe('/rc/workspace/permissions', () => {
     expect(rows).toHaveLength(0);
   });
 });
+
+describe('/rc/workspace/permissions — optimistic concurrency', () => {
+  // Stable daemon shape (with `.rules` objects, not bare arrays) so the
+  // version hash is computed from the real fields the gateway reads.
+  const basePermissions = {
+    v: 1,
+    user: { path: '/proj', rules: { allow: ['Bash(ls:*'], ask: [], deny: [] } },
+    workspace: {
+      path: '/proj',
+      rules: { allow: ['Bash(cat:*'], ask: [], deny: [] },
+    },
+    merged: { allow: ['Bash(ls:*', 'Bash(cat:*'], ask: [], deny: [] },
+    isTrusted: true,
+  };
+
+  it('GET includes a stable version hash', async () => {
+    const ctx = await setup({ workspacePermissionsResult: basePermissions });
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.version).toBe('string');
+    expect(body.version.length).toBeGreaterThan(0);
+  });
+
+  it('POST without baseVersion is accepted (backward compatible)', async () => {
+    const ctx = await setup({ workspacePermissionsResult: basePermissions });
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      method: 'POST',
+      headers: authed(ctx.ownerToken),
+      body: JSON.stringify({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(rm:*)'],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(ctx.stub.lastPermissionRulesBody).toEqual({
+      scope: 'workspace',
+      ruleType: 'allow',
+      rules: ['Bash(rm:*)'],
+    });
+  });
+
+  it('POST with stale baseVersion → 409 stale_base, daemon not called', async () => {
+    const ctx = await setup({ workspacePermissionsResult: basePermissions });
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      method: 'POST',
+      headers: authed(ctx.ownerToken),
+      body: JSON.stringify({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(rm:*)'],
+        baseVersion: 'definitely-not-the-current-hash',
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe('stale_base');
+    expect(typeof body.currentVersion).toBe('string');
+    // The daemon's setWorkspacePermissionRules was never called — the
+    // stale base caused the request to be rejected before the mutation.
+    expect(ctx.stub.lastPermissionRulesBody).toBeUndefined();
+  });
+
+  it('POST with correct baseVersion → 200, daemon called, no audit clobber', async () => {
+    const ctx = await setup({ workspacePermissionsResult: basePermissions });
+    // First GET to obtain the current version hash.
+    const getRes = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      headers: authed(ctx.writeToken),
+    });
+    const { version } = (await getRes.json()) as { version: string };
+    expect(version.length).toBeGreaterThan(0);
+
+    // POST with the fresh baseVersion — should succeed.
+    const rules = ['Bash(rm:*)'];
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      method: 'POST',
+      headers: authed(ctx.ownerToken),
+      body: JSON.stringify({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules,
+        baseVersion: version,
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(ctx.stub.lastPermissionRulesBody).toEqual({
+      scope: 'workspace',
+      ruleType: 'allow',
+      rules,
+    });
+    // The POST response carries a version (of the post-mutation state).
+    const postBody = await res.json();
+    expect(typeof postBody.version).toBe('string');
+  });
+
+  it('POST with non-string baseVersion → 400 invalid_base_version', async () => {
+    const ctx = await setup({ workspacePermissionsResult: basePermissions });
+    for (const baseVersion of [123, true, null, [], {}]) {
+      const res = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+        method: 'POST',
+        headers: authed(ctx.ownerToken),
+        body: JSON.stringify({
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Bash(ls:*)'],
+          baseVersion,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('invalid_base_version');
+    }
+    expect(ctx.stub.lastPermissionRulesBody).toBeUndefined();
+  });
+
+  it('version is stable across transient fields (isTrusted, merged)', async () => {
+    // The stub serves `opts.workspacePermissionsResult` by reference, so
+    // mutating it between requests simulates a daemon state change.
+    const permissions = {
+      ...basePermissions,
+      user: {
+        ...basePermissions.user,
+        rules: { ...basePermissions.user.rules },
+      },
+    };
+    const ctx = await setup({ workspacePermissionsResult: permissions });
+
+    const v1 = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    // Flipping isTrusted (a derived field) must NOT change the version.
+    permissions.isTrusted = false;
+    permissions.merged = { allow: [], ask: [], deny: [] };
+
+    const v2 = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    expect(v2.version).toBe(v1.version);
+  });
+
+  it('version changes when a persisted rule list changes', async () => {
+    const permissions = {
+      ...basePermissions,
+      user: {
+        ...basePermissions.user,
+        rules: { ...basePermissions.user.rules },
+      },
+    };
+    const ctx = await setup({ workspacePermissionsResult: permissions });
+
+    const v1 = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    // Mutate the user rules — a persisted field that IS covered by the hash.
+    permissions.user.rules.allow = ['Bash(rm:*)'];
+
+    const v2 = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
+      headers: authed(ctx.writeToken),
+    }).then((r) => r.json() as Promise<{ version: string }>);
+
+    expect(v2.version).not.toBe(v1.version);
+  });
+});

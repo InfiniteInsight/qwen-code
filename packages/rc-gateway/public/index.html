@@ -1242,6 +1242,12 @@
       let permRules = null; // { user, workspace, merged, isTrusted }
       let permScope = 'workspace';
 
+      // Last-rendered workspace GET snapshots (issue #34 drift detection).
+      // Each loader writes its freshest data here so a self-change made in
+      // this tab does not masquerade as an external change on refocus.
+      const wsLastData = { trust: null, mcp: null, tools: null, perms: null };
+      let wsLastFocusCheck = 0;
+
       function permRulesGate() {
         const wc =
           caps && caps.remoteControl && caps.remoteControl.workspaceControl;
@@ -1387,6 +1393,7 @@
             return;
           }
           permRules = await res.json();
+          wsLastData.perms = permRules;
           const st = permRulesStatusEl();
           st.textContent = '';
           renderPermRulesSection();
@@ -1408,10 +1415,22 @@
               'Content-Type': 'application/json',
               Authorization: 'Bearer ' + token(),
             },
-            body: JSON.stringify({ scope: permScope, ruleType, rules }),
+            body: JSON.stringify({
+              scope: permScope,
+              ruleType,
+              rules,
+              baseVersion: permRules.version,
+            }),
           });
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
+            if (res.status === 409 && body.code === 'stale_base') {
+              st.textContent = 'conflict — rules changed, reloading…';
+              await loadPermRules(false);
+              st.textContent = 'rules changed — review and retry';
+              setStatus('permission rules changed by another writer — reloaded');
+              return;
+            }
             let msg = (body.error || 'save failed') + ' (' + res.status + ')';
             if (body.code === 'permission_session_required') {
               msg +=
@@ -1494,6 +1513,7 @@
             return;
           }
           const data = await res.json();
+          wsLastData.trust = data;
           body.innerHTML = '';
           const v2 = data.v === 2;
           const eff = data.effective || {};
@@ -1665,6 +1685,7 @@
             return;
           }
           const data = await res.json();
+          wsLastData.mcp = data;
           body.innerHTML = '';
           const head = document.createElement('div');
           head.style.cssText = 'font-size:12px;opacity:0.6';
@@ -1750,6 +1771,12 @@
           const payload = !server.disabled
             ? { operation: 'remove', name: server.name }
             : { operation: 'set', name: server.name, config: server.config || {} };
+          // Send the version from the last GET so the gateway can reject a
+          // stale write (another writer changed the server list in the
+          // window) instead of silently clobbering it.
+          if (wsLastData.mcp && wsLastData.mcp.version) {
+            payload.baseVersion = wsLastData.mcp.version;
+          }
           const res = await fetch('/rc/workspace/mcp/servers', {
             method: 'POST',
             headers: {
@@ -1760,6 +1787,13 @@
           });
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
+            if (res.status === 409 && e.code === 'stale_base') {
+              status.textContent = 'conflict — server list changed, reloading…';
+              await loadWorkspaceMcp(false);
+              btn.disabled = false;
+              setStatus('MCP server list changed by another writer — reloaded');
+              return;
+            }
             status.textContent =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs an owner token'
@@ -1815,6 +1849,7 @@
             return;
           }
           const data = await res.json();
+          wsLastData.tools = data;
           body.innerHTML = '';
           const disabled = Array.isArray(data.disabledTools)
             ? data.disabledTools
@@ -3705,7 +3740,67 @@
         renderDaemonRows();
       }
 
-      // Spec 4.2: polling pauses while the tab is backgrounded and RESUMES on
+      // Issue #34 — drift detection: other clients (the CLI, another dashboard
+      // tab) can change workspace settings while this tab is backgrounded,
+      // leaving the displayed sections stale. On refocus, re-fetch each
+      // workspace GET and, only when the data differs from the last render,
+      // re-render that section and flag it. The loaders keep wsLastData in
+      // sync, so a change made in THIS tab does not look like an external one.
+      const WS_DRIFT_THROTTLE_MS = 5000;
+      async function refreshWorkspaceSections() {
+        if (!token()) return;
+        const now = Date.now();
+        if (now - wsLastFocusCheck < WS_DRIFT_THROTTLE_MS) return;
+        wsLastFocusCheck = now;
+        const sections = {
+          trust: loadWorkspaceTrust,
+          mcp: loadWorkspaceMcp,
+          tools: loadWorkspaceTools,
+          perms: loadPermRules,
+        };
+        const fetches = {
+          trust: fetchWorkspaceTrust,
+          mcp: () =>
+            fetch('/rc/workspace/mcp', {
+              headers: { Authorization: 'Bearer ' + token() },
+            }),
+          tools: () =>
+            fetch('/rc/workspace/settings', {
+              headers: { Authorization: 'Bearer ' + token() },
+            }),
+          perms: () =>
+            fetch('/rc/workspace/permissions', {
+              headers: { Authorization: 'Bearer ' + token() },
+            }),
+        };
+        for (const key of Object.keys(sections)) {
+          let data;
+          try {
+            const res = await fetches[key]();
+            if (!res.ok) continue; // don't clobber a good view on auth/error
+            data = await res.json();
+          } catch {
+            continue;
+          }
+          if (wsLastData[key] === null) {
+            wsLastData[key] = data; // seed lazily; nothing to compare yet
+            continue;
+          }
+          if (JSON.stringify(data) === JSON.stringify(wsLastData[key])) continue;
+          await sections[key](false);
+          wsLastData[key] = data;
+          const status =
+            key === 'perms'
+              ? permRulesStatusEl()
+              : wsSectionStatusEl('ws-' + key + '-status');
+          status.textContent = 'updated externally — reloaded';
+        }
+      }
+      window.addEventListener('focus', () => {
+        void refreshWorkspaceSections();
+      });
+
+      // Spec 4.2: polling pauses while the tab is backgrounded and RESUMES ON
       // visibility return (the interval alone would just keep skipping).
       // Also reconnects the session SSE stream if it died while backgrounded
       // (mobile screen-off kills connections).
@@ -3715,6 +3810,7 @@
         if (watchedSessionId && !watchStreamAlive && token()) {
           startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }
+        void refreshWorkspaceSections();
       });
 
       async function loadDaemonManifest() {
