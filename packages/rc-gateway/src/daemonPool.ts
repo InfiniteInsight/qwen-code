@@ -22,6 +22,7 @@ import type {
   DaemonRestoredSession,
   DaemonCapabilities,
   DaemonSessionSummary,
+  DaemonToolCatalog,
   DaemonToolToggleResult,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpStatus,
@@ -169,6 +170,7 @@ export interface SessionDaemon {
       mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
     },
   ): Promise<DaemonSettingUpdateResult>;
+  workspaceToolsCatalog(): Promise<DaemonToolCatalog>;
   setWorkspaceToolEnabled(
     toolName: string,
     enabled: boolean,
@@ -960,6 +962,12 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSettingUpdateResult> {
     return this.withDefaultDeathTrigger(() =>
       this.opts.defaultDaemon.setWorkspaceSetting(scope, key, value, opts),
+    );
+  }
+
+  workspaceToolsCatalog(): Promise<DaemonToolCatalog> {
+    return this.withDefaultDeathTrigger(() =>
+      this.opts.defaultDaemon.workspaceToolsCatalog(),
     );
   }
 

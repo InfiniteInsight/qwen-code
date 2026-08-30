@@ -1835,7 +1835,7 @@
         const body = $('ws-tools-body');
         const status = wsSectionStatusEl('ws-tools-status');
         try {
-          const res = await fetch('/rc/workspace/settings', {
+          const res = await fetch('/rc/workspace/tools', {
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (!res.ok) {
@@ -1850,48 +1850,61 @@
           }
           const data = await res.json();
           wsLastData.tools = data;
+          const tools = Array.isArray(data.tools) ? data.tools : [];
           body.innerHTML = '';
-          const disabled = Array.isArray(data.disabledTools)
-            ? data.disabledTools
-            : [];
           const list = document.createElement('div');
           list.style.cssText = 'display:flex;flex-direction:column;gap:6px';
-          if (!disabled.length) {
+          if (!tools.length) {
             const none = document.createElement('div');
-            none.textContent = '(no disabled tools)';
+            none.textContent = '(no tools reported)';
             none.style.cssText = 'font-size:12px;opacity:0.5';
             list.appendChild(none);
           }
-          for (const tool of disabled) {
+          const rows = [];
+          for (const tool of tools) {
+            if (!tool || typeof tool.name !== 'string') continue;
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;align-items:center;gap:8px';
             const name = document.createElement('strong');
-            name.textContent = tool;
+            name.textContent = tool.name;
             const note = document.createElement('span');
             note.style.cssText = 'font-size:12px;opacity:0.6';
-            note.textContent = 'disabled';
+            const parts = [];
+            if (tool.source && tool.source !== 'builtin') parts.push(tool.source);
+            if (
+              tool.displayName &&
+              tool.displayName !== tool.name
+            ) {
+              parts.push(tool.displayName);
+            }
+            parts.push(tool.disabled ? 'disabled' : 'enabled');
+            note.textContent = parts.join(' — ');
             const btn = document.createElement('button');
-            btn.textContent = 'enable';
-            btn.addEventListener('click', () => setToolEnabled(tool, true, btn));
+            btn.textContent = tool.disabled ? 'enable' : 'disable';
+            btn.addEventListener('click', () =>
+              setToolEnabled(tool.name, !tool.disabled, btn),
+            );
             row.append(name, note, btn);
+            row.dataset.filter =
+              (tool.name + ' ' + (tool.displayName || '')).toLowerCase();
             list.appendChild(row);
+            rows.push(row);
           }
           const addRow = document.createElement('div');
           addRow.style.cssText = 'display:flex;gap:6px';
-          const inp = document.createElement('input');
-          inp.placeholder = 'tool name to disable, e.g. WebFetch';
-          inp.style.flex = '1';
-          const disBtn = document.createElement('button');
-          disBtn.textContent = 'disable tool';
-          disBtn.addEventListener('click', () => {
-            const v = inp.value.trim();
-            if (!v) return;
-            setToolEnabled(v, false, disBtn);
+          const filter = document.createElement('input');
+          filter.placeholder = 'filter tools by name';
+          filter.style.flex = '1';
+          filter.addEventListener('input', () => {
+            const q = filter.value.trim().toLowerCase();
+            for (const row of rows) {
+              row.style.display = row.dataset.filter.includes(q) ? '' : 'none';
+            }
           });
           const refresh = document.createElement('button');
           refresh.textContent = 'refresh';
           refresh.addEventListener('click', () => loadWorkspaceTools(false));
-          addRow.append(inp, disBtn, refresh);
+          addRow.append(filter, refresh);
           body.append(list, addRow, status);
         } catch (err) {
           body.innerHTML = '';
@@ -1933,7 +1946,7 @@
           }
           status.textContent =
             'tool ' + toolName + (enabled ? ' enabled' : ' disabled');
-          await loadWorkspaceTools(false); // re-read disabledTools
+          await loadWorkspaceTools(false); // re-read catalog
         } catch (err) {
           status.textContent = 'change failed: ' + err.message;
           btn.disabled = false;

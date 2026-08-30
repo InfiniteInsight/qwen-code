@@ -103,6 +103,8 @@ export {
   type DaemonSettingsReloadedEvent,
   type DaemonSettingsChangedData,
   type DaemonSettingsChangedEvent,
+  type DaemonToolCatalog,
+  type DaemonToolCatalogEntry,
   type DaemonToolToggleResult,
   type DaemonSkillBatchToggleError,
   type DaemonSkillBatchToggleErrorCode,

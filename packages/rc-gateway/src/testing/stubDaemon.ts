@@ -244,6 +244,12 @@ export interface StubDaemonOptions {
   toolToggleResult?: { toolName: string; enabled: boolean };
   /** JSON body to return on a non-200 tool-toggle response. */
   toolToggleBody?: unknown;
+  /** Status for GET /workspace/tools/catalog (default 200). Non-200 → error body. */
+  workspaceToolsStatus?: number;
+  /** JSON body to return on a non-200 GET /workspace/tools/catalog response. */
+  workspaceToolsErrorBody?: unknown;
+  /** Full body for GET /workspace/tools/catalog (overrides the default v:1 shape). */
+  workspaceToolsResult?: unknown;
   /** Status for GET /workspace/mcp (default 200). Non-200 → { error }. */
   workspaceMcpStatus?: number;
   /** Full body for GET /workspace/mcp (overrides the default v:1 shape). */
@@ -416,6 +422,35 @@ export async function startStubDaemon(
         scope: b.scope,
         value: undefined,
         requiresRestart: false,
+      },
+    );
+  });
+
+  app.get('/workspace/tools/catalog', (_req, res) => {
+    const status = opts.workspaceToolsStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.workspaceToolsErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.json(
+      opts.workspaceToolsResult ?? {
+        v: 1,
+        tools: [
+          {
+            name: 'web_fetch',
+            displayName: 'Web Fetch',
+            disabled: false,
+            source: 'builtin',
+          },
+          {
+            name: 'write_file',
+            displayName: 'Write File',
+            disabled: true,
+            source: 'builtin',
+          },
+        ],
       },
     );
   });

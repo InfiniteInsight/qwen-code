@@ -4,18 +4,59 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /** The daemon surface this route file needs. */
 export type WorkspaceToolsDaemon = Pick<
   SessionDaemon,
-  'setWorkspaceToolEnabled'
+  'setWorkspaceToolEnabled' | 'workspaceToolsCatalog'
 >;
 
 export interface WorkspaceToolsRouteDeps {
   audit?: AuditRecorder;
+}
+
+/**
+ * Map a daemon failure to the route's response, mirroring
+ * routes/approvalMode.ts: 400/403/409 pass through unchanged (human error +
+ * daemon code), 404 maps to 502 `tools_unsupported` (daemon predates the
+ * tools surface), anything else to 502 `daemon_unavailable`.
+ */
+function sendMappedToolsError(
+  res: Response,
+  err: unknown,
+  unsupportedMessage: string,
+): void {
+  const status = (err as { status?: unknown }).status;
+  const eBody = (err as { body?: unknown }).body as
+    | { code?: unknown; error?: unknown; message?: unknown }
+    | undefined;
+  if (status === 400 || status === 403 || status === 409) {
+    const humanError =
+      (typeof eBody?.error === 'string' && eBody.error.length > 0
+        ? eBody.error
+        : undefined) ??
+      (typeof eBody?.message === 'string' && eBody.message.length > 0
+        ? eBody.message
+        : undefined) ??
+      'Daemon rejected the request';
+    res.status(status as number).json({
+      error: humanError,
+      code: typeof eBody?.code === 'string' ? eBody.code : 'daemon_rejected',
+    });
+    return;
+  }
+  if (status === 404) {
+    res
+      .status(502)
+      .json({ error: unsupportedMessage, code: 'tools_unsupported' });
+    return;
+  }
+  res
+    .status(502)
+    .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
 }
 
 /**
@@ -55,36 +96,11 @@ export function createWorkspaceToolToggleRoute(
       try {
         result = await daemon.setWorkspaceToolEnabled(toolName, enabled);
       } catch (err) {
-        const status = (err as { status?: unknown }).status;
-        const eBody = (err as { body?: unknown }).body as
-          | { code?: unknown; error?: unknown; message?: unknown }
-          | undefined;
-        if (status === 400 || status === 403 || status === 409) {
-          const humanError =
-            (typeof eBody?.error === 'string' && eBody.error.length > 0
-              ? eBody.error
-              : undefined) ??
-            (typeof eBody?.message === 'string' && eBody.message.length > 0
-              ? eBody.message
-              : undefined) ??
-            'Daemon rejected the request';
-          res.status(status as number).json({
-            error: humanError,
-            code:
-              typeof eBody?.code === 'string' ? eBody.code : 'daemon_rejected',
-          });
-          return;
-        }
-        if (status === 404) {
-          res.status(502).json({
-            error: 'Daemon does not support workspace tool toggling',
-            code: 'tools_unsupported',
-          });
-          return;
-        }
-        res
-          .status(502)
-          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+        sendMappedToolsError(
+          res,
+          err,
+          'Daemon does not support workspace tool toggling',
+        );
         return;
       }
 
@@ -102,6 +118,35 @@ export function createWorkspaceToolToggleRoute(
           error: 'Workspace tool toggle failed',
           code: 'workspace_tools_failed',
         });
+      }
+    }
+  };
+}
+
+/**
+ * GET /rc/workspace/tools — read the workspace's tools catalog (every
+ * built-in tool with per-tool disabled state, plus disabled MCP-style or
+ * unknown names). Mounted write-scope (server.ts); the response is the
+ * daemon's, unchanged. Read-only: no audit row.
+ *
+ * Daemon errors map as in the toggle route: 404 → 502 `tools_unsupported`,
+ * anything else to 502 `daemon_unavailable` (400/403/409 passthrough for
+ * completeness).
+ */
+export function createWorkspaceToolsCatalogRoute(
+  daemon: Pick<SessionDaemon, 'workspaceToolsCatalog'>,
+): RequestHandler {
+  return async (_req: Request, res: Response) => {
+    try {
+      const result = await daemon.workspaceToolsCatalog();
+      res.status(200).json(result);
+    } catch (err) {
+      if (!res.headersSent) {
+        sendMappedToolsError(
+          res,
+          err,
+          'Daemon does not support the workspace tools catalog',
+        );
       }
     }
   };
