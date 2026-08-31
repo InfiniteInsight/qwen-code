@@ -414,6 +414,23 @@
         "
       ></div>
     </section>
+    <section id="perm-decisions" hidden style="margin-top: 8px">
+      <strong>permission decisions</strong>
+      <span
+        id="perm-decisions-note"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+        >gateway-visible decisions only</span
+      >
+      <div
+        id="perm-decisions-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </section>
     <div
       id="session-footer"
       style="
@@ -1609,6 +1626,175 @@
         }
       }
 
+      // ---- Permission decisions feed (issue #32) --------------------------
+      // Read-only view over the audit log's permission rows: `policy_decision`
+      // (rule-based gateway decisions — the row now carries the tool and the
+      // ruleId that fired) and `permission_voted` (human votes on ask/default
+      // requests). Filterable by tool and rule so a user can verify that a
+      // rule they set actually behaves. Daemon-local rule short-circuits
+      // (allow/deny decided inside the daemon) never reach the gateway, so
+      // this feed shows gateway-visible decisions only (the section note).
+      // Rows are built with createElement/textContent only — never innerHTML
+      // (server-sourced tool names / rule ids must not inject markup).
+      let permDecisionTool = '';
+      let permDecisionRule = '';
+      // ACP tool kinds a policy rule can match (loader.ts POLICY_KINDS);
+      // tool names not in the list can still be filtered by typing them.
+      const PERM_DECISION_TOOLS = [
+        'read',
+        'search',
+        'edit',
+        'execute',
+        'fetch',
+        'other',
+      ];
+
+      function permDecisionsStatusEl() {
+        let st = $('perm-decisions-status');
+        if (!st) {
+          st = document.createElement('span');
+          st.id = 'perm-decisions-status';
+          st.style.fontSize = '12px';
+        }
+        return st;
+      }
+
+      function renderPermDecisionsSection() {
+        const sec = $('perm-decisions');
+        if (!sec) return;
+        if (!permRulesGate()) {
+          sec.hidden = true;
+          return;
+        }
+        sec.hidden = false;
+        const body = $('perm-decisions-body');
+        body.innerHTML = '';
+
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '6px';
+        const sel = document.createElement('select');
+        sel.title = 'filter by tool';
+        const anyOpt = document.createElement('option');
+        anyOpt.value = '';
+        anyOpt.textContent = '(any tool)';
+        sel.appendChild(anyOpt);
+        for (const t of PERM_DECISION_TOOLS) {
+          const o = document.createElement('option');
+          o.value = t;
+          o.textContent = t;
+          sel.appendChild(o);
+        }
+        sel.value = permDecisionTool;
+        sel.addEventListener('change', () => {
+          permDecisionTool = sel.value;
+          void loadPermDecisions();
+        });
+        const inp = document.createElement('input');
+        inp.placeholder = 'rule id (optional)';
+        inp.value = permDecisionRule;
+        inp.style.flex = '1';
+        inp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            permDecisionRule = inp.value.trim();
+            void loadPermDecisions();
+          }
+        });
+        const query = document.createElement('button');
+        query.textContent = 'query';
+        query.addEventListener('click', () => {
+          permDecisionRule = inp.value.trim();
+          void loadPermDecisions();
+        });
+        const st = permDecisionsStatusEl();
+        row.append(sel, inp, query, document.createTextNode(' '), st);
+        body.append(row);
+
+        const rows = document.createElement('div');
+        rows.id = 'perm-decisions-rows';
+        body.append(rows);
+      }
+
+      async function loadPermDecisions() {
+        if (!permRulesGate()) return;
+        const st = permDecisionsStatusEl();
+        st.textContent = 'querying…';
+        try {
+          const fetchRows = async (action) => {
+            const params = new URLSearchParams();
+            params.set('action', action);
+            if (permDecisionTool) params.set('tool', permDecisionTool);
+            if (permDecisionRule) params.set('rule', permDecisionRule);
+            params.set('limit', '50');
+            const res = await fetch('/rc/audit?' + params.toString(), {
+              headers: { Authorization: 'Bearer ' + token() },
+            });
+            if (res.status === 401 || res.status === 403) {
+              st.textContent = 'not authorized — needs an owner token';
+              throw new Error('unauthorized');
+            }
+            if (!res.ok) throw new Error('query failed (' + res.status + ')');
+            const rows = await res.json();
+            return Array.isArray(rows) ? rows : [];
+          };
+          // permission_voted rows never carry detail.tool/ruleId (the vote
+          // route has no frame data), so under a tool/rule filter the second
+          // query is guaranteed empty — skip it.
+          const [pol, votes] = await Promise.all([
+            fetchRows('policy_decision'),
+            !permDecisionTool && !permDecisionRule
+              ? fetchRows('permission_voted')
+              : Promise.resolve([]),
+          ]);
+          const rows = pol.concat(votes).sort((a, b) => b.ts - a.ts);
+          const rowsEl = $('perm-decisions-rows');
+          if (rowsEl) rowsEl.innerHTML = '';
+          if (!rows.length) {
+            st.textContent = '';
+            if (rowsEl) {
+              const empty = document.createElement('div');
+              empty.textContent = '(no matching decisions)';
+              empty.style.cssText = 'font-size:12px;opacity:0.6';
+              rowsEl.appendChild(empty);
+            }
+            return;
+          }
+          st.textContent = '';
+          if (!rowsEl) return;
+          for (const rec of rows) {
+            const d =
+              typeof rec.detail === 'object' && rec.detail !== null
+                ? rec.detail
+                : {};
+            const parts = [
+              new Date(rec.ts).toISOString().replace('T', ' ').slice(0, 19),
+            ];
+            if (rec.action === 'policy_decision') {
+              parts.push(d.action || '?');
+              if (d.tool) parts.push('tool=' + d.tool);
+              if (d.ruleId) parts.push('rule=' + d.ruleId);
+              if (d.decisionSource) parts.push('source=' + d.decisionSource);
+              if (d.reason) parts.push('why=' + d.reason);
+              if (d.voted) parts.push('voted');
+            } else {
+              parts.push('vote:' + (d.outcome || '?'));
+              if (d.decisionSource) parts.push('source=' + d.decisionSource);
+              parts.push(d.accepted ? 'accepted' : 'not accepted');
+            }
+            if (rec.target) parts.push('session=' + rec.target);
+            const line = document.createElement('div');
+            line.style.cssText =
+              'font-family:ui-monospace,monospace;font-size:12px;color:#c8ccd4;white-space:pre-wrap;word-break:break-all;';
+            line.textContent = parts.join('  ');
+            rowsEl.appendChild(line);
+          }
+        } catch {
+          if (st.textContent !== 'not authorized — needs an owner token') {
+            st.textContent = 'query failed';
+          }
+        }
+      }
+
       // ---- Workspace trust / MCP / tools (task #27, Settings tab) ---------
       // Capability-gated (applyWorkspaceControlGating). Reads need WRITE,
       // mutations OWNER. Trust changes are 202-async — the LOCAL operator on
@@ -2748,6 +2934,9 @@
         }
         renderPermRulesSection();
         if (permRulesGate()) void loadPermRules(false);
+        // issue #32: the decisions feed shares the permissions capability gate.
+        renderPermDecisionsSection();
+        if (permRulesGate()) void loadPermDecisions();
       }
 
       (async function authGate() {
