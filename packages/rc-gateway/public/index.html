@@ -637,6 +637,16 @@
           gap: 8px;
         "
       ></div>
+      <div
+        id="ws-mcp-form"
+        hidden
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        "
+      ></div>
     </section>
     <section id="ws-tools" hidden>
       <strong>Workspace tools</strong> (reads: write scope · changes: owner
@@ -1721,10 +1731,30 @@
             const btn = document.createElement('button');
             btn.textContent = s.disabled ? 'enable' : 'disable';
             btn.addEventListener('click', () => toggleMcpServer(s, btn));
-            row.append(name, meta, btn);
+            // Edit config is only offered for workspace-scope servers: the
+            // set mutation writes workspace settings, and the daemon's
+            // __redacted__ secret restore compares against the workspace
+            // scope, so only there is a no-op edit lossless.
+            if (s.configOrigin === 'workspace_settings') {
+              const editBtn = document.createElement('button');
+              editBtn.textContent = 'edit config';
+              editBtn.title =
+                'Edit this server\'s config in workspace settings';
+              editBtn.addEventListener('click', () =>
+                showMcpServerForm({ mode: 'edit', server: s }),
+              );
+              row.append(name, meta, editBtn, btn);
+            } else {
+              row.append(name, meta, btn);
+            }
             list.appendChild(row);
           }
           const row = document.createElement('div');
+          const addBtn = document.createElement('button');
+          addBtn.textContent = 'add MCP server';
+          addBtn.addEventListener('click', () =>
+            showMcpServerForm({ mode: 'add' }),
+          );
           const reloadBtn = document.createElement('button');
           reloadBtn.textContent = 'reload MCP servers';
           reloadBtn.addEventListener('click', () => reloadMcpServers());
@@ -1732,7 +1762,7 @@
           refresh.textContent = 'refresh';
           refresh.style.marginLeft = '6px';
           refresh.addEventListener('click', () => loadWorkspaceMcp(false));
-          row.append(reloadBtn, refresh);
+          row.append(addBtn, reloadBtn, refresh);
           body.append(head, list, row, status);
         } catch (err) {
           body.innerHTML = '';
@@ -1829,6 +1859,199 @@
         } catch (err) {
           status.textContent = 'reload failed: ' + err.message;
         }
+      }
+
+      // #31 — add / edit MCP server config. Both paths reuse the persisted
+      // `set` mutation. The config is a JSON object the operator types: the
+      // schema is wide (command/args/env/cwd, url/headers, oauth, tool
+      // allowlists, …), so a JSON editor is the only form that cannot lose
+      // fields on save. Edit prefills from the REDACTED config
+      // (GET /rc/workspace/settings): secrets render as __redacted__, and
+      // the daemon restores any value saved unchanged, so an unedited
+      // secret round-trips. Status text carries the server name and the
+      // operation only — never config values.
+      const MCP_CONFIG_HINT =
+        'config is the server JSON object — stdio: "command", "args", ' +
+        '"env", "cwd"; HTTP: "url" or "httpUrl", "headers"; plus "timeout", ' +
+        '"trust", "description", "includeTools", "excludeTools". Written to ' +
+        'workspace settings.';
+      const MCP_REDACTED_HINT =
+        'Secrets are shown as __redacted__ — saving __redacted__ unchanged ' +
+        'keeps the current secret; replace it to set a new value.';
+
+      function hideMcpServerForm() {
+        const form = $('ws-mcp-form');
+        form.hidden = true;
+        form.innerHTML = '';
+      }
+
+      // Redacted config for `name`, most-specific source first. The
+      // settings read returns the full persisted config with secrets
+      // redacted; the server-status config is a partial fallback (no
+      // env/headers) for daemons without the settings read.
+      async function fetchMcpServerConfig(name) {
+        try {
+          const res = await fetch('/rc/workspace/settings', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const desc = (Array.isArray(data.settings) ? data.settings : [])
+              .find((s) => s && s.key === 'mcpServers');
+            const ws =
+              desc && desc.values && desc.values.workspace
+                ? desc.values.workspace[name]
+                : undefined;
+            if (ws && typeof ws === 'object' && !Array.isArray(ws)) {
+              return { config: ws, source: 'workspace settings' };
+            }
+            const eff =
+              desc && desc.values && desc.values.effective
+                ? desc.values.effective[name]
+                : undefined;
+            if (eff && typeof eff === 'object' && !Array.isArray(eff)) {
+              return { config: eff, source: 'effective (merged) config' };
+            }
+          }
+        } catch {
+          /* fall through to the status-subset fallback */
+        }
+        return { config: {}, source: 'none' };
+      }
+
+      function showMcpServerForm({ mode, server }) {
+        hideMcpServerForm();
+        const form = $('ws-mcp-form');
+        const status = wsSectionStatusEl('ws-mcp-status');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.placeholder = 'server name';
+        nameInput.style.cssText = 'font-family:monospace;font-size:12px';
+        if (mode === 'edit') {
+          nameInput.value = server.name;
+          nameInput.disabled = true;
+          nameInput.title =
+            'the name is the settings key — remove and re-add to rename';
+        }
+        const configText = document.createElement('textarea');
+        configText.rows = 10;
+        configText.spellcheck = false;
+        configText.style.cssText =
+          'font-family:monospace;font-size:12px;width:100%';
+        configText.value =
+          mode === 'edit' ? '' : '{\n  "command": "",\n  "args": []\n}';
+        const hint = document.createElement('div');
+        hint.style.cssText = 'font-size:12px;opacity:0.6';
+        const formStatus = document.createElement('div');
+        formStatus.style.cssText = 'font-size:12px;opacity:0.7';
+        const save = document.createElement('button');
+        save.textContent = mode === 'edit' ? 'save config' : 'add server';
+        const cancel = document.createElement('button');
+        cancel.textContent = 'cancel';
+        cancel.style.marginLeft = '6px';
+        cancel.addEventListener('click', () => hideMcpServerForm());
+        form.append(nameInput, configText, hint, formStatus, save, cancel);
+
+        if (mode === 'edit') {
+          hint.textContent = MCP_CONFIG_HINT;
+          formStatus.textContent = 'loading current config…';
+          fetchMcpServerConfig(server.name).then(({ config, source }) => {
+            if (form.hidden) return; // closed while loading
+            configText.value = JSON.stringify(config, null, 2);
+            if (source === 'workspace settings') {
+              hint.textContent = MCP_CONFIG_HINT + ' ' + MCP_REDACTED_HINT;
+              formStatus.textContent = 'prefilled from workspace settings';
+            } else {
+              hint.textContent =
+                MCP_CONFIG_HINT +
+                ' Saving writes workspace settings (an override for a ' +
+                'server defined elsewhere).';
+              formStatus.textContent =
+                source === 'none'
+                  ? 'no current config readable — enter the full config'
+                  : 'note: prefilled from ' +
+                    source +
+                    ' (may be partial)';
+            }
+          });
+        } else {
+          hint.textContent = MCP_CONFIG_HINT;
+        }
+
+        save.addEventListener('click', async () => {
+          const serverName = nameInput.value.trim();
+          if (!serverName) {
+            formStatus.textContent = 'name is required';
+            return;
+          }
+          let config;
+          try {
+            config = JSON.parse(configText.value);
+          } catch {
+            // Fixed message on purpose — a parse error can quote a
+            // fragment of the config, which may carry a secret.
+            formStatus.textContent = 'config is not valid JSON';
+            return;
+          }
+          if (
+            !config ||
+            typeof config !== 'object' ||
+            Array.isArray(config)
+          ) {
+            formStatus.textContent = 'config must be a JSON object';
+            return;
+          }
+          save.disabled = true;
+          try {
+            const payload = {
+              operation: 'set',
+              name: serverName,
+              config,
+            };
+            // Send the version from the last GET so the gateway can reject
+            // a stale write (another writer changed the server list in the
+            // window) instead of silently clobbering it.
+            if (wsLastData.mcp && wsLastData.mcp.version) {
+              payload.baseVersion = wsLastData.mcp.version;
+            }
+            const res = await fetch('/rc/workspace/mcp/servers', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+              const e = await res.json().catch(() => ({}));
+              if (res.status === 409 && e.code === 'stale_base') {
+                // The list changed under us; re-read it so the next save
+                // carries the fresh version. Keep the form open.
+                status.textContent =
+                  'conflict — server list changed, reloading…';
+                formStatus.textContent =
+                  'conflict — the server list changed; try saving again';
+                await loadWorkspaceMcp(false);
+                save.disabled = false;
+                return;
+              }
+              status.textContent =
+                res.status === 401 || res.status === 403
+                  ? 'not authorized — needs an owner token'
+                  : (e.error || 'save failed') + ' (' + res.status + ')';
+              save.disabled = false;
+              return;
+            }
+            status.textContent =
+              'saved "' + serverName + '" — reloading';
+            hideMcpServerForm();
+            await reloadMcpServers();
+          } catch (err) {
+            status.textContent = 'save failed: ' + err.message;
+            save.disabled = false;
+          }
+        });
+        form.hidden = false;
       }
 
       async function loadWorkspaceTools(notify) {
