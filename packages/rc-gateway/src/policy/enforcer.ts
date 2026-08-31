@@ -14,7 +14,7 @@ import {
 } from './evaluator.js';
 import type { QuotaStore } from './quotas.js';
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
-import { frameToContext } from './frameContext.js';
+import { frameToContext, type FrameContext } from './frameContext.js';
 
 /** Safe optional read of a string field from an unknown record. */
 function readString(
@@ -57,8 +57,10 @@ export function policyDecisionReason(d: PolicyDecision): string {
  *   an unexpected throw there takes the same no-vote path as a `prompt`
  *   decision, rather than escaping this method.
  * - **Audit hygiene:** `policy_decision` detail carries only
- *   `{requestId, action, ruleId?, voted, decisionSource, reason, quotaRemaining?}`
- *   — NEVER the tool args/paths/prompt. `decisionSource` is `'policy'|'default'`
+ *   `{requestId, action, tool?, ruleId?, voted, decisionSource, reason, quotaRemaining?}`
+ *   — NEVER the tool args/paths/prompt. `tool` is the tool's kind/name from
+ *   the frame (absent when the frame carries none) so rule hits can be
+ *   checked per tool. `decisionSource` is `'policy'|'default'`
  *   (a fixed token); `reason` is the closed-enum "why" token from
  *   {@link policyDecisionReason} (or the literal `'eval-error'` on the
  *   eval-error fail-safe path).
@@ -131,9 +133,13 @@ export class PolicyEnforcer {
 
     // projectRoot MUST come from the daemon/config resolver (this.projectRootFn),
     // NEVER from the frame's rawInput — see the constructor doc above.
+    // `ctx` is declared outside the try so the audit sites below can record
+    // the frame's tool (issue #32). If frameToContext itself throws, ctx
+    // stays undefined and the tool is simply omitted.
+    let ctx: FrameContext | undefined;
     let d: ReturnType<typeof evaluate>;
     try {
-      const ctx = frameToContext(event.data, {
+      ctx = frameToContext(event.data, {
         projectRoot: this.projectRootFn(),
       });
       d = evaluate(this.policy, ctx, now, oracle);
@@ -147,6 +153,7 @@ export class PolicyEnforcer {
         detail: {
           requestId,
           action: 'prompt',
+          ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
           voted: false,
           decisionSource: 'default',
           reason: 'eval-error',
@@ -201,6 +208,7 @@ export class PolicyEnforcer {
               detail: {
                 requestId,
                 action: 'allow',
+                ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
                 ruleId: d.ruleId,
                 voted: true,
                 decisionSource: d.source,
@@ -230,6 +238,7 @@ export class PolicyEnforcer {
         detail: {
           requestId,
           action: 'allow',
+          ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
           ruleId: d.ruleId,
           voted: false,
           decisionSource: d.source,
@@ -254,6 +263,7 @@ export class PolicyEnforcer {
               detail: {
                 requestId,
                 action: 'deny',
+                ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
                 ruleId: d.ruleId,
                 voted: true,
                 decisionSource: d.source,
@@ -272,6 +282,7 @@ export class PolicyEnforcer {
         detail: {
           requestId,
           action: 'deny',
+          ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
           ruleId: d.ruleId,
           voted: false,
           decisionSource: d.source,
@@ -291,6 +302,7 @@ export class PolicyEnforcer {
       detail: {
         requestId,
         action: 'prompt',
+        ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
         ruleId: d.ruleId,
         voted: false,
         decisionSource: d.source,

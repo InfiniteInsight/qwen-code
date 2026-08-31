@@ -12,7 +12,11 @@ import {
   type AuditReader,
 } from '../auditLog.js';
 
-/** GET /rc/audit?limit&since&action&actor&shareId → newest-first audit records. */
+/**
+ * GET /rc/audit?limit&since&action&actor&shareId&tool&rule → newest-first
+ * audit records. `tool`/`rule` (issue #32) filter on `detail.tool` /
+ * `detail.ruleId` so a permission decisions feed can query per rule.
+ */
 export function createAuditQueryRoute(reader: AuditReader): RequestHandler {
   return async (req, res) => {
     const q: AuditQuery = {};
@@ -37,6 +41,12 @@ export function createAuditQueryRoute(reader: AuditReader): RequestHandler {
 
     const shareId = req.query.shareId;
     if (typeof shareId === 'string' && shareId.length > 0) q.shareId = shareId;
+
+    const tool = req.query.tool;
+    if (typeof tool === 'string' && tool.length > 0) q.tool = tool;
+
+    const rule = req.query.rule;
+    if (typeof rule === 'string' && rule.length > 0) q.rule = rule;
 
     const rows = await reader.query(q);
     res.status(200).json(rows);

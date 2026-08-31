@@ -514,4 +514,71 @@ describe('PolicyEnforcer', () => {
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  it('audit detail carries the frame tool on every decision site (issue #32)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+
+    // allow, voted
+    const a = fakeAudit();
+    await new PolicyEnforcer(daemon, allowExecute, a.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(a.entries[0].detail).toMatchObject({
+      tool: 'execute',
+      action: 'allow',
+      voted: true,
+    });
+
+    // deny, voted
+    const d = fakeAudit();
+    await new PolicyEnforcer(daemon, denyExecute, d.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(d.entries[0].detail).toMatchObject({
+      tool: 'execute',
+      action: 'deny',
+      voted: true,
+    });
+
+    // prompt (no rule matched — tool still recorded)
+    const p = fakeAudit();
+    await new PolicyEnforcer(daemon, emptyPolicy, p.recorder).handlePermission(
+      's1',
+      permissionEvent('edit', {}, { requestId: 'r1' }),
+    );
+    expect(p.entries[0].detail).toMatchObject({
+      tool: 'edit',
+      action: 'prompt',
+      voted: false,
+    });
+
+    // allow, unvoted (fail-safe: no allow_once option)
+    const u = fakeAudit();
+    await new PolicyEnforcer(daemon, allowExecute, u.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1', options: [] }),
+    );
+    expect(u.entries[0].detail).toMatchObject({
+      tool: 'execute',
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('audit detail omits tool when the frame carries no kind (issue #32)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    await new PolicyEnforcer(
+      daemon,
+      emptyPolicy,
+      audit.recorder,
+    ).handlePermission('s1', permissionEvent('', {}, { requestId: 'r1' }));
+    const detail = policyDecisionDetail(audit);
+    expect(detail).toMatchObject({ action: 'prompt' });
+    expect(detail).not.toHaveProperty('tool');
+  });
 });

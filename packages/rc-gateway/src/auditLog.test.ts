@@ -148,6 +148,46 @@ describe('AuditLog', () => {
     expect(await audit.query({ shareId: '12345' })).toEqual([]);
   });
 
+  it('tool/rule filters match detail.tool / detail.ruleId exactly (issue #32)', async () => {
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    const audit = new AuditLog(path, () => ++t);
+    await audit.record({
+      action: 'policy_decision',
+      detail: { tool: 'execute', ruleId: 'rule-a' },
+    });
+    await audit.record({
+      action: 'policy_decision',
+      detail: { tool: 'edit', ruleId: 'rule-b' },
+    });
+    await audit.record({
+      action: 'policy_decision',
+      detail: { tool: 'execute' },
+    });
+    await audit.record({ action: 'policy_decision' });
+
+    const byTool = await audit.query({ tool: 'execute' });
+    expect(byTool.map((r) => r.detail?.ruleId).sort()).toEqual([
+      'rule-a',
+      undefined,
+    ]);
+    const byRule = await audit.query({ rule: 'rule-a' });
+    expect(byRule.map((r) => r.detail?.tool)).toEqual(['execute']);
+    const both = await audit.query({ tool: 'execute', rule: 'rule-a' });
+    expect(both).toHaveLength(1);
+    expect(both[0]?.detail).toMatchObject({
+      tool: 'execute',
+      ruleId: 'rule-a',
+    });
+    // Rows without the field never match.
+    expect(await audit.query({ rule: 'rule-c' })).toEqual([]);
+    expect(
+      (await audit.query({ tool: 'execute' })).some(
+        (r) => r.detail === undefined,
+      ),
+    ).toBe(false);
+  });
+
   it('skips corrupt lines and returns [] for a missing log', async () => {
     const path = join(dir, 'audit.log');
     const audit = new AuditLog(path, () => 1);

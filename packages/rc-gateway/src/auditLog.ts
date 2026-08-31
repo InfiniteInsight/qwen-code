@@ -272,6 +272,16 @@ export interface AuditQuery {
    * (historical owner-side create/revoke rows) equals this id.
    */
   shareId?: string;
+  /**
+   * Exact match on `detail.tool` (issue #32): the tool kind/name recorded by
+   * `policy_decision` rows. Rows without a `detail.tool` never match.
+   */
+  tool?: string;
+  /**
+   * Exact match on `detail.ruleId` (issue #32): the rule that produced a
+   * `policy_decision`. Rows without a `detail.ruleId` never match.
+   */
+  rule?: string;
 }
 
 /** Write side. */
@@ -527,6 +537,10 @@ export class AuditLog implements AuditRecorder, AuditReader {
           (typeof r.detail?.shareId === 'string' &&
             r.detail.shareId === q.shareId),
       );
+    if (q.tool !== undefined)
+      out = out.filter((r) => r.detail?.tool === q.tool);
+    if (q.rule !== undefined)
+      out = out.filter((r) => r.detail?.ruleId === q.rule);
     out.sort((a, b) => b.ts - a.ts);
     return out.slice(0, clampLimit(q.limit));
   }
