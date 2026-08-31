@@ -133,7 +133,9 @@ export type AuditAction =
   | 'workspace_tool_enabled'
   | 'workspace_mcp_reloaded'
   | 'workspace_mcp_server_set'
-  | 'workspace_mcp_server_removed';
+  | 'workspace_mcp_server_removed'
+  | 'permission_overlay_set'
+  | 'permission_overlay_revoked';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -219,6 +221,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'workspace_mcp_reloaded',
   'workspace_mcp_server_set',
   'workspace_mcp_server_removed',
+  'permission_overlay_set',
+  'permission_overlay_revoked',
 ];
 
 export interface AuditEntry {

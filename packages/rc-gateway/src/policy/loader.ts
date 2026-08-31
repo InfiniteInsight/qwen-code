@@ -94,7 +94,14 @@ export const TOOL_ALIAS_TO_KIND: Record<string, string> = {
 
 export const POLICY_OPERATIONS = ['read', 'write', 'execute'] as const;
 
-function normalizeTool(raw: string, ruleRef: string): string {
+/**
+ * Normalize a rule's `match.tool` (kind, wildcard glob, or known tool NAME)
+ * to the form the evaluator matches against; throws {@link PolicyError} on
+ * an unknown value. Exported so the permission-overlay route (issue #33)
+ * validates operator-supplied tools with the SAME fail-closed rules the
+ * YAML loader applies.
+ */
+export function normalizeTool(raw: string, ruleRef: string): string {
   if (raw === '*' || raw.includes('*')) return raw; // globs pass through
   if ((POLICY_KINDS as readonly string[]).includes(raw)) return raw;
   const mapped = TOOL_ALIAS_TO_KIND[raw];

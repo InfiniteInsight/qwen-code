@@ -431,6 +431,23 @@
         "
       ></div>
     </section>
+    <section id="perm-overlays" hidden style="margin-top: 8px">
+      <strong>session overrides</strong>
+      <span
+        id="perm-overlays-note"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+        >ephemeral — lost when the gateway restarts</span
+      >
+      <div
+        id="perm-overlays-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </section>
     <div
       id="session-footer"
       style="
@@ -1795,6 +1812,254 @@
         }
       }
 
+      // ---- Session-scoped permission overlays (issue #33) ----------------
+      // Ephemeral TTL-bound rules set from the dashboard; they live only in
+      // the gateway process and are lost on restart. A blank session id means
+      // "applies to all sessions".
+      const OVERLAY_TTLS = [
+        [60, '1 min'],
+        [300, '5 min'],
+        [900, '15 min'],
+        [3600, '1 hour'],
+        [14400, '4 hours'],
+        [43200, '12 hours'],
+        [86400, '24 hours'],
+      ];
+      let permOverlays = null; // null = not loaded yet
+
+      function permOverlaysStatusEl() {
+        let st = $('perm-overlays-status');
+        if (!st) {
+          st = document.createElement('span');
+          st.id = 'perm-overlays-status';
+          st.style.fontSize = '12px';
+        }
+        return st;
+      }
+
+      function overlayExpiryLabel(ov) {
+        const abs = new Date(ov.expiresAt)
+          .toISOString()
+          .replace('T', ' ')
+          .slice(0, 19);
+        const mins = Math.max(
+          0,
+          Math.round((ov.expiresAt - Date.now()) / 60000),
+        );
+        return mins >= 90
+          ? abs + ' (in ~' + Math.round(mins / 60) + 'h)'
+          : abs + ' (in ~' + mins + 'm)';
+      }
+
+      function renderPermOverlaysSection() {
+        const sec = $('perm-overlays');
+        if (!sec) return;
+        if (!permRulesGate()) {
+          sec.hidden = true;
+          return;
+        }
+        sec.hidden = false;
+        const body = $('perm-overlays-body');
+        body.innerHTML = '';
+
+        const form = document.createElement('div');
+        form.style.cssText =
+          'display:flex;flex-wrap:wrap;gap:6px;align-items:center;';
+        const sess = document.createElement('input');
+        sess.placeholder = 'session id (blank = all sessions)';
+        sess.style.flex = '2';
+        sess.value = watchedSessionId || '';
+        const toolSel = document.createElement('select');
+        const anyTool = document.createElement('option');
+        anyTool.value = '';
+        anyTool.textContent = '(any tool)';
+        toolSel.appendChild(anyTool);
+        for (const t of PERM_DECISION_TOOLS) {
+          const o = document.createElement('option');
+          o.value = t;
+          o.textContent = t;
+          toolSel.appendChild(o);
+        }
+        const actSel = document.createElement('select');
+        for (const a of ['allow', 'deny', 'prompt']) {
+          const o = document.createElement('option');
+          o.value = a;
+          o.textContent = a;
+          actSel.appendChild(o);
+        }
+        actSel.value = 'deny';
+        const ttlSel = document.createElement('select');
+        for (const [secs, label] of OVERLAY_TTLS) {
+          const o = document.createElement('option');
+          o.value = String(secs);
+          o.textContent = label;
+          ttlSel.appendChild(o);
+        }
+        ttlSel.value = '300';
+        const reason = document.createElement('input');
+        reason.placeholder = 'reason (optional)';
+        reason.style.flex = '2';
+        const setBtn = document.createElement('button');
+        setBtn.textContent = 'set';
+        setBtn.addEventListener('click', () => {
+          void setPermOverlay({
+            sessionId: sess.value.trim(),
+            tool: toolSel.value,
+            action: actSel.value,
+            ttlSeconds: Number(ttlSel.value),
+            reason: reason.value.trim(),
+          });
+        });
+        form.append(sess, toolSel, actSel, ttlSel, reason, setBtn);
+        body.append(form);
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:6px;align-items:center;';
+        const refresh = document.createElement('button');
+        refresh.textContent = 'refresh';
+        refresh.addEventListener('click', () => void loadPermOverlays(true));
+        row.append(refresh, permOverlaysStatusEl());
+        body.append(row);
+
+        const rows = document.createElement('div');
+        rows.id = 'perm-overlays-rows';
+        body.append(rows);
+        renderPermOverlaysRows();
+      }
+
+      function renderPermOverlaysRows() {
+        const rowsEl = $('perm-overlays-rows');
+        if (!rowsEl) return;
+        rowsEl.innerHTML = '';
+        if (permOverlays === null) {
+          const note = document.createElement('div');
+          note.textContent = 'loading…';
+          note.style.cssText = 'font-size:12px;opacity:0.6';
+          rowsEl.appendChild(note);
+          return;
+        }
+        if (!permOverlays.length) {
+          const note = document.createElement('div');
+          note.textContent = '(no active overrides)';
+          note.style.cssText = 'font-size:12px;opacity:0.6';
+          rowsEl.appendChild(note);
+          return;
+        }
+        for (const ov of permOverlays) {
+          const parts = [
+            ov.tool || '(any tool)',
+            ov.action,
+            ov.sessionId ? 'session=' + ov.sessionId : 'all sessions',
+            'expires ' + overlayExpiryLabel(ov),
+          ];
+          if (ov.reason) parts.push('why=' + ov.reason);
+          const line = document.createElement('div');
+          line.style.cssText = 'display:flex;gap:6px;align-items:baseline;';
+          const txt = document.createElement('span');
+          txt.textContent = parts.join('  ');
+          txt.style.cssText =
+            'font-family:ui-monospace,monospace;font-size:12px;color:#c8ccd4;word-break:break-all;';
+          const revoke = document.createElement('button');
+          revoke.textContent = 'revoke';
+          revoke.addEventListener('click', () => void revokePermOverlay(ov.id));
+          line.append(txt, revoke);
+          rowsEl.appendChild(line);
+        }
+      }
+
+      async function loadPermOverlays(notify) {
+        if (!permRulesGate()) return;
+        const st = permOverlaysStatusEl();
+        st.textContent = 'loading…';
+        try {
+          const res = await fetch('/rc/permission-overlays', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            st.textContent = 'not authorized — needs an owner token';
+            return;
+          }
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            st.textContent =
+              (body.error || 'load failed') + ' (' + res.status + ')';
+            if (notify) setStatus(st.textContent);
+            return;
+          }
+          const data = await res.json();
+          permOverlays = Array.isArray(data.overlays) ? data.overlays : [];
+          st.textContent = '';
+          renderPermOverlaysRows();
+        } catch {
+          st.textContent = 'load failed';
+          if (notify) setStatus('load failed');
+        }
+      }
+
+      async function setPermOverlay(ov) {
+        const st = permOverlaysStatusEl();
+        st.textContent = 'setting…';
+        const payload = { action: ov.action, ttlSeconds: ov.ttlSeconds };
+        if (ov.sessionId) payload.sessionId = ov.sessionId;
+        if (ov.tool) payload.tool = ov.tool;
+        if (ov.reason) payload.reason = ov.reason;
+        try {
+          const res = await fetch('/rc/permission-overlays', {
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer ' + token(),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          });
+          if (res.status === 401 || res.status === 403) {
+            st.textContent = 'not authorized — needs an owner token';
+            return;
+          }
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const msg = (body.error || 'set failed') + ' (' + res.status + ')';
+            st.textContent = msg;
+            setStatus(msg);
+            return;
+          }
+          st.textContent = 'set';
+          await loadPermOverlays(false);
+        } catch {
+          st.textContent = 'set failed';
+          setStatus('set failed');
+        }
+      }
+
+      async function revokePermOverlay(id) {
+        const st = permOverlaysStatusEl();
+        st.textContent = 'revoking…';
+        try {
+          const res = await fetch(
+            '/rc/permission-overlays/' + encodeURIComponent(id),
+            {
+              method: 'DELETE',
+              headers: { Authorization: 'Bearer ' + token() },
+            },
+          );
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const msg =
+              body.code === 'overlay_not_found'
+                ? 'already expired'
+                : body.error || 'revoke failed';
+            st.textContent = msg;
+            setStatus(msg);
+            return;
+          }
+          st.textContent = 'revoked';
+          await loadPermOverlays(false);
+        } catch {
+          st.textContent = 'revoke failed';
+          setStatus('revoke failed');
+        }
+      }
+
       // ---- Workspace trust / MCP / tools (task #27, Settings tab) ---------
       // Capability-gated (applyWorkspaceControlGating). Reads need WRITE,
       // mutations OWNER. Trust changes are 202-async — the LOCAL operator on
@@ -2937,6 +3202,9 @@
         // issue #32: the decisions feed shares the permissions capability gate.
         renderPermDecisionsSection();
         if (permRulesGate()) void loadPermDecisions();
+        // issue #33: the overlays section shares the same gate.
+        renderPermOverlaysSection();
+        if (permRulesGate()) void loadPermOverlays(false);
       }
 
       (async function authGate() {

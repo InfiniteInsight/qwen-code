@@ -13,6 +13,7 @@ import {
   type QuotaOracle,
 } from './evaluator.js';
 import type { QuotaStore } from './quotas.js';
+import type { PermissionOverlayStore } from './overlays.js';
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
 import { frameToContext, type FrameContext } from './frameContext.js';
 
@@ -57,13 +58,25 @@ export function policyDecisionReason(d: PolicyDecision): string {
  *   an unexpected throw there takes the same no-vote path as a `prompt`
  *   decision, rather than escaping this method.
  * - **Audit hygiene:** `policy_decision` detail carries only
- *   `{requestId, action, tool?, ruleId?, voted, decisionSource, reason, quotaRemaining?}`
- *   — NEVER the tool args/paths/prompt. `tool` is the tool's kind/name from
- *   the frame (absent when the frame carries none) so rule hits can be
- *   checked per tool. `decisionSource` is `'policy'|'default'`
+ *   `{requestId, action, tool?, ruleId?, overlayId?, voted, decisionSource,
+ *   reason, quotaRemaining?}` — NEVER the tool args/paths/prompt. `tool` is
+ *   the tool's kind/name from the frame (absent when the frame carries none)
+ *   so rule hits can be checked per tool. `decisionSource` is `'policy'|'default'`
  *   (a fixed token); `reason` is the closed-enum "why" token from
  *   {@link policyDecisionReason} (or the literal `'eval-error'` on the
- *   eval-error fail-safe path).
+ *   eval-error fail-safe path). `overlayId` (issue #33) is set only when a
+ *   session-scoped overlay rule produced the decision — `ruleId` already
+ *   carries the overlay id, so the decisions feed's `rule=` filter works on
+ *   overlays too.
+ * - **Overlays (issue #33):** when constructed with a
+ *   {@link PermissionOverlayStore}, the per-session overlay policy is also
+ *   evaluated for every event; a matched overlay rule
+ *   (`source === 'policy'`) PREEMPTS the file policy's decision, and the
+ *   file decision stands whenever no overlay rule matches. Overlays never
+ *   offer `maxPerWindow`, so the
+ *   overlay evaluation runs WITHOUT the quota oracle (a would-be
+ *   maxPerWindow classifies as untracked → prompt, fail-safe). Absent store
+ *   → byte-identical behavior to the file-policy-only path.
  */
 export class PolicyEnforcer {
   constructor(
@@ -91,6 +104,13 @@ export class PolicyEnforcer {
      * reorder construction.
      */
     private readonly projectRootFn: () => string = () => process.cwd(),
+    /**
+     * Optional session-scoped permission overlays (issue #33) — TTL-bound
+     * dashboard-set rules that preempt the file policy for one session (or
+     * all sessions) until they auto-expire. Absent → the enforcer behaves
+     * exactly as before (no overlay evaluation at all).
+     */
+    private readonly overlays?: PermissionOverlayStore,
   ) {}
 
   /** Swap the active policy (for a future hot-reload). */
@@ -138,11 +158,31 @@ export class PolicyEnforcer {
     // stays undefined and the tool is simply omitted.
     let ctx: FrameContext | undefined;
     let d: ReturnType<typeof evaluate>;
+    // The overlay id that produced `d` (issue #33) — undefined when the
+    // file policy decided. Set together with `d` inside the try, so the
+    // eval-error path (either evaluation throws) never carries a stale one.
+    let overlayId: string | undefined;
     try {
       ctx = frameToContext(event.data, {
         projectRoot: this.projectRootFn(),
       });
       d = evaluate(this.policy, ctx, now, oracle);
+      // Session-scoped overlays (issue #33) preempt the file policy: the
+      // per-session overlay policy is evaluated WITHOUT the quota oracle
+      // (overlays never offer maxPerWindow). A matched overlay rule
+      // (source 'policy') wins — including an overlay 'prompt', which
+      // downgrades a file 'allow'; otherwise the file decision stands.
+      if (this.overlays) {
+        const od = evaluate(
+          this.overlays.policyFor(sessionId, nowMs),
+          ctx,
+          now,
+        );
+        if (od.source === 'policy') {
+          d = od;
+          overlayId = od.ruleId;
+        }
+      }
     } catch {
       // NEVER THROWS (class docstring): an unexpected extraction/evaluation
       // failure must not crash the caller. Fall through to the same no-vote
@@ -210,6 +250,7 @@ export class PolicyEnforcer {
                 action: 'allow',
                 ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
                 ruleId: d.ruleId,
+                ...(overlayId ? { overlayId } : {}),
                 voted: true,
                 decisionSource: d.source,
                 reason: policyDecisionReason(d),
@@ -240,6 +281,7 @@ export class PolicyEnforcer {
           action: 'allow',
           ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
           ruleId: d.ruleId,
+          ...(overlayId ? { overlayId } : {}),
           voted: false,
           decisionSource: d.source,
           reason: policyDecisionReason(d),
@@ -265,6 +307,7 @@ export class PolicyEnforcer {
                 action: 'deny',
                 ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
                 ruleId: d.ruleId,
+                ...(overlayId ? { overlayId } : {}),
                 voted: true,
                 decisionSource: d.source,
                 reason: policyDecisionReason(d),
@@ -284,6 +327,7 @@ export class PolicyEnforcer {
           action: 'deny',
           ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
           ruleId: d.ruleId,
+          ...(overlayId ? { overlayId } : {}),
           voted: false,
           decisionSource: d.source,
           reason: policyDecisionReason(d),
@@ -304,6 +348,7 @@ export class PolicyEnforcer {
         action: 'prompt',
         ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
         ruleId: d.ruleId,
+        ...(overlayId ? { overlayId } : {}),
         voted: false,
         decisionSource: d.source,
         reason: policyDecisionReason(d),
