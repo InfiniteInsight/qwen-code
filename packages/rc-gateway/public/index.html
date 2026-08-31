@@ -4016,6 +4016,11 @@
           if (res.status === 200) {
             const j = await res.json();
             lastSeenEventId = null;
+            // Resume is a conversation SWITCH, not a reconnect: startWatch
+            // only self-clears when fromEventId is null (which would skip the
+            // replay), so wipe the stale transcript here for the replayed
+            // history to render on a clean slate.
+            clearTranscript();
             startWatch(j.sessionId, 0, title);
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');

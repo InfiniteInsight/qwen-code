@@ -24,6 +24,8 @@ export interface StubDaemon {
   lastCreateSessionBody: unknown;
   /** Body of the most recent POST /session/:id/resume request. */
   lastResumeSessionBody: unknown;
+  /** Body of the most recent POST /session/:id/load request. */
+  lastLoadSessionBody: unknown;
   /** Body of the most recent POST /session/:id/prompt request. */
   lastPromptBody: unknown;
   /** Body of the most recent POST /session/:id/rewind request. */
@@ -173,6 +175,8 @@ export interface StubDaemonOptions {
   createSessionId?: (n: number) => string;
   /** Status for POST /session/:id/resume (default 200). Non-200 → { error }. */
   resumeSessionStatus?: number;
+  /** Status for POST /session/:id/load (default 200). Non-200 → { error }. */
+  loadSessionStatus?: number;
   /**
    * Skills reported by GET /session/:id/supported-commands, the route the
    * SDK's `daemon.sessionSupportedCommands(sessionId)` hits (default
@@ -275,6 +279,7 @@ export async function startStubDaemon(
     createdSessionCount: 0,
     lastCreateSessionBody: undefined as unknown,
     lastResumeSessionBody: undefined as unknown,
+    lastLoadSessionBody: undefined as unknown,
     lastPromptBody: undefined as unknown,
     lastRewindBody: undefined as unknown,
     lastApprovalModeBody: undefined as unknown,
@@ -780,6 +785,27 @@ export async function startStubDaemon(
     });
   });
 
+  // Mirrors /resume: DaemonPool.resumeSession restores through the load
+  // action (no-history bug, #37), so pool-based tests exercise this route.
+  app.post('/session/:id/load', (req, res) => {
+    state.lastLoadSessionBody = req.body;
+    const status = opts.loadSessionStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const cwd = (req.body as { cwd?: unknown })?.cwd;
+    res.status(200).json({
+      sessionId: req.params.id,
+      workspaceCwd:
+        typeof cwd === 'string' && cwd.length > 0
+          ? cwd
+          : (opts.workspaceCwd ?? '/stub/workspace'),
+      attached: true,
+      state: {},
+    });
+  });
+
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -803,6 +829,9 @@ export async function startStubDaemon(
     },
     get lastResumeSessionBody() {
       return state.lastResumeSessionBody;
+    },
+    get lastLoadSessionBody() {
+      return state.lastLoadSessionBody;
     },
     get lastPromptBody() {
       return state.lastPromptBody;

@@ -737,17 +737,27 @@ export class DaemonPool implements SessionDaemon {
     }
   }
 
-  /** Resolve (spawn if needed) the daemon for `req.workspaceCwd`, resume the
+  /** Resolve (spawn if needed) the daemon for `req.workspaceCwd`, restore the
    * session there, and record which daemon owns `sessionId` so later
    * session-keyed calls route correctly. Unlike `createOrAttachSession`, the
-   * daemon does not mint a new id on resume -- it reuses `sessionId` as
+   * daemon does not mint a new id on restore -- it reuses `sessionId` as
    * passed in, so that's what gets recorded in `ownerOf`, not anything read
    * off the response.
    *
-   * Workspace-keyed (like `createOrAttachSession`), not session-id-keyed
-   * (like `DaemonClient.resumeSession`): a resumed session's owning
-   * workspace was never in memory here (this pool didn't create it), so the
-   * caller must supply it. Mirrors `createOrAttachSession`'s
+   * Restores via the SDK's `loadSession`, not `resumeSession`: ACP's
+   * `session/resume` reactivates a session WITHOUT replaying its transcript,
+   * so a cold-restored session's event bus starts empty and a dashboard
+   * watcher attaching at cursor 0 replays nothing (no-history bug, #37). The
+   * daemon's `load` action (REST always runs it with
+   * `historyReplay: 'response'`) seeds the event bus with the full transcript
+   * BEFORE responding, so the caller's cursor-0 SSE watch replays the whole
+   * conversation. Warm/live sessions are unaffected -- both actions merely
+   * attach; `load` additionally returns a ring snapshot in the body, which
+   * callers discard.
+   *
+   * Workspace-keyed (like `createOrAttachSession`): a resumed session's
+   * owning workspace was never in memory here (this pool didn't create it),
+   * so the caller must supply it. Mirrors `createOrAttachSession`'s
    * `pendingCreates` reservation exactly -- marked SYNCHRONOUSLY, before the
    * `getOrSpawn` await -- for the same reason: without it, a concurrent
    * `getOrSpawn`'s cap eviction could reclaim this entry mid-registration. */
@@ -764,7 +774,10 @@ export class DaemonPool implements SessionDaemon {
     }
     try {
       const client = await this.getOrSpawn(req.workspaceCwd);
-      const restored = await client.resumeSession(sessionId, {
+      // `load`, not `resume`: see the doc above -- the daemon's load action
+      // seeds the session's event bus with the full transcript before
+      // responding, so the caller's cursor-0 watcher replays the history.
+      const restored = await client.loadSession(sessionId, {
         workspaceCwd: key,
       });
       this.ownerOf.set(sessionId, key);

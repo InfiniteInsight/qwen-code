@@ -27,8 +27,13 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * On success, `daemon.resumeSession(sessionId, { workspaceCwd: cwd })` (a
  * `SessionDaemon` — either a single `DaemonClient` or the multi-workspace
  * `DaemonPool`, add-workspace-pool) spawns/reuses the daemon bound to `cwd`
- * and resumes the session there, returning `200 { sessionId, workspaceCwd }`
- * so the caller can immediately attach/watch it.
+ * and restores the session there, returning `200 { sessionId, workspaceCwd }`
+ * so the caller can immediately attach/watch it. The `DaemonPool` implements
+ * the restore with the daemon's `load` action rather than ACP's history-less
+ * `resume`: load seeds the session's event bus with the full transcript
+ * before responding, so a caller that watches from cursor 0 (the dashboard)
+ * replays the whole conversation instead of an empty stream (no-history bug,
+ * #37).
  *
  * Audit carries only the session id (`target`) — never the `cwd` path (audit
  * records stay free of paths/args per the gateway's data contract).

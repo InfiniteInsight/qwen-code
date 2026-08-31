@@ -292,7 +292,9 @@ describe('mid-turn recovery integration', () => {
     expect(death!.sessions).toEqual([SID]);
     expect(death!.exit.code).toBe(137);
     expect(stubs.length).toBe(2);
-    expect(stubs[1]!.lastResumeSessionBody).toBeDefined();
+    // pool.resumeSession restores through the daemon's load action (#37),
+    // so the stub records the request on lastLoadSessionBody.
+    expect(stubs[1]!.lastLoadSessionBody).toBeDefined();
     expect(recovery.recoveryState(SID)).toBe('recovered');
     const outcome = recovery.lastOutcome(SID)!;
     expect(outcome.recovered).toBe(true);
