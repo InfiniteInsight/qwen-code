@@ -12,7 +12,25 @@ import type {
   DaemonWorkspacePermissionsStatus,
 } from '@qwen-code/sdk/daemon';
 import type { SessionDaemon } from '../daemonPool.js';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+
+/**
+ * rc-workspace-scoping (#28): resolve the optional `workspace` target out
+ * of a GET query / POST body value. Absent or empty string → the
+ * default/boot workspace (`undefined`); a non-empty string is trimmed and
+ * used as the target cwd; any other shape is a 400 `invalid_workspace`
+ * (the handler sends it and returns).
+ */
+function parseWorkspaceTarget(
+  raw: unknown,
+): { ok: true; cwd: string | undefined } | { ok: false } {
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return { ok: true, cwd: undefined };
+  }
+  if (typeof raw === 'string') return { ok: true, cwd: raw.trim() };
+  return { ok: false };
+}
 
 /**
  * Stable ETag for a permission-rules GET: the hash covers ONLY the mutable
@@ -65,6 +83,16 @@ function isPermissionRuleType(v: unknown): v is DaemonPermissionRuleType {
  * Always sends a response; the caller must return after it.
  */
 function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
+  // rc-workspace-scoping (#28): targeting a non-default workspace spawns
+  // on demand; at the pool cap with no idle victim this is a 503, not a
+  // daemon failure.
+  if (err instanceof WorkspacePoolFullError) {
+    res.status(503).json({
+      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
+      code: 'workspace_pool_full',
+    });
+    return;
+  }
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -128,9 +156,15 @@ function wrap(failed: {
  * mount's `requireScope` writes the `scope_denied` audit row on denial, so
  * the daemon is never touched by an under-scoped caller.
  *
+ * Both accept an optional `workspace` target (rc-workspace-scoping, #28):
+ * `?workspace=<cwd>` on the GET, a `workspace` field on the POST body.
+ * Absent/empty → the default/boot workspace; the baseVersion re-fetch and
+ * the mutation both resolve the SAME target.
+ *
  * On a successful POST, audits `workspace_permission_rules_set` with ONLY
- * `{scope, ruleType, rules}` — never session or prompt content — and the
- * actor is always the AUTHENTICATED `req.rcClient`.
+ * `{scope, ruleType, rules}` plus the resolved `workspace` cwd when a
+ * non-default workspace was targeted — never session or prompt content —
+ * and the actor is always the AUTHENTICATED `req.rcClient`.
  */
 export function createWorkspacePermissionsRoutes(
   daemon: WorkspacePermissionsDaemon,
@@ -142,8 +176,16 @@ export function createWorkspacePermissionsRoutes(
   };
 
   const get = wrap(failed)(async (req, res) => {
+    const target = parseWorkspaceTarget(req.query.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
     try {
-      const result = await daemon.workspacePermissions();
+      const result = await daemon.workspacePermissions(undefined, target.cwd);
       res.status(200).json({ ...result, version: permissionsVersion(result) });
     } catch (err) {
       daemonError(err, res);
@@ -156,7 +198,17 @@ export function createWorkspacePermissionsRoutes(
       ruleType?: unknown;
       rules?: unknown;
       baseVersion?: unknown;
+      workspace?: unknown;
     };
+
+    const target = parseWorkspaceTarget(body.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
 
     // Fail closed on a malformed replacement: an unknown scope or rule
     // type is a 400, never silently coerced.
@@ -208,7 +260,9 @@ export function createWorkspacePermissionsRoutes(
     if (baseVersion !== undefined) {
       let current: DaemonWorkspacePermissionsStatus;
       try {
-        current = await daemon.workspacePermissions();
+        // Same target as the mutation below — a baseVersion from one
+        // workspace must not be checked against another's rules.
+        current = await daemon.workspacePermissions(undefined, target.cwd);
       } catch (err) {
         daemonError(err, res);
         return;
@@ -226,7 +280,13 @@ export function createWorkspacePermissionsRoutes(
 
     let result;
     try {
-      result = await daemon.setWorkspacePermissionRules(scope, ruleType, rules);
+      result = await daemon.setWorkspacePermissionRules(
+        scope,
+        ruleType,
+        rules,
+        undefined,
+        target.cwd,
+      );
     } catch (err) {
       daemonError(err, res);
       return;
@@ -236,7 +296,14 @@ export function createWorkspacePermissionsRoutes(
       action: 'workspace_permission_rules_set',
       actorTokenId: req.rcClient?.id,
       subActor: req.rcClient?.subActor,
-      detail: { scope, ruleType, rules },
+      detail: {
+        scope,
+        ruleType,
+        rules,
+        // Only recorded for a non-default target (undefined for the default
+        // workspace keeps the row shape unchanged for existing readers).
+        ...(target.cwd !== undefined ? { workspace: target.cwd } : {}),
+      },
     });
 
     res.status(200).json({

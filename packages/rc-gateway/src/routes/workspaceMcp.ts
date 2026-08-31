@@ -11,7 +11,25 @@ import type {
   DaemonWorkspaceMcpServerStatus,
 } from '@qwen-code/sdk/daemon';
 import type { SessionDaemon } from '../daemonPool.js';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+
+/**
+ * rc-workspace-scoping (#28): resolve the optional `workspace` target out
+ * of a GET query / POST body value. Absent or empty string → the
+ * default/boot workspace (`undefined`); a non-empty string is trimmed and
+ * used as the target cwd; any other shape is a 400 `invalid_workspace`
+ * (the handler sends it and returns).
+ */
+function parseWorkspaceTarget(
+  raw: unknown,
+): { ok: true; cwd: string | undefined } | { ok: false } {
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return { ok: true, cwd: undefined };
+  }
+  if (typeof raw === 'string') return { ok: true, cwd: raw.trim() };
+  return { ok: false };
+}
 
 /**
  * Stable ETag for an MCP GET: hashes ONLY the mutable, persisted server
@@ -59,6 +77,16 @@ export interface WorkspaceMcpRouteDeps {
  * Always sends a response; the caller must return after it.
  */
 function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
+  // rc-workspace-scoping (#28): targeting a non-default workspace spawns
+  // on demand; at the pool cap with no idle victim this is a 503, not a
+  // daemon failure.
+  if (err instanceof WorkspacePoolFullError) {
+    res.status(503).json({
+      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
+      code: 'workspace_pool_full',
+    });
+    return;
+  }
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -96,7 +124,8 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
  * redacts credential-bearing config values before this response is built.
  *
  * POST /rc/workspace/mcp/reload — (re)run workspace MCP discovery. Mounted
- * OWNER-only. Audits `workspace_mcp_reloaded` on success (no extra fields).
+ * OWNER-only. Audits `workspace_mcp_reloaded` on success (no extra fields;
+ * the resolved `workspace` cwd for a non-default target).
  *
  * POST /rc/workspace/mcp/servers — persist one MCP server into the
  * workspace's `mcpServers` setting: `{operation: 'set' | 'remove', name,
@@ -106,11 +135,17 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
  * The daemon performs the read-modify-write under its own mutation lock
  * and restores redacted secrets from the existing config.
  *
+ * All three accept an optional `workspace` target (rc-workspace-scoping,
+ * #28): `?workspace=<cwd>` on the GET, a `workspace` field on the POST
+ * bodies. Absent/empty → the default/boot workspace; the baseVersion
+ * re-fetch and the mutation both resolve the SAME target.
+ *
  * SECURITY: MCP config values are credential material (env, headers,
  * command args). They are NEVER logged, audited, or echoed beyond the
  * daemon's own redaction: the audit rows (`workspace_mcp_server_set` /
- * `workspace_mcp_server_removed`) carry the server NAME ONLY, and this
- * file deliberately never logs the request body.
+ * `workspace_mcp_server_removed`) carry the server NAME ONLY (plus the
+ * non-default `workspace` cwd), and this file deliberately never logs the
+ * request body.
  */
 export function createWorkspaceMcpRoutes(
   daemon: WorkspaceMcpDaemon,
@@ -118,8 +153,16 @@ export function createWorkspaceMcpRoutes(
 ): { get: RequestHandler; reload: RequestHandler; servers: RequestHandler } {
   const get: RequestHandler = async (req, res) => {
     try {
+      const target = parseWorkspaceTarget(req.query.workspace);
+      if (!target.ok) {
+        res.status(400).json({
+          error: 'Invalid workspace target',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
       try {
-        const result = await daemon.workspaceMcp();
+        const result = await daemon.workspaceMcp(target.cwd);
         res.status(200).json({ ...result, version: mcpVersion(result) });
       } catch (err) {
         daemonError(err, res);
@@ -136,9 +179,19 @@ export function createWorkspaceMcpRoutes(
 
   const reload: RequestHandler = async (req, res) => {
     try {
+      const target = parseWorkspaceTarget(
+        ((req.body ?? {}) as { workspace?: unknown }).workspace,
+      );
+      if (!target.ok) {
+        res.status(400).json({
+          error: 'Invalid workspace target',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
       let result;
       try {
-        result = await daemon.reloadWorkspaceMcp();
+        result = await daemon.reloadWorkspaceMcp(undefined, target.cwd);
       } catch (err) {
         daemonError(err, res);
         return;
@@ -148,6 +201,12 @@ export function createWorkspaceMcpRoutes(
         action: 'workspace_mcp_reloaded',
         actorTokenId: req.rcClient?.id,
         subActor: req.rcClient?.subActor,
+        // Only for a non-default target — keeps the row shape unchanged
+        // for existing readers; name-only rule still holds (no config
+        // values).
+        ...(target.cwd !== undefined
+          ? { detail: { workspace: target.cwd } }
+          : {}),
       });
 
       res.status(200).json(result);
@@ -168,7 +227,16 @@ export function createWorkspaceMcpRoutes(
         name?: unknown;
         config?: unknown;
         baseVersion?: unknown;
+        workspace?: unknown;
       };
+      const target = parseWorkspaceTarget(body.workspace);
+      if (!target.ok) {
+        res.status(400).json({
+          error: 'Invalid workspace target',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
       const operation = body.operation;
       if (operation !== 'set' && operation !== 'remove') {
         res.status(400).json({
@@ -219,7 +287,9 @@ export function createWorkspaceMcpRoutes(
       if (baseVersion !== undefined) {
         let current: DaemonWorkspaceMcpStatus;
         try {
-          current = await daemon.workspaceMcp();
+          // Same target as the mutation below — a baseVersion from one
+          // workspace must not be checked against another's servers.
+          current = await daemon.workspaceMcp(target.cwd);
         } catch (err) {
           daemonError(err, res);
           return;
@@ -242,13 +312,15 @@ export function createWorkspaceMcpRoutes(
           'mcpServers',
           operation === 'set' ? body.config : {},
           { mcpServerMutation: { operation, name } },
+          target.cwd,
         );
       } catch (err) {
         daemonError(err, res);
         return;
       }
 
-      // Name only — NEVER the config (credential material).
+      // Name only — NEVER the config (credential material). The
+      // non-default `workspace` cwd is metadata, not config.
       void deps.audit?.record({
         action:
           operation === 'set'
@@ -256,7 +328,13 @@ export function createWorkspaceMcpRoutes(
             : 'workspace_mcp_server_removed',
         actorTokenId: req.rcClient?.id,
         subActor: req.rcClient?.subActor,
-        detail: { name },
+        detail: {
+          name,
+          // Only recorded for a non-default target (undefined for the
+          // default workspace keeps the row shape unchanged for existing
+          // readers).
+          ...(target.cwd !== undefined ? { workspace: target.cwd } : {}),
+        },
       });
 
       res.status(200).json(result);

@@ -400,6 +400,10 @@
     </style>
     <section id="perm-rules" hidden style="margin-top: 8px">
       <strong>permission rules</strong>
+      <span
+        id="perm-rules-target"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+      ></span>
       <div
         id="perm-rules-body"
         style="
@@ -612,9 +616,24 @@
       </div>
       <div id="fork-result"></div>
     </section>
+    <section id="ws-target" hidden>
+      <strong>Workspace</strong> (target of the workspace controls below)
+      <div style="margin-top: 6px">
+        <select id="ws-target-select"></select>
+      </div>
+      <div
+        id="ws-target-status"
+        style="margin-top: 4px; font-size: 0.8rem; color: #888"
+      ></div>
+    </section>
     <section id="ws-trust" hidden>
-      <strong>Workspace trust</strong> (reads: write scope · changes: owner
-      scope, applied by the local operator on the daemon host)
+      <strong>Workspace trust</strong>
+      <span
+        id="ws-trust-target"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+      ></span>
+      (reads: write scope · changes: owner scope, applied by the local
+      operator on the daemon host)
       <div
         id="ws-trust-body"
         style="
@@ -626,8 +645,12 @@
       ></div>
     </section>
     <section id="ws-mcp" hidden>
-      <strong>Workspace MCP servers</strong> (reads: write scope · changes:
-      owner scope)
+      <strong>Workspace MCP servers</strong>
+      <span
+        id="ws-mcp-target"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+      ></span>
+      (reads: write scope · changes: owner scope)
       <div
         id="ws-mcp-body"
         style="
@@ -649,8 +672,12 @@
       ></div>
     </section>
     <section id="ws-tools" hidden>
-      <strong>Workspace tools</strong> (reads: write scope · changes: owner
-      scope)
+      <strong>Workspace tools</strong>
+      <span
+        id="ws-tools-target"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+      ></span>
+      (reads: write scope · changes: owner scope)
       <div
         id="ws-tools-body"
         style="
@@ -1258,6 +1285,123 @@
       const wsLastData = { trust: null, mcp: null, tools: null, perms: null };
       let wsLastFocusCheck = 0;
 
+      // rc-workspace-scoping (#28): the workspace the workspace-control
+      // sections currently act on. `null` = the default/boot workspace (the
+      // daemon the gateway was started in); otherwise a cwd string sent as
+      // the `workspace` query/body field on every /rc/workspace/* call.
+      let wsTargetCwd = null;
+      // Non-default cwds the pool currently holds (from GET /rc/workspaces),
+      // merged with cwds of sessions opened in this tab so the selector can
+      // offer workspaces before the first control call has spawned one.
+      let wsKnownWorkspaces = [];
+
+      function wsTargetQuery(url) {
+        if (!wsTargetCwd) return url;
+        return (
+          url +
+          (url.includes('?') ? '&' : '?') +
+          'workspace=' +
+          encodeURIComponent(wsTargetCwd)
+        );
+      }
+
+      function wsTargetBody() {
+        return wsTargetCwd ? { workspace: wsTargetCwd } : {};
+      }
+
+      function wsTargetLabel() {
+        return wsTargetCwd || '(default workspace)';
+      }
+
+      function renderWsTargetLabels() {
+        const label = wsTargetLabel();
+        for (const id of [
+          'ws-trust-target',
+          'ws-mcp-target',
+          'ws-tools-target',
+          'perm-rules-target',
+        ]) {
+          const el = $(id);
+          if (el) el.textContent = label;
+        }
+      }
+
+      function renderWsTargetSelector() {
+        const sel = $('ws-target-select');
+        if (!sel) return;
+        sel.innerHTML = '';
+        const opts = [];
+        if (caps && caps.workspaceCwd) opts.push(caps.workspaceCwd);
+        for (const cwd of wsKnownWorkspaces) {
+          if (cwd && !opts.includes(cwd)) opts.push(cwd);
+        }
+        if (!opts.length) opts.push('(unknown)');
+        for (const cwd of opts) {
+          const o = document.createElement('option');
+          o.value = cwd === '(unknown)' ? '' : cwd;
+          o.textContent =
+            cwd === caps.workspaceCwd
+              ? cwd + ' (default)'
+              : cwd;
+          sel.appendChild(o);
+        }
+        // Restore the current selection (or the default option for null).
+        sel.value = wsTargetCwd || (opts.length ? opts[0] : '');
+        const st = $('ws-target-status');
+        if (st)
+          st.textContent = sel.value && sel.value !== opts[0]
+            ? 'controlling a non-default workspace'
+            : 'controlling the default workspace';
+      }
+
+      async function loadWorkspaceList() {
+        try {
+          const res = await fetch('/rc/workspaces', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) return; // best-effort; the selector still works
+          const j = await res.json();
+          const seen = [];
+          if (Array.isArray(j.workspaces))
+            for (const cwd of j.workspaces)
+              if (cwd && !seen.includes(cwd)) seen.push(cwd);
+          wsKnownWorkspaces = seen;
+          if (j.default) caps = { ...caps, workspaceCwd: j.default };
+        } catch {
+          /* best-effort */
+        }
+        renderWsTargetSelector();
+      }
+
+      // Switch which workspace the sections act on. Resets every cached
+      // snapshot and re-seeds each section with its Load placeholder so no
+      // section can display another workspace's data.
+      function setWsTarget(cwd) {
+        cwd = cwd || null;
+        if (cwd === wsTargetCwd) return;
+        wsTargetCwd = cwd;
+        if (cwd && !wsKnownWorkspaces.includes(cwd))
+          wsKnownWorkspaces.push(cwd);
+        renderWsTargetSelector();
+        wsLastData.trust = null;
+        wsLastData.mcp = null;
+        wsLastData.tools = null;
+        wsLastData.perms = null;
+        renderWsTargetLabels();
+        const form = $('ws-mcp-form');
+        if (form) form.hidden = true;
+        renderWsSectionPlaceholder('ws-trust-body', 'Load', (n) =>
+          loadWorkspaceTrust(n),
+        );
+        renderWsSectionPlaceholder('ws-mcp-body', 'Load', (n) =>
+          loadWorkspaceMcp(n),
+        );
+        renderWsSectionPlaceholder('ws-tools-body', 'Load', (n) =>
+          loadWorkspaceTools(n),
+        );
+        loadPermRules(false);
+      }
+
       function permRulesGate() {
         const wc =
           caps && caps.remoteControl && caps.remoteControl.workspaceControl;
@@ -1387,7 +1531,7 @@
       async function loadPermRules(notify) {
         if (!permRulesGate()) return;
         try {
-          const res = await fetch('/rc/workspace/permissions', {
+          const res = await fetch(wsTargetQuery('/rc/workspace/permissions'), {
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (!res.ok) {
@@ -1430,6 +1574,7 @@
               ruleType,
               rules,
               baseVersion: permRules.version,
+              ...wsTargetBody(),
             }),
           });
           if (!res.ok) {
@@ -1493,13 +1638,14 @@
       // GET /rc/workspace/trust — v2 preferred, v1 fallback for daemons that
       // reject statusVersion=2 (400 invalid_status_version).
       async function fetchWorkspaceTrust() {
-        let res = await fetch('/rc/workspace/trust?statusVersion=2', {
-          headers: { Authorization: 'Bearer ' + token() },
-        });
+        let res = await fetch(
+          wsTargetQuery('/rc/workspace/trust?statusVersion=2'),
+          { headers: { Authorization: 'Bearer ' + token() } },
+        );
         if (res.status === 400) {
           const body = await res.json().catch(() => ({}));
           if (body.code === 'invalid_status_version') {
-            res = await fetch('/rc/workspace/trust', {
+            res = await fetch(wsTargetQuery('/rc/workspace/trust'), {
               headers: { Authorization: 'Bearer ' + token() },
             });
           }
@@ -1597,7 +1743,7 @@
         status.textContent =
           'requested — waiting for the local operator on the daemon host…';
         try {
-          const payload = { desiredState };
+          const payload = { desiredState, ...wsTargetBody() };
           if (reason && reason.trim()) payload.reason = reason.trim();
           const res = await fetch('/rc/workspace/trust/request', {
             method: 'POST',
@@ -1681,7 +1827,7 @@
         const body = $('ws-mcp-body');
         const status = wsSectionStatusEl('ws-mcp-status');
         try {
-          const res = await fetch('/rc/workspace/mcp', {
+          const res = await fetch(wsTargetQuery('/rc/workspace/mcp'), {
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (!res.ok) {
@@ -1799,8 +1945,13 @@
           // config; 'remove' deletes the named entry. The daemon rewrites the
           // whole mcpServers map, so a reload follows.
           const payload = !server.disabled
-            ? { operation: 'remove', name: server.name }
-            : { operation: 'set', name: server.name, config: server.config || {} };
+            ? { operation: 'remove', name: server.name, ...wsTargetBody() }
+            : {
+                operation: 'set',
+                name: server.name,
+                config: server.config || {},
+                ...wsTargetBody(),
+              };
           // Send the version from the last GET so the gateway can reject a
           // stale write (another writer changed the server list in the
           // window) instead of silently clobbering it.
@@ -1848,6 +1999,7 @@
               'Content-Type': 'application/json',
               Authorization: 'Bearer ' + token(),
             },
+            body: JSON.stringify(wsTargetBody()),
           });
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
@@ -1891,7 +2043,7 @@
       // env/headers) for daemons without the settings read.
       async function fetchMcpServerConfig(name) {
         try {
-          const res = await fetch('/rc/workspace/settings', {
+          const res = await fetch(wsTargetQuery('/rc/workspace/settings'), {
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (res.ok) {
@@ -2007,6 +2159,7 @@
               operation: 'set',
               name: serverName,
               config,
+              ...wsTargetBody(),
             };
             // Send the version from the last GET so the gateway can reject
             // a stale write (another writer changed the server list in the
@@ -2058,7 +2211,7 @@
         const body = $('ws-tools-body');
         const status = wsSectionStatusEl('ws-tools-status');
         try {
-          const res = await fetch('/rc/workspace/tools', {
+          const res = await fetch(wsTargetQuery('/rc/workspace/tools'), {
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (!res.ok) {
@@ -2151,7 +2304,7 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
-              body: JSON.stringify({ enabled }),
+              body: JSON.stringify({ enabled, ...wsTargetBody() }),
             },
           );
           if (!res.ok) {
@@ -2244,6 +2397,19 @@
           if (!res.ok) return; // footer stays hidden; not fatal to watching
           ctxInfo = parseContext(await res.json());
           renderFooter();
+          // rc-workspace-scoping (#28): watching a session in a non-default
+          // workspace targets the workspace controls at it — but only when
+          // nothing is explicitly selected (never hijack a manual choice)
+          // and the session cwd actually differs from the boot workspace.
+          if (
+            wsTargetCwd === null &&
+            ctxInfo.cwd &&
+            caps &&
+            caps.workspaceCwd &&
+            ctxInfo.cwd !== caps.workspaceCwd
+          ) {
+            setWsTarget(ctxInfo.cwd);
+          }
         } catch {
           /* transient; leave footer as-is */
         }
@@ -2564,6 +2730,20 @@
           const body = $(bodyId);
           if (on && body && body.childElementCount === 0) {
             renderWsSectionPlaceholder(bodyId, label, loader);
+          }
+        }
+        // rc-workspace-scoping (#28): the target selector appears when at
+        // least one workspace-control surface is available on this daemon.
+        const anyControl = !!(wc.trust || wc.mcp || wc.tools || permRulesGate());
+        const targetSec = $('ws-target');
+        if (targetSec) {
+          targetSec.hidden = !anyControl;
+          if (anyControl) {
+            renderWsTargetLabels();
+            renderWsTargetSelector();
+            $('ws-target-select').onchange = (e) =>
+              setWsTarget(e.target.value);
+            void loadWorkspaceList();
           }
         }
         renderPermRulesSection();
@@ -3355,6 +3535,15 @@
             // Record the RESOLVED workspace (not the raw typed/blank input) so
             // "daemon default" runs still land a real absolute path in Recent.
             if (j.workspaceCwd) pushRecentWorkspace(j.workspaceCwd);
+            // rc-workspace-scoping (#28): offer the freshly resolved
+            // workspace in the target selector (the pool may now hold it).
+            if (
+              j.workspaceCwd &&
+              !wsKnownWorkspaces.includes(j.workspaceCwd)
+            ) {
+              wsKnownWorkspaces.push(j.workspaceCwd);
+              renderWsTargetSelector();
+            }
             setStatus(
               'created ' +
                 j.sessionId.slice(0, 8) +
@@ -3997,15 +4186,15 @@
         const fetches = {
           trust: fetchWorkspaceTrust,
           mcp: () =>
-            fetch('/rc/workspace/mcp', {
+            fetch(wsTargetQuery('/rc/workspace/mcp'), {
               headers: { Authorization: 'Bearer ' + token() },
             }),
           tools: () =>
-            fetch('/rc/workspace/settings', {
+            fetch(wsTargetQuery('/rc/workspace/settings'), {
               headers: { Authorization: 'Bearer ' + token() },
             }),
           perms: () =>
-            fetch('/rc/workspace/permissions', {
+            fetch(wsTargetQuery('/rc/workspace/permissions'), {
               headers: { Authorization: 'Bearer ' + token() },
             }),
         };

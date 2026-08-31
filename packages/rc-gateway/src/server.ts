@@ -1232,6 +1232,35 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // WRITE floor; MUTATIONS are OWNER — `requireScope` already writes the
   // `scope_denied` audit row with the required scope, so the handlers stay
   // scope-agnostic.
+  // GET /rc/workspaces — live workspace listing for the UI's target
+  // selector (rc-workspace-scoping, #28): the default/boot workspace's cwd
+  // (from the daemon's capabilities) plus the non-default cwds the pool
+  // currently holds (a pool without a `workspaces()` implementation reads
+  // as []). Read-only, no audit row; WRITE floor like the other workspace
+  // reads. The default daemon being down is the same failure as any other
+  // workspace read → 502 `daemon_unavailable`.
+  app.get(
+    '/rc/workspaces',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    async (_req, res) => {
+      try {
+        const defaultCwd = (await deps.daemon.capabilities()).workspaceCwd;
+        res.status(200).json({
+          default: defaultCwd,
+          workspaces: deps.daemon.workspaces?.() ?? [],
+        });
+      } catch {
+        if (!res.headersSent) {
+          res
+            .status(502)
+            .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+        }
+      }
+    },
+  );
   const workspacePermissions = createWorkspacePermissionsRoutes(deps.daemon, {
     audit,
   });

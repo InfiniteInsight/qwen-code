@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { DaemonClient } from '@qwen-code/sdk';
+import { DaemonPool } from '../daemonPool.js';
 import { createGatewayApp } from '../server.js';
 import { TokenStore } from '../tokenStore.js';
 import { PairingService } from '../pairing.js';
@@ -495,5 +496,236 @@ describe('POST /rc/workspace/mcp/servers — optimistic concurrency', () => {
     }).then((r) => r.json() as Promise<{ version: string }>);
 
     expect(v2.version).not.toBe(v1.version);
+  });
+});
+
+describe('workspace target (rc-workspace-scoping, #28)', () => {
+  it('GET rejects a repeated (array) workspace query param with 400 invalid_workspace', async () => {
+    // 404 stub status proves the daemon was never reached: a daemon call
+    // would surface as 502 mcp_unsupported, not the parse 400.
+    const ctx = await setup({ workspaceMcpStatus: 404 });
+    const res = await fetch(
+      `${ctx.baseUrl}/rc/workspace/mcp?workspace=a&workspace=b`,
+      { headers: authed(ctx.writeToken) },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe('invalid_workspace');
+    expect(body.error).toBe('Invalid workspace target');
+  });
+
+  it('GET accepts a valid non-default workspace target', async () => {
+    const ctx = await setup({
+      workspaceMcpResult: {
+        v: 1,
+        workspaceCwd: '/proj/a',
+        initialized: true,
+        servers: [],
+        clientCount: 0,
+      },
+    });
+    const res = await fetch(
+      `${ctx.baseUrl}/rc/workspace/mcp?workspace=${encodeURIComponent('/proj/a')}`,
+      { headers: authed(ctx.writeToken) },
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).workspaceCwd).toBe('/proj/a');
+  });
+
+  it('GET with an empty workspace string still targets the default', async () => {
+    const ctx = await setup();
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/mcp?workspace=`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('reload POST rejects a non-string workspace with 400 invalid_workspace (no daemon call)', async () => {
+    const ctx = await setup();
+    for (const workspace of [42, true, null, ['x'], { cwd: '/x' }]) {
+      const res = await fetch(`${ctx.baseUrl}/rc/workspace/mcp/reload`, {
+        method: 'POST',
+        headers: authed(ctx.ownerToken),
+        body: JSON.stringify({ workspace }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('invalid_workspace');
+    }
+    expect(ctx.stub.lastMcpReloadBody).toBeUndefined();
+  });
+
+  it('reload POST for a non-default target audits detail.workspace', async () => {
+    const ctx = await setup();
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/mcp/reload`, {
+      method: 'POST',
+      headers: authed(ctx.ownerToken),
+      body: JSON.stringify({ workspace: '/proj/a' }),
+    });
+    expect(res.status).toBe(200);
+    const rows = (await auditRows()).filter(
+      (r) => r.action === 'workspace_mcp_reloaded',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].detail).toEqual({ workspace: '/proj/a' });
+  });
+
+  it('servers POST for a non-default target audits name + workspace', async () => {
+    const ctx = await setup();
+    const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
+      operation: 'set',
+      name: 'memory',
+      config: { command: 'npx', args: ['-y', 'memory-mcp'] },
+      workspace: '/proj/a',
+    });
+    expect(res.status).toBe(200);
+    const rows = (await auditRows()).filter(
+      (r) => r.action === 'workspace_mcp_server_set',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].detail).toEqual({ name: 'memory', workspace: '/proj/a' });
+  });
+
+  it('servers POST rejects a non-string workspace with 400 invalid_workspace (no daemon call)', async () => {
+    const ctx = await setup();
+    const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
+      operation: 'set',
+      name: 'memory',
+      config: { command: 'npx' },
+      workspace: 42,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_workspace');
+    expect(ctx.stub.lastSetSettingBody).toBeUndefined();
+  });
+});
+
+describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
+  /**
+   * A real DaemonPool wired in as the gateway's `daemon` dep: cap of 1
+   * with one busy entry (a live session → not evictable), so a NEW
+   * workspace target cannot be spawned — the routes must map
+   * WorkspacePoolFullError to 503 `workspace_pool_full`, not 502.
+   */
+  async function setupPoolAtCap(): Promise<{
+    baseUrl: string;
+    writeToken: string;
+    ownerToken: string;
+  }> {
+    const pool = new DaemonPool({
+      defaultDaemon: {
+        async capabilities() {
+          return { workspaceCwd: '/home/evan' };
+        },
+        async workspaceMcp() {
+          return {
+            v: 1,
+            workspaceCwd: '/home/evan',
+            initialized: true,
+            servers: [],
+            clientCount: 0,
+          };
+        },
+      } as unknown as DaemonClient,
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 1,
+      idleReapMs: 999_999_999,
+      spawn: async (cwd) => ({
+        client: {
+          async createOrAttachSession() {
+            return {
+              sessionId: `${cwd}-s`,
+              workspaceCwd: cwd,
+              attached: false,
+            };
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    // Occupy the single pool slot with a busy entry (a live session).
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+
+    const store = await TokenStore.open(join(runtimeBase, 'tokens.json'));
+    const { token: writeToken } = await store.issue(['write'], 'w');
+    const { token: ownerToken } = await store.issue(['owner'], 'o');
+    const gw = createGatewayApp({
+      daemon: pool,
+      store,
+      pairing: new PairingService(),
+      auditPath,
+    });
+    server = await new Promise((resolve) => {
+      const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const { port } = server.address() as AddressInfo;
+    return {
+      baseUrl: `http://127.0.0.1:${port}`,
+      writeToken,
+      ownerToken,
+    };
+  }
+
+  it('GET ?workspace=<new cwd> at pool cap → 503 workspace_pool_full (default target unaffected)', async () => {
+    const ctx = await setupPoolAtCap();
+    const res = await fetch(
+      `${ctx.baseUrl}/rc/workspace/mcp?workspace=${encodeURIComponent('/proj/b')}`,
+      { headers: authed(ctx.writeToken) },
+    );
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe('workspace_pool_full');
+    expect(body.error).toBe('Workspace daemon pool is full (max 1)');
+    // The default workspace is not pooled — it stays reachable at cap.
+    const ok = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('reload POST for a new workspace at pool cap → 503 workspace_pool_full', async () => {
+    const ctx = await setupPoolAtCap();
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/mcp/reload`, {
+      method: 'POST',
+      headers: authed(ctx.ownerToken),
+      body: JSON.stringify({ workspace: '/proj/b' }),
+    });
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('workspace_pool_full');
+  });
+});
+
+describe('GET /rc/workspaces (rc-workspace-scoping, #28)', () => {
+  it('lists the default cwd (capabilities) plus the pool-held workspaces', async () => {
+    // A plain DaemonClient has no workspaces() member → reads as [].
+    const ctx = await setup();
+    const res = await fetch(`${ctx.baseUrl}/rc/workspaces`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      default: '/stub/workspace',
+      workspaces: [],
+    });
+  });
+
+  it('session:read token → 403 scope_required (WRITE floor)', async () => {
+    const ctx = await setup();
+    const { token: readToken } = await ctx.store.issue(['session:read'], 'r');
+    const res = await fetch(`${ctx.baseUrl}/rc/workspaces`, {
+      headers: authed(readToken),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe('scope_required');
+  });
+
+  it('daemon down → 502 daemon_unavailable', async () => {
+    const ctx = await setup();
+    await ctx.stub.crash();
+    const res = await fetch(`${ctx.baseUrl}/rc/workspaces`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('daemon_unavailable');
   });
 });

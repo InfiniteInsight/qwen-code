@@ -1074,3 +1074,208 @@ describe('DaemonPool death detection', () => {
     expect(typeof calls[0].exit.atMs).toBe('number');
   });
 });
+
+describe('DaemonPool workspace scoping (rc-workspace-scoping, #28)', () => {
+  /** fakeClient plus the ten workspace methods, each recording itself. */
+  function wsClient(tag: string) {
+    const calls: string[] = [];
+    return {
+      ...fakeClient(tag, `${tag}-s`),
+      tag,
+      calls,
+      async workspacePermissions() {
+        calls.push('workspacePermissions');
+        return { calledOn: tag };
+      },
+      async setWorkspacePermissionRules(
+        _scope: string,
+        _ruleType: string,
+        rules: readonly string[],
+      ) {
+        calls.push('setWorkspacePermissionRules:' + rules.join(','));
+        return { calledOn: tag };
+      },
+      async workspaceTrust() {
+        calls.push('workspaceTrust');
+        return { calledOn: tag };
+      },
+      async requestWorkspaceTrustChange(request: { desiredState: string }) {
+        calls.push('requestWorkspaceTrustChange:' + request.desiredState);
+        return { calledOn: tag };
+      },
+      async workspaceSettings() {
+        calls.push('workspaceSettings');
+        return { calledOn: tag };
+      },
+      async setWorkspaceSetting(_scope: string, key: string) {
+        calls.push('setWorkspaceSetting:' + key);
+        return { calledOn: tag };
+      },
+      async workspaceToolsCatalog() {
+        calls.push('workspaceToolsCatalog');
+        return { calledOn: tag };
+      },
+      async setWorkspaceToolEnabled(toolName: string) {
+        calls.push('setWorkspaceToolEnabled:' + toolName);
+        return { calledOn: tag };
+      },
+      async workspaceMcp() {
+        calls.push('workspaceMcp');
+        return { calledOn: tag };
+      },
+      async reloadWorkspaceMcp() {
+        calls.push('reloadWorkspaceMcp');
+        return { calledOn: tag };
+      },
+    } as unknown as DaemonClient & {
+      calls: string[];
+      tag: string;
+      calledOn?: string;
+    };
+  }
+
+  function makeWsHarness(opts: { maxDaemons?: number } = {}) {
+    const log: string[] = [];
+    const defaultClient = wsClient('default');
+    const clients = new Map<string, ReturnType<typeof wsClient>>();
+    const pool = new DaemonPool({
+      defaultDaemon: defaultClient,
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: opts.maxDaemons,
+      idleReapMs: 999_999_999,
+      spawn: async (cwd) => {
+        log.push(cwd);
+        const client = wsClient(cwd);
+        clients.set(cwd, client);
+        return { client, stop: async () => {}, workspaceCwd: cwd };
+      },
+    });
+    return { pool, log, clients, defaultClient };
+  }
+
+  it('routes every workspace method to the daemon spawned for a non-default cwd', async () => {
+    const h = makeWsHarness();
+    await h.pool.workspacePermissions(undefined, '/proj/a');
+    await h.pool.setWorkspacePermissionRules(
+      'workspace',
+      'allow',
+      ['Bash(git *)'],
+      undefined,
+      '/proj/a',
+    );
+    await h.pool.workspaceTrust(undefined, '/proj/a');
+    await h.pool.workspaceTrust({ statusVersion: 2 }, '/proj/a');
+    await h.pool.requestWorkspaceTrustChange(
+      { desiredState: 'trusted' },
+      undefined,
+      '/proj/a',
+    );
+    await h.pool.workspaceSettings(undefined, '/proj/a');
+    await h.pool.setWorkspaceSetting(
+      'workspace',
+      'mcpServers',
+      {},
+      undefined,
+      '/proj/a',
+    );
+    await h.pool.workspaceToolsCatalog('/proj/a');
+    await h.pool.setWorkspaceToolEnabled(
+      'grep_search',
+      true,
+      undefined,
+      '/proj/a',
+    );
+    await h.pool.workspaceMcp('/proj/a');
+    await h.pool.reloadWorkspaceMcp(undefined, '/proj/a');
+    // One spawn, shared by every method — and nothing hit the boot daemon.
+    expect(h.log).toEqual(['/proj/a']);
+    const spawned = h.clients.get('/proj/a');
+    expect(spawned).toBeDefined();
+    expect(spawned!.calls).toEqual([
+      'workspacePermissions',
+      'setWorkspacePermissionRules:Bash(git *)',
+      'workspaceTrust',
+      'workspaceTrust',
+      'requestWorkspaceTrustChange:trusted',
+      'workspaceSettings',
+      'setWorkspaceSetting:mcpServers',
+      'workspaceToolsCatalog',
+      'setWorkspaceToolEnabled:grep_search',
+      'workspaceMcp',
+      'reloadWorkspaceMcp',
+    ]);
+    expect(h.defaultClient.calls).toEqual([]);
+  });
+
+  it('an omitted or default cwd targets the boot daemon and never spawns', async () => {
+    const h = makeWsHarness();
+    await h.pool.workspaceMcp();
+    await h.pool.workspacePermissions();
+    await h.pool.workspaceMcp('/home/evan/'); // normalized default
+    expect(h.log).toEqual([]);
+    expect(h.defaultClient.calls).toEqual([
+      'workspaceMcp',
+      'workspacePermissions',
+      'workspaceMcp',
+    ]);
+  });
+
+  it('transport death on a non-default target removes the entry; the next call respawns', async () => {
+    let spawned = 0;
+    const h = makeDeathHarness({
+      client: (cwd) => {
+        const c = { ...fakeClient(cwd, `${cwd}-s`) } as Record<string, unknown>;
+        if (spawned++ > 0) {
+          c.workspaceMcp = async () => ({ calledOn: cwd + '#2' });
+        } else {
+          c.workspaceMcp = async () => {
+            // fetch wraps the socket error under a TypeError with `cause`.
+            throw Object.assign(new TypeError('mcp: fetch failed'), {
+              cause: Object.assign(
+                new Error('connect ECONNREFUSED 127.0.0.1:4181'),
+                { code: 'ECONNREFUSED' },
+              ),
+            });
+          };
+        }
+        return c;
+      },
+    });
+    await expect(h.pool.workspaceMcp('/proj/a')).rejects.toThrow(
+      /fetch failed/,
+    );
+    expect(h.pool.size()).toBe(0); // marked dead on the transport error
+    expect(h.deaths).toHaveLength(1);
+    expect(h.auditRows[0].action).toBe('daemon_died');
+    // The next call spawns a fresh daemon for the same cwd.
+    const second = (await h.pool.workspaceMcp('/proj/a')) as unknown as {
+      calledOn: string;
+    };
+    expect(second.calledOn).toBe('/proj/a#2');
+    expect(spawned).toBe(2);
+  });
+
+  it('WorkspacePoolFullError from a workspace method propagates untouched (the route maps it to 503)', async () => {
+    const h = makeWsHarness({ maxDaemons: 1 });
+    await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(
+      h.pool.workspacePermissions(undefined, '/proj/b'),
+    ).rejects.toBeInstanceOf(WorkspacePoolFullError);
+    expect(h.log).toEqual(['/proj/a']); // /proj/b was never spawned
+    // The pool-full rejection did not mark the held daemon dead.
+    const alive = (await h.pool.workspaceMcp('/proj/a')) as unknown as {
+      calledOn: string;
+    };
+    expect(alive.calledOn).toBe('/proj/a');
+    expect(h.pool.size()).toBe(1);
+  });
+
+  it('workspaces() lists the non-default cwds the pool holds (default excluded)', async () => {
+    const h = makeWsHarness();
+    expect(h.pool.workspaces()).toEqual([]);
+    await h.pool.workspaceToolsCatalog('/proj/a');
+    await h.pool.workspaceMcp('/proj/b');
+    await h.pool.workspaceSettings('/home/evan'); // default: no entry
+    expect(h.pool.workspaces().sort()).toEqual(['/proj/a', '/proj/b']);
+  });
+});

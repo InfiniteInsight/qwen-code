@@ -129,38 +129,55 @@ export interface SessionDaemon {
   ): Promise<DaemonRestoredSession>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
-  // Daemon-global methods: no session id, always the default/boot daemon
-  // (workspace state is per-daemon, and the pool's pooled daemons are
-  // session-scoped). Signatures copied verbatim from `DaemonClient`.
+  // Daemon-global methods: no session id, but workspace-scoped — each takes
+  // an optional trailing `workspaceCwd` (rc-workspace-scoping, #28) naming
+  // the workspace to act on; omitted/empty/the default workspace's cwd
+  // targets the default/boot daemon. A `DaemonClient`'s own workspace
+  // methods ignore the extra argument (they have no trailing parameter,
+  // which is structurally fine), so a real `DaemonClient` still satisfies
+  // this interface. Signatures otherwise copied verbatim from `DaemonClient`.
 
-  workspacePermissions(opts?: {
-    clientId?: string;
-  }): Promise<DaemonWorkspacePermissionsStatus>;
+  workspacePermissions(
+    opts?: { clientId?: string },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspacePermissionsStatus>;
   setWorkspacePermissionRules(
     scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,
     rules: readonly string[],
     opts?: { clientId?: string },
+    workspaceCwd?: string,
   ): Promise<DaemonWorkspacePermissionsStatus>;
-  workspaceTrust(opts?: {
-    clientId?: string;
-    statusVersion?: 1;
-  }): Promise<DaemonWorkspaceTrustStatus>;
-  workspaceTrust(opts: {
-    clientId?: string;
-    statusVersion: 2;
-  }): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
-  workspaceTrust(opts?: {
-    clientId?: string;
-    statusVersion?: 1 | 2;
-  }): Promise<DaemonWorkspaceTrustStatusResponse>;
+  workspaceTrust(
+    opts?: {
+      clientId?: string;
+      statusVersion?: 1;
+    },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceTrustStatus>;
+  workspaceTrust(
+    opts: {
+      clientId?: string;
+      statusVersion: 2;
+    },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
+  workspaceTrust(
+    opts?: {
+      clientId?: string;
+      statusVersion?: 1 | 2;
+    },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceTrustStatusResponse>;
   requestWorkspaceTrustChange(
     request: DaemonWorkspaceTrustChangeRequest,
     clientId?: string,
+    workspaceCwd?: string,
   ): Promise<DaemonWorkspaceTrustChangeResult>;
-  workspaceSettings(opts?: {
-    clientId?: string;
-  }): Promise<DaemonWorkspaceSettingsStatus>;
+  workspaceSettings(
+    opts?: { clientId?: string },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceSettingsStatus>;
   setWorkspaceSetting(
     scope: 'workspace' | 'user',
     key: string,
@@ -169,22 +186,29 @@ export interface SessionDaemon {
       clientId?: string;
       mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
     },
+    workspaceCwd?: string,
   ): Promise<DaemonSettingUpdateResult>;
-  workspaceToolsCatalog(): Promise<DaemonToolCatalog>;
+  workspaceToolsCatalog(workspaceCwd?: string): Promise<DaemonToolCatalog>;
   setWorkspaceToolEnabled(
     toolName: string,
     enabled: boolean,
     opts?: { clientId?: string },
+    workspaceCwd?: string,
   ): Promise<DaemonToolToggleResult>;
-  workspaceMcp(): Promise<DaemonWorkspaceMcpStatus>;
+  workspaceMcp(workspaceCwd?: string): Promise<DaemonWorkspaceMcpStatus>;
   reloadWorkspaceMcp(
     options?: DaemonWorkspaceMcpReloadOptions,
+    workspaceCwd?: string,
   ): Promise<DaemonWorkspaceMcpInitializeResult>;
 
   /** The session's recovery state (add-mid-turn-recovery §3). Optional — a
    * plain `DaemonClient` has no recovery behind it, so the events route
    * treats a missing implementation as `'idle'`. */
   recoveryState?(sessionId: string): RecoveryState;
+  /** Live pooled workspace cwds, excl. the default (rc-workspace-scoping,
+   * #28). Optional — a plain `DaemonClient` has no pool behind it, so the
+   * workspace listing route treats a missing implementation as `[]`. */
+  workspaces?(): string[];
 }
 
 export interface DaemonPoolOptions {
@@ -606,6 +630,33 @@ export class DaemonPool implements SessionDaemon {
     }
   }
 
+  /** Run a workspace-scoped pool call (rc-workspace-scoping, #28) against
+   * the target workspace's daemon — the default/boot daemon when
+   * `workspaceCwd` is omitted/empty/normalizes to the default workspace,
+   * otherwise the pooled daemon for that cwd (spawned on demand via
+   * `getOrSpawn`, exactly like session creation — a controllable workspace
+   * does not need a live session). Marks that workspace dead on a
+   * transport-level error (then rethrow; routes keep their 502 mapping) —
+   * for the default target this is byte-for-byte the
+   * `withDefaultDeathTrigger` behavior. A `WorkspacePoolFullError` from
+   * `getOrSpawn` is not a transport death: it propagates untouched for the
+   * route's 503 mapping. */
+  private async withWorkspaceDeathTrigger<T>(
+    workspaceCwd: string | undefined,
+    call: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> {
+    const key = this.isDefault(workspaceCwd)
+      ? this.defaultWorkspaceCwd
+      : this.normalizeCwd(workspaceCwd!);
+    try {
+      const client = await this.getOrSpawn(workspaceCwd);
+      return await call(client);
+    } catch (err) {
+      this.noteTransportDeathByKey(key, err);
+      throw err;
+    }
+  }
+
   // -- Session routing ------------------------------------------------
 
   /** The session's recovery state (add-mid-turn-recovery §3): delegated to
@@ -879,13 +930,18 @@ export class DaemonPool implements SessionDaemon {
     );
   }
 
-  // -- Workspace control (rc-workspace-permissions) --------------------
+  // -- Workspace control (rc-workspace-permissions, scoped per #28) -----
+  // Each takes an optional trailing `workspaceCwd` and resolves the target
+  // through the pool (default/boot daemon when omitted or the default
+  // workspace; spawn-on-demand otherwise) with the same transport-death
+  // fallback as session-keyed calls.
 
-  workspacePermissions(opts?: {
-    clientId?: string;
-  }): Promise<DaemonWorkspacePermissionsStatus> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.workspacePermissions(opts),
+  workspacePermissions(
+    opts?: { clientId?: string },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspacePermissions(opts),
     );
   }
 
@@ -894,41 +950,46 @@ export class DaemonPool implements SessionDaemon {
     ruleType: DaemonPermissionRuleType,
     rules: readonly string[],
     opts?: { clientId?: string },
+    workspaceCwd?: string,
   ): Promise<DaemonWorkspacePermissionsStatus> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.setWorkspacePermissionRules(
-        scope,
-        ruleType,
-        rules,
-        opts,
-      ),
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.setWorkspacePermissionRules(scope, ruleType, rules, opts),
     );
   }
 
-  workspaceTrust(opts?: {
-    clientId?: string;
-    statusVersion?: 1;
-  }): Promise<DaemonWorkspaceTrustStatus>;
-  workspaceTrust(opts: {
-    clientId?: string;
-    statusVersion: 2;
-  }): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
-  workspaceTrust(opts?: {
-    clientId?: string;
-    statusVersion?: 1 | 2;
-  }): Promise<DaemonWorkspaceTrustStatusResponse> {
+  workspaceTrust(
+    opts?: {
+      clientId?: string;
+      statusVersion?: 1;
+    },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceTrustStatus>;
+  workspaceTrust(
+    opts: {
+      clientId?: string;
+      statusVersion: 2;
+    },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
+  workspaceTrust(
+    opts?: {
+      clientId?: string;
+      statusVersion?: 1 | 2;
+    },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceTrustStatusResponse> {
     // Dispatch by statusVersion so the inner call matches one of the
     // DaemonClient overloads (the union-typed opts matches neither). The
     // consts keep the narrowing intact across the closure boundary.
     const statusVersion = opts?.statusVersion ?? 1;
     const clientId = opts?.clientId;
-    return this.withDefaultDeathTrigger(() =>
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       statusVersion === 2
-        ? this.opts.defaultDaemon.workspaceTrust({
+        ? client.workspaceTrust({
             ...(clientId !== undefined ? { clientId } : {}),
             statusVersion: 2,
           })
-        : this.opts.defaultDaemon.workspaceTrust(
+        : client.workspaceTrust(
             clientId !== undefined ? { clientId } : undefined,
           ),
     );
@@ -937,17 +998,19 @@ export class DaemonPool implements SessionDaemon {
   requestWorkspaceTrustChange(
     request: DaemonWorkspaceTrustChangeRequest,
     clientId?: string,
+    workspaceCwd?: string,
   ): Promise<DaemonWorkspaceTrustChangeResult> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.requestWorkspaceTrustChange(request, clientId),
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.requestWorkspaceTrustChange(request, clientId),
     );
   }
 
-  workspaceSettings(opts?: {
-    clientId?: string;
-  }): Promise<DaemonWorkspaceSettingsStatus> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.workspaceSettings(opts),
+  workspaceSettings(
+    opts?: { clientId?: string },
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceSettingsStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceSettings(opts),
     );
   }
 
@@ -959,15 +1022,16 @@ export class DaemonPool implements SessionDaemon {
       clientId?: string;
       mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
     },
+    workspaceCwd?: string,
   ): Promise<DaemonSettingUpdateResult> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.setWorkspaceSetting(scope, key, value, opts),
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.setWorkspaceSetting(scope, key, value, opts),
     );
   }
 
-  workspaceToolsCatalog(): Promise<DaemonToolCatalog> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.workspaceToolsCatalog(),
+  workspaceToolsCatalog(workspaceCwd?: string): Promise<DaemonToolCatalog> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceToolsCatalog(),
     );
   }
 
@@ -975,23 +1039,25 @@ export class DaemonPool implements SessionDaemon {
     toolName: string,
     enabled: boolean,
     opts?: { clientId?: string },
+    workspaceCwd?: string,
   ): Promise<DaemonToolToggleResult> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.setWorkspaceToolEnabled(toolName, enabled, opts),
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.setWorkspaceToolEnabled(toolName, enabled, opts),
     );
   }
 
-  workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.workspaceMcp(),
+  workspaceMcp(workspaceCwd?: string): Promise<DaemonWorkspaceMcpStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceMcp(),
     );
   }
 
   reloadWorkspaceMcp(
     options?: DaemonWorkspaceMcpReloadOptions,
+    workspaceCwd?: string,
   ): Promise<DaemonWorkspaceMcpInitializeResult> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.reloadWorkspaceMcp(options),
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.reloadWorkspaceMcp(options),
     );
   }
 
