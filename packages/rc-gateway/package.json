@@ -1,0 +1,41 @@
+{
+  "name": "@qwen-code/rc-gateway",
+  "version": "0.17.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "qwen-rc": "dist/cli.js",
+    "qwen-rc-bridge": "dist/bridge-sidecar.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@qwen-code/qwen-code-core": "*",
+    "@qwen-code/sdk": "*",
+    "discord.js": "^14.16.3",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "smol-toml": "^1.6.1",
+    "web-push": "^3.6.7",
+    "yaml": "^2.8.1"
+  },
+  "optionalDependencies": {
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
+    "better-sqlite3": "^11.10.0",
+    "bonjour-service": "^1.4.1",
+    "matrix-bot-sdk": "^0.8.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^4.17.21",
+    "@types/qrcode": "^1.5.6",
+    "@types/web-push": "^3.6.4"
+  }
+}

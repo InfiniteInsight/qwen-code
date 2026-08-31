@@ -1,0 +1,359 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { DaemonClient } from '@qwen-code/sdk';
+import type { AuditRecorder } from '../auditLog.js';
+import type { Policy } from './loader.js';
+import {
+  evaluate,
+  type PolicyDecision,
+  type QuotaOracle,
+} from './evaluator.js';
+import type { QuotaStore } from './quotas.js';
+import type { PermissionOverlayStore } from './overlays.js';
+import { selectAllowOnceOptionId } from '../permissionOptions.js';
+import { frameToContext, type FrameContext } from './frameContext.js';
+
+/** Safe optional read of a string field from an unknown record. */
+function readString(
+  obj: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const v = obj[key];
+  return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * The site-derivable "why" token for a resolved decision (P4). Derived
+ * purely from the decision the enforcer already holds — no trace recompute.
+ * `eval-error` is NOT produced here (that branch has no PolicyDecision); the
+ * catch site sets it literally. Near-miss causes (quota-exhausted, expired,
+ * outside-time-window) make a rule fall through to source:'default', so they
+ * are indistinguishable here from a genuine no-match — they surface only in
+ * the explain trace, never in this token.
+ */
+export function policyDecisionReason(d: PolicyDecision): string {
+  if (d.source === 'default') return 'default';
+  if (d.usedDeferredField) return 'rule-downgraded-deferred';
+  return `rule-${d.action}`;
+}
+
+/**
+ * Evaluates `permission_request` events against a {@link Policy} and, on an
+ * `allow`/`deny` decision, auto-casts the cycle-6 nested vote against the
+ * daemon. `prompt` (the fail-closed default) and any fail-safe miss return
+ * false so the caller falls through to push.
+ *
+ * Security contract:
+ * - **Fail-closed:** empty/absent policy → evaluator returns `prompt` → never
+ *   votes → behavior identical to pre-policy.
+ * - **Fail-safe:** an `allow`/`deny` with no usable `requestId` (or, for allow,
+ *   no `approveOptionId`) → DO NOT vote; return false. Never fabricate an id.
+ * - **Never throws:** every daemon call is wrapped; a thrown/false vote audits
+ *   `voted:false` and returns false (fall through to push). Frame extraction
+ *   and policy evaluation (`frameToContext`/`evaluate`) are ALSO wrapped, so
+ *   an unexpected throw there takes the same no-vote path as a `prompt`
+ *   decision, rather than escaping this method.
+ * - **Audit hygiene:** `policy_decision` detail carries only
+ *   `{requestId, action, tool?, ruleId?, overlayId?, voted, decisionSource,
+ *   reason, quotaRemaining?}` — NEVER the tool args/paths/prompt. `tool` is
+ *   the tool's kind/name from the frame (absent when the frame carries none)
+ *   so rule hits can be checked per tool. `decisionSource` is `'policy'|'default'`
+ *   (a fixed token); `reason` is the closed-enum "why" token from
+ *   {@link policyDecisionReason} (or the literal `'eval-error'` on the
+ *   eval-error fail-safe path). `overlayId` (issue #33) is set only when a
+ *   session-scoped overlay rule produced the decision — `ruleId` already
+ *   carries the overlay id, so the decisions feed's `rule=` filter works on
+ *   overlays too.
+ * - **Overlays (issue #33):** when constructed with a
+ *   {@link PermissionOverlayStore}, the per-session overlay policy is also
+ *   evaluated for every event; a matched overlay rule
+ *   (`source === 'policy'`) PREEMPTS the file policy's decision, and the
+ *   file decision stands whenever no overlay rule matches. Overlays never
+ *   offer `maxPerWindow`, so the
+ *   overlay evaluation runs WITHOUT the quota oracle (a would-be
+ *   maxPerWindow classifies as untracked → prompt, fail-safe). Absent store
+ *   → byte-identical behavior to the file-policy-only path.
+ */
+export class PolicyEnforcer {
+  constructor(
+    private readonly daemon: DaemonClient,
+    private policy: Policy,
+    private readonly audit?: AuditRecorder,
+    /**
+     * Optional rolling-window quota store (cycle 43). When present, a matched
+     * `maxPerWindow` rule with room auto-allows (and is consumed after a
+     * successful vote); exhausted falls through; absent → maxPerWindow stays a
+     * prompt (the pre-quota behavior). The store's `limitsFor` must reflect the
+     * active policy (hot-reload, Phase 3, would rebuild it on `setPolicy`).
+     */
+    private readonly quota?: QuotaStore,
+    /** Injected clock (epoch-ms) for deterministic tests. */
+    private readonly nowFn: () => number = Date.now,
+    /**
+     * Lazily-read project-root resolver, anchoring `pathGlob` matching
+     * (frameContext.ts). MUST resolve to a value sourced from daemon
+     * capabilities/config — NEVER from the frame's `rawInput` — or a
+     * prompt-injected model could move the anchor out from under a
+     * `pathGlob` deny on a literal path (see frameContext.ts / evaluator.ts).
+     * A closure (rather than a value captured at construction) so callers
+     * whose project root resolves later in boot (cli.ts) don't need to
+     * reorder construction.
+     */
+    private readonly projectRootFn: () => string = () => process.cwd(),
+    /**
+     * Optional session-scoped permission overlays (issue #33) — TTL-bound
+     * dashboard-set rules that preempt the file policy for one session (or
+     * all sessions) until they auto-expire. Absent → the enforcer behaves
+     * exactly as before (no overlay evaluation at all).
+     */
+    private readonly overlays?: PermissionOverlayStore,
+  ) {}
+
+  /** Swap the active policy (for a future hot-reload). */
+  setPolicy(policy: Policy): void {
+    this.policy = policy;
+  }
+
+  /**
+   * Evaluate a permission_request event and, on allow/deny, cast the vote.
+   * Returns true iff the event was auto-handled (caller should NOT push).
+   * Never throws.
+   */
+  async handlePermission(
+    sessionId: string,
+    event: { type: string; data: unknown },
+  ): Promise<boolean> {
+    if (event.type !== 'permission_request') return false;
+
+    // Defensive ctx extraction (design §2): event.data shape is untrusted.
+    const data: Record<string, unknown> =
+      typeof event.data === 'object' &&
+      event.data !== null &&
+      !Array.isArray(event.data)
+        ? (event.data as Record<string, unknown>)
+        : {};
+    const requestId = readString(data, 'requestId');
+    // The ONE-TIME approve option (kind 'allow_once'), never options[0] — that
+    // is typically 'allow_always', which would persist a standing grant / flip
+    // the session to auto-edit, escalating a single policy match into a blanket
+    // bypass of all future gateway evaluation. Absent → we do NOT vote (below).
+    const approveOptionId = selectAllowOnceOptionId(data['options']);
+
+    // One instant for the whole decision: the quota CHECK (in evaluate) and the
+    // post-vote CONSUME prune against the SAME window boundary.
+    const nowMs = this.nowFn();
+    const now = new Date(nowMs);
+    const oracle: QuotaOracle | undefined = this.quota
+      ? { state: (id, ms) => this.quota!.state(id, ms) }
+      : undefined;
+
+    // projectRoot MUST come from the daemon/config resolver (this.projectRootFn),
+    // NEVER from the frame's rawInput — see the constructor doc above.
+    // `ctx` is declared outside the try so the audit sites below can record
+    // the frame's tool (issue #32). If frameToContext itself throws, ctx
+    // stays undefined and the tool is simply omitted.
+    let ctx: FrameContext | undefined;
+    let d: ReturnType<typeof evaluate>;
+    // The overlay id that produced `d` (issue #33) — undefined when the
+    // file policy decided. Set together with `d` inside the try, so the
+    // eval-error path (either evaluation throws) never carries a stale one.
+    let overlayId: string | undefined;
+    try {
+      ctx = frameToContext(event.data, {
+        projectRoot: this.projectRootFn(),
+      });
+      d = evaluate(this.policy, ctx, now, oracle);
+      // Session-scoped overlays (issue #33) preempt the file policy: the
+      // per-session overlay policy is evaluated WITHOUT the quota oracle
+      // (overlays never offer maxPerWindow). A matched overlay rule
+      // (source 'policy') wins — including an overlay 'prompt', which
+      // downgrades a file 'allow'; otherwise the file decision stands.
+      if (this.overlays) {
+        const od = evaluate(
+          this.overlays.policyFor(sessionId, nowMs),
+          ctx,
+          now,
+        );
+        if (od.source === 'policy') {
+          d = od;
+          overlayId = od.ruleId;
+        }
+      }
+    } catch {
+      // NEVER THROWS (class docstring): an unexpected extraction/evaluation
+      // failure must not crash the caller. Fall through to the same no-vote
+      // path a `prompt` decision takes — never vote, audit it, return false.
+      void this.audit?.record({
+        action: 'policy_decision',
+        target: sessionId,
+        detail: {
+          requestId,
+          action: 'prompt',
+          ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
+          voted: false,
+          decisionSource: 'default',
+          reason: 'eval-error',
+        },
+      });
+      return false;
+    }
+
+    if (d.action === 'allow') {
+      if (requestId && approveOptionId) {
+        // Reserve-at-decision (closes the maxPerWindow check-then-consume race
+        // across concurrent sessions, quotas.ts#reserve): commit the slot HERE,
+        // synchronously, the instant the decision is 'allow' — strictly before
+        // the vote's `await` below. Everything from the `evaluate()` call
+        // above through this line is synchronous (no `await`), so by JS
+        // run-to-completion no OTHER `handlePermission` call — even one
+        // racing the SAME ruleId from a different session — can run in
+        // between. That other call's own `evaluate()` check therefore either
+        // runs entirely before this reservation (and reserves the slot
+        // itself) or entirely after (and sees this reservation via the same
+        // oracle, i.e. 'exhausted' → falls through to prompt on its OWN
+        // check, never reaching its vote). Only ONE of two concurrent
+        // decisions on a count:1 rule can ever reserve.
+        let reservedRuleId: string | undefined;
+        if (
+          this.quota &&
+          d.ruleId &&
+          this.quota.remaining(d.ruleId, nowMs) !== undefined
+        ) {
+          reservedRuleId = this.quota.reserve(d.ruleId, nowMs)
+            ? d.ruleId
+            : undefined;
+        }
+        try {
+          const ok = await this.daemon.respondToSessionPermission(
+            sessionId,
+            requestId,
+            { outcome: { outcome: 'selected', optionId: approveOptionId } },
+          );
+          if (ok) {
+            // CONFIRM the reservation made above — persist it durably (WAL).
+            // The in-memory count was already committed by reserve(), so this
+            // is append-only, never a second in-memory consume.
+            let quotaRemaining: number | undefined;
+            if (reservedRuleId) {
+              await this.quota!.confirmReserved(reservedRuleId, nowMs);
+              quotaRemaining = this.quota!.remaining(reservedRuleId, nowMs);
+            }
+            void this.audit?.record({
+              action: 'policy_decision',
+              target: sessionId,
+              detail: {
+                requestId,
+                action: 'allow',
+                ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
+                ruleId: d.ruleId,
+                ...(overlayId ? { overlayId } : {}),
+                voted: true,
+                decisionSource: d.source,
+                reason: policyDecisionReason(d),
+                ...(quotaRemaining !== undefined ? { quotaRemaining } : {}),
+              },
+            });
+            return true;
+          }
+          // Vote returned false (not thrown): RELEASE the reservation — a
+          // failed vote must not permanently consume a slot (fail-safe,
+          // preserved from before this fix).
+          if (reservedRuleId) {
+            this.quota!.releaseReserved(reservedRuleId, nowMs);
+          }
+        } catch {
+          // Swallow — a thrown vote is the same fail-safe as a `false` vote:
+          // release any reservation, then fall through to the audit below.
+          if (reservedRuleId) {
+            this.quota!.releaseReserved(reservedRuleId, nowMs);
+          }
+        }
+      }
+      void this.audit?.record({
+        action: 'policy_decision',
+        target: sessionId,
+        detail: {
+          requestId,
+          action: 'allow',
+          ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
+          ruleId: d.ruleId,
+          ...(overlayId ? { overlayId } : {}),
+          voted: false,
+          decisionSource: d.source,
+          reason: policyDecisionReason(d),
+        },
+      });
+      return false;
+    }
+
+    if (d.action === 'deny') {
+      if (requestId) {
+        try {
+          const ok = await this.daemon.respondToSessionPermission(
+            sessionId,
+            requestId,
+            { outcome: { outcome: 'cancelled' } },
+          );
+          if (ok) {
+            void this.audit?.record({
+              action: 'policy_decision',
+              target: sessionId,
+              detail: {
+                requestId,
+                action: 'deny',
+                ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
+                ruleId: d.ruleId,
+                ...(overlayId ? { overlayId } : {}),
+                voted: true,
+                decisionSource: d.source,
+                reason: policyDecisionReason(d),
+              },
+            });
+            return true;
+          }
+        } catch {
+          // Swallow — fall through to the fail-safe below.
+        }
+      }
+      void this.audit?.record({
+        action: 'policy_decision',
+        target: sessionId,
+        detail: {
+          requestId,
+          action: 'deny',
+          ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
+          ruleId: d.ruleId,
+          ...(overlayId ? { overlayId } : {}),
+          voted: false,
+          decisionSource: d.source,
+          reason: policyDecisionReason(d),
+        },
+      });
+      return false;
+    }
+
+    // prompt (incl. fail-closed default): never vote, fall through to push.
+    // decisionSource discriminates a rule-caused prompt ('policy') from the
+    // no-rule-match default fall-through ('default') — which `ruleId` cannot,
+    // since a matched rule may be id-less.
+    void this.audit?.record({
+      action: 'policy_decision',
+      target: sessionId,
+      detail: {
+        requestId,
+        action: 'prompt',
+        ...(ctx && ctx.tool ? { tool: ctx.tool } : {}),
+        ruleId: d.ruleId,
+        ...(overlayId ? { overlayId } : {}),
+        voted: false,
+        decisionSource: d.source,
+        reason: policyDecisionReason(d),
+      },
+    });
+    return false;
+  }
+}

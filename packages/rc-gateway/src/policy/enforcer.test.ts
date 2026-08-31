@@ -1,0 +1,775 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { DaemonClient } from '@qwen-code/sdk';
+import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
+import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+import type { Policy } from './loader.js';
+import { PolicyEnforcer, policyDecisionReason } from './enforcer.js';
+import type { PolicyDecision } from './evaluator.js';
+import * as evaluatorMod from './evaluator.js';
+import { PermissionOverlayStore } from './overlays.js';
+
+/** Fake audit recorder collecting entries; never throws. */
+function fakeAudit(): { entries: AuditEntry[]; recorder: AuditRecorder } {
+  const entries: AuditEntry[] = [];
+  return {
+    entries,
+    recorder: {
+      record: async (entry: AuditEntry): Promise<void> => {
+        entries.push(entry);
+      },
+    },
+  };
+}
+
+/**
+ * REAL permission_request data: the daemon emits the ACP ToolCall verbatim as
+ * `{ toolCallId, title, kind, rawInput }`. The old synthetic `{ name, input }`
+ * shape is what hid the extraction bug for nine policy cycles — never
+ * reintroduce it. Every permission event in this file is built through this
+ * one helper.
+ *
+ * `opts.requestId: null` omits `requestId` entirely (vs. the default `'q1'`),
+ * for the fail-safe "no requestId" case. `opts.options` overrides the default
+ * two-option (`allow_always` + `allow_once`) list for the fail-safe
+ * "no options" / "only allow_always" cases.
+ */
+function permissionEvent(
+  kind: string,
+  rawInput: Record<string, unknown> = {},
+  opts: {
+    requestId?: string | null;
+    options?: unknown[];
+  } = {},
+): { type: string; data: unknown } {
+  const requestId = 'requestId' in opts ? opts.requestId : 'q1';
+  return {
+    type: 'permission_request',
+    data: {
+      ...(requestId ? { requestId } : {}),
+      sessionId: 's1',
+      toolCall: { toolCallId: 'tc1', title: 'humanized', kind, rawInput },
+      options: opts.options ?? [
+        { optionId: 'always', kind: 'allow_always', label: 'Always allow' },
+        { optionId: 'ok', kind: 'allow_once', label: 'Allow once' },
+      ],
+    },
+  };
+}
+
+const allowExecute: Policy = {
+  defaults: { action: 'prompt', requireScope: 'approve' },
+  rules: [{ id: 'allow-bash', match: { tool: 'execute' }, action: 'allow' }],
+};
+
+const denyExecute: Policy = {
+  defaults: { action: 'prompt', requireScope: 'approve' },
+  rules: [{ id: 'deny-bash', match: { tool: 'execute' }, action: 'deny' }],
+};
+
+const emptyPolicy: Policy = {
+  defaults: { action: 'prompt', requireScope: 'approve' },
+  rules: [],
+};
+
+// An allow rule whose expiresAt is firmly in the past: the (real-clock)
+// evaluator classifies it as a definitive no-match → falls through to default
+// prompt, so the enforcer must NOT auto-vote. Clock-independent.
+const expiredAllowExecute: Policy = {
+  defaults: { action: 'prompt', requireScope: 'approve' },
+  rules: [
+    {
+      id: 'expired-allow',
+      match: { tool: 'execute' },
+      action: 'allow',
+      expiresAt: '2000-01-01T00:00:00Z',
+    },
+  ],
+};
+
+let stub: StubDaemon | undefined;
+
+afterEach(async () => {
+  if (stub) await stub.close();
+  stub = undefined;
+});
+
+const dec = (over: Partial<PolicyDecision>): PolicyDecision => ({
+  action: 'allow',
+  source: 'policy',
+  usedDeferredField: false,
+  ...over,
+});
+
+describe('policyDecisionReason', () => {
+  it('maps a matched allow/deny/prompt to rule-<action>', () => {
+    expect(policyDecisionReason(dec({ action: 'allow' }))).toBe('rule-allow');
+    expect(policyDecisionReason(dec({ action: 'deny' }))).toBe('rule-deny');
+    expect(policyDecisionReason(dec({ action: 'prompt' }))).toBe('rule-prompt');
+  });
+  it('maps a no-rule-match default to "default" regardless of action', () => {
+    expect(
+      policyDecisionReason(dec({ source: 'default', action: 'prompt' })),
+    ).toBe('default');
+    expect(
+      policyDecisionReason(dec({ source: 'default', action: 'allow' })),
+    ).toBe('default');
+  });
+  it('maps a matched-but-unevaluable downgrade to rule-downgraded-deferred', () => {
+    expect(
+      policyDecisionReason(dec({ action: 'prompt', usedDeferredField: true })),
+    ).toBe('rule-downgraded-deferred');
+  });
+  it('does not emit near-miss tokens (quota/expired/time-window)', () => {
+    // an exhausted/expired rule falls through to source:'default'
+    expect(policyDecisionReason(dec({ source: 'default' }))).toBe('default');
+  });
+});
+
+const policyDecisionDetail = (audit: {
+  entries: Array<{ action: string; detail?: unknown }>;
+}) =>
+  audit.entries.find((e) => e.action === 'policy_decision')?.detail as
+    | Record<string, unknown>
+    | undefined;
+
+describe('PolicyEnforcer', () => {
+  it('allow + options + 200 → votes selected, returns true, audits voted:true', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(handled).toBe(true);
+    expect(audit.entries).toHaveLength(1);
+    const e = audit.entries[0];
+    expect(e.action).toBe('policy_decision');
+    expect(e.detail).toMatchObject({
+      requestId: 'r1',
+      action: 'allow',
+      ruleId: 'allow-bash',
+      voted: true,
+    });
+  });
+
+  it('deny → votes cancelled, returns true, audits voted:true', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, denyExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(handled).toBe(true);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'deny',
+      voted: true,
+    });
+  });
+
+  it('prompt (empty policy) → returns false, no vote, audits voted:false', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, emptyPolicy, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'prompt',
+      voted: false,
+    });
+  });
+
+  it('allow + NO options → no vote, returns false, audits voted:false (fail-safe)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1', options: [] }),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('SECURITY: allow but options have ONLY allow_always (no allow_once) → no vote (fail-safe)', async () => {
+    // Auto-voting an allow_always option would persist a standing grant / flip
+    // the session to auto-edit. With no allow_once available we must NOT vote.
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent(
+        'execute',
+        {},
+        {
+          requestId: 'r1',
+          options: [{ optionId: 'always', kind: 'allow_always' }],
+        },
+      ),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('allow but stub 404 → vote not accepted → returns false, voted:false', async () => {
+    stub = await startStubDaemon({ permissionStatus: 404 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('allow but stub 500 → vote not accepted/throws → returns false, voted:false', async () => {
+    stub = await startStubDaemon({ permissionStatus: 500 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('an out-of-window / expired allow rule does NOT auto-vote (falls through to prompt)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, expiredAllowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'prompt',
+      voted: false,
+    });
+  });
+
+  it('non-permission_request event → returns false, no audit', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission('s1', {
+      type: 'session_update',
+      data: { text: 'hi' },
+    });
+    expect(handled).toBe(false);
+    expect(audit.entries).toHaveLength(0);
+  });
+
+  it('audit detail never includes tool args (no path/command leakage)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent(
+        'execute',
+        { command: 'rm -rf /secret/path' },
+        { requestId: 'r1' },
+      ),
+    );
+    const blob = JSON.stringify(audit.entries);
+    expect(blob).not.toContain('rm -rf');
+    expect(blob).not.toContain('/secret/path');
+  });
+
+  it('allow but NO requestId → no vote, returns false, voted:false', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent(
+        'execute',
+        {},
+        { requestId: null, options: [{ optionId: 'ok' }] },
+      ),
+    );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it("stamps decisionSource:'policy' on a rule-decided allow/deny, 'default' on no-match (cycle 39)", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+
+    const a = fakeAudit();
+    await new PolicyEnforcer(daemon, allowExecute, a.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(a.entries[0].detail).toMatchObject({ decisionSource: 'policy' });
+
+    const d = fakeAudit();
+    await new PolicyEnforcer(daemon, denyExecute, d.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(d.entries[0].detail).toMatchObject({ decisionSource: 'policy' });
+
+    // No rule matches (empty policy) → default prompt → decisionSource 'default'.
+    const p = fakeAudit();
+    await new PolicyEnforcer(daemon, emptyPolicy, p.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(p.entries[0].detail).toMatchObject({
+      action: 'prompt',
+      decisionSource: 'default',
+    });
+  });
+
+  it('matches a rule against a REAL frame (kind + rawInput)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const policy: Policy = {
+      defaults: { action: 'prompt' },
+      rules: [{ id: 'deny-shell', match: { tool: 'execute' }, action: 'deny' }],
+    };
+    const enf = new PolicyEnforcer(
+      daemon,
+      policy,
+      audit.recorder,
+      undefined,
+      () => 0,
+      () => '/proj',
+    );
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', { command: 'rm -rf /' }),
+    );
+    expect(handled).toBe(true);
+    expect(
+      (stub.lastRespondedPermission?.response as { outcome?: unknown })
+        ?.outcome,
+    ).toEqual({ outcome: 'cancelled' });
+  });
+
+  it('matches a pathGlob rule via rawInput.file_path', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const policy: Policy = {
+      defaults: { action: 'prompt' },
+      rules: [
+        {
+          id: 'deny-env',
+          match: { pathGlob: ['**/.env*'] },
+          action: 'deny',
+        },
+      ],
+    };
+    const enf = new PolicyEnforcer(
+      daemon,
+      policy,
+      audit.recorder,
+      undefined,
+      () => 0,
+      () => '/proj',
+    );
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('edit', { file_path: '/proj/.env' }),
+    );
+    expect(handled).toBe(true);
+  });
+
+  it('leaves originScope/sessionTag unpopulated (documented limitation)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const policy: Policy = {
+      defaults: { action: 'prompt' },
+      rules: [
+        {
+          id: 'scoped',
+          match: { originScope: 'write' },
+          action: 'deny',
+        },
+      ],
+    };
+    const enf = new PolicyEnforcer(
+      daemon,
+      policy,
+      audit.recorder,
+      undefined,
+      () => 0,
+      () => '/proj',
+    );
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', { command: 'ls' }),
+    );
+    expect(handled).toBe(false); // no match → falls through to a human
+  });
+
+  it("reason 'rule-deny' on a rule-decided deny", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, denyExecute, audit.recorder);
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(policyDecisionDetail(audit)).toMatchObject({
+      action: 'deny',
+      decisionSource: 'policy',
+      reason: 'rule-deny',
+    });
+  });
+
+  it("reason 'default' on a no-rule-match", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, emptyPolicy, audit.recorder);
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(policyDecisionDetail(audit)).toMatchObject({
+      decisionSource: 'default',
+      reason: 'default',
+    });
+  });
+
+  it("reason 'eval-error' when evaluation throws (fail-safe)", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const spy = vi
+      .spyOn(evaluatorMod, 'evaluate')
+      .mockImplementationOnce(() => {
+        throw new Error('boom');
+      });
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(policyDecisionDetail(audit)).toMatchObject({
+      action: 'prompt',
+      decisionSource: 'default',
+      reason: 'eval-error',
+    });
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('audit detail carries the frame tool on every decision site (issue #32)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+
+    // allow, voted
+    const a = fakeAudit();
+    await new PolicyEnforcer(daemon, allowExecute, a.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(a.entries[0].detail).toMatchObject({
+      tool: 'execute',
+      action: 'allow',
+      voted: true,
+    });
+
+    // deny, voted
+    const d = fakeAudit();
+    await new PolicyEnforcer(daemon, denyExecute, d.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(d.entries[0].detail).toMatchObject({
+      tool: 'execute',
+      action: 'deny',
+      voted: true,
+    });
+
+    // prompt (no rule matched — tool still recorded)
+    const p = fakeAudit();
+    await new PolicyEnforcer(daemon, emptyPolicy, p.recorder).handlePermission(
+      's1',
+      permissionEvent('edit', {}, { requestId: 'r1' }),
+    );
+    expect(p.entries[0].detail).toMatchObject({
+      tool: 'edit',
+      action: 'prompt',
+      voted: false,
+    });
+
+    // allow, unvoted (fail-safe: no allow_once option)
+    const u = fakeAudit();
+    await new PolicyEnforcer(daemon, allowExecute, u.recorder).handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1', options: [] }),
+    );
+    expect(u.entries[0].detail).toMatchObject({
+      tool: 'execute',
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('audit detail omits tool when the frame carries no kind (issue #32)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    await new PolicyEnforcer(
+      daemon,
+      emptyPolicy,
+      audit.recorder,
+    ).handlePermission('s1', permissionEvent('', {}, { requestId: 'r1' }));
+    const detail = policyDecisionDetail(audit);
+    expect(detail).toMatchObject({ action: 'prompt' });
+    expect(detail).not.toHaveProperty('tool');
+  });
+
+  // ---- Session-scoped permission overlays (issue #33) ---------------------
+  // Fixed clock so overlay expiry is deterministic and independent of wall time.
+  const NOW = 2_000_000_000_000;
+  const HOUR_MS = 3_600_000;
+
+  describe('session-scoped overlays (issue #33)', () => {
+    it('a deny overlay preempts a file allow: vote cancelled, audit carries the overlay id', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      const ov = overlays.add(
+        { action: 'deny', tool: 'execute', expiresAt: NOW + HOUR_MS },
+        NOW,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      expect(
+        (stub.lastRespondedPermission?.response as { outcome?: unknown })
+          ?.outcome,
+      ).toEqual({ outcome: 'cancelled' });
+      expect(audit.entries[0].detail).toMatchObject({
+        action: 'deny',
+        ruleId: ov.id,
+        overlayId: ov.id,
+        voted: true,
+        decisionSource: 'policy',
+        reason: 'rule-deny',
+      });
+    });
+
+    it("a 'prompt' overlay downgrades a file 'allow' (no vote)", async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      const ov = overlays.add(
+        { action: 'prompt', tool: 'execute', expiresAt: NOW + HOUR_MS },
+        NOW,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(false);
+      expect(audit.entries[0].detail).toMatchObject({
+        action: 'prompt',
+        ruleId: ov.id,
+        overlayId: ov.id,
+        voted: false,
+        decisionSource: 'policy',
+        reason: 'rule-prompt',
+      });
+    });
+
+    it('a session-bound overlay does not apply to another session', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      overlays.add(
+        {
+          action: 'deny',
+          tool: 'execute',
+          sessionId: 's2',
+          expiresAt: NOW + HOUR_MS,
+        },
+        NOW,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+
+      // s1 is not the bound session: the file policy (allow) stands.
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      const detail = audit.entries[0].detail as Record<string, unknown>;
+      expect(detail).toMatchObject({
+        action: 'allow',
+        ruleId: 'allow-bash',
+        voted: true,
+      });
+      expect(detail).not.toHaveProperty('overlayId');
+
+      // ...while s2 gets the overlay's deny.
+      const audit2 = fakeAudit();
+      const enf2 = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit2.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+      const handled2 = await enf2.handlePermission(
+        's2',
+        permissionEvent('execute', {}, { requestId: 'r2' }),
+      );
+      expect(handled2).toBe(true);
+      expect(audit2.entries[0].detail).toMatchObject({
+        action: 'deny',
+        overlayId: expect.stringMatching(/^overlay-/),
+      });
+    });
+
+    it('an expired overlay is inert — the file policy stands', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      overlays.add(
+        { action: 'deny', tool: 'execute', expiresAt: NOW - 1 },
+        NOW - HOUR_MS,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW,
+        () => '/proj',
+        overlays,
+      );
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      const detail = audit.entries[0].detail as Record<string, unknown>;
+      expect(detail).toMatchObject({ action: 'allow', ruleId: 'allow-bash' });
+      expect(detail).not.toHaveProperty('overlayId');
+    });
+
+    it('without a store the file policy decides even when a populated store would deny', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      overlays.add(
+        { action: 'deny', tool: 'execute', expiresAt: NOW + HOUR_MS },
+        NOW,
+      );
+      // 3-arg ctor: no overlays wired in — the store is never consulted.
+      const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      const detail = audit.entries[0].detail as Record<string, unknown>;
+      expect(detail).toMatchObject({ action: 'allow', ruleId: 'allow-bash' });
+      expect(detail).not.toHaveProperty('overlayId');
+    });
+  });
+});
