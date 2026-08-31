@@ -10,7 +10,25 @@ import type {
   DaemonWorkspaceTrustChangeResult,
 } from '@qwen-code/sdk';
 import type { SessionDaemon } from '../daemonPool.js';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+
+/**
+ * rc-workspace-scoping (#28): resolve the optional `workspace` target out
+ * of a GET query / POST body value. Absent or empty string → the
+ * default/boot workspace (`undefined`); a non-empty string is trimmed and
+ * used as the target cwd; any other shape is a 400 `invalid_workspace`
+ * (the handler sends it and returns).
+ */
+function parseWorkspaceTarget(
+  raw: unknown,
+): { ok: true; cwd: string | undefined } | { ok: false } {
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return { ok: true, cwd: undefined };
+  }
+  if (typeof raw === 'string') return { ok: true, cwd: raw.trim() };
+  return { ok: false };
+}
 
 /** The daemon surface this route file needs. */
 export type WorkspaceTrustDaemon = Pick<
@@ -36,6 +54,16 @@ const TRUST_DESIRED_STATES = new Set<string>(['trusted', 'untrusted']);
  * Always sends a response; the caller must return after it.
  */
 function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
+  // rc-workspace-scoping (#28): targeting a non-default workspace spawns
+  // on demand; at the pool cap with no idle victim this is a 503, not a
+  // daemon failure.
+  if (err instanceof WorkspacePoolFullError) {
+    res.status(503).json({
+      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
+      code: 'workspace_pool_full',
+    });
+    return;
+  }
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -80,6 +108,12 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
  * 202 and its body are passed through unchanged and the
  * `workspace_trust_requested` audit row is written on the 202, carrying
  * only `{desiredState, reason?}` — never session or prompt content.
+ *
+ * Both accept an optional `workspace` target (rc-workspace-scoping, #28):
+ * `?workspace=<cwd>` on the GET, a `workspace` field on the POST body.
+ * Absent/empty → the default/boot workspace; a non-default target names the
+ * workspace whose trust status is read / change is requested, and the
+ * audit row then carries the resolved `workspace` cwd as well.
  */
 export function createWorkspaceTrustRoutes(
   daemon: WorkspaceTrustDaemon,
@@ -87,11 +121,20 @@ export function createWorkspaceTrustRoutes(
 ): { get: RequestHandler; request: RequestHandler } {
   const get: RequestHandler = async (req, res) => {
     try {
+      const target = parseWorkspaceTarget(req.query.workspace);
+      if (!target.ok) {
+        res.status(400).json({
+          error: 'Invalid workspace target',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
       const raw = req.query.statusVersion;
       if (raw === undefined || raw === '2') {
         try {
           const result = await daemon.workspaceTrust(
             raw === '2' ? { statusVersion: 2 } : {},
+            target.cwd,
           );
           res.status(200).json(result);
         } catch (err) {
@@ -119,7 +162,16 @@ export function createWorkspaceTrustRoutes(
       const body = (req.body ?? {}) as {
         desiredState?: unknown;
         reason?: unknown;
+        workspace?: unknown;
       };
+      const target = parseWorkspaceTarget(body.workspace);
+      if (!target.ok) {
+        res.status(400).json({
+          error: 'Invalid workspace target',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
       if (
         typeof body.desiredState !== 'string' ||
         !TRUST_DESIRED_STATES.has(body.desiredState)
@@ -146,10 +198,14 @@ export function createWorkspaceTrustRoutes(
 
       let result: DaemonWorkspaceTrustChangeResult;
       try {
-        result = await daemon.requestWorkspaceTrustChange({
-          desiredState,
-          ...(reason !== undefined ? { reason } : {}),
-        });
+        result = await daemon.requestWorkspaceTrustChange(
+          {
+            desiredState,
+            ...(reason !== undefined ? { reason } : {}),
+          },
+          undefined,
+          target.cwd,
+        );
       } catch (err) {
         daemonError(err, res);
         return;
@@ -162,6 +218,10 @@ export function createWorkspaceTrustRoutes(
         detail: {
           desiredState,
           ...(reason !== undefined ? { reason } : {}),
+          // Only recorded for a non-default target (undefined for the
+          // default workspace keeps the row shape unchanged for existing
+          // readers).
+          ...(target.cwd !== undefined ? { workspace: target.cwd } : {}),
         },
       });
 

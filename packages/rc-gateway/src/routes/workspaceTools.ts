@@ -6,6 +6,7 @@
 
 import type { Request, RequestHandler, Response } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /** The daemon surface this route file needs. */
@@ -19,6 +20,23 @@ export interface WorkspaceToolsRouteDeps {
 }
 
 /**
+ * rc-workspace-scoping (#28): resolve the optional `workspace` target out
+ * of a GET query / POST body value. Absent or empty string → the
+ * default/boot workspace (`undefined`); a non-empty string is trimmed and
+ * used as the target cwd; any other shape is a 400 `invalid_workspace`
+ * (the handler sends it and returns).
+ */
+function parseWorkspaceTarget(
+  raw: unknown,
+): { ok: true; cwd: string | undefined } | { ok: false } {
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return { ok: true, cwd: undefined };
+  }
+  if (typeof raw === 'string') return { ok: true, cwd: raw.trim() };
+  return { ok: false };
+}
+
+/**
  * Map a daemon failure to the route's response, mirroring
  * routes/approvalMode.ts: 400/403/409 pass through unchanged (human error +
  * daemon code), 404 maps to 502 `tools_unsupported` (daemon predates the
@@ -29,6 +47,16 @@ function sendMappedToolsError(
   err: unknown,
   unsupportedMessage: string,
 ): void {
+  // rc-workspace-scoping (#28): targeting a non-default workspace spawns
+  // on demand; at the pool cap with no idle victim this is a 503, not a
+  // daemon failure.
+  if (err instanceof WorkspacePoolFullError) {
+    res.status(503).json({
+      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
+      code: 'workspace_pool_full',
+    });
+    return;
+  }
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -71,9 +99,15 @@ function sendMappedToolsError(
  * maps to 502 `tools_unsupported`, anything else to 502
  * `daemon_unavailable`.
  *
+ * Accepts an optional `workspace` target (rc-workspace-scoping, #28): a
+ * `workspace` field on the POST body; absent/empty → the default/boot
+ * workspace, and a non-default target makes the audit row carry the
+ * resolved `workspace` cwd as well.
+ *
  * On success audits `workspace_tool_enabled` with ONLY
- * `{toolName, enabled}` — never session or prompt content — and the actor
- * is always the AUTHENTICATED `req.rcClient`.
+ * `{toolName, enabled}` plus the `workspace` cwd for a non-default target
+ * — never session or prompt content — and the actor is always the
+ * AUTHENTICATED `req.rcClient`.
  */
 export function createWorkspaceToolToggleRoute(
   daemon: WorkspaceToolsDaemon,
@@ -81,7 +115,18 @@ export function createWorkspaceToolToggleRoute(
 ): RequestHandler {
   return async (req, res) => {
     try {
-      const body = (req.body ?? {}) as { enabled?: unknown };
+      const body = (req.body ?? {}) as {
+        enabled?: unknown;
+        workspace?: unknown;
+      };
+      const target = parseWorkspaceTarget(body.workspace);
+      if (!target.ok) {
+        res.status(400).json({
+          error: 'Invalid workspace target',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
       if (typeof body.enabled !== 'boolean') {
         res.status(400).json({
           error: 'Invalid enabled flag',
@@ -94,7 +139,12 @@ export function createWorkspaceToolToggleRoute(
 
       let result;
       try {
-        result = await daemon.setWorkspaceToolEnabled(toolName, enabled);
+        result = await daemon.setWorkspaceToolEnabled(
+          toolName,
+          enabled,
+          undefined,
+          target.cwd,
+        );
       } catch (err) {
         sendMappedToolsError(
           res,
@@ -108,7 +158,14 @@ export function createWorkspaceToolToggleRoute(
         action: 'workspace_tool_enabled',
         actorTokenId: req.rcClient?.id,
         subActor: req.rcClient?.subActor,
-        detail: { toolName, enabled },
+        detail: {
+          toolName,
+          enabled,
+          // Only recorded for a non-default target (undefined for the
+          // default workspace keeps the row shape unchanged for existing
+          // readers).
+          ...(target.cwd !== undefined ? { workspace: target.cwd } : {}),
+        },
       });
 
       res.status(200).json(result);
@@ -129,6 +186,9 @@ export function createWorkspaceToolToggleRoute(
  * unknown names). Mounted write-scope (server.ts); the response is the
  * daemon's, unchanged. Read-only: no audit row.
  *
+ * Accepts an optional `workspace` target (rc-workspace-scoping, #28):
+ * `?workspace=<cwd>`; absent/empty → the default/boot workspace.
+ *
  * Daemon errors map as in the toggle route: 404 → 502 `tools_unsupported`,
  * anything else to 502 `daemon_unavailable` (400/403/409 passthrough for
  * completeness).
@@ -136,9 +196,17 @@ export function createWorkspaceToolToggleRoute(
 export function createWorkspaceToolsCatalogRoute(
   daemon: Pick<SessionDaemon, 'workspaceToolsCatalog'>,
 ): RequestHandler {
-  return async (_req: Request, res: Response) => {
+  return async (req: Request, res: Response) => {
+    const target = parseWorkspaceTarget(req.query.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
     try {
-      const result = await daemon.workspaceToolsCatalog();
+      const result = await daemon.workspaceToolsCatalog(target.cwd);
       res.status(200).json(result);
     } catch (err) {
       if (!res.headersSent) {
