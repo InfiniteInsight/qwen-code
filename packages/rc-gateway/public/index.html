@@ -218,9 +218,15 @@
         <div>
           <button id="continue-last" disabled>Continue last</button>
         </div>
-        <div id="past-list" style="margin-top: 0.4rem; font-size: 0.85rem">
+        <!-- issue #36: bounded — fixed-height scroll box; #past-pager holds
+             the prev/next controls (JS-rendered, empty for a single page) -->
+        <div
+          id="past-list"
+          style="margin-top: 0.4rem; font-size: 0.85rem; max-height: 400px; overflow-y: auto"
+        >
           (none)
         </div>
+        <div id="past-pager" style="margin-top: 0.3rem; font-size: 0.8rem"></div>
       </div>
     </section>
     <section>
@@ -3856,11 +3862,27 @@
 
       // createElement + textContent only — a session title is user/model data
       // (never innerHTML), same discipline as renderPermissionCard/subRow.
-      function renderPastConversations(sessions, cwd) {
+      // issue #36: the list is bounded. The #past-list box itself is a
+      // fixed-height scroll region (HTML), and when the fetched list exceeds
+      // one page it is paginated CLIENT-side (the server already caps the
+      // scan at 500 files and reports `truncated`, surfaced as a note).
+      // Page state resets when the browsed workspace changes, and is
+      // preserved across re-fetches of the same workspace (the #35 tick) so
+      // a background refresh never yanks the user back to page 1.
+      const PAST_PAGE_SIZE = 25;
+      let pastPage = 1; // 1-based
+      let pastTruncated = false;
+
+      function renderPastConversations(sessions, cwd, truncated) {
         pastConvos = Array.isArray(sessions) ? sessions : [];
+        if (cwd !== pastConvosCwd) pastPage = 1; // workspace switch → page 1
         pastConvosCwd = cwd;
+        pastTruncated = Boolean(truncated);
         const box = $('past-list');
+        const pager = $('past-pager');
+        const scroll = box.scrollTop; // kept across same-page re-renders
         box.textContent = '';
+        pager.textContent = '';
         const btn = $('continue-last');
         if (pastConvos.length === 0) {
           box.textContent = '(no past conversations)';
@@ -3868,7 +3890,11 @@
           return;
         }
         btn.disabled = false;
-        for (const s of pastConvos) {
+        const pageCount = Math.ceil(pastConvos.length / PAST_PAGE_SIZE);
+        if (pastPage > pageCount) pastPage = pageCount; // list shrank
+        if (pastPage < 1) pastPage = 1;
+        const start = (pastPage - 1) * PAST_PAGE_SIZE;
+        for (const s of pastConvos.slice(start, start + PAST_PAGE_SIZE)) {
           const row = document.createElement('div');
           row.className = 'token-row';
           row.style.cursor = 'pointer';
@@ -3889,6 +3915,39 @@
           row.onclick = () => resumeConversation(s.sessionId, cwd, strOr(s.title, ''));
           box.appendChild(row);
         }
+        if (pastTruncated) {
+          const note = document.createElement('div');
+          note.textContent =
+            '(list truncated — showing the ' +
+            pastConvos.length +
+            ' most recent)';
+          note.style.cssText = 'color:#888;font-size:0.75rem';
+          box.appendChild(note);
+        }
+        if (pageCount > 1) {
+          const prevBtn = document.createElement('button');
+          prevBtn.textContent = '‹ prev';
+          prevBtn.disabled = pastPage === 1;
+          prevBtn.onclick = () => {
+            pastPage--;
+            renderPastConversations(pastConvos, pastConvosCwd, pastTruncated);
+            box.scrollTop = 0; // a page change shows the top of the new page
+          };
+          const nextBtn = document.createElement('button');
+          nextBtn.textContent = 'next ›';
+          nextBtn.disabled = pastPage === pageCount;
+          nextBtn.onclick = () => {
+            pastPage++;
+            renderPastConversations(pastConvos, pastConvosCwd, pastTruncated);
+            box.scrollTop = 0;
+          };
+          const pageLabel = document.createElement('span');
+          pageLabel.textContent = ' page ' + pastPage + ' of ' + pageCount;
+          pager.appendChild(prevBtn);
+          pager.appendChild(pageLabel);
+          pager.appendChild(nextBtn);
+        }
+        box.scrollTop = scroll;
       }
 
       // GET /rc/sessions?cwd=<cwd> (Bearer/OWNER). Renders only if `cwd` is
@@ -3912,7 +3971,9 @@
           }
           const body = await res.json();
           if (cwd !== curDirPath) return; // superseded by a newer browse
-          renderPastConversations(body.sessions, cwd);
+          // issue #36: pass the server's `truncated` flag through so the
+          // 500-file cap is visible in the list.
+          renderPastConversations(body.sessions, cwd, body.truncated);
         } catch {
           if (cwd === curDirPath) renderPastConversations([], cwd);
         }
