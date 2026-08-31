@@ -3224,6 +3224,7 @@
             setStatusDot(true);
             showApp();
             startHealthPoll();
+            startPastConvosPoll(); // issue #35: keep the past-conversations list fresh
             applyWorkspaceControlGating();
             renderRecentWorkspaces();
             void browseTo();
@@ -3325,6 +3326,7 @@
           applyWorkspaceControlGating();
           showApp();
           startHealthPoll();
+          startPastConvosPoll(); // issue #35: same as the auth-gate path
           // authGate() (above) only populates the directory picker for a
           // token that ALREADY existed at script load — a fresh pair (QR or
           // manual code) has no such run, so #dir-list would otherwise show
@@ -3762,9 +3764,10 @@
           list.appendChild(none);
         }
         // Landing on a new path is "a workspace is selected" — refresh the
-        // past-conversations list for it (single call site: default open,
-        // subfolder tap, ".." , and a typed path routed through browseTo
-        // below all flow through here).
+        // past-conversations list for it (the browse-time trigger: default
+        // open, subfolder tap, ".." , and a typed path routed through
+        // browseTo below all flow through here. issue #35 added the
+        // lifecycle + interval refreshes alongside).
         void refreshPastConversations(curDirPath);
       }
 
@@ -3822,9 +3825,11 @@
 
       // ---- Past conversations (add-resume-conversations) --------------------
       // Tied to the currently-browsed workspace folder (curDirPath, above):
-      // renderDirList calls refreshPastConversations(curDirPath) every time
-      // the folder browser lands on a new path. "Continue last" resumes
-      // sessions[0]; a row tap resumes that row. Both funnel into
+      // renderDirList calls refreshPastConversations(curDirPath) when the
+      // folder browser lands on a path, and issue #35 refreshes it on
+      // session lifecycle events (watch start, stream end, visibility
+      // return) plus a 30 s poll so live sessions appear. "Continue last"
+      // resumes sessions[0]; a row tap resumes that row. Both funnel into
       // resumeConversation, which mirrors the New-conversation flow's watch
       // hand-off ($('new-session').onclick, below) — drop the id into
       // #session, fire #watch's click handler — so a resumed session replays
@@ -3911,6 +3916,22 @@
         } catch {
           if (cwd === curDirPath) renderPastConversations([], cwd);
         }
+      }
+
+      // issue #35: folder browsing is no longer the ONLY refresh trigger. A
+      // live session's transcript is created lazily (first record write) and
+      // its mtime/title keep moving — all AFTER the last browse. A slow
+      // re-fetch covers new sessions, in-place mtime/title updates, and the
+      // relative "N min ago" labels. /rc/sessions is a bounded local scan
+      // (500-file cap), so the tick is cheap. Pauses while the tab is
+      // backgrounded, like startHealthPoll.
+      let pastConvosPollId = null;
+      function startPastConvosPoll() {
+        if (pastConvosPollId) return;
+        pastConvosPollId = setInterval(() => {
+          if (document.hidden || !curDirPath) return;
+          void refreshPastConversations(curDirPath);
+        }, 30000);
       }
 
       // POST /session/<id>/resume { cwd } (Bearer). On 200, hand off to the
@@ -4060,6 +4081,11 @@
           void renderLineage(id);
           void refreshIdleToggle();
           void loadPermRules(false); // task #27: refresh the rules for this workspace
+          // issue #35: this session just (re)started — the list may predate
+          // it. If its transcript file does not exist yet (lazy creation),
+          // the startPastConvosPoll interval picks it up once the first
+          // record lands.
+          void refreshPastConversations(curDirPath);
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
@@ -4104,6 +4130,10 @@
             }
           }
           setStatus('stream ended');
+          // issue #35: the session just finished — refresh so it lands in
+          // the list with its final mtime/title instead of waiting for the
+          // next interval tick.
+          void refreshPastConversations(curDirPath);
         } catch (e) {
           setStatus(
             controller.signal.aborted ? 'stopped' : 'stream error: ' + e,
@@ -4689,6 +4719,8 @@
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;
         void pollDaemonHealths();
+        // issue #35: the 30 s tick is paused while hidden — catch up now.
+        void refreshPastConversations(curDirPath);
         if (watchedSessionId && !watchStreamAlive && token()) {
           startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }
