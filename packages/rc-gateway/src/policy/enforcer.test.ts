@@ -12,6 +12,7 @@ import type { Policy } from './loader.js';
 import { PolicyEnforcer, policyDecisionReason } from './enforcer.js';
 import type { PolicyDecision } from './evaluator.js';
 import * as evaluatorMod from './evaluator.js';
+import { PermissionOverlayStore } from './overlays.js';
 
 /** Fake audit recorder collecting entries; never throws. */
 function fakeAudit(): { entries: AuditEntry[]; recorder: AuditRecorder } {
@@ -580,5 +581,195 @@ describe('PolicyEnforcer', () => {
     const detail = policyDecisionDetail(audit);
     expect(detail).toMatchObject({ action: 'prompt' });
     expect(detail).not.toHaveProperty('tool');
+  });
+
+  // ---- Session-scoped permission overlays (issue #33) ---------------------
+  // Fixed clock so overlay expiry is deterministic and independent of wall time.
+  const NOW = 2_000_000_000_000;
+  const HOUR_MS = 3_600_000;
+
+  describe('session-scoped overlays (issue #33)', () => {
+    it('a deny overlay preempts a file allow: vote cancelled, audit carries the overlay id', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      const ov = overlays.add(
+        { action: 'deny', tool: 'execute', expiresAt: NOW + HOUR_MS },
+        NOW,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      expect(
+        (stub.lastRespondedPermission?.response as { outcome?: unknown })
+          ?.outcome,
+      ).toEqual({ outcome: 'cancelled' });
+      expect(audit.entries[0].detail).toMatchObject({
+        action: 'deny',
+        ruleId: ov.id,
+        overlayId: ov.id,
+        voted: true,
+        decisionSource: 'policy',
+        reason: 'rule-deny',
+      });
+    });
+
+    it("a 'prompt' overlay downgrades a file 'allow' (no vote)", async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      const ov = overlays.add(
+        { action: 'prompt', tool: 'execute', expiresAt: NOW + HOUR_MS },
+        NOW,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(false);
+      expect(audit.entries[0].detail).toMatchObject({
+        action: 'prompt',
+        ruleId: ov.id,
+        overlayId: ov.id,
+        voted: false,
+        decisionSource: 'policy',
+        reason: 'rule-prompt',
+      });
+    });
+
+    it('a session-bound overlay does not apply to another session', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      overlays.add(
+        {
+          action: 'deny',
+          tool: 'execute',
+          sessionId: 's2',
+          expiresAt: NOW + HOUR_MS,
+        },
+        NOW,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+
+      // s1 is not the bound session: the file policy (allow) stands.
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      const detail = audit.entries[0].detail as Record<string, unknown>;
+      expect(detail).toMatchObject({
+        action: 'allow',
+        ruleId: 'allow-bash',
+        voted: true,
+      });
+      expect(detail).not.toHaveProperty('overlayId');
+
+      // ...while s2 gets the overlay's deny.
+      const audit2 = fakeAudit();
+      const enf2 = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit2.recorder,
+        undefined,
+        () => NOW + 1000,
+        () => '/proj',
+        overlays,
+      );
+      const handled2 = await enf2.handlePermission(
+        's2',
+        permissionEvent('execute', {}, { requestId: 'r2' }),
+      );
+      expect(handled2).toBe(true);
+      expect(audit2.entries[0].detail).toMatchObject({
+        action: 'deny',
+        overlayId: expect.stringMatching(/^overlay-/),
+      });
+    });
+
+    it('an expired overlay is inert — the file policy stands', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      overlays.add(
+        { action: 'deny', tool: 'execute', expiresAt: NOW - 1 },
+        NOW - HOUR_MS,
+      );
+      const enf = new PolicyEnforcer(
+        daemon,
+        allowExecute,
+        audit.recorder,
+        undefined,
+        () => NOW,
+        () => '/proj',
+        overlays,
+      );
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      const detail = audit.entries[0].detail as Record<string, unknown>;
+      expect(detail).toMatchObject({ action: 'allow', ruleId: 'allow-bash' });
+      expect(detail).not.toHaveProperty('overlayId');
+    });
+
+    it('without a store the file policy decides even when a populated store would deny', async () => {
+      stub = await startStubDaemon({ permissionStatus: 200 });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const audit = fakeAudit();
+      const overlays = new PermissionOverlayStore();
+      overlays.add(
+        { action: 'deny', tool: 'execute', expiresAt: NOW + HOUR_MS },
+        NOW,
+      );
+      // 3-arg ctor: no overlays wired in — the store is never consulted.
+      const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+      const handled = await enf.handlePermission(
+        's1',
+        permissionEvent('execute', {}, { requestId: 'r1' }),
+      );
+      expect(handled).toBe(true);
+      const detail = audit.entries[0].detail as Record<string, unknown>;
+      expect(detail).toMatchObject({ action: 'allow', ruleId: 'allow-bash' });
+      expect(detail).not.toHaveProperty('overlayId');
+    });
   });
 });

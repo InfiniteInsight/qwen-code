@@ -128,6 +128,7 @@ import {
   quotaLimitsFromPolicy,
 } from './policy/quotas.js';
 import { PolicyReloader } from './policy/reloader.js';
+import { PermissionOverlayStore } from './policy/overlays.js';
 import { DebouncedReloader } from './reload/debouncedReloader.js';
 import {
   checkPolicyFilePermissions,
@@ -696,6 +697,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // Live policy for POST /policy/explain, read through a closure so the route
   // always sees the hot-reloaded ruleset (set at load + in the reloader apply).
   let currentPolicy: Policy | undefined;
+  // Session-scoped permission overlays (issue #33): TTL-bound, in-memory
+  // dashboard-set overrides that preempt the file policy for one session (or
+  // all sessions). One instance is shared by the /rc/permission-overlays
+  // routes and the PolicyEnforcer below; ephemeral by design (a gateway
+  // restart drops all overlays — the file policy stays the only durable
+  // source of truth). Created here, pre-app, because the gateway deps need
+  // it at createGatewayApp time while the enforcer is built later.
+  const permissionOverlays = new PermissionOverlayStore();
 
   const {
     app,
@@ -769,6 +778,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         return q ? { state: (id, ms) => q.state(id, ms) } : undefined;
       },
     },
+    // /rc/permission-overlays (issue #33): TTL-bound session-scoped overrides.
+    // The SAME store instance the PolicyEnforcer below evaluates against.
+    permissionOverlays,
     clientsManifestReadToml: () =>
       readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
         (text) => text,
@@ -957,6 +969,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         quota,
         Date.now,
         () => workspaceCwd ?? process.cwd(),
+        // Session-scoped overlays (issue #33) preempt the file policy; the
+        // store is shared with the /rc/permission-overlays routes above.
+        permissionOverlays,
       )
     : undefined;
 

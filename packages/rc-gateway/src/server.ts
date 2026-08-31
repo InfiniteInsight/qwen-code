@@ -101,6 +101,8 @@ import {
 import { createWorkspaceMcpRoutes } from './routes/workspaceMcp.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
+import { createPermissionOverlayRoutes } from './routes/permissionOverlays.js';
+import type { PermissionOverlayStore } from './policy/overlays.js';
 import { createPeersRoute } from './routes/peers.js';
 import type { BrowsePeers } from './routes/peers.js';
 import { createGpuRoute } from './routes/gpu.js';
@@ -219,6 +221,13 @@ export interface GatewayDeps {
   walDir?: string;
   /** Live policy access for POST /policy/explain (P4). Absent → route not mounted. */
   policyExplain?: PolicyExplainAccess;
+  /**
+   * Session-scoped permission overlay store (issue #33): TTL-bound,
+   * dashboard-set overrides that preempt the file policy. When set, the
+   * OWNER-scoped `/rc/permission-overlays` routes (GET/POST/DELETE) mount.
+   * Absent → routes not mounted at all (404, not a 503).
+   */
+  permissionOverlays?: PermissionOverlayStore;
   /** LAN daemon discovery for GET /rc/peers. Absent → route not mounted. */
   browsePeers?: BrowsePeers;
   /** GPU status probe for GET /rc/gpu. Absent → route not mounted. */
@@ -1177,6 +1186,35 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/policy/explain',
       requireScope(OWNER, audit),
       createPolicyExplainRoute(deps.policyExplain, { audit }),
+    );
+  }
+
+  // /rc/permission-overlays (issue #33) — gateway-global (no :id),
+  // OWNER-scoped, TTL-bound session-scoped permission overrides. Gateway-
+  // local in-memory store: no session lock, no daemon call, nothing
+  // durable (a restart drops all overlays — the file policy stays the
+  // only source of truth). Mirrors the /policy/explain mount just above:
+  // absent dep → routes not mounted at all (404, not a 503 at request
+  // time).
+  if (deps.permissionOverlays) {
+    const overlayRoutes = createPermissionOverlayRoutes(
+      deps.permissionOverlays,
+      { audit },
+    );
+    app.get(
+      '/rc/permission-overlays',
+      requireScope(OWNER, audit),
+      overlayRoutes.get,
+    );
+    app.post(
+      '/rc/permission-overlays',
+      requireScope(OWNER, audit),
+      overlayRoutes.post,
+    );
+    app.delete(
+      '/rc/permission-overlays/:id',
+      requireScope(OWNER, audit),
+      overlayRoutes.remove,
     );
   }
 
