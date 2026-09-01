@@ -213,6 +213,38 @@ export function buildPayload(
     };
   }
 
+  // Turn endings (#40): the prompt route owns the turn lifecycle, so it emits
+  // prompt_completed / prompt_failed when the daemon turn reaches a terminal
+  // point (success / timeout / daemon error). Metadata only — a stop reason
+  // at most; reply text never reaches the payload.
+  if (event.type === 'prompt_completed') {
+    return {
+      v: 1,
+      kind: 'session.turn_complete',
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate('Reply ready'),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
+  if (event.type === 'prompt_failed') {
+    const reason =
+      typeof data.reason === 'string' && data.reason.length > 0
+        ? data.reason
+        : 'error';
+    return {
+      v: 1,
+      kind: 'session.turn_failed',
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(
+        reason === 'timeout' ? 'Turn timed out' : 'Turn failed',
+      ),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
   switch (event.type) {
     case 'permission_request': {
       const toolCall = data.toolCall as { title?: unknown } | undefined;

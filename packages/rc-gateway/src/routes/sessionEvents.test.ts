@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getSharedWal, SessionWal } from '../wal.js';
 import { loadEpochState, saveEpochState } from '../walEpoch.js';
+import { WatchPresence } from '../webpush/watchPresence.js';
 
 // Valid session-id shapes (isValidSessionId: 32-36 hex/dash chars) — these
 // fixtures previously used arbitrary strings like 'sess-1', which the route's
@@ -62,6 +63,7 @@ async function mountGateway(
       undefined,
       walDir,
       undefined,
+      undefined, // watchPresence (7th param since #40 — no presence in these tests)
       idleAttachMs,
       recoveryAttachMs,
     ),
@@ -773,5 +775,50 @@ describe('walEpoch sidecar (add-mid-turn-recovery §4)', () => {
       '{"epochOffset":"x","lastOutId":3}',
     );
     expect(loadEpochState(walDir, SID)).toEqual(CONSERVATIVE);
+  });
+});
+
+describe('watch presence join/leave (#40)', () => {
+  // Distinct valid 32-hex id so it can't collide with SESS fixtures.
+  const WP_SID = '22222222222222222222222222222222';
+
+  it('joins on attach and leaves when the stream ends', async () => {
+    stub = await startStubDaemon({
+      frames: [{ id: 1, type: 'session_update', data: { text: 'one' } }],
+      holdOpenMs: 100,
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const wp = new WatchPresence();
+    const app = express();
+    app.get(
+      '/session/:id/events',
+      createSessionEventsRoute(
+        daemon,
+        new ConnectionRegistry(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        wp,
+      ),
+    );
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${WP_SID}/events`,
+    );
+    expect(res.status).toBe(200);
+    // fetch resolved once 200 headers flushed; the route joins presence
+    // before headers are written, so the mid-stream state is already set.
+    expect(wp.isWatched(WP_SID)).toBe(true);
+    await res.text(); // stream ends when the stub's holdOpenMs lapses
+    const deadline = Date.now() + 2000;
+    while (wp.isWatched(WP_SID) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(wp.isWatched(WP_SID)).toBe(false); // leave ran in the route finally
   });
 });

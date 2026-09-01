@@ -57,6 +57,18 @@ export interface PromptRouteOptions {
    * Override the shared PromptQueue (for tests that need isolated queues).
    */
   queue?: PromptQueue;
+  /**
+   * Fired exactly once at the turn's terminal point — success, timeout, or
+   * daemon error — with the outcome (#40). server.ts wires it to the push
+   * notifier so a backgrounded client hears that the turn ended. Must be
+   * sync-safe and never throw: it is called with the queue slot still held.
+   */
+  onTurnEnd?: (
+    sessionId: string,
+    outcome:
+      | { ok: true; stopReason: string }
+      | { ok: false; reason: 'timeout' | 'error' },
+  ) => void;
 }
 
 export function createPromptRoute(
@@ -137,13 +149,14 @@ export function createPromptRoute(
           // Daemon error unrelated to the timeout. Respond only if the client
           // is still connected; the slot is released in the finally below.
           if (!res.closed) {
-            res
-              .status(502)
-              .json({
-                error: 'Daemon unavailable',
-                code: 'daemon_unavailable',
-              });
+            res.status(502).json({
+              error: 'Daemon unavailable',
+              code: 'daemon_unavailable',
+            });
           }
+          // #40: the turn ended in failure — a backgrounded client should
+          // still hear about it (fires even when the client is gone).
+          opts.onTurnEnd?.(sessionId, { ok: false, reason: 'error' });
           return;
         }
       } finally {
@@ -157,6 +170,8 @@ export function createPromptRoute(
           type: 'stream_error',
           data: { code: 'prompt_timeout' },
         });
+        // #40: the turn ended in failure (gateway timeout).
+        opts.onTurnEnd?.(sessionId, { ok: false, reason: 'timeout' });
         if (!res.closed) {
           res
             .status(504)
@@ -174,6 +189,14 @@ export function createPromptRoute(
         subActor: req.rcClient?.subActor,
         target: sessionId,
         detail: { stopReason: result!.stopReason, blocks: blocks.length },
+      });
+
+      // #40: the turn completed — notify backgrounded clients (the push is
+      // suppressed in the notifier when the session is live-watched).
+      opts.onTurnEnd?.(sessionId, {
+        ok: true,
+        stopReason:
+          typeof result!.stopReason === 'string' ? result!.stopReason : '',
       });
 
       if (!res.closed) {
