@@ -3457,6 +3457,14 @@
       let controller = null;
       let watchedSessionId = null;
       let watchedSessionTitle = null;
+      // issue #39: the workspace the watched session runs in, when known —
+      // the only cwd the resume route will accept for a state_resync_required
+      // self-heal re-resume. null → the user must re-tap the conversation.
+      let watchedSessionCwd = null;
+      // Set when a state_resync_required frame arrives; consumed by the
+      // startWatch teardown (after the loop has fully exited, so the new
+      // watch's state is not clobbered by this one's finally).
+      let pendingResyncCwd = null;
       let lastSeenEventId = null;
       let watchStreamAlive = false;
 
@@ -3658,7 +3666,11 @@
             setStatus('send failed (' + res.status + ')');
           }
         } catch (e) {
-          setStatus('send failed: ' + e);
+          // issue #38: the common network failure here is a backgrounded
+          // app's socket dying mid-turn — the daemon keeps running the turn,
+          // so this is not a failed send; the reply streams in when the
+          // watch reconnects (visibilitychange).
+          setStatus('connection dropped — the reply may still be streaming');
         } finally {
           $('send').disabled = false;
         }
@@ -4021,7 +4033,29 @@
             // replay), so wipe the stale transcript here for the replayed
             // history to render on a clean slate.
             clearTranscript();
-            startWatch(j.sessionId, 0, title);
+            // issue #39: the daemon's load action returns the transcript in
+            // THIS RESPONSE — compactedReplay + liveJournal are DaemonEvent[]
+            // (the same shape as SSE frames) — and clears the bus ring after
+            // seeding it, so a cursor-0 watch would replay nothing. Render
+            // the in-band frames now, then watch from the lastEventId
+            // watermark: at the watermark the daemon emits no resync frame,
+            // only live events follow. No watermark (older gateway/daemon)
+            // → fall back to the max replay-frame id, or cursor 0.
+            const replay = [].concat(
+              Array.isArray(j.compactedReplay) ? j.compactedReplay : [],
+              Array.isArray(j.liveJournal) ? j.liveJournal : [],
+            );
+            for (const f of replay) renderFrame(f);
+            let from = 0;
+            if (typeof j.lastEventId === 'number') {
+              from = j.lastEventId;
+            } else {
+              for (const f of replay)
+                if (f && Number.isFinite(f.id) && f.id > from) from = f.id;
+            }
+            lastSeenEventId = from || null;
+            watchedSessionCwd = cwd || null;
+            startWatch(j.sessionId, lastSeenEventId, title);
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');
           } else if (res.status === 404) {
@@ -4094,6 +4128,9 @@
                 '… in ' +
                 (j.workspaceCwd || 'daemon workspace'),
             );
+            // issue #39: remember the resolved workspace for the
+            // state_resync_required self-heal (re-resume needs the cwd).
+            watchedSessionCwd = j.workspaceCwd || null;
             $('watch').onclick(); // connect the stream + open the composer
           } else if (res.status === 401 || res.status === 403) {
             setStatus('not authorized — needs a write/owner token');
@@ -4181,7 +4218,19 @@
                 log(payload);
                 continue;
               }
-              if (ev && ev.type === 'permission_request' && ev.data) {
+              if (ev && ev.type === 'state_resync_required') {
+                // issue #39: the daemon's bus epoch changed (daemon restart)
+                // or our cursor fell out of the ring — this stream no longer
+                // carries the history. Abort this watch; the finally below
+                // re-runs the resume flow (in-band reload + fresh watermark)
+                // once teardown has completed. Unknown workspace → the
+                // finally surfaces a re-tap prompt instead.
+                if (watchedSessionId === id) {
+                  pendingResyncCwd = watchedSessionCwd;
+                  controller.abort();
+                }
+                continue;
+              } else if (ev && ev.type === 'permission_request' && ev.data) {
                 renderPermissionCard(ev.data, id);
               } else if (
                 ev &&
@@ -4208,6 +4257,18 @@
           watchStreamAlive = false;
           $('watch').disabled = false;
           $('stop').disabled = true;
+          // issue #39: a resync was flagged while the loop was live — run
+          // the re-resume now that this teardown has finished, so the new
+          // watch's state is not clobbered by this finally.
+          if (pendingResyncCwd && watchedSessionId === id) {
+            const cwd = pendingResyncCwd;
+            pendingResyncCwd = null;
+            if (cwd) {
+              void resumeConversation(id, cwd, title);
+            } else {
+              setStatus('history resync needed — tap the conversation again');
+            }
+          }
         }
       }
 

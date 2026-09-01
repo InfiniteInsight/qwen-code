@@ -746,14 +746,14 @@ export class DaemonPool implements SessionDaemon {
    *
    * Restores via the SDK's `loadSession`, not `resumeSession`: ACP's
    * `session/resume` reactivates a session WITHOUT replaying its transcript,
-   * so a cold-restored session's event bus starts empty and a dashboard
-   * watcher attaching at cursor 0 replays nothing (no-history bug, #37). The
-   * daemon's `load` action (REST always runs it with
-   * `historyReplay: 'response'`) seeds the event bus with the full transcript
-   * BEFORE responding, so the caller's cursor-0 SSE watch replays the whole
-   * conversation. Warm/live sessions are unaffected -- both actions merely
-   * attach; `load` additionally returns a ring snapshot in the body, which
-   * callers discard.
+   * so a cold-restored session has no history anywhere except the daemon's
+   * `load` action's response (no-history bug, #37). Since upstream
+   * `e23c8e845` that action returns the transcript in-band
+   * (`compactedReplay` + `liveJournal`, `lastEventId` watermark) and CLEARS
+   * the event bus ring after seeding it -- a cursor-0 SSE watch replays
+   * nothing. Callers therefore render the in-band frames and start their
+   * watch at `lastEventId` (the resume route forwards all of it; #39).
+   * Warm/live sessions are unaffected -- both actions merely attach.
    *
    * Workspace-keyed (like `createOrAttachSession`): a resumed session's
    * owning workspace was never in memory here (this pool didn't create it),
@@ -774,9 +774,8 @@ export class DaemonPool implements SessionDaemon {
     }
     try {
       const client = await this.getOrSpawn(req.workspaceCwd);
-      // `load`, not `resume`: see the doc above -- the daemon's load action
-      // seeds the session's event bus with the full transcript before
-      // responding, so the caller's cursor-0 watcher replays the history.
+      // `load`, not `resume`: see the doc above -- the history travels in the
+      // load response (in-band frames + lastEventId), not the bus ring.
       const restored = await client.loadSession(sessionId, {
         workspaceCwd: key,
       });
