@@ -3235,7 +3235,11 @@
             renderRecentWorkspaces();
             void browseTo();
             void loadDaemonManifest();
-            restoreWatchedSession();
+            // A ?session= push deep link (#40) wins over the persisted
+            // watch: handleSessionDeepLink() returns true only when the
+            // param was present (and scrubbed), so a plain reload still
+            // restores the previously watched session as before.
+            if (!handleSessionDeepLink()) restoreWatchedSession();
           } else {
             setStatusDot(false);
             showAuthGate();
@@ -3349,6 +3353,10 @@
           // tokens reveal the daemon switcher + the "all daemons" search
           // toggle (add-multi-workspace-client task 4.1).
           void loadDaemonManifest();
+          // A fresh device may arrive via a push deep link (#40) and pair
+          // from the auth gate: authGate() won't re-run after pairing, so
+          // handle any surviving ?session= param here (no-op if absent).
+          handleSessionDeepLink();
           pairFeedback(
             '✓ paired — scopes: ' + (data.scopes || []).join(', '),
             true,
@@ -5197,6 +5205,49 @@
       // instead — self-guarding on token() *presence* isn't enough, since a
       // stale/invalid stored token would still fire these eagerly before the
       // auth gate has validated it. See restoreWatchedSession(), used there.
+
+      // Turn-end push deep link (#40): a push notification's URL is
+      // /ui/?session=<id>. The push payload is metadata-only — it carries
+      // NO cwd — so the session's workspace is resolved by probing the
+      // recent-workspace list (most recent first) against
+      // GET /rc/sessions?cwd=. If no workspace lists the session (fresh
+      // device, stale recent list), fall back to startWatch() — attaching
+      // the event stream does not need a cwd, and a 401/404 surfaces in
+      // the status line. Returns true synchronously when a ?session= param
+      // was present and handled, so callers can SKIP restoreWatchedSession():
+      // startWatch() creates a fresh AbortController without aborting a
+      // prior one, so racing the two would leak a second live SSE stream.
+      function handleSessionDeepLink() {
+        const m = /[?&]session=([^&]+)/.exec(location.search);
+        if (!m) return false;
+        const id = decodeURIComponent(m[1]);
+        // Scrub immediately (like the auto-pair hash scrub, above) so the
+        // session id never lingers in the URL or history.
+        history.replaceState(null, '', location.pathname);
+        void (async () => {
+          for (const cwd of loadRecentWorkspaces()) {
+            try {
+              const res = await fetch(
+                '/rc/sessions?cwd=' + encodeURIComponent(cwd),
+                { headers: { Authorization: 'Bearer ' + token() } },
+              );
+              if (!res.ok) continue;
+              const body = await res.json();
+              const s = (body.sessions || []).find(
+                (x) => x && x.sessionId === id,
+              );
+              if (s) {
+                void resumeConversation(id, cwd, strOr(s.title, ''));
+                return;
+              }
+            } catch { /* unreachable workspace — keep probing */ }
+          }
+          // No recent workspace listed it: replay from 0, like
+          // restoreWatchedSession, so a persisted transcript rebuilds.
+          void startWatch(id, 0);
+        })();
+        return true;
+      }
 
       // Auto-restore: if a watched session was persisted (mobile screen-off
       // discards the page), reconnect on reload.  The DOM is empty after a

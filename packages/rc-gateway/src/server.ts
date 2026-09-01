@@ -167,6 +167,7 @@ import { PushNotifier } from './webpush/notifier.js';
 import { PushRateLimiter } from './webpush/rateLimiter.js';
 import { PushCoalescer } from './webpush/coalescer.js';
 import { PushDigest } from './webpush/digest.js';
+import { WatchPresence } from './webpush/watchPresence.js';
 import type { SnoozeStore } from './routing/snooze.js';
 import type { RoutingMatcher } from './routing/rules.js';
 import {
@@ -415,6 +416,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // (emit) and the events relay (register/write). Created here so both routes
   // share the same instance without requiring the caller to instantiate it.
   const promptEventBroadcaster = new PromptEventBroadcaster();
+  // Live-watch presence for push suppression (#40): each attached session
+  // stream joins/leaves, and the notifier drops turn-end pushes while a
+  // session is watched live. Shared by the events route and the notifier.
+  const watchPresence = new WatchPresence();
   // Shared per-session FIFO serialiser: both the prompt route and the agent
   // routes' spawn/steer prompts must queue behind each other for the same
   // session, so a single PromptQueue instance is injected into both.
@@ -660,6 +665,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       // durable replay + renumbering + marker path.
       deps.walDir,
       promptEventBroadcaster,
+      watchPresence,
     ),
   );
   // GET /session/:id/context — read-scope; relays the daemon's per-session
@@ -701,6 +707,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       promptTimeoutMs: deps.promptTimeoutMs,
       promptEventBroadcaster,
       queue: promptQueue,
+      // Turn-end push (#40): fire the notifier after the turn's terminal
+      // outcome (success / timeout / daemon error). `notifier` is a `let`
+      // initialised in the push block below — safe here because the closure
+      // runs at request time, never at mount time.
+      onTurnEnd: (sessionId, outcome) => {
+        void notifier?.notify(
+          {
+            type: outcome.ok ? 'prompt_completed' : 'prompt_failed',
+            data: outcome.ok ? {} : { reason: outcome.reason },
+          },
+          { sessionId },
+        );
+      },
     }),
   );
   // POST /session — create (or attach to) a session so a freshly-paired client
@@ -1134,6 +1153,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       coalescer,
       digest,
       apns,
+      // ownerBus intentionally unwired (pre-existing gap, not part of #40):
+      // routing_decision SSE emission stays off in production, as before.
+      undefined,
+      (id) => watchPresence.isWatched(id),
     );
     app.use(
       '/rc/push',

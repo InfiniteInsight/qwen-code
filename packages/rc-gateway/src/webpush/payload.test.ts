@@ -528,3 +528,80 @@ describe('session_recovered push payload', () => {
     expect(QUIET_HOURS_BYPASS_KINDS.has('session.recovered')).toBe(false);
   });
 });
+
+describe('turn-end push payloads (#40)', () => {
+  it('maps prompt_completed to session.turn_complete with a fixed summary', () => {
+    const p = buildPayload(
+      { type: 'prompt_completed', data: { stopReason: 'end_turn' } },
+      { sessionId: 's1', sessionName: 'My Session' },
+    );
+    expect(p).toMatchObject({
+      v: 1,
+      kind: 'session.turn_complete',
+      sessionId: 's1',
+      sessionName: 'My Session',
+      summary: 'Reply ready',
+      url: '/ui/?session=s1',
+    });
+    // Metadata only — a stop reason is never surfaced in the summary.
+    expect(JSON.stringify(p)).not.toContain('end_turn');
+  });
+
+  it('omits sessionName when absent (direct call sites pass sessionId only)', () => {
+    const p = buildPayload(
+      { type: 'prompt_completed', data: {} },
+      { sessionId: 's2' },
+    );
+    expect(p).not.toBeNull();
+    expect('sessionName' in p!).toBe(false);
+  });
+
+  it('maps prompt_failed reason timeout to session.turn_failed "Turn timed out"', () => {
+    const p = buildPayload(
+      { type: 'prompt_failed', data: { reason: 'timeout' } },
+      { sessionId: 's1' },
+    );
+    expect(p).toMatchObject({
+      v: 1,
+      kind: 'session.turn_failed',
+      sessionId: 's1',
+      summary: 'Turn timed out',
+      url: '/ui/?session=s1',
+    });
+  });
+
+  it('maps prompt_failed error (and missing/blank/non-string reason) to "Turn failed"', () => {
+    for (const data of [
+      { reason: 'error' },
+      {},
+      { reason: '' },
+      { reason: 42 },
+    ]) {
+      const p = buildPayload(
+        { type: 'prompt_failed', data },
+        { sessionId: 's1' },
+      );
+      expect(p!.kind).toBe('session.turn_failed');
+      expect(p!.summary).toBe('Turn failed');
+    }
+  });
+
+  it('does NOT map the daemon-prefixed turn events (pump double-push guard)', () => {
+    // The pump forwards EVERY daemon event to the notifier. The daemon's
+    // own turn-end events are pending_prompt_completed / turn_error — never
+    // the bare prompt_* types the onTurnEnd hook emits — so these must
+    // produce no payload, or every turn would push twice.
+    for (const type of ['pending_prompt_completed', 'turn_error']) {
+      expect(buildPayload({ type, data: {} }, { sessionId: 's1' })).toBeNull();
+    }
+  });
+
+  it('scope-gates both kinds at session:read; neither bypasses snooze or quiet hours', () => {
+    expect(KIND_SCOPE['session.turn_complete']).toBe(SESSION_READ);
+    expect(KIND_SCOPE['session.turn_failed']).toBe(SESSION_READ);
+    expect(SNOOZE_BYPASS_KINDS.has('session.turn_complete')).toBe(false);
+    expect(SNOOZE_BYPASS_KINDS.has('session.turn_failed')).toBe(false);
+    expect(QUIET_HOURS_BYPASS_KINDS.has('session.turn_complete')).toBe(false);
+    expect(QUIET_HOURS_BYPASS_KINDS.has('session.turn_failed')).toBe(false);
+  });
+});

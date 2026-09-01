@@ -36,8 +36,11 @@ self.addEventListener('push', (event) => {
     p = {};
   }
   if (p.v !== 1) return;
-  let title =
-    p.kind === 'permission.required' ? 'Permission needed' : 'qwen-code';
+  let title;
+  if (p.kind === 'permission.required') title = 'Permission needed';
+  else if (p.kind === 'session.turn_complete') title = 'Reply ready';
+  else if (p.kind === 'session.turn_failed') title = 'Turn failed';
+  else title = 'qwen-code';
   // Push titles only (notification clicks are untouched): when this origin is
   // one of several registered daemons, "[workstation-1] Permission needed".
   const dname = originDaemonName();

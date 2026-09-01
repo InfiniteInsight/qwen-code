@@ -35,6 +35,12 @@ interface MountOpts {
   promptTimeoutMs?: number;
   promptEventBroadcaster?: PromptEventBroadcaster;
   queue?: PromptQueue;
+  onTurnEnd?: (
+    sessionId: string,
+    outcome:
+      | { ok: true; stopReason: string }
+      | { ok: false; reason: 'timeout' | 'error' },
+  ) => void;
 }
 
 async function mount(
@@ -343,5 +349,101 @@ describe('prompt route', () => {
     expect(stub.promptCallLog).toHaveLength(0);
     // No audit record for a turn that never finished.
     expect(audit.calls.find((c) => c.action === 'prompt_sent')).toBeUndefined();
+  });
+});
+
+// ── Turn-end hook (issue #40) ──────────────────────────────────────────────
+
+describe('prompt route onTurnEnd hook (#40)', () => {
+  it('fires once on success with the stopReason', async () => {
+    stub = await startStubDaemon({ promptStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const seen: unknown[] = [];
+    const url = await mount(daemon, audit, {
+      queue: new PromptQueue(),
+      onTurnEnd: (sid, outcome) => void seen.push({ sid, outcome }),
+    });
+    const res = await postPrompt(url, { prompt: 'hello' });
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      sid: 'sess-1',
+      outcome: { ok: true, stopReason: 'end_turn' },
+    });
+  });
+
+  it('fires once on daemon error with reason error', async () => {
+    stub = await startStubDaemon({ promptStatus: 500 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const seen: unknown[] = [];
+    const url = await mount(daemon, audit, {
+      queue: new PromptQueue(),
+      onTurnEnd: (sid, outcome) => void seen.push({ sid, outcome }),
+    });
+    const res = await postPrompt(url, { prompt: 'hello' });
+    expect(res.status).toBe(502);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      sid: 'sess-1',
+      outcome: { ok: false, reason: 'error' },
+    });
+  });
+
+  it('fires once on gateway timeout with reason timeout', async () => {
+    // Daemon takes 300ms; the execution budget is 50ms.
+    stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 300 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const seen: unknown[] = [];
+    const url = await mount(daemon, audit, {
+      promptTimeoutMs: 50,
+      queue: new PromptQueue(),
+      onTurnEnd: (sid, outcome) => void seen.push({ sid, outcome }),
+    });
+    const res = await postPrompt(url, { prompt: 'too-slow' });
+    expect(res.status).toBe(504);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      sid: 'sess-1',
+      outcome: { ok: false, reason: 'timeout' },
+    });
+  });
+
+  it('fires on success even when the client disconnected mid-turn', async () => {
+    // The whole point of #40: a backgrounded mobile client's turn still
+    // reports its ending so the push can fire.
+    stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const seen: unknown[] = [];
+    const url = await mount(daemon, audit, {
+      queue: new PromptQueue(),
+      onTurnEnd: (sid, outcome) => void seen.push({ sid, outcome }),
+    });
+
+    const ac = new AbortController();
+    const p = fetch(`${url}/session/sess-1/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'backgrounded' }),
+      signal: ac.signal,
+    });
+    p.catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 50));
+    ac.abort();
+
+    const deadline = Date.now() + 2000;
+    while (seen.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      sid: 'sess-1',
+      outcome: { ok: true, stopReason: 'end_turn' },
+    });
+    await expect(p).rejects.toThrow();
   });
 });

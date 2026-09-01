@@ -1732,3 +1732,96 @@ describe('PushNotifier — APNs fan-out', () => {
     expect(sent).toHaveLength(1);
   });
 });
+
+describe('PushNotifier watched-session suppression (#40)', () => {
+  const TURN_END = {
+    type: 'prompt_completed',
+    data: {},
+  } as const;
+
+  /** Sub + notifier with an isWatched probe (13th ctor arg). */
+  async function setup(
+    watched: Map<string, boolean>,
+  ): Promise<{
+    notifier: PushNotifier;
+    notifierAudit: ReturnType<typeof fakeAudit>;
+  }> {
+    const reader = await tokens.issue([SESSION_READ], 'watcher');
+    await store.add(reader.id, {
+      endpoint: 'https://push.example.com/watcher',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifierAudit = fakeAudit();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      notifierAudit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (id) => watched.get(id) ?? false,
+    );
+    return { notifier, notifierAudit };
+  }
+
+  it('suppresses a turn-end push event-globally when the session is live-watched', async () => {
+    const watched = new Map([['s1', true]]);
+    const { notifier, notifierAudit } = await setup(watched);
+    await notifier.notify(TURN_END, { sessionId: 's1' });
+    expect(sent).toHaveLength(0);
+    expect(notifierAudit.calls).toHaveLength(1);
+    expect(notifierAudit.calls[0]).toMatchObject({
+      action: 'push_suppressed',
+      target: 's1',
+      detail: { kind: 'session.turn_complete', reason: 'session_watched' },
+    });
+  });
+
+  it('delivers the turn-end push when the session is NOT watched', async () => {
+    const { notifier, notifierAudit } = await setup(new Map([['s1', false]]));
+    await notifier.notify(TURN_END, { sessionId: 's1' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('session.turn_complete');
+    // The suppressed audit action must NOT be present for a delivered push.
+    expect(
+      notifierAudit.calls.filter((c) => c.action === 'push_suppressed'),
+    ).toHaveLength(0);
+  });
+
+  it('suppression is per-session: another session is still watched=false here', async () => {
+    const watched = new Map([['s1', true]]);
+    const { notifier } = await setup(watched);
+    await notifier.notify(TURN_END, { sessionId: 's2' });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('does NOT suppress non-turn kinds even when watched (gate is kind-scoped)', async () => {
+    const watched = new Map([['s1', true]]);
+    const { notifier } = await setup(watched);
+    // session.recovered is scope-gated at session:read like the turn kinds
+    // but is NOT in WATCHED_SUPPRESS_KINDS — a live watch must not gate it.
+    await notifier.notify(
+      { type: 'session_recovered', data: { sessionId: 's1', tookMs: 42 } },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('session.recovered');
+  });
+
+  it('no probe wired (back-compat): turn-end pushes always deliver', async () => {
+    const reader = await tokens.issue([SESSION_READ], 'watcher');
+    await store.add(reader.id, {
+      endpoint: 'https://push.example.com/watcher',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifier = new PushNotifier(tokens, store, sender);
+    await notifier.notify(TURN_END, { sessionId: 's1' });
+    expect(sent).toHaveLength(1);
+  });
+});

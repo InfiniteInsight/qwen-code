@@ -11,6 +11,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import type { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import type { UsageTick } from '../cost/ingester.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
+import type { WatchPresence } from '../webpush/watchPresence.js';
 import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
 import { getSharedWal } from '../wal.js';
@@ -99,6 +100,13 @@ export function createSessionEventsRoute(
   usageBroadcaster?: UsageTickBroadcaster,
   walDir?: string,
   promptEventBroadcaster?: PromptEventBroadcaster,
+  /**
+   * Live-watch presence for push suppression (#40): each attached stream
+   * joins on attach and leaves in the teardown, so the notifier can skip
+   * turn-end pushes while the session is watched live. Absent → no
+   * presence tracking.
+   */
+  watchPresence?: WatchPresence,
   idleAttachMs: number = DEFAULT_IDLE_ATTACH_MS,
   recoveryAttachMs: number = DEFAULT_RECOVERY_ATTACH_MS,
 ): RequestHandler {
@@ -229,6 +237,7 @@ export function createSessionEventsRoute(
         let attached = false;
         let unregisterUsage = (): void => {};
         let unregisterPromptEventsWal = (): void => {};
+        let leaveWatch = (): void => {};
         try {
           const iterator = daemon.subscribeEvents(sessionId, {
             lastEventId: latestReplayed,
@@ -243,6 +252,7 @@ export function createSessionEventsRoute(
             Connection: 'keep-alive',
           });
           attached = true;
+          leaveWatch = watchPresence?.join(sessionId) ?? (() => {});
           void audit?.record({
             action: 'session_attached',
             actorTokenId,
@@ -295,6 +305,7 @@ export function createSessionEventsRoute(
         } finally {
           unregisterPromptEventsWal();
           unregisterUsage();
+          leaveWatch();
           unregister();
           if (attached) {
             void audit?.record({
@@ -326,6 +337,7 @@ export function createSessionEventsRoute(
     let attached = false;
     let unregisterUsage = (): void => {};
     let unregisterPromptEvents = (): void => {};
+    let leaveWatch = (): void => {};
     try {
       const iterator = daemon.subscribeEvents(sessionId, {
         lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
@@ -341,6 +353,7 @@ export function createSessionEventsRoute(
         Connection: 'keep-alive',
       });
       attached = true;
+      leaveWatch = watchPresence?.join(sessionId) ?? (() => {});
       void audit?.record({
         action: 'session_attached',
         actorTokenId,
@@ -396,6 +409,7 @@ export function createSessionEventsRoute(
     } finally {
       unregisterPromptEvents();
       unregisterUsage();
+      leaveWatch();
       unregister();
       if (attached) {
         void audit?.record({

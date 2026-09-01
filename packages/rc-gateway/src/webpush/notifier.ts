@@ -87,7 +87,24 @@ export const KIND_SCOPE: Record<string, RcScope> = {
   // the spec table — SESSION_READ is the floor both kinds must clear).
   'session.interrupted': SESSION_READ,
   'session.recovered': SESSION_READ,
+  // Turn endings (#40): visible to any read-scoped client, same floor as the
+  // other session lifecycle kinds.
+  'session.turn_complete': SESSION_READ,
+  'session.turn_failed': SESSION_READ,
 };
+
+/**
+ * Kinds suppressed while the session has a live SSE watch (#40): when
+ * someone is already watching the session live, the turn's terminal frames
+ * reach them in-stream, so a push is redundant. The check runs BEFORE the
+ * snooze/routing gates and audits its own reason (`session_watched`).
+ * Fail-open: presence is a point-in-time count, so a watch that dies in the
+ * race still gets the push.
+ */
+export const WATCHED_SUPPRESS_KINDS = new Set([
+  'session.turn_complete',
+  'session.turn_failed',
+]);
 
 /**
  * Scope-filtered fan-out of push payloads. The notifier resolves each
@@ -120,6 +137,13 @@ export class PushNotifier {
      * Absent → no SSE emission (no behavioral change).
      */
     private readonly ownerBus?: OwnerEventBus,
+    /**
+     * Live-watch presence probe (#40). When present and it reports the event's
+     * session as watched, `WATCHED_SUPPRESS_KINDS` payloads are dropped
+     * event-globally — audited `push_suppressed`, reason `session_watched` —
+     * before any send. Other kinds are unaffected. Absent → no suppression.
+     */
+    private readonly isWatched?: (sessionId: string) => boolean,
   ) {}
 
   /** Edge-detector for the end-of-quiet-window digest flush (D4, cycle 75). */
@@ -197,6 +221,21 @@ export class PushNotifier {
   ): Promise<void> {
     const payload = buildPayload(event, ctx);
     if (!payload) return;
+    // Watched-session gate (#40): turn endings are redundant while someone is
+    // watching the session live — suppress the whole fan-out once, before any
+    // send, like snooze. Other kinds (e.g. permission.required) still push to
+    // a watched session: they need action, not just visibility.
+    if (
+      WATCHED_SUPPRESS_KINDS.has(payload.kind) &&
+      this.isWatched?.(ctx.sessionId)
+    ) {
+      void this.audit?.record({
+        action: 'push_suppressed',
+        target: ctx.sessionId,
+        detail: { kind: payload.kind, reason: 'session_watched' },
+      });
+      return;
+    }
     // Capture the routing matcher ONCE: a hot-reload (setRouting) landing mid
     // fan-out must not swap the rules an in-flight event evaluates under
     // (per-event atomicity — spec "an in-flight event begun before reload
