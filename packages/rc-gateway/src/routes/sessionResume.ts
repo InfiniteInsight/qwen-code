@@ -27,13 +27,16 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * On success, `daemon.resumeSession(sessionId, { workspaceCwd: cwd })` (a
  * `SessionDaemon` — either a single `DaemonClient` or the multi-workspace
  * `DaemonPool`, add-workspace-pool) spawns/reuses the daemon bound to `cwd`
- * and restores the session there, returning `200 { sessionId, workspaceCwd }`
+ * and restores the session there, returning `200 { sessionId, workspaceCwd, … }`
  * so the caller can immediately attach/watch it. The `DaemonPool` implements
  * the restore with the daemon's `load` action rather than ACP's history-less
- * `resume`: load seeds the session's event bus with the full transcript
- * before responding, so a caller that watches from cursor 0 (the dashboard)
- * replays the whole conversation instead of an empty stream (no-history bug,
- * #37).
+ * `resume`: since upstream `e23c8e845` the load action returns the transcript
+ * **in the response** (`compactedReplay` + `liveJournal`) and clears the event
+ * bus ring after seeding it, so a cursor-0 watch would replay nothing. This
+ * route therefore forwards the replay frames and the `lastEventId` watermark:
+ * the dashboard renders the in-band frames and starts its SSE watch at
+ * `lastEventId`, from which only live events follow (no-history bug, #37 →
+ * #39).
  *
  * Audit carries only the session id (`target`) — never the `cwd` path (audit
  * records stay free of paths/args per the gateway's data contract).
@@ -82,8 +85,9 @@ export function createSessionResumeRoute(
       return;
     }
 
+    let restored;
     try {
-      await daemon.resumeSession(sessionId, { workspaceCwd });
+      restored = await daemon.resumeSession(sessionId, { workspaceCwd });
     } catch (err) {
       // A full workspace daemon pool (max concurrent workspace daemons, all
       // busy) is a distinct, RETRYABLE condition — surface it as its own 503
@@ -114,7 +118,32 @@ export function createSessionResumeRoute(
       target: sessionId,
     });
 
-    res.status(200).json({ sessionId, workspaceCwd });
+    // Forward the in-band replay (see doc above): the daemon's load action
+    // returns the transcript in the response and the bus ring is cleared
+    // after seeding, so the history MUST travel in this body. All fields are
+    // additive — older clients that only read {sessionId, workspaceCwd} are
+    // unaffected.
+    res.status(200).json({
+      sessionId,
+      workspaceCwd,
+      ...(restored.compactedReplay
+        ? { compactedReplay: restored.compactedReplay }
+        : {}),
+      ...(restored.liveJournal ? { liveJournal: restored.liveJournal } : {}),
+      ...(typeof restored.lastEventId === 'number'
+        ? { lastEventId: restored.lastEventId }
+        : {}),
+      ...(restored.eventEpoch ? { eventEpoch: restored.eventEpoch } : {}),
+      ...(restored.partial ? { partial: true } : {}),
+      ...(restored.replayDegraded ? { replayDegraded: true } : {}),
+      ...(typeof restored.historyHasMore === 'boolean'
+        ? { historyHasMore: restored.historyHasMore }
+        : {}),
+      ...(restored.historyAnchorRecordId
+        ? { historyAnchorRecordId: restored.historyAnchorRecordId }
+        : {}),
+      ...(restored.replayError ? { replayError: restored.replayError } : {}),
+    });
   };
 }
 

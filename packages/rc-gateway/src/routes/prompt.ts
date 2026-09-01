@@ -15,8 +15,15 @@ import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
  * POST /session/:id/prompt — proxy the SDK's daemon.prompt(). Accepts either
  * `{ prompt: string }` (turned into a single text block) or
  * `{ blocks: PromptContentBlock[] }` (forwarded verbatim). Long-lived: awaits
- * the daemon's turn and returns its stopReason. A client disconnect aborts the
- * daemon prompt (no response written). The prompt text is NEVER audited.
+ * the daemon's turn and returns its stopReason. A client disconnect does NOT
+ * abort the daemon prompt (#38): mobile clients get backgrounded routinely
+ * (screen off, app switch) and the OS kills their sockets, but the turn must
+ * keep running in the daemon — its events keep landing in the per-session
+ * event bus ring, so when the client returns it resumes + watches from the
+ * event watermark and the live turn streams to completion. When the client is
+ * gone the 200 response is simply skipped; the audit record is written
+ * regardless. The prompt-execution timeout below remains the only
+ * cancellation. The prompt text is NEVER audited.
  *
  * Session FIFO + timeouts (spec "Per-session FIFO preserved"):
  *  - Each session has a single-slot queue (`PromptQueue`). A prompt that
@@ -104,50 +111,39 @@ export function createPromptRoute(
         });
       }
 
-      // Abort the (long-lived) daemon turn if the client disconnects. Listen on
-      // the response, not the request: for a POST, `req`'s 'close' fires as soon
-      // as the body is consumed — well before the turn resolves — which would
-      // abort every prompt immediately. `res`'s 'close' fires only when the
-      // underlying connection actually closes (client disconnect, or after we
-      // end the response — by which point the turn has already resolved).
-      const clientAbort = new AbortController();
-      res.on('close', () => clientAbort.abort());
-
       // Prompt-execution timeout: cancel the daemon turn if it takes too long.
+      // This is the ONLY abort signal passed to the daemon — a client
+      // disconnect deliberately does NOT cancel the turn (see the module doc
+      // above, #38): the route keeps awaiting daemon.prompt() after the
+      // response closes, and the queue slot below is held until the turn
+      // actually completes, so a backgrounded mobile client's turn survives.
       const timeoutAbort = new AbortController();
       const promptTimer = setTimeout(() => {
         timeoutAbort.abort();
       }, promptTimeoutMs);
 
-      // Compose both abort signals so either cancels the daemon call.
-      const signal = AbortSignal.any
-        ? AbortSignal.any([clientAbort.signal, timeoutAbort.signal])
-        : (() => {
-            // Fallback: manual composition for older Node versions.
-            const ctrl = new AbortController();
-            const abort = () => ctrl.abort();
-            clientAbort.signal.addEventListener('abort', abort, { once: true });
-            timeoutAbort.signal.addEventListener('abort', abort, {
-              once: true,
-            });
-            return ctrl.signal;
-          })();
-
       let result;
       let timedOut = false;
       try {
-        result = await daemon.prompt(sessionId, { prompt: blocks }, signal);
+        result = await daemon.prompt(
+          sessionId,
+          { prompt: blocks },
+          timeoutAbort.signal,
+        );
       } catch {
-        // Check what triggered the abort.
         if (timeoutAbort.signal.aborted) {
           timedOut = true;
-        } else if (clientAbort.signal.aborted) {
-          // Client disconnected — socket is gone, don't try to respond.
-          return;
         } else {
-          res
-            .status(502)
-            .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+          // Daemon error unrelated to the timeout. Respond only if the client
+          // is still connected; the slot is released in the finally below.
+          if (!res.closed) {
+            res
+              .status(502)
+              .json({
+                error: 'Daemon unavailable',
+                code: 'daemon_unavailable',
+              });
+          }
           return;
         }
       } finally {
@@ -161,16 +157,17 @@ export function createPromptRoute(
           type: 'stream_error',
           data: { code: 'prompt_timeout' },
         });
-        res
-          .status(504)
-          .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
+        if (!res.closed) {
+          res
+            .status(504)
+            .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
+        }
         return;
       }
 
-      // Guard against a race: if the client disconnected while we were awaiting
-      // the result (but clientAbort didn't win the race above), don't respond.
-      if (clientAbort.signal.aborted) return;
-
+      // The turn completed. The audit record reflects the daemon's work, so
+      // it is written even when the client disconnected mid-turn; only the
+      // HTTP response is skipped in that case.
       void audit?.record({
         action: 'prompt_sent',
         actorTokenId: req.rcClient?.id,
@@ -179,7 +176,9 @@ export function createPromptRoute(
         detail: { stopReason: result!.stopReason, blocks: blocks.length },
       });
 
-      res.status(200).json({ stopReason: result!.stopReason });
+      if (!res.closed) {
+        res.status(200).json({ stopReason: result!.stopReason });
+      }
     } finally {
       // Always release the queue slot, even on timeout or error.
       release();

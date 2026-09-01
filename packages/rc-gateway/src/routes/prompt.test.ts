@@ -271,4 +271,77 @@ describe('prompt route', () => {
     // the queue was not deadlocked.
     expect(r2.status).toBe(504);
   });
+
+  // ── Client disconnect vs. timeout (issue #38) ────────────────────────────
+
+  it('does NOT cancel the daemon prompt when the client disconnects mid-turn (#38)', async () => {
+    // Mobile clients get backgrounded routinely (screen off, app switch) and
+    // the OS kills their sockets. The daemon turn must keep running: its
+    // events land in the per-session bus ring and the client resumes +
+    // watches from the watermark when it returns.
+    stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    // Default promptTimeoutMs (600s) — the execution timeout must NOT be the
+    // thing that decides this test.
+    const queue = new PromptQueue();
+    const url = await mount(daemon, audit, { queue });
+
+    const ac = new AbortController();
+    const p = fetch(`${url}/session/sess-1/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'backgrounded' }),
+      signal: ac.signal,
+    });
+    p.catch(() => {}); // swallow the abort rejection; asserted below.
+
+    // Simulate the mobile app being backgrounded ~50ms in.
+    await new Promise((r) => setTimeout(r, 50));
+    ac.abort();
+
+    // The gateway must keep awaiting the daemon's turn even though the HTTP
+    // client is gone. The stub only logs a prompt call when its own socket
+    // stays open to completion — so a completed entry proves the gateway did
+    // NOT propagate the client disconnect into the daemon prompt.
+    const deadline = Date.now() + 2000;
+    while (stub.promptCallLog.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(stub.promptCallLog).toHaveLength(1);
+    const call = stub.promptCallLog[0]!;
+    // The turn ran to completion (>= the 200ms stub delay), not cut short.
+    expect(call.endedAt - call.startedAt).toBeGreaterThanOrEqual(195);
+
+    // The audit record is written even though the HTTP client is gone.
+    const entry = audit.calls.find((c) => c.action === 'prompt_sent');
+    expect(entry).toBeDefined();
+    expect(entry!.target).toBe('sess-1');
+    expect(entry!.detail).toMatchObject({ stopReason: 'end_turn' });
+
+    // The client's own fetch rejected on abort — expected, and must not have
+    // turned into a 500 on the gateway side.
+    await expect(p).rejects.toThrow();
+  });
+
+  it('prompt timeout DOES cancel the daemon prompt (the only remaining abort, #38)', async () => {
+    // Daemon takes 300ms; the execution budget is 50ms. The gateway must
+    // abort the daemon turn on timeout — the stub observes the socket close
+    // and never logs a completed call.
+    stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 300 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const queue = new PromptQueue();
+    const url = await mount(daemon, audit, { promptTimeoutMs: 50, queue });
+
+    const res = await postPrompt(url, { prompt: 'too-slow' });
+    expect(res.status).toBe(504);
+
+    // Give the stub a moment to observe the socket close.
+    await new Promise((r) => setTimeout(r, 50));
+    // The daemon turn was cancelled — the stub never completed it.
+    expect(stub.promptCallLog).toHaveLength(0);
+    // No audit record for a turn that never finished.
+    expect(audit.calls.find((c) => c.action === 'prompt_sent')).toBeUndefined();
+  });
 });

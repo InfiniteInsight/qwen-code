@@ -233,4 +233,68 @@ describe('POST /session/:id/resume', () => {
     // Path hygiene: the cwd must never reach the audit record.
     expect(JSON.stringify(row)).not.toContain(secretDir);
   });
+
+  it('forwards the in-band replay frames + watermark from the daemon load (#39)', async () => {
+    // issue #39: since upstream e23c8e845 the daemon's load action returns the
+    // transcript in-band (compactedReplay + liveJournal) and clears the bus
+    // ring after seeding it, so a cursor-0 watch replays nothing. The route
+    // must forward every in-band field so the UI can render the frames and
+    // start its watch at the lastEventId watermark.
+    const dir = makeTmpDir('qwen-session-resume-replay-');
+    const replayPool: Pick<SessionDaemon, 'resumeSession'> = {
+      async resumeSession(sessionId, req) {
+        return {
+          sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: true,
+          state: {},
+          compactedReplay: [
+            { id: 1, v: 1, type: 'session_update', data: { text: 'early' } },
+          ],
+          liveJournal: [
+            { id: 2, v: 1, type: 'session_update', data: { text: 'late' } },
+          ],
+          lastEventId: 2,
+          eventEpoch: 'epoch-7',
+          historyHasMore: true,
+          historyAnchorRecordId: 'rec-0001',
+          replayDegraded: false,
+        } satisfies DaemonRestoredSession;
+      },
+    };
+    const url = await mountGateway(replayPool);
+
+    const res = await fetch(`${url}/session/${SID}/resume`, post({ cwd: dir }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    // The in-band transcript must be forwarded verbatim.
+    expect(body.compactedReplay).toEqual([
+      { id: 1, v: 1, type: 'session_update', data: { text: 'early' } },
+    ]);
+    expect(body.liveJournal).toEqual([
+      { id: 2, v: 1, type: 'session_update', data: { text: 'late' } },
+    ]);
+    // The watermark + epoch the UI watches from.
+    expect(body.lastEventId).toBe(2);
+    expect(body.eventEpoch).toBe('epoch-7');
+    // Pagination / degradation metadata.
+    expect(body.historyHasMore).toBe(true);
+    expect(body.historyAnchorRecordId).toBe('rec-0001');
+  });
+
+  it('omits replay fields the daemon did not return (older daemon)', async () => {
+    // A daemon that returns a bare restored session (no in-band replay) must
+    // not surface `undefined` keys — the route spreads conditionally.
+    const dir = makeTmpDir('qwen-session-resume-bare-');
+    const pool = fakePool();
+    const url = await mountGateway(pool);
+
+    const res = await fetch(`${url}/session/${SID}/resume`, post({ cwd: dir }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect('compactedReplay' in body).toBe(false);
+    expect('liveJournal' in body).toBe(false);
+    expect('lastEventId' in body).toBe(false);
+    expect('eventEpoch' in body).toBe(false);
+  });
 });
