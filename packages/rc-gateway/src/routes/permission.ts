@@ -13,7 +13,14 @@ import type {
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
-/** POST /session/:id/permission/:requestId { outcome, optionId? } → vote. */
+/**
+ * POST /session/:id/permission/:requestId
+ * { outcome, optionId?, answers? } → vote.
+ *
+ * `answers` carries ask_user_question responses — a flat string→string map
+ * keyed by question index — forwarded to the daemon at the PermissionResponse
+ * level so the tool's onConfirm/execute can read it.
+ */
 export function createPermissionVoteRoute(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
@@ -21,12 +28,43 @@ export function createPermissionVoteRoute(
   return async (req, res) => {
     const sessionId = req.params.id;
     const requestId = req.params.requestId;
-    const body = (req.body ?? {}) as { outcome?: unknown; optionId?: unknown };
+    const body = (req.body ?? {}) as {
+      outcome?: unknown;
+      optionId?: unknown;
+      answers?: unknown;
+    };
+
+    // Sanitize `answers` fail-closed: it must be a plain string→string map.
+    // A malformed body must not smuggle nested payloads into the
+    // PermissionResponse forwarded to the daemon.
+    let answers: Record<string, string> | undefined;
+    if (body.answers !== undefined) {
+      if (
+        typeof body.answers !== 'object' ||
+        body.answers === null ||
+        Array.isArray(body.answers)
+      ) {
+        res.status(400).json({ error: 'Invalid vote', code: 'invalid_vote' });
+        return;
+      }
+      const clean: Record<string, string> = {};
+      for (const [key, value] of Object.entries(
+        body.answers as Record<string, unknown>,
+      )) {
+        if (typeof value !== 'string') {
+          res.status(400).json({ error: 'Invalid vote', code: 'invalid_vote' });
+          return;
+        }
+        clean[key] = value;
+      }
+      answers = clean;
+    }
 
     let response: PermissionResponse;
     if (body.outcome === 'cancelled') {
       response = {
         outcome: { outcome: 'cancelled' } as PermissionOutcomeCancelled,
+        ...(answers ? { answers } : {}),
       };
     } else if (
       body.outcome === 'selected' &&
@@ -38,6 +76,7 @@ export function createPermissionVoteRoute(
           outcome: 'selected',
           optionId: body.optionId,
         } as PermissionOutcomeSelected,
+        ...(answers ? { answers } : {}),
       };
     } else {
       res.status(400).json({ error: 'Invalid vote', code: 'invalid_vote' });
