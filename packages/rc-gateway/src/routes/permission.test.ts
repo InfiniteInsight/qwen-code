@@ -137,6 +137,71 @@ describe('permission vote route', () => {
     expect(res.status).toBe(200);
   });
 
+  it('forwards ask_user_question answers to the daemon on a selected vote', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const { token } = await store.issue([APPROVE], 'owner');
+    const url = await mount(daemon);
+    const res = await postVote(url, token, {
+      outcome: 'selected',
+      optionId: 'allow',
+      answers: { '0': 'option B', '1': 'a, b' },
+    });
+    expect(res.status).toBe(200);
+    expect(stub.lastRespondedPermission?.requestId).toBe('req-1');
+    expect(stub.lastRespondedPermission?.response).toMatchObject({
+      outcome: { outcome: 'selected', optionId: 'allow' },
+      // answers ride at the PermissionResponse level, not inside outcome.
+      answers: { '0': 'option B', '1': 'a, b' },
+    });
+  });
+
+  it('forwards answers on a cancelled vote too', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const { token } = await store.issue([APPROVE], 'owner');
+    const url = await mount(daemon);
+    const res = await postVote(url, token, {
+      outcome: 'cancelled',
+      answers: { '0': 'typed before changing mind' },
+    });
+    expect(res.status).toBe(200);
+    expect(stub.lastRespondedPermission?.response).toMatchObject({
+      outcome: { outcome: 'cancelled' },
+      answers: { '0': 'typed before changing mind' },
+    });
+  });
+
+  it('omits answers from the forwarded response when the client sent none', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const { token } = await store.issue([APPROVE], 'owner');
+    const url = await mount(daemon);
+    await postVote(url, token, { outcome: 'selected', optionId: 'allow' });
+    expect(stub.lastRespondedPermission?.response).not.toHaveProperty(
+      'answers',
+    );
+  });
+
+  it.each([
+    ['a plain string', 'nope'],
+    ['an array', ['0', '1']],
+    ['a nested value', { '0': { deep: true } }],
+    ['a non-string value', { 0: 42 }],
+  ])('400s answers shaped as %s', async (_label, answers) => {
+    stub = await startStubDaemon();
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const { token } = await store.issue([APPROVE], 'owner');
+    const url = await mount(daemon);
+    const res = await postVote(url, token, {
+      outcome: 'selected',
+      optionId: 'allow',
+      answers,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_vote');
+  });
+
   it('400s an invalid vote (selected without optionId)', async () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
