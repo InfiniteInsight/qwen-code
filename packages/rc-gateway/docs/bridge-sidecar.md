@@ -44,9 +44,9 @@ For Matrix the sidecar also exits 1 with `MXID mismatch` if the access token
 resolves to an MXID other than `MATRIX_USER_ID`.
 
 `MATRIX_ENABLE_E2EE` opts into encrypted-room support and is **OFF by default**.
-When set, the `matrix-bot-sdk` + olm crypto adapter becomes the bridge's transport
-(it owns `/sync`, decrypts encrypted rooms transparently, and sends encrypted
-replies) — verified end-to-end against a real Synapse; see
+When set, the `@vector-im/matrix-bot-sdk` + olm crypto adapter becomes the
+bridge's transport (it owns `/sync`, decrypts encrypted rooms transparently, and
+sends encrypted replies) — verified end-to-end against a real Synapse; see
 [matrix-bridge.md](./matrix-bridge.md) "End-to-end encryption". The flag is honored
 on **both** the sidecar and the in-process bridge (both construct via the shared
 `startBridge`). The olm store lives at `$QWEN_BRIDGE_STATE_DIR/olm/`. The Matrix
