@@ -368,6 +368,28 @@
       #transcript .thought .thought-body[hidden] {
         display: none;
       }
+      /* Processing indicator while a sent prompt is being processed. */
+      #transcript .processing {
+        align-self: flex-start;
+        background: transparent;
+        color: #8a8f98;
+        font-style: italic;
+        font-size: 0.85rem;
+        border-left: 2px solid #3a3f47;
+      }
+      #transcript .processing .proc-spin {
+        display: inline-block;
+        animation: proc-pulse 1.3s ease-in-out infinite;
+      }
+      @keyframes proc-pulse {
+        0%,
+        100% {
+          opacity: 0.35;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
       #transcript .tool {
         align-self: flex-start;
         background: #17203a;
@@ -1147,6 +1169,51 @@
       function resetTurn() {
         curAsst = null;
         finishThought();
+        hideProcessing();
+      }
+      // ---- Processing indicator (feedback between send and first frame) ---
+      // After a send, the reply can take several seconds (gateway → daemon →
+      // first model token). Show a quiet "thinking" row with a live elapsed
+      // timer; hide it the moment any first-frame of the turn arrives.
+      let processingEl = null;
+      let processingTimer = null;
+      let processingStartedAt = 0;
+      function hideProcessing() {
+        if (processingTimer) {
+          clearInterval(processingTimer);
+          processingTimer = null;
+        }
+        if (processingEl && processingEl.isConnected) processingEl.remove();
+        processingEl = null;
+      }
+      function showProcessing() {
+        hideProcessing();
+        processingStartedAt = Date.now();
+        const b = document.createElement('div');
+        b.className = 'bubble processing';
+        const spin = document.createElement('span');
+        spin.className = 'proc-spin';
+        spin.textContent = '⏳ ';
+        const msg = document.createElement('span');
+        msg.textContent = 'thinking';
+        const time = document.createElement('span');
+        time.className = 'proc-time';
+        b.append(spin, msg, time);
+        const tick = () => {
+          const secs = Math.max(
+            0,
+            Math.floor((Date.now() - processingStartedAt) / 1000),
+          );
+          time.textContent =
+            secs >= 60
+              ? ' · ' + Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
+              : ' · ' + secs + 's';
+        };
+        tick();
+        processingTimer = setInterval(tick, 1000);
+        $('transcript').appendChild(b);
+        processingEl = b;
+        scrollTranscript();
       }
       // ---- Crash-recovery banner (add-mid-turn-recovery §7) ---------------
       // `session_interrupted` / `session_recovered` are WAL-persisted markers,
@@ -1177,6 +1244,8 @@
           'Daemon crashed — this turn was interrupted' +
           (notRecovered ? ' and not recovered' : '');
         el.hidden = false;
+        // Not recovered = the turn is over; stop the processing timer.
+        if (notRecovered) hideProcessing();
       }
       function showRecoveredNote() {
         if (recoveredNoteTimer) clearTimeout(recoveredNoteTimer);
@@ -3222,6 +3291,7 @@
           return;
         }
         if (su === 'agent_message_chunk' && text) {
+          hideProcessing(); // the turn's first frame has arrived
           // First agent chunk after a user record = one completed turn
           // boundary (the value "Fork from here" posts as fromTurn).
           if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
@@ -3238,7 +3308,10 @@
           }
           return;
         }
-        if (su === 'agent_thought_chunk' && text) return appendThought(text);
+        if (su === 'agent_thought_chunk' && text) {
+          hideProcessing(); // the turn's first frame has arrived
+          return appendThought(text);
+        }
         if (su === 'tool_call' || su === 'tool_call_update')
           return renderTool(u);
         if (su === 'plan') return renderPlan(u.entries);
@@ -3319,6 +3392,7 @@
             // carries no turn_complete, so historical turns stay button-less
             // by design (fork them from the Sessions/fork panels instead).
             finishThought();
+            hideProcessing();
             // A turn can't end while an Agent tool is still in flight —
             // settle any indicator whose terminal update never arrived.
             for (const [pid] of subagents) finishSubagent(pid, 'completed');
@@ -4121,6 +4195,7 @@
         $('send').disabled = true;
         setStatus('sending…');
         addUser(prompt); // echo locally; the daemon's user_message_chunk is ignored
+        showProcessing(); // visible feedback until the turn's first frame
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
@@ -4139,10 +4214,13 @@
             setStatus('sent: ' + (json.stopReason || 'ok'));
             clearCrashBanner(); // a prompt was accepted: the banner is stale
           } else if (res.status === 400) {
+            hideProcessing();
             setStatus('empty prompt');
           } else if (res.status === 401 || res.status === 403) {
+            hideProcessing();
             setStatus('not authorized');
           } else {
+            hideProcessing();
             setStatus('send failed (' + res.status + ')');
           }
         } catch (e) {
