@@ -19,7 +19,8 @@
     "packages/channels/plugin-example",
     "integrations/external-context",
     "!packages/desktop",
-    "!packages/desktop-shell"
+    "!packages/desktop-shell",
+    "!packages/launcher-app"
   ],
   "repository": {
     "type": "git",
