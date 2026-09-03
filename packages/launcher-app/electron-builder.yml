@@ -6,16 +6,16 @@
 # Deferred (not in scope for this task): nsis installer, code signing,
 # publish/auto-update.
 
-appId: com.qwen-code.launcher-app
-productName: Qwen Remote Launcher
+appId: 'com.qwen-code.launcher-app'
+productName: 'Qwen Remote Launcher'
 
 directories:
-  output: release
+  output: 'release'
 
 files:
-  - dist/**
-  - package.json
+  - 'dist/**'
+  - 'package.json'
 
 win:
   target:
-    - dir
+    - 'dir'

@@ -27,10 +27,10 @@
     "yaml": "^2.8.1"
   },
   "optionalDependencies": {
-    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.6.6",
+    "@vector-im/matrix-bot-sdk": "^0.10.0-element.0",
     "better-sqlite3": "^11.10.0",
-    "bonjour-service": "^1.4.1",
-    "matrix-bot-sdk": "^0.8.0"
+    "bonjour-service": "^1.4.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

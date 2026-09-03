@@ -1141,17 +1141,20 @@ describe('workspace-qualified core REST', () => {
     try {
       const enabled = await request(h.app)
         .post(
-          `/workspaces/${encodeURIComponent(h.secondaryId)}/tools/Bash/enable`,
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/tools/run_shell_command/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())
         .send({ enabled: false });
       expect(enabled.status).toBe(200);
-      expect(enabled.body).toEqual({ toolName: 'Bash', enabled: false });
+      expect(enabled.body).toEqual({
+        toolName: 'run_shell_command',
+        enabled: false,
+      });
 
       const badBody = await request(h.app)
         .post(
-          `/workspaces/${encodeURIComponent(h.secondaryId)}/tools/Bash/enable`,
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/tools/run_shell_command/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())
@@ -1169,7 +1172,7 @@ describe('workspace-qualified core REST', () => {
     try {
       const res = await request(untrusted.app)
         .post(
-          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/tools/Bash/enable`,
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/tools/run_shell_command/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())

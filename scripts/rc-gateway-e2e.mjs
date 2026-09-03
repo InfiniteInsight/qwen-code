@@ -174,9 +174,11 @@ try {
   // 2. Gateway health.
   {
     const r = await fetch(`${gw}/rc/health`);
-    r.status === 200
-      ? ok('gateway /rc/health 200')
-      : bad(`gateway health ${r.status}`);
+    if (r.status === 200) {
+      ok('gateway /rc/health 200');
+    } else {
+      bad(`gateway health ${r.status}`);
+    }
   }
 
   // 2b. Session event pump (cycle 10): starts cleanly against the REAL daemon
@@ -188,9 +190,11 @@ try {
       pump = new SessionEventPump(dc, notifier);
       await pump.start();
       const r = await fetch(`${gw}/rc/health`);
-      r.status === 200
-        ? ok('session event pump started cleanly; gateway still healthy')
-        : bad(`gateway unhealthy after pump start (${r.status})`);
+      if (r.status === 200) {
+        ok('session event pump started cleanly; gateway still healthy');
+      } else {
+        bad(`gateway unhealthy after pump start (${r.status})`);
+      }
     } catch (e) {
       bad(`pump start threw: ${e?.message ?? e}`);
     }
@@ -226,9 +230,11 @@ try {
         QWEN_BRIDGE_PAIRING_CODE: '',
       });
       const exitCode = await new Promise((res) => proc.on('exit', res));
-      exitCode === 1 && output().includes('TELEGRAM_BOT_TOKEN is required')
-        ? ok('sidecar fails fast on missing bot token (exit 1, exact message)')
-        : bad(`sidecar fail-fast exit=${exitCode} out=${output().trim()}`);
+      if (exitCode === 1 && output().includes('TELEGRAM_BOT_TOKEN is required')) {
+        ok('sidecar fails fast on missing bot token (exit 1, exact message)');
+      } else {
+        bad(`sidecar fail-fast exit=${exitCode} out=${output().trim()}`);
+      }
     }
 
     // (B) Loopback contract + pairing-code bootstrap: the sidecar redeems a
@@ -273,9 +279,11 @@ try {
         );
         ok('sidecar redeems a pairing code and registers over the loopback contract');
         const mode = statSync(join(stateDir, 'token')).mode & 0o777;
-        mode === 0o600
-          ? ok('sidecar persists the redeemed token at mode 0600')
-          : bad(`persisted token mode ${mode.toString(8)} (want 600)`);
+        if (mode === 0o600) {
+          ok('sidecar persists the redeemed token at mode 0600');
+        } else {
+          bad(`persisted token mode ${mode.toString(8)} (want 600)`);
+        }
       } catch {
         bad('sidecar did not register within 10s');
       } finally {
@@ -292,19 +300,23 @@ try {
     body: JSON.stringify({ code, label: 'e2e' }),
   });
   const redeemBody = await redeem.json();
-  redeem.status === 200 &&
+  if (redeem.status === 200 &&
   JSON.stringify(redeemBody.scopes) === JSON.stringify([SESSION_READ]) &&
-  typeof redeemBody.token === 'string'
-    ? ok('pair redeem -> 200 with scoped token')
-    : bad(`pair redeem ${redeem.status} ${JSON.stringify(redeemBody)}`);
+  typeof redeemBody.token === 'string') {
+    ok('pair redeem -> 200 with scoped token');
+  } else {
+    bad(`pair redeem ${redeem.status} ${JSON.stringify(redeemBody)}`);
+  }
   const userToken = redeemBody.token;
 
   // 4. Events without a token -> 401.
   {
     const r = await fetch(`${gw}/rc/session/nope/events`);
-    r.status === 401
-      ? ok('events without token -> 401')
-      : bad(`no-token ${r.status}`);
+    if (r.status === 401) {
+      ok('events without token -> 401');
+    } else {
+      bad(`no-token ${r.status}`);
+    }
   }
 
   // 5. Events with a no-scope token -> 403.
@@ -319,9 +331,11 @@ try {
     const r = await fetch(`${gw}/rc/session/nope/events`, {
       headers: { Authorization: `Bearer ${weak}` },
     });
-    r.status === 403
-      ? ok('events with no-scope token -> 403')
-      : bad(`no-scope ${r.status}`);
+    if (r.status === 403) {
+      ok('events with no-scope token -> 403');
+    } else {
+      bad(`no-scope ${r.status}`);
+    }
   }
 
   // 6. Authenticated, scoped proxy actually reaches the REAL daemon.
@@ -335,11 +349,13 @@ try {
         headers: { Authorization: `Bearer ${userToken}` },
         signal: ac.signal,
       });
-      r.status === 502 || r.status === 404
-        ? ok(
+      if (r.status === 502 || r.status === 404) {
+        ok(
             `scoped proxy reached real daemon (status ${r.status} for unknown session)`,
-          )
-        : bad(`unexpected proxy status ${r.status}`);
+          );
+      } else {
+        bad(`unexpected proxy status ${r.status}`);
+      }
     } catch (e) {
       bad(`proxy request errored/hung: ${e}`);
     } finally {
@@ -350,16 +366,20 @@ try {
   {
     const r = await fetch(`${gw}/ui/`);
     const body = await r.text();
-    r.status === 200 && body.includes('qwen-rc viewer')
-      ? ok('web viewer served at /ui/')
-      : bad(`/ui/ returned ${r.status}`);
+    if (r.status === 200 && body.includes('qwen-rc viewer')) {
+      ok('web viewer served at /ui/');
+    } else {
+      bad(`/ui/ returned ${r.status}`);
+    }
   }
   // The push service worker is served at /ui/sw.js (public static asset).
   {
     const r = await fetch(`${gw}/ui/sw.js`);
-    r.status === 200
-      ? ok('service worker served at /ui/sw.js')
-      : bad(`/ui/sw.js returned ${r.status}`);
+    if (r.status === 200) {
+      ok('service worker served at /ui/sw.js');
+    } else {
+      bad(`/ui/sw.js returned ${r.status}`);
+    }
   }
 
   // Permission vote with an approve-scoped token reaches the real daemon.
@@ -379,9 +399,11 @@ try {
       },
       body: JSON.stringify({ outcome: 'cancelled' }),
     });
-    r.status === 404
-      ? ok('permission vote reached real daemon (404 no pending)')
-      : bad(`vote returned ${r.status}`);
+    if (r.status === 404) {
+      ok('permission vote reached real daemon (404 no pending)');
+    } else {
+      bad(`vote returned ${r.status}`);
+    }
   }
 
   // Prompt with a write-scoped token reaches the real daemon. For an unknown
@@ -403,9 +425,11 @@ try {
       },
       body: JSON.stringify({ prompt: 'ping' }),
     });
-    r.status === 502
-      ? ok('prompt reached real daemon (502 for unknown session)')
-      : bad(`prompt returned ${r.status}`);
+    if (r.status === 502) {
+      ok('prompt reached real daemon (502 for unknown session)');
+    } else {
+      bad(`prompt returned ${r.status}`);
+    }
   }
 
   // WebPush (cycle 8): vapid key, subscribe, list, delete — pure gateway state,
@@ -415,9 +439,11 @@ try {
       headers: { Authorization: `Bearer ${userToken}` },
     });
     const vb = await vr.json();
-    vr.status === 200 && typeof vb.applicationServerKey === 'string'
-      ? ok('push vapid -> 200 with applicationServerKey')
-      : bad(`push vapid ${vr.status} ${JSON.stringify(vb)}`);
+    if (vr.status === 200 && typeof vb.applicationServerKey === 'string') {
+      ok('push vapid -> 200 with applicationServerKey');
+    } else {
+      bad(`push vapid ${vr.status} ${JSON.stringify(vb)}`);
+    }
 
     const sr = await fetch(`${gw}/rc/push/subscribe`, {
       method: 'POST',
@@ -434,19 +460,23 @@ try {
     });
     const sb = await sr.json();
     const subId = sb.id;
-    sr.status === 201 && typeof subId === 'string'
-      ? ok('push subscribe -> 201 with id')
-      : bad(`push subscribe ${sr.status} ${JSON.stringify(sb)}`);
+    if (sr.status === 201 && typeof subId === 'string') {
+      ok('push subscribe -> 201 with id');
+    } else {
+      bad(`push subscribe ${sr.status} ${JSON.stringify(sb)}`);
+    }
 
     const lr = await fetch(`${gw}/rc/push/subscriptions`, {
       headers: { Authorization: `Bearer ${userToken}` },
     });
     const lb = await lr.json();
-    lr.status === 200 &&
+    if (lr.status === 200 &&
     Array.isArray(lb.subscriptions) &&
-    lb.subscriptions.some((s) => s.id === subId)
-      ? ok('push subscriptions list includes new subscription')
-      : bad(`push list ${lr.status} ${JSON.stringify(lb)}`);
+    lb.subscriptions.some((s) => s.id === subId)) {
+      ok('push subscriptions list includes new subscription');
+    } else {
+      bad(`push list ${lr.status} ${JSON.stringify(lb)}`);
+    }
 
     // Per-subscription prefs (cycle 16): PATCH the prefs, then confirm GET
     // reflects them. Pure gateway state on our own subscription record.
@@ -459,35 +489,41 @@ try {
       body: JSON.stringify({ prefs: ['task.completed'] }),
     });
     const ppb = await ppr.json();
-    ppr.status === 200 &&
+    if (ppr.status === 200 &&
     Array.isArray(ppb.prefs) &&
     ppb.prefs.length === 1 &&
-    ppb.prefs[0] === 'task.completed'
-      ? ok('push PATCH prefs -> 200 with prefs:[task.completed]')
-      : bad(`push patch prefs ${ppr.status} ${JSON.stringify(ppb)}`);
+    ppb.prefs[0] === 'task.completed') {
+      ok('push PATCH prefs -> 200 with prefs:[task.completed]');
+    } else {
+      bad(`push patch prefs ${ppr.status} ${JSON.stringify(ppb)}`);
+    }
 
     const plr = await fetch(`${gw}/rc/push/subscriptions`, {
       headers: { Authorization: `Bearer ${userToken}` },
     });
     const plb = await plr.json();
-    plr.status === 200 &&
+    if (plr.status === 200 &&
     Array.isArray(plb.subscriptions) &&
     plb.subscriptions.some(
       (s) =>
         s.id === subId &&
         Array.isArray(s.prefs) &&
         s.prefs[0] === 'task.completed',
-    )
-      ? ok('push subscriptions list reflects updated prefs')
-      : bad(`push list prefs ${plr.status} ${JSON.stringify(plb)}`);
+    )) {
+      ok('push subscriptions list reflects updated prefs');
+    } else {
+      bad(`push list prefs ${plr.status} ${JSON.stringify(plb)}`);
+    }
 
     const dr = await fetch(`${gw}/rc/push/subscriptions/${subId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${userToken}` },
     });
-    dr.status === 204
-      ? ok('push unsubscribe -> 204')
-      : bad(`push delete ${dr.status}`);
+    if (dr.status === 204) {
+      ok('push unsubscribe -> 204');
+    } else {
+      bad(`push delete ${dr.status}`);
+    }
   }
 
   // WebPush send-test (cycle 9): an owner token subscribes a dummy endpoint and
@@ -517,9 +553,11 @@ try {
         },
       }),
     });
-    sr.status === 201
-      ? ok('push subscribe (owner, for send-test) -> 201')
-      : bad(`push owner subscribe ${sr.status}`);
+    if (sr.status === 201) {
+      ok('push subscribe (owner, for send-test) -> 201');
+    } else {
+      bad(`push owner subscribe ${sr.status}`);
+    }
 
     const tr = await fetch(`${gw}/rc/push/test`, {
       method: 'POST',
@@ -530,9 +568,11 @@ try {
       body: JSON.stringify({ sessionId: 'e2e' }),
     });
     const tb = await tr.json();
-    tr.status === 200 && typeof tb.sent === 'number' && tb.sent >= 1
-      ? ok(`push test route -> 200 with sent=${tb.sent}`)
-      : bad(`push test ${tr.status} ${JSON.stringify(tb)}`);
+    if (tr.status === 200 && typeof tb.sent === 'number' && tb.sent >= 1) {
+      ok(`push test route -> 200 with sent=${tb.sent}`);
+    } else {
+      bad(`push test ${tr.status} ${JSON.stringify(tb)}`);
+    }
 
     // A non-owner (session:read-only) token must be rejected at the owner gate.
     const ntr = await fetch(`${gw}/rc/push/test`, {
@@ -543,9 +583,11 @@ try {
       },
       body: JSON.stringify({}),
     });
-    ntr.status === 403
-      ? ok('push test route as non-owner -> 403')
-      : bad(`push test non-owner ${ntr.status}`);
+    if (ntr.status === 403) {
+      ok('push test route as non-owner -> 403');
+    } else {
+      bad(`push test non-owner ${ntr.status}`);
+    }
   }
 
   // Routing snooze (cycle 15): owner-gated POST/GET/DELETE /rc/routing/snooze.
@@ -568,25 +610,31 @@ try {
       body: JSON.stringify({ durationSec: 1 }),
     });
     const pb = await pr.json();
-    pr.status === 200 && pb.scope === 'all' && typeof pb.until === 'number'
-      ? ok('routing snooze POST -> 200 {until,scope:all}')
-      : bad(`routing snooze POST ${pr.status} ${JSON.stringify(pb)}`);
+    if (pr.status === 200 && pb.scope === 'all' && typeof pb.until === 'number') {
+      ok('routing snooze POST -> 200 {until,scope:all}');
+    } else {
+      bad(`routing snooze POST ${pr.status} ${JSON.stringify(pb)}`);
+    }
 
     const gr = await fetch(`${gw}/rc/routing/snooze`, {
       headers: { Authorization: `Bearer ${snoozeOwnerToken}` },
     });
     const gb = await gr.json();
-    gr.status === 200 && gb.active === true
-      ? ok('routing snooze GET -> active:true')
-      : bad(`routing snooze GET ${gr.status} ${JSON.stringify(gb)}`);
+    if (gr.status === 200 && gb.active === true) {
+      ok('routing snooze GET -> active:true');
+    } else {
+      bad(`routing snooze GET ${gr.status} ${JSON.stringify(gb)}`);
+    }
 
     const drr = await fetch(`${gw}/rc/routing/snooze`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${snoozeOwnerToken}` },
     });
-    drr.status === 204
-      ? ok('routing snooze DELETE -> 204')
-      : bad(`routing snooze DELETE ${drr.status}`);
+    if (drr.status === 204) {
+      ok('routing snooze DELETE -> 204');
+    } else {
+      bad(`routing snooze DELETE ${drr.status}`);
+    }
 
     // A non-owner (session:read-only) token is rejected at the owner gate.
     const nsr = await fetch(`${gw}/rc/routing/snooze`, {
@@ -597,9 +645,11 @@ try {
       },
       body: JSON.stringify({ durationSec: 1 }),
     });
-    nsr.status === 403
-      ? ok('routing snooze POST as non-owner -> 403')
-      : bad(`routing snooze non-owner ${nsr.status}`);
+    if (nsr.status === 403) {
+      ok('routing snooze POST as non-owner -> 403');
+    } else {
+      bad(`routing snooze non-owner ${nsr.status}`);
+    }
   }
 
   // Link-share core (cycle 18): owner mints a session-locked, TTL-bounded share
@@ -623,40 +673,48 @@ try {
       body: JSON.stringify({ sessionId: 'share-sess', ttlSec: 3600 }),
     });
     const mb = await mr.json();
-    mr.status === 201 &&
+    if (mr.status === 201 &&
     typeof mb.id === 'string' &&
     typeof mb.token === 'string' &&
     mb.url === '/ui/share/' + mb.token &&
-    typeof mb.expiresAt === 'number'
-      ? ok('share mint -> 201 {id,token,url,expiresAt}')
-      : bad(`share mint ${mr.status} ${JSON.stringify(mb)}`);
+    typeof mb.expiresAt === 'number') {
+      ok('share mint -> 201 {id,token,url,expiresAt}');
+    } else {
+      bad(`share mint ${mr.status} ${JSON.stringify(mb)}`);
+    }
 
     const lr = await fetch(`${gw}/rc/share`, {
       headers: { Authorization: `Bearer ${shareOwnerToken}` },
     });
     const lb = await lr.json();
-    lr.status === 200 &&
+    if (lr.status === 200 &&
     Array.isArray(lb.shares) &&
-    lb.shares.some((s) => s.id === mb.id && s.sessionLockId === 'share-sess')
-      ? ok('share list includes the minted share')
-      : bad(`share list ${lr.status} ${JSON.stringify(lb)}`);
+    lb.shares.some((s) => s.id === mb.id && s.sessionLockId === 'share-sess')) {
+      ok('share list includes the minted share');
+    } else {
+      bad(`share list ${lr.status} ${JSON.stringify(lb)}`);
+    }
 
     // The share token on a DIFFERENT session -> 403 session_locked.
     const wr = await fetch(`${gw}/rc/session/some-other-session/events`, {
       headers: { Authorization: `Bearer ${mb.token}` },
     });
     const wb = await wr.json().catch(() => ({}));
-    wr.status === 403 && wb.code === 'session_locked'
-      ? ok('share token on a different session -> 403 session_locked')
-      : bad(`share wrong-session ${wr.status} ${JSON.stringify(wb)}`);
+    if (wr.status === 403 && wb.code === 'session_locked') {
+      ok('share token on a different session -> 403 session_locked');
+    } else {
+      bad(`share wrong-session ${wr.status} ${JSON.stringify(wb)}`);
+    }
 
     const dr = await fetch(`${gw}/rc/share/${mb.id}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${shareOwnerToken}` },
     });
-    dr.status === 204
-      ? ok('share revoke -> 204')
-      : bad(`share revoke ${dr.status}`);
+    if (dr.status === 204) {
+      ok('share revoke -> 204');
+    } else {
+      bad(`share revoke ${dr.status}`);
+    }
   }
 
   // Cross-session search core (cycle 19): owner-gated GET /rc/search. A pure
@@ -676,17 +734,21 @@ try {
       headers: { Authorization: `Bearer ${searchOwnerToken}` },
     });
     const sb = await sr.json().catch(() => ({}));
-    sr.status === 200 && Array.isArray(sb.hits)
-      ? ok(`search GET -> 200 with hits array (len=${sb.hits.length})`)
-      : bad(`search GET ${sr.status} ${JSON.stringify(sb)}`);
+    if (sr.status === 200 && Array.isArray(sb.hits)) {
+      ok(`search GET -> 200 with hits array (len=${sb.hits.length})`);
+    } else {
+      bad(`search GET ${sr.status} ${JSON.stringify(sb)}`);
+    }
 
     // A non-owner (session:read-only) token is rejected at the owner gate.
     const nsr = await fetch(`${gw}/rc/search?q=test`, {
       headers: { Authorization: `Bearer ${userToken}` },
     });
-    nsr.status === 403
-      ? ok('search GET as non-owner -> 403')
-      : bad(`search non-owner ${nsr.status}`);
+    if (nsr.status === 403) {
+      ok('search GET as non-owner -> 403');
+    } else {
+      bad(`search non-owner ${nsr.status}`);
+    }
   }
 
   // Custom slash commands (cycle 20): drop a valid workspace command into the
@@ -716,9 +778,11 @@ try {
     const echo = Array.isArray(lb.commands)
       ? lb.commands.find((c) => c.name === 'echo')
       : undefined;
-    lr.status === 200 && lb.v === 1 && echo && echo.invocableByYou === true
-      ? ok('GET /rc/commands -> 200 {v:1} with fixture echo invocableByYou:true')
-      : bad(`commands list ${lr.status} ${JSON.stringify(lb)}`);
+    if (lr.status === 200 && lb.v === 1 && echo && echo.invocableByYou === true) {
+      ok('GET /rc/commands -> 200 {v:1} with fixture echo invocableByYou:true');
+    } else {
+      bad(`commands list ${lr.status} ${JSON.stringify(lb)}`);
+    }
 
     // Invoke an unknown command on a bogus session -> 404 unknown_command
     // (the 404 short-circuits before the daemon is touched).
@@ -731,15 +795,19 @@ try {
       body: JSON.stringify({}),
     });
     const ib = await ir.json().catch(() => ({}));
-    ir.status === 404 && ib.code === 'unknown_command'
-      ? ok('invoke unknown command -> 404 unknown_command')
-      : bad(`invoke unknown ${ir.status} ${JSON.stringify(ib)}`);
+    if (ir.status === 404 && ib.code === 'unknown_command') {
+      ok('invoke unknown command -> 404 unknown_command');
+    } else {
+      bad(`invoke unknown ${ir.status} ${JSON.stringify(ib)}`);
+    }
 
     // GET /rc/commands without a token -> 401.
     const nr = await fetch(`${gw}/rc/commands`);
-    nr.status === 401
-      ? ok('GET /rc/commands without token -> 401')
-      : bad(`commands no-token ${nr.status}`);
+    if (nr.status === 401) {
+      ok('GET /rc/commands without token -> 401');
+    } else {
+      bad(`commands no-token ${nr.status}`);
+    }
   }
 
   // Session forking (cycle 21): THE drift detector. Write a real parent
@@ -814,9 +882,11 @@ try {
 
     // (b) The fork's JSONL exists on disk.
     if (newId) {
-      existsSync(join(chatsDir, `${newId}.jsonl`))
-        ? ok('fork JSONL written to the derived chats dir')
-        : bad('fork JSONL missing on disk');
+      if (existsSync(join(chatsDir, `${newId}.jsonl`))) {
+        ok('fork JSONL written to the derived chats dir');
+      } else {
+        bad('fork JSONL missing on disk');
+      }
     }
 
     // (c) THE make-or-break signal: the fork appears in listWorkspaceSessions,
@@ -824,15 +894,17 @@ try {
     if (newId) {
       try {
         const summaries = await dc.listWorkspaceSessions(wsCwd);
-        summaries.some((s) => s.sessionId === newId)
-          ? ok(
+        if (summaries.some((s) => s.sessionId === newId)) {
+          ok(
               'RESTORE-BY-PATH: fork appears in listWorkspaceSessions ' +
                 '(real daemon restored our gateway-written file)',
-            )
-          : bad(
+            );
+        } else {
+          bad(
               'RESTORE-BY-PATH FAILED: fork NOT in listWorkspaceSessions ' +
                 `(restored ids: ${JSON.stringify(summaries.map((s) => s.sessionId))})`,
             );
+        }
       } catch (e) {
         bad(`listWorkspaceSessions threw: ${e?.message ?? e}`);
       }
@@ -853,23 +925,27 @@ try {
         headers: { Authorization: `Bearer ${lineageToken}` },
       });
       const lb = await lr.json().catch(() => ({}));
-      lr.status === 200 &&
+      if (lr.status === 200 &&
       lb.sessionId === newId &&
       Array.isArray(lb.chain) &&
       lb.chain.length === 2 &&
       lb.chain[0]?.sessionId === newId &&
       lb.chain[1]?.sessionId === parentId &&
-      lb.truncated === false
-        ? ok('lineage GET -> 200 chain [fork, parent] to root')
-        : bad(`lineage GET ${lr.status} ${JSON.stringify(lb)}`);
+      lb.truncated === false) {
+        ok('lineage GET -> 200 chain [fork, parent] to root');
+      } else {
+        bad(`lineage GET ${lr.status} ${JSON.stringify(lb)}`);
+      }
 
       // A WRITE-but-not-OWNER token is 403 (topology is owner-only).
       const nr = await fetch(`${gw}/rc/session/${newId}/lineage`, {
         headers: { Authorization: `Bearer ${forkToken}` },
       });
-      nr.status === 403
-        ? ok('lineage GET as non-owner -> 403')
-        : bad(`lineage non-owner expected 403, got ${nr.status}`);
+      if (nr.status === 403) {
+        ok('lineage GET as non-owner -> 403');
+      } else {
+        bad(`lineage non-owner expected 403, got ${nr.status}`);
+      }
 
       // Session listing (cycle 50): an OWNER token GETs /rc/sessions; the flat
       // list (over the REAL on-disk chats dir, which holds other sessions too)
@@ -882,25 +958,29 @@ try {
       const items = Array.isArray(slb.sessions) ? slb.sessions : [];
       const parentItem = items.find((s) => s.sessionId === parentId);
       const forkItem = items.find((s) => s.sessionId === newId);
-      slr.status === 200 &&
+      if (slr.status === 200 &&
       parentItem &&
       Array.isArray(parentItem.forks) &&
       parentItem.forks.includes(newId) &&
       forkItem &&
-      forkItem.parentSessionId === parentId
-        ? ok('sessions GET -> 200 parent has forks=[fork], fork points to parent')
-        : bad(
+      forkItem.parentSessionId === parentId) {
+        ok('sessions GET -> 200 parent has forks=[fork], fork points to parent');
+      } else {
+        bad(
             `sessions GET ${slr.status} parent=${JSON.stringify(parentItem)} ` +
               `fork=${JSON.stringify(forkItem)}`,
           );
+      }
 
       // A WRITE-but-not-OWNER token is 403 (topology is owner-only).
       const nsl = await fetch(`${gw}/rc/sessions`, {
         headers: { Authorization: `Bearer ${forkToken}` },
       });
-      nsl.status === 403
-        ? ok('sessions GET as non-owner -> 403')
-        : bad(`sessions non-owner expected 403, got ${nsl.status}`);
+      if (nsl.status === 403) {
+        ok('sessions GET as non-owner -> 403');
+      } else {
+        bad(`sessions non-owner expected 403, got ${nsl.status}`);
+      }
     }
 
     // Owner event stream (cycle 49): an OWNER token opens GET /rc/events; an
@@ -973,17 +1053,21 @@ try {
           done({ ok: false, why: 'timeout' });
         }, 5000);
       });
-      result.ok
-        ? ok('owner event stream -> live token_minted frame')
-        : bad(`owner event stream: ${result.why}`);
+      if (result.ok) {
+        ok('owner event stream -> live token_minted frame');
+      } else {
+        bad(`owner event stream: ${result.why}`);
+      }
 
       // A non-owner (session:read) token is rejected at the OWNER gate.
       const nr = await fetch(`${gw}/rc/events`, {
         headers: { Authorization: `Bearer ${forkToken}` },
       });
-      nr.status === 403
-        ? ok('owner event stream as non-owner -> 403')
-        : bad(`owner events non-owner expected 403, got ${nr.status}`);
+      if (nr.status === 403) {
+        ok('owner event stream as non-owner -> 403');
+      } else {
+        bad(`owner events non-owner expected 403, got ${nr.status}`);
+      }
     }
 
     // Error case: forking an unknown parent -> 404 parent_transcript_not_found.
@@ -997,9 +1081,11 @@ try {
         body: JSON.stringify({}),
       });
       const ub = await ur.json().catch(() => ({}));
-      ur.status === 404 && ub.code === 'parent_transcript_not_found'
-        ? ok('fork unknown parent -> 404 parent_transcript_not_found')
-        : bad(`fork unknown parent ${ur.status} ${JSON.stringify(ub)}`);
+      if (ur.status === 404 && ub.code === 'parent_transcript_not_found') {
+        ok('fork unknown parent -> 404 parent_transcript_not_found');
+      } else {
+        bad(`fork unknown parent ${ur.status} ${JSON.stringify(ub)}`);
+      }
     }
 
     // Named fork (cycle 86): POST {name} appends a core-faithful custom_title
@@ -1040,9 +1126,11 @@ try {
       if (namedId) {
         try {
           const summaries = await dc.listWorkspaceSessions(wsCwd);
-          summaries.some((s) => s.sessionId === namedId)
-            ? ok('named fork restored by path (in listWorkspaceSessions)')
-            : bad('named fork NOT in listWorkspaceSessions');
+          if (summaries.some((s) => s.sessionId === namedId)) {
+            ok('named fork restored by path (in listWorkspaceSessions)');
+          } else {
+            bad('named fork NOT in listWorkspaceSessions');
+          }
         } catch (e) {
           bad(`named fork listWorkspaceSessions threw: ${e?.message ?? e}`);
         }
@@ -1057,9 +1145,11 @@ try {
         const item = (Array.isArray(sb.sessions) ? sb.sessions : []).find(
           (s) => s.sessionId === namedId,
         );
-        sr.status === 200 && item && item.title === NAME
-          ? ok(`named fork title surfaces via /rc/sessions ("${NAME}")`)
-          : bad(`named fork title ${sr.status} item=${JSON.stringify(item)}`);
+        if (sr.status === 200 && item && item.title === NAME) {
+          ok(`named fork title surfaces via /rc/sessions ("${NAME}")`);
+        } else {
+          bad(`named fork title ${sr.status} item=${JSON.stringify(item)}`);
+        }
       }
 
       // (c) Fork the NAMED fork (now itself titled) with a different name -> the
@@ -1084,9 +1174,11 @@ try {
           const item = (Array.isArray(sb.sessions) ? sb.sessions : []).find(
             (s) => s.sessionId === gfb.sessionId,
           );
-          item && item.title === SECOND
-            ? ok('named fork of a titled parent -> new name wins (most-recent)')
-            : bad(`grand fork title item=${JSON.stringify(item)}`);
+          if (item && item.title === SECOND) {
+            ok('named fork of a titled parent -> new name wins (most-recent)');
+          } else {
+            bad(`grand fork title item=${JSON.stringify(item)}`);
+          }
         } else {
           bad(`grand fork POST ${gf.status} ${JSON.stringify(gfb)}`);
         }
@@ -1100,9 +1192,11 @@ try {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
-      nr.status === 401
-        ? ok('fork without token -> 401')
-        : bad(`fork no-token ${nr.status}`);
+      if (nr.status === 401) {
+        ok('fork without token -> 401');
+      } else {
+        bad(`fork no-token ${nr.status}`);
+      }
     }
 
     // Error case: forking with a session:read-only token -> 403 (WRITE gate).
@@ -1115,9 +1209,11 @@ try {
         },
         body: JSON.stringify({}),
       });
-      wr.status === 403
-        ? ok('fork with insufficient (session:read) token -> 403')
-        : bad(`fork insufficient-scope ${wr.status}`);
+      if (wr.status === 403) {
+        ok('fork with insufficient (session:read) token -> 403');
+      } else {
+        bad(`fork insufficient-scope ${wr.status}`);
+      }
     }
   }
 } catch (e) {

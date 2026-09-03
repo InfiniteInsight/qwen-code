@@ -61,15 +61,15 @@ an encrypted room, and asserts the bot decrypts.
 2. **Unverified-device policy.** The sender must be willing to share keys to the
    bot's (unverified) device. If your Synapse / SDK build withholds keys from
    unverified devices, the bot never decrypts — verify the device or enable
-   share-to-unverified on the sender. (matrix-bot-sdk's default shares to
-   unverified, so this passed out of the box — but it's the #1 silent failure if a
-   build changes the policy.)
-3. **Runtime-erased const enum.** matrix-bot-sdk's `RustSdkCryptoStoreType` is a
-   `const enum` — it type-checks but is **erased at runtime** under esbuild
-   (`.Sqlite` → `undefined`), which silently makes the adapter degrade to `null`.
-   The store-type value is sourced from the native `@matrix-org/matrix-sdk-crypto-
-nodejs` `StoreType` instead; don't "simplify" it back to the matrix-bot-sdk
-   re-export.
+   share-to-unverified on the sender. (@vector-im/matrix-bot-sdk's default
+   shares to unverified, so this passed out of the box — but it's the #1 silent
+   failure if a build changes the policy.)
+3. **Runtime-erased const enum.** @vector-im/matrix-bot-sdk's
+   `RustSdkCryptoStoreType` is a `const enum` — it type-checks but is **erased
+   at runtime** under esbuild (`.Sqlite` → `undefined`), which silently makes
+   the adapter degrade to `null`. The store-type value is sourced from the
+   native `@matrix-org/matrix-sdk-crypto-nodejs` `StoreType` instead; don't
+   "simplify" it back to the @vector-im/matrix-bot-sdk re-export.
 
 ## Status
 

@@ -111,8 +111,8 @@ mDNS TTL (design D4). A SIGKILL still leaves a stale record — unavoidable.
 ## Verification ceiling
 
 `bonjour-service` is an **optional, dynamically-imported** dependency (mirrors
-`better-sqlite3` / `matrix-bot-sdk`): if it is not installed, advertising is
-simply off and the gateway runs normally. The decision logic, name validation,
+`better-sqlite3` / `@vector-im/matrix-bot-sdk`): if it is not installed,
+advertising is simply off and the gateway runs normally. The decision logic, name validation,
 TXT schema, browse normalize/dedupe/sort/format, and the advertiser publish/
 Goodbye lifecycle are all unit-tested against a fake bonjour instance. The **live
 multicast publish/browse is not exercised in CI** — it needs a real LAN socket
