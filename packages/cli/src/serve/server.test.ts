@@ -21851,7 +21851,7 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
-        .post('/workspace/tools/Bash/enable')
+        .post('/workspace/tools/run_shell_command/enable')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ enabled: false });
       expect(res.status).toBe(401);
@@ -21866,10 +21866,13 @@ describe('createServeApp', () => {
         persistDisabledTools: async () => {},
       });
       const res = await auth(
-        request(app).post('/workspace/tools/Bash/enable'),
+        request(app).post('/workspace/tools/run_shell_command/enable'),
       ).send({ enabled: false });
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ toolName: 'Bash', enabled: false });
+      expect(res.body).toEqual({
+        toolName: 'run_shell_command',
+        enabled: false,
+      });
     });
 
     it('200 on enable=true (re-enable a previously disabled tool)', async () => {
@@ -21879,10 +21882,13 @@ describe('createServeApp', () => {
         persistDisabledTools: async () => {},
       });
       const res = await auth(
-        request(app).post('/workspace/tools/Bash/enable'),
+        request(app).post('/workspace/tools/run_shell_command/enable'),
       ).send({ enabled: true });
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ toolName: 'Bash', enabled: true });
+      expect(res.body).toEqual({
+        toolName: 'run_shell_command',
+        enabled: true,
+      });
     });
 
     it('rejects tool setting writes for an untrusted primary workspace', async () => {
@@ -21894,7 +21900,7 @@ describe('createServeApp', () => {
       });
 
       const res = await auth(
-        request(app).post('/workspace/tools/Bash/enable'),
+        request(app).post('/workspace/tools/run_shell_command/enable'),
       ).send({ enabled: false });
 
       expect(res.status).toBe(403);
@@ -21962,17 +21968,24 @@ describe('createServeApp', () => {
         bridge,
         persistDisabledTools: async () => {},
       });
-      const res = await auth(request(app).post('/workspace/tools/Bash/enable'))
+      const res = await auth(
+        request(app).post('/workspace/tools/run_shell_command/enable'),
+      )
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ enabled: false });
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ toolName: 'Bash', enabled: false });
+      expect(res.body).toEqual({
+        toolName: 'run_shell_command',
+        enabled: false,
+      });
     });
 
     it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
-      const res = await auth(request(app).post('/workspace/tools/Bash/enable'))
+      const res = await auth(
+        request(app).post('/workspace/tools/run_shell_command/enable'),
+      )
         .set('X-Qwen-Client-Id', 'forged-client')
         .send({ enabled: false });
       expect(res.status).toBe(400);
@@ -21987,12 +22000,12 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const missing = await auth(
-        request(app).post('/workspace/tools/Bash/enable'),
+        request(app).post('/workspace/tools/run_shell_command/enable'),
       ).send({});
       expect(missing.status).toBe(400);
       expect(missing.body.code).toBe('invalid_enabled_flag');
       const bad = await auth(
-        request(app).post('/workspace/tools/Bash/enable'),
+        request(app).post('/workspace/tools/run_shell_command/enable'),
       ).send({ enabled: 'truthy' });
       expect(bad.status).toBe(400);
       expect(bridge.setToolEnabledCalls).toHaveLength(0);
@@ -22021,10 +22034,10 @@ describe('createServeApp', () => {
         persistDisabledTools: async () => {},
       });
       const res = await auth(
-        request(app).post('/workspace/tools/%20Bash%20/enable'),
+        request(app).post('/workspace/tools/%20run_shell_command%20/enable'),
       ).send({ enabled: false });
       expect(res.status).toBe(200);
-      expect(res.body.toolName).toBe('Bash');
+      expect(res.body.toolName).toBe('run_shell_command');
     });
 
     it('400 when whitespace-only path parameter trims to empty', async () => {

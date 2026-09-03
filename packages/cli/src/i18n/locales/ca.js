@@ -2430,6 +2430,7 @@ export default {
   'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
   'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
   'toolDisplayName.Workflow': 'Flux de treball',
+  'toolDisplayName.WorkflowRun': 'Execució del flux de treball',
   'toolDisplayName.ReadMcpResource': 'Llegeix recurs MCP',
 
   // ============================================================================
