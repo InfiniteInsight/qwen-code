@@ -134,10 +134,24 @@ jobs:
           echo "Selected Linux runner: ${ubuntu_runner}"
 
   #
-  # Test: Node
+  # Checks + per-package test lanes (Node 22)
+  #
+  # The ubuntu gate used to be one monolithic job: pre-test checks plus
+  # every workspace suite (~3k test files, 11 workspaces) in a single
+  # 60-minute job on one 2-core runner. Wall time per PR push was ~50
+  # minutes, and full-suite contention amplified per-test flakes (it
+  # blew rc-gateway's 5s vitest ceiling in 3 consecutive runs before the
+  # per-package testTimeout fix). Now `test` runs only the pre-test gates
+  # and keeps the job key plus the `ci_profile` output that
+  # web_shell_e2e_smoke and post_coverage_comment consume; each workspace
+  # suite runs in its own lane on its own runner, all in parallel, so
+  # wall time is the longest single suite (cli), not the sum. Each lane
+  # re-checks-out, re-classifies the CI profile (a few seconds, API
+  # only), and npm ci's on its own runner, so lanes do not wait for the
+  # Checks job. macOS/Windows merge-queue jobs keep the monolithic step.
   #
   test:
-    name: 'Test (ubuntu-latest, Node 22.x)'
+    name: 'Checks (ubuntu-latest, Node 22.x)'
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
@@ -444,6 +458,198 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test ${{ env.HELPER_TESTS }}'
 
+  # Largest suite (699 test files); owns the tmux + zip tooling its
+  # real-tmux and install-script packaging suites need.
+
+  test_cli:
+    name: 'Tests: cli (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       # The install-script packaging suite needs zip/unzip, and throws on a
       # CI host that ships neither, so a silent skip there is impossible.
       # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
@@ -493,7 +699,7 @@ jobs:
             echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
           fi
 
-      - name: 'Run tests and generate reports'
+      - name: 'Run cli tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
@@ -505,6 +711,7 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           # ENOSPC has failed test steps mid-suite while the host looks
@@ -525,7 +732,1519 @@ jobs:
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
-          npm run test:ci
+          npm run test:ci -w packages/cli
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+      - name: 'Publish Test Report (for non-forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
+        with:
+          name: 'Test Results (ubuntu-latest, Node 22.x) - cli'
+          path: 'packages/cli/junit.xml'
+          reporter: 'java-junit'
+          fail-on-error: 'false'
+
+      - name: 'Upload Test Results Artifact (for forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'test-results-fork-22.x-ubuntu-latest-cli'
+          path: 'packages/cli/junit.xml'
+
+  # Second-largest suite (606 test files).
+
+  test_core:
+    name: 'Tests: core (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Run core tests and generate reports'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
+          npm run test:ci -w packages/core
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+      - name: 'Publish Test Report (for non-forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
+        with:
+          name: 'Test Results (ubuntu-latest, Node 22.x) - core'
+          path: 'packages/core/junit.xml'
+          reporter: 'java-junit'
+          fail-on-error: 'false'
+
+      - name: 'Upload Test Results Artifact (for forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'test-results-fork-22.x-ubuntu-latest-core'
+          path: 'packages/core/junit.xml'
+
+  # 217 test files; the suite that exposed the 5s vitest-timeout flake
+  # under full-runner contention.
+
+  test_rc_gateway:
+    name: 'Tests: rc-gateway (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Run rc-gateway tests and generate reports'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
+          npm run test:ci -w packages/rc-gateway
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+  # Runs with --coverage; owns the coverage-reports artifact upload that
+  # post_coverage_comment downloads.
+
+  test_web_shell:
+    name: 'Tests: web-shell (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Run web-shell tests and generate reports'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
+          npm run test:ci -w packages/web-shell
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+      - name: 'Publish Test Report (for non-forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
+        with:
+          name: 'Test Results (ubuntu-latest, Node 22.x) - web-shell'
+          path: 'packages/web-shell/junit.xml'
+          reporter: 'java-junit'
+          fail-on-error: 'false'
+
+      - name: 'Upload Test Results Artifact (for forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'test-results-fork-22.x-ubuntu-latest-web-shell'
+          path: 'packages/web-shell/junit.xml'
+
+      - name: 'Upload coverage reports'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'coverage-reports-22.x-ubuntu-latest'
+          path: 'packages/*/coverage'
+
+  # 44 test files.
+
+  test_vscode:
+    name: 'Tests: vscode-ide-companion (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Run vscode-ide-companion tests and generate reports'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
+          npm run test:ci -w packages/vscode-ide-companion
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+  # Runs the public-surface typecheck plus the suite.
+
+  test_sdk:
+    name: 'Tests: sdk-typescript (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Run sdk-typescript tests and generate reports'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
+          npm run test:ci -w packages/sdk-typescript
+          RC=$?
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+  # Small suites run sequentially on one runner (acp-bridge, audio-capture,
+  # chrome-extension, launcher-app, webui), then the root scripts tests.
+  # Owns the Chrome extension package/scan release guard (moved from the
+  # monolithic job; the extension suite runs in this lane).
+
+  test_smalls:
+    name: 'Tests: remaining packages (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      # The install-script packaging suite needs zip/unzip, and throws on a
+      # CI host that ships neither, so a silent skip there is impossible.
+      # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
+      # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
+      # without tmux (the hosted ubuntu-latest image ships none), would
+      # silently skip every real-tmux behaviour — holder survival, matching,
+      # server reaping, refusal contracts — inside a green required check.
+      # Until it lands, the tmux half installs a tool nothing here uses;
+      # that is deliberate, so the tooling is in place before the suite that
+      # depends on it (qwen-autofix.yml already installs tmux the same way).
+      - name: 'Install tmux and zip tooling'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        # Bounded AND advisory: a stalled mirror or dpkg lock must neither
+        # hang the job toward its 60-minute cap nor red the required check —
+        # continue-on-error absorbs the step-level timeout. The apt calls
+        # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
+        # step cap) so the guard below still runs: when the step-level
+        # timeout fires there is no `|| echo`, and the lane loses its
+        # tooling with no annotation to say so.
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
+            # Advisory here too: a broken-but-installed tmux (dangling
+            # symlink, missing lib) must not fail the required Test check
+            # before a single test has run.
+            tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
+            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
+            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
+          elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
+            # Root-container lanes have no sudo (and need none): apt-get
+            # runs as-is. Advisory, not a gate: an apt hiccup must not red
+            # this step before a single test has run — the suites carry
+            # their own signal (the real-tmux suite skips; the zip suite
+            # throws on CI). ::warning:: (not a plain echo) so a lane
+            # where the install PERMANENTLY fails shows the loss in the
+            # check UI instead of hiding it in a multi-thousand-line log.
+            timeout 140 apt-get update -qq && timeout 140 apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
+            # Same advisory contract as the root branch; sudo -n here so a
+            # runner without passwordless sudo fails fast instead of
+            # hanging on a password prompt toward the step's bound.
+            timeout 140 sudo -n apt-get update -qq && timeout 140 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          else
+            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          fi
+
+      - name: 'Run remaining package suites'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
+          npm run test:ci -w packages/acp-bridge &&
+            npm run test:ci -w packages/audio-capture &&
+            npm run test:ci -w packages/chrome-extension &&
+            npm run test:ci -w packages/launcher-app &&
+            npm run test:ci -w packages/webui &&
+            npm run test:scripts
           RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
@@ -546,6 +2265,198 @@ jobs:
           fi
           npm -w packages/chrome-extension run package
           npm -w packages/chrome-extension run scan:artifacts
+
+  # The no-AK integration gate, split out so it no longer serialises after
+  # every unit suite (PR/merge_group only).
+
+  integration_no_ak:
+    name: 'Integration: no-AK gate (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 45
+    permissions:
+      contents: 'read'
+      checks: 'write'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      - name: 'Docs-only CI'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
+        run: 'echo "Docs-only change; suite skipped."'
+      - name: 'GitHub CI-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        run: 'echo "GitHub CI-only change; suite skipped (helper checks run in the Checks job)."'
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Run required no-AK integration gate'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
@@ -583,31 +2494,6 @@ jobs:
           mkdir -p "${HOME}" "${QWEN_HOME}"
           npx tsc -p integration-tests/tsconfig.json --pretty false
           npm run test:integration:no-ak:sandbox:none
-
-      - name: 'Publish Test Report (for non-forks)'
-        if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
-        with:
-          name: 'Test Results (ubuntu-latest, Node 22.x)'
-          path: 'packages/*/junit.xml'
-          reporter: 'java-junit'
-          fail-on-error: 'false'
-
-      - name: 'Upload Test Results Artifact (for forks)'
-        if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'test-results-fork-22.x-ubuntu-latest'
-          path: 'packages/*/junit.xml'
-
-      - name: 'Upload coverage reports'
-        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'coverage-reports-22.x-ubuntu-latest'
-          path: 'packages/*/coverage'
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
@@ -992,6 +2878,9 @@ jobs:
     needs:
       - 'classify_pr'
       - 'test'
+      # The web-shell lane owns the coverage-reports upload (its suite runs
+      # with --coverage), so the download below can only succeed after it.
+      - 'test_web_shell'
     # !cancelled() not always(): don't let a cancelled run hold the concurrency slot here.
     if: |-
       ${{
