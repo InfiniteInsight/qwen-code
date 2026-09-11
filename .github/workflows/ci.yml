@@ -1964,7 +1964,8 @@ jobs:
           exit "$RC"
 
   # Small suites run sequentially on one runner (acp-bridge, audio-capture,
-  # chrome-extension, launcher-app, webui), then the root scripts tests.
+  # chrome-extension, webui), then the root scripts tests. launcher-app is an
+  # isolated (non-root) workspace and is not run by the monolithic test:ci.
   # Owns the Chrome extension package/scan release guard (moved from the
   # monolithic job; the extension suite runs in this lane).
 
@@ -2242,7 +2243,6 @@ jobs:
           npm run test:ci -w packages/acp-bridge &&
             npm run test:ci -w packages/audio-capture &&
             npm run test:ci -w packages/chrome-extension &&
-            npm run test:ci -w packages/launcher-app &&
             npm run test:ci -w packages/webui &&
             npm run test:scripts
           RC=$?
