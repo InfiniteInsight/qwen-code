@@ -12,10 +12,11 @@
  * (permission_request messages, `!qwen` replies, `m.replace` resolve edits, and
  * the encrypted-room refusal notice).
  *
- * NOTE: `matrix-bot-sdk`'s crypto (for E2EE rooms) is integrated with its sync
- * loop and would SUBSUME this fetch client + the sync loop if E2EE is added
- * later. That's why the render/dispatch/store/normalize layers are kept
- * transport-agnostic — they survive that swap; only this adapter is replaceable.
+ * NOTE: `@vector-im/matrix-bot-sdk`'s crypto (for E2EE rooms) is integrated
+ * with its sync loop and would SUBSUME this fetch client + the sync loop if
+ * E2EE is added later. That's why the render/dispatch/store/normalize layers
+ * are kept transport-agnostic — they survive that swap; only this adapter is
+ * replaceable.
  *
  * Matrix ids (rooms, users) are opaque STRINGS, URL-encoded into paths.
  */

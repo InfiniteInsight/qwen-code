@@ -1,4 +1,4 @@
-schema: spec-driven
+schema: 'spec-driven'
 
 context: |
   qwen-remote-control adds a self-hosted "Remote Control" capability to
