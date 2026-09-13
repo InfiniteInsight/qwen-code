@@ -22,15 +22,24 @@ import { BRIDGE, expandScopes } from './scopes.js';
 let server: Server | undefined;
 let stub: StubDaemon | undefined;
 
+// Explicit 20s ceiling (above the 10s default): the last test runs an
+// 8s-delayed stub prompt whose in-flight socket (closeSession does not abort
+// it) keeps stub.close() draining for the full delay, on top of the gateway
+// server's own keep-alive drain.
 afterEach(async () => {
   if (server) await new Promise<void>((r) => server!.close(() => r()));
   if (stub) await stub.close();
   server = undefined;
   stub = undefined;
-});
+}, 20000);
 
-async function setup(subActorCap?: number) {
-  stub = await startStubDaemon({ promptDelayMs: 2000 });
+async function setup(
+  subActorCap?: number,
+  stubOpts?: { promptDelayMs?: number },
+) {
+  stub = await startStubDaemon({
+    promptDelayMs: stubOpts?.promptDelayMs ?? 2000,
+  });
   const dir = await mkdtemp(join(tmpdir(), 'srv-agents-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
   const writeTok = (await store.issue(['write', 'session:read'], 'w')).token;
@@ -266,19 +275,16 @@ describe('sub-actor rate limit on the agent routes', () => {
   });
 
   it('still cancels via POST /rc/agents/:id/cancel for a bridge sub-actor who has exhausted the rate budget (design intent: stopping is never rate-limited)', async () => {
-    const { url, writeTok, bridgeTok } = await setup(1);
-    // Spawn with a plain write token (uncapped) so the agent exists...
-    const spawn = await fetch(`${url}/rc/agents`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${writeTok}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ task: 't' }),
+    // A long stub prompt delay keeps the cancel-target agent provably
+    // non-terminal (the cancel route 409s terminal records) even if the
+    // event loop is starved for seconds under CI load, so this assert fails
+    // only on a real rate-limit regression, never on a stall.
+    const { url, writeTok, bridgeTok } = await setup(1, {
+      promptDelayMs: 8000,
     });
-    const { agentId } = (await spawn.json()) as { agentId: string };
 
-    // ...then exhaust telegram:bob's cap=1 budget on a rate-limited route.
+    // Exhaust telegram:bob's cap=1 budget on a rate-limited route FIRST, so
+    // bob is already spent before the cancel-target agent exists.
     const spend = await fetch(`${url}/rc/agents`, {
       method: 'POST',
       headers: {
@@ -300,8 +306,21 @@ describe('sub-actor rate limit on the agent routes', () => {
     });
     expect(overCap.status).toBe(429); // confirms the budget is actually spent
 
-    // Cancel (never rate-limited by design) still succeeds for the SAME
-    // exhausted sub-actor.
+    // Spawn with a plain write token (uncapped) so the agent exists...
+    const spawn = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${writeTok}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ task: 't' }),
+    });
+    const { agentId } = (await spawn.json()) as { agentId: string };
+
+    // ...then cancel it IMMEDIATELY, while its prompt is still in flight on
+    // the 8s stub delay, so the record is provably non-terminal. Cancel
+    // (never rate-limited by design) still succeeds for the SAME exhausted
+    // sub-actor.
     const cancel = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
       method: 'POST',
       headers: {

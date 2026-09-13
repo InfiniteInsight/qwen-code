@@ -566,4 +566,14 @@ export const legacyFilenames = [
   'useTeamInProcess',
   'userMemory',
   'workflowsCommand',
+  // Fork rc-work files added before the kebab-case rule synced from upstream
+  // (3d6b6f747 landed via the 2026-08-19 sync); rename in a migration PR.
+  'DaemonStreamContext',
+  'daemonConfirmation',
+  'projectDaemonEvent',
+  'resolveNamed',
+  'scriptRunner',
+  'useDaemonStream',
+  'useDaemonStreamAdapter',
+  'workflowRun',
 ];

@@ -3141,6 +3141,7 @@ const ZH: Messages = {
   'toolName.enter_worktree': '进入 Worktree',
   'toolName.exit_worktree': '退出 Worktree',
   'toolName.workflow': '工作流',
+  'toolName.workflow_run': '工作流运行',
   'toolName.team_plan_approval': '团队计划审批',
   'toolName.loop_wakeup': '循环唤醒',
   'toolName.create_sub_session': '创建子会话',
