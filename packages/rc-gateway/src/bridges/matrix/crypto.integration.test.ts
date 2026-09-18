@@ -49,13 +49,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // describe.skipIf keeps the default suite green when the homeserver env is absent.
 describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
   it('the bot decrypts a message sent into an encrypted room', async () => {
-    const sdk = await import('matrix-bot-sdk');
+    const sdk = await import('@vector-im/matrix-bot-sdk');
     const {
       MatrixClient,
       RustSdkCryptoStorageProvider,
       SimpleFsStorageProvider,
     } = sdk;
-    // Runtime store-type value from the native package (matrix-bot-sdk's
+    // Runtime store-type value from the native package (@vector-im/matrix-bot-sdk's
     // RustSdkCryptoStoreType is a runtime-erased const enum — see cryptoAdapter.ts).
     const { StoreType } = await import('@matrix-org/matrix-sdk-crypto-nodejs');
 
@@ -96,7 +96,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
     expect(botAdapter).not.toBeNull();
 
     try {
-      await senderClient.crypto.prepare([]);
+      await senderClient.crypto.prepare();
       await senderClient.start();
 
       // Sender creates an ENCRYPTED room and invites the bot.
@@ -147,7 +147,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
     //   2. the bot's reply is real ciphertext the SENDER decrypts (no plaintext
     //      leak into the encrypted room);
     //   3. a 👍 reaction on the bot's tracked message registers a vote.
-    const sdk = await import('matrix-bot-sdk');
+    const sdk = await import('@vector-im/matrix-bot-sdk');
     const {
       MatrixClient,
       RustSdkCryptoStorageProvider,
@@ -237,7 +237,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
     wired.bridge = bridge;
 
     try {
-      await senderClient.crypto.prepare([]);
+      await senderClient.crypto.prepare();
       await senderClient.start();
 
       const roomId = await senderClient.createRoom({

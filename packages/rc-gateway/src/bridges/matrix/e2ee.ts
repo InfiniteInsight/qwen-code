@@ -14,8 +14,9 @@
  * This module is the pure decision/convention layer — the flag, the olm-store
  * path/status, and the per-room transport decision — so the bug-prone routing is
  * unit-tested without the native crypto module or a homeserver. The actual
- * decrypt/encrypt adapter ({@link ./cryptoAdapter.js}, matrix-bot-sdk + the native
- * rust crypto, dynamically imported) is wired live by `startBridge`: when E2EE is
+ * decrypt/encrypt adapter ({@link ./cryptoAdapter.js},
+ * @vector-im/matrix-bot-sdk + the native rust crypto, dynamically imported) is
+ * wired live by `startBridge`: when E2EE is
  * on, the SDK crypto client SUBSUMES the fetch `/sync` (so it can't race the
  * to-device megolm keys) and transparently decrypts encrypted rooms — there is no
  * per-room refuse, the whole bridge runs over crypto. When OFF (the default), the

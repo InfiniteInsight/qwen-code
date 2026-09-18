@@ -56,6 +56,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   team_delete: 'TeamDelete',
   team_plan_approval: 'TeamPlanApproval',
   workflow: 'Workflow',
+  workflow_run: 'WorkflowRun',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
   web_search: 'WebSearch',

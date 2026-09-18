@@ -171,7 +171,14 @@ describe('listSessions', () => {
   });
 
   it('caps the scan and reports truncated', async () => {
-    for (let i = 1; i <= 5; i++) await write(ID(i));
+    const pin = new Date('2025-06-01T00:00:00Z');
+    for (let i = 1; i <= 5; i++) {
+      await write(ID(i));
+      // Pin every transcript to the same mtime so the final most-recent-first
+      // sort is a stable no-op; real-time mtimes can straddle millisecond
+      // boundaries and reorder the capped set.
+      await utimes(join(dir, `${ID(i)}.jsonl`), pin, pin);
+    }
     const { sessions, truncated } = await listSessions(dir, { max: 3 });
     expect(truncated).toBe(true);
     // Lexical order -> the first three ids win, deterministically.

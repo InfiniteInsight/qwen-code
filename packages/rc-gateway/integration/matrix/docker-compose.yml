@@ -5,13 +5,13 @@
 # registration for ephemeral test accounts. Do not expose it publicly.
 services:
   synapse:
-    image: matrixdotorg/synapse:latest
-    restart: unless-stopped
+    image: 'matrixdotorg/synapse:latest'
+    restart: 'unless-stopped'
     environment:
-      SYNAPSE_SERVER_NAME: qwen-it.local
+      SYNAPSE_SERVER_NAME: 'qwen-it.local'
       SYNAPSE_REPORT_STATS: 'no'
     volumes:
-      - ./data:/data
+      - './data:/data'
     ports:
       # Client-server API. Point QWEN_MATRIX_IT_HS_URL at http://<host>:8008
       - '8008:8008'
