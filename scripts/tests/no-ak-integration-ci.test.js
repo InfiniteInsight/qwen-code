@@ -26,6 +26,24 @@ const CONFIGURE_ACTION_PATH =
 const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
+// The ubuntu suite was split into per-package lanes (PR #43): the `test` job
+// now only runs checks, and each lane owns its own TMPDIR routing + cleanup
+// trap. Pin every lane, so a lane added without the routing is caught.
+const UBUNTU_TEST_LANES = [
+  ['test_cli', 'Run cli tests and generate reports'],
+  ['test_core', 'Run core tests and generate reports'],
+  ['test_rc_gateway', 'Run rc-gateway tests and generate reports'],
+  ['test_web_shell', 'Run web-shell tests and generate reports'],
+  ['test_vscode', 'Run vscode-ide-companion tests and generate reports'],
+  ['test_sdk', 'Run sdk-typescript tests and generate reports'],
+  ['test_smalls', 'Run remaining package suites'],
+];
+const OS_TEST_JOBS = [
+  ...UBUNTU_TEST_LANES,
+  ['test_macos', 'Run tests and generate reports'],
+  ['test_windows', 'Run tests and generate reports'],
+];
+
 describe('no-AK integration CI wiring', () => {
   it.runIf(process.platform === 'linux')(
     'keeps Linux Unix socket paths short and identity-stable',
@@ -34,22 +52,20 @@ describe('no-AK integration CI wiring', () => {
         path.join(ROOT, '.github/workflows/ci.yml'),
         'utf8',
       );
-      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
-        (jobName) => {
-          const testStep = getWorkflowStep(
-            getWorkflowJob(workflow, jobName),
-            'Run tests and generate reports',
-          );
-          const start = testStep.indexOf('export TMPDIR=');
-          expect(
-            start,
-            `${jobName}: TMPDIR routing block`,
-          ).toBeGreaterThanOrEqual(0);
-          const end = testStep.indexOf('\n          ( while true', start);
-          expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
-          return testStep.slice(start, end);
-        },
-      );
+      const routingBlocks = OS_TEST_JOBS.map(([jobName, stepName]) => {
+        const testStep = getWorkflowStep(
+          getWorkflowJob(workflow, jobName),
+          stepName,
+        );
+        const start = testStep.indexOf('export TMPDIR=');
+        expect(
+          start,
+          `${jobName}: TMPDIR routing block`,
+        ).toBeGreaterThanOrEqual(0);
+        const end = testStep.indexOf('\n          ( while true', start);
+        expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
+        return testStep.slice(start, end);
+      });
       expect(new Set(routingBlocks)).toHaveLength(1);
       const [routeTemp] = routingBlocks;
       const root = mkdtempSync(path.join(tmpdir(), 'ci-temp-routing-'));
@@ -83,9 +99,11 @@ describe('no-AK integration CI wiring', () => {
             path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
           ),
         ).toBeLessThan(108);
+        // One routed TMPDIR per OS test job; derived so adding a lane without
+        // the routing fails here rather than silently.
         expect(
           workflow.match(/mktemp -d \/var\/tmp\/qwen-ci-XXXXXX/g),
-        ).toHaveLength(3);
+        ).toHaveLength(OS_TEST_JOBS.length);
         expect(workflow).toContain('QWEN_CI_TMPDIR="$(mktemp -d');
         expect(workflow).toContain('if [ -n "$QWEN_CI_TMPDIR" ]; then');
       } finally {
@@ -100,10 +118,10 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+    for (const [jobName, stepName] of OS_TEST_JOBS) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
-        'Run tests and generate reports',
+        stepName,
       );
       expect(testStep).toContain(
         'trap \'rm -rf "$TMPDIR" 2>/dev/null || true\' EXIT',
@@ -155,7 +173,9 @@ describe('no-AK integration CI wiring', () => {
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
-    const ubuntuJob = getWorkflowJob(workflow, 'test');
+    // Split out of `test` into its own job so it no longer serialises behind
+    // the suite; it must still exist exactly once and keep its pins.
+    const ubuntuJob = getWorkflowJob(workflow, 'integration_no_ak');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const permissionsIndex = workflow.indexOf('\npermissions:');
@@ -165,14 +185,19 @@ describe('no-AK integration CI wiring', () => {
       "      - name: 'Run required no-AK integration gate'";
     const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
     expect(gateStepStart).toBeGreaterThanOrEqual(0);
-    const nextStepIndex = ubuntuJob.indexOf(
+    // In its own job the gate is the final step, so "up to the next step"
+    // means "to the end of the job".
+    const following = ubuntuJob.indexOf(
       '\n      - name:',
       gateStepStart + gateStepMarker.length,
     );
-    expect(nextStepIndex).toBeGreaterThan(0);
-    const gateStep = ubuntuJob.slice(gateStepStart, nextStepIndex);
+    const gateStep = ubuntuJob.slice(
+      gateStepStart,
+      following > 0 ? following : undefined,
+    );
+    expect(gateStep.length).toBeGreaterThan(0);
 
-    expect(workflow).not.toContain('  integration_no_ak:');
+    expect(workflow).toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     expect(workflowTriggers).toContain('\n  pull_request:\n');
     expect(workflowTriggers).toContain('\n  merge_group:\n');
