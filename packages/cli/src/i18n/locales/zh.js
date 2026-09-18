@@ -214,6 +214,7 @@ export default {
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
+  'toolDisplayName.WorkflowRun': '工作流运行',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
   // ============================================================================

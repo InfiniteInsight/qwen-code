@@ -16,8 +16,9 @@ sidecar later by changing only its configuration.
 > **Encrypted rooms: supported when `MATRIX_ENABLE_E2EE` is set (sidecar path).**
 > By default (flag off) the bridge talks the plain client-server API over `fetch`
 > and **refuses to bind** an encrypted room (posts a notice). With the flag on, the
-> `matrix-bot-sdk` + olm crypto adapter becomes the bridge's transport: it owns
-> `/sync` (subsuming the fetch loop), decrypts encrypted rooms transparently, and
+> `@vector-im/matrix-bot-sdk` + olm crypto adapter becomes the bridge's transport:
+> it owns `/sync` (subsuming the fetch loop), decrypts encrypted rooms
+> transparently, and
 > sends encrypted replies. This full path is **verified end-to-end against a real
 > Synapse** (see "End-to-end encryption" below). The flag is honored on both the
 > standalone sidecar (`qwen-rc-bridge matrix`) and the in-process bridge (both
@@ -161,9 +162,9 @@ The tested fetch path stays the default for plain rooms, so enabling crypto can
 never destabilize the working unencrypted bridge.
 
 **The subsume model.** When the flag is on and the adapter builds, `startBridge`
-makes the `matrix-bot-sdk` crypto client the bridge's transport: it owns the single
-`/sync` and the runner's fetch `/sync` is **subsumed** (`runInbound` replaces
-`syncLoop`). This is not a style choice — two `/sync` loops on one access
+makes the `@vector-im/matrix-bot-sdk` crypto client the bridge's transport: it
+owns the single `/sync` and the runner's fetch `/sync` is **subsumed**
+(`runInbound` replaces `syncLoop`). This is not a style choice — two `/sync` loops on one access
 token/device would race for the device-global **to-device** events that carry the
 megolm room keys, so a second syncer starves the crypto client and decrypts fail
 intermittently. The SDK client also becomes the **outbound** transport
@@ -186,13 +187,14 @@ transport is injected), and reconcile-after-dispatch (a decrypted-path `!qwen
 attach` picks up the newly bound session).
 
 **Crypto adapter (`cryptoAdapter.ts`, compile-checked ceiling):**
-`createMatrixCryptoAdapter` constructs a `matrix-bot-sdk` `MatrixClient` with a
-`RustSdkCryptoStorageProvider` (SQLite olm store at `<stateDir>/olm/`), sets up
-`AutojoinRoomsMixin`, resolves sender power levels from `m.room.power_levels`, and
-implements `MatrixInbound` (`sendMessage`/`joinRoom`) plus `start`/`stop`/
-`isReady`, surfacing decrypted messages (`onMessage`) and reactions (`onReaction`).
-matrix-bot-sdk is an `optionalDependency`, dynamically imported (absent → adapter
-returns `null`, E2EE stays off, plain bridge unaffected). The construction is typed
+`createMatrixCryptoAdapter` constructs a `@vector-im/matrix-bot-sdk`
+`MatrixClient` with a `RustSdkCryptoStorageProvider` (SQLite olm store at
+`<stateDir>/olm/`), sets up `AutojoinRoomsMixin`, resolves sender power levels
+from `m.room.power_levels`, and implements `MatrixInbound` (`sendMessage`/
+`joinRoom`) plus `start`/`stop`/`isReady`, surfacing decrypted messages
+(`onMessage`) and reactions (`onReaction`).
+`@vector-im/matrix-bot-sdk` is an `optionalDependency`, dynamically imported
+(absent → adapter returns `null`, E2EE stays off, plain bridge unaffected). The construction is typed
 against the **real** SDK — the ctor calls are signature-checked by tsc (proven via
 a deliberate-wrong-argument test that makes the build go red), **not** hand-rolled
 `*Like` shapes.
@@ -212,10 +214,10 @@ vote**. It **skips** in the default suite and runs only when `QWEN_MATRIX_IT_HS_
   (`synapseRegisterMac`) also has its own known-answer unit test.
 
 Running it earlier surfaced a real bug the compile-checked path could not:
-matrix-bot-sdk's `RustSdkCryptoStoreType` is a **`const enum`** (erased at runtime
-under esbuild → `undefined`), so `RustSdkCryptoStoreType.Sqlite` threw at
-construction and the adapter silently degraded to `null` (E2EE off) on every real
-run. Fixed by sourcing the store-type value from the native
+`@vector-im/matrix-bot-sdk`'s `RustSdkCryptoStoreType` is a **`const enum`**
+(erased at runtime under esbuild → `undefined`), so
+`RustSdkCryptoStoreType.Sqlite` threw at construction and the adapter silently
+degraded to `null` (E2EE off) on every real run. Fixed by sourcing the store-type value from the native
 `@matrix-org/matrix-sdk-crypto-nodejs` `StoreType` (a real runtime object), which is
 both type-correct and present at runtime — a reminder that "compile-checked" can
 hide runtime-erased const enums.

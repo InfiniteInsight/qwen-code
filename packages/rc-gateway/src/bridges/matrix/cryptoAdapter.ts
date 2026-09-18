@@ -10,13 +10,17 @@
  * ./e2ee.js} scaffolding reserved. Opt-in via `MATRIX_ENABLE_E2EE`, OFF by
  * default; the tested `fetch`-based plain path is untouched and stays the default.
  *
- * The construction is typed against the REAL SDK (the `import('matrix-bot-sdk')`
- * types flow through tsc and the ctor calls are signature-checked). The live
+ * The construction is typed against the ambient shim
+ * (`matrixBotSdkShim.d.ts` — on Node 22 the optional SDK deps install-skip
+ * (engines `node >= 24`), so their types are unavailable to tsc there),
+ * which mirrors the empirically verified 0.10.0-element.0 surface, so the
+ * ctor calls are signature-checked. The live
  * olm/megolm round-trip is exercised by the env-gated `crypto.integration.test.ts`
- * and has been RUN GREEN against a real Synapse: the bot decrypts an encrypted
- * message, a decrypted message reaches a BOUND SESSION through dispatch, the bot's
- * reply is real ciphertext the sender decrypts (no plaintext leak), and a 👍
- * reaction registers a vote. The pure seams — olm-store presence, the
+ * (RUN GREEN against a real Synapse on the original `matrix-bot-sdk` — re-run
+ * it after the #42 vector-fork migration): the bot decrypts an encrypted
+ * message, a decrypted message reaches a BOUND SESSION through dispatch, the
+ * bot's reply is real ciphertext the sender decrypts (no plaintext leak), and
+ * a 👍 reaction registers a vote. The pure seams — olm-store presence, the
  * store-missing warn, `e2eeEnabled` gating — are unit-tested.
  *
  * When E2EE is on, `startBridge` makes this adapter the SOLE `/sync` owner (a
@@ -80,7 +84,7 @@ export interface DecryptedMatrixMessage {
 export interface MatrixCryptoAdapter extends MatrixInbound {
   /** Crypto ready to decrypt/encrypt (after {@link start}). */
   isReady(): boolean;
-  /** Prepare crypto for the joined rooms, then begin syncing. */
+  /** Prepare crypto (initializes the olm machine), then begin syncing. */
   start(): Promise<void>;
   /** Stop syncing and release the client. */
   stop(): Promise<void>;
@@ -100,10 +104,13 @@ export interface CryptoAdapterDeps {
 
 /**
  * Construct the crypto-enabled Matrix client, or `null` when the optional
- * `matrix-bot-sdk` dependency is not installed (E2EE then stays off; the plain
- * bridge is unaffected — mirrors the other optional-dep loaders).
+ * `@vector-im/matrix-bot-sdk` dependency is not installed (E2EE then stays
+ * off; the plain bridge is unaffected — mirrors the other optional-dep
+ * loaders).
  *
- * The body is typed against the real SDK but not runtime-verified (the ceiling).
+ * The body is typed via the ambient shim (matrixBotSdkShim.d.ts) but not
+ * runtime-verified here (the ceiling — the env-gated integration test is the
+ * runtime verification).
  */
 export async function createMatrixCryptoAdapter(
   deps: CryptoAdapterDeps,
@@ -113,14 +120,14 @@ export async function createMatrixCryptoAdapter(
   // <stateDir>/olm/ ALL degrade to null (E2EE off) rather than throwing — so
   // flipping MATRIX_ENABLE_E2EE can never crash the working plain bridge.
   try {
-    const sdk = await import('matrix-bot-sdk');
+    const sdk = await import('@vector-im/matrix-bot-sdk');
     const {
       MatrixClient,
       RustSdkCryptoStorageProvider,
       SimpleFsStorageProvider,
       AutojoinRoomsMixin,
     } = sdk;
-    // matrix-bot-sdk re-exports the store-type enum as a TYPE only
+    // @vector-im/matrix-bot-sdk re-exports the store-type enum as a TYPE only
     // (`RustSdkCryptoStoreType` is a `const enum`, erased at runtime → `undefined`
     // under esbuild). Source the real runtime value from the native package, which
     // exports `StoreType` as an actual object — both type-correct and present at
@@ -157,21 +164,24 @@ export async function createMatrixCryptoAdapter(
       sender: string,
     ): Promise<number> => {
       try {
-        const pl = await client.getRoomStateEvent(
+        const pl = (await client.getRoomStateEvent(
           roomId,
           'm.room.power_levels',
           '',
-        );
+        )) as
+          | { users?: Record<string, number>; users_default?: number }
+          | undefined;
         return senderPowerLevel(pl, sender);
       } catch {
         return 0;
       }
     };
 
-    // matrix-bot-sdk decrypts `m.room.encrypted` events IN PLACE and re-emits the
-    // plaintext as `room.message` (MatrixClient processSync: decrypt → fall through
-    // to the m.room.message emit), so this one handler covers BOTH cleartext and
-    // decrypted encrypted-room messages — no manual decryptRoomEvent needed.
+    // @vector-im/matrix-bot-sdk decrypts `m.room.encrypted` events IN PLACE
+    // and re-emits the plaintext as `room.message` (MatrixClient processSync:
+    // decrypt → fall through to the m.room.message emit), so this one handler
+    // covers BOTH cleartext and decrypted encrypted-room messages — no manual
+    // decryptRoomEvent needed.
     client.on('room.message', (roomId: string, event: unknown) => {
       const e = event as { sender?: string; content?: { body?: string } };
       if (typeof e.content?.body !== 'string') return;
@@ -233,7 +243,7 @@ export async function createMatrixCryptoAdapter(
           const eventId = await client.sendEvent(
             roomId,
             'm.room.message',
-            content,
+            content as Record<string, unknown>,
           );
           return { ok: true, status: 200, eventId };
         } catch (err) {
@@ -244,8 +254,9 @@ export async function createMatrixCryptoAdapter(
         }
       },
       start: async () => {
-        const joined = await client.getJoinedRooms();
-        await client.crypto.prepare(joined);
+        // The vector fork's prepare() takes no room list — it initializes the
+        // olm machine and the RoomTracker picks rooms up as they sync.
+        await client.crypto.prepare();
         await client.start();
         deps.log?.('matrix crypto: prepared + syncing');
       },
@@ -313,8 +324,8 @@ export async function setupMatrixCrypto(
   }
   if (!adapter) {
     io.warn(
-      'matrix crypto unavailable (matrix-bot-sdk not installed or failed to ' +
-        'initialize) — encrypted rooms refused; plain bridge continues',
+      'matrix crypto unavailable (@vector-im/matrix-bot-sdk not installed or ' +
+        'failed to initialize) — encrypted rooms refused; plain bridge continues',
     );
   } else {
     io.log(

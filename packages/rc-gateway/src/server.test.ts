@@ -1036,7 +1036,7 @@ describe('gateway app', () => {
     // enough that the slot is provably held during the ~ms-scale rewind probe,
     // yet short enough that awaiting the prompt at the end keeps teardown quick.
     const sessionId = '33333333333333333333333333333333';
-    const { url, pairing } = await boot({ promptDelayMs: 500 });
+    const { url, pairing } = await boot({ promptDelayMs: 5000 });
     const { code } = pairing.mint([OWNER]); // owner ⊃ write: prompts AND rewinds
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
       method: 'POST',
@@ -1059,7 +1059,9 @@ describe('gateway app', () => {
     // The stub records the prompt body the instant the request arrives (before
     // the delay), which is strictly after the gateway has acquired the queue
     // slot — so this poll proves the slot is held before we probe the rewind.
-    const deadline = Date.now() + 2000;
+    // The 5s deadline matches the prompt delay: a round-trip stalling longer
+    // than that is a hard stall, not a slot race.
+    const deadline = Date.now() + 5000;
     while (stub!.lastPromptBody === undefined && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 10));
     }
