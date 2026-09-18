@@ -77,6 +77,7 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { PersistedSessionListCache } from '../server/persisted-session-list-cache.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import { CredentialStore } from '../local-control/credentials.js';
 import { tagListener } from '../local-control/listener-identity.js';
@@ -3535,6 +3536,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         return scan;
       });
+    const lookupSpy = vi.spyOn(PersistedSessionListCache.prototype, 'lookup');
 
     try {
       const firstConnId = await initialize();
@@ -3557,6 +3559,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       await waitUntil(() => loadSignal !== undefined);
       expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      // Both requests must have reached the cache before the first
+      // connection is destroyed. The first `lookup` starts the shared scan;
+      // the second takes the single-flight path and attaches as a waiter
+      // synchronously. Waiting for two lookups guarantees the destroyed
+      // connection is NOT the last waiter, so its abort cannot cancel the
+      // shared scan. (Awaiting the POST ack alone is racy: the 202 is sent
+      // before `dispatch.handle` runs.)
+      await waitUntil(() => lookupSpy.mock.calls.length === 2);
 
       const deleted = await fetch(`${base}/acp`, {
         method: 'DELETE',
@@ -3575,6 +3585,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     } finally {
       resolveScan({ items: [], nextCursor: undefined, hasMore: false });
       listSessionsSpy.mockRestore();
+      lookupSpy.mockRestore();
     }
   });
 
