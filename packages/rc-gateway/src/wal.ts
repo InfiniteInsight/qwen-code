@@ -117,6 +117,8 @@ export class SessionWal {
    * bound by dropping leading frames / pruning segments.
    */
   private frames: FrameMeta[] = [];
+  /** Set when dropped from the registry; forces a resync before the next write. */
+  private evicted = false;
   private _earliest: number | null = null;
   private _latest: number | null = null;
 
@@ -159,6 +161,13 @@ export class SessionWal {
    * active segment exceeds segmentMaxBytes, then enforces the retention bounds.
    */
   append(frame: WalFrame): void {
+    // Evicted instances may have been superseded by a fresh one that rotated or
+    // pruned segments; resync from disk so this write and the bound enforcement
+    // below act on the real state rather than a stale snapshot.
+    if (this.evicted) {
+      this.evicted = false;
+      this.recover();
+    }
     const encoded = encodeFrame(frame);
     const fd = this.ensureOpen();
     writeSync(fd, encoded, 0, encoded.length);
@@ -187,6 +196,20 @@ export class SessionWal {
       closeSync(this.fd);
       this.fd = null;
     }
+  }
+
+  /**
+   * Mark this instance as evicted from the shared registry.
+   *
+   * A caller may still hold a reference across an open stream, and meanwhile a
+   * fresh instance for the same session can be created. Two instances trusting
+   * their own in-memory bookkeeping could rotate or prune segments out from
+   * under each other, so an evicted instance re-reads the on-disk truth before
+   * its next append instead of acting on stale state.
+   */
+  markEvicted(): void {
+    this.evicted = true;
+    this.close();
   }
 
   // -- replay path --------------------------------------------------------
@@ -419,16 +442,57 @@ export class SessionWal {
  * offset to the shared instance's `latestId()` — a stale duplicate instance
  * would re-anchor too low and write a colliding WAL id.
  */
+/**
+ * Shared WAL handles, bounded.
+ *
+ * Every session ever streamed used to leave a `SessionWal` here forever, each
+ * holding per-frame metadata for up to `walMaxEvents` events and an open file
+ * descriptor. On a long-lived gateway that is unbounded growth in both memory
+ * and fds, for sessions nobody is reading any more.
+ *
+ * Entries are dropped least-recently-used. Dropping one is safe: a `SessionWal`
+ * rebuilds its whole state from the on-disk log in its constructor, and any
+ * reference a caller still holds resyncs before its next append (see
+ * {@link SessionWal.markEvicted}).
+ */
+const SHARED_WAL_MAX = 64;
 const sharedWalRegistry = new Map<string, SessionWal>();
 
 export function getSharedWal(dir: string, sessionId: string): SessionWal {
   const key = `${dir}/${sessionId}`;
-  let wal = sharedWalRegistry.get(key);
-  if (!wal) {
-    wal = new SessionWal({ dir, sessionId });
-    sharedWalRegistry.set(key, wal);
+  const existing = sharedWalRegistry.get(key);
+  if (existing !== undefined) {
+    // Re-insert so Map iteration order stays least-recently-used first.
+    sharedWalRegistry.delete(key);
+    sharedWalRegistry.set(key, existing);
+    return existing;
+  }
+
+  const wal = new SessionWal({ dir, sessionId });
+  sharedWalRegistry.set(key, wal);
+
+  while (sharedWalRegistry.size > SHARED_WAL_MAX) {
+    const oldest = sharedWalRegistry.keys().next();
+    if (oldest.done || oldest.value === key) break;
+    const victim = sharedWalRegistry.get(oldest.value);
+    sharedWalRegistry.delete(oldest.value);
+    victim?.markEvicted();
   }
   return wal;
+}
+
+/** Drop a session's WAL handle, closing its fd. Used when a session ends. */
+export function releaseSharedWal(dir: string, sessionId: string): void {
+  const key = `${dir}/${sessionId}`;
+  const wal = sharedWalRegistry.get(key);
+  if (wal === undefined) return;
+  sharedWalRegistry.delete(key);
+  wal.markEvicted();
+}
+
+/** Registry size, for tests. */
+export function sharedWalCount(): number {
+  return sharedWalRegistry.size;
 }
 
 // ---------------------------------------------------------------------------

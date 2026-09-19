@@ -28,14 +28,28 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * (add-mid-turn-recovery §4). Lazily loaded from the on-disk sidecar so a
  * gateway restart resumes the same raw→downstream id mapping.
  */
+const EPOCH_REGISTRY_MAX = 64;
 const epochRegistry = new Map<string, EpochState>();
 
 function getEpochState(walDir: string, sessionId: string): EpochState {
   const key = `${walDir}/${sessionId}`;
-  let state = epochRegistry.get(key);
-  if (!state) {
-    state = loadEpochState(walDir, sessionId);
-    epochRegistry.set(key, state);
+  // Bounded least-recently-used, mirroring the shared WAL registry: without a
+  // cap every session ever streamed stays resident for the life of the process.
+  // Dropping an entry is safe because the state is lazily reloaded from its
+  // on-disk sidecar.
+  const cached = epochRegistry.get(key);
+  if (cached !== undefined) {
+    epochRegistry.delete(key);
+    epochRegistry.set(key, cached);
+    return cached;
+  }
+  const state = loadEpochState(walDir, sessionId);
+  epochRegistry.set(key, state);
+
+  while (epochRegistry.size > EPOCH_REGISTRY_MAX) {
+    const oldest = epochRegistry.keys().next();
+    if (oldest.done || oldest.value === key) break;
+    epochRegistry.delete(oldest.value);
   }
   return state;
 }
