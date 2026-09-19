@@ -6787,17 +6787,33 @@
       // ~65 pre-existing `Authorization: Bearer` literals elsewhere in this
       // file are deliberately left alone.
       async function rcCall(path, init) {
-        const res = await fetch(path, {
-          ...init,
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + token(),
-            ...((init && init.headers) || {}),
-          },
-        });
+        // Never rejects: a rejected fetch inside an async onclick escapes as an
+        // unhandled rejection and leaves the button's status text stuck on
+        // "cancelling…" forever. Over a tailnet that is the common failure,
+        // not an exotic one, so it is folded into the same return shape the
+        // five callers already branch on.
+        let res;
+        try {
+          res = await fetch(path, {
+            ...init,
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+              ...((init && init.headers) || {}),
+            },
+          });
+        } catch (e) {
+          return { ok: false, status: 0, code: 'network: ' + (e && e.message ? e.message : e) };
+        }
         if (res.ok) {
-          const text = await res.text();
-          return { ok: true, status: res.status, body: text ? JSON.parse(text) : {} };
+          try {
+            const text = await res.text();
+            return { ok: true, status: res.status, body: text ? JSON.parse(text) : {} };
+          } catch (e) {
+            // 2xx with a truncated or non-JSON body — a proxy cutting the
+            // response mid-flight looks exactly like this.
+            return { ok: false, status: res.status, code: 'bad response body' };
+          }
         }
         let code = String(res.status);
         try {
