@@ -684,7 +684,12 @@ describe('the bash model these pins run on', () => {
 describe('ci.yml capture tooling', () => {
   const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
   const doc = parse(ci);
-  const steps = doc.jobs['test'].steps;
+  // The ubuntu suite is split into per-package lanes (PR #43). tmux belongs to
+  // the lane that actually runs the real-tmux suite — `test_cli`, which ci.yml
+  // documents as owning the tmux + zip tooling — not the `test` checks job.
+  const TMUX_LANE = 'test_cli';
+  const RUN_TESTS_STEP = 'Run cli tests and generate reports';
+  const steps = doc.jobs[TMUX_LANE].steps;
   const nameIndex = (name) => steps.findIndex((st) => st.name === name);
   const INSTALL = 'Install tmux and zip tooling';
 
@@ -693,7 +698,7 @@ describe('ci.yml capture tooling', () => {
     // below the test step — where the real-tmux suite silently skips, the
     // exact failure mode this file exists to prevent.
     const install = nameIndex(INSTALL);
-    const runTests = nameIndex('Run tests and generate reports');
+    const runTests = nameIndex(RUN_TESTS_STEP);
     expect(install).toBeGreaterThan(-1);
     expect(runTests).toBeGreaterThan(-1);
     expect(install).toBeLessThan(runTests);
