@@ -8,7 +8,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionWal, encodeFrame, decodeSegment } from './wal.js';
+import {
+  SessionWal,
+  encodeFrame,
+  decodeSegment,
+  getSharedWal,
+  releaseSharedWal,
+  sharedWalCount,
+} from './wal.js';
 import type { WalFrame } from './wal.js';
 
 function makeTmpDir(): string {
@@ -199,5 +206,63 @@ describe('encodeFrame / decodeSegment', () => {
     const decoded = [...decodeSegment(path)];
     expect(decoded).toHaveLength(1);
     expect(decoded[0]).toEqual(frame);
+  });
+});
+
+describe('shared WAL registry', () => {
+  it('returns the same instance for the same session', () => {
+    const dir = makeTmpDir();
+    expect(getSharedWal(dir, 's1')).toBe(getSharedWal(dir, 's1'));
+  });
+
+  it('stays bounded as sessions accumulate', () => {
+    const dir = makeTmpDir();
+    const before = sharedWalCount();
+    for (let i = 0; i < 200; i++) getSharedWal(dir, `bounded-${i}`);
+    // Without a cap this would be `before + 200`.
+    expect(sharedWalCount()).toBeLessThanOrEqual(64);
+    expect(sharedWalCount()).toBeLessThan(before + 200);
+  });
+
+  it('evicts least-recently-used, keeping the freshly touched one', () => {
+    const dir = makeTmpDir();
+    const keep = getSharedWal(dir, 'keep-me');
+    keep.append(makeFrame(1));
+    for (let i = 0; i < 40; i++) {
+      getSharedWal(dir, `filler-a-${i}`);
+      // Touch it again so it never becomes the oldest entry.
+      getSharedWal(dir, 'keep-me');
+    }
+    expect(getSharedWal(dir, 'keep-me')).toBe(keep);
+  });
+
+  it('releaseSharedWal drops the handle', () => {
+    const dir = makeTmpDir();
+    const first = getSharedWal(dir, 'released');
+    releaseSharedWal(dir, 'released');
+    expect(getSharedWal(dir, 'released')).not.toBe(first);
+  });
+
+  // The reason eviction is safe at all: a caller can still be holding an
+  // evicted instance across an open stream.
+  it('an evicted instance still appends correctly, resyncing from disk', () => {
+    const dir = makeTmpDir();
+    const held = getSharedWal(dir, 'evicted');
+    held.append(makeFrame(1));
+    held.append(makeFrame(2));
+
+    // Push it out of the registry, then let a fresh instance write more.
+    releaseSharedWal(dir, 'evicted');
+    const fresh = getSharedWal(dir, 'evicted');
+    expect(fresh).not.toBe(held);
+    fresh.append(makeFrame(3));
+
+    // The stale reference must not clobber what the fresh one wrote.
+    held.append(makeFrame(4));
+
+    const ids = getSharedWal(dir, 'evicted')
+      .replayFrom(0)
+      .events.map((e) => e.id);
+    expect(ids).toEqual([1, 2, 3, 4]);
   });
 });
