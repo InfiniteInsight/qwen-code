@@ -81,6 +81,7 @@ export interface SessionDaemon {
   ): Promise<PromptResult>;
   capabilities(): Promise<DaemonCapabilities>;
   closeSession(sessionId: string, clientId?: string): Promise<void>;
+  cancel(sessionId: string, clientId?: string): Promise<void>;
   subscribeEvents(
     sessionId: string,
     opts?: SubscribeOptions,
@@ -875,6 +876,17 @@ export class DaemonPool implements SessionDaemon {
       client.closeSession(sessionId, clientId),
     );
     this.removeSession(sessionId);
+  }
+
+  /**
+   * Abort the session's in-flight turn. Unlike {@link closeSession} the session
+   * SURVIVES — only the running prompt is cancelled — so the pool entry is
+   * deliberately left in place and `removeSession` is NOT called.
+   */
+  async cancel(sessionId: string, clientId?: string): Promise<void> {
+    await this.withSessionDeathTrigger(sessionId, (client) =>
+      client.cancel(sessionId, clientId),
+    );
   }
 
   async rewindSession(

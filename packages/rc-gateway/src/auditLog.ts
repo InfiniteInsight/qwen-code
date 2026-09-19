@@ -110,6 +110,7 @@ export type AuditAction =
   | 'apns_subscription_removed'
   | 'push_routed'
   | 'session_ended'
+  | 'session_cancelled'
   | 'agent_spawned'
   | 'agent_message_sent'
   | 'agent_cancelled'
@@ -197,6 +198,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'apns_subscription_removed',
   'push_routed',
   'session_ended',
+  'session_cancelled',
   'agent_spawned',
   'agent_message_sent',
   'agent_cancelled',

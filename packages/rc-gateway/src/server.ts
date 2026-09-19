@@ -130,6 +130,7 @@ import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
+import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
 import {
@@ -685,6 +686,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionEndRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/cancel — write-scope; aborts the session's in-flight
+  // turn without ending the session. Same guard set as /end (including the
+  // no-rate-limit rationale: a stop request is never rate-limited) because a
+  // cancel is strictly less destructive than an end.
+  app.post(
+    '/session/:id/cancel',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
+    createSessionCancelRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',

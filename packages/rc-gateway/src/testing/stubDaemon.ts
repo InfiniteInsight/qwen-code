@@ -18,6 +18,8 @@ export interface StubDaemon {
   eventsAbortedByClient: boolean;
   /** Session id passed to the most recent DELETE /session/:id request. */
   lastEndedSessionId: string | undefined;
+  /** Session id passed to the most recent POST /session/:id/cancel request. */
+  lastCancelledSessionId: string | undefined;
   /** Number of POST /session calls the stub has served. */
   createdSessionCount: number;
   /** Body of the most recent POST /session request. */
@@ -130,6 +132,11 @@ export interface StubDaemonOptions {
    * value is returned verbatim as an error.
    */
   endSessionStatus?: number;
+  /**
+   * Status for POST /session/:id/cancel (default 204). The SDK's `cancel`
+   * resolves on any ok status and on 204; anything else throws.
+   */
+  cancelSessionStatus?: number;
   /** Status for POST /session/:id/rewind (default 200). */
   rewindStatus?: number;
   /**
@@ -276,6 +283,7 @@ export async function startStubDaemon(
     lastEventIdHeader: undefined as string | undefined,
     eventsAbortedByClient: false,
     lastEndedSessionId: undefined as string | undefined,
+    lastCancelledSessionId: undefined as string | undefined,
     createdSessionCount: 0,
     lastCreateSessionBody: undefined as unknown,
     lastResumeSessionBody: undefined as unknown,
@@ -662,6 +670,16 @@ export async function startStubDaemon(
     }
   });
 
+  app.post('/session/:id/cancel', (req, res) => {
+    state.lastCancelledSessionId = req.params.id;
+    const status = opts.cancelSessionStatus ?? 204;
+    if (status === 200 || status === 204) {
+      res.status(204).end();
+    } else {
+      res.status(status).json({ error: 'stub error' });
+    }
+  });
+
   app.get('/session/:id/rewind/snapshots', (_req, res) => {
     res.json({ snapshots: opts.rewindSnapshots ?? [] });
   });
@@ -820,6 +838,9 @@ export async function startStubDaemon(
     },
     get lastEndedSessionId() {
       return state.lastEndedSessionId;
+    },
+    get lastCancelledSessionId() {
+      return state.lastCancelledSessionId;
     },
     get createdSessionCount() {
       return state.createdSessionCount;
