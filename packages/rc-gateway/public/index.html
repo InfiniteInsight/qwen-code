@@ -228,7 +228,10 @@
       <section>
       <label>Session id <input id="session" placeholder="session id" /></label>
       <button id="watch">Watch</button>
-      <button id="stop" disabled>Stop</button>
+      <button id="stop" disabled title="Stop following this session's event stream. The turn keeps running on the host.">Unwatch</button>
+      <button id="cancel-turn" title="Abort the turn running on the host (POST /session/:id/cancel)">Cancel turn</button>
+      <button id="end-session" title="Terminate the session on the host (POST /session/:id/end)">End session</button>
+      <span id="session-verb-result" style="color: #888; font-size: 0.85rem"></span>
     </section>
     <section id="dir-picker">
       <strong>New conversation</strong> — pick a directory
@@ -678,6 +681,45 @@
       <strong>Sessions</strong> (fork tree; requires owner scope)
       <div><button id="list-sessions">List sessions</button></div>
       <pre id="sessions">(not listed)</pre>
+    </section>
+    <section id="rewind">
+      <strong>Rewind</strong> (roll a session back to an earlier turn; requires
+      owner scope)
+      <div>
+        <input id="rewind-id" placeholder="session id (blank = watched)" />
+        <input
+          id="rewind-turn"
+          type="number"
+          min="0"
+          placeholder="to turn"
+          title="Turn index to rewind to. 0 discards every turn; the tip is a no-op."
+        />
+        <label
+          title="Also restore files to their state at that turn's snapshot"
+          ><input id="rewind-files" type="checkbox" /> restore files</label
+        >
+        <button id="rewind-btn">Rewind</button>
+      </div>
+      <div id="rewind-result"></div>
+    </section>
+    <section id="reviews">
+      <strong>Reviews</strong> (requires session-read scope)
+      <div>
+        <button id="reviews-list">List reviews</button>
+        <select id="reviews-status" title="filter by status">
+          <option value="">all</option>
+          <option value="running">running</option>
+          <option value="succeeded">succeeded</option>
+          <option value="failed">failed</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+      </div>
+      <div id="reviews-body">(not listed)</div>
+    </section>
+    <section id="workflows">
+      <strong>Workflows</strong> (requires session-read scope)
+      <div><button id="workflows-list">List runs</button></div>
+      <div id="workflows-body">(not listed)</div>
     </section>
     <section id="search">
       <strong>Search</strong> (transcripts; requires owner scope)
@@ -6738,6 +6780,222 @@
       // Fork session (cycle 69): POST /session/:id/fork (WRITE) full-copy
       // include mode -> a new daemon-hosted session inheriting the transcript.
       // textContent-only (returned ids are server hex/uuid).
+      // ---- Session verbs, rewind, reviews, workflows -------------------
+      // Five surfaces the gateway has always exposed and no client ever did.
+      //
+      // `rcCall` exists because these are new call sites, not a refactor: the
+      // ~65 pre-existing `Authorization: Bearer` literals elsewhere in this
+      // file are deliberately left alone.
+      async function rcCall(path, init) {
+        const res = await fetch(path, {
+          ...init,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + token(),
+            ...((init && init.headers) || {}),
+          },
+        });
+        if (res.ok) {
+          const text = await res.text();
+          return { ok: true, status: res.status, body: text ? JSON.parse(text) : {} };
+        }
+        let code = String(res.status);
+        try {
+          const b = await res.json();
+          if (b && b.code) code = b.code;
+        } catch {
+          /* non-JSON error body */
+        }
+        if (res.status === 401 || res.status === 403) code = 'not authorized (' + code + ')';
+        return { ok: false, status: res.status, code };
+      }
+
+      /** The session these verbs act on: explicit field, else the watched one. */
+      function verbSessionId(inputId) {
+        const typed = inputId ? ($(inputId).value || '').trim() : '';
+        return typed || watchedSessionId || '';
+      }
+
+      /** Replace a container's children with plain-text rows (never innerHTML). */
+      function renderRows(el, rows) {
+        el.textContent = '';
+        for (const row of rows) {
+          const div = document.createElement('div');
+          div.textContent = row;
+          el.appendChild(div);
+        }
+      }
+
+      $('cancel-turn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('session-verb-result');
+        const id = verbSessionId('session');
+        if (!id) {
+          out.textContent = 'no session';
+          return;
+        }
+        out.textContent = 'cancelling…';
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/cancel', {
+          method: 'POST',
+          body: '{}',
+        });
+        // Idempotent by design — a repeated cancel is not an error.
+        out.textContent = r.ok ? 'turn cancelled' : 'cancel failed: ' + r.code;
+      };
+
+      $('end-session').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('session-verb-result');
+        const id = verbSessionId('session');
+        if (!id) {
+          out.textContent = 'no session';
+          return;
+        }
+        // Destructive and not undoable: the daemon tears the session down.
+        if (!window.confirm('End session ' + id + '? This cannot be undone.')) return;
+        out.textContent = 'ending…';
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/end', {
+          method: 'POST',
+          body: '{}',
+        });
+        out.textContent = r.ok ? 'session ended' : 'end failed: ' + r.code;
+      };
+
+      $('rewind-btn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('rewind-result');
+        const id = verbSessionId('rewind-id');
+        if (!id) {
+          out.textContent = 'no session';
+          return;
+        }
+        const raw = ($('rewind-turn').value || '').trim();
+        if (raw === '' || !Number.isInteger(Number(raw)) || Number(raw) < 0) {
+          out.textContent = 'enter a turn index (0 or greater)';
+          return;
+        }
+        const turn = Number(raw);
+        // Discards every turn after `turn`, and optionally the file edits too.
+        if (
+          !window.confirm(
+            'Rewind ' + id + ' to turn ' + turn +
+              ($('rewind-files').checked ? ' and restore files' : '') +
+              '? Later turns are discarded.',
+          )
+        ) return;
+        out.textContent = 'rewinding…';
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/rewind', {
+          method: 'POST',
+          body: JSON.stringify({
+            toTurn: turn,
+            rewindFiles: $('rewind-files').checked,
+          }),
+        });
+        if (!r.ok) {
+          out.textContent = 'rewind failed: ' + r.code;
+          return;
+        }
+        renderRows(out, [
+          'rewound to turn ' + r.body.toTurn,
+          'truncated at event ' + r.body.truncatedEventId,
+        ]);
+      };
+
+      $('reviews-list').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('reviews-body');
+        out.textContent = 'loading…';
+        const status = $('reviews-status').value;
+        const r = await rcCall(
+          '/rc/reviews' + (status ? '?status=' + encodeURIComponent(status) : ''),
+        );
+        if (!r.ok) {
+          out.textContent = 'list failed: ' + r.code;
+          return;
+        }
+        const reviews = r.body.reviews || [];
+        if (reviews.length === 0) {
+          out.textContent = '(no reviews)';
+          return;
+        }
+        out.textContent = '';
+        for (const rev of reviews) {
+          const row = document.createElement('div');
+          const label = document.createElement('span');
+          const findings = rev.summary && rev.summary.findingsCount;
+          label.textContent =
+            rev.status +
+            '  ' + rev.reviewId +
+            '  session ' + rev.sessionId +
+            (findings === undefined || findings === null ? '' : '  ' + findings + ' findings') +
+            '  ' + rev.triggeredAt;
+          row.appendChild(label);
+          if (rev.status === 'running') {
+            const btn = document.createElement('button');
+            btn.textContent = 'cancel';
+            btn.style.marginLeft = '6px';
+            btn.onclick = async () => {
+              btn.disabled = true;
+              const c = await rcCall(
+                '/rc/reviews/' + encodeURIComponent(rev.reviewId) + '/cancel',
+                { method: 'POST', body: '{}' },
+              );
+              label.textContent = c.ok
+                ? 'cancelled  ' + rev.reviewId
+                : label.textContent + '  [cancel failed: ' + c.code + ']';
+            };
+            row.appendChild(btn);
+          }
+          out.appendChild(row);
+        }
+      };
+
+      $('workflows-list').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('workflows-body');
+        out.textContent = 'loading…';
+        const r = await rcCall('/rc/workflows');
+        if (!r.ok) {
+          out.textContent = 'list failed: ' + r.code;
+          return;
+        }
+        const runs = r.body.workflows || [];
+        if (runs.length === 0) {
+          out.textContent = '(no runs)';
+          return;
+        }
+        out.textContent = '';
+        for (const run of runs) {
+          const row = document.createElement('div');
+          const label = document.createElement('span');
+          label.textContent =
+            run.status +
+            '  ' + run.name +
+            '  ' + run.runId +
+            '  phase ' + run.phase +
+            '  ' + run.agentCount + ' agents' +
+            '  ' + run.tokensSpent + ' tok';
+          row.appendChild(label);
+          if (run.status === 'running') {
+            const btn = document.createElement('button');
+            btn.textContent = 'cancel';
+            btn.style.marginLeft = '6px';
+            btn.onclick = async () => {
+              btn.disabled = true;
+              const c = await rcCall(
+                '/rc/workflows/' + encodeURIComponent(run.runId) + '/cancel',
+                { method: 'POST', body: '{}' },
+              );
+              label.textContent = c.ok
+                ? 'cancelling  ' + run.runId
+                : label.textContent + '  [cancel failed: ' + c.code + ']';
+            };
+            row.appendChild(btn);
+          }
+          out.appendChild(row);
+        }
+      };
+
       $('fork-btn').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('fork-result');
