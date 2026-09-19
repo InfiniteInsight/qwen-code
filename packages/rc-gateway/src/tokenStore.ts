@@ -17,6 +17,24 @@ import type { CorsOriginRecord } from './types.js';
 // tests stay fast while remaining a real argon2id cost.
 // ---------------------------------------------------------------------------
 
+/**
+ * Verified-token cache bounds.
+ *
+ * argon2id is deliberately memory-hard (19 MiB) and slow (~390 ms measured), by
+ * design — that cost is right when checking a *candidate* secret, but the auth
+ * path re-pays it on every single authenticated request, including polls and
+ * SSE reconnects. Under sustained traffic that is hundreds of megabytes of
+ * churn per minute and enough CPU to make the gateway visibly slow.
+ *
+ * Caching only the argon2 comparison (plaintext ↔ record identity) keeps the
+ * expensive step once per token per TTL. Every policy decision — revocation,
+ * max-age, TTL expiry — is still evaluated from the live record on each
+ * request, so a revoked or expired token stops working immediately.
+ */
+const VERIFY_CACHE_TTL_MS = 5 * 60_000;
+/** Bounded so the cache cannot become a leak of its own. */
+const VERIFY_CACHE_MAX = 512;
+
 const ARGON2_PARAMS = {
   /** memory cost in KiB */
   m: 19456,
@@ -237,6 +255,13 @@ export class TokenStore {
     private nowFn: () => number,
   ) {}
 
+  /**
+   * lookupHash -> the record its plaintext already argon2-verified against.
+   * Skips only the hash comparison; policy is always re-evaluated live.
+   * Cleared whenever records change (see persist).
+   */
+  private verifyCache = new Map<string, { recordId: string; at: number }>();
+
   static async open(
     filePath: string,
     nowFn: () => number = Date.now,
@@ -363,37 +388,86 @@ export class TokenStore {
     const maxAgeDays = opts.maxTokenAgeDays ?? DEFAULT_MAX_TOKEN_AGE_DAYS;
 
     const lh = lookupHash(plaintext);
+
+    // A previously verified secret skips argon2 only; it still has to pass
+    // every check below against the record as it stands right now.
+    const cached = this.verifyCache.get(lh);
+    if (cached !== undefined) {
+      if (nowMs - cached.at > VERIFY_CACHE_TTL_MS) {
+        this.verifyCache.delete(lh);
+      } else {
+        const rec = this.records.find((r) => r.id === cached.recordId);
+        if (rec === undefined) {
+          this.verifyCache.delete(lh);
+        } else {
+          const decided = this.decideForRecord(rec, nowMs, maxAgeDays);
+          // `undefined` means "this record does not apply" (expired share),
+          // which in the uncached path continues to the next candidate; with a
+          // single cached identity there is nothing else to try.
+          if (decided !== undefined) return decided;
+          return { ok: false, reason: 'not_found' };
+        }
+      }
+    }
+
     const candidates = this.records.filter((r) => r.lookupHash === lh);
 
     for (const rec of candidates) {
       if (!argon2idVerify(plaintext, rec.tokenHash)) continue;
-
-      if (rec.revokedAt !== undefined) {
-        return { ok: false, reason: 'revoked' };
-      }
-
-      // Absolute max-age check (wins over sliding renewal / expiresAt).
-      const maxAgeCeilingMs = rec.issuedAt + maxAgeDays * DAY_MS;
-      if (nowMs > maxAgeCeilingMs) {
-        return { ok: false, reason: 'token_expired_max_age' };
-      }
-
-      // TTL expiry (share tokens only; owner/normal tokens have no expiresAt).
-      if (rec.expiresAt !== undefined && nowMs >= rec.expiresAt) {
-        // Expired share → treated as not found (no distinct 'expired' reason
-        // exposed through resolve(); consistent with existing behaviour).
-        continue;
-      }
-
-      return {
-        ok: true,
-        id: rec.id,
-        scopes: [...rec.scopes],
-        sessionLockId: rec.sessionLockId,
-        shareLabel: rec.sessionLockId !== undefined ? rec.label : undefined,
-      };
+      this.rememberVerified(lh, rec.id, nowMs);
+      const decided = this.decideForRecord(rec, nowMs, maxAgeDays);
+      // undefined => expired share; keep looking at the other candidates.
+      if (decided === undefined) continue;
+      return decided;
     }
     return { ok: false, reason: 'not_found' };
+  }
+
+  /**
+   * Apply revocation / max-age / TTL policy to a record whose secret already
+   * matched. Split out so the cached and uncached auth paths cannot drift.
+   * @returns the outcome, or undefined when this record is an expired share and
+   * the caller should consider the next candidate.
+   */
+  private decideForRecord(
+    rec: TokenRecord,
+    nowMs: number,
+    maxAgeDays: number,
+  ): VerifyTokenResult | undefined {
+    if (rec.revokedAt !== undefined) {
+      return { ok: false, reason: 'revoked' };
+    }
+
+    // Absolute max-age check (wins over sliding renewal / expiresAt).
+    if (nowMs > rec.issuedAt + maxAgeDays * DAY_MS) {
+      return { ok: false, reason: 'token_expired_max_age' };
+    }
+
+    // TTL expiry (share tokens only; owner/normal tokens have no expiresAt).
+    if (rec.expiresAt !== undefined && nowMs >= rec.expiresAt) {
+      return undefined;
+    }
+
+    return {
+      ok: true,
+      id: rec.id,
+      scopes: [...rec.scopes],
+      sessionLockId: rec.sessionLockId,
+      shareLabel: rec.sessionLockId !== undefined ? rec.label : undefined,
+    };
+  }
+
+  /** Record a successful argon2 match, evicting the oldest entry when full. */
+  private rememberVerified(
+    lookup: string,
+    recordId: string,
+    nowMs: number,
+  ): void {
+    if (this.verifyCache.size >= VERIFY_CACHE_MAX) {
+      const oldest = this.verifyCache.keys().next();
+      if (!oldest.done) this.verifyCache.delete(oldest.value);
+    }
+    this.verifyCache.set(lookup, { recordId, at: nowMs });
   }
 
   /**
@@ -611,6 +685,11 @@ export class TokenStore {
   }
 
   private async persist(): Promise<void> {
+    // Any change to the record set (mint, revoke, rotate) must not be
+
+    // survivable by a cached verification.
+
+    this.verifyCache.clear();
     await mkdir(dirname(this.filePath), { recursive: true });
     const body: PersistShape = {
       tokens: this.records,

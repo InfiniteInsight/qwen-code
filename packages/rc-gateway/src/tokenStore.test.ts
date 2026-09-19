@@ -495,6 +495,61 @@ describe('TokenStore', () => {
     expect(reopened.resolve(`Bearer ${a.token}`)).toBeNull();
   });
 
+  // --- verified-token cache -------------------------------------------------
+  // The cache skips argon2 only. Anything that changes whether a token SHOULD
+  // work has to take effect on the very next request.
+
+  it('cached verification does not survive revocation', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    // Prime the cache.
+    expect(store.resolve(`Bearer ${a.token}`)).not.toBeNull();
+    await store.revoke(a.id);
+    expect(store.resolve(`Bearer ${a.token}`)).toBeNull();
+    expect(store.verifyTokenDetailed(a.token)).toEqual({
+      ok: false,
+      reason: 'revoked',
+    });
+  });
+
+  it('cached verification does not survive revokeAll', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    expect(store.resolve(`Bearer ${a.token}`)).not.toBeNull();
+    await store.revokeAll();
+    expect(store.resolve(`Bearer ${a.token}`)).toBeNull();
+  });
+
+  it('max-age is still enforced on a cached token', async () => {
+    let now = Date.now();
+    const store = await TokenStore.open(path, () => now);
+    const a = await store.issue([SESSION_READ], 'a');
+    expect(store.verifyTokenDetailed(a.token).ok).toBe(true);
+    // Same secret, same record — only the clock moved past the ceiling.
+    now += 400 * 24 * 60 * 60 * 1000;
+    expect(store.verifyTokenDetailed(a.token)).toEqual({
+      ok: false,
+      reason: 'token_expired_max_age',
+    });
+  });
+
+  it('repeated verification of the same token is consistent', async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    const first = store.resolve(`Bearer ${a.token}`);
+    for (let i = 0; i < 5; i++) {
+      expect(store.resolve(`Bearer ${a.token}`)).toEqual(first);
+    }
+  });
+
+  it("a wrong token is never served from another token's cache entry", async () => {
+    const store = await TokenStore.open(path);
+    const a = await store.issue([SESSION_READ], 'a');
+    expect(store.resolve(`Bearer ${a.token}`)).not.toBeNull();
+    expect(store.resolve(`Bearer ${a.token}x`)).toBeNull();
+    expect(store.resolve('Bearer totally-different')).toBeNull();
+  });
+
   it('revokeAll returns empty array when no tokens exist', async () => {
     const store = await TokenStore.open(path);
     const { revokedIds } = await store.revokeAll();
