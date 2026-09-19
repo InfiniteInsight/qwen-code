@@ -46,6 +46,59 @@
         margin: 0 0 0.4rem;
         font-size: 0.8rem;
       }
+      .ask-questions {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-bottom: 0.5rem;
+      }
+      .ask-q {
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 8px;
+      }
+      .ask-q-head {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        opacity: 0.6;
+        margin-bottom: 4px;
+      }
+      .ask-q-text {
+        font-size: 0.9rem;
+        margin-bottom: 6px;
+      }
+      .ask-q-opts {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .ask-opt {
+        display: block;
+        width: 100%;
+        text-align: left;
+      }
+      .ask-opt .lbl {
+        font-weight: 600;
+      }
+      .ask-opt .desc {
+        display: block;
+        font-size: 0.75rem;
+        opacity: 0.7;
+      }
+      .ask-opt.sel,
+      .ask-other-row button.sel {
+        outline: 2px solid #1d4ed8;
+        outline-offset: -2px;
+      }
+      .ask-other-row {
+        display: flex;
+        gap: 6px;
+        margin-top: 2px;
+      }
+      .ask-other-row input {
+        flex: 1;
+      }
       #log,
       #events,
       #audit,
@@ -247,6 +300,22 @@
         max-height: 75vh;
         overflow-y: auto;
       }
+      #transcript-wrap {
+        position: relative;
+      }
+      #jump-bottom {
+        position: absolute;
+        bottom: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2;
+        border-radius: 999px;
+        background: #fff;
+        color: #111;
+        border: 1px solid #ccc;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+        font-size: 0.85rem;
+      }
       #transcript .bubble {
         max-width: 92%;
         padding: 8px 10px;
@@ -281,6 +350,46 @@
         font-size: 0.85rem;
         border-left: 2px solid #3a3f47;
       }
+      /* Folded thought: one-line clickable header + hidden full text. */
+      #transcript .thought .thought-head {
+        cursor: pointer;
+        user-select: none;
+        opacity: 0.75;
+      }
+      #transcript .thought .thought-head:hover {
+        opacity: 1;
+      }
+      #transcript .thought .thought-body {
+        display: block;
+        margin-top: 4px;
+        opacity: 0.9;
+      }
+      /* Author display above overrides the UA [hidden] rule — reassert it. */
+      #transcript .thought .thought-body[hidden] {
+        display: none;
+      }
+      /* Processing indicator while a sent prompt is being processed. */
+      #transcript .processing {
+        align-self: flex-start;
+        background: transparent;
+        color: #8a8f98;
+        font-style: italic;
+        font-size: 0.85rem;
+        border-left: 2px solid #3a3f47;
+      }
+      #transcript .processing .proc-spin {
+        display: inline-block;
+        animation: proc-pulse 1.3s ease-in-out infinite;
+      }
+      @keyframes proc-pulse {
+        0%,
+        100% {
+          opacity: 0.35;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
       #transcript .tool {
         align-self: flex-start;
         background: #17203a;
@@ -298,6 +407,28 @@
         font-weight: 600;
       }
       #transcript .tool .st {
+        opacity: 0.7;
+      }
+      /* Subagent activity nested inside the parent agent's tool row. */
+      #transcript .subagent {
+        margin: 6px 0 0 6px;
+        padding-left: 10px;
+        border-left: 2px solid #3a4a7a;
+      }
+      #transcript .subagent .subagent-head {
+        opacity: 0.85;
+      }
+      #transcript .subagent .subagent-time {
+        opacity: 0.6;
+      }
+      #transcript .subagent .subagent-text {
+        margin-top: 4px;
+      }
+      #transcript .subagent .subtool {
+        margin-top: 4px;
+        opacity: 0.85;
+      }
+      #transcript .subagent .subtool .st {
         opacity: 0.7;
       }
       /* Per-message "Fork from here" (add-session-forking web gap): a small
@@ -474,7 +605,10 @@
       font-weight:600;border-bottom:1px solid #333;
     "></div>
     <div id="lineage" hidden></div>
-    <div id="transcript"></div>
+    <div id="transcript-wrap">
+      <div id="transcript"></div>
+      <button id="jump-bottom" hidden>↓ jump to bottom</button>
+    </div>
     <section id="composer" style="display: none">
       <textarea
         id="prompt"
@@ -1009,11 +1143,20 @@
       const strOr = (v, d) => (typeof v === 'string' && v ? clean(v) : d);
 
       let stickToBottom = true; // follow the newest content while near the bottom
+      // While the user is reading history (scrolled up), show the floating
+      // "jump to bottom" pill; it hides again once we reach the bottom.
+      function updateJumpBottom() {
+        $('jump-bottom').hidden = stickToBottom;
+      }
+      $('jump-bottom').addEventListener('click', () => {
+        scrollTranscript(true);
+      });
       $('transcript').addEventListener('scroll', () => {
         const el = $('transcript');
         // "Near the bottom" = within a bubble's height of the end.
         stickToBottom =
           el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        updateJumpBottom();
       });
       function scrollTranscript(force) {
         const el = $('transcript');
@@ -1021,10 +1164,56 @@
         // only follow if the user is still near the bottom, so scrolling up
         // to read history mid-stream doesn't yank them back down.
         if (force || stickToBottom) el.scrollTop = el.scrollHeight;
+        updateJumpBottom();
       }
       function resetTurn() {
         curAsst = null;
-        curThought = null;
+        finishThought();
+        hideProcessing();
+      }
+      // ---- Processing indicator (feedback between send and first frame) ---
+      // After a send, the reply can take several seconds (gateway → daemon →
+      // first model token). Show a quiet "thinking" row with a live elapsed
+      // timer; hide it the moment any first-frame of the turn arrives.
+      let processingEl = null;
+      let processingTimer = null;
+      let processingStartedAt = 0;
+      function hideProcessing() {
+        if (processingTimer) {
+          clearInterval(processingTimer);
+          processingTimer = null;
+        }
+        if (processingEl && processingEl.isConnected) processingEl.remove();
+        processingEl = null;
+      }
+      function showProcessing() {
+        hideProcessing();
+        processingStartedAt = Date.now();
+        const b = document.createElement('div');
+        b.className = 'bubble processing';
+        const spin = document.createElement('span');
+        spin.className = 'proc-spin';
+        spin.textContent = '⏳ ';
+        const msg = document.createElement('span');
+        msg.textContent = 'thinking';
+        const time = document.createElement('span');
+        time.className = 'proc-time';
+        b.append(spin, msg, time);
+        const tick = () => {
+          const secs = Math.max(
+            0,
+            Math.floor((Date.now() - processingStartedAt) / 1000),
+          );
+          time.textContent =
+            secs >= 60
+              ? ' · ' + Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
+              : ' · ' + secs + 's';
+        };
+        tick();
+        processingTimer = setInterval(tick, 1000);
+        $('transcript').appendChild(b);
+        processingEl = b;
+        scrollTranscript();
       }
       // ---- Crash-recovery banner (add-mid-turn-recovery §7) ---------------
       // `session_interrupted` / `session_recovered` are WAL-persisted markers,
@@ -1055,6 +1244,8 @@
           'Daemon crashed — this turn was interrupted' +
           (notRecovered ? ' and not recovered' : '');
         el.hidden = false;
+        // Not recovered = the turn is over; stop the processing timer.
+        if (notRecovered) hideProcessing();
       }
       function showRecoveredNote() {
         if (recoveredNoteTimer) clearTimeout(recoveredNoteTimer);
@@ -1077,6 +1268,10 @@
       function clearTranscript() {
         $('transcript').innerHTML = '';
         toolEls.clear();
+        for (const s of subagents.values())
+          if (s.timer) clearInterval(s.timer);
+        subagents.clear();
+        subagentTypes.clear();
         resetTurn();
         ctxInfo = null;
         liveIn = 0;
@@ -1090,6 +1285,7 @@
         forkBtnTurn = -1;
         clearCrashBanner(); // a new watch starts with no crash banner
         stickToBottom = true; // a new watch follows the newest content
+        updateJumpBottom();
         renderFooter();
       }
       function makeBubble(cls, roleLabel) {
@@ -1113,15 +1309,58 @@
         scrollTranscript(true);
       }
       function appendAssistant(text) {
-        curThought = null;
+        finishThought();
         if (!curAsst) curAsst = makeBubble('asst', 'assistant');
         curAsst._body.textContent += clean(text);
         scrollTranscript();
       }
       function appendThought(text) {
         curAsst = null;
-        if (!curThought) curThought = makeBubble('thought', 'thinking');
+        if (!curThought) {
+          curThought = makeBubble('thought', 'thinking');
+          curThought._startedAt = Date.now();
+        }
         curThought._body.textContent += clean(text);
+        scrollTranscript();
+      }
+      // A thought block ends when any non-thought frame arrives (assistant
+      // text, tool call, user message, plan) or the turn completes. Fold the
+      // bubble to a one-line "Thought for Ns" header; clicking the header
+      // expands the full text and back.
+      function finishThought() {
+        const b = curThought;
+        curThought = null;
+        if (!b || !b.isConnected) return; // transcript cleared mid-block
+        const full = b._body.textContent;
+        if (!full.trim()) {
+          b.remove(); // empty thought — nothing to keep
+          return;
+        }
+        const secs = Math.max(0, (Date.now() - (b._startedAt || Date.now())) / 1000);
+        const dur =
+          secs < 1
+            ? '<1s'
+            : secs < 60
+              ? Math.round(secs) + 's'
+              : Math.floor(secs / 60) + 'm' + Math.round(secs % 60) + 's';
+        b.innerHTML = '';
+        const head = document.createElement('span');
+        head.className = 'thought-head';
+        const body = document.createElement('span');
+        body.className = 'thought-body';
+        body.textContent = full;
+        body.hidden = true;
+        const renderHead = () => {
+          head.textContent =
+            '∴ Thought for ' + dur + (body.hidden ? ' ▸' : ' ▾');
+        };
+        head.onclick = () => {
+          body.hidden = !body.hidden;
+          renderHead();
+        };
+        renderHead();
+        b.appendChild(head);
+        b.appendChild(body);
         scrollTranscript();
       }
       function addSystem(text, err) {
@@ -1130,6 +1369,115 @@
         b.className = 'system' + (err ? ' err' : '');
         b.textContent = clean(text);
         $('transcript').appendChild(b);
+        scrollTranscript();
+      }
+      // ---- Subagent feedback -------------------------------------------------
+      // Subagent (Agent tool) frames carry the parent tool call's id in
+      // _meta.parentToolCallId (SubAgentTracker stamps it on the child's
+      // tool calls and stream text). Nest them inside the parent's tool row —
+      // a running indicator with an elapsed timer plus the child's own text
+      // and tool calls — so a long subagent run is visible instead of
+      // crowding (or vanishing from) the top-level transcript.
+      const subagents = new Map(); // parentToolCallId -> subagent state
+      const subagentTypes = new Map(); // parentToolCallId -> child type label
+      const TERMINAL_TOOL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+      function subagentState(parentId) {
+        let s = subagents.get(parentId);
+        if (s) return s;
+        const row = toolEls.get(parentId);
+        if (!row) return null; // parent tool_call always precedes child frames
+        s = {
+          startedAt: Date.now(),
+          timer: null,
+          done: false,
+          type: subagentTypes.get(parentId) || '',
+          text: null,
+          tools: new Map(),
+        };
+        const host = document.createElement('div');
+        host.className = 'subagent';
+        const head = document.createElement('div');
+        head.className = 'subagent-head';
+        const spin = document.createElement('span');
+        spin.textContent = '⏳ ';
+        const msg = document.createElement('span');
+        msg.textContent = 'subagent running';
+        const time = document.createElement('span');
+        time.className = 'subagent-time';
+        head.append(spin, msg, time);
+        host.appendChild(head);
+        row.appendChild(host);
+        s.host = host;
+        s._spin = spin;
+        s._msg = msg;
+        s._time = time;
+        const tick = () => {
+          const secs = Math.max(0, Math.floor((Date.now() - s.startedAt) / 1000));
+          time.textContent =
+            secs >= 60
+              ? ' · ' + Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
+              : ' · ' + secs + 's';
+        };
+        tick();
+        s.timer = setInterval(tick, 1000);
+        subagents.set(parentId, s);
+        scrollTranscript();
+        return s;
+      }
+      function renderSubagentHead(s) {
+        const who = s.type ? 'subagent ' + s.type + ' ' : 'subagent ';
+        if (s.done) {
+          const secs = Math.max(0, Math.floor((Date.now() - s.startedAt) / 1000));
+          const dur =
+            secs >= 60
+              ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
+              : secs + 's';
+          s._spin.textContent = s._failed ? '✖ ' : '✔ ';
+          s._msg.textContent = who + (s._failed ? 'failed' : 'done') + ' in ' + dur;
+        } else {
+          s._spin.textContent = '⏳ ';
+          s._msg.textContent = who + 'running';
+        }
+      }
+      function finishSubagent(parentId, status) {
+        const s = subagents.get(parentId);
+        if (!s || s.done) return;
+        s.done = true;
+        s._failed = status === 'failed';
+        if (s.timer) {
+          clearInterval(s.timer);
+          s.timer = null;
+        }
+        renderSubagentHead(s);
+      }
+      function appendSubagentText(parentId, text) {
+        const s = subagentState(parentId);
+        if (!s) return;
+        if (!s.text) {
+          s.text = document.createElement('div');
+          s.text.className = 'subagent-text';
+          s.host.appendChild(s.text);
+        }
+        s.text.textContent += clean(text);
+        scrollTranscript();
+      }
+      function renderSubagentTool(u, parentId) {
+        const s = subagentState(parentId);
+        if (!s) return;
+        const id = strOr(u.toolCallId, '');
+        const status = strOr(u.status, '');
+        let row = id ? s.tools.get(id) : null;
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'subtool';
+          s.host.appendChild(row);
+          if (id) s.tools.set(id, row);
+        }
+        // Same "keep the first name" rule as the top-level tool rows.
+        const label =
+          strOr(u.title, '') || strOr(u.kind, '') || row._label || id || 'tool';
+        row._label = label;
+        row.textContent = '🔧 ' + label + (status ? '  [' + status + ']' : '');
         scrollTranscript();
       }
       function renderTool(u) {
@@ -1154,6 +1502,9 @@
           st.textContent = '  [' + status + ']';
           row._body.appendChild(st);
         }
+        // The parent agent tool reaching a terminal status settles the
+        // nested subagent indicator (⏳ → ✔/✖ with total elapsed time).
+        if (id && TERMINAL_TOOL_STATUSES.has(status)) finishSubagent(id, status);
         scrollTranscript();
       }
       function renderPlan(entries) {
@@ -2906,10 +3257,32 @@
       function renderSessionUpdate(u) {
         if (!u || typeof u !== 'object') return;
         const su = u.sessionUpdate;
+        const text = u.content && u.content.text;
+        // Subagent frames are tagged with the parent Agent tool call's id —
+        // nest them in that tool row (running indicator + elapsed time + the
+        // child's own text/tools) instead of the top-level transcript. The
+        // child's usage is not this session's, so skip updateLiveTokens.
+        const parentId =
+          u._meta && typeof u._meta.parentToolCallId === 'string'
+            ? u._meta.parentToolCallId
+            : '';
+        if (parentId) {
+          if (
+            !subagentTypes.has(parentId) &&
+            typeof u._meta.subagentType === 'string' &&
+            u._meta.subagentType
+          )
+            subagentTypes.set(parentId, u._meta.subagentType);
+          if (su === 'agent_message_chunk' && text)
+            return appendSubagentText(parentId, text);
+          if (su === 'tool_call' || su === 'tool_call_update')
+            return renderSubagentTool(u, parentId);
+          // Subagent thoughts and other child frames: no top-level feedback.
+          return;
+        }
         // Token usage rides on agent_message_chunk _meta.usage (the frame may
         // carry empty text), so read it before the text guard below.
         updateLiveTokens(u._meta && u._meta.usage);
-        const text = u.content && u.content.text;
         // Still NOT rendered (the prompt is echoed locally on send) — but
         // counted: each user record arms the next turn boundary.
         if (su === 'user_message_chunk') {
@@ -2918,6 +3291,7 @@
           return;
         }
         if (su === 'agent_message_chunk' && text) {
+          hideProcessing(); // the turn's first frame has arrived
           // First agent chunk after a user record = one completed turn
           // boundary (the value "Fork from here" posts as fromTurn).
           if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
@@ -2934,7 +3308,10 @@
           }
           return;
         }
-        if (su === 'agent_thought_chunk' && text) return appendThought(text);
+        if (su === 'agent_thought_chunk' && text) {
+          hideProcessing(); // the turn's first frame has arrived
+          return appendThought(text);
+        }
         if (su === 'tool_call' || su === 'tool_call_update')
           return renderTool(u);
         if (su === 'plan') return renderPlan(u.entries);
@@ -3014,6 +3391,11 @@
             // here" under the turn's last assistant bubble. Replayed history
             // carries no turn_complete, so historical turns stay button-less
             // by design (fork them from the Sessions/fork panels instead).
+            finishThought();
+            hideProcessing();
+            // A turn can't end while an Agent tool is still in flight —
+            // settle any indicator whose terminal update never arrived.
+            for (const [pid] of subagents) finishSubagent(pid, 'completed');
             if (asstThisTurn && curAsst) placeForkButton();
             return;
           // suppressed noise (still in raw JSON): client_joined, client_left,
@@ -3384,7 +3766,7 @@
         void doPair(code);
       })();
 
-      async function vote(sessionId, requestId, outcome, optionId) {
+      async function vote(sessionId, requestId, outcome, optionId, answers) {
         const entry = cards.get(requestId);
         try {
           const res = await fetch(
@@ -3398,8 +3780,12 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
+              // answers: ask_user_question responses, keyed by question
+              // index — the keying the tool's parser expects.
               body: JSON.stringify(
-                outcome === 'selected' ? { outcome, optionId } : { outcome },
+                outcome === 'selected'
+                  ? { outcome, optionId, ...(answers ? { answers } : {}) }
+                  : { outcome },
               ),
             },
           );
@@ -3421,37 +3807,197 @@
         if (!requestId || cards.has(requestId)) return;
         const card = document.createElement('div');
         card.className = 'card';
-        const summary = document.createElement('pre');
-        summary.textContent =
-          'permission request ' +
-          requestId +
-          '\n' +
-          JSON.stringify(data.toolCall, null, 2);
-        card.appendChild(summary);
         const note = document.createElement('div');
-        const buttons = [];
-        for (const opt of data.options || []) {
-          const b = document.createElement('button');
-          b.textContent = 'Approve: ' + (opt.name || opt.optionId);
-          b.onclick = () =>
-            vote(sessionId, requestId, 'selected', opt.optionId);
-          card.appendChild(b);
-          buttons.push(b);
+        const rawInput =
+          data.toolCall && typeof data.toolCall === 'object'
+            ? data.toolCall.rawInput
+            : null;
+        const questions =
+          rawInput && Array.isArray(rawInput.questions)
+            ? rawInput.questions
+            : [];
+        if (questions.length > 0) {
+          // ask_user_question: render the real questions, answerable.
+          card.appendChild(
+            renderQuestionBlock(
+              questions,
+              data.options || [],
+              (optionId, answers) =>
+                vote(sessionId, requestId, 'selected', optionId, answers),
+              note,
+            ),
+          );
+        } else {
+          const summary = document.createElement('pre');
+          summary.textContent =
+            'permission request ' +
+            requestId +
+            '\n' +
+            JSON.stringify(data.toolCall, null, 2);
+          card.appendChild(summary);
+          for (const opt of data.options || []) {
+            const b = document.createElement('button');
+            b.textContent = 'Approve: ' + (opt.name || opt.optionId);
+            b.onclick = () =>
+              vote(sessionId, requestId, 'selected', opt.optionId);
+            card.appendChild(b);
+          }
         }
         const deny = document.createElement('button');
-        deny.textContent = 'Deny';
+        deny.textContent = questions.length > 0 ? 'Cancel' : 'Deny';
         deny.onclick = () => vote(sessionId, requestId, 'cancelled');
         card.appendChild(deny);
-        buttons.push(deny);
         card.appendChild(note);
         $('cards').appendChild(card);
         cards.set(requestId, {
           el: card,
-          disable: () => buttons.forEach((b) => (b.disabled = true)),
+          disable: () =>
+            card
+              .querySelectorAll('button, input, textarea')
+              .forEach((el) => (el.disabled = true)),
           note: (m) => {
             note.textContent = m;
           },
         });
+      }
+      // Answerable body of an ask_user_question card: one section per
+      // question — option buttons (single-select is radio, multi-select
+      // toggles) plus an "Other…" free-text row. Submitting votes the
+      // allow_once option with answers keyed by question index, the keying
+      // the tool's parseAnswerQuestionIndex expects.
+      function renderQuestionBlock(questions, permOptions, submit, note) {
+        const wrap = document.createElement('div');
+        wrap.className = 'ask-questions';
+        const selected = {}; // qi -> label (single-select)
+        const multi = {}; // qi -> [labels] (multi-select)
+        const custom = {}; // qi -> free-text
+        const optBtns = {}; // qi -> [buttons]
+        const otherBtns = {}; // qi -> "Other…" button
+        const otherInputs = {}; // qi -> text input
+        questions.forEach((q, qi) => {
+          const isMulti = Boolean(q.multiSelect);
+          const sec = document.createElement('div');
+          sec.className = 'ask-q';
+          const head = document.createElement('div');
+          head.className = 'ask-q-head';
+          head.textContent =
+            (q.header || 'Question ' + (qi + 1)) +
+            (isMulti ? ' — select any' : '');
+          const text = document.createElement('div');
+          text.className = 'ask-q-text';
+          text.textContent = q.question;
+          const opts = document.createElement('div');
+          opts.className = 'ask-q-opts';
+          sec.appendChild(head);
+          sec.appendChild(text);
+          sec.appendChild(opts);
+          wrap.appendChild(sec);
+          const btns = [];
+          (q.options || []).forEach((opt) => {
+            const b = document.createElement('button');
+            b.className = 'ask-opt';
+            const lbl = document.createElement('span');
+            lbl.className = 'lbl';
+            lbl.textContent = opt.label;
+            b.appendChild(lbl);
+            if (opt.description) {
+              const d = document.createElement('span');
+              d.className = 'desc';
+              d.textContent = opt.description;
+              b.appendChild(d);
+            }
+            b.onclick = () => {
+              if (isMulti) {
+                const cur = multi[qi] || [];
+                const i = cur.indexOf(opt.label);
+                if (i >= 0) cur.splice(i, 1);
+                else cur.push(opt.label);
+                multi[qi] = cur;
+              } else {
+                selected[qi] = opt.label;
+                custom[qi] = '';
+                const inp = otherInputs[qi];
+                if (inp) inp.value = '';
+              }
+              syncSelection(qi);
+            };
+            opts.appendChild(b);
+            btns.push(b);
+          });
+          optBtns[qi] = btns;
+          const otherRow = document.createElement('div');
+          otherRow.className = 'ask-other-row';
+          const otherBtn = document.createElement('button');
+          otherBtn.textContent = 'Other…';
+          const inp = document.createElement('input');
+          inp.type = 'text';
+          inp.placeholder = 'type a custom answer';
+          inp.hidden = true;
+          otherBtn.onclick = () => {
+            inp.hidden = !inp.hidden;
+            if (!inp.hidden) inp.focus();
+            syncSelection(qi);
+          };
+          inp.oninput = () => {
+            custom[qi] = inp.value;
+            if (!isMulti && inp.value.trim()) selected[qi] = '';
+            syncSelection(qi);
+          };
+          otherBtns[qi] = otherBtn;
+          otherInputs[qi] = inp;
+          otherRow.appendChild(otherBtn);
+          otherRow.appendChild(inp);
+          opts.appendChild(otherRow);
+          // Default to the first option (the model marks its recommendation
+          // first), matching the TUI/web-shell behavior.
+          if (!isMulti && (q.options || []).length > 0) {
+            selected[qi] = q.options[0].label;
+          }
+        });
+        function syncSelection(qi) {
+          const q = questions[qi];
+          if (!q) return;
+          const isMulti = Boolean(q.multiSelect);
+          (optBtns[qi] || []).forEach((b, bi) => {
+            const label = (q.options || [])[bi] && (q.options || [])[bi].label;
+            const on = isMulti
+              ? (multi[qi] || []).includes(label)
+              : selected[qi] === label;
+            b.classList.toggle('sel', on);
+          });
+          otherBtns[qi] &&
+            otherBtns[qi].classList.toggle(
+              'sel',
+              Boolean((custom[qi] || '').trim()),
+            );
+        }
+        questions.forEach((q, qi) => syncSelection(qi));
+        const submitBtn = document.createElement('button');
+        submitBtn.textContent = 'Submit answers';
+        const allowOnce = (permOptions || []).find(
+          (o) => o.kind === 'allow_once',
+        );
+        if (!allowOnce) {
+          submitBtn.disabled = true;
+          note.textContent = 'no submit option in this request';
+        } else {
+          submitBtn.onclick = () => {
+            const out = {};
+            questions.forEach((qq, qi) => {
+              const c = (custom[qi] || '').trim();
+              if (qq.multiSelect) {
+                const parts = [...(multi[qi] || [])];
+                if (c) parts.push(c);
+                out[String(qi)] = parts.join(', ');
+              } else {
+                out[String(qi)] = selected[qi] || c;
+              }
+            });
+            submit(allowOnce.optionId, out);
+          };
+        }
+        wrap.appendChild(submitBtn);
+        return wrap;
       }
 
       function resolveCard(requestId) {
@@ -3649,6 +4195,7 @@
         $('send').disabled = true;
         setStatus('sending…');
         addUser(prompt); // echo locally; the daemon's user_message_chunk is ignored
+        showProcessing(); // visible feedback until the turn's first frame
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
@@ -3667,10 +4214,13 @@
             setStatus('sent: ' + (json.stopReason || 'ok'));
             clearCrashBanner(); // a prompt was accepted: the banner is stale
           } else if (res.status === 400) {
+            hideProcessing();
             setStatus('empty prompt');
           } else if (res.status === 401 || res.status === 403) {
+            hideProcessing();
             setStatus('not authorized');
           } else {
+            hideProcessing();
             setStatus('send failed (' + res.status + ')');
           }
         } catch (e) {
