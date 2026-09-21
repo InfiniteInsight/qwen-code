@@ -274,6 +274,13 @@
         <div>
           <button id="continue-last" disabled>Continue last</button>
         </div>
+        <!-- issue #44: client-side filter over the already-fetched set;
+             matching + pager rules live in renderPastConversations -->
+        <input
+          id="past-filter"
+          placeholder="filter by name"
+          style="margin-top: 0.4rem; width: 100%; box-sizing: border-box"
+        />
         <!-- issue #36: bounded — fixed-height scroll box; #past-pager holds
              the prev/next controls (JS-rendered, empty for a single page) -->
         <div
@@ -4483,11 +4490,16 @@
       // a background refresh never yanks the user back to page 1.
       const PAST_PAGE_SIZE = 25;
       let pastPage = 1; // 1-based
+      let pastFilter = ''; // issue #44: trimmed, lowercased filter text
       let pastTruncated = false;
 
       function renderPastConversations(sessions, cwd, truncated) {
         pastConvos = Array.isArray(sessions) ? sessions : [];
-        if (cwd !== pastConvosCwd) pastPage = 1; // workspace switch → page 1
+        if (cwd !== pastConvosCwd) {
+          pastPage = 1; // workspace switch → page 1
+          pastFilter = ''; // issue #44: filter is per-workspace view state
+          $('past-filter').value = '';
+        }
         pastConvosCwd = cwd;
         pastTruncated = Boolean(truncated);
         const box = $('past-list');
@@ -4502,11 +4514,30 @@
           return;
         }
         btn.disabled = false;
-        const pageCount = Math.ceil(pastConvos.length / PAST_PAGE_SIZE);
+        // issue #44: filter the already-fetched set client-side, matching
+        // the displayed title (title text, or the session-id fallback the
+        // rows show) case-insensitively. The truncated note below still
+        // describes the fetched set, which the filter does not change.
+        const shown = pastFilter
+          ? pastConvos.filter((s) =>
+              (
+                strOr(s.title, '') ||
+                'session ' + String(s.sessionId).slice(0, 8)
+              )
+                .toLowerCase()
+                .includes(pastFilter),
+            )
+          : pastConvos;
+        if (pastFilter && shown.length === 0) {
+          box.textContent =
+            '(no matches for "' + $('past-filter').value + '")';
+          return;
+        }
+        const pageCount = Math.ceil(shown.length / PAST_PAGE_SIZE);
         if (pastPage > pageCount) pastPage = pageCount; // list shrank
         if (pastPage < 1) pastPage = 1;
         const start = (pastPage - 1) * PAST_PAGE_SIZE;
-        for (const s of pastConvos.slice(start, start + PAST_PAGE_SIZE)) {
+        for (const s of shown.slice(start, start + PAST_PAGE_SIZE)) {
           const row = document.createElement('div');
           row.className = 'token-row';
           row.style.cursor = 'pointer';
@@ -4676,6 +4707,13 @@
         if (!pastConvos.length) return;
         const s = pastConvos[0];
         resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''));
+      };
+      // issue #44: filter on input; applying a filter resets the pager to
+      // page 1 (page size unchanged), clearing it restores the full list
+      $('past-filter').oninput = (e) => {
+        pastFilter = e.target.value.trim().toLowerCase();
+        pastPage = 1;
+        renderPastConversations(pastConvos, pastConvosCwd, pastTruncated);
       };
 
       // renderRecentWorkspaces() + browseTo() (open the browser at the server
