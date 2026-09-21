@@ -513,6 +513,12 @@ jobs:
     # poller (gh-runner-jit systemd timer) starts it when a Qwen Triage run
     # queues and stops it again after ~5 idle polls. Kill switch: set var
     # FORK_TRIAGE_RUNNER_DISABLED=true to fall back to ubuntu-latest.
+    #
+    # Live verification: only pull_request_target (opened /
+    # ready_for_review) events reach this arm — dispatch and comment
+    # reruns stay on hosted runners by design. PR #21 (which introduced
+    # the arm) therefore triaged on the pre-change main workflow, and
+    # PR #22 is the first run expected to land on lovelace-triage.
     runs-on: '${{ (github.repository == ''InfiniteInsight/qwen-code'' && vars.FORK_TRIAGE_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "qwen-fork-triage"]'') || (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
