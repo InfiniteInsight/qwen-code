@@ -502,7 +502,18 @@ jobs:
     # comment/dispatch-triggered reruns (which may target fork PRs), go to
     # ephemeral hosted runners so a steered agent cannot persist anything
     # across runs. Forks of this repo fall back to ubuntu-latest as before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    #
+    # Fork arm (InfiniteInsight/qwen-code): triage routes to the JIT
+    # self-hosted runner `lovelace-triage` (label qwen-fork-triage) under the
+    # same trust bar as the ECS arm — issue/dispatch events and same-repo PR
+    # events, plus fork PRs whose author has write access. That box also
+    # hosts the model server (OPENAI_BASE_URL points at 127.0.0.1:9090,
+    # reachable only from it), so it is the only runner where the fork's
+    # triage can reach a model at all. The runner is stopped when idle; a
+    # poller (gh-runner-jit systemd timer) starts it when a Qwen Triage run
+    # queues and stops it again after ~5 idle polls. Kill switch: set var
+    # FORK_TRIAGE_RUNNER_DISABLED=true to fall back to ubuntu-latest.
+    runs-on: '${{ (github.repository == ''InfiniteInsight/qwen-code'' && vars.FORK_TRIAGE_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "qwen-fork-triage"]'') || (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
