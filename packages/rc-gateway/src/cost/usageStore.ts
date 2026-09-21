@@ -77,6 +77,38 @@ const GROUP_COLUMN: Record<GroupBy, string> = {
   model: "model_service_id || '/' || model_id",
 };
 
+/**
+ * Bring a pre-existing `usage_events` table up to the current cost column.
+ *
+ * Costs were once stored as `cost_cents REAL` and are now
+ * `cost_microcents INTEGER` (see the header note: integers avoid float drift
+ * when summing millions of rows). `CREATE TABLE IF NOT EXISTS` does nothing to
+ * a table that already exists, so every gateway whose DB predates the rename
+ * kept the old column — and every `/rc/usage` request failed outright with
+ * `SqliteError: no such column: cost_microcents`. The cost surface was dead on
+ * exactly the long-lived installs that had usage worth reading.
+ *
+ * Idempotent: a fresh DB already has the new column and is left alone, and a
+ * DB with neither column (not ours) is not touched either.
+ */
+export function migrateCostColumn(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{
+    name: string;
+  }>;
+  const names = new Set(cols.map((c) => c.name));
+  if (names.has('cost_microcents') || !names.has('cost_cents')) return;
+
+  // ALTER ADD + UPDATE rather than a table rebuild: it is a single pass, it
+  // keeps the row ids stable, and the old column is left in place so a
+  // rollback to an older gateway still reads its own data.
+  db.exec(`ALTER TABLE usage_events ADD COLUMN cost_microcents INTEGER`);
+  db.exec(
+    `UPDATE usage_events
+        SET cost_microcents = CAST(ROUND(cost_cents * 1000000) AS INTEGER)
+      WHERE cost_cents IS NOT NULL`,
+  );
+}
+
 export class UsageStore {
   private constructor(private readonly db: Database.Database) {}
 
@@ -111,6 +143,7 @@ export class UsageStore {
          stage TEXT
        )`,
     );
+    migrateCostColumn(db);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events (ts)`);
     db.exec(
       `CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events (session_id, ts)`,
