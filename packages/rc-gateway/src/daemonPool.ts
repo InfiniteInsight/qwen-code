@@ -64,13 +64,13 @@ export interface DaemonExitInfo {
 
 /**
  * The session-routing surface of `DaemonClient` that the gateway's routes
- * actually call through `deps.daemon` — exactly the 24 methods, signatures
- * copied verbatim from `DaemonClient` (packages/sdk-typescript/src/daemon/
- * DaemonClient.ts) so a real `DaemonClient` structurally satisfies this
- * interface with zero changes. `DaemonPool` is the other implementation: a
- * drop-in that routes each call to the pooled daemon owning the session (or
- * workspace) instead of a single daemon connection. Both are accepted
- * wherever the gateway holds `GatewayDeps.daemon`.
+ * actually call through `deps.daemon` — signatures copied verbatim from
+ * `DaemonClient` (packages/sdk-typescript/src/daemon/DaemonClient.ts) so a
+ * real `DaemonClient` structurally satisfies this interface with zero
+ * changes. `DaemonPool` is the other implementation: a drop-in that routes
+ * each call to the pooled daemon owning the session (or workspace) instead
+ * of a single daemon connection. Both are accepted wherever the gateway
+ * holds `GatewayDeps.daemon`.
  */
 export interface SessionDaemon {
   prompt(
@@ -119,6 +119,10 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionContextStatus>;
+  sessionStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSummary>;
   loadSession(
     sessionId: string,
     req?: RestoreSessionRequest,
@@ -852,6 +856,15 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionContextStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionContext(sessionId, clientId),
+    );
+  }
+
+  async sessionStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSummary> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionStatus(sessionId, clientId),
     );
   }
 

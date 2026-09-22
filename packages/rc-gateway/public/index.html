@@ -3662,6 +3662,7 @@
             showApp();
             startHealthPoll();
             startPastConvosPoll(); // issue #35: keep the past-conversations list fresh
+            startPendingCardsPoll(); // issue #46: recover lost question cards while watching
             applyWorkspaceControlGating();
             renderRecentWorkspaces();
             void browseTo();
@@ -3768,6 +3769,7 @@
           showApp();
           startHealthPoll();
           startPastConvosPoll(); // issue #35: same as the auth-gate path
+          startPendingCardsPoll(); // issue #46: same as the auth-gate path
           // authGate() (above) only populates the directory picker for a
           // token that ALREADY existed at script load — a fresh pair (QR or
           // manual code) has no such run, so #dir-list would otherwise show
@@ -3900,6 +3902,9 @@
         $('cards').appendChild(card);
         cards.set(requestId, {
           el: card,
+          // issue #46: which session this card belongs to — the pending
+          // poll auto-resolves only cards of the session it polled.
+          sessionId,
           disable: () =>
             card
               .querySelectorAll('button, input, textarea')
@@ -4052,6 +4057,81 @@
       function resolveCard(requestId) {
         const entry = cards.get(requestId);
         if (entry) {
+          entry.disable();
+          entry.note('resolved');
+        }
+      }
+
+      // issue #46: recovery for question/permission cards the event
+      // stream lost (ring overflow, daemon restart, page reload mid-
+      // question). The daemon's GET /session/:id/status reports the
+      // pendingInteractions still awaiting an answer; the gateway relays
+      // it. Redraw anything still pending, then mark resolved any card
+      // we hold for this session that the daemon no longer reports
+      // (answered elsewhere or expired). renderPermissionCard's
+      // cards.has(requestId) dedupe makes overlap with live frames
+      // harmless.
+      async function refreshPendingCards(sessionId) {
+        if (!token()) return;
+        let res;
+        try {
+          res = await fetch(
+            '/session/' + encodeURIComponent(sessionId) + '/status',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+        } catch {
+          return; // transport blip — the stream's own reconnect handles it
+        }
+        if (res.status !== 200) return; // 404/502 — nothing to draw
+        const body = await res.json().catch(() => null);
+        if (!body || !Array.isArray(body.pendingInteractions)) return;
+        // Older daemons omit pendingInteractions entirely — the absence
+        // also skips the auto-resolve below (can't distinguish "none
+        // pending" from "unknown").
+        const pending = new Set();
+        for (const p of body.pendingInteractions) {
+          if (!p || !p.requestId) continue;
+          pending.add(p.requestId);
+          // Bridge options carry label; the card buttons read name.
+          const options = (p.options || []).map((o) => ({
+            optionId: o.optionId,
+            name: o.label,
+            kind: o.kind,
+          }));
+          if (p.kind === 'user_question') {
+            renderPermissionCard(
+              {
+                requestId: p.requestId,
+                toolCall: { rawInput: { questions: p.questions || [] } },
+                options,
+              },
+              sessionId,
+            );
+          } else if (p.kind === 'permission') {
+            const a = p.action || {};
+            renderPermissionCard(
+              {
+                requestId: p.requestId,
+                toolCall: {
+                  kind: a.type,
+                  title: a.title,
+                  content: a.content,
+                  locations: a.locations,
+                  rawInput: a.input,
+                },
+                options,
+              },
+              sessionId,
+            );
+          }
+        }
+        for (const [requestId, entry] of cards) {
+          if (entry.sessionId !== sessionId) continue;
+          if (pending.has(requestId)) continue;
+          // Already handled locally (voted or resolved): disable() has
+          // left every button disabled.
+          const firstBtn = entry.el.querySelector('button');
+          if (firstBtn && firstBtn.disabled) continue;
           entry.disable();
           entry.note('resolved');
         }
@@ -4638,6 +4718,24 @@
         }, 30000);
       }
 
+      // issue #46: while a session is watched, the event stream is the
+      // only card source — if a permission_request frame was lost (ring
+      // overflow, daemon restart, reload mid-question) the card never
+      // arrives. A light status poll covers the gap: it redraws still-
+      // pending interactions and marks locally stale cards resolved.
+      // 5 s keeps a stuck question recoverable without hammering the
+      // daemon; the fetch is one small JSON summary. Pauses while the tab
+      // is backgrounded or no watch is alive, like startHealthPoll.
+      let pendingCardsPollId = null;
+      function startPendingCardsPoll() {
+        if (pendingCardsPollId) return;
+        pendingCardsPollId = setInterval(() => {
+          if (document.hidden || !watchStreamAlive || !watchedSessionId)
+            return;
+          void refreshPendingCards(watchedSessionId);
+        }, 5000);
+      }
+
       // POST /session/<id>/resume { cwd } (Bearer). On 200, hand off to the
       // SAME watch flow the New-conversation button uses.
       async function resumeConversation(sessionId, cwd, title) {
@@ -4827,6 +4925,10 @@
           // the startPastConvosPoll interval picks it up once the first
           // record lands.
           void refreshPastConversations(curDirPath);
+          // issue #46: every watch open (fresh tap, deep link, resume,
+          // resync self-heal, reload restore) funnels through here — redraw
+          // any question/permission cards the stream has not (yet) replayed.
+          void refreshPendingCards(id);
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
@@ -5489,6 +5591,10 @@
         if (watchedSessionId && !watchStreamAlive && token()) {
           startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }
+        // issue #46: the 5 s tick is paused while hidden — catch up now.
+        // (Duplicates startWatch's own refresh when the stream just
+        // reconnected; the card dedupe makes that harmless.)
+        if (watchedSessionId) void refreshPendingCards(watchedSessionId);
         void refreshWorkspaceSections();
       });
 
