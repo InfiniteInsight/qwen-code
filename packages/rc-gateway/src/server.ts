@@ -129,6 +129,7 @@ import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
+import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
@@ -677,6 +678,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionContextRoute(deps.daemon),
+  );
+  // GET /session/:id/status — read-scope; relays the daemon's per-session
+  // status summary (including pendingInteractions) so the web UI can
+  // reconstruct question/permission cards a dropped event stream lost.
+  // Bare namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/status',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionStatusRoute(deps.daemon),
   );
   // POST /session/:id/end — write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.

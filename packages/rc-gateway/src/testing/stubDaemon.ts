@@ -194,6 +194,14 @@ export interface StubDaemonOptions {
   contextStatusCode?: number;
   /** Full body to return from GET /session/:id/context (overrides the default). */
   contextStatus?: unknown;
+  /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
+  sessionStatusCode?: number;
+  /**
+   * Full body to return from GET /session/:id/status (overrides the default
+   * minimal summary). Read live per request, so a test can mutate
+   * `pendingInteractions` and have the next poll observe the change.
+   */
+  sessionStatus?: unknown;
   /**
    * Status for GET /workspace/permissions (default 200). Non-200 →
    * `workspacePermissionsErrorBody ?? { error, code }`.
@@ -653,6 +661,24 @@ export async function startStubDaemon(
           },
           configOptions: [],
         },
+      },
+    );
+  });
+
+  app.get('/session/:id/status', (req, res) => {
+    const status = opts.sessionStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    res.status(200).json(
+      opts.sessionStatus ?? {
+        sessionId: req.params.id,
+        workspaceCwd: cwd,
+        clientCount: 0,
+        hasActivePrompt: false,
+        pendingInteractions: [],
       },
     );
   });
