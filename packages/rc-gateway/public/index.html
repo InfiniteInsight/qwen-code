@@ -3471,17 +3471,23 @@
             if (asstThisTurn && curAsst) placeForkButton();
             return;
           case 'session_rewound': {
-            // The rewind saga truncates the daemon's history and appends
-            // this marker to the session WAL, but the WAL itself is never
-            // truncated. A from-0 replay (the re-sync after a rewind, or
-            // any later re-watch) re-renders every discarded turn before
-            // it reaches this marker — which is always the LAST event of
-            // the replay — so cut the rendered transcript here at the
-            // user-turn count the rewind kept. Idempotent: re-watching
-            // replays the marker and re-cuts, so the view stays correct.
+            // The rewind truncates the daemon's history. Two producers
+            // carry this frame: the daemon's own event (data.targetTurnIndex)
+            // arrives live through the relay, and the gateway's WAL marker
+            // (data.toTurn) would arrive on a from-0 replay when a WAL is
+            // wired. A from-0 replay (the re-sync after a rewind, or any
+            // later re-watch) re-renders every discarded turn before it
+            // reaches the marker — which is always the LAST event of the
+            // replay — so cut the rendered transcript here at the user-turn
+            // count the rewind kept. Idempotent: re-watching replays the
+            // marker and re-cuts, so the view stays correct.
             const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
-            const keep =
-              Number.isInteger(d.toTurn) && d.toTurn >= 0 ? d.toTurn : -1;
+            const turn = Number.isInteger(d.toTurn)
+              ? d.toTurn
+              : Number.isInteger(d.targetTurnIndex)
+                ? d.targetTurnIndex
+                : -1;
+            const keep = turn >= 0 ? turn : -1;
             if (keep >= 0) {
               // The keep-th user bubble (0-based) is the first one to
               // drop, along with everything rendered after it. Fewer
