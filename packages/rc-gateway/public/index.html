@@ -226,12 +226,21 @@
       </div>
       <div class="tab-pane active" id="pane-chat">
       <section>
-      <label>Session id <input id="session" placeholder="session id" /></label>
-      <button id="watch">Watch</button>
-      <button id="stop" disabled title="Stop following this session's event stream. The turn keeps running on the host.">Unwatch</button>
       <button id="cancel-turn" title="Abort the turn running on the host (POST /session/:id/cancel)">Cancel turn</button>
       <button id="end-session" title="Terminate the session on the host (POST /session/:id/end)">End session</button>
+      <button id="rewind-chat" title="Roll this session back to an earlier turn (POST /session/:id/rewind)">Rewind</button>
+      <!-- issue #48: hidden by default; self-heal shows it when the retry
+           budget is exhausted, and any fresh watch / Unwatch hides it -->
+      <button id="reconnect" style="display: none" title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now.">Reconnect</button>
       <span id="session-verb-result" style="color: #888; font-size: 0.85rem"></span>
+      <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
+        <label>Rewind to
+          <select id="rewind-turn-pick" style="max-width: 28rem"></select>
+        </label>
+        <button id="rewind-pick-btn">Rewind</button>
+        <button id="rewind-pick-close" type="button">Cancel</button>
+        <span id="rewind-pick-result" style="color: #888; font-size: 0.85rem"></span>
+      </div>
     </section>
     <section id="dir-picker">
       <strong>New conversation</strong> — pick a directory
@@ -291,9 +300,6 @@
         </div>
         <div id="past-pager" style="margin-top: 0.3rem; font-size: 0.8rem"></div>
       </div>
-    </section>
-    <section>
-      <button id="enable">Enable notifications</button>
     </section>
       <div class="pin-area" id="pin-area"></div>
     <div id="status"></div>
@@ -759,6 +765,15 @@
     </section>
       </div>
       <div class="tab-pane" id="pane-settings">
+    <section id="notif-toggle">
+      <strong>Notifications</strong> (push alerts for permission prompts and
+      task completion; on by default — the toggle reflects this device's
+      subscription)
+      <div>
+        <button id="enable">Enable notifications</button>
+      </div>
+      <div id="notif-state" style="font-size: 0.85rem; color: #888"></div>
+    </section>
     <section id="push-prefs">
       <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
       scope)
@@ -917,6 +932,14 @@
       </section>
       </div>
       <div class="tab-pane" id="pane-diag">
+    <section id="watch-stream">
+      <strong>Stream</strong> (the watched session's event feed; the status
+      bar above shows its live state)
+      <div>
+        <button id="watch" title="Re-attach to the session on screen (full replay). Self-heal does this automatically with backoff when the stream dies.">Watch</button>
+        <button id="stop" disabled title="Stop following this session's event stream and cancel the self-heal retries. The turn keeps running on the host.">Unwatch</button>
+      </div>
+    </section>
     <section id="owner-events">
       <strong>Owner event stream</strong> (live audit feed; requires owner
       scope)
@@ -3447,6 +3470,65 @@
             for (const [pid] of subagents) finishSubagent(pid, 'completed');
             if (asstThisTurn && curAsst) placeForkButton();
             return;
+          case 'session_rewound': {
+            // The rewind truncates the daemon's history. Two producers
+            // carry this frame: the daemon's own event (data.targetTurnIndex)
+            // arrives live through the relay, and the gateway's WAL marker
+            // (data.toTurn) would arrive on a from-0 replay when a WAL is
+            // wired. A from-0 replay (the re-sync after a rewind, or any
+            // later re-watch) re-renders every discarded turn before it
+            // reaches the marker — which is always the LAST event of the
+            // replay — so cut the rendered transcript here at the user-turn
+            // count the rewind kept. Idempotent: re-watching replays the
+            // marker and re-cuts, so the view stays correct.
+            const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            const turn = Number.isInteger(d.toTurn)
+              ? d.toTurn
+              : Number.isInteger(d.targetTurnIndex)
+                ? d.targetTurnIndex
+                : -1;
+            const keep = turn >= 0 ? turn : -1;
+            if (keep >= 0) {
+              // The keep-th user bubble (0-based) is the first one to
+              // drop, along with everything rendered after it. Fewer
+              // rendered user bubbles means the replay already started
+              // past the rewind (412 resume) — nothing to cut.
+              const users = Array.from(
+                document.querySelectorAll('#transcript .bubble.user'),
+              );
+              if (users.length > keep) {
+                let el = users[keep];
+                while (el) {
+                  const next = el.nextElementSibling;
+                  el.remove();
+                  el = next;
+                }
+              }
+              // The discarded turns' tool rows and subagent hosts are
+              // gone from the DOM now; drop their bookkeeping too (kept
+              // turns are complete, so no frames will reference those
+              // ids again).
+              toolEls.clear();
+              for (const s of subagents.values())
+                if (s.timer) clearInterval(s.timer);
+              subagents.clear();
+              subagentTypes.clear();
+              // The in-memory turn state must reflect the kept view, or
+              // the next "Fork from here" posts a fromTurn past the tip.
+              userTurnsSeen = keep;
+              forkTurnCount = keep;
+              asstThisTurn = false;
+              forkBtnEl = null;
+              forkBtnTurn = -1;
+              resetTurn();
+              stickToBottom = true;
+              scrollTranscript(true);
+            }
+            return addSystem(
+              'rewound to turn ' + (keep >= 0 ? keep : '?'),
+              false,
+            );
+          }
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // usage_tick, permission_* (rendered as cards)
           default:
@@ -3460,8 +3542,8 @@
       // where fromTurn = the number of user turns answered so far (the
       // daemon's turnResolver reads it as "keep the first N user turns").
       // On success the viewer switches to the fork via the SAME hand-off
-      // resumeConversation uses (set #session, re-fire the Watch handler —
-      // which clears the transcript, resetting the turn counters).
+      // resumeConversation uses (a direct startWatch call, which clears the
+      // transcript, resetting the turn counters).
       function buildForkButton(turn) {
         const row = document.createElement('div');
         row.className = 'bubble-fork';
@@ -3510,6 +3592,11 @@
         note.textContent = 'forking…';
         const payload = { fromTurn: turn, transcript: mode };
         if (name.trim()) payload.name = name.trim();
+        // Only the watched session's workspace is known; pass it so the
+        // gateway finds the parent transcript without scanning.
+        if (sessionId === watchedSessionId && watchedSessionCwd) {
+          payload.cwd = watchedSessionCwd;
+        }
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(sessionId) + '/fork',
@@ -3539,12 +3626,12 @@
           }
           const data = await res.json();
           setStatus('forked → ' + String(data.sessionId).slice(0, 8) + '…');
-          // Switch the viewer to the fork: abort any live stream (the
-          // onclick() call bypasses #watch's disabled guard), then run the
-          // standard watch hand-off.
+          // Switch the viewer to the fork: abort any live stream first,
+          // then run the standard watch hand-off (no freeform id field
+          // anymore, so the hand-off is a direct startWatch call).
           if ($('watch').disabled) $('stop').onclick();
-          $('session').value = data.sessionId;
-          $('watch').onclick();
+          lastSeenEventId = null;
+          startWatch(data.sessionId);
         } catch (e) {
           btn.disabled = false;
           note.textContent = 'fork error: ' + e;
@@ -3672,6 +3759,9 @@
             // param was present (and scrubbed), so a plain reload still
             // restores the previously watched session as before.
             if (!handleSessionDeepLink()) restoreWatchedSession();
+            // issue #48: notifications are on by default — silently
+            // (re)enable unless the user opted out in Settings.
+            void autoEnableNotifications();
           } else {
             setStatusDot(false);
             showAuthGate();
@@ -4144,12 +4234,79 @@
       // the only cwd the resume route will accept for a state_resync_required
       // self-heal re-resume. null → the user must re-tap the conversation.
       let watchedSessionCwd = null;
+      // issue #46: sessions whose from-0 resume replay was met with
+      // state_resync_required. A second from-0 attempt for them would loop
+      // (resume → from-0 → resync → resume …), so they re-resume at the
+      // watermark instead — the status poll still recovers the card.
+      const noReplayResynced = new Set();
+      // Set by resumeConversation when it demotes a resume watch to a from-0
+      // replay; consumed by the resync branch to attribute the eviction to
+      // the fallback rather than to live ring overflow.
+      let noReplayFallbackSessionId = null;
       // Set when a state_resync_required frame arrives; consumed by the
       // startWatch teardown (after the loop has fully exited, so the new
       // watch's state is not clobbered by this one's finally).
       let pendingResyncCwd = null;
       let lastSeenEventId = null;
       let watchStreamAlive = false;
+      // issue #48 (self-heal): the session stream can die while the tab is
+      // foreground-visible (daemon restart, gateway blip). The
+      // visibilitychange reconnect only covers the backgrounded case, so
+      // startWatch's teardown schedules a bounded backoff retry from the
+      // last seen event (the transcript stays intact). Unwatch and any
+      // fresh startWatch cancel a pending retry; a healthy connect resets
+      // the attempt counter.
+      let watchRetryTimer = null;
+      let watchRetryAttempt = 0;
+      const watchRetryDelays = [1000, 2000, 4000, 8000, 15000, 30000];
+      const watchRetryMax = 10;
+
+      function clearWatchRetry() {
+        if (watchRetryTimer) {
+          clearTimeout(watchRetryTimer);
+          watchRetryTimer = null;
+        }
+      }
+
+      // 401/403 (re-pair) and 404 (session gone) are terminal: retrying
+      // cannot help. Everything else (502 daemon blip, 412 truncated
+      // replay, network error, clean end) retries up to watchRetryMax
+      // times, then hands back to the user with an enabled Watch button
+      // in Diagnostics.
+      function scheduleWatchRetry(status) {
+        clearWatchRetry();
+        if (!watchedSessionId || !token()) return;
+        if (status === 401 || status === 403 || status === 404) return;
+        if (watchRetryAttempt >= watchRetryMax) {
+          // Budget exhausted: hand back to the user via the Chat-tab
+          // Reconnect button (a fresh watch or Unwatch hides it).
+          $('reconnect').style.display = '';
+          setStatus(
+            'reconnect failed after ' + watchRetryMax +
+              ' tries — tap Reconnect in the toolbar',
+          );
+          return;
+        }
+        const delay =
+          watchRetryDelays[
+            Math.min(watchRetryAttempt, watchRetryDelays.length - 1)
+          ];
+        watchRetryAttempt += 1;
+        setStatus(
+          'reconnecting (attempt ' + watchRetryAttempt + '/' + watchRetryMax +
+            ', in ' + delay / 1000 + 's)…',
+        );
+        watchRetryTimer = setTimeout(() => {
+          watchRetryTimer = null;
+          // Guards: the user may have unwatched or switched sessions, a
+          // fresh watch may already be running, or the tab may be hidden
+          // (the visibilitychange handler reconnects on return instead).
+          if (document.hidden) return;
+          if (!watchedSessionId || !token() || watchStreamAlive) return;
+          if (!$('watch').disabled) return; // a watch is already in flight
+          startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
+        }, delay);
+      }
 
       function showSessionTitle(title) {
         const el = $('session-title');
@@ -4168,6 +4325,10 @@
             sessionId: watchedSessionId,
             lastEventId: lastSeenEventId,
             title: watchedSessionTitle,
+            // issue #46: the resync self-heal (re-resume after a bus-epoch
+            // change) needs the workspace cwd, which a fresh page load
+            // otherwise has no source for — persist it with the watch.
+            cwd: watchedSessionCwd,
           }));
         }
       }
@@ -4175,13 +4336,28 @@
       function clearPersistedWatch() {
         localStorage.removeItem(WATCHED_KEY);
         lastSeenEventId = null;
+        watchedSessionCwd = null;
       }
 
       $('stop').onclick = () => {
+        // Unwatch is a deliberate stop: cancel any pending self-heal
+        // retry, so the watch is not resurrected after the user left it.
+        clearWatchRetry();
+        watchRetryAttempt = 0;
+        $('reconnect').style.display = 'none';
         clearPersistedWatch();
         showSessionTitle(null);
         watchedSessionTitle = null;
         if (controller) controller.abort();
+      };
+
+      // The give-up button: mirrors the self-heal timer's retry, from the
+      // last seen event (the transcript stays intact). A 412 falls back to
+      // a from-0 full replay via the connect-failure path.
+      $('reconnect').onclick = () => {
+        if (!watchedSessionId || !token()) return;
+        watchRetryAttempt = 0;
+        startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
       };
 
       // Idle suggestions (add-idle-suggestions): render an idle_suggestions owner
@@ -4536,9 +4712,9 @@
       // return) plus a 30 s poll so live sessions appear. "Continue last"
       // resumes sessions[0]; a row tap resumes that row. Both funnel into
       // resumeConversation, which mirrors the New-conversation flow's watch
-      // hand-off ($('new-session').onclick, below) — drop the id into
-      // #session, fire #watch's click handler — so a resumed session replays
-      // history and opens the composer exactly the same way a fresh one does.
+      // hand-off ($('new-session').onclick, below) — a direct startWatch
+      // call — so a resumed session replays history and opens the composer
+      // exactly the same way a fresh one does.
       let pastConvos = []; // sessions[] from the last successful /rc/sessions fetch
       let pastConvosCwd = null; // the cwd that list was fetched FOR (closed over per row)
 
@@ -4725,13 +4901,15 @@
       // pending interactions and marks locally stale cards resolved.
       // 5 s keeps a stuck question recoverable without hammering the
       // daemon; the fetch is one small JSON summary. Pauses while the tab
-      // is backgrounded or no watch is alive, like startHealthPoll.
+      // is backgrounded or nothing is watched, like startHealthPoll.
+      // issue #46: NOT gated on watchStreamAlive — a dead stream (minimize
+      // killed the SSE, a failed connect, a pending resync) is exactly when
+      // this safety net has to keep redrawing the pending card.
       let pendingCardsPollId = null;
       function startPendingCardsPoll() {
         if (pendingCardsPollId) return;
         pendingCardsPollId = setInterval(() => {
-          if (document.hidden || !watchStreamAlive || !watchedSessionId)
-            return;
+          if (document.hidden || !watchedSessionId) return;
           void refreshPendingCards(watchedSessionId);
         }, 5000);
       }
@@ -4781,6 +4959,22 @@
             } else {
               for (const f of replay)
                 if (f && Number.isFinite(f.id) && f.id > from) from = f.id;
+            }
+            // issue #46: daemons that predate the in-band resume transcript
+            // (e.g. published 0.24.x) return no replay frames, and their
+            // lastEventId watermark sits AFTER a pending question's
+            // permission_request frame — a watermark watch replays nothing,
+            // so the question is invisible and the session looks stuck.
+            // With no in-band frames, replay from 0 instead: the daemon's
+            // journal still holds the history, the transcript rebuilds, and
+            // the question frame re-renders. If that replay is met with a
+            // resync (cursor fell out of the ring), the self-heal re-runs
+            // this resume and noReplayResynced stops a second from-0
+            // attempt (a loop) — the watermark watch plus the status poll
+            // still recover the card.
+            if (replay.length === 0 && !noReplayResynced.has(j.sessionId)) {
+              from = 0;
+              noReplayFallbackSessionId = j.sessionId;
             }
             lastSeenEventId = from || null;
             watchedSessionCwd = cwd || null;
@@ -4845,7 +5039,6 @@
           });
           if (res.status === 200) {
             const j = await res.json();
-            $('session').value = j.sessionId;
             // Record the RESOLVED workspace (not the raw typed/blank input) so
             // "daemon default" runs still land a real absolute path in Recent.
             if (j.workspaceCwd) pushRecentWorkspace(j.workspaceCwd);
@@ -4867,7 +5060,9 @@
             // issue #39: remember the resolved workspace for the
             // state_resync_required self-heal (re-resume needs the cwd).
             watchedSessionCwd = j.workspaceCwd || null;
-            $('watch').onclick(); // connect the stream + open the composer
+            // No freeform id field anymore: hand straight to the watch.
+            lastSeenEventId = null;
+            startWatch(j.sessionId); // connect the stream + open the composer
           } else if (res.status === 401 || res.status === 403) {
             setStatus('not authorized — needs a write/owner token');
           } else if (res.status === 502) {
@@ -4883,12 +5078,25 @@
       };
 
       async function startWatch(id, fromEventId, title) {
+        // A fresh watch makes any pending self-heal retry stale.
+        clearWatchRetry();
+        // Any fresh watch (manual, deep-link, resume, or the user tapping
+        // Reconnect) dismisses the give-up button; self-heal re-shows it
+        // only if the budget exhausts again.
+        $('reconnect').style.display = 'none';
         if (id !== watchedSessionId) clearIdleChips();
         watchedSessionId = id;
         watchedSessionTitle = title || null;
-        $('session').value = id;
         showSessionTitle(watchedSessionTitle);
-        controller = new AbortController();
+        // issue #46: a re-tap / deep link / resume replaces the previous
+        // watch — abort it, so two streams cannot keep appending frames at
+        // once. The aborted predecessor's teardown ignores the shared state
+        // unless it is still current (the controller-identity checks below),
+        // so it cannot clobber the new watch.
+        const prevController = controller;
+        const myController = (controller = new AbortController());
+        if (prevController && prevController !== myController)
+          prevController.abort();
         $('watch').disabled = true;
         $('stop').disabled = false;
         watchStreamAlive = false;
@@ -4901,19 +5109,37 @@
           }
           const res = await fetch(
             '/session/' + encodeURIComponent(id) + '/events',
-            { headers, signal: controller.signal },
+            { headers, signal: myController.signal },
           );
           if (!res.ok) {
+            const terminal =
+              res.status === 401 || res.status === 403 || res.status === 404;
             if (res.status === 401 || res.status === 403) {
               setStatus('not authorized (' + res.status + ') — re-pair');
+            } else if (res.status === 404) {
+              setStatus('session gone (404) — pick another conversation');
+            } else {
+              setStatus('connect failed (' + res.status + ')');
+            }
+            if (terminal) {
+              // Re-pair / gone session: nothing to re-attach to.
+              $('reconnect').style.display = 'none';
               clearPersistedWatch();
             } else {
-              setStatus('connect failed (' + res.status + ') — will retry on next visibility change');
+              // 412: our resume point fell out of the WAL — the retry
+              // re-subscribes from the beginning (full replay).
+              if (res.status === 412) lastSeenEventId = null;
+              scheduleWatchRetry(res.status);
             }
+            // issue #46: a failed stream connect must not strand a pending
+            // question — the status fetch still redraws the card the
+            // stream will not deliver.
+            if (watchedSessionId === id) void refreshPendingCards(id);
             return;
           }
           setStatus('streaming');
           watchStreamAlive = true;
+          watchRetryAttempt = 0; // healthy connect: reset the self-heal backoff
           $('composer').style.display = '';
           if (fromEventId == null) clearTranscript();
           void fetchContext(id);
@@ -4965,9 +5191,16 @@
                 // re-runs the resume flow (in-band reload + fresh watermark)
                 // once teardown has completed. Unknown workspace → the
                 // finally surfaces a re-tap prompt instead.
-                if (watchedSessionId === id) {
+                if (controller === myController && watchedSessionId === id) {
+                  // issue #46: attribute a resync on the from-0 fallback
+                  // replay, so the self-heal re-resume demotes to the
+                  // watermark instead of looping on from-0.
+                  if (noReplayFallbackSessionId === id) {
+                    noReplayResynced.add(id);
+                    noReplayFallbackSessionId = null;
+                  }
                   pendingResyncCwd = watchedSessionCwd;
-                  controller.abort();
+                  myController.abort();
                 }
                 continue;
               } else if (ev && ev.type === 'permission_request' && ev.data) {
@@ -4989,11 +5222,25 @@
           // the list with its final mtime/title instead of waiting for the
           // next interval tick.
           void refreshPastConversations(curDirPath);
+          // Self-heal: a clean end while the tab is on the session is
+          // usually a dropped subscription (daemon/gateway blip), not a
+          // finished session — retry from where we last saw. A truly gone
+          // session just keeps failing until the attempts run out.
+          scheduleWatchRetry(0);
         } catch (e) {
-          setStatus(
-            controller.signal.aborted ? 'stopped' : 'stream error: ' + e,
-          );
+          // issue #46: a superseded watch must not overwrite the new
+          // watch's status with its own 'stopped'/'stream error'.
+          if (controller !== myController) return;
+          const aborted = myController.signal.aborted;
+          setStatus(aborted ? 'stopped' : 'stream error: ' + e);
+          // Self-heal: a network-level death (not an Unwatch abort)
+          // retries from where we last saw.
+          if (!aborted) scheduleWatchRetry(0);
         } finally {
+          // issue #46: a newer startWatch already replaced this one (its
+          // abort fired) — that watch's teardown owns the shared state now,
+          // so do not clobber it.
+          if (controller !== myController) return;
           watchStreamAlive = false;
           $('watch').disabled = false;
           $('stop').disabled = true;
@@ -5006,7 +5253,9 @@
             if (cwd) {
               void resumeConversation(id, cwd, title);
             } else {
-              setStatus('history resync needed — tap the conversation again');
+              // No cwd for the re-resume: re-watch directly. A stale
+              // cursor 412s into a from-0 full replay (self-heal).
+              void startWatch(id, lastSeenEventId, title);
             }
           }
         }
@@ -5014,60 +5263,215 @@
 
       $('watch').onclick = () => {
         if (!token()) return setStatus('pair first');
-        const id = $('session').value.trim();
-        if (!id) return setStatus('enter a session id');
+        // No freeform id field: Watch re-attaches to the session on screen.
+        // A new watch starts from the past-conversations list (or the
+        // New-conversation button), which runs its own watch hand-off.
+        if (!watchedSessionId)
+          return setStatus('pick a conversation from the list in the Chat tab');
         lastSeenEventId = null;
-        startWatch(id);
+        startWatch(watchedSessionId);
       };
 
+      // issue #48: notifications are on by default. The Settings toggle
+      // reflects this device's subscription (via the service worker's
+      // pushManager); boot auto-enables unless the user opted out
+      // (localStorage flag, set when the toggle is switched off).
+      let notifSwReg = null;
+
+      const pushSupported = () =>
+        'serviceWorker' in navigator &&
+        'PushManager' in window &&
+        'Notification' in window;
+
+      async function getNotifSubscription() {
+        if (!pushSupported()) return null;
+        try {
+          if (!notifSwReg) {
+            notifSwReg =
+              (await navigator.serviceWorker.getRegistration(
+                '/ui/sw.js',
+              )) || null;
+          }
+          if (!notifSwReg) return null;
+          return (await notifSwReg.pushManager.getSubscription()) || null;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      async function refreshNotifToggle() {
+        const btn = $('enable');
+        const state = $('notif-state');
+        if (!pushSupported()) {
+          btn.textContent = 'Enable notifications';
+          btn.disabled = true;
+          state.textContent = 'push unsupported in this browser';
+          return;
+        }
+        const sub = await getNotifSubscription();
+        if (sub) {
+          btn.textContent = 'Disable notifications';
+          state.textContent = 'enabled';
+          return;
+        }
+        btn.textContent = 'Enable notifications';
+        state.textContent =
+          Notification.permission === 'denied'
+            ? 'disabled — browser permission denied (re-allow it in the site settings)'
+            : Notification.permission === 'granted'
+              ? 'disabled'
+              : 'disabled — browser permission not asked yet';
+      }
+
+      // register SW -> VAPID key -> subscribe -> POST the subscription.
+      // Callers must have ensured Notification.permission is 'granted'.
+      async function subscribeNotifications() {
+        if (!notifSwReg) {
+          notifSwReg = await navigator.serviceWorker.register('/ui/sw.js');
+        }
+        const vapidRes = await fetch('/rc/push/vapid', {
+          headers: { Authorization: 'Bearer ' + token() },
+        });
+        if (!vapidRes.ok) {
+          throw new Error('vapid fetch failed (' + vapidRes.status + ')');
+        }
+        const { applicationServerKey } = await vapidRes.json();
+        const sub = await notifSwReg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(applicationServerKey),
+        });
+        const subRes = await fetch('/rc/push/subscribe', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + token(),
+          },
+          body: JSON.stringify({
+            subscription: sub.toJSON ? sub.toJSON() : sub,
+          }),
+        });
+        idbPutToken(token());
+        if (subRes.status !== 201) {
+          throw new Error('subscribe failed (' + subRes.status + ')');
+        }
+      }
+
+      // Returns 'ok' | 'denied' | 'not-granted' (prompt never showed) |
+      // 'unsupported' | 'no-token'.
       async function enableNotifications() {
-        // 1. guards
-        if (!token()) return setStatus('pair first');
-        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-          return setStatus('push unsupported');
+        if (!token()) return 'no-token';
+        if (!pushSupported()) return 'unsupported';
+        if (Notification.permission === 'default') {
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted')
+            return perm === 'denied' ? 'denied' : 'not-granted';
+        }
+        if (Notification.permission !== 'granted') return 'denied';
+        await subscribeNotifications();
+        try {
+          localStorage.removeItem('rc-notif-optout');
+        } catch (e) {
+          /* private mode */
+        }
+        return 'ok';
+      }
+
+      async function disableNotifications() {
+        const sub = await getNotifSubscription();
+        if (sub) {
+          // Drop the gateway-side record first (matched by endpoint),
+          // then the browser-side subscription.
+          try {
+            const listRes = await fetch('/rc/push/subscriptions', {
+              headers: { Authorization: 'Bearer ' + token() },
+            });
+            if (listRes.ok) {
+              const { subscriptions } = await listRes.json();
+              for (const rec of subscriptions) {
+                if (rec.endpoint === sub.endpoint) {
+                  await fetch(
+                    '/rc/push/subscriptions/' + encodeURIComponent(rec.id),
+                    {
+                      method: 'DELETE',
+                      headers: { Authorization: 'Bearer ' + token() },
+                    },
+                  );
+                }
+              }
+            }
+          } catch (e) {
+            /* best-effort — the local unsubscribe still holds */
+          }
+          try {
+            await sub.unsubscribe();
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        // Opt out so the boot auto-enable does not switch this back on.
+        try {
+          localStorage.setItem('rc-notif-optout', '1');
+        } catch (e) {
+          /* private mode */
+        }
+      }
+
+      async function autoEnableNotifications() {
+        try {
+          if (!token() || !pushSupported()) return;
+          let optedOut = false;
+          try {
+            optedOut = localStorage.getItem('rc-notif-optout') === '1';
+          } catch (e) {
+            /* private mode */
+          }
+          if (optedOut) return;
+          if (await getNotifSubscription()) return; // already enabled
+          if (Notification.permission === 'denied') return;
+          const r = await enableNotifications();
+          if (r === 'not-granted') {
+            // The browser will not prompt without a user gesture; try
+            // again on the first click.
+            const onFirstClick = () => {
+              void enableNotifications().then((r2) => {
+                if (r2 === 'ok') void refreshNotifToggle();
+              });
+            };
+            document.addEventListener('click', onFirstClick, { once: true });
+          }
+        } catch (e) {
+          /* best-effort at boot — the Settings toggle is the manual path */
+        } finally {
+          void refreshNotifToggle();
+        }
+      }
+
+      $('enable').onclick = async () => {
+        const sub = await getNotifSubscription();
+        if (sub) {
+          await disableNotifications();
+          void refreshNotifToggle();
+          return;
         }
         $('enable').disabled = true;
         try {
-          // 2. register the service worker
-          const reg = await navigator.serviceWorker.register('/ui/sw.js');
-          // 3. request notification permission
-          const perm = await Notification.requestPermission();
-          if (perm !== 'granted') return setStatus('notifications denied');
-          // 4. fetch the VAPID public key
-          const vapidRes = await fetch('/rc/push/vapid', {
-            headers: { Authorization: 'Bearer ' + token() },
-          });
-          if (!vapidRes.ok) {
-            return setStatus('vapid fetch failed (' + vapidRes.status + ')');
-          }
-          const { applicationServerKey } = await vapidRes.json();
-          // 5. subscribe via the push manager
-          const sub = await reg.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: urlBase64ToUint8Array(applicationServerKey),
-          });
-          // 6. POST the subscription to the gateway
-          const subRes = await fetch('/rc/push/subscribe', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: 'Bearer ' + token(),
-            },
-            body: JSON.stringify({
-              subscription: sub.toJSON ? sub.toJSON() : sub,
-            }),
-          });
-          idbPutToken(token());
-          if (subRes.status === 201) setStatus('notifications enabled');
-          else setStatus('enable failed (' + subRes.status + ')');
+          const r = await enableNotifications();
+          setStatus(
+            r === 'ok'
+              ? 'notifications enabled'
+              : r === 'no-token'
+                ? 'pair first'
+                : r === 'unsupported'
+                  ? 'push unsupported'
+                  : 'notifications not enabled (permission not granted)',
+          );
         } catch (e) {
           setStatus('enable failed: ' + e);
         } finally {
           $('enable').disabled = false;
+          void refreshNotifToggle();
         }
-      }
-
-      $('enable').onclick = enableNotifications;
+      };
 
       // Raw-JSON toggle: swap between the readable transcript and the raw frame
       // dump (kept for debugging). Transcript is the default view.
@@ -5589,6 +5993,10 @@
         // issue #35: the 30 s tick is paused while hidden — catch up now.
         void refreshPastConversations(curDirPath);
         if (watchedSessionId && !watchStreamAlive && token()) {
+          // The user is back: drop the pending backoff retry, reconnect
+          // now, and give the stream a fresh retry budget.
+          clearWatchRetry();
+          watchRetryAttempt = 0;
           startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }
         // issue #46: the 5 s tick is paused while hidden — catch up now.
@@ -5993,9 +6401,12 @@
         const raw = localStorage.getItem(WATCHED_KEY);
         if (!raw) return;
         try {
-          const { sessionId, lastEventId, title } = JSON.parse(raw);
+          const { sessionId, lastEventId, title, cwd } = JSON.parse(raw);
           if (sessionId) {
             lastSeenEventId = lastEventId ?? null;
+            // issue #46: restore the workspace too, so if the from-0 replay
+            // hits a resync the self-heal can re-resume without a re-tap.
+            watchedSessionCwd = typeof cwd === 'string' && cwd ? cwd : null;
             startWatch(sessionId, 0, title || null);
           }
         } catch { /* corrupt entry — ignore */ }
@@ -6243,17 +6654,16 @@
         if (daemonName) head.appendChild(daemonPill(daemonName));
         const label = document.createElement('span');
         label.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
-        // Open (cycle 65): reuse the existing watch panel — set #session and
-        // invoke the existing #watch handler so the hit's session streams.
+        // Open (cycle 65): reuse the existing watch panel — hand straight to
+        // startWatch so the hit's session streams.
         const open = document.createElement('button');
         open.textContent = 'Open';
         open.onclick = () => {
-          // Calling onclick() bypasses #watch's disabled guard, so if a stream
-          // is already active, abort it first (else the new watch overwrites the
-          // module-level controller and orphans the old stream).
+          // If a stream is already active, abort it first (else the new watch
+          // overwrites the module-level controller and orphans the old stream).
           if ($('watch').disabled) $('stop').onclick();
-          $('session').value = h.sessionId;
-          $('watch').onclick();
+          lastSeenEventId = null;
+          startWatch(h.sessionId);
         };
         head.appendChild(label);
         head.appendChild(open);
@@ -6647,14 +7057,14 @@
       };
 
       // Slash-commands palette (cycle 67): GET /rc/commands list + POST
-      // /session/:id/command/:name invoke (targets the watched #session).
+      // /session/:id/command/:name invoke (targets the watched session).
       // Commands above the caller's scope are LISTED with invocableByYou:false
       // (grayed + disabled) per the backend's list-don't-hide design.
       // textContent/createElement only (name/description are command-file text).
       async function invokeCommand(name, btn, note) {
-        // Use the WATCHED session (the captured watchedSessionId), not the live
-        // #session input, so invoke targets the same session as the composer/log
-        // (the section label promises "the watched session").
+        // Use the WATCHED session (watchedSessionId), so invoke targets the
+        // same session as the composer/log (the section label promises
+        // "the watched session").
         const id = watchedSessionId;
         if (!id) {
           note.textContent = ' watch a session first';
@@ -6989,7 +7399,7 @@
       $('cancel-turn').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('session-verb-result');
-        const id = verbSessionId('session');
+        const id = watchedSessionId;
         if (!id) {
           out.textContent = 'no session';
           return;
@@ -7006,7 +7416,7 @@
       $('end-session').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('session-verb-result');
-        const id = verbSessionId('session');
+        const id = watchedSessionId;
         if (!id) {
           out.textContent = 'no session';
           return;
@@ -7018,7 +7428,113 @@
           method: 'POST',
           body: '{}',
         });
-        out.textContent = r.ok ? 'session ended' : 'end failed: ' + r.code;
+        if (r.ok) {
+          out.textContent = 'session ended';
+          // The session is gone: drop the watch (and any self-heal retry
+          // the stream-end may have scheduled) instead of re-attaching to
+          // a corpse.
+          $('stop').onclick();
+        } else {
+          out.textContent = 'end failed: ' + r.code;
+        }
+      };
+
+      // issue #48: the rewind control in the Chat tab, where the user
+      // actually watches a session. The picker enumerates the user turns
+      // visible in the transcript (the Nth #transcript .bubble.user node
+      // is user turn N, 1-based) and posts the count of turns to KEEP —
+      // the gateway's turnResolver reads toTurn as "keep the first N user
+      // turns", so "Turn K" posts K and "Start" posts 0.
+      const rewindPick = $('rewind-pick');
+      const rewindTurnPick = $('rewind-turn-pick');
+      const rewindPickResult = $('rewind-pick-result');
+
+      function rewindUserTurns() {
+        return Array.from(document.querySelectorAll('#transcript .bubble.user'));
+      }
+
+      $('rewind-chat').onclick = () => {
+        const out = rewindPickResult;
+        out.textContent = '';
+        if (!token()) return setStatus('pair first');
+        if (!watchedSessionId) {
+          out.textContent = 'watch a session first';
+          rewindPick.style.display = '';
+          return;
+        }
+        const turns = rewindUserTurns();
+        if (turns.length === 0) {
+          out.textContent = 'no turns in the transcript yet';
+          rewindPick.style.display = '';
+          return;
+        }
+        rewindTurnPick.innerHTML = '';
+        const start = document.createElement('option');
+        start.value = '0';
+        start.textContent = 'Start (discard every turn)';
+        rewindTurnPick.appendChild(start);
+        turns.forEach((n, i) => {
+          const o = document.createElement('option');
+          o.value = String(i + 1);
+          const t = clean((n._body || n).textContent || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          o.textContent = 'Turn ' + (i + 1) + ': ' + (t.slice(0, 60) || '(no text)');
+          rewindTurnPick.appendChild(o);
+        });
+        // Default to the newest turn: the least destructive choice (the
+        // tip itself is a no-op — move up the list to discard turns).
+        rewindTurnPick.value = String(turns.length);
+        rewindPick.style.display = '';
+      };
+
+      $('rewind-pick-close').onclick = () => {
+        rewindPick.style.display = 'none';
+        rewindPickResult.textContent = '';
+      };
+
+      $('rewind-pick-btn').onclick = async () => {
+        const out = rewindPickResult;
+        if (!token()) return setStatus('pair first');
+        const id = watchedSessionId;
+        if (!id) {
+          out.textContent = 'watch a session first';
+          return;
+        }
+        const turns = rewindUserTurns();
+        const keep = Number(rewindTurnPick.value);
+        if (turns.length === 0 || !Number.isInteger(keep) || keep < 0 || keep > turns.length) {
+          out.textContent = 'no turns in the transcript yet';
+          return;
+        }
+        const what =
+          keep === 0
+            ? 'before any turn — every turn is discarded'
+            : 'to after turn ' + keep + ' of ' + turns.length +
+              ' — turns ' + (keep + 1) + ' to ' + turns.length + ' are discarded';
+        if (!window.confirm('Rewind ' + id + ' ' + what + '?')) return;
+        const btn = $('rewind-pick-btn');
+        btn.disabled = true;
+        out.textContent = 'rewinding…';
+        // Pass the watched session's workspace so the gateway can locate the
+        // transcript without scanning; it lives where the session ran, which
+        // may differ from the daemon's boot workspace.
+        const rwBody = { toTurn: keep };
+        if (watchedSessionCwd) rwBody.cwd = watchedSessionCwd;
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/rewind', {
+          method: 'POST',
+          body: JSON.stringify(rwBody),
+        });
+        btn.disabled = false;
+        if (!r.ok) {
+          out.textContent = 'rewind failed: ' + r.code;
+          return;
+        }
+        rewindPick.style.display = 'none';
+        setStatus('rewound to turn ' + r.body.toTurn + ' — re-syncing transcript');
+        // Re-sync: re-watch from event 0 so the transcript reflects the
+        // truncation (startWatch clears and replays the shortened history).
+        void startWatch(id);
       };
 
       $('rewind-btn').onclick = async () => {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, isAbsolute, resolve } from 'node:path';
 
@@ -119,4 +120,46 @@ export const SESSION_FILE_RE = /^[0-9a-fA-F-]{32,36}$/;
 /** True when `id` is a syntactically valid session id (safe to path-join). */
 export function isValidSessionId(id: string): boolean {
   return SESSION_FILE_RE.test(id);
+}
+
+/**
+ * Locates the chats dir that holds `<sessionId>.jsonl` by scanning every
+ * `<runtimeBaseDir>/projects/<segment>/chats/` dir when no workspace cwd
+ * names it.
+ *
+ * Sessions live in the chats dir of the workspace they were RUN in, which
+ * need not be the gateway's boot workspace (e.g. a conversation started in a
+ * project dir). `sanitizeCwd` is lossy — the project segment cannot be
+ * reversed to the original cwd — so when the trusted/request cwd candidates
+ * miss, the only way to find the transcript is a bounded scan of the project
+ * segments. The scan names the FILE, not the workspace: callers must treat a
+ * scan hit as "workspace unknown" (they cannot derive a `workspaceCwd` for
+ * daemon routing from it).
+ *
+ * Returns `null` when the file exists in no project dir (or the projects dir
+ * itself is missing/unreadable). The id is validated first — this function
+ * never path-joins an unvalidated id.
+ */
+export async function findSessionChatsDir(
+  sessionId: string,
+  env: Record<string, string | undefined> = process.env,
+): Promise<string | null> {
+  if (!isValidSessionId(sessionId)) return null;
+  const projectsDir = join(runtimeBaseDir(env), 'projects');
+  let segments: string[];
+  try {
+    segments = await readdir(projectsDir);
+  } catch {
+    return null; // no projects dir → nothing to scan
+  }
+  for (const segment of segments) {
+    const chatsDir = join(projectsDir, segment, 'chats');
+    try {
+      await stat(join(chatsDir, `${sessionId}.jsonl`));
+      return chatsDir;
+    } catch {
+      // not in this segment — keep scanning
+    }
+  }
+  return null;
 }

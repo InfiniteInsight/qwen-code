@@ -19,6 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
 import { createForkRoute } from './fork.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
@@ -41,22 +42,43 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   return { calls, record: async (e: AuditEntry) => void calls.push(e) };
 }
 
-/** A daemon stub exposing only loadSession (the route's sole daemon dep). */
-function fakeDaemon(loadSession: (id: string) => Promise<unknown>) {
-  const calls: string[] = [];
+/** A daemon stub with the route's two daemon deps: `loadSession` (the
+ * scan-hit restore fallback) and `resumeSession` (the pool-ownership ensure
+ * used when the workspace is known). `loadCalls` records loadSession ids,
+ * `resumeCalls` records resumeSession (id, workspaceCwd). */
+function fakeDaemon(
+  loadSession: (id: string) => Promise<unknown>,
+  opts: {
+    resume?: (id: string, workspaceCwd?: string) => Promise<unknown> | unknown;
+  } = {},
+) {
+  const loadCalls: string[] = [];
+  const resumeCalls: Array<{ id: string; workspaceCwd?: string }> = [];
   return {
-    calls,
+    loadCalls,
+    resumeCalls,
     daemon: {
       loadSession: async (id: string) => {
-        calls.push(id);
+        loadCalls.push(id);
         return loadSession(id);
+      },
+      resumeSession: async (id: string, req?: { workspaceCwd?: string }) => {
+        const workspaceCwd = req?.workspaceCwd;
+        resumeCalls.push({ id, workspaceCwd });
+        if (opts.resume) return await opts.resume(id, workspaceCwd);
+        return {
+          sessionId: id,
+          workspaceCwd: workspaceCwd ?? CWD,
+          attached: true,
+          state: {},
+        };
       },
     },
   };
 }
 
-async function writeParent(): Promise<void> {
-  await mkdir(chatsDir, { recursive: true });
+async function writeParent(dir: string = chatsDir): Promise<void> {
+  await mkdir(dir, { recursive: true });
   const rec = {
     uuid: 'p0',
     parentUuid: null,
@@ -66,14 +88,20 @@ async function writeParent(): Promise<void> {
     message: { role: 'user', parts: [{ text: 'hello' }] },
   };
   await writeFile(
-    join(chatsDir, `${PARENT_ID}.jsonl`),
+    join(dir, `${PARENT_ID}.jsonl`),
     JSON.stringify(rec) + '\n',
     'utf8',
   );
 }
 
 interface MountOpts {
-  daemon: { loadSession: (id: string) => Promise<unknown> };
+  daemon: {
+    loadSession: (id: string) => Promise<unknown>;
+    resumeSession: (
+      id: string,
+      req?: { workspaceCwd?: string },
+    ) => Promise<unknown>;
+  };
   audit: AuditRecorder;
   cwd?: string | undefined;
   randomId?: () => string;
@@ -167,13 +195,16 @@ describe('fork route', () => {
     expect((await res.json()).code).toBe('parent_transcript_not_found');
   });
 
-  it('502s when no workspace cwd is resolvable', async () => {
+  it('404s when no workspace cwd is resolvable and the transcript is nowhere', async () => {
+    // No trusted cwd and no request cwd → no candidate dirs; the scan finds
+    // nothing either. The old 502 daemon_unavailable branch is gone: a
+    // missing transcript is a 404 whether or not a workspace is resolvable.
     const { daemon } = fakeDaemon(async () => ({}));
     const audit = fakeAudit();
     const url = await mount({ daemon, audit, cwd: undefined });
     const res = await postFork(url, {});
-    expect(res.status).toBe(502);
-    expect((await res.json()).code).toBe('daemon_unavailable');
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe('parent_transcript_not_found');
   });
 
   it('404s when the parent transcript does not exist', async () => {
@@ -185,9 +216,9 @@ describe('fork route', () => {
     expect((await res.json()).code).toBe('parent_transcript_not_found');
   });
 
-  it('forks (200): writes a rewritten file, loads it, audits ids+count not content', async () => {
+  it('forks (200): writes a rewritten file, restores it, audits ids+count not content', async () => {
     await writeParent();
-    const { daemon, calls } = fakeDaemon(async () => ({}));
+    const { daemon, loadCalls, resumeCalls } = fakeDaemon(async () => ({}));
     const audit = fakeAudit();
     const url = await mount({ daemon, audit, randomId: () => NEW_ID });
     const res = await postFork(url, {});
@@ -209,8 +240,11 @@ describe('fork route', () => {
     expect(first.sessionId).toBe(NEW_ID);
     expect(first.cwd).toBe(CWD); // cwd untouched
 
-    // loadSession called with the new id.
-    expect(calls).toEqual([NEW_ID]);
+    // The workspace was known (trusted cwd hit), so the restore went through
+    // resumeSession (which registers the fresh id with the pool) — the plain
+    // loadSession, unroutable for a fresh id under a DaemonPool, was not used.
+    expect(resumeCalls).toEqual([{ id: NEW_ID, workspaceCwd: CWD }]);
+    expect(loadCalls).toHaveLength(0);
 
     // Audit: ids + count only, never record content.
     const entry = audit.calls.find((c) => c.action === 'session_forked');
@@ -286,10 +320,12 @@ describe('fork route', () => {
     expect(entry!.detail).toMatchObject({ named: false });
   });
 
-  it('502s and removes the fork file when loadSession rejects', async () => {
+  it('502s and removes the fork file when the daemon restore rejects', async () => {
     await writeParent();
-    const { daemon } = fakeDaemon(async () => {
-      throw new Error('daemon down');
+    const { daemon } = fakeDaemon(async () => ({}), {
+      resume: () => {
+        throw new Error('daemon down');
+      },
     });
     const audit = fakeAudit();
     const url = await mount({ daemon, audit, randomId: () => ROLLBACK_ID });
@@ -300,6 +336,25 @@ describe('fork route', () => {
     await expect(
       stat(join(chatsDir, `${ROLLBACK_ID}.jsonl`)),
     ).rejects.toThrow();
+  });
+
+  it('503s workspace_pool_full and removes the fork file when resume-ensure reports the pool full', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}), {
+      resume: () => {
+        throw new WorkspacePoolFullError(3);
+      },
+    });
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => ROLLBACK_ID });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('workspace_pool_full');
+    await expect(
+      stat(join(chatsDir, `${ROLLBACK_ID}.jsonl`)),
+    ).rejects.toThrow();
+    // Nothing persisted for a rolled-back fork.
+    expect(audit.calls).toHaveLength(0);
   });
 
   it('500s (does not hang) when reading the parent throws a non-ENOENT error', async () => {
@@ -506,6 +561,52 @@ describe('fork route', () => {
       const url = await mount({ daemon, audit, randomId: () => NEW_ID });
       const res = await postFork(url, {});
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('cross-workspace parent lookup', () => {
+    const CWD2 = '/fork-test/ws2';
+
+    it('scan fallback: parent under a second workspace is forked (200); restore falls back to loadSession (workspace unknown)', async () => {
+      // The session ran in CWD2, but the gateway's trusted workspace is CWD —
+      // exactly the production shape. No request cwd is supplied.
+      await writeParent(resolveChatsDir(CWD2));
+      const { daemon, loadCalls, resumeCalls } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+      const res = await postFork(url, {});
+      expect(res.status).toBe(200);
+      expect((await res.json()).sessionId).toBe(NEW_ID);
+
+      // The fork file lands in the LOCATED (parent's) chats dir, not the
+      // trusted workspace's.
+      const forkPath = join(resolveChatsDir(CWD2), `${NEW_ID}.jsonl`);
+      const written = await readFile(forkPath, 'utf8');
+      expect(JSON.parse(written.split('\n')[0]).parentSessionId).toBe(
+        PARENT_ID,
+      );
+
+      // A scan hit names the FILE, not the workspace: the restore uses the
+      // plain loadSession fallback (unroutable under a live pool — the 502
+      // rollback covers that) and never a guessed-workspace resume.
+      expect(resumeCalls).toHaveLength(0);
+      expect(loadCalls).toEqual([NEW_ID]);
+      expect(audit.calls).toHaveLength(1);
+    });
+
+    it('request cwd hit: parent under body.cwd is forked (200); restore goes through resumeSession with that workspace', async () => {
+      await writeParent(resolveChatsDir(CWD2));
+      const { daemon, loadCalls, resumeCalls } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+      const res = await postFork(url, { cwd: CWD2 });
+      expect(res.status).toBe(200);
+
+      const forkPath = join(resolveChatsDir(CWD2), `${NEW_ID}.jsonl`);
+      await stat(forkPath); // throws if missing
+      expect(resumeCalls).toEqual([{ id: NEW_ID, workspaceCwd: CWD2 }]);
+      expect(loadCalls).toHaveLength(0);
+      expect(audit.calls).toHaveLength(1);
     });
   });
 });
