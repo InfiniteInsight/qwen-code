@@ -7,8 +7,13 @@
 import { randomUUID } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { resolveChatsDir, isValidSessionId } from '../sessions/chatsPath.js';
+import {
+  resolveChatsDir,
+  isValidSessionId,
+  findSessionChatsDir,
+} from '../sessions/chatsPath.js';
 import { resolveTurn } from '../sessions/turnResolver.js';
 import {
   forkRecords,
@@ -22,11 +27,15 @@ import {
   removeFork,
   ForkExistsError,
 } from '../sessions/forkStore.js';
+import type { ForkRecord } from '../sessions/forkTranscript.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import { SessionWal } from '../wal.js';
 
-/** The daemon surface this route needs: just `loadSession`. */
-type ForkDaemon = Pick<DaemonClient, 'loadSession'>;
+/** The daemon surface this route needs: `loadSession` (restore the freshly
+ * written fork as a live session) plus `resumeSession` — the pool-ownership
+ * ensure, so under `DaemonPool` the new fork id is routed to the workspace
+ * daemon that owns the parent before the restore call. */
+type ForkDaemon = Pick<DaemonClient, 'loadSession' | 'resumeSession'>;
 
 export interface ForkRouteDeps {
   audit?: AuditRecorder;
@@ -61,8 +70,12 @@ export interface ForkRouteDeps {
  * SDK) so it restores the fork as a live, listable session — exactly what the
  * core `/branch` TUI command does internally.
  *
- * `resolveWorkspaceCwd` yields the trusted `workspaceCwd` (no request input
- * ever reaches a filesystem path). Supported transcript modes:
+ * The parent lives in the chats dir of the workspace it was run in, which may
+ * differ from the gateway's boot workspace. Candidate cwds (request-supplied
+ * `cwd` — always flattened through `sanitizeCwd`, never a raw path — then the
+ * trusted `resolveWorkspaceCwd()` result) are tried in order; when both miss,
+ * a bounded project-dir scan (`findSessionChatsDir`) locates the transcript
+ * with the workspace left unknown. Supported transcript modes:
  *  - `include` (default): full copy of the parent transcript up to
  *    `fromEventId` records (all records when absent).
  *  - `empty`: no transcript records copied (fork header only).
@@ -110,6 +123,7 @@ export function createForkRoute(
       fromEventId?: unknown;
       fromTurn?: unknown;
       name?: unknown;
+      cwd?: unknown;
     };
 
     // An optional human name for the fork. Trim, then cap to a sane length so a
@@ -169,19 +183,44 @@ export function createForkRoute(
       return;
     }
 
-    // 3. Trusted workspace cwd → derived chats dir.
-    const cwd = await resolveWorkspaceCwd();
-    if (!cwd) {
-      res
-        .status(502)
-        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
-      return;
+    // 3. Locate the parent transcript. The session file lives in the chats dir
+    //    of the workspace the session ran in, which may differ from the
+    //    gateway's boot workspace. Candidate cwds: the request-supplied cwd
+    //    (flattened through sanitizeCwd — never a raw path), then the trusted
+    //    workspace cwd; a bounded project-dir scan is the last resort. The
+    //    cwd of the FIRST candidate that hits is remembered as workspaceCwd so
+    //    the step-6 restore can route the pool to the owning workspace daemon;
+    //    a scan hit leaves it undefined (the scan names the file, not the
+    //    workspace) and the restore then falls back to a plain loadSession.
+    const requestedCwd =
+      typeof body.cwd === 'string' && body.cwd.length > 0
+        ? body.cwd
+        : undefined;
+    const trustedCwd = await resolveWorkspaceCwd();
+    const candidateCwds: string[] = [];
+    for (const c of [requestedCwd, trustedCwd]) {
+      if (c && !candidateCwds.includes(c)) candidateCwds.push(c);
     }
-    const chatsDir = resolveChatsDir(cwd);
-
-    // 4. Read the parent transcript (missing/empty/all-corrupt → 404).
-    const allRecords = await readParentRecords(chatsDir, parentId);
+    let workspaceCwd: string | undefined;
+    let chatsDir: string | undefined;
+    let allRecords: ForkRecord[] | null = null;
+    for (const c of candidateCwds) {
+      const dir = resolveChatsDir(c);
+      allRecords = await readParentRecords(dir, parentId);
+      if (allRecords) {
+        workspaceCwd = c;
+        chatsDir = dir;
+        break;
+      }
+    }
     if (!allRecords) {
+      const scannedChatsDir = await findSessionChatsDir(parentId);
+      if (scannedChatsDir) {
+        chatsDir = scannedChatsDir;
+        allRecords = await readParentRecords(scannedChatsDir, parentId);
+      }
+    }
+    if (!allRecords || !chatsDir) {
       res.status(404).json({
         error: 'Parent transcript not found',
         code: 'parent_transcript_not_found',
@@ -258,12 +297,28 @@ export function createForkRoute(
       throw err;
     }
 
-    // 6. Drive the daemon to restore the fork by path. On failure, roll back
-    //    the just-written file and report the daemon as unavailable.
+    // 6. Drive the daemon to restore the fork by path. When workspaceCwd is
+    //    known, `resumeSession(newId, { workspaceCwd })` does the restore AND
+    //    registers the new id with the pool (a fresh id has no owner, so the
+    //    session-keyed `loadSession` is unroutable under a DaemonPool); the
+    //    in-band replay payload is discarded. When the workspace is unknown
+    //    (scan hit), fall back to the plain `loadSession` — unroutable under
+    //    a pool, which rolls back below. On ANY failure: roll back the
+    //    just-written file; pool-full -> 503, everything else -> 502.
     try {
-      await daemon.loadSession(newId);
-    } catch {
+      if (workspaceCwd) {
+        await daemon.resumeSession(newId, { workspaceCwd });
+      } else {
+        await daemon.loadSession(newId);
+      }
+    } catch (err) {
       await removeFork(chatsDir, newId);
+      if (err instanceof WorkspacePoolFullError) {
+        res
+          .status(503)
+          .json({ error: 'Workspace pool full', code: 'workspace_pool_full' });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
