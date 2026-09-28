@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import {
   sanitizeCwd,
   runtimeBaseDir,
   resolveChatsDir,
   isValidSessionId,
   SESSION_FILE_RE,
+  findSessionChatsDir,
 } from './chatsPath.js';
 
 describe('sanitizeCwd', () => {
@@ -101,5 +104,63 @@ describe('isValidSessionId / SESSION_FILE_RE', () => {
 
   it('SESSION_FILE_RE matches a 32-char hex id', () => {
     expect(SESSION_FILE_RE.test('0123456789abcdef0123456789abcdef')).toBe(true);
+  });
+});
+
+describe('findSessionChatsDir', () => {
+  let runtimeBase: string;
+  const env = () => ({ QWEN_RUNTIME_DIR: runtimeBase });
+  const SESSION_ID = '123e4567-e89b-12d3-a456-426614174000';
+
+  beforeEach(async () => {
+    runtimeBase = await mkdtemp(join(tmpdir(), 'rc-chats-path-'));
+  });
+
+  afterEach(async () => {
+    await rm(runtimeBase, { recursive: true, force: true });
+  });
+
+  it('returns null when the projects dir is missing', async () => {
+    await expect(findSessionChatsDir(SESSION_ID, env())).resolves.toBeNull();
+  });
+
+  it('returns null for an invalid id without touching the filesystem', async () => {
+    await expect(findSessionChatsDir('../x', env())).resolves.toBeNull();
+  });
+
+  it('returns the matching chats dir when the file exists in one segment', async () => {
+    const segA = join(runtimeBase, 'projects', '-home-evan');
+    const segB = join(
+      runtimeBase,
+      'projects',
+      '-home-evan-projects-qwen-code-remote',
+    );
+    await mkdir(join(segA, 'chats'), { recursive: true });
+    await mkdir(join(segB, 'chats'), { recursive: true });
+    await writeFile(join(segB, 'chats', `${SESSION_ID}.jsonl`), '');
+    await expect(findSessionChatsDir(SESSION_ID, env())).resolves.toEqual(
+      join(segB, 'chats'),
+    );
+  });
+
+  it('returns null when no segment holds the file', async () => {
+    const segA = join(runtimeBase, 'projects', '-home-evan');
+    await mkdir(join(segA, 'chats'), { recursive: true });
+    await writeFile(
+      join(segA, 'chats', 'ffffffff-ffff-ffff-ffff-ffffffffffff.jsonl'),
+      '',
+    );
+    await expect(findSessionChatsDir(SESSION_ID, env())).resolves.toBeNull();
+  });
+
+  it('keeps scanning past a segment without a chats subdir', async () => {
+    const segNoChats = join(runtimeBase, 'projects', '-seg-no-chats');
+    const segHit = join(runtimeBase, 'projects', '-seg-hit');
+    await mkdir(segNoChats, { recursive: true });
+    await mkdir(join(segHit, 'chats'), { recursive: true });
+    await writeFile(join(segHit, 'chats', `${SESSION_ID}.jsonl`), '');
+    await expect(findSessionChatsDir(SESSION_ID, env())).resolves.toEqual(
+      join(segHit, 'chats'),
+    );
   });
 });

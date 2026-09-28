@@ -6,9 +6,15 @@
 
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { resolveChatsDir, isValidSessionId } from '../sessions/chatsPath.js';
+import {
+  resolveChatsDir,
+  isValidSessionId,
+  findSessionChatsDir,
+} from '../sessions/chatsPath.js';
 import { readParentRecords } from '../sessions/forkStore.js';
+import type { ForkRecord } from '../sessions/forkTranscript.js';
 import { resolveTurn } from '../sessions/turnResolver.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import type { PushNotifier } from '../webpush/notifier.js';
@@ -18,11 +24,16 @@ import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 /**
  * The daemon surface this route needs: `rewindSession` plus
  * `getRewindSnapshots`, which the route uses to map the gateway's
- * turn-counted `toTurn` onto the daemon's promptId-keyed rewind target.
+ * turn-counted `toTurn` onto the daemon's promptId-keyed rewind target, and
+ * `resumeSession` — the pool-ownership ensure: under `DaemonPool` a session
+ * this process never created/resumed is unroutable (session-keyed calls look
+ * up an in-memory owner map), so the route resumes the session (an idempotent
+ * attach for warm ones, a load for cold ones) in its workspace before the
+ * snapshot/rewind calls.
  */
 export type RewindDaemon = Pick<
   DaemonClient,
-  'rewindSession' | 'getRewindSnapshots'
+  'rewindSession' | 'getRewindSnapshots' | 'resumeSession'
 >;
 
 /** Fallback queue when a route set is wired without an explicit queue. */
@@ -57,17 +68,34 @@ export interface RewindRouteDeps {
  *     from starting mid-rewind); a busy slot throws `QueueTimeoutError`
  *     within the same tick, mapped to `409 rewind_in_progress` with the
  *     daemon never touched. The slot is released in a `finally`.
- *  2. Read the parent transcript (`readParentRecords`, same source
- *     routes/fork.ts reads) and resolve `toTurn` via the shared
- *     `resolveTurn`. `invalid_turn` -> 400; `rewind_not_applicable` -> 409.
- *  3. Map `toTurn` onto the daemon's promptId-keyed rewind: the daemon
- *     exposes one rewind snapshot per user turn (`getRewindSnapshots`; a
- *     snapshot's `turnIndex` counts the same user turns the resolver does),
- *     and `rewindSession(id, promptId)` truncates history before that
- *     snapshot's turn. `toTurn === addressableTurnCount` is the TIP (no
- *     truncation): no snapshot exists there, the daemon is NOT called, and
- *     only the marker below is recorded. For a non-tip turn, a missing
- *     snapshot means the daemon's view does not support that boundary ->
+ *  2. Locate the transcript (`readParentRecords`, same source routes/fork.ts
+ *     reads) and resolve `toTurn` via the shared `resolveTurn`. The session
+ *     file lives in the chats dir of the workspace it was run in, which may
+ *     differ from the gateway's boot workspace: candidate cwds are the
+ *     request-supplied `cwd` (the web shell sends the watched session's
+ *     workspace) then the trusted `daemon.capabilities().workspaceCwd`; when
+ *     both miss, a bounded scan of the runtime base dir's project dirs
+ *     (`findSessionChatsDir`) is the last resort. The cwd of the first
+ *     candidate that hits is remembered as `workspaceCwd` (a scan hit leaves
+ *     it undefined — the scan names the file, not the workspace). No cwd
+ *     names the transcript and the scan finds nothing ->
+ *     404 `session_transcript_not_found`. `invalid_turn` -> 400;
+ *     `rewind_not_applicable` -> 409.
+ *  3. Map `toTurn` onto the daemon's promptId-keyed rewind. First, when
+ *     `workspaceCwd` is known, `resumeSession(id, { workspaceCwd })` ensures
+ *     the session is owned by its workspace daemon (idempotent attach for
+ *     warm sessions; the in-band replay payload is discarded — the client's
+ *     SSE cursor belongs to the watch flow). Pool-full ->
+ *     503 `workspace_pool_full`; the daemon reporting the session unknown ->
+ *     404 `session_not_found`; any other ensure failure -> 502
+ *     `daemon_unavailable`. Then: the daemon exposes one rewind snapshot per
+ *     user turn (`getRewindSnapshots`; a snapshot's `turnIndex` counts the
+ *     same user turns the resolver does), and `rewindSession(id, promptId)`
+ *     truncates history before that snapshot's turn.
+ *     `toTurn === addressableTurnCount` is the TIP (no truncation): no
+ *     snapshot exists there, the daemon is NOT called, and only the marker
+ *     below is recorded. For a non-tip turn, a missing snapshot means the
+ *     daemon's view does not support that boundary ->
  *     409 `rewind_not_applicable`. The daemon's own `409` (session_busy) is
  *     surfaced verbatim as 409; every other failure (unreachable, 4xx/5xx,
  *     network) maps to 502 `daemon_unavailable`. On ANY failure: no WAL
@@ -124,7 +152,7 @@ export function createRewindRoute(
       return;
     }
 
-    const body = (req.body ?? {}) as { toTurn?: unknown };
+    const body = (req.body ?? {}) as { toTurn?: unknown; cwd?: unknown };
 
     // 1. Immediate, non-blocking prompt-in-flight guard. A free slot is HELD
     //    by this call for the rest of the saga (released in `finally`).
@@ -142,16 +170,41 @@ export function createRewindRoute(
     }
 
     try {
-      // 2. Resolve the trusted workspace cwd -> chats dir -> parent records.
-      const cwd = await resolveWorkspaceCwd();
-      if (!cwd) {
-        res
-          .status(502)
-          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
-        return;
+      // 2. Locate the transcript. It lives in the chats dir of the workspace
+      //    the session ran in, which may differ from the gateway's boot
+      //    workspace (a conversation started in a project dir). Candidate
+      //    order: the request-supplied cwd (the web shell sends the watched
+      //    session's workspace), then the trusted workspace cwd; a bounded
+      //    scan of the runtime base dir's project segments is the last
+      //    resort. The cwd of the FIRST candidate that hits is remembered as
+      //    workspaceCwd so the step-3 resume-ensure can route the pool to
+      //    the owning workspace daemon; a scan hit leaves it undefined (the
+      //    scan names the file, not the workspace) and the ensure is then
+      //    skipped.
+      const requestedCwd =
+        typeof body.cwd === 'string' && body.cwd.length > 0
+          ? body.cwd
+          : undefined;
+      const trustedCwd = await resolveWorkspaceCwd();
+      const candidateCwds: string[] = [];
+      for (const c of [requestedCwd, trustedCwd]) {
+        if (c && !candidateCwds.includes(c)) candidateCwds.push(c);
       }
-      const chatsDir = resolveChatsDir(cwd);
-      const records = await readParentRecords(chatsDir, sessionId);
+      let workspaceCwd: string | undefined;
+      let records: ForkRecord[] | null = null;
+      for (const c of candidateCwds) {
+        records = await readParentRecords(resolveChatsDir(c), sessionId);
+        if (records) {
+          workspaceCwd = c;
+          break;
+        }
+      }
+      if (!records) {
+        const scannedChatsDir = await findSessionChatsDir(sessionId);
+        if (scannedChatsDir) {
+          records = await readParentRecords(scannedChatsDir, sessionId);
+        }
+      }
       if (!records) {
         res.status(404).json({
           error: 'Session transcript not found',
@@ -183,6 +236,36 @@ export function createRewindRoute(
       //    (session_busy) is surfaced as 409; everything else -> 502.
       try {
         if (targetTurnIndex < addressableTurnCount) {
+          // 3a. Ensure the session is owned by its workspace daemon before
+          //     any session-keyed call. Under DaemonPool, a session this
+          //     process never created/resumed is unroutable (the owner map is
+          //     in-memory); `resumeSession` is an idempotent attach for warm
+          //     sessions and loads cold ones. The in-band replay payload is
+          //     intentionally discarded — the client's SSE cursor is owned by
+          //     the watch flow, not this route. Skipped when workspaceCwd is
+          //     unknown (scan hit): an unroutable session then surfaces as
+          //     the 502 below rather than a guessed workspace.
+          if (workspaceCwd) {
+            try {
+              await daemon.resumeSession(sessionId, { workspaceCwd });
+            } catch (err) {
+              if (err instanceof WorkspacePoolFullError) {
+                res.status(503).json({
+                  error: 'Workspace pool full',
+                  code: 'workspace_pool_full',
+                });
+                return;
+              }
+              if (isSessionNotFoundError(err)) {
+                res.status(404).json({
+                  error: 'Session not found',
+                  code: 'session_not_found',
+                });
+                return;
+              }
+              throw err; // other ensure failures -> 502 via the outer catch
+            }
+          }
           const { snapshots } = await daemon.getRewindSnapshots(sessionId);
           const snapshot = snapshots.find(
             (s) => s.turnIndex === targetTurnIndex,
@@ -331,4 +414,15 @@ function appendMarkerWithRetry(
   } catch {
     wal.append({ id, v: 1, type: 'session_rewound', data });
   }
+}
+
+/** Same classification routes/sessionResume.ts uses for the resume call: a
+ * 404 status (the daemon's `session_not_found`) or a `UnknownSessionError`
+ * (thrown by `DaemonPool` for a session id it has no record of) both mean
+ * the session is unknown to the daemon — distinct from transport death. */
+function isSessionNotFoundError(err: unknown): boolean {
+  const status = (err as { status?: unknown } | undefined)?.status;
+  if (status === 404) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /not found/i.test(message);
 }

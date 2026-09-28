@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DaemonRewindSnapshotInfo } from '@qwen-code/sdk/daemon';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+import { WorkspacePoolFullError } from '../daemonPool.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
 import { createRewindRoute, type RewindDaemon } from './rewind.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
@@ -20,6 +21,7 @@ import { SessionWal, decodeSegment } from '../wal.js';
 import { PromptQueue } from './promptQueue.js';
 
 const CWD = '/rewind-test/ws';
+const CWD2 = '/rewind-test/ws2';
 const SESSION_ID = '11111111111111111111111111111111';
 
 let server: Server | undefined;
@@ -51,19 +53,25 @@ function makeSnapshots(turnCount: number): DaemonRewindSnapshotInfo[] {
 }
 
 /**
- * Fake `RewindDaemon` (the `getRewindSnapshots` + `rewindSession` pair the
- * route consumes). Records every `rewindSession` call's `(id, promptId)` and
- * counts `getRewindSnapshots` invocations so tests can assert which promptId
- * the route mapped `toTurn` onto, or that the daemon was never touched.
+ * Fake `RewindDaemon` (the `getRewindSnapshots` + `rewindSession` +
+ * `resumeSession` surface the route consumes). Records every
+ * `rewindSession` call's `(id, promptId)`, every `resumeSession` call's
+ * `(id, workspaceCwd)`, and counts `getRewindSnapshots` invocations so
+ * tests can assert which promptId the route mapped `toTurn` onto, which
+ * workspace the resume-ensure targeted, or that the daemon was never
+ * touched.
  */
 function fakeDaemon(
   opts: {
     snapshots?: DaemonRewindSnapshotInfo[];
     /** Override the rewindSession body/throw; defaults to a clean success. */
     rewind?: (id: string, promptId: string) => Promise<unknown> | unknown;
+    /** Override the resumeSession body/throw; defaults to a clean success. */
+    resume?: (id: string, workspaceCwd?: string) => Promise<unknown> | unknown;
   } = {},
 ) {
   const rewindCalls: Array<{ id: string; promptId: string }> = [];
+  const resumeCalls: Array<{ id: string; workspaceCwd?: string }> = [];
   let snapshotCalls = 0;
   const snapshots = opts.snapshots ?? [];
   const daemon: RewindDaemon = {
@@ -81,9 +89,21 @@ function fakeDaemon(
         filesFailed: [],
       };
     },
+    resumeSession: async (id: string, req?: { workspaceCwd?: string }) => {
+      const workspaceCwd = req?.workspaceCwd;
+      resumeCalls.push({ id, workspaceCwd });
+      if (opts.resume) return await opts.resume(id, workspaceCwd);
+      return {
+        sessionId: id,
+        workspaceCwd: workspaceCwd ?? CWD,
+        attached: true,
+        state: {},
+      };
+    },
   };
   return {
     rewindCalls,
+    resumeCalls,
     get snapshotCalls() {
       return snapshotCalls;
     },
@@ -91,8 +111,11 @@ function fakeDaemon(
   };
 }
 
-async function writeTranscript(userTurns: number): Promise<void> {
-  await mkdir(chatsDir, { recursive: true });
+async function writeTranscript(
+  userTurns: number,
+  dir: string = chatsDir,
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
   const lines: string[] = [];
   for (let i = 0; i < userTurns; i++) {
     lines.push(
@@ -117,7 +140,7 @@ async function writeTranscript(userTurns: number): Promise<void> {
     );
   }
   await writeFile(
-    join(chatsDir, `${SESSION_ID}.jsonl`),
+    join(dir, `${SESSION_ID}.jsonl`),
     lines.join('\n') + '\n',
     'utf8',
   );
@@ -187,7 +210,7 @@ afterEach(async () => {
 describe('POST /session/:id/rewind', () => {
   it('happy path: 202 with toTurn + truncatedEventId, one WAL marker, one audit row', async () => {
     await writeTranscript(3);
-    const { daemon, rewindCalls } = fakeDaemon({
+    const { daemon, rewindCalls, resumeCalls } = fakeDaemon({
       snapshots: makeSnapshots(3),
     });
     const audit = fakeAudit();
@@ -212,6 +235,11 @@ describe('POST /session/:id/rewind', () => {
     expect(rewindCalls).toEqual([
       { id: SESSION_ID, promptId: `${SESSION_ID}########1` },
     ]);
+
+    // Non-tip rewind with a known workspace (trusted cwd hit): the
+    // resume-ensure ran first, routing the pool to the owning workspace
+    // daemon before any session-keyed call.
+    expect(resumeCalls).toEqual([{ id: SESSION_ID, workspaceCwd: CWD }]);
 
     expect(audit.calls).toHaveLength(1);
     expect(audit.calls[0]).toMatchObject({
@@ -510,7 +538,7 @@ describe('POST /session/:id/rewind', () => {
     // Defensive: if the route ever (incorrectly) reached the daemon, the
     // rewind would throw and we'd get 502, not 202. The call counters below
     // also prove the daemon was never touched.
-    const { daemon, rewindCalls, snapshotCalls } = fakeDaemon({
+    const { daemon, rewindCalls, snapshotCalls, resumeCalls } = fakeDaemon({
       snapshots: makeSnapshots(3),
       rewind: () => {
         throw new Error('daemon must not be called for a tip rewind');
@@ -529,10 +557,11 @@ describe('POST /session/:id/rewind', () => {
     expect(body.toTurn).toBe(3);
     expect(body.truncatedEventId).toBe(6); // tip → whole transcript (3 turns × 2 records)
 
-    // A tip rewind truncates nothing: the daemon (snapshots + rewind) is
-    // NEVER called — only the gateway-side marker is recorded.
+    // A tip rewind truncates nothing: the daemon (resume-ensure, snapshots,
+    // rewind) is NEVER called — only the gateway-side marker is recorded.
     expect(rewindCalls).toHaveLength(0);
     expect(snapshotCalls).toBe(0);
+    expect(resumeCalls).toHaveLength(0);
 
     // The marker + audit are still written (preserves the pre-merge no-op
     // behavior for a tip rewind).
@@ -563,6 +592,138 @@ describe('POST /session/:id/rewind', () => {
     expect(await res.json()).toMatchObject({ code: 'rewind_not_applicable' });
     // The snapshots lookup ran (to find the missing snapshot) but the rewind
     // itself never fired — and nothing was persisted.
+    expect(rewindCalls).toHaveLength(0);
+    expect(audit.calls).toHaveLength(0);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(0);
+    wal.close();
+  });
+
+  it('404 session_transcript_not_found when no workspace has the transcript', async () => {
+    const { daemon, rewindCalls, resumeCalls, snapshotCalls } = fakeDaemon({
+      snapshots: makeSnapshots(1),
+    });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 0 });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({
+      code: 'session_transcript_not_found',
+    });
+    // The daemon is never touched when the transcript can't be located.
+    expect(rewindCalls).toHaveLength(0);
+    expect(resumeCalls).toHaveLength(0);
+    expect(snapshotCalls).toBe(0);
+  });
+
+  it('cross-workspace: transcript under a second workspace is found by the scan; resume-ensure skipped (workspace unknown)', async () => {
+    // The session ran in CWD2, but the gateway's trusted workspace is CWD —
+    // exactly the production shape (conversations started in a project dir
+    // while the daemon booted in $HOME).
+    await writeTranscript(3, resolveChatsDir(CWD2));
+    const { daemon, rewindCalls, resumeCalls } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(202);
+    // The scan located the file, so the rewind proceeds and persists.
+    expect(rewindCalls).toEqual([
+      { id: SESSION_ID, promptId: `${SESSION_ID}########1` },
+    ]);
+    expect(audit.calls).toHaveLength(1);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(1);
+    wal.close();
+    // A scan hit names the FILE, not the workspace: the resume-ensure is
+    // deliberately skipped (an unroutable session would surface as 502).
+    expect(resumeCalls).toHaveLength(0);
+  });
+
+  it('request cwd hit: transcript found under body.cwd, resume-ensure targets that workspace', async () => {
+    // The web shell sends the watched session's workspace; it wins over the
+    // trusted cwd even though both could be tried.
+    await writeTranscript(3, resolveChatsDir(CWD2));
+    const { daemon, rewindCalls, resumeCalls } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+    });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 1, cwd: CWD2 });
+    expect(res.status).toBe(202);
+    expect(rewindCalls).toEqual([
+      { id: SESSION_ID, promptId: `${SESSION_ID}########1` },
+    ]);
+    expect(resumeCalls).toEqual([{ id: SESSION_ID, workspaceCwd: CWD2 }]);
+  });
+
+  it('resume-ensure failure: WorkspacePoolFullError -> 503 workspace_pool_full, no marker, no audit, no rewind', async () => {
+    await writeTranscript(2);
+    const { daemon, rewindCalls, resumeCalls, snapshotCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+      resume: () => {
+        throw new WorkspacePoolFullError(3);
+      },
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'workspace_pool_full' });
+    // The ensure is the first session-keyed step: nothing after it ran.
+    expect(resumeCalls).toHaveLength(1);
+    expect(snapshotCalls).toBe(0);
+    expect(rewindCalls).toHaveLength(0);
+    expect(audit.calls).toHaveLength(0);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(0);
+    wal.close();
+  });
+
+  it('resume-ensure failure: daemon 404 -> 404 session_not_found, no marker, no audit', async () => {
+    await writeTranscript(2);
+    const { daemon, rewindCalls, snapshotCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+      resume: () => {
+        throw Object.assign(new Error('Session not found'), { status: 404 });
+      },
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: 'session_not_found' });
+    expect(snapshotCalls).toBe(0);
+    expect(rewindCalls).toHaveLength(0);
+    expect(audit.calls).toHaveLength(0);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(0);
+    wal.close();
+  });
+
+  it('resume-ensure failure: other error -> 502 daemon_unavailable, no marker, no audit', async () => {
+    await writeTranscript(2);
+    const { daemon, rewindCalls, snapshotCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+      resume: () => {
+        throw new Error('socket hang up');
+      },
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ code: 'daemon_unavailable' });
+    expect(snapshotCalls).toBe(0);
     expect(rewindCalls).toHaveLength(0);
     expect(audit.calls).toHaveLength(0);
     const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });

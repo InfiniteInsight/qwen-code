@@ -31,8 +31,12 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
 }
 
 /** Write a transcript: a root record, or one declaring `parent` as fork source. */
-async function writeTranscript(id: string, parent?: string): Promise<void> {
-  await mkdir(chatsDir, { recursive: true });
+async function writeTranscript(
+  id: string,
+  parent?: string,
+  dir: string = chatsDir,
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
   const rec: Record<string, unknown> = {
     uuid: `${id}-0`,
     sessionId: id,
@@ -41,11 +45,7 @@ async function writeTranscript(id: string, parent?: string): Promise<void> {
     message: { role: 'user', parts: [{ text: 'hi' }] },
   };
   if (parent) rec['forkedFrom'] = { sessionId: parent, messageUuid: 'm0' };
-  await writeFile(
-    join(chatsDir, `${id}.jsonl`),
-    JSON.stringify(rec) + '\n',
-    'utf8',
-  );
+  await writeFile(join(dir, `${id}.jsonl`), JSON.stringify(rec) + '\n', 'utf8');
 }
 
 interface MountOpts {
@@ -162,13 +162,47 @@ describe('GET /session/:id/lineage', () => {
     expect((await res.json()).code).toBe('session_not_found');
   });
 
-  it('502s when the workspace cwd is unresolvable', async () => {
+  it('falls back to the project-dir scan when the workspace cwd is unresolvable (no more 502)', async () => {
+    // The old code 502'd when resolveWorkspaceCwd() was empty. Now the scan
+    // locates the transcript in whatever project segment holds it, so an
+    // unresolvable cwd is transparent to the caller.
     await writeTranscript(PARENT);
     const audit = fakeAudit();
     const base = await mount({ audit, cwd: undefined });
     const res = await fetch(`${base}/session/${PARENT}/lineage`);
-    expect(res.status).toBe(502);
-    expect((await res.json()).code).toBe('daemon_unavailable');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      sessionId: PARENT,
+      chain: [{ sessionId: PARENT }],
+      truncated: false,
+    });
+  });
+
+  it('cross-workspace: the chain is served from a second workspace via the scan when the trusted cwd misses', async () => {
+    // Both transcripts live under a DIFFERENT workspace than the trusted one
+    // (the production shape: a conversation started in a project dir while the
+    // daemon booted in $HOME). The trusted stat misses; the scan finds the
+    // segment and the whole fork chain walks from there.
+    const CWD2 = '/lineage-test/ws2';
+    const dir2 = resolveChatsDir(CWD2);
+    await writeTranscript(PARENT, undefined, dir2);
+    await writeTranscript(FORK, PARENT, dir2);
+    const audit = fakeAudit();
+    const base = await mount({ audit, cwd: CWD }); // trusted points at CWD, not CWD2
+
+    const res = await fetch(`${base}/session/${FORK}/lineage`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      sessionId: FORK,
+      chain: [{ sessionId: FORK }, { sessionId: PARENT }],
+      truncated: false,
+    });
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'session_lineage_read',
+      target: FORK,
+      detail: { depth: 2, truncated: false },
+    });
   });
 });
 

@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
-import { resolveChatsDir, isValidSessionId } from '../sessions/chatsPath.js';
+import {
+  resolveChatsDir,
+  isValidSessionId,
+  findSessionChatsDir,
+} from '../sessions/chatsPath.js';
 import { readParentRecords } from '../sessions/forkStore.js';
 import { walkLineage } from '../sessions/lineage.js';
 import { readSessionTitle } from '../sessions/sessionList.js';
@@ -18,9 +24,13 @@ import { readSessionTitle } from '../sessions/sessionList.js';
  * OWNER-scoped at the mount (a lineage chain enumerates ancestor session ids; a
  * session-locked share token must never learn sibling/ancestor ids it isn't
  * locked to). Read-only: walks each transcript's first-record
- * `forkedFrom.sessionId` on demand — no daemon call beyond resolving the trusted
- * workspace cwd, no in-memory adjacency map, no write path. `resolveWorkspaceCwd`
- * yields the trusted `workspaceCwd`; no request input ever reaches a path.
+ * `forkedFrom.sessionId` on demand — no daemon call at all, no in-memory
+ * adjacency map, no write path. The transcript lives in the chats dir of the
+ * workspace the session ran in: the trusted `resolveWorkspaceCwd()` dir is
+ * tried first (a cheap existence stat — the walk re-reads the file anyway),
+ * then a bounded project-dir scan (`findSessionChatsDir`) covers sessions of
+ * other workspaces. A fork chain always stays in one workspace (fork copies
+ * land in the parent's chats dir), so the located dir serves the whole walk.
  */
 export function createLineageRoute(
   resolveWorkspaceCwd: () => Promise<string | undefined>,
@@ -38,14 +48,30 @@ export function createLineageRoute(
         return;
       }
 
-      const cwd = await resolveWorkspaceCwd();
-      if (!cwd) {
-        res
-          .status(502)
-          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+      // The transcript lives in the chats dir of the workspace the session
+      // ran in. Trusted cwd first (cheap stat — the walk re-reads the file
+      // anyway), then a bounded scan for sessions of other workspaces.
+      let chatsDir: string | null = null;
+      const trustedCwd = await resolveWorkspaceCwd();
+      if (trustedCwd) {
+        const candidate = resolveChatsDir(trustedCwd);
+        try {
+          await stat(join(candidate, `${sessionId}.jsonl`));
+          chatsDir = candidate;
+        } catch {
+          // not in the trusted workspace — fall through to the scan
+        }
+      }
+      if (!chatsDir) {
+        chatsDir = await findSessionChatsDir(sessionId);
+      }
+      if (!chatsDir) {
+        res.status(404).json({
+          error: 'Session not found',
+          code: 'session_not_found',
+        });
         return;
       }
-      const chatsDir = resolveChatsDir(cwd);
 
       const result = await walkLineage(sessionId, {
         readRecords: (id) => readParentRecords(chatsDir, id),
