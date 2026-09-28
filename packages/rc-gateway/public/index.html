@@ -187,16 +187,49 @@
       .tab-pane.active {
         display: block;
       }
-      .pin-area details {
+      .pin-area > details {
         border: 1px solid #ccc;
         border-radius: 6px;
         margin-bottom: 0.5rem;
         padding: 0.5rem;
       }
-      .pin-area summary {
+      .pin-area > details > summary {
         cursor: pointer;
         font-weight: 600;
         font-size: 0.9rem;
+      }
+      details.ops-collapse {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 1rem;
+      }
+      details.ops-collapse > summary {
+        cursor: pointer;
+      }
+      .ops-note {
+        color: #888;
+        font-size: 0.85rem;
+        margin: 0.4rem 0;
+      }
+      .help-btn {
+        width: 1.75rem;
+        height: 1.75rem;
+        padding: 0;
+        margin-left: 0.6rem;
+        border-radius: 50%;
+        font-weight: 600;
+        line-height: 1;
+        vertical-align: middle;
+      }
+      .help-text {
+        margin: 0.5rem 0;
+        padding: 0.5rem 0.75rem;
+        border-left: 3px solid #07f;
+        border-radius: 4px;
+        background: rgba(128, 128, 128, 0.12);
+        font-size: 0.85rem;
+        line-height: 1.45;
       }
       .tab-bar.sticky {
         position: sticky;
@@ -551,56 +584,6 @@
         color: #888;
       }
     </style>
-    <section id="perm-rules" hidden style="margin-top: 8px">
-      <strong>permission rules</strong>
-      <span
-        id="perm-rules-target"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span>
-      <div
-        id="perm-rules-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </section>
-    <section id="perm-decisions" hidden style="margin-top: 8px">
-      <strong>permission decisions</strong>
-      <span
-        id="perm-decisions-note"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-        >gateway-visible decisions only</span
-      >
-      <div
-        id="perm-decisions-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </section>
-    <section id="perm-overlays" hidden style="margin-top: 8px">
-      <strong>session overrides</strong>
-      <span
-        id="perm-overlays-note"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-        >ephemeral — lost when the gateway restarts</span
-      >
-      <div
-        id="perm-overlays-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </section>
     <div
       id="session-footer"
       style="
@@ -670,8 +653,16 @@
     </section>
       </div>
       <div class="tab-pane" id="pane-ops">
-    <section id="daemons">
-      <strong>Daemons</strong> (multi-daemon registry; requires owner scope)
+    <details id="daemons" class="ops-collapse">
+      <summary><strong>Daemons</strong><button type="button" class="help-btn" aria-label="What is Daemons?" aria-expanded="false" aria-controls="help-daemons">?</button></summary>
+      <div class="help-text" id="help-daemons" hidden>
+        Lists the other qwen daemons this gateway knows about, with a health
+        dot for each. Tap <b>Sessions on all daemons</b> to see every running
+        session across them, or <b>Refresh GPUs</b> to check GPU load. Stays
+        empty unless the gateway has a multi-daemon registry
+        (<code>clients.toml</code>) and your token has owner scope.
+      </div>
+      <div class="ops-note">(multi-daemon registry; requires owner scope)</div>
       <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
         (no registry — this daemon has no clients.toml, or your token lacks
         owner scope)
@@ -689,15 +680,28 @@
         <div id="daemons-sessions" hidden>(not fetched)</div>
         <div id="daemons-gpus" hidden>(not fetched)</div>
       </div>
-    </section>
-    <section id="session-tree">
-      <strong>Sessions</strong> (fork tree; requires owner scope)
+    </details>
+    <details id="session-tree" class="ops-collapse">
+      <summary><strong>Sessions</strong><button type="button" class="help-btn" aria-label="What is Sessions?" aria-expanded="false" aria-controls="help-session-tree">?</button></summary>
+      <div class="help-text" id="help-session-tree" hidden>
+        Shows recorded sessions as a fork tree, so you can see which session
+        was forked from which. Tap <b>List sessions</b> to load it. Needs
+        owner scope.
+      </div>
+      <div class="ops-note">(fork tree; requires owner scope)</div>
       <div><button id="list-sessions">List sessions</button></div>
       <pre id="sessions">(not listed)</pre>
-    </section>
-    <section id="rewind">
-      <strong>Rewind</strong> (roll a session back to an earlier turn; requires
-      owner scope)
+    </details>
+    <details id="rewind" class="ops-collapse">
+      <summary><strong>Rewind</strong><button type="button" class="help-btn" aria-label="What is Rewind?" aria-expanded="false" aria-controls="help-rewind">?</button></summary>
+      <div class="help-text" id="help-rewind" hidden>
+        Rolls a session back to an earlier turn. Enter the session id (blank
+        means the session you're watching) and the turn number to rewind to:
+        0 discards every turn, and the latest turn is a no-op. Tick
+        <b>restore files</b> to also put files back to how they were at that
+        turn's snapshot. Needs owner scope.
+      </div>
+      <div class="ops-note">(roll a session back to an earlier turn; requires owner scope)</div>
       <div>
         <input id="rewind-id" placeholder="session id (blank = watched)" />
         <input
@@ -714,9 +718,17 @@
         <button id="rewind-btn">Rewind</button>
       </div>
       <div id="rewind-result"></div>
-    </section>
-    <section id="reviews">
-      <strong>Reviews</strong> (requires session-read scope)
+    </details>
+    <details id="reviews" class="ops-collapse">
+      <summary><strong>Reviews</strong><button type="button" class="help-btn" aria-label="What is Reviews?" aria-expanded="false" aria-controls="help-reviews">?</button></summary>
+      <div class="help-text" id="help-reviews" hidden>
+        Lists code reviews run on this host, one per row: status, review id,
+        the session it belongs to, how many findings it produced, and when it
+        was triggered. Tap <b>List reviews</b>; use the dropdown to show only
+        running, succeeded, failed or cancelled reviews. A review that is
+        still running has a <b>cancel</b> button. Needs session-read scope.
+      </div>
+      <div class="ops-note">(requires session-read scope)</div>
       <div>
         <button id="reviews-list">List reviews</button>
         <select id="reviews-status" title="filter by status">
@@ -728,15 +740,32 @@
         </select>
       </div>
       <div id="reviews-body">(not listed)</div>
-    </section>
-    <section id="workflows">
-      <strong>Workflows</strong> (requires session-read scope)
+    </details>
+    <details id="workflows" class="ops-collapse">
+      <summary><strong>Workflows</strong><button type="button" class="help-btn" aria-label="What is Workflows?" aria-expanded="false" aria-controls="help-workflows">?</button></summary>
+      <div class="help-text" id="help-workflows" hidden>
+        Lists workflow runs on this host, one per row: status, workflow name,
+        run id, current phase, how many agents it has used and how many tokens
+        it has spent. Tap <b>List runs</b> to load them. A run that is still
+        running has a <b>cancel</b> button. Needs session-read scope.
+      </div>
+      <div class="ops-note">(requires session-read scope)</div>
       <div><button id="workflows-list">List runs</button></div>
       <div id="workflows-body">(not listed)</div>
-    </section>
-    <section id="search">
-      <strong>Search</strong> (transcripts; requires owner scope)
-      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
+    </details>
+    <details id="search" class="ops-collapse">
+      <summary><strong>Search</strong><button type="button" class="help-btn" aria-label="What is Search?" aria-expanded="false" aria-controls="help-search">?</button></summary>
+      <div class="help-text" id="help-search" hidden>
+        Full-text search across every recorded session transcript. Type a
+        query (<code>AND</code> works, e.g. <code>oauth refresh AND error</code>),
+        optionally narrow by message kind or date range, then tap
+        <b>Search</b>. <b>rank (BM25)</b> orders results by relevance; it
+        needs the index built with <code>qwen-rc reindex</code> and otherwise
+        falls back to a slower scan. <b>all daemons</b> also searches the other
+        daemons. Shortcut: &#8984;K / Ctrl-K from anywhere. Needs owner scope.
+      </div>
+      <div class="ops-note">(transcripts; requires owner scope)
+      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span></div>
       <div>
         <input id="search-q" placeholder="oauth refresh AND error" />
         <select id="search-kind">
@@ -762,7 +791,79 @@
         >
       </div>
       <div id="search-results">(not searched)</div>
-    </section>
+    </details>
+    <details id="perm-rules" class="ops-collapse" hidden>
+      <summary><strong>Permission rules</strong><span
+        id="perm-rules-target"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+      ></span><button type="button" class="help-btn" aria-label="What are Permission rules?" aria-expanded="false" aria-controls="help-perm-rules">?</button></summary>
+      <div class="help-text" id="help-perm-rules" hidden>
+        The allow / ask / deny lists that decide what the agent may do.
+        <b>allow</b> runs without a prompt, <b>ask</b> always prompts you, and
+        <b>deny</b> is blocked. Pick a scope (<b>workspace</b> = this
+        project, <b>user</b> = all your projects), type a rule such as
+        <code>shell(git status:*)</code> or <code>edit(./docs/**)</code>, tap
+        <b>add</b>, then <b>save</b> that list &mdash; nothing is applied
+        until you save. Needs an owner token and a trusted workspace. If
+        saving says a session is required, send a prompt in that workspace and
+        retry.
+      </div>
+      <div
+        id="perm-rules-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </details>
+    <details id="perm-decisions" class="ops-collapse" hidden>
+      <summary><strong>Permission decisions</strong><span
+        id="perm-decisions-note"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+        >gateway-visible decisions only</span
+      ><button type="button" class="help-btn" aria-label="What are Permission decisions?" aria-expanded="false" aria-controls="help-perm-decisions">?</button></summary>
+      <div class="help-text" id="help-perm-decisions" hidden>
+        A read-only log of recent permission decisions the gateway saw: which
+        rule fired for a tool call, and the votes you made on permission
+        prompts. Filter by tool or rule id and tap <b>query</b> to check that
+        a rule you set behaves the way you intended. Decisions the daemon
+        makes locally never reach the gateway, so they don't appear here.
+      </div>
+      <div
+        id="perm-decisions-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </details>
+    <details id="perm-overlays" class="ops-collapse" hidden>
+      <summary><strong>Session overrides</strong><span
+        id="perm-overlays-note"
+        style="margin-left: 6px; font-size: 0.8rem; color: #888"
+        >ephemeral — lost when the gateway restarts</span
+      ><button type="button" class="help-btn" aria-label="What are Session overrides?" aria-expanded="false" aria-controls="help-perm-overlays">?</button></summary>
+      <div class="help-text" id="help-perm-overlays" hidden>
+        Temporary permission rules that expire on their own. Choose a session
+        (blank = all sessions), a tool, an action (allow / deny / prompt) and
+        how long it lasts, then tap <b>set</b>. Tap <b>revoke</b> on a row to
+        remove one early. Overrides live only in the gateway's memory, so
+        restarting the gateway clears them.
+      </div>
+      <div
+        id="perm-overlays-body"
+        style="
+          margin-top: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        "
+      ></div>
+    </details>
       </div>
       <div class="tab-pane" id="pane-settings">
     <section id="notif-toggle">
@@ -1126,6 +1227,23 @@
             pinState[tabId] = null;
           }
         }
+      });
+
+      // "?" help buttons in Operations section headers. Delegated on document
+      // so it keeps working after the pane's nodes are moved into/out of a pin.
+      // Tapping "?" on a collapsed section opens it and shows the help; on an
+      // open section it toggles the help.
+      document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.help-btn');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const panel = $(btn.getAttribute('aria-controls'));
+        const det = btn.closest('details');
+        const wasClosed = !det.open;
+        det.open = true;
+        panel.hidden = wasClosed ? false : !panel.hidden;
+        btn.setAttribute('aria-expanded', String(!panel.hidden));
       });
 
       // Sticky tab bar (Settings > UI preferences). Not persisted — resets on
@@ -6878,6 +6996,7 @@
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
           switchTab('ops');
+          $('search').open = true;
           const box = $('search-q');
           box.scrollIntoView({ block: 'center' });
           box.focus();
