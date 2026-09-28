@@ -2081,6 +2081,7 @@
           block.append(list);
           const addRow = document.createElement('div');
           addRow.style.display = 'flex';
+          addRow.style.flexWrap = 'wrap';
           addRow.style.gap = '6px';
           const inp = document.createElement('input');
           inp.placeholder = rt + ' rule, e.g. shell(git status:*) or edit(./docs/**)';
@@ -2236,6 +2237,8 @@
 
         const row = document.createElement('div');
         row.style.display = 'flex';
+        row.style.flexWrap = 'wrap';
+        row.style.alignItems = 'center';
         row.style.gap = '6px';
         const sel = document.createElement('select');
         sel.title = 'filter by tool';
