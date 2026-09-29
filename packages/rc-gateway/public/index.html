@@ -258,7 +258,17 @@
         <span class="tab" data-tab="diag" role="tab" tabindex="0">Diagnostics <input type="checkbox" class="pin-cb" data-pin="diag" title="Pin to Chat"></span>
       </div>
       <div class="tab-pane active" id="pane-chat">
-      <section>
+      <details id="session-controls" class="ops-collapse" open>
+      <summary><strong>Session controls</strong><button type="button" class="help-btn" aria-label="What is Session controls?" aria-expanded="false" aria-controls="help-session-controls">?</button></summary>
+      <div class="help-text" id="help-session-controls" hidden>
+        Controls for the session shown above. <b>Cancel turn</b> aborts
+        whatever the agent is doing right now without ending the session.
+        <b>End session</b> terminates it entirely. <b>Rewind</b> rolls it
+        back to an earlier turn (a turn picker appears once you choose one).
+        <b>Reconnect</b> only appears after the automatic self-heal gives up
+        after repeated retries — tap it to re-attach the event stream by
+        hand.
+      </div>
       <button id="cancel-turn" title="Abort the turn running on the host (POST /session/:id/cancel)">Cancel turn</button>
       <button id="end-session" title="Terminate the session on the host (POST /session/:id/end)">End session</button>
       <button id="rewind-chat" title="Roll this session back to an earlier turn (POST /session/:id/rewind)">Rewind</button>
@@ -274,9 +284,17 @@
         <button id="rewind-pick-close" type="button">Cancel</button>
         <span id="rewind-pick-result" style="color: #888; font-size: 0.85rem"></span>
       </div>
-    </section>
-    <section id="dir-picker">
-      <strong>New conversation</strong> — pick a directory
+    </details>
+    <details id="dir-picker" class="ops-collapse" open>
+      <summary><strong>New conversation</strong><button type="button" class="help-btn" aria-label="What is New conversation?" aria-expanded="false" aria-controls="help-dir-picker">?</button></summary>
+      <div class="help-text" id="help-dir-picker" hidden>
+        Start or resume a session. Browse to a directory (or type an
+        absolute path) and tap <b>New conversation</b> to start fresh there.
+        <b>Recent workspaces</b> and the <b>Past conversations</b> list below
+        let you jump back into an existing session in that folder — filter
+        by name, and <b>Continue last</b> reopens the most recent one.
+      </div>
+      — pick a directory
       <div
         id="dir-current"
         style="
@@ -333,7 +351,7 @@
         </div>
         <div id="past-pager" style="margin-top: 0.3rem; font-size: 0.8rem"></div>
       </div>
-    </section>
+    </details>
       <div class="pin-area" id="pin-area"></div>
     <div id="status"></div>
     <div id="cards"></div>
@@ -866,27 +884,52 @@
     </details>
       </div>
       <div class="tab-pane" id="pane-settings">
-    <section id="notif-toggle">
-      <strong>Notifications</strong> (push alerts for permission prompts and
-      task completion; on by default — the toggle reflects this device's
-      subscription)
+    <details id="notif-toggle" class="ops-collapse">
+      <summary><strong>Notifications</strong><button type="button" class="help-btn" aria-label="What is Notifications?" aria-expanded="false" aria-controls="help-notif-toggle">?</button></summary>
+      <div class="help-text" id="help-notif-toggle" hidden>
+        Turns on push notifications to this device for permission prompts
+        and finished tasks. Notifications are on by default; tap
+        <b>Enable notifications</b> if this browser hasn't granted push
+        permission yet. The line below shows this device's current
+        subscription state.
+      </div>
+      <div class="ops-note">(push alerts for permission prompts and task completion; on by default — the toggle reflects this device's subscription)</div>
       <div>
         <button id="enable">Enable notifications</button>
       </div>
       <div id="notif-state" style="font-size: 0.85rem; color: #888"></div>
-    </section>
-    <section id="push-prefs">
-      <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
-      scope)
+    </details>
+    <details id="push-prefs" class="ops-collapse">
+      <summary><strong>Push preferences</strong><button type="button" class="help-btn" aria-label="What are Push preferences?" aria-expanded="false" aria-controls="help-push-prefs">?</button></summary>
+      <div class="help-text" id="help-push-prefs" hidden>
+        Lists every device subscribed to push on this gateway (not just this
+        one) and lets you tune each: <b>quiet hours</b> (a from/to time range
+        plus timezone that pauses push during it), a per-hour cap, and which
+        kinds of alerts it receives (all, or a custom pick of permission
+        prompts / task-completed). Tap <b>List subscriptions</b> to load
+        them, edit a row and tap <b>Save</b>, or <b>Unsubscribe</b> to remove
+        it. <b>Send test push</b> fires one push to your own subscriptions
+        right now, to check delivery. Needs owner scope.
+      </div>
+      <div class="ops-note">(quiet hours + rate cap; requires owner scope)</div>
       <div>
         <button id="list-subs">List subscriptions</button>
         <button id="test-push-btn">Send test push</button>
         <span id="test-push-result"></span>
       </div>
       <div id="subs">(not listed)</div>
-    </section>
-    <section id="snooze">
-      <strong>Snooze notifications</strong> (requires owner scope)
+    </details>
+    <details id="snooze" class="ops-collapse">
+      <summary><strong>Snooze notifications</strong><button type="button" class="help-btn" aria-label="What is Snooze notifications?" aria-expanded="false" aria-controls="help-snooze">?</button></summary>
+      <div class="help-text" id="help-snooze" hidden>
+        Pauses push notifications for a time window, either for everything
+        or for one kind of alert. Enter a duration in seconds, pick a scope,
+        and tap <b>Snooze</b>. <b>Status</b> shows what's currently active.
+        <b>Unsnooze</b> clears every active snooze; a per-row
+        <b>Unsnooze</b> next to a listed scope clears just that one. Needs
+        owner scope.
+      </div>
+      <div class="ops-note">(requires owner scope)</div>
       <div>
         <input
           id="snooze-dur"
@@ -905,14 +948,31 @@
       </div>
       <div id="snooze-status">(unknown)</div>
       <div id="snooze-list"></div>
-    </section>
-    <section id="token-mgmt">
-      <strong>Tokens</strong> (active tokens; requires owner scope)
+    </details>
+    <details id="token-mgmt" class="ops-collapse">
+      <summary><strong>Tokens</strong><button type="button" class="help-btn" aria-label="What is Tokens?" aria-expanded="false" aria-controls="help-token-mgmt">?</button></summary>
+      <div class="help-text" id="help-token-mgmt" hidden>
+        Lists every access token this gateway has issued: its label, scopes
+        and id. Tap <b>List tokens</b> to load them, then <b>Revoke</b> to
+        permanently invalidate one — the device holding it loses access
+        immediately. Needs owner scope.
+      </div>
+      <div class="ops-note">(active tokens; requires owner scope)</div>
       <div><button id="list-tokens">List tokens</button></div>
       <div id="tokens">(not listed)</div>
-    </section>
-    <section id="share-create">
-      <strong>Create share link</strong> (requires owner scope)
+    </details>
+    <details id="share-create" class="ops-collapse">
+      <summary><strong>Create share link</strong><button type="button" class="help-btn" aria-label="What is Create share link?" aria-expanded="false" aria-controls="help-share-create">?</button></summary>
+      <div class="help-text" id="help-share-create" hidden>
+        Mints a link that lets someone without a token view (or, with
+        <b>approve</b> scope, also answer permission prompts on) one
+        session, for a limited time. Enter the session id and a
+        time-to-live in seconds, choose the scope, optionally cap how many
+        times it can be used, then tap <b>Create</b>. The link is shown
+        once here — copy it, since the raw token isn't shown again. Needs
+        owner scope.
+      </div>
+      <div class="ops-note">(requires owner scope)</div>
       <div>
         <input id="share-session" placeholder="session id" />
         <input
@@ -929,14 +989,29 @@
         <button id="share-create-btn">Create</button>
       </div>
       <div id="share-result"></div>
-    </section>
-    <section id="share-manage">
-      <strong>Manage shares</strong> (requires owner scope)
+    </details>
+    <details id="share-manage" class="ops-collapse">
+      <summary><strong>Manage shares</strong><button type="button" class="help-btn" aria-label="What is Manage shares?" aria-expanded="false" aria-controls="help-share-manage">?</button></summary>
+      <div class="help-text" id="help-share-manage" hidden>
+        Lists share links you've created, without exposing their tokens.
+        Tap <b>List shares</b> to load them, then <b>Revoke</b> to
+        invalidate one early. Needs owner scope.
+      </div>
+      <div class="ops-note">(requires owner scope)</div>
       <div><button id="list-shares">List shares</button></div>
       <div id="shares-list">(not listed)</div>
-    </section>
-    <section id="fork-session">
-      <strong>Fork session</strong> (requires write scope)
+    </details>
+    <details id="fork-session" class="ops-collapse">
+      <summary><strong>Fork session</strong><button type="button" class="help-btn" aria-label="What is Fork session?" aria-expanded="false" aria-controls="help-fork-session">?</button></summary>
+      <div class="help-text" id="help-fork-session" hidden>
+        Creates a new session that starts from a copy of an existing one.
+        Enter the parent session id (blank uses the one you're watching),
+        an optional name, and pick <b>include</b> to copy the full
+        transcript or <b>empty</b> for a blank session with just the
+        header — <b>from event</b> copies only up to a specific point. Tap
+        <b>Fork</b>. Needs write scope.
+      </div>
+      <div class="ops-note">(requires write scope)</div>
       <div>
         <input id="fork-id" placeholder="parent session id" />
         <input id="fork-name" placeholder="optional name" />
@@ -954,9 +1029,15 @@
         <button id="fork-btn">Fork</button>
       </div>
       <div id="fork-result"></div>
-    </section>
-    <section id="ws-target" hidden>
-      <strong>Workspace</strong> (target of the workspace controls below)
+    </details>
+    <details id="ws-target" class="ops-collapse" hidden>
+      <summary><strong>Workspace</strong><button type="button" class="help-btn" aria-label="What is Workspace?" aria-expanded="false" aria-controls="help-ws-target">?</button></summary>
+      <div class="help-text" id="help-ws-target" hidden>
+        Selects which workspace (project directory) the Workspace trust,
+        MCP servers and Tools sections below act on. Only shown when more
+        than one workspace is known to this gateway.
+      </div>
+      <div class="ops-note">(target of the workspace controls below)</div>
       <div style="margin-top: 6px">
         <select id="ws-target-select"></select>
       </div>
@@ -964,15 +1045,22 @@
         id="ws-target-status"
         style="margin-top: 4px; font-size: 0.8rem; color: #888"
       ></div>
-    </section>
-    <section id="ws-trust" hidden>
-      <strong>Workspace trust</strong>
-      <span
+    </details>
+    <details id="ws-trust" class="ops-collapse" hidden>
+      <summary><strong>Workspace trust</strong><span
         id="ws-trust-target"
         style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span>
-      (reads: write scope · changes: owner scope, applied by the local
-      operator on the daemon host)
+      ></span><button type="button" class="help-btn" aria-label="What is Workspace trust?" aria-expanded="false" aria-controls="help-ws-trust">?</button></summary>
+      <div class="help-text" id="help-ws-trust" hidden>
+        Shows whether this workspace is trusted — folder trust must be
+        enabled for the workspace controls here to take effect — and lets
+        you change it. Type an optional reason and tap <b>trust</b> or
+        <b>untrust</b>. Reading needs write scope; changing it needs owner
+        scope, and on older daemons a trust change requires a daemon
+        restart to take effect.
+      </div>
+      <div class="ops-note">(reads: write scope · changes: owner scope, applied by the local
+      operator on the daemon host)</div>
       <div
         id="ws-trust-body"
         style="
@@ -982,14 +1070,21 @@
           gap: 8px;
         "
       ></div>
-    </section>
-    <section id="ws-mcp" hidden>
-      <strong>Workspace MCP servers</strong>
-      <span
+    </details>
+    <details id="ws-mcp" class="ops-collapse" hidden>
+      <summary><strong>Workspace MCP servers</strong><span
         id="ws-mcp-target"
         style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span>
-      (reads: write scope · changes: owner scope)
+      ></span><button type="button" class="help-btn" aria-label="What are Workspace MCP servers?" aria-expanded="false" aria-controls="help-ws-mcp">?</button></summary>
+      <div class="help-text" id="help-ws-mcp" hidden>
+        Lists MCP servers configured for this workspace, with their status
+        and transport. Tap <b>enable</b>/<b>disable</b> to toggle one,
+        <b>add MCP server</b> to configure a new one (workspace-scoped
+        servers also get an <b>edit config</b> button), and
+        <b>reload MCP servers</b> to make the daemon re-read its MCP
+        config. Reading needs write scope; changes need owner scope.
+      </div>
+      <div class="ops-note">(reads: write scope · changes: owner scope)</div>
       <div
         id="ws-mcp-body"
         style="
@@ -1009,14 +1104,18 @@
           gap: 6px;
         "
       ></div>
-    </section>
-    <section id="ws-tools" hidden>
-      <strong>Workspace tools</strong>
-      <span
+    </details>
+    <details id="ws-tools" class="ops-collapse" hidden>
+      <summary><strong>Workspace tools</strong><span
         id="ws-tools-target"
         style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span>
-      (reads: write scope · changes: owner scope)
+      ></span><button type="button" class="help-btn" aria-label="What are Workspace tools?" aria-expanded="false" aria-controls="help-ws-tools">?</button></summary>
+      <div class="help-text" id="help-ws-tools" hidden>
+        Lists the tools available to the agent in this workspace. Filter by
+        name, and tap <b>enable</b>/<b>disable</b> next to a tool to turn
+        it on or off. Reading needs write scope; changes need owner scope.
+      </div>
+      <div class="ops-note">(reads: write scope · changes: owner scope)</div>
       <div
         id="ws-tools-body"
         style="
@@ -1026,32 +1125,63 @@
           gap: 8px;
         "
       ></div>
-    </section>
-      <section>
-        <strong>UI preferences</strong>
+    </details>
+      <details id="ui-prefs" class="ops-collapse">
+        <summary><strong>UI preferences</strong><button type="button" class="help-btn" aria-label="What are UI preferences?" aria-expanded="false" aria-controls="help-ui-prefs">?</button></summary>
+        <div class="help-text" id="help-ui-prefs" hidden>
+          Local display preferences for this browser tab only.
+          <b>Sticky tab bar</b> keeps the tab row pinned to the top of the
+          page while you scroll; it resets on reload.
+        </div>
         <div><label><input type="checkbox" id="sticky-tabs"> Sticky tab bar</label></div>
-      </section>
+      </details>
       </div>
       <div class="tab-pane" id="pane-diag">
-    <section id="watch-stream">
-      <strong>Stream</strong> (the watched session's event feed; the status
-      bar above shows its live state)
+    <details id="watch-stream" class="ops-collapse">
+      <summary><strong>Stream</strong><button type="button" class="help-btn" aria-label="What is Stream?" aria-expanded="false" aria-controls="help-watch-stream">?</button></summary>
+      <div class="help-text" id="help-watch-stream" hidden>
+        Controls the live event connection to the session shown in the
+        status bar and transcript on the Chat tab. <b>Watch</b>
+        (re)attaches and replays from the start; <b>Unwatch</b> stops
+        following and cancels the automatic reconnect retries — the turn
+        keeps running on the host either way. Self-heal normally reattaches
+        on its own after a drop; use this only if it gives up or you want
+        to deliberately detach.
+      </div>
+      <div class="ops-note">(the watched session's event feed; the status
+      bar above shows its live state)</div>
       <div>
         <button id="watch" title="Re-attach to the session on screen (full replay). Self-heal does this automatically with backoff when the stream dies.">Watch</button>
         <button id="stop" disabled title="Stop following this session's event stream and cancel the self-heal retries. The turn keeps running on the host.">Unwatch</button>
       </div>
-    </section>
-    <section id="owner-events">
-      <strong>Owner event stream</strong> (live audit feed; requires owner
-      scope)
+    </details>
+    <details id="owner-events" class="ops-collapse">
+      <summary><strong>Owner event stream</strong><button type="button" class="help-btn" aria-label="What is Owner event stream?" aria-expanded="false" aria-controls="help-owner-events">?</button></summary>
+      <div class="help-text" id="help-owner-events" hidden>
+        A live feed of every audit event across this gateway — pairing,
+        tokens, permission votes, policy decisions and more — not just the
+        session you're watching. Tap <b>Watch events</b> to connect,
+        <b>Stop</b> to disconnect. A "resync: dropped N frame(s)" line
+        means the connection missed some events; query the Audit log below
+        for the gap. Needs owner scope.
+      </div>
+      <div class="ops-note">(live audit feed; requires owner
+      scope)</div>
       <div>
         <button id="watch-events">Watch events</button>
         <button id="stop-events" disabled>Stop</button>
       </div>
       <pre id="events">(not connected)</pre>
-    </section>
-    <section id="audit-log">
-      <strong>Audit log</strong> (history; requires owner scope)
+    </details>
+    <details id="audit-log" class="ops-collapse">
+      <summary><strong>Audit log</strong><button type="button" class="help-btn" aria-label="What is Audit log?" aria-expanded="false" aria-controls="help-audit-log">?</button></summary>
+      <div class="help-text" id="help-audit-log" hidden>
+        Queries the gateway's permanent audit history — the same events
+        the live stream above shows, but searchable after the fact. Pick
+        an action to filter by (or any), a row limit, and tap
+        <b>Query</b>. Needs owner scope.
+      </div>
+      <div class="ops-note">(history; requires owner scope)</div>
       <div>
         <label
           >action
@@ -1082,25 +1212,49 @@
         <button id="audit-query">Query</button>
       </div>
       <pre id="audit">(not queried)</pre>
-    </section>
-    <section id="digest">
-      <strong>Missed while quiet (digest)</strong> (requires owner scope)
+    </details>
+    <details id="digest" class="ops-collapse">
+      <summary><strong>Missed while quiet (digest)</strong><button type="button" class="help-btn" aria-label="What is Missed while quiet?" aria-expanded="false" aria-controls="help-digest">?</button></summary>
+      <div class="help-text" id="help-digest" hidden>
+        Shows notifications that were suppressed by an active snooze or
+        quiet-hours window, grouped by device subscription and kind, so
+        you can see what you missed. Tap <b>Refresh digest</b> to load it.
+        Needs owner scope.
+      </div>
+      <div class="ops-note">(requires owner scope)</div>
       <div><button id="digest-btn">Refresh digest</button></div>
       <div id="digest-list">(not loaded)</div>
-    </section>
-    <section id="commands">
-      <strong>Commands</strong> (invoke targets the watched session)
+    </details>
+    <details id="commands" class="ops-collapse">
+      <summary><strong>Commands</strong><button type="button" class="help-btn" aria-label="What are Commands?" aria-expanded="false" aria-controls="help-commands">?</button></summary>
+      <div class="help-text" id="help-commands" hidden>
+        Lists slash commands available on the session you're watching,
+        with their description, scope and source. Grayed-out rows aren't
+        invocable by you. Tap <b>Invoke</b> on a row to run that command
+        against the watched session. Tap <b>List commands</b> to load
+        them.
+      </div>
+      <div class="ops-note">(invoke targets the watched session)</div>
       <div><button id="list-commands">List commands</button></div>
       <div id="commands-list">(not listed)</div>
-    </section>
-    <div style="margin-top: 8px">
-      <label style="font-size: 0.8rem; color: #888"
-        ><input type="checkbox" id="raw-toggle" /> raw JSON</label
-      >
-    </div>
-    <pre id="log" style="display: none"></pre>
+    </details>
+    <details id="raw-log" class="ops-collapse">
+      <summary><strong>Raw JSON log</strong><button type="button" class="help-btn" aria-label="What is Raw JSON log?" aria-expanded="false" aria-controls="help-raw-log">?</button></summary>
+      <div class="help-text" id="help-raw-log" hidden>
+        Toggles a raw JSON view of the gateway's event stream in place of
+        the rendered transcript — useful for debugging what the daemon
+        actually sent. Check <b>raw JSON</b> to switch the Chat tab's
+        transcript panel to this log; uncheck to go back to the normal
+        transcript.
       </div>
-    </div>
+      <div style="margin-top: 8px">
+        <label style="font-size: 0.8rem; color: #888"
+          ><input type="checkbox" id="raw-toggle" /> raw JSON</label
+        >
+      </div>
+      <pre id="log" style="display: none"></pre>
+    </details>
+      </div>
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
