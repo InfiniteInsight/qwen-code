@@ -252,1009 +252,1443 @@
       <h1>qwen-rc viewer</h1>
       <div class="tab-bar" id="tab-bar">
         <span class="status-dot" id="status-dot" title="checking…"></span>
-        <span class="tab active" data-tab="chat" role="tab" tabindex="0">Chat</span>
-        <span class="tab" data-tab="ops" role="tab" tabindex="0">Operations <input type="checkbox" class="pin-cb" data-pin="ops" title="Pin to Chat"></span>
-        <span class="tab" data-tab="settings" role="tab" tabindex="0">Settings <input type="checkbox" class="pin-cb" data-pin="settings" title="Pin to Chat"></span>
-        <span class="tab" data-tab="diag" role="tab" tabindex="0">Diagnostics <input type="checkbox" class="pin-cb" data-pin="diag" title="Pin to Chat"></span>
+        <span class="tab active" data-tab="chat" role="tab" tabindex="0"
+          >Chat</span
+        >
+        <span class="tab" data-tab="ops" role="tab" tabindex="0"
+          >Operations
+          <input
+            type="checkbox"
+            class="pin-cb"
+            data-pin="ops"
+            title="Pin to Chat"
+        /></span>
+        <span class="tab" data-tab="settings" role="tab" tabindex="0"
+          >Settings
+          <input
+            type="checkbox"
+            class="pin-cb"
+            data-pin="settings"
+            title="Pin to Chat"
+        /></span>
+        <span class="tab" data-tab="diag" role="tab" tabindex="0"
+          >Diagnostics
+          <input
+            type="checkbox"
+            class="pin-cb"
+            data-pin="diag"
+            title="Pin to Chat"
+        /></span>
       </div>
       <div class="tab-pane active" id="pane-chat">
-      <details id="session-controls" class="ops-collapse" open>
-      <summary><strong>Session controls</strong><button type="button" class="help-btn" aria-label="What is Session controls?" aria-expanded="false" aria-controls="help-session-controls">?</button></summary>
-      <div class="help-text" id="help-session-controls" hidden>
-        Controls for the session shown above. <b>Cancel turn</b> aborts
-        whatever the agent is doing right now without ending the session.
-        <b>End session</b> terminates it entirely. <b>Rewind</b> rolls it
-        back to an earlier turn (a turn picker appears once you choose one).
-        <b>Reconnect</b> only appears after the automatic self-heal gives up
-        after repeated retries — tap it to re-attach the event stream by
-        hand.
-      </div>
-      <button id="cancel-turn" title="Abort the turn running on the host (POST /session/:id/cancel)">Cancel turn</button>
-      <button id="end-session" title="Terminate the session on the host (POST /session/:id/end)">End session</button>
-      <button id="rewind-chat" title="Roll this session back to an earlier turn (POST /session/:id/rewind)">Rewind</button>
-      <!-- issue #48: hidden by default; self-heal shows it when the retry
+        <details id="session-controls" class="ops-collapse" open>
+          <summary>
+            <strong>Session controls</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Session controls?"
+              aria-expanded="false"
+              aria-controls="help-session-controls"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-session-controls" hidden>
+            Controls for the session shown above. <b>Cancel turn</b> aborts
+            whatever the agent is doing right now without ending the session.
+            <b>End session</b> terminates it entirely. <b>Rewind</b> rolls it
+            back to an earlier turn (a turn picker appears once you choose one).
+            <b>Reconnect</b> only appears after the automatic self-heal gives up
+            after repeated retries — tap it to re-attach the event stream by
+            hand.
+          </div>
+          <button
+            id="cancel-turn"
+            title="Abort the turn running on the host (POST /session/:id/cancel)"
+          >
+            Cancel turn
+          </button>
+          <button
+            id="end-session"
+            title="Terminate the session on the host (POST /session/:id/end)"
+          >
+            End session
+          </button>
+          <button
+            id="rewind-chat"
+            title="Roll this session back to an earlier turn (POST /session/:id/rewind)"
+          >
+            Rewind
+          </button>
+          <!-- issue #48: hidden by default; self-heal shows it when the retry
            budget is exhausted, and any fresh watch / Unwatch hides it -->
-      <button id="reconnect" style="display: none" title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now.">Reconnect</button>
-      <span id="session-verb-result" style="color: #888; font-size: 0.85rem"></span>
-      <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
-        <label>Rewind to
-          <select id="rewind-turn-pick" style="max-width: 28rem"></select>
-        </label>
-        <button id="rewind-pick-btn">Rewind</button>
-        <button id="rewind-pick-close" type="button">Cancel</button>
-        <span id="rewind-pick-result" style="color: #888; font-size: 0.85rem"></span>
-      </div>
-    </details>
-    <details id="dir-picker" class="ops-collapse" open>
-      <summary><strong>New conversation</strong><button type="button" class="help-btn" aria-label="What is New conversation?" aria-expanded="false" aria-controls="help-dir-picker">?</button></summary>
-      <div class="help-text" id="help-dir-picker" hidden>
-        Start or resume a session. Browse to a directory (or type an
-        absolute path) and tap <b>New conversation</b> to start fresh there.
-        <b>Recent workspaces</b> and the <b>Past conversations</b> list below
-        let you jump back into an existing session in that folder — filter
-        by name, and <b>Continue last</b> reopens the most recent one.
-      </div>
-      — pick a directory
-      <div
-        id="dir-current"
-        style="
-          font-family: ui-monospace, monospace;
-          font-size: 0.85rem;
-          overflow-wrap: anywhere;
-          margin: 0.4rem 0 0.2rem;
-        "
-      >
-        (not loaded)
-      </div>
-      <div
-        id="dir-list"
-        style="
-          max-height: 30vh;
-          overflow: auto;
-          border: 1px solid #ccc;
-          border-radius: 4px;
-          margin-bottom: 0.4rem;
-        "
-      >
-        (loading…)
-      </div>
-      <button id="dir-use">Use this folder</button>
-      <div style="margin-top: 0.6rem">
-        <label
-          >Or type an absolute path
-          <input id="new-session-cwd" placeholder="(daemon workspace)"
-        /></label>
-        <button id="new-session">New conversation</button>
-      </div>
-      <div id="dir-recent" style="margin-top: 0.6rem; font-size: 0.85rem">
-        (no recent workspaces)
-      </div>
-      <div style="margin-top: 0.6rem">
-        <strong>Past conversations</strong> — for the current folder
-        <div>
-          <button id="continue-last" disabled>Continue last</button>
-        </div>
-        <!-- issue #44: client-side filter over the already-fetched set;
+          <button
+            id="reconnect"
+            style="display: none"
+            title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now."
+          >
+            Reconnect
+          </button>
+          <span
+            id="session-verb-result"
+            style="color: #888; font-size: 0.85rem"
+          ></span>
+          <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
+            <label
+              >Rewind to
+              <select id="rewind-turn-pick" style="max-width: 28rem"></select>
+            </label>
+            <button id="rewind-pick-btn">Rewind</button>
+            <button id="rewind-pick-close" type="button">Cancel</button>
+            <span
+              id="rewind-pick-result"
+              style="color: #888; font-size: 0.85rem"
+            ></span>
+          </div>
+        </details>
+        <details id="dir-picker" class="ops-collapse" open>
+          <summary>
+            <strong>New conversation</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is New conversation?"
+              aria-expanded="false"
+              aria-controls="help-dir-picker"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-dir-picker" hidden>
+            Start or resume a session. Browse to a directory (or type an
+            absolute path) and tap <b>New conversation</b> to start fresh there.
+            <b>Recent workspaces</b> and the <b>Past conversations</b> list
+            below let you jump back into an existing session in that folder —
+            filter by name, and <b>Continue last</b> reopens the most recent
+            one.
+          </div>
+          — pick a directory
+          <div
+            id="dir-current"
+            style="
+              font-family: ui-monospace, monospace;
+              font-size: 0.85rem;
+              overflow-wrap: anywhere;
+              margin: 0.4rem 0 0.2rem;
+            "
+          >
+            (not loaded)
+          </div>
+          <div
+            id="dir-list"
+            style="
+              max-height: 30vh;
+              overflow: auto;
+              border: 1px solid #ccc;
+              border-radius: 4px;
+              margin-bottom: 0.4rem;
+            "
+          >
+            (loading…)
+          </div>
+          <button id="dir-use">Use this folder</button>
+          <div style="margin-top: 0.6rem">
+            <label
+              >Or type an absolute path
+              <input id="new-session-cwd" placeholder="(daemon workspace)"
+            /></label>
+            <button id="new-session">New conversation</button>
+          </div>
+          <div id="dir-recent" style="margin-top: 0.6rem; font-size: 0.85rem">
+            (no recent workspaces)
+          </div>
+          <div style="margin-top: 0.6rem">
+            <strong>Past conversations</strong> — for the current folder
+            <div>
+              <button id="continue-last" disabled>Continue last</button>
+            </div>
+            <!-- issue #44: client-side filter over the already-fetched set;
              matching + pager rules live in renderPastConversations -->
-        <input
-          id="past-filter"
-          placeholder="filter by name"
-          style="margin-top: 0.4rem; width: 100%; box-sizing: border-box"
-        />
-        <!-- issue #36: bounded — fixed-height scroll box; #past-pager holds
+            <input
+              id="past-filter"
+              placeholder="filter by name"
+              style="margin-top: 0.4rem; width: 100%; box-sizing: border-box"
+            />
+            <!-- issue #36: bounded — fixed-height scroll box; #past-pager holds
              the prev/next controls (JS-rendered, empty for a single page) -->
-        <div
-          id="past-list"
-          style="margin-top: 0.4rem; font-size: 0.85rem; max-height: 400px; overflow-y: auto"
-        >
-          (none)
-        </div>
-        <div id="past-pager" style="margin-top: 0.3rem; font-size: 0.8rem"></div>
-      </div>
-    </details>
-      <div class="pin-area" id="pin-area"></div>
-    <div id="status"></div>
-    <div id="cards"></div>
-    <style>
-      #transcript {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        padding: 8px;
-        background: #111;
-        border-radius: 6px;
-        min-height: 60px;
-        max-height: 75vh;
-        overflow-y: auto;
-      }
-      #transcript-wrap {
-        position: relative;
-      }
-      #jump-bottom {
-        position: absolute;
-        bottom: 8px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 2;
-        border-radius: 999px;
-        background: #fff;
-        color: #111;
-        border: 1px solid #ccc;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-        font-size: 0.85rem;
-      }
-      #transcript .bubble {
-        max-width: 92%;
-        padding: 8px 10px;
-        border-radius: 10px;
-        white-space: pre-wrap;
-        word-break: break-word;
-        line-height: 1.4;
-        font-size: 0.95rem;
-      }
-      #transcript .role {
-        font-size: 0.7rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        opacity: 0.6;
-        margin-bottom: 2px;
-      }
-      #transcript .user {
-        align-self: flex-end;
-        background: #1d4ed8;
-        color: #fff;
-      }
-      #transcript .asst {
-        align-self: flex-start;
-        background: #26292e;
-        color: #e6e6e6;
-      }
-      #transcript .thought {
-        align-self: flex-start;
-        background: transparent;
-        color: #8a8f98;
-        font-style: italic;
-        font-size: 0.85rem;
-        border-left: 2px solid #3a3f47;
-      }
-      /* Folded thought: one-line clickable header + hidden full text. */
-      #transcript .thought .thought-head {
-        cursor: pointer;
-        user-select: none;
-        opacity: 0.75;
-      }
-      #transcript .thought .thought-head:hover {
-        opacity: 1;
-      }
-      #transcript .thought .thought-body {
-        display: block;
-        margin-top: 4px;
-        opacity: 0.9;
-      }
-      /* Author display above overrides the UA [hidden] rule — reassert it. */
-      #transcript .thought .thought-body[hidden] {
-        display: none;
-      }
-      /* Processing indicator while a sent prompt is being processed. */
-      #transcript .processing {
-        align-self: flex-start;
-        background: transparent;
-        color: #8a8f98;
-        font-style: italic;
-        font-size: 0.85rem;
-        border-left: 2px solid #3a3f47;
-      }
-      #transcript .processing .proc-spin {
-        display: inline-block;
-        animation: proc-pulse 1.3s ease-in-out infinite;
-      }
-      @keyframes proc-pulse {
-        0%,
-        100% {
-          opacity: 0.35;
-        }
-        50% {
-          opacity: 1;
-        }
-      }
-      #transcript .tool {
-        align-self: flex-start;
-        background: #17203a;
-        color: #cdd6f4;
-        font-family: ui-monospace, monospace;
-        font-size: 0.85rem;
-      }
-      #transcript .system {
-        align-self: center;
-        color: #9aa0a6;
-        font-size: 0.8rem;
-      }
-      #transcript .system.err {
-        color: #f38ba8;
-        font-weight: 600;
-      }
-      #transcript .tool .st {
-        opacity: 0.7;
-      }
-      /* Subagent activity nested inside the parent agent's tool row. */
-      #transcript .subagent {
-        margin: 6px 0 0 6px;
-        padding-left: 10px;
-        border-left: 2px solid #3a4a7a;
-      }
-      #transcript .subagent .subagent-head {
-        opacity: 0.85;
-      }
-      #transcript .subagent .subagent-time {
-        opacity: 0.6;
-      }
-      #transcript .subagent .subagent-text {
-        margin-top: 4px;
-      }
-      #transcript .subagent .subtool {
-        margin-top: 4px;
-        opacity: 0.85;
-      }
-      #transcript .subagent .subtool .st {
-        opacity: 0.7;
-      }
-      /* Per-message "Fork from here" (add-session-forking web gap): a small
+            <div
+              id="past-list"
+              style="
+                margin-top: 0.4rem;
+                font-size: 0.85rem;
+                max-height: 400px;
+                overflow-y: auto;
+              "
+            >
+              (none)
+            </div>
+            <div
+              id="past-pager"
+              style="margin-top: 0.3rem; font-size: 0.8rem"
+            ></div>
+          </div>
+        </details>
+        <div class="pin-area" id="pin-area"></div>
+        <div id="status"></div>
+        <div id="cards"></div>
+        <style>
+          #transcript {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 8px;
+            background: #111;
+            border-radius: 6px;
+            min-height: 60px;
+            max-height: 75vh;
+            overflow-y: auto;
+          }
+          #transcript-wrap {
+            position: relative;
+          }
+          #jump-bottom {
+            position: absolute;
+            bottom: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 2;
+            border-radius: 999px;
+            background: #fff;
+            color: #111;
+            border: 1px solid #ccc;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+            font-size: 0.85rem;
+          }
+          #transcript .bubble {
+            max-width: 92%;
+            padding: 8px 10px;
+            border-radius: 10px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.4;
+            font-size: 0.95rem;
+          }
+          #transcript .role {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            opacity: 0.6;
+            margin-bottom: 2px;
+          }
+          #transcript .user {
+            align-self: flex-end;
+            background: #1d4ed8;
+            color: #fff;
+          }
+          #transcript .asst {
+            align-self: flex-start;
+            background: #26292e;
+            color: #e6e6e6;
+          }
+          #transcript .thought {
+            align-self: flex-start;
+            background: transparent;
+            color: #8a8f98;
+            font-style: italic;
+            font-size: 0.85rem;
+            border-left: 2px solid #3a3f47;
+          }
+          /* Folded thought: one-line clickable header + hidden full text. */
+          #transcript .thought .thought-head {
+            cursor: pointer;
+            user-select: none;
+            opacity: 0.75;
+          }
+          #transcript .thought .thought-head:hover {
+            opacity: 1;
+          }
+          #transcript .thought .thought-body {
+            display: block;
+            margin-top: 4px;
+            opacity: 0.9;
+          }
+          /* Author display above overrides the UA [hidden] rule — reassert it. */
+          #transcript .thought .thought-body[hidden] {
+            display: none;
+          }
+          /* Processing indicator while a sent prompt is being processed. */
+          #transcript .processing {
+            align-self: flex-start;
+            background: transparent;
+            color: #8a8f98;
+            font-style: italic;
+            font-size: 0.85rem;
+            border-left: 2px solid #3a3f47;
+          }
+          #transcript .processing .proc-spin {
+            display: inline-block;
+            animation: proc-pulse 1.3s ease-in-out infinite;
+          }
+          @keyframes proc-pulse {
+            0%,
+            100% {
+              opacity: 0.35;
+            }
+            50% {
+              opacity: 1;
+            }
+          }
+          #transcript .tool {
+            align-self: flex-start;
+            background: #17203a;
+            color: #cdd6f4;
+            font-family: ui-monospace, monospace;
+            font-size: 0.85rem;
+          }
+          #transcript .system {
+            align-self: center;
+            color: #9aa0a6;
+            font-size: 0.8rem;
+          }
+          #transcript .system.err {
+            color: #f38ba8;
+            font-weight: 600;
+          }
+          #transcript .tool .st {
+            opacity: 0.7;
+          }
+          /* Subagent activity nested inside the parent agent's tool row. */
+          #transcript .subagent {
+            margin: 6px 0 0 6px;
+            padding-left: 10px;
+            border-left: 2px solid #3a4a7a;
+          }
+          #transcript .subagent .subagent-head {
+            opacity: 0.85;
+          }
+          #transcript .subagent .subagent-time {
+            opacity: 0.6;
+          }
+          #transcript .subagent .subagent-text {
+            margin-top: 4px;
+          }
+          #transcript .subagent .subtool {
+            margin-top: 4px;
+            opacity: 0.85;
+          }
+          #transcript .subagent .subtool .st {
+            opacity: 0.7;
+          }
+          /* Per-message "Fork from here" (add-session-forking web gap): a small
          action under a COMPLETED assistant turn. */
-      #transcript .bubble-fork {
-        align-self: flex-start;
-        margin-top: -4px;
-      }
-      #transcript .bubble-fork button {
-        background: transparent;
-        border: 1px solid #3a3f47;
-        border-radius: 6px;
-        color: #8a8f98;
-        font-size: 0.72rem;
-        padding: 2px 8px;
-        cursor: pointer;
-      }
-      #transcript .bubble-fork button:hover {
-        color: #e6e6e6;
-        border-color: #8a8f98;
-      }
-      /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
-      #lineage {
-        margin-top: 8px;
-        padding: 4px 8px;
-        background: #14171c;
-        border-radius: 6px;
-        color: #9aa0a6;
-        font-family: ui-monospace, monospace;
-        font-size: 0.78rem;
-        word-break: break-word;
-      }
-      /* Crash-recovery banner (add-mid-turn-recovery §7): non-blocking, above
+          #transcript .bubble-fork {
+            align-self: flex-start;
+            margin-top: -4px;
+          }
+          #transcript .bubble-fork button {
+            background: transparent;
+            border: 1px solid #3a3f47;
+            border-radius: 6px;
+            color: #8a8f98;
+            font-size: 0.72rem;
+            padding: 2px 8px;
+            cursor: pointer;
+          }
+          #transcript .bubble-fork button:hover {
+            color: #e6e6e6;
+            border-color: #8a8f98;
+          }
+          /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
+          #lineage {
+            margin-top: 8px;
+            padding: 4px 8px;
+            background: #14171c;
+            border-radius: 6px;
+            color: #9aa0a6;
+            font-family: ui-monospace, monospace;
+            font-size: 0.78rem;
+            word-break: break-word;
+          }
+          /* Crash-recovery banner (add-mid-turn-recovery §7): non-blocking, above
          the transcript. The unrecovered variant persists until the user's
          next prompt is accepted; the .ok variant auto-fades after a few
          seconds. */
-      #crash-banner {
-        margin-top: 8px;
-        padding: 6px 10px;
-        background: #241318;
-        border: 1px solid #f38ba8;
-        border-radius: 6px;
-        color: #f38ba8;
-        font-size: 0.85rem;
-      }
-      #crash-banner.ok {
-        background: #122018;
-        border-color: #a6e3a1;
-        color: #a6e3a1;
-      }
-      /* Aggregated multi-daemon sessions/search rows (spec 4.5/4.6/4.7). */
-      .daemon-pill {
-        display: inline-block;
-        background: #1d4ed8;
-        color: #fff;
-        border-radius: 8px;
-        font-size: 0.7rem;
-        padding: 1px 8px;
-        margin-right: 6px;
-      }
-      .daemon-status-row {
-        color: #f38ba8;
-        font-size: 0.85rem;
-      }
-      .daemon-status-row a {
-        color: #f38ba8;
-      }
-      .agg-session-row {
-        padding: 3px 0;
-        border-bottom: 1px solid #26292e;
-        font-family: ui-monospace, monospace;
-        font-size: 0.85rem;
-      }
-      .agg-session-row .open {
-        cursor: pointer;
-      }
-      .gpu-row {
-        margin: 0.3rem 0 0.3rem 1.2rem;
-        font-size: 0.85rem;
-      }
-      .gpu-bar {
-        display: inline-block;
-        width: 120px;
-        height: 10px;
-        background: #333;
-        border-radius: 4px;
-        vertical-align: middle;
-        overflow: hidden;
-      }
-      .gpu-bar-fill {
-        height: 100%;
-        background: #4a4;
-        border-radius: 4px 0 0 4px;
-      }
-      .gpu-bar-fill.warn {
-        background: #ca0;
-      }
-      .gpu-bar-fill.crit {
-        background: #c44;
-      }
-      .gpu-proc {
-        margin-left: 1.6rem;
-        font-size: 0.8rem;
-        color: #888;
-      }
-    </style>
-    <div
-      id="session-footer"
-      style="
-        display: none;
-        margin-top: 8px;
-        padding: 6px 8px;
-        background: #14171c;
-        border-radius: 6px;
-        color: #9aa0a6;
-        font-family: ui-monospace, monospace;
-        font-size: 0.8rem;
-        line-height: 1.5;
-        word-break: break-word;
-      "
-    ></div>
-    <div id="session-title" hidden style="
-      margin-top:4px;padding:4px 8px;font-size:0.85rem;color:#b0b8c1;
-      font-weight:600;border-bottom:1px solid #333;
-    "></div>
-    <div id="lineage" hidden></div>
-    <div id="transcript-wrap">
-      <div id="transcript"></div>
-      <button id="jump-bottom" hidden>↓ jump to bottom</button>
-    </div>
-    <section id="composer" style="display: none">
-      <textarea
-        id="prompt"
-        rows="3"
-        style="width: 100%"
-        placeholder="type a prompt to send to the watched session"
-      ></textarea>
-      <button id="send">Send</button>
-      <button id="dictate">Dictate</button>
-      <select id="dictate-lang" title="dictation language">
-        <option value="">auto</option>
-        <option value="en-US">English (US)</option>
-        <option value="en-GB">English (UK)</option>
-        <option value="es-ES">Spanish</option>
-        <option value="fr-FR">French</option>
-        <option value="de-DE">German</option>
-        <option value="pt-BR">Portuguese (BR)</option>
-        <option value="hi-IN">Hindi</option>
-        <option value="zh-CN">Chinese</option>
-        <option value="ja-JP">Japanese</option>
-      </select>
-      <label
-        title="when dictation ends on a pause, send the prompt automatically"
-        ><input id="dictate-autosend" type="checkbox" /> auto-send</label
-      >
-      <span
-        id="dictate-interim"
-        aria-live="polite"
-        style="color: #888; font-size: 0.85rem"
-      ></span>
-      <div id="idle-suggest" style="margin-top: 6px; font-size: 0.85rem">
-        <label title="next-step suggestions when this session goes idle"
-          ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
-          suggestions</label
-        >
-        <span id="idle-suggest-status" style="color: #888"></span>
-      </div>
-      <div
-        id="idle-chips"
-        aria-live="polite"
-        style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
-      ></div>
-    </section>
-      </div>
-      <div class="tab-pane" id="pane-ops">
-    <details id="daemons" class="ops-collapse">
-      <summary><strong>Daemons</strong><button type="button" class="help-btn" aria-label="What is Daemons?" aria-expanded="false" aria-controls="help-daemons">?</button></summary>
-      <div class="help-text" id="help-daemons" hidden>
-        Lists the other qwen daemons this gateway knows about, with a health
-        dot for each. Tap <b>Sessions on all daemons</b> to see every running
-        session across them, or <b>Refresh GPUs</b> to check GPU load. Stays
-        empty unless the gateway has a multi-daemon registry
-        (<code>clients.toml</code>) and your token has owner scope.
-      </div>
-      <div class="ops-note">(multi-daemon registry; requires owner scope)</div>
-      <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
-        (no registry — this daemon has no clients.toml, or your token lacks
-        owner scope)
-      </div>
-      <div id="daemons-body" hidden>
-        <div id="daemons-rows"></div>
-        <div style="margin-top: 6px">
-          <button id="daemons-refresh-sessions">Sessions on all daemons</button>
-          <button id="daemons-refresh-gpus">Refresh GPUs</button>
+          #crash-banner {
+            margin-top: 8px;
+            padding: 6px 10px;
+            background: #241318;
+            border: 1px solid #f38ba8;
+            border-radius: 6px;
+            color: #f38ba8;
+            font-size: 0.85rem;
+          }
+          #crash-banner.ok {
+            background: #122018;
+            border-color: #a6e3a1;
+            color: #a6e3a1;
+          }
+          /* Aggregated multi-daemon sessions/search rows (spec 4.5/4.6/4.7). */
+          .daemon-pill {
+            display: inline-block;
+            background: #1d4ed8;
+            color: #fff;
+            border-radius: 8px;
+            font-size: 0.7rem;
+            padding: 1px 8px;
+            margin-right: 6px;
+          }
+          .daemon-status-row {
+            color: #f38ba8;
+            font-size: 0.85rem;
+          }
+          .daemon-status-row a {
+            color: #f38ba8;
+          }
+          .agg-session-row {
+            padding: 3px 0;
+            border-bottom: 1px solid #26292e;
+            font-family: ui-monospace, monospace;
+            font-size: 0.85rem;
+          }
+          .agg-session-row .open {
+            cursor: pointer;
+          }
+          .gpu-row {
+            margin: 0.3rem 0 0.3rem 1.2rem;
+            font-size: 0.85rem;
+          }
+          .gpu-bar {
+            display: inline-block;
+            width: 120px;
+            height: 10px;
+            background: #333;
+            border-radius: 4px;
+            vertical-align: middle;
+            overflow: hidden;
+          }
+          .gpu-bar-fill {
+            height: 100%;
+            background: #4a4;
+            border-radius: 4px 0 0 4px;
+          }
+          .gpu-bar-fill.warn {
+            background: #ca0;
+          }
+          .gpu-bar-fill.crit {
+            background: #c44;
+          }
+          .gpu-proc {
+            margin-left: 1.6rem;
+            font-size: 0.8rem;
+            color: #888;
+          }
+        </style>
+        <div
+          id="session-footer"
+          style="
+            display: none;
+            margin-top: 8px;
+            padding: 6px 8px;
+            background: #14171c;
+            border-radius: 6px;
+            color: #9aa0a6;
+            font-family: ui-monospace, monospace;
+            font-size: 0.8rem;
+            line-height: 1.5;
+            word-break: break-word;
+          "
+        ></div>
+        <div
+          id="session-title"
+          hidden
+          style="
+            margin-top: 4px;
+            padding: 4px 8px;
+            font-size: 0.85rem;
+            color: #b0b8c1;
+            font-weight: 600;
+            border-bottom: 1px solid #333;
+          "
+        ></div>
+        <div id="lineage" hidden></div>
+        <div id="transcript-wrap">
+          <div id="transcript"></div>
+          <button id="jump-bottom" hidden>↓ jump to bottom</button>
+        </div>
+        <section id="composer" style="display: none">
+          <textarea
+            id="prompt"
+            rows="3"
+            style="width: 100%"
+            placeholder="type a prompt to send to the watched session"
+          ></textarea>
+          <button id="send">Send</button>
+          <button id="dictate">Dictate</button>
+          <select id="dictate-lang" title="dictation language">
+            <option value="">auto</option>
+            <option value="en-US">English (US)</option>
+            <option value="en-GB">English (UK)</option>
+            <option value="es-ES">Spanish</option>
+            <option value="fr-FR">French</option>
+            <option value="de-DE">German</option>
+            <option value="pt-BR">Portuguese (BR)</option>
+            <option value="hi-IN">Hindi</option>
+            <option value="zh-CN">Chinese</option>
+            <option value="ja-JP">Japanese</option>
+          </select>
+          <label
+            title="when dictation ends on a pause, send the prompt automatically"
+            ><input id="dictate-autosend" type="checkbox" /> auto-send</label
+          >
           <span
-            id="daemons-updated"
+            id="dictate-interim"
+            aria-live="polite"
             style="color: #888; font-size: 0.85rem"
           ></span>
-        </div>
-        <div id="daemons-sessions" hidden>(not fetched)</div>
-        <div id="daemons-gpus" hidden>(not fetched)</div>
+          <div id="idle-suggest" style="margin-top: 6px; font-size: 0.85rem">
+            <label title="next-step suggestions when this session goes idle"
+              ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
+              suggestions</label
+            >
+            <span id="idle-suggest-status" style="color: #888"></span>
+          </div>
+          <div
+            id="idle-chips"
+            aria-live="polite"
+            style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
+          ></div>
+        </section>
       </div>
-    </details>
-    <details id="session-tree" class="ops-collapse">
-      <summary><strong>Sessions</strong><button type="button" class="help-btn" aria-label="What is Sessions?" aria-expanded="false" aria-controls="help-session-tree">?</button></summary>
-      <div class="help-text" id="help-session-tree" hidden>
-        Shows recorded sessions as a fork tree, so you can see which session
-        was forked from which. Tap <b>List sessions</b> to load it. Needs
-        owner scope.
-      </div>
-      <div class="ops-note">(fork tree; requires owner scope)</div>
-      <div><button id="list-sessions">List sessions</button></div>
-      <pre id="sessions">(not listed)</pre>
-    </details>
-    <details id="rewind" class="ops-collapse">
-      <summary><strong>Rewind</strong><button type="button" class="help-btn" aria-label="What is Rewind?" aria-expanded="false" aria-controls="help-rewind">?</button></summary>
-      <div class="help-text" id="help-rewind" hidden>
-        Rolls a session back to an earlier turn. Enter the session id (blank
-        means the session you're watching) and the turn number to rewind to:
-        0 discards every turn, and the latest turn is a no-op. Tick
-        <b>restore files</b> to also put files back to how they were at that
-        turn's snapshot. Needs owner scope.
-      </div>
-      <div class="ops-note">(roll a session back to an earlier turn; requires owner scope)</div>
-      <div>
-        <input id="rewind-id" placeholder="session id (blank = watched)" />
-        <input
-          id="rewind-turn"
-          type="number"
-          min="0"
-          placeholder="to turn"
-          title="Turn index to rewind to. 0 discards every turn; the tip is a no-op."
-        />
-        <label
-          title="Also restore files to their state at that turn's snapshot"
-          ><input id="rewind-files" type="checkbox" /> restore files</label
-        >
-        <button id="rewind-btn">Rewind</button>
-      </div>
-      <div id="rewind-result"></div>
-    </details>
-    <details id="reviews" class="ops-collapse">
-      <summary><strong>Reviews</strong><button type="button" class="help-btn" aria-label="What is Reviews?" aria-expanded="false" aria-controls="help-reviews">?</button></summary>
-      <div class="help-text" id="help-reviews" hidden>
-        Lists code reviews run on this host, one per row: status, review id,
-        the session it belongs to, how many findings it produced, and when it
-        was triggered. Tap <b>List reviews</b>; use the dropdown to show only
-        running, succeeded, failed or cancelled reviews. A review that is
-        still running has a <b>cancel</b> button. Needs session-read scope.
-      </div>
-      <div class="ops-note">(requires session-read scope)</div>
-      <div>
-        <button id="reviews-list">List reviews</button>
-        <select id="reviews-status" title="filter by status">
-          <option value="">all</option>
-          <option value="running">running</option>
-          <option value="succeeded">succeeded</option>
-          <option value="failed">failed</option>
-          <option value="cancelled">cancelled</option>
-        </select>
-      </div>
-      <div id="reviews-body">(not listed)</div>
-    </details>
-    <details id="workflows" class="ops-collapse">
-      <summary><strong>Workflows</strong><button type="button" class="help-btn" aria-label="What is Workflows?" aria-expanded="false" aria-controls="help-workflows">?</button></summary>
-      <div class="help-text" id="help-workflows" hidden>
-        Lists workflow runs on this host, one per row: status, workflow name,
-        run id, current phase, how many agents it has used and how many tokens
-        it has spent. Tap <b>List runs</b> to load them. A run that is still
-        running has a <b>cancel</b> button. Needs session-read scope.
-      </div>
-      <div class="ops-note">(requires session-read scope)</div>
-      <div><button id="workflows-list">List runs</button></div>
-      <div id="workflows-body">(not listed)</div>
-    </details>
-    <details id="search" class="ops-collapse">
-      <summary><strong>Search</strong><button type="button" class="help-btn" aria-label="What is Search?" aria-expanded="false" aria-controls="help-search">?</button></summary>
-      <div class="help-text" id="help-search" hidden>
-        Full-text search across every recorded session transcript. Type a
-        query (<code>AND</code> works, e.g. <code>oauth refresh AND error</code>),
-        optionally narrow by message kind or date range, then tap
-        <b>Search</b>. <b>rank (BM25)</b> orders results by relevance; it
-        needs the index built with <code>qwen-rc reindex</code> and otherwise
-        falls back to a slower scan. <b>all daemons</b> also searches the other
-        daemons. Shortcut: &#8984;K / Ctrl-K from anywhere. Needs owner scope.
-      </div>
-      <div class="ops-note">(transcripts; requires owner scope)
-      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span></div>
-      <div>
-        <input id="search-q" placeholder="oauth refresh AND error" />
-        <select id="search-kind">
-          <option value="all">all</option>
-          <option value="user">user</option>
-          <option value="assistant">assistant</option>
-          <option value="tool">tool</option>
-        </select>
-        <button id="search-btn">Search</button>
-      </div>
-      <div>
-        <label>since <input id="search-since" type="datetime-local" /></label>
-        <label>until <input id="search-until" type="datetime-local" /></label>
-        <label
-          title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
-          ><input id="search-rank" type="checkbox" /> rank (BM25)</label
-        >
-        <label
-          id="search-all-daemons-label"
-          title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
-          ><input id="search-all-daemons" type="checkbox" disabled /> all
-          daemons</label
-        >
-      </div>
-      <div id="search-results">(not searched)</div>
-    </details>
-    <details id="perm-rules" class="ops-collapse" hidden>
-      <summary><strong>Permission rules</strong><span
-        id="perm-rules-target"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span><button type="button" class="help-btn" aria-label="What are Permission rules?" aria-expanded="false" aria-controls="help-perm-rules">?</button></summary>
-      <div class="help-text" id="help-perm-rules" hidden>
-        The allow / ask / deny lists that decide what the agent may do.
-        <b>allow</b> runs without a prompt, <b>ask</b> always prompts you, and
-        <b>deny</b> is blocked. Pick a scope (<b>workspace</b> = this
-        project, <b>user</b> = all your projects), type a rule such as
-        <code>shell(git status:*)</code> or <code>edit(./docs/**)</code>, tap
-        <b>add</b>, then <b>save</b> that list &mdash; nothing is applied
-        until you save. Needs an owner token and a trusted workspace. If
-        saving says a session is required, send a prompt in that workspace and
-        retry.
-      </div>
-      <div
-        id="perm-rules-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </details>
-    <details id="perm-decisions" class="ops-collapse" hidden>
-      <summary><strong>Permission decisions</strong><span
-        id="perm-decisions-note"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-        >gateway-visible decisions only</span
-      ><button type="button" class="help-btn" aria-label="What are Permission decisions?" aria-expanded="false" aria-controls="help-perm-decisions">?</button></summary>
-      <div class="help-text" id="help-perm-decisions" hidden>
-        A read-only log of recent permission decisions the gateway saw: which
-        rule fired for a tool call, and the votes you made on permission
-        prompts. Filter by tool or rule id and tap <b>query</b> to check that
-        a rule you set behaves the way you intended. Decisions the daemon
-        makes locally never reach the gateway, so they don't appear here.
-      </div>
-      <div
-        id="perm-decisions-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </details>
-    <details id="perm-overlays" class="ops-collapse" hidden>
-      <summary><strong>Session overrides</strong><span
-        id="perm-overlays-note"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-        >ephemeral — lost when the gateway restarts</span
-      ><button type="button" class="help-btn" aria-label="What are Session overrides?" aria-expanded="false" aria-controls="help-perm-overlays">?</button></summary>
-      <div class="help-text" id="help-perm-overlays" hidden>
-        Temporary permission rules that expire on their own. Choose a session
-        (blank = all sessions), a tool, an action (allow / deny / prompt) and
-        how long it lasts, then tap <b>set</b>. Tap <b>revoke</b> on a row to
-        remove one early. Overrides live only in the gateway's memory, so
-        restarting the gateway clears them.
-      </div>
-      <div
-        id="perm-overlays-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </details>
+      <div class="tab-pane" id="pane-ops">
+        <details id="daemons" class="ops-collapse">
+          <summary>
+            <strong>Daemons</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Daemons?"
+              aria-expanded="false"
+              aria-controls="help-daemons"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-daemons" hidden>
+            Lists the other qwen daemons this gateway knows about, with a health
+            dot for each. Tap <b>Sessions on all daemons</b> to see every
+            running session across them, or <b>Refresh GPUs</b> to check GPU
+            load. Stays empty unless the gateway has a multi-daemon registry
+            (<code>clients.toml</code>) and your token has owner scope.
+          </div>
+          <div class="ops-note">
+            (multi-daemon registry; requires owner scope)
+          </div>
+          <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
+            (no registry — this daemon has no clients.toml, or your token lacks
+            owner scope)
+          </div>
+          <div id="daemons-body" hidden>
+            <div id="daemons-rows"></div>
+            <div style="margin-top: 6px">
+              <button id="daemons-refresh-sessions">
+                Sessions on all daemons
+              </button>
+              <button id="daemons-refresh-gpus">Refresh GPUs</button>
+              <span
+                id="daemons-updated"
+                style="color: #888; font-size: 0.85rem"
+              ></span>
+            </div>
+            <div id="daemons-sessions" hidden>(not fetched)</div>
+            <div id="daemons-gpus" hidden>(not fetched)</div>
+          </div>
+        </details>
+        <details id="session-tree" class="ops-collapse">
+          <summary>
+            <strong>Sessions</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Sessions?"
+              aria-expanded="false"
+              aria-controls="help-session-tree"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-session-tree" hidden>
+            Shows recorded sessions as a fork tree, so you can see which session
+            was forked from which. Tap <b>List sessions</b> to load it. Needs
+            owner scope.
+          </div>
+          <div class="ops-note">(fork tree; requires owner scope)</div>
+          <div><button id="list-sessions">List sessions</button></div>
+          <pre id="sessions">(not listed)</pre>
+        </details>
+        <details id="rewind" class="ops-collapse">
+          <summary>
+            <strong>Rewind</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Rewind?"
+              aria-expanded="false"
+              aria-controls="help-rewind"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-rewind" hidden>
+            Rolls a session back to an earlier turn. Enter the session id (blank
+            means the session you're watching) and the turn number to rewind to:
+            0 discards every turn, and the latest turn is a no-op. Tick
+            <b>restore files</b> to also put files back to how they were at that
+            turn's snapshot. Needs owner scope.
+          </div>
+          <div class="ops-note">
+            (roll a session back to an earlier turn; requires owner scope)
+          </div>
+          <div>
+            <input id="rewind-id" placeholder="session id (blank = watched)" />
+            <input
+              id="rewind-turn"
+              type="number"
+              min="0"
+              placeholder="to turn"
+              title="Turn index to rewind to. 0 discards every turn; the tip is a no-op."
+            />
+            <label
+              title="Also restore files to their state at that turn's snapshot"
+              ><input id="rewind-files" type="checkbox" /> restore files</label
+            >
+            <button id="rewind-btn">Rewind</button>
+          </div>
+          <div id="rewind-result"></div>
+        </details>
+        <details id="reviews" class="ops-collapse">
+          <summary>
+            <strong>Reviews</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Reviews?"
+              aria-expanded="false"
+              aria-controls="help-reviews"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-reviews" hidden>
+            Lists code reviews run on this host, one per row: status, review id,
+            the session it belongs to, how many findings it produced, and when
+            it was triggered. Tap <b>List reviews</b>; use the dropdown to show
+            only running, succeeded, failed or cancelled reviews. A review that
+            is still running has a <b>cancel</b> button. Needs session-read
+            scope.
+          </div>
+          <div class="ops-note">(requires session-read scope)</div>
+          <div>
+            <button id="reviews-list">List reviews</button>
+            <select id="reviews-status" title="filter by status">
+              <option value="">all</option>
+              <option value="running">running</option>
+              <option value="succeeded">succeeded</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </div>
+          <div id="reviews-body">(not listed)</div>
+        </details>
+        <details id="workflows" class="ops-collapse">
+          <summary>
+            <strong>Workflows</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Workflows?"
+              aria-expanded="false"
+              aria-controls="help-workflows"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-workflows" hidden>
+            Lists workflow runs on this host, one per row: status, workflow
+            name, run id, current phase, how many agents it has used and how
+            many tokens it has spent. Tap <b>List runs</b> to load them. A run
+            that is still running has a <b>cancel</b> button. Needs session-read
+            scope.
+          </div>
+          <div class="ops-note">(requires session-read scope)</div>
+          <div><button id="workflows-list">List runs</button></div>
+          <div id="workflows-body">(not listed)</div>
+        </details>
+        <details id="search" class="ops-collapse">
+          <summary>
+            <strong>Search</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Search?"
+              aria-expanded="false"
+              aria-controls="help-search"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-search" hidden>
+            Full-text search across every recorded session transcript. Type a
+            query (<code>AND</code> works, e.g.
+            <code>oauth refresh AND error</code>), optionally narrow by message
+            kind or date range, then tap <b>Search</b>.
+            <b>rank (BM25)</b> orders results by relevance; it needs the index
+            built with <code>qwen-rc reindex</code> and otherwise falls back to
+            a slower scan. <b>all daemons</b> also searches the other daemons.
+            Shortcut: &#8984;K / Ctrl-K from anywhere. Needs owner scope.
+          </div>
+          <div class="ops-note">
+            (transcripts; requires owner scope)
+            <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
+          </div>
+          <div>
+            <input id="search-q" placeholder="oauth refresh AND error" />
+            <select id="search-kind">
+              <option value="all">all</option>
+              <option value="user">user</option>
+              <option value="assistant">assistant</option>
+              <option value="tool">tool</option>
+            </select>
+            <button id="search-btn">Search</button>
+          </div>
+          <div>
+            <label
+              >since <input id="search-since" type="datetime-local"
+            /></label>
+            <label
+              >until <input id="search-until" type="datetime-local"
+            /></label>
+            <label
+              title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
+              ><input id="search-rank" type="checkbox" /> rank (BM25)</label
+            >
+            <label
+              id="search-all-daemons-label"
+              title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
+              ><input id="search-all-daemons" type="checkbox" disabled /> all
+              daemons</label
+            >
+          </div>
+          <div id="search-results">(not searched)</div>
+        </details>
+        <details id="perm-rules" class="ops-collapse" hidden>
+          <summary>
+            <strong>Permission rules</strong
+            ><span
+              id="perm-rules-target"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+            ></span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Permission rules?"
+              aria-expanded="false"
+              aria-controls="help-perm-rules"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-perm-rules" hidden>
+            The allow / ask / deny lists that decide what the agent may do.
+            <b>allow</b> runs without a prompt, <b>ask</b> always prompts you,
+            and <b>deny</b> is blocked. Pick a scope (<b>workspace</b> = this
+            project, <b>user</b> = all your projects), type a rule such as
+            <code>shell(git status:*)</code> or <code>edit(./docs/**)</code>,
+            tap <b>add</b>, then <b>save</b> that list &mdash; nothing is
+            applied until you save. Needs an owner token and a trusted
+            workspace. If saving says a session is required, send a prompt in
+            that workspace and retry.
+          </div>
+          <div
+            id="perm-rules-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+        </details>
+        <details id="perm-decisions" class="ops-collapse" hidden>
+          <summary>
+            <strong>Permission decisions</strong
+            ><span
+              id="perm-decisions-note"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+              >gateway-visible decisions only</span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Permission decisions?"
+              aria-expanded="false"
+              aria-controls="help-perm-decisions"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-perm-decisions" hidden>
+            A read-only log of recent permission decisions the gateway saw:
+            which rule fired for a tool call, and the votes you made on
+            permission prompts. Filter by tool or rule id and tap
+            <b>query</b> to check that a rule you set behaves the way you
+            intended. Decisions the daemon makes locally never reach the
+            gateway, so they don't appear here.
+          </div>
+          <div
+            id="perm-decisions-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+        </details>
+        <details id="perm-overlays" class="ops-collapse" hidden>
+          <summary>
+            <strong>Session overrides</strong
+            ><span
+              id="perm-overlays-note"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+              >ephemeral — lost when the gateway restarts</span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Session overrides?"
+              aria-expanded="false"
+              aria-controls="help-perm-overlays"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-perm-overlays" hidden>
+            Temporary permission rules that expire on their own. Choose a
+            session (blank = all sessions), a tool, an action (allow / deny /
+            prompt) and how long it lasts, then tap <b>set</b>. Tap
+            <b>revoke</b> on a row to remove one early. Overrides live only in
+            the gateway's memory, so restarting the gateway clears them.
+          </div>
+          <div
+            id="perm-overlays-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+        </details>
       </div>
       <div class="tab-pane" id="pane-settings">
-    <details id="notif-toggle" class="ops-collapse">
-      <summary><strong>Notifications</strong><button type="button" class="help-btn" aria-label="What is Notifications?" aria-expanded="false" aria-controls="help-notif-toggle">?</button></summary>
-      <div class="help-text" id="help-notif-toggle" hidden>
-        Turns on push notifications to this device for permission prompts
-        and finished tasks. Notifications are on by default; tap
-        <b>Enable notifications</b> if this browser hasn't granted push
-        permission yet. The line below shows this device's current
-        subscription state.
-      </div>
-      <div class="ops-note">(push alerts for permission prompts and task completion; on by default — the toggle reflects this device's subscription)</div>
-      <div>
-        <button id="enable">Enable notifications</button>
-      </div>
-      <div id="notif-state" style="font-size: 0.85rem; color: #888"></div>
-    </details>
-    <details id="push-prefs" class="ops-collapse">
-      <summary><strong>Push preferences</strong><button type="button" class="help-btn" aria-label="What are Push preferences?" aria-expanded="false" aria-controls="help-push-prefs">?</button></summary>
-      <div class="help-text" id="help-push-prefs" hidden>
-        Lists every device subscribed to push on this gateway (not just this
-        one) and lets you tune each: <b>quiet hours</b> (a from/to time range
-        plus timezone that pauses push during it), a per-hour cap, and which
-        kinds of alerts it receives (all, or a custom pick of permission
-        prompts / task-completed). Tap <b>List subscriptions</b> to load
-        them, edit a row and tap <b>Save</b>, or <b>Unsubscribe</b> to remove
-        it. <b>Send test push</b> fires one push to your own subscriptions
-        right now, to check delivery. Needs owner scope.
-      </div>
-      <div class="ops-note">(quiet hours + rate cap; requires owner scope)</div>
-      <div>
-        <button id="list-subs">List subscriptions</button>
-        <button id="test-push-btn">Send test push</button>
-        <span id="test-push-result"></span>
-      </div>
-      <div id="subs">(not listed)</div>
-    </details>
-    <details id="snooze" class="ops-collapse">
-      <summary><strong>Snooze notifications</strong><button type="button" class="help-btn" aria-label="What is Snooze notifications?" aria-expanded="false" aria-controls="help-snooze">?</button></summary>
-      <div class="help-text" id="help-snooze" hidden>
-        Pauses push notifications for a time window, either for everything
-        or for one kind of alert. Enter a duration in seconds, pick a scope,
-        and tap <b>Snooze</b>. <b>Status</b> shows what's currently active.
-        <b>Unsnooze</b> clears every active snooze; a per-row
-        <b>Unsnooze</b> next to a listed scope clears just that one. Needs
-        owner scope.
-      </div>
-      <div class="ops-note">(requires owner scope)</div>
-      <div>
-        <input
-          id="snooze-dur"
-          type="number"
-          placeholder="seconds"
-          value="3600"
-        />
-        <select id="snooze-scope">
-          <option value="all">all</option>
-          <option value="permission.required">permission.required</option>
-          <option value="task.completed">task.completed</option>
-        </select>
-        <button id="snooze-btn">Snooze</button>
-        <button id="unsnooze-btn">Unsnooze</button>
-        <button id="snooze-status-btn">Status</button>
-      </div>
-      <div id="snooze-status">(unknown)</div>
-      <div id="snooze-list"></div>
-    </details>
-    <details id="token-mgmt" class="ops-collapse">
-      <summary><strong>Tokens</strong><button type="button" class="help-btn" aria-label="What is Tokens?" aria-expanded="false" aria-controls="help-token-mgmt">?</button></summary>
-      <div class="help-text" id="help-token-mgmt" hidden>
-        Lists every access token this gateway has issued: its label, scopes
-        and id. Tap <b>List tokens</b> to load them, then <b>Revoke</b> to
-        permanently invalidate one — the device holding it loses access
-        immediately. Needs owner scope.
-      </div>
-      <div class="ops-note">(active tokens; requires owner scope)</div>
-      <div><button id="list-tokens">List tokens</button></div>
-      <div id="tokens">(not listed)</div>
-    </details>
-    <details id="share-create" class="ops-collapse">
-      <summary><strong>Create share link</strong><button type="button" class="help-btn" aria-label="What is Create share link?" aria-expanded="false" aria-controls="help-share-create">?</button></summary>
-      <div class="help-text" id="help-share-create" hidden>
-        Mints a link that lets someone without a token view (or, with
-        <b>approve</b> scope, also answer permission prompts on) one
-        session, for a limited time. Enter the session id and a
-        time-to-live in seconds, choose the scope, optionally cap how many
-        times it can be used, then tap <b>Create</b>. The link is shown
-        once here — copy it, since the raw token isn't shown again. Needs
-        owner scope.
-      </div>
-      <div class="ops-note">(requires owner scope)</div>
-      <div>
-        <input id="share-session" placeholder="session id" />
-        <input
-          id="share-ttl"
-          type="number"
-          placeholder="ttl (sec)"
-          value="3600"
-        />
-        <select id="share-scope">
-          <option value="view">view</option>
-          <option value="approve">approve</option>
-        </select>
-        <input id="share-max" type="number" placeholder="max uses" />
-        <button id="share-create-btn">Create</button>
-      </div>
-      <div id="share-result"></div>
-    </details>
-    <details id="share-manage" class="ops-collapse">
-      <summary><strong>Manage shares</strong><button type="button" class="help-btn" aria-label="What is Manage shares?" aria-expanded="false" aria-controls="help-share-manage">?</button></summary>
-      <div class="help-text" id="help-share-manage" hidden>
-        Lists share links you've created, without exposing their tokens.
-        Tap <b>List shares</b> to load them, then <b>Revoke</b> to
-        invalidate one early. Needs owner scope.
-      </div>
-      <div class="ops-note">(requires owner scope)</div>
-      <div><button id="list-shares">List shares</button></div>
-      <div id="shares-list">(not listed)</div>
-    </details>
-    <details id="fork-session" class="ops-collapse">
-      <summary><strong>Fork session</strong><button type="button" class="help-btn" aria-label="What is Fork session?" aria-expanded="false" aria-controls="help-fork-session">?</button></summary>
-      <div class="help-text" id="help-fork-session" hidden>
-        Creates a new session that starts from a copy of an existing one.
-        Enter the parent session id (blank uses the one you're watching),
-        an optional name, and pick <b>include</b> to copy the full
-        transcript or <b>empty</b> for a blank session with just the
-        header — <b>from event</b> copies only up to a specific point. Tap
-        <b>Fork</b>. Needs write scope.
-      </div>
-      <div class="ops-note">(requires write scope)</div>
-      <div>
-        <input id="fork-id" placeholder="parent session id" />
-        <input id="fork-name" placeholder="optional name" />
-        <input
-          id="fork-from"
-          type="number"
-          min="0"
-          placeholder="from event (blank = full)"
-        />
-        <select id="fork-mode" title="transcript mode">
-          <option value="include" selected>include (copy)</option>
-          <option value="empty">empty (header only)</option>
-          <option value="summary" disabled>summary (unavailable)</option>
-        </select>
-        <button id="fork-btn">Fork</button>
-      </div>
-      <div id="fork-result"></div>
-    </details>
-    <details id="ws-target" class="ops-collapse" hidden>
-      <summary><strong>Workspace</strong><button type="button" class="help-btn" aria-label="What is Workspace?" aria-expanded="false" aria-controls="help-ws-target">?</button></summary>
-      <div class="help-text" id="help-ws-target" hidden>
-        Selects which workspace (project directory) the Workspace trust,
-        MCP servers and Tools sections below act on. Only shown when more
-        than one workspace is known to this gateway.
-      </div>
-      <div class="ops-note">(target of the workspace controls below)</div>
-      <div style="margin-top: 6px">
-        <select id="ws-target-select"></select>
-      </div>
-      <div
-        id="ws-target-status"
-        style="margin-top: 4px; font-size: 0.8rem; color: #888"
-      ></div>
-    </details>
-    <details id="ws-trust" class="ops-collapse" hidden>
-      <summary><strong>Workspace trust</strong><span
-        id="ws-trust-target"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span><button type="button" class="help-btn" aria-label="What is Workspace trust?" aria-expanded="false" aria-controls="help-ws-trust">?</button></summary>
-      <div class="help-text" id="help-ws-trust" hidden>
-        Shows whether this workspace is trusted — folder trust must be
-        enabled for the workspace controls here to take effect — and lets
-        you change it. Type an optional reason and tap <b>trust</b> or
-        <b>untrust</b>. Reading needs write scope; changing it needs owner
-        scope, and on older daemons a trust change requires a daemon
-        restart to take effect.
-      </div>
-      <div class="ops-note">(reads: write scope · changes: owner scope, applied by the local
-      operator on the daemon host)</div>
-      <div
-        id="ws-trust-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </details>
-    <details id="ws-mcp" class="ops-collapse" hidden>
-      <summary><strong>Workspace MCP servers</strong><span
-        id="ws-mcp-target"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span><button type="button" class="help-btn" aria-label="What are Workspace MCP servers?" aria-expanded="false" aria-controls="help-ws-mcp">?</button></summary>
-      <div class="help-text" id="help-ws-mcp" hidden>
-        Lists MCP servers configured for this workspace, with their status
-        and transport. Tap <b>enable</b>/<b>disable</b> to toggle one,
-        <b>add MCP server</b> to configure a new one (workspace-scoped
-        servers also get an <b>edit config</b> button), and
-        <b>reload MCP servers</b> to make the daemon re-read its MCP
-        config. Reading needs write scope; changes need owner scope.
-      </div>
-      <div class="ops-note">(reads: write scope · changes: owner scope)</div>
-      <div
-        id="ws-mcp-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-      <div
-        id="ws-mcp-form"
-        hidden
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        "
-      ></div>
-    </details>
-    <details id="ws-tools" class="ops-collapse" hidden>
-      <summary><strong>Workspace tools</strong><span
-        id="ws-tools-target"
-        style="margin-left: 6px; font-size: 0.8rem; color: #888"
-      ></span><button type="button" class="help-btn" aria-label="What are Workspace tools?" aria-expanded="false" aria-controls="help-ws-tools">?</button></summary>
-      <div class="help-text" id="help-ws-tools" hidden>
-        Lists the tools available to the agent in this workspace. Filter by
-        name, and tap <b>enable</b>/<b>disable</b> next to a tool to turn
-        it on or off. Reading needs write scope; changes need owner scope.
-      </div>
-      <div class="ops-note">(reads: write scope · changes: owner scope)</div>
-      <div
-        id="ws-tools-body"
-        style="
-          margin-top: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        "
-      ></div>
-    </details>
-      <details id="ui-prefs" class="ops-collapse">
-        <summary><strong>UI preferences</strong><button type="button" class="help-btn" aria-label="What are UI preferences?" aria-expanded="false" aria-controls="help-ui-prefs">?</button></summary>
-        <div class="help-text" id="help-ui-prefs" hidden>
-          Local display preferences for this browser tab only.
-          <b>Sticky tab bar</b> keeps the tab row pinned to the top of the
-          page while you scroll; it resets on reload.
-        </div>
-        <div><label><input type="checkbox" id="sticky-tabs"> Sticky tab bar</label></div>
-      </details>
+        <details id="notif-toggle" class="ops-collapse">
+          <summary>
+            <strong>Notifications</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Notifications?"
+              aria-expanded="false"
+              aria-controls="help-notif-toggle"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-notif-toggle" hidden>
+            Turns on push notifications to this device for permission prompts
+            and finished tasks. Notifications are on by default; tap
+            <b>Enable notifications</b> if this browser hasn't granted push
+            permission yet. The line below shows this device's current
+            subscription state.
+          </div>
+          <div class="ops-note">
+            (push alerts for permission prompts and task completion; on by
+            default — the toggle reflects this device's subscription)
+          </div>
+          <div>
+            <button id="enable">Enable notifications</button>
+          </div>
+          <div id="notif-state" style="font-size: 0.85rem; color: #888"></div>
+        </details>
+        <details id="push-prefs" class="ops-collapse">
+          <summary>
+            <strong>Push preferences</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Push preferences?"
+              aria-expanded="false"
+              aria-controls="help-push-prefs"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-push-prefs" hidden>
+            Lists every device subscribed to push on this gateway (not just this
+            one) and lets you tune each: <b>quiet hours</b> (a from/to time
+            range plus timezone that pauses push during it), a per-hour cap, and
+            which kinds of alerts it receives (all, or a custom pick of
+            permission prompts / task-completed). Tap
+            <b>List subscriptions</b> to load them, edit a row and tap
+            <b>Save</b>, or <b>Unsubscribe</b> to remove it.
+            <b>Send test push</b> fires one push to your own subscriptions right
+            now, to check delivery. Needs owner scope.
+          </div>
+          <div class="ops-note">
+            (quiet hours + rate cap; requires owner scope)
+          </div>
+          <div>
+            <button id="list-subs">List subscriptions</button>
+            <button id="test-push-btn">Send test push</button>
+            <span id="test-push-result"></span>
+          </div>
+          <div id="subs">(not listed)</div>
+        </details>
+        <details id="snooze" class="ops-collapse">
+          <summary>
+            <strong>Snooze notifications</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Snooze notifications?"
+              aria-expanded="false"
+              aria-controls="help-snooze"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-snooze" hidden>
+            Pauses push notifications for a time window, either for everything
+            or for one kind of alert. Enter a duration in seconds, pick a scope,
+            and tap <b>Snooze</b>. <b>Status</b> shows what's currently active.
+            <b>Unsnooze</b> clears every active snooze; a per-row
+            <b>Unsnooze</b> next to a listed scope clears just that one. Needs
+            owner scope.
+          </div>
+          <div class="ops-note">(requires owner scope)</div>
+          <div>
+            <input
+              id="snooze-dur"
+              type="number"
+              placeholder="seconds"
+              value="3600"
+            />
+            <select id="snooze-scope">
+              <option value="all">all</option>
+              <option value="permission.required">permission.required</option>
+              <option value="task.completed">task.completed</option>
+            </select>
+            <button id="snooze-btn">Snooze</button>
+            <button id="unsnooze-btn">Unsnooze</button>
+            <button id="snooze-status-btn">Status</button>
+          </div>
+          <div id="snooze-status">(unknown)</div>
+          <div id="snooze-list"></div>
+        </details>
+        <details id="token-mgmt" class="ops-collapse">
+          <summary>
+            <strong>Tokens</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Tokens?"
+              aria-expanded="false"
+              aria-controls="help-token-mgmt"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-token-mgmt" hidden>
+            Lists every access token this gateway has issued: its label, scopes
+            and id. Tap <b>List tokens</b> to load them, then <b>Revoke</b> to
+            permanently invalidate one — the device holding it loses access
+            immediately. Needs owner scope.
+          </div>
+          <div class="ops-note">(active tokens; requires owner scope)</div>
+          <div><button id="list-tokens">List tokens</button></div>
+          <div id="tokens">(not listed)</div>
+        </details>
+        <details id="share-create" class="ops-collapse">
+          <summary>
+            <strong>Create share link</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Create share link?"
+              aria-expanded="false"
+              aria-controls="help-share-create"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-share-create" hidden>
+            Mints a link that lets someone without a token view (or, with
+            <b>approve</b> scope, also answer permission prompts on) one
+            session, for a limited time. Enter the session id and a time-to-live
+            in seconds, choose the scope, optionally cap how many times it can
+            be used, then tap <b>Create</b>. The link is shown once here — copy
+            it, since the raw token isn't shown again. Needs owner scope.
+          </div>
+          <div class="ops-note">(requires owner scope)</div>
+          <div>
+            <input id="share-session" placeholder="session id" />
+            <input
+              id="share-ttl"
+              type="number"
+              placeholder="ttl (sec)"
+              value="3600"
+            />
+            <select id="share-scope">
+              <option value="view">view</option>
+              <option value="approve">approve</option>
+            </select>
+            <input id="share-max" type="number" placeholder="max uses" />
+            <button id="share-create-btn">Create</button>
+          </div>
+          <div id="share-result"></div>
+        </details>
+        <details id="share-manage" class="ops-collapse">
+          <summary>
+            <strong>Manage shares</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Manage shares?"
+              aria-expanded="false"
+              aria-controls="help-share-manage"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-share-manage" hidden>
+            Lists share links you've created, without exposing their tokens. Tap
+            <b>List shares</b> to load them, then <b>Revoke</b> to invalidate
+            one early. Needs owner scope.
+          </div>
+          <div class="ops-note">(requires owner scope)</div>
+          <div><button id="list-shares">List shares</button></div>
+          <div id="shares-list">(not listed)</div>
+        </details>
+        <details id="fork-session" class="ops-collapse">
+          <summary>
+            <strong>Fork session</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Fork session?"
+              aria-expanded="false"
+              aria-controls="help-fork-session"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-fork-session" hidden>
+            Creates a new session that starts from a copy of an existing one.
+            Enter the parent session id (blank uses the one you're watching), an
+            optional name, and pick <b>include</b> to copy the full transcript
+            or <b>empty</b> for a blank session with just the header —
+            <b>from event</b> copies only up to a specific point. Tap
+            <b>Fork</b>. Needs write scope.
+          </div>
+          <div class="ops-note">(requires write scope)</div>
+          <div>
+            <input id="fork-id" placeholder="parent session id" />
+            <input id="fork-name" placeholder="optional name" />
+            <input
+              id="fork-from"
+              type="number"
+              min="0"
+              placeholder="from event (blank = full)"
+            />
+            <select id="fork-mode" title="transcript mode">
+              <option value="include" selected>include (copy)</option>
+              <option value="empty">empty (header only)</option>
+              <option value="summary" disabled>summary (unavailable)</option>
+            </select>
+            <button id="fork-btn">Fork</button>
+          </div>
+          <div id="fork-result"></div>
+        </details>
+        <details id="ws-target" class="ops-collapse" hidden>
+          <summary>
+            <strong>Workspace</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Workspace?"
+              aria-expanded="false"
+              aria-controls="help-ws-target"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-target" hidden>
+            Selects which workspace (project directory) the Workspace trust, MCP
+            servers and Tools sections below act on. Only shown when more than
+            one workspace is known to this gateway.
+          </div>
+          <div class="ops-note">(target of the workspace controls below)</div>
+          <div style="margin-top: 6px">
+            <select id="ws-target-select"></select>
+          </div>
+          <div
+            id="ws-target-status"
+            style="margin-top: 4px; font-size: 0.8rem; color: #888"
+          ></div>
+        </details>
+        <details id="ws-trust" class="ops-collapse" hidden>
+          <summary>
+            <strong>Workspace trust</strong
+            ><span
+              id="ws-trust-target"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+            ></span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Workspace trust?"
+              aria-expanded="false"
+              aria-controls="help-ws-trust"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-trust" hidden>
+            Shows whether this workspace is trusted — folder trust must be
+            enabled for the workspace controls here to take effect — and lets
+            you change it. Type an optional reason and tap <b>trust</b> or
+            <b>untrust</b>. Reading needs write scope; changing it needs owner
+            scope, and on older daemons a trust change requires a daemon restart
+            to take effect.
+          </div>
+          <div class="ops-note">
+            (reads: write scope · changes: owner scope, applied by the local
+            operator on the daemon host)
+          </div>
+          <div
+            id="ws-trust-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+        </details>
+        <details id="ws-mcp" class="ops-collapse" hidden>
+          <summary>
+            <strong>Workspace MCP servers</strong
+            ><span
+              id="ws-mcp-target"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+            ></span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Workspace MCP servers?"
+              aria-expanded="false"
+              aria-controls="help-ws-mcp"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-mcp" hidden>
+            Lists MCP servers configured for this workspace, with their status
+            and transport. Tap <b>enable</b>/<b>disable</b> to toggle one,
+            <b>add MCP server</b> to configure a new one (workspace-scoped
+            servers also get an <b>edit config</b> button), and
+            <b>reload MCP servers</b> to make the daemon re-read its MCP config.
+            Reading needs write scope; changes need owner scope.
+          </div>
+          <div class="ops-note">
+            (reads: write scope · changes: owner scope)
+          </div>
+          <div
+            id="ws-mcp-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+          <div
+            id="ws-mcp-form"
+            hidden
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+            "
+          ></div>
+        </details>
+        <details id="ws-tools" class="ops-collapse" hidden>
+          <summary>
+            <strong>Workspace tools</strong
+            ><span
+              id="ws-tools-target"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+            ></span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Workspace tools?"
+              aria-expanded="false"
+              aria-controls="help-ws-tools"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-tools" hidden>
+            Lists the tools available to the agent in this workspace. Filter by
+            name, and tap <b>enable</b>/<b>disable</b> next to a tool to turn it
+            on or off. Reading needs write scope; changes need owner scope.
+          </div>
+          <div class="ops-note">
+            (reads: write scope · changes: owner scope)
+          </div>
+          <div
+            id="ws-tools-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+        </details>
+        <details id="ui-prefs" class="ops-collapse">
+          <summary>
+            <strong>UI preferences</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are UI preferences?"
+              aria-expanded="false"
+              aria-controls="help-ui-prefs"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ui-prefs" hidden>
+            Local display preferences for this browser tab only.
+            <b>Sticky tab bar</b> keeps the tab row pinned to the top of the
+            page while you scroll; it resets on reload.
+          </div>
+          <div>
+            <label
+              ><input type="checkbox" id="sticky-tabs" /> Sticky tab bar</label
+            >
+          </div>
+        </details>
       </div>
       <div class="tab-pane" id="pane-diag">
-    <details id="watch-stream" class="ops-collapse">
-      <summary><strong>Stream</strong><button type="button" class="help-btn" aria-label="What is Stream?" aria-expanded="false" aria-controls="help-watch-stream">?</button></summary>
-      <div class="help-text" id="help-watch-stream" hidden>
-        Controls the live event connection to the session shown in the
-        status bar and transcript on the Chat tab. <b>Watch</b>
-        (re)attaches and replays from the start; <b>Unwatch</b> stops
-        following and cancels the automatic reconnect retries — the turn
-        keeps running on the host either way. Self-heal normally reattaches
-        on its own after a drop; use this only if it gives up or you want
-        to deliberately detach.
+        <details id="watch-stream" class="ops-collapse">
+          <summary>
+            <strong>Stream</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Stream?"
+              aria-expanded="false"
+              aria-controls="help-watch-stream"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-watch-stream" hidden>
+            Controls the live event connection to the session shown in the
+            status bar and transcript on the Chat tab. <b>Watch</b> (re)attaches
+            and replays from the start; <b>Unwatch</b> stops following and
+            cancels the automatic reconnect retries — the turn keeps running on
+            the host either way. Self-heal normally reattaches on its own after
+            a drop; use this only if it gives up or you want to deliberately
+            detach.
+          </div>
+          <div class="ops-note">
+            (the watched session's event feed; the status bar above shows its
+            live state)
+          </div>
+          <div>
+            <button
+              id="watch"
+              title="Re-attach to the session on screen (full replay). Self-heal does this automatically with backoff when the stream dies."
+            >
+              Watch
+            </button>
+            <button
+              id="stop"
+              disabled
+              title="Stop following this session's event stream and cancel the self-heal retries. The turn keeps running on the host."
+            >
+              Unwatch
+            </button>
+          </div>
+        </details>
+        <details id="owner-events" class="ops-collapse">
+          <summary>
+            <strong>Owner event stream</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Owner event stream?"
+              aria-expanded="false"
+              aria-controls="help-owner-events"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-owner-events" hidden>
+            A live feed of every audit event across this gateway — pairing,
+            tokens, permission votes, policy decisions and more — not just the
+            session you're watching. Tap <b>Watch events</b> to connect,
+            <b>Stop</b> to disconnect. A "resync: dropped N frame(s)" line means
+            the connection missed some events; query the Audit log below for the
+            gap. Needs owner scope.
+          </div>
+          <div class="ops-note">(live audit feed; requires owner scope)</div>
+          <div>
+            <button id="watch-events">Watch events</button>
+            <button id="stop-events" disabled>Stop</button>
+          </div>
+          <pre id="events">(not connected)</pre>
+        </details>
+        <details id="audit-log" class="ops-collapse">
+          <summary>
+            <strong>Audit log</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Audit log?"
+              aria-expanded="false"
+              aria-controls="help-audit-log"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-audit-log" hidden>
+            Queries the gateway's permanent audit history — the same events the
+            live stream above shows, but searchable after the fact. Pick an
+            action to filter by (or any), a row limit, and tap
+            <b>Query</b>. Needs owner scope.
+          </div>
+          <div class="ops-note">(history; requires owner scope)</div>
+          <div>
+            <label
+              >action
+              <select id="audit-action">
+                <option value="">(any)</option>
+                <option>pairing_redeemed</option>
+                <option>token_minted</option>
+                <option>token_revoked</option>
+                <option>auth_failed</option>
+                <option>scope_denied</option>
+                <option>permission_voted</option>
+                <option>prompt_sent</option>
+                <option>push_sent</option>
+                <option>push_suppressed</option>
+                <option>policy_decision</option>
+                <option>session_list_read</option>
+              </select>
+            </label>
+            <label
+              >limit
+              <input
+                id="audit-limit"
+                type="number"
+                value="50"
+                min="1"
+                style="width: 5rem"
+            /></label>
+            <button id="audit-query">Query</button>
+          </div>
+          <pre id="audit">(not queried)</pre>
+        </details>
+        <details id="digest" class="ops-collapse">
+          <summary>
+            <strong>Missed while quiet (digest)</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Missed while quiet?"
+              aria-expanded="false"
+              aria-controls="help-digest"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-digest" hidden>
+            Shows notifications that were suppressed by an active snooze or
+            quiet-hours window, grouped by device subscription and kind, so you
+            can see what you missed. Tap <b>Refresh digest</b> to load it. Needs
+            owner scope.
+          </div>
+          <div class="ops-note">(requires owner scope)</div>
+          <div><button id="digest-btn">Refresh digest</button></div>
+          <div id="digest-list">(not loaded)</div>
+        </details>
+        <details id="commands" class="ops-collapse">
+          <summary>
+            <strong>Commands</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Commands?"
+              aria-expanded="false"
+              aria-controls="help-commands"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-commands" hidden>
+            Lists slash commands available on the session you're watching, with
+            their description, scope and source. Grayed-out rows aren't
+            invocable by you. Tap <b>Invoke</b> on a row to run that command
+            against the watched session. Tap <b>List commands</b> to load them.
+          </div>
+          <div class="ops-note">(invoke targets the watched session)</div>
+          <div><button id="list-commands">List commands</button></div>
+          <div id="commands-list">(not listed)</div>
+        </details>
+        <details id="raw-log" class="ops-collapse">
+          <summary>
+            <strong>Raw JSON log</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Raw JSON log?"
+              aria-expanded="false"
+              aria-controls="help-raw-log"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-raw-log" hidden>
+            Toggles a raw JSON view of the gateway's event stream in place of
+            the rendered transcript — useful for debugging what the daemon
+            actually sent. Check <b>raw JSON</b> to switch the Chat tab's
+            transcript panel to this log; uncheck to go back to the normal
+            transcript.
+          </div>
+          <div style="margin-top: 8px">
+            <label style="font-size: 0.8rem; color: #888"
+              ><input type="checkbox" id="raw-toggle" /> raw JSON</label
+            >
+          </div>
+          <pre id="log" style="display: none"></pre>
+        </details>
       </div>
-      <div class="ops-note">(the watched session's event feed; the status
-      bar above shows its live state)</div>
-      <div>
-        <button id="watch" title="Re-attach to the session on screen (full replay). Self-heal does this automatically with backoff when the stream dies.">Watch</button>
-        <button id="stop" disabled title="Stop following this session's event stream and cancel the self-heal retries. The turn keeps running on the host.">Unwatch</button>
-      </div>
-    </details>
-    <details id="owner-events" class="ops-collapse">
-      <summary><strong>Owner event stream</strong><button type="button" class="help-btn" aria-label="What is Owner event stream?" aria-expanded="false" aria-controls="help-owner-events">?</button></summary>
-      <div class="help-text" id="help-owner-events" hidden>
-        A live feed of every audit event across this gateway — pairing,
-        tokens, permission votes, policy decisions and more — not just the
-        session you're watching. Tap <b>Watch events</b> to connect,
-        <b>Stop</b> to disconnect. A "resync: dropped N frame(s)" line
-        means the connection missed some events; query the Audit log below
-        for the gap. Needs owner scope.
-      </div>
-      <div class="ops-note">(live audit feed; requires owner
-      scope)</div>
-      <div>
-        <button id="watch-events">Watch events</button>
-        <button id="stop-events" disabled>Stop</button>
-      </div>
-      <pre id="events">(not connected)</pre>
-    </details>
-    <details id="audit-log" class="ops-collapse">
-      <summary><strong>Audit log</strong><button type="button" class="help-btn" aria-label="What is Audit log?" aria-expanded="false" aria-controls="help-audit-log">?</button></summary>
-      <div class="help-text" id="help-audit-log" hidden>
-        Queries the gateway's permanent audit history — the same events
-        the live stream above shows, but searchable after the fact. Pick
-        an action to filter by (or any), a row limit, and tap
-        <b>Query</b>. Needs owner scope.
-      </div>
-      <div class="ops-note">(history; requires owner scope)</div>
-      <div>
-        <label
-          >action
-          <select id="audit-action">
-            <option value="">(any)</option>
-            <option>pairing_redeemed</option>
-            <option>token_minted</option>
-            <option>token_revoked</option>
-            <option>auth_failed</option>
-            <option>scope_denied</option>
-            <option>permission_voted</option>
-            <option>prompt_sent</option>
-            <option>push_sent</option>
-            <option>push_suppressed</option>
-            <option>policy_decision</option>
-            <option>session_list_read</option>
-          </select>
-        </label>
-        <label
-          >limit
-          <input
-            id="audit-limit"
-            type="number"
-            value="50"
-            min="1"
-            style="width: 5rem"
-        /></label>
-        <button id="audit-query">Query</button>
-      </div>
-      <pre id="audit">(not queried)</pre>
-    </details>
-    <details id="digest" class="ops-collapse">
-      <summary><strong>Missed while quiet (digest)</strong><button type="button" class="help-btn" aria-label="What is Missed while quiet?" aria-expanded="false" aria-controls="help-digest">?</button></summary>
-      <div class="help-text" id="help-digest" hidden>
-        Shows notifications that were suppressed by an active snooze or
-        quiet-hours window, grouped by device subscription and kind, so
-        you can see what you missed. Tap <b>Refresh digest</b> to load it.
-        Needs owner scope.
-      </div>
-      <div class="ops-note">(requires owner scope)</div>
-      <div><button id="digest-btn">Refresh digest</button></div>
-      <div id="digest-list">(not loaded)</div>
-    </details>
-    <details id="commands" class="ops-collapse">
-      <summary><strong>Commands</strong><button type="button" class="help-btn" aria-label="What are Commands?" aria-expanded="false" aria-controls="help-commands">?</button></summary>
-      <div class="help-text" id="help-commands" hidden>
-        Lists slash commands available on the session you're watching,
-        with their description, scope and source. Grayed-out rows aren't
-        invocable by you. Tap <b>Invoke</b> on a row to run that command
-        against the watched session. Tap <b>List commands</b> to load
-        them.
-      </div>
-      <div class="ops-note">(invoke targets the watched session)</div>
-      <div><button id="list-commands">List commands</button></div>
-      <div id="commands-list">(not listed)</div>
-    </details>
-    <details id="raw-log" class="ops-collapse">
-      <summary><strong>Raw JSON log</strong><button type="button" class="help-btn" aria-label="What is Raw JSON log?" aria-expanded="false" aria-controls="help-raw-log">?</button></summary>
-      <div class="help-text" id="help-raw-log" hidden>
-        Toggles a raw JSON view of the gateway's event stream in place of
-        the rendered transcript — useful for debugging what the daemon
-        actually sent. Check <b>raw JSON</b> to switch the Chat tab's
-        transcript panel to this log; uncheck to go back to the normal
-        transcript.
-      </div>
-      <div style="margin-top: 8px">
-        <label style="font-size: 0.8rem; color: #888"
-          ><input type="checkbox" id="raw-toggle" /> raw JSON</label
-        >
-      </div>
-      <pre id="log" style="display: none"></pre>
-    </details>
-      </div>
+    </div>
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
@@ -1268,7 +1702,10 @@
         $('app-body').hidden = false;
       }
       function showAuthGate() {
-        if (healthPollId) { clearInterval(healthPollId); healthPollId = null; }
+        if (healthPollId) {
+          clearInterval(healthPollId);
+          healthPollId = null;
+        }
         $('auth-gate').hidden = false;
         $('app-body').hidden = true;
       }
@@ -1294,7 +1731,11 @@
       }
 
       const PIN_ORDER = ['ops', 'settings', 'diag'];
-      const PIN_LABELS = { ops: 'Operations', settings: 'Settings', diag: 'Diagnostics' };
+      const PIN_LABELS = {
+        ops: 'Operations',
+        settings: 'Settings',
+        diag: 'Diagnostics',
+      };
       const pinState = { ops: null, settings: null, diag: null };
 
       function switchTab(tabId) {
@@ -1368,7 +1809,8 @@
 
           // Pinning the tab currently being viewed would leave its pane
           // active but empty — send the user back to Chat instead.
-          if ($('pane-' + tabId).classList.contains('active')) switchTab('chat');
+          if ($('pane-' + tabId).classList.contains('active'))
+            switchTab('chat');
         } else {
           // Unpin: move content back to its tab pane (a no-op if the pane is
           // already showing it, i.e. the user is currently viewing this
@@ -1498,8 +1940,7 @@
       $('transcript').addEventListener('scroll', () => {
         const el = $('transcript');
         // "Near the bottom" = within a bubble's height of the end.
-        stickToBottom =
-          el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         updateJumpBottom();
       });
       function scrollTranscript(force) {
@@ -1612,8 +2053,7 @@
       function clearTranscript() {
         $('transcript').innerHTML = '';
         toolEls.clear();
-        for (const s of subagents.values())
-          if (s.timer) clearInterval(s.timer);
+        for (const s of subagents.values()) if (s.timer) clearInterval(s.timer);
         subagents.clear();
         subagentTypes.clear();
         resetTurn();
@@ -1680,7 +2120,10 @@
           b.remove(); // empty thought — nothing to keep
           return;
         }
-        const secs = Math.max(0, (Date.now() - (b._startedAt || Date.now())) / 1000);
+        const secs = Math.max(
+          0,
+          (Date.now() - (b._startedAt || Date.now())) / 1000,
+        );
         const dur =
           secs < 1
             ? '<1s'
@@ -1724,7 +2167,11 @@
       // crowding (or vanishing from) the top-level transcript.
       const subagents = new Map(); // parentToolCallId -> subagent state
       const subagentTypes = new Map(); // parentToolCallId -> child type label
-      const TERMINAL_TOOL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+      const TERMINAL_TOOL_STATUSES = new Set([
+        'completed',
+        'failed',
+        'cancelled',
+      ]);
       function subagentState(parentId) {
         let s = subagents.get(parentId);
         if (s) return s;
@@ -1756,7 +2203,10 @@
         s._msg = msg;
         s._time = time;
         const tick = () => {
-          const secs = Math.max(0, Math.floor((Date.now() - s.startedAt) / 1000));
+          const secs = Math.max(
+            0,
+            Math.floor((Date.now() - s.startedAt) / 1000),
+          );
           time.textContent =
             secs >= 60
               ? ' · ' + Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
@@ -1771,13 +2221,17 @@
       function renderSubagentHead(s) {
         const who = s.type ? 'subagent ' + s.type + ' ' : 'subagent ';
         if (s.done) {
-          const secs = Math.max(0, Math.floor((Date.now() - s.startedAt) / 1000));
+          const secs = Math.max(
+            0,
+            Math.floor((Date.now() - s.startedAt) / 1000),
+          );
           const dur =
             secs >= 60
               ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
               : secs + 's';
           s._spin.textContent = s._failed ? '✖ ' : '✔ ';
-          s._msg.textContent = who + (s._failed ? 'failed' : 'done') + ' in ' + dur;
+          s._msg.textContent =
+            who + (s._failed ? 'failed' : 'done') + ' in ' + dur;
         } else {
           s._spin.textContent = '⏳ ';
           s._msg.textContent = who + 'running';
@@ -1848,7 +2302,8 @@
         }
         // The parent agent tool reaching a terminal status settles the
         // nested subagent indicator (⏳ → ✔/✖ with total elapsed time).
-        if (id && TERMINAL_TOOL_STATUSES.has(status)) finishSubagent(id, status);
+        if (id && TERMINAL_TOOL_STATUSES.has(status))
+          finishSubagent(id, status);
         scrollTranscript();
       }
       function renderPlan(entries) {
@@ -2074,19 +2529,17 @@
         for (const cwd of opts) {
           const o = document.createElement('option');
           o.value = cwd === '(unknown)' ? '' : cwd;
-          o.textContent =
-            cwd === caps.workspaceCwd
-              ? cwd + ' (default)'
-              : cwd;
+          o.textContent = cwd === caps.workspaceCwd ? cwd + ' (default)' : cwd;
           sel.appendChild(o);
         }
         // Restore the current selection (or the default option for null).
         sel.value = wsTargetCwd || (opts.length ? opts[0] : '');
         const st = $('ws-target-status');
         if (st)
-          st.textContent = sel.value && sel.value !== opts[0]
-            ? 'controlling a non-default workspace'
-            : 'controlling the default workspace';
+          st.textContent =
+            sel.value && sel.value !== opts[0]
+              ? 'controlling a non-default workspace'
+              : 'controlling the default workspace';
       }
 
       async function loadWorkspaceList() {
@@ -2238,7 +2691,8 @@
           addRow.style.flexWrap = 'wrap';
           addRow.style.gap = '6px';
           const inp = document.createElement('input');
-          inp.placeholder = rt + ' rule, e.g. shell(git status:*) or edit(./docs/**)';
+          inp.placeholder =
+            rt + ' rule, e.g. shell(git status:*) or edit(./docs/**)';
           inp.style.flex = '1';
           const addBtn = document.createElement('button');
           addBtn.textContent = 'add';
@@ -2295,7 +2749,9 @@
       async function savePermRuleList(ruleType) {
         if (!permRules) return;
         const src = permRules[permScope] || { rules: {} };
-        const rules = Array.isArray(src.rules[ruleType]) ? src.rules[ruleType] : [];
+        const rules = Array.isArray(src.rules[ruleType])
+          ? src.rules[ruleType]
+          : [];
         const st = permRulesStatusEl();
         st.textContent = 'saving…';
         try {
@@ -2319,7 +2775,9 @@
               st.textContent = 'conflict — rules changed, reloading…';
               await loadPermRules(false);
               st.textContent = 'rules changed — review and retry';
-              setStatus('permission rules changed by another writer — reloaded');
+              setStatus(
+                'permission rules changed by another writer — reloaded',
+              );
               return;
             }
             let msg = (body.error || 'save failed') + ' (' + res.status + ')';
@@ -2853,7 +3311,9 @@
                 ' (rev ' +
                 String(rec.revision == null ? '?' : rec.revision) +
                 '/' +
-                String(rec.appliedRevision == null ? '?' : rec.appliedRevision) +
+                String(
+                  rec.appliedRevision == null ? '?' : rec.appliedRevision,
+                ) +
                 ')' +
                 (rec.error ? ' — ' + rec.error : '') +
                 '\n';
@@ -3004,8 +3464,7 @@
             (data.initialized ? 'initialized' : 'not initialized') +
             (data.discoveryState ? ' · ' + data.discoveryState : '');
           const list = document.createElement('div');
-          list.style.cssText =
-            'display:flex;flex-direction:column;gap:6px';
+          list.style.cssText = 'display:flex;flex-direction:column;gap:6px';
           const servers = Array.isArray(data.servers) ? data.servers : [];
           if (!servers.length) {
             const none = document.createElement('div');
@@ -3039,8 +3498,7 @@
             if (s.configOrigin === 'workspace_settings') {
               const editBtn = document.createElement('button');
               editBtn.textContent = 'edit config';
-              editBtn.title =
-                'Edit this server\'s config in workspace settings';
+              editBtn.title = "Edit this server's config in workspace settings";
               editBtn.addEventListener('click', () =>
                 showMcpServerForm({ mode: 'edit', server: s }),
               );
@@ -3158,7 +3616,8 @@
           });
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
-            status.textContent = (e.error || 'reload failed') + ' (' + res.status + ')';
+            status.textContent =
+              (e.error || 'reload failed') + ' (' + res.status + ')';
             return;
           }
           status.textContent = 'reloaded';
@@ -3203,8 +3662,9 @@
           });
           if (res.ok) {
             const data = await res.json();
-            const desc = (Array.isArray(data.settings) ? data.settings : [])
-              .find((s) => s && s.key === 'mcpServers');
+            const desc = (
+              Array.isArray(data.settings) ? data.settings : []
+            ).find((s) => s && s.key === 'mcpServers');
             const ws =
               desc && desc.values && desc.values.workspace
                 ? desc.values.workspace[name]
@@ -3276,9 +3736,7 @@
               formStatus.textContent =
                 source === 'none'
                   ? 'no current config readable — enter the full config'
-                  : 'note: prefilled from ' +
-                    source +
-                    ' (may be partial)';
+                  : 'note: prefilled from ' + source + ' (may be partial)';
             }
           });
         } else {
@@ -3300,11 +3758,7 @@
             formStatus.textContent = 'config is not valid JSON';
             return;
           }
-          if (
-            !config ||
-            typeof config !== 'object' ||
-            Array.isArray(config)
-          ) {
+          if (!config || typeof config !== 'object' || Array.isArray(config)) {
             formStatus.textContent = 'config must be a JSON object';
             return;
           }
@@ -3350,8 +3804,7 @@
               save.disabled = false;
               return;
             }
-            status.textContent =
-              'saved "' + serverName + '" — reloading';
+            status.textContent = 'saved "' + serverName + '" — reloading';
             hideMcpServerForm();
             await reloadMcpServers();
           } catch (err) {
@@ -3401,11 +3854,9 @@
             const note = document.createElement('span');
             note.style.cssText = 'font-size:12px;opacity:0.6';
             const parts = [];
-            if (tool.source && tool.source !== 'builtin') parts.push(tool.source);
-            if (
-              tool.displayName &&
-              tool.displayName !== tool.name
-            ) {
+            if (tool.source && tool.source !== 'builtin')
+              parts.push(tool.source);
+            if (tool.displayName && tool.displayName !== tool.name) {
               parts.push(tool.displayName);
             }
             parts.push(tool.disabled ? 'disabled' : 'enabled');
@@ -3416,8 +3867,11 @@
               setToolEnabled(tool.name, !tool.disabled, btn),
             );
             row.append(name, note, btn);
-            row.dataset.filter =
-              (tool.name + ' ' + (tool.displayName || '')).toLowerCase();
+            row.dataset.filter = (
+              tool.name +
+              ' ' +
+              (tool.displayName || '')
+            ).toLowerCase();
             list.appendChild(row);
             rows.push(row);
           }
@@ -3450,9 +3904,7 @@
         const status = wsSectionStatusEl('ws-tools-status');
         try {
           const res = await fetch(
-            '/rc/workspace/tools/' +
-              encodeURIComponent(toolName) +
-              '/enable',
+            '/rc/workspace/tools/' + encodeURIComponent(toolName) + '/enable',
             {
               method: 'POST',
               headers: {
@@ -3962,19 +4414,34 @@
       // reports more than one available mode.
       function applyWorkspaceControlGating() {
         const wc =
-          (caps &&
-            caps.remoteControl &&
-            caps.remoteControl.workspaceControl) ||
+          (caps && caps.remoteControl && caps.remoteControl.workspaceControl) ||
           {};
         // Sections start as a Load placeholder (no auto-load — these reads
         // hit the daemon workspace). Only seed the placeholder when the body
         // is still empty so a re-gate never wipes loaded content.
         const sections = {
-          'ws-trust': [wc.trust, 'ws-trust-body', 'load workspace trust', loadWorkspaceTrust],
-          'ws-mcp': [wc.mcp, 'ws-mcp-body', 'load MCP servers', loadWorkspaceMcp],
-          'ws-tools': [wc.tools, 'ws-tools-body', 'load tool settings', loadWorkspaceTools],
+          'ws-trust': [
+            wc.trust,
+            'ws-trust-body',
+            'load workspace trust',
+            loadWorkspaceTrust,
+          ],
+          'ws-mcp': [
+            wc.mcp,
+            'ws-mcp-body',
+            'load MCP servers',
+            loadWorkspaceMcp,
+          ],
+          'ws-tools': [
+            wc.tools,
+            'ws-tools-body',
+            'load tool settings',
+            loadWorkspaceTools,
+          ],
         };
-        for (const [id, [on, bodyId, label, loader]] of Object.entries(sections)) {
+        for (const [id, [on, bodyId, label, loader]] of Object.entries(
+          sections,
+        )) {
           const el = $(id);
           if (el) el.hidden = !on;
           const body = $(bodyId);
@@ -3984,15 +4451,19 @@
         }
         // rc-workspace-scoping (#28): the target selector appears when at
         // least one workspace-control surface is available on this daemon.
-        const anyControl = !!(wc.trust || wc.mcp || wc.tools || permRulesGate());
+        const anyControl = !!(
+          wc.trust ||
+          wc.mcp ||
+          wc.tools ||
+          permRulesGate()
+        );
         const targetSec = $('ws-target');
         if (targetSec) {
           targetSec.hidden = !anyControl;
           if (anyControl) {
             renderWsTargetLabels();
             renderWsTargetSelector();
-            $('ws-target-select').onchange = (e) =>
-              setWsTarget(e.target.value);
+            $('ws-target-select').onchange = (e) => setWsTarget(e.target.value);
             void loadWorkspaceList();
           }
         }
@@ -4557,7 +5028,8 @@
           // Reconnect button (a fresh watch or Unwatch hides it).
           $('reconnect').style.display = '';
           setStatus(
-            'reconnect failed after ' + watchRetryMax +
+            'reconnect failed after ' +
+              watchRetryMax +
               ' tries — tap Reconnect in the toolbar',
           );
           return;
@@ -4568,8 +5040,13 @@
           ];
         watchRetryAttempt += 1;
         setStatus(
-          'reconnecting (attempt ' + watchRetryAttempt + '/' + watchRetryMax +
-            ', in ' + delay / 1000 + 's)…',
+          'reconnecting (attempt ' +
+            watchRetryAttempt +
+            '/' +
+            watchRetryMax +
+            ', in ' +
+            delay / 1000 +
+            's)…',
         );
         watchRetryTimer = setTimeout(() => {
           watchRetryTimer = null;
@@ -4596,15 +5073,18 @@
 
       function persistWatch() {
         if (watchedSessionId) {
-          localStorage.setItem(WATCHED_KEY, JSON.stringify({
-            sessionId: watchedSessionId,
-            lastEventId: lastSeenEventId,
-            title: watchedSessionTitle,
-            // issue #46: the resync self-heal (re-resume after a bus-epoch
-            // change) needs the workspace cwd, which a fresh page load
-            // otherwise has no source for — persist it with the watch.
-            cwd: watchedSessionCwd,
-          }));
+          localStorage.setItem(
+            WATCHED_KEY,
+            JSON.stringify({
+              sessionId: watchedSessionId,
+              lastEventId: lastSeenEventId,
+              title: watchedSessionTitle,
+              // issue #46: the resync self-heal (re-resume after a bus-epoch
+              // change) needs the workspace cwd, which a fresh page load
+              // otherwise has no source for — persist it with the watch.
+              cwd: watchedSessionCwd,
+            }),
+          );
         }
       }
 
@@ -5060,8 +5540,7 @@
             )
           : pastConvos;
         if (pastFilter && shown.length === 0) {
-          box.textContent =
-            '(no matches for "' + $('past-filter').value + '")';
+          box.textContent = '(no matches for "' + $('past-filter').value + '")';
           return;
         }
         const pageCount = Math.ceil(shown.length / PAST_PAGE_SIZE);
@@ -5086,7 +5565,8 @@
               'text-overflow:ellipsis;white-space:nowrap;max-width:100%';
             row.appendChild(prev);
           }
-          row.onclick = () => resumeConversation(s.sessionId, cwd, strOr(s.title, ''));
+          row.onclick = () =>
+            resumeConversation(s.sessionId, cwd, strOr(s.title, ''));
           box.appendChild(row);
         }
         if (pastTruncated) {
@@ -5319,10 +5799,7 @@
             if (j.workspaceCwd) pushRecentWorkspace(j.workspaceCwd);
             // rc-workspace-scoping (#28): offer the freshly resolved
             // workspace in the target selector (the pool may now hold it).
-            if (
-              j.workspaceCwd &&
-              !wsKnownWorkspaces.includes(j.workspaceCwd)
-            ) {
+            if (j.workspaceCwd && !wsKnownWorkspaces.includes(j.workspaceCwd)) {
               wsKnownWorkspaces.push(j.workspaceCwd);
               renderWsTargetSelector();
             }
@@ -5563,9 +6040,8 @@
         try {
           if (!notifSwReg) {
             notifSwReg =
-              (await navigator.serviceWorker.getRegistration(
-                '/ui/sw.js',
-              )) || null;
+              (await navigator.serviceWorker.getRegistration('/ui/sw.js')) ||
+              null;
           }
           if (!notifSwReg) return null;
           return (await notifSwReg.pushManager.getSubscription()) || null;
@@ -6244,7 +6720,8 @@
             wsLastData[key] = data; // seed lazily; nothing to compare yet
             continue;
           }
-          if (JSON.stringify(data) === JSON.stringify(wsLastData[key])) continue;
+          if (JSON.stringify(data) === JSON.stringify(wsLastData[key]))
+            continue;
           await sections[key](false);
           wsLastData[key] = data;
           const status =
@@ -6386,8 +6863,9 @@
       async function fetchDaemonGpu(d) {
         try {
           const base = d.url.replace(/\/+$/, '');
-          const isSelf = base === location.origin ||
-                         base === location.origin.replace(/\/+$/, '');
+          const isSelf =
+            base === location.origin ||
+            base === location.origin.replace(/\/+$/, '');
           const url = isSelf ? '/rc/gpu' : base + '/rc/gpu';
           const res = await fetch(url, {
             headers: { Authorization: 'Bearer ' + token() },
@@ -6396,7 +6874,10 @@
           if (res.ok) return { ok: true, data: await res.json() };
           return { ok: false, status: res.status };
         } catch (e) {
-          return { ok: false, kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network' };
+          return {
+            ok: false,
+            kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network',
+          };
         }
       }
 
@@ -6547,13 +7028,15 @@
           row.className = 'gpu-row';
 
           // Memory bar
-          const pct = gpu.memoryTotalMiB > 0
-            ? Math.round((gpu.memoryUsedMiB / gpu.memoryTotalMiB) * 100)
-            : 0;
+          const pct =
+            gpu.memoryTotalMiB > 0
+              ? Math.round((gpu.memoryUsedMiB / gpu.memoryTotalMiB) * 100)
+              : 0;
           const bar = document.createElement('span');
           bar.className = 'gpu-bar';
           const fill = document.createElement('span');
-          fill.className = 'gpu-bar-fill' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '');
+          fill.className =
+            'gpu-bar-fill' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '');
           fill.style.width = pct + '%';
           bar.appendChild(fill);
 
@@ -6561,9 +7044,20 @@
           const used = (gpu.memoryUsedMiB / 1024).toFixed(1);
           const total = (gpu.memoryTotalMiB / 1024).toFixed(1);
           const txt = document.createElement('span');
-          txt.textContent = ' GPU ' + gpu.index + ': ' + gpu.name +
-            ' — ' + used + '/' + total + ' GB (' + pct + '%) · ' +
-            gpu.temperatureC + '°C';
+          txt.textContent =
+            ' GPU ' +
+            gpu.index +
+            ': ' +
+            gpu.name +
+            ' — ' +
+            used +
+            '/' +
+            total +
+            ' GB (' +
+            pct +
+            '%) · ' +
+            gpu.temperatureC +
+            '°C';
 
           row.appendChild(bar);
           row.appendChild(txt);
@@ -6573,11 +7067,14 @@
           for (const proc of gpu.processes) {
             const procRow = document.createElement('div');
             procRow.className = 'gpu-proc';
-            const label = proc.workspace
-              ? proc.workspace
-              : proc.name;
-            procRow.textContent = 'PID ' + proc.pid + ' · ' +
-              (proc.gpuMemoryMiB / 1024).toFixed(1) + ' GB · ' + label;
+            const label = proc.workspace ? proc.workspace : proc.name;
+            procRow.textContent =
+              'PID ' +
+              proc.pid +
+              ' · ' +
+              (proc.gpuMemoryMiB / 1024).toFixed(1) +
+              ' GB · ' +
+              label;
             container.appendChild(procRow);
           }
         }
@@ -6599,17 +7096,31 @@
           if (r.ok) {
             renderDaemonGpuRows(d, r.data, out);
           } else if (r.status === 401) {
-            daemonStatusRow(d, out, 'RE-PAIR REQUIRED',
-              d.url.replace(/\/+$/, '') + '/ui/');
+            daemonStatusRow(
+              d,
+              out,
+              'RE-PAIR REQUIRED',
+              d.url.replace(/\/+$/, '') + '/ui/',
+            );
           } else if (r.status === 403) {
-            daemonStatusRow(d, out, 'ERROR — daemon returned 403 (token lacks owner scope)');
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR — daemon returned 403 (token lacks owner scope)',
+            );
           } else if (r.kind === 'timeout' || r.kind === 'network') {
             const ls = lastSeen[d.url];
             const seen = ls !== undefined ? relTime(Date.now() - ls) : 'never';
-            daemonStatusRow(d, out,
-              'UNREACHABLE — last seen ' + seen +
-              ' · if this daemon is up: origin not admitted on ' + d.name +
-              ' — owner action required: qwen-rc cors add ' + location.origin);
+            daemonStatusRow(
+              d,
+              out,
+              'UNREACHABLE — last seen ' +
+                seen +
+                ' · if this daemon is up: origin not admitted on ' +
+                d.name +
+                ' — owner action required: qwen-rc cors add ' +
+                location.origin,
+            );
           } else {
             daemonStatusRow(d, out, 'ERROR — ' + (r.status || r.kind));
           }
@@ -6659,7 +7170,9 @@
                 void resumeConversation(id, cwd, strOr(s.title, ''));
                 return;
               }
-            } catch { /* unreachable workspace — keep probing */ }
+            } catch {
+              /* unreachable workspace — keep probing */
+            }
           }
           // No recent workspace listed it: replay from 0, like
           // restoreWatchedSession, so a persisted transcript rebuilds.
@@ -6684,7 +7197,9 @@
             watchedSessionCwd = typeof cwd === 'string' && cwd ? cwd : null;
             startWatch(sessionId, 0, title || null);
           }
-        } catch { /* corrupt entry — ignore */ }
+        } catch {
+          /* corrupt entry — ignore */
+        }
       }
 
       // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic
@@ -7633,12 +8148,20 @@
             },
           });
         } catch (e) {
-          return { ok: false, status: 0, code: 'network: ' + (e && e.message ? e.message : e) };
+          return {
+            ok: false,
+            status: 0,
+            code: 'network: ' + (e && e.message ? e.message : e),
+          };
         }
         if (res.ok) {
           try {
             const text = await res.text();
-            return { ok: true, status: res.status, body: text ? JSON.parse(text) : {} };
+            return {
+              ok: true,
+              status: res.status,
+              body: text ? JSON.parse(text) : {},
+            };
           } catch (e) {
             // 2xx with a truncated or non-JSON body — a proxy cutting the
             // response mid-flight looks exactly like this.
@@ -7652,7 +8175,8 @@
         } catch {
           /* non-JSON error body */
         }
-        if (res.status === 401 || res.status === 403) code = 'not authorized (' + code + ')';
+        if (res.status === 401 || res.status === 403)
+          code = 'not authorized (' + code + ')';
         return { ok: false, status: res.status, code };
       }
 
@@ -7681,10 +8205,13 @@
           return;
         }
         out.textContent = 'cancelling…';
-        const r = await rcCall('/session/' + encodeURIComponent(id) + '/cancel', {
-          method: 'POST',
-          body: '{}',
-        });
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/cancel',
+          {
+            method: 'POST',
+            body: '{}',
+          },
+        );
         // Idempotent by design — a repeated cancel is not an error.
         out.textContent = r.ok ? 'turn cancelled' : 'cancel failed: ' + r.code;
       };
@@ -7698,7 +8225,8 @@
           return;
         }
         // Destructive and not undoable: the daemon tears the session down.
-        if (!window.confirm('End session ' + id + '? This cannot be undone.')) return;
+        if (!window.confirm('End session ' + id + '? This cannot be undone.'))
+          return;
         out.textContent = 'ending…';
         const r = await rcCall('/session/' + encodeURIComponent(id) + '/end', {
           method: 'POST',
@@ -7726,7 +8254,9 @@
       const rewindPickResult = $('rewind-pick-result');
 
       function rewindUserTurns() {
-        return Array.from(document.querySelectorAll('#transcript .bubble.user'));
+        return Array.from(
+          document.querySelectorAll('#transcript .bubble.user'),
+        );
       }
 
       $('rewind-chat').onclick = () => {
@@ -7755,7 +8285,8 @@
           const t = clean((n._body || n).textContent || '')
             .replace(/\s+/g, ' ')
             .trim();
-          o.textContent = 'Turn ' + (i + 1) + ': ' + (t.slice(0, 60) || '(no text)');
+          o.textContent =
+            'Turn ' + (i + 1) + ': ' + (t.slice(0, 60) || '(no text)');
           rewindTurnPick.appendChild(o);
         });
         // Default to the newest turn: the least destructive choice (the
@@ -7779,15 +8310,27 @@
         }
         const turns = rewindUserTurns();
         const keep = Number(rewindTurnPick.value);
-        if (turns.length === 0 || !Number.isInteger(keep) || keep < 0 || keep > turns.length) {
+        if (
+          turns.length === 0 ||
+          !Number.isInteger(keep) ||
+          keep < 0 ||
+          keep > turns.length
+        ) {
           out.textContent = 'no turns in the transcript yet';
           return;
         }
         const what =
           keep === 0
             ? 'before any turn — every turn is discarded'
-            : 'to after turn ' + keep + ' of ' + turns.length +
-              ' — turns ' + (keep + 1) + ' to ' + turns.length + ' are discarded';
+            : 'to after turn ' +
+              keep +
+              ' of ' +
+              turns.length +
+              ' — turns ' +
+              (keep + 1) +
+              ' to ' +
+              turns.length +
+              ' are discarded';
         if (!window.confirm('Rewind ' + id + ' ' + what + '?')) return;
         const btn = $('rewind-pick-btn');
         btn.disabled = true;
@@ -7797,17 +8340,22 @@
         // may differ from the daemon's boot workspace.
         const rwBody = { toTurn: keep };
         if (watchedSessionCwd) rwBody.cwd = watchedSessionCwd;
-        const r = await rcCall('/session/' + encodeURIComponent(id) + '/rewind', {
-          method: 'POST',
-          body: JSON.stringify(rwBody),
-        });
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/rewind',
+          {
+            method: 'POST',
+            body: JSON.stringify(rwBody),
+          },
+        );
         btn.disabled = false;
         if (!r.ok) {
           out.textContent = 'rewind failed: ' + r.code;
           return;
         }
         rewindPick.style.display = 'none';
-        setStatus('rewound to turn ' + r.body.toTurn + ' — re-syncing transcript');
+        setStatus(
+          'rewound to turn ' + r.body.toTurn + ' — re-syncing transcript',
+        );
         // Re-sync: re-watch from event 0 so the transcript reflects the
         // truncation (startWatch clears and replays the shortened history).
         void startWatch(id);
@@ -7830,19 +8378,26 @@
         // Discards every turn after `turn`, and optionally the file edits too.
         if (
           !window.confirm(
-            'Rewind ' + id + ' to turn ' + turn +
+            'Rewind ' +
+              id +
+              ' to turn ' +
+              turn +
               ($('rewind-files').checked ? ' and restore files' : '') +
               '? Later turns are discarded.',
           )
-        ) return;
+        )
+          return;
         out.textContent = 'rewinding…';
-        const r = await rcCall('/session/' + encodeURIComponent(id) + '/rewind', {
-          method: 'POST',
-          body: JSON.stringify({
-            toTurn: turn,
-            rewindFiles: $('rewind-files').checked,
-          }),
-        });
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/rewind',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              toTurn: turn,
+              rewindFiles: $('rewind-files').checked,
+            }),
+          },
+        );
         if (!r.ok) {
           out.textContent = 'rewind failed: ' + r.code;
           return;
@@ -7859,7 +8414,8 @@
         out.textContent = 'loading…';
         const status = $('reviews-status').value;
         const r = await rcCall(
-          '/rc/reviews' + (status ? '?status=' + encodeURIComponent(status) : ''),
+          '/rc/reviews' +
+            (status ? '?status=' + encodeURIComponent(status) : ''),
         );
         if (!r.ok) {
           out.textContent = 'list failed: ' + r.code;
@@ -7877,10 +8433,15 @@
           const findings = rev.summary && rev.summary.findingsCount;
           label.textContent =
             rev.status +
-            '  ' + rev.reviewId +
-            '  session ' + rev.sessionId +
-            (findings === undefined || findings === null ? '' : '  ' + findings + ' findings') +
-            '  ' + rev.triggeredAt;
+            '  ' +
+            rev.reviewId +
+            '  session ' +
+            rev.sessionId +
+            (findings === undefined || findings === null
+              ? ''
+              : '  ' + findings + ' findings') +
+            '  ' +
+            rev.triggeredAt;
           row.appendChild(label);
           if (rev.status === 'running') {
             const btn = document.createElement('button');
@@ -7922,11 +8483,18 @@
           const label = document.createElement('span');
           label.textContent =
             run.status +
-            '  ' + run.name +
-            '  ' + run.runId +
-            '  phase ' + run.phase +
-            '  ' + run.agentCount + ' agents' +
-            '  ' + run.tokensSpent + ' tok';
+            '  ' +
+            run.name +
+            '  ' +
+            run.runId +
+            '  phase ' +
+            run.phase +
+            '  ' +
+            run.agentCount +
+            ' agents' +
+            '  ' +
+            run.tokensSpent +
+            ' tok';
           row.appendChild(label);
           if (run.status === 'running') {
             const btn = document.createElement('button');
