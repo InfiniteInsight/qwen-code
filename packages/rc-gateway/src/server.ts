@@ -91,6 +91,7 @@ import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import { createRewindRoute } from './routes/rewind.js';
 import { createApprovalModeRoute } from './routes/approvalMode.js';
+import { createModelSwitchRoute } from './routes/modelSwitch.js';
 import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.js';
 import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
 import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
@@ -1308,6 +1309,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap approval-mode changes per chat user
     createApprovalModeRoute(deps.daemon, { audit }),
+  );
+
+  // POST /session/:id/model — WRITE is the mount floor, identical to
+  // approval-mode's middleware chain immediately above (same integrity
+  // guarantee: a session-locked share token is confined to its own
+  // session). No in-handler scope escalation — unlike approval-mode,
+  // switching models has no power-tier concept.
+  app.post(
+    '/session/:id/model',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap model switches per chat user
+    createModelSwitchRoute(deps.daemon),
   );
 
   // /rc/workspace/* — workspace-control routes (rc-workspace-permissions).
