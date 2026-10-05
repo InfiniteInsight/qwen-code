@@ -301,7 +301,9 @@
             back to an earlier turn (a turn picker appears once you choose one).
             <b>Reconnect</b> only appears after the automatic self-heal gives up
             after repeated retries — tap it to re-attach the event stream by
-            hand.
+            hand. <b>Model</b> switches the model backing this session
+            immediately; entries without a residency badge in Operations →
+            Models are still selectable.
           </div>
           <button
             id="cancel-turn"
@@ -334,6 +336,16 @@
             id="session-verb-result"
             style="color: #888; font-size: 0.85rem"
           ></span>
+          <div id="model-switch-row" style="margin-top: 0.6rem; display: none">
+            <label
+              >Model
+              <select id="model-switch-select"></select>
+            </label>
+            <span
+              id="model-switch-result"
+              style="color: #888; font-size: 0.85rem"
+            ></span>
+          </div>
           <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
             <label
               >Rewind to
@@ -2390,6 +2402,28 @@
         f.style.display = '';
       }
 
+      // Model switcher (Chat tab Session controls, issue #52): populates the
+      // select from ctxInfo.availableModels, hidden until there's at least
+      // one entry — mirrors renderFooter's own "hide until there's data"
+      // convention for the approval-mode select above.
+      function renderModelSwitch() {
+        const row = $('model-switch-row');
+        const sel = $('model-switch-select');
+        if (!ctxInfo || !ctxInfo.availableModels || ctxInfo.availableModels.length === 0) {
+          row.style.display = 'none';
+          return;
+        }
+        sel.innerHTML = '';
+        for (const m of ctxInfo.availableModels) {
+          const o = document.createElement('option');
+          o.value = m.modelId;
+          o.textContent = m.name;
+          if (m.modelId === ctxInfo.currentModelId) o.selected = true;
+          sel.appendChild(o);
+        }
+        row.style.display = '';
+      }
+
       // Approval-mode switcher (task #27): POST /session/:id/approval-mode
       // with {mode, persist}. On 200 the response carries the effective mode
       // plus whether the plan document was dropped out-of-band; on 4xx the
@@ -2454,6 +2488,57 @@
         } catch (err) {
           sel.value = prev;
           const detail = 'approval mode change failed: ' + err.message;
+          setNote(detail);
+          setStatus(detail);
+        }
+      }
+
+      // Model switcher (Chat tab Session controls, issue #52):
+      // POST /session/:id/model with {modelId}. Mirrors
+      // changeApprovalMode's structure: on 200 the footer and ctxInfo are
+      // updated in place; on failure (or network error) the select reverts
+      // to the previous model and the error is surfaced in the result note.
+      async function changeModel(sel) {
+        const id = watchedSessionId;
+        if (!id) return;
+        const modelId = sel.value;
+        const prev = ctxInfo ? ctxInfo.currentModelId : modelId;
+        const setNote = (msg) => {
+          const n = $('model-switch-result');
+          if (n) n.textContent = msg;
+        };
+        setNote('');
+        try {
+          const res = await fetch('/session/' + encodeURIComponent(id) + '/model', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ modelId }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            sel.value = prev;
+            const detail =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs a write-scoped token'
+                : (body.error || 'failed (' + res.status + ')') +
+                  (body.code ? ' (' + body.code + ')' : '');
+            setNote(detail);
+            setStatus(detail);
+            return;
+          }
+          if (ctxInfo) {
+            ctxInfo.currentModelId = modelId;
+            const m = ctxInfo.availableModels.find((x) => x.modelId === modelId);
+            ctxInfo.modelName = m ? m.name : modelId;
+            renderFooter();
+          }
+          setNote('switched to ' + (ctxInfo ? ctxInfo.modelName : modelId));
+        } catch (err) {
+          sel.value = prev;
+          const detail = 'model switch failed: ' + err.message;
           setNote(detail);
           setStatus(detail);
         }
@@ -3956,27 +4041,22 @@
 
       // Pull the current model name and approval mode out of the daemon's
       // context status, defensively (state.* is opaque across the boundary).
-      // Model id lives in different places depending on setup: the picker list
-      // (multi-model), `models.current`, or the `model` config option; fall
-      // through them. Single env-model setups may leave it unknown until a
-      // `model_switched` frame arrives.
+      // The real shape is `models.currentModelId` (a string) plus
+      // `models.availableModels` (an array of `{modelId, name, description,
+      // _meta}`, no per-item `isCurrent` flag). Setups with no model list
+      // yet may leave the name unknown until a `model_switched` frame
+      // arrives.
       function parseContext(ctx) {
         const cwd = (ctx && ctx.workspaceCwd) || '';
         const st = (ctx && ctx.state) || {};
         const models = st.models || {};
-        let cur = null;
-        for (const p of models.providers || [])
-          for (const m of p.models || []) if (m && m.isCurrent) cur = m;
-        let modelOpt = null;
-        if (Array.isArray(st.configOptions)) {
-          const mo = st.configOptions.find((o) => o && o.id === 'model');
-          if (mo && mo.currentValue) modelOpt = mo.currentValue;
-        }
-        const modelName =
-          (cur && (cur.name || cur.modelId)) ||
-          modelOpt ||
-          (models.current && models.current.modelId) ||
-          '(model unknown until switched)';
+        const availableModels = (models.availableModels || [])
+          .filter((m) => m && typeof m.modelId === 'string')
+          .map((m) => ({ modelId: m.modelId, name: clean(m.name || m.modelId) }));
+        const currentModelId =
+          typeof models.currentModelId === 'string' ? models.currentModelId : '';
+        const current = availableModels.find((m) => m.modelId === currentModelId);
+        const modelName = current ? current.name : currentModelId || '(model unknown until switched)';
         const modes = st.modes || {};
         const found = (modes.availableModes || []).find(
           (x) => x && x.id === modes.currentModeId,
@@ -3984,6 +4064,8 @@
         const modeName = found ? found.name : modes.currentModeId || '';
         return {
           modelName: clean(modelName),
+          availableModels,
+          currentModelId,
           modeName: clean(modeName),
           currentModeId:
             typeof modes.currentModeId === 'string' ? modes.currentModeId : '',
@@ -4004,6 +4086,7 @@
           if (!res.ok) return; // footer stays hidden; not fatal to watching
           ctxInfo = parseContext(await res.json());
           renderFooter();
+          renderModelSwitch();
           // rc-workspace-scoping (#28): watching a session in a non-default
           // workspace targets the workspace controls at it — but only when
           // nothing is explicitly selected (never hijack a manual choice)
@@ -4164,6 +4247,7 @@
                 };
               ctxInfo.modelName = mid;
               renderFooter();
+              renderModelSwitch();
             }
             return addSystem('model switched to ' + (mid || '?'), false);
           }
@@ -8252,6 +8336,12 @@
       const rewindPick = $('rewind-pick');
       const rewindTurnPick = $('rewind-turn-pick');
       const rewindPickResult = $('rewind-pick-result');
+
+      // Model switcher (issue #52): one-time change listener; see
+      // changeModel/renderModelSwitch above.
+      $('model-switch-select').addEventListener('change', (e) =>
+        changeModel(e.target),
+      );
 
       function rewindUserTurns() {
         return Array.from(
