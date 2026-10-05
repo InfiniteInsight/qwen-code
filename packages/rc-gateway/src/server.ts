@@ -107,6 +107,7 @@ import type { PermissionOverlayStore } from './policy/overlays.js';
 import { createPeersRoute } from './routes/peers.js';
 import type { BrowsePeers } from './routes/peers.js';
 import { createGpuRoute } from './routes/gpu.js';
+import { createLlamaSwapRoute } from './routes/llamaSwap.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -236,6 +237,10 @@ export interface GatewayDeps {
   browsePeers?: BrowsePeers;
   /** GPU status probe for GET /rc/gpu. Absent → route not mounted. */
   gpuProbe?: () => Promise<import('./gpu/gpuStatus.js').GpuStatusResponse>;
+  /** llama-swap status probe for GET /rc/llama-swap. Absent → route not mounted. */
+  llamaSwapProbe?: () => Promise<
+    import('./llama-swap/llamaSwapStatus.js').LlamaSwapStatusResponse
+  >;
   /**
    * Per-sub-actor write cap within the limiter's rolling window (bridge
    * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
@@ -1288,6 +1293,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/gpu',
       requireScope(OWNER, audit),
       createGpuRoute(deps.gpuProbe),
+    );
+  }
+
+  // GET /rc/llama-swap — gateway-global (no :id), OWNER-scoped, read-only
+  // llama-swap status via the optional llama-swap probe. Mirrors the
+  // /rc/gpu mount just above: no session lock, no daemon call. Absent dep
+  // (no --llama-swap-url wired) → route not mounted at all (404, not a 503
+  // at request time).
+  if (deps.llamaSwapProbe) {
+    app.get(
+      '/rc/llama-swap',
+      requireScope(OWNER, audit),
+      createLlamaSwapRoute(deps.llamaSwapProbe),
     );
   }
 

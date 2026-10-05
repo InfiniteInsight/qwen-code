@@ -32,6 +32,7 @@ import {
 } from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { probeGpuStatus } from './gpu/gpuStatus.js';
+import { probeLlamaSwapStatus } from './llama-swap/llamaSwapStatus.js';
 import { startDaemon } from './daemonSupervisor.js';
 import { DaemonPool, type PooledDaemonSpawn } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
@@ -266,6 +267,12 @@ export interface ServeOptions {
   attachDaemonUrl?: string;
   /** Token (`QWEN_SERVER_TOKEN`) of the daemon to attach to. */
   attachDaemonToken?: string;
+  /**
+   * Base URL of a running llama-swap instance (e.g. `http://127.0.0.1:8080`).
+   * When set, `GET /rc/llama-swap` mounts and polls it via
+   * {@link probeLlamaSwapStatus}. Omitted → route not mounted.
+   */
+  llamaSwapUrl?: string;
   /**
    * `--acme-domain` values: bind with native TLS using an auto-obtained (and
    * auto-renewed) Let's Encrypt cert via DNS-01. Requires {@link acmeEmail} and
@@ -767,6 +774,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // No pidResolver override — workspace resolution via `/proc/<pid>/cwd`
     // happens automatically inside probeGpuStatus.
     gpuProbe: () => probeGpuStatus(),
+    // GET /rc/llama-swap: probe the optional llama-swap base URL
+    // (--llama-swap-url / QWEN_RC_LLAMA_SWAP_URL) for live model status.
+    // Trailing slash stripped so `${baseUrl}/v1/models` never doubles up.
+    llamaSwapProbe: opts.llamaSwapUrl
+      ? () => probeLlamaSwapStatus(opts.llamaSwapUrl!.replace(/\/+$/, ''))
+      : undefined,
     policyExplain: {
       policy: () => currentPolicy,
       projectRoot: () => workspaceCwd ?? process.cwd(),
@@ -1651,8 +1664,8 @@ if (process.argv[2] === 'serve') {
   // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
   //        --port <n> --daemon-port <n> --no-mdns --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
-  //        --acme-domain <d[,d]> --acme-email <e> --acme-dns-provider <route53|cloudflare>
-  //        --acme-staging --acme-directory <url>
+  //        --llama-swap-url <url> --acme-domain <d[,d]> --acme-email <e>
+  //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   const argv = process.argv.slice(3);
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -1676,6 +1689,7 @@ if (process.argv[2] === 'serve') {
     // Handoff Phase 1: attach to an existing daemon instead of spawning.
     attachDaemonUrl: flag('attach-daemon') ?? process.env.QWEN_RC_DAEMON_URL,
     attachDaemonToken: flag('daemon-token') ?? process.env.QWEN_RC_DAEMON_TOKEN,
+    llamaSwapUrl: flag('llama-swap-url') ?? process.env.QWEN_RC_LLAMA_SWAP_URL,
     // Auto TLS (Let's Encrypt, DNS-01). Provider creds come from env.
     acmeDomains: acmeDomain
       ? acmeDomain
