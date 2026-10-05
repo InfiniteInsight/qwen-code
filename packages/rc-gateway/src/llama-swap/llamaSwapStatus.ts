@@ -14,7 +14,9 @@ export async function probeLlamaSwapStatus(
   fetchImpl: typeof fetch = fetch,
 ): Promise<LlamaSwapStatusResponse> {
   try {
-    const res = await fetchImpl(`${baseUrl}/v1/models`);
+    const res = await fetchImpl(`${baseUrl}/v1/models`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!res.ok) return { available: false, models: [] };
     const body = (await res.json()) as { data?: unknown } | null;
     if (!body || !Array.isArray(body.data)) {
