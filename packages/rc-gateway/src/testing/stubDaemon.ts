@@ -171,6 +171,16 @@ export interface StubDaemonOptions {
   };
   /** JSON body to return on a non-200 approval-mode response. */
   approvalModeBody?: unknown;
+  /** Status for POST /session/:id/model (default 200). */
+  setModelStatus?: number;
+  /**
+   * Response body for POST /session/:id/model on success. Defaults to
+   * `{ modelId: req.body.modelId }` so a test that doesn't care about the
+   * exact value still gets one consistent with what it sent.
+   */
+  setModelResult?: Record<string, unknown>;
+  /** JSON body to return on a non-200 POST /session/:id/model response. */
+  setModelBody?: unknown;
   /** Status for POST /session (default 200). Non-200 → { error }. */
   createSessionStatus?: number;
   /**
@@ -746,6 +756,17 @@ export async function startStubDaemon(
       previous: r.previous,
       persisted: r.persisted,
     });
+  });
+
+  app.post('/session/:id/model', express.json(), (req, res) => {
+    const status = opts.setModelStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.setModelBody ?? { error: 'stub' });
+      return;
+    }
+    res
+      .status(200)
+      .json(opts.setModelResult ?? { modelId: req.body?.modelId });
   });
 
   app.post('/session/:id/prompt', (req, res) => {

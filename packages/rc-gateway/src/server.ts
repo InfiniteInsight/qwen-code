@@ -91,6 +91,7 @@ import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import { createRewindRoute } from './routes/rewind.js';
 import { createApprovalModeRoute } from './routes/approvalMode.js';
+import { createModelSwitchRoute } from './routes/modelSwitch.js';
 import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.js';
 import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
 import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
@@ -106,6 +107,7 @@ import type { PermissionOverlayStore } from './policy/overlays.js';
 import { createPeersRoute } from './routes/peers.js';
 import type { BrowsePeers } from './routes/peers.js';
 import { createGpuRoute } from './routes/gpu.js';
+import { createLlamaSwapRoute } from './routes/llamaSwap.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -235,6 +237,10 @@ export interface GatewayDeps {
   browsePeers?: BrowsePeers;
   /** GPU status probe for GET /rc/gpu. Absent → route not mounted. */
   gpuProbe?: () => Promise<import('./gpu/gpuStatus.js').GpuStatusResponse>;
+  /** llama-swap status probe for GET /rc/llama-swap. Absent → route not mounted. */
+  llamaSwapProbe?: () => Promise<
+    import('./llama-swap/llamaSwapStatus.js').LlamaSwapStatusResponse
+  >;
   /**
    * Per-sub-actor write cap within the limiter's rolling window (bridge
    * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
@@ -1290,6 +1296,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
+  // GET /rc/llama-swap — gateway-global (no :id), OWNER-scoped, read-only
+  // llama-swap status via the optional llama-swap probe. Mirrors the
+  // /rc/gpu mount just above: no session lock, no daemon call. Absent dep
+  // (no --llama-swap-url wired) → route not mounted at all (404, not a 503
+  // at request time).
+  if (deps.llamaSwapProbe) {
+    app.get(
+      '/rc/llama-swap',
+      requireScope(OWNER, audit),
+      createLlamaSwapRoute(deps.llamaSwapProbe),
+    );
+  }
+
   // POST /session/:id/approval-mode — WRITE is the floor (plan/default);
   // the in-handler OWNER gate escalates for power modes (auto-edit/auto/
   // yolo) and a durable `persist: true`. Mirrors the fork/rewind mounts'
@@ -1308,6 +1327,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap approval-mode changes per chat user
     createApprovalModeRoute(deps.daemon, { audit }),
+  );
+
+  // POST /session/:id/model — WRITE is the mount floor, identical to
+  // approval-mode's middleware chain immediately above (same integrity
+  // guarantee: a session-locked share token is confined to its own
+  // session). No in-handler scope escalation — unlike approval-mode,
+  // switching models has no power-tier concept.
+  app.post(
+    '/session/:id/model',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap model switches per chat user
+    createModelSwitchRoute(deps.daemon),
   );
 
   // /rc/workspace/* — workspace-control routes (rc-workspace-permissions).
