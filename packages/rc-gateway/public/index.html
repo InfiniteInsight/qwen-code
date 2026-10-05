@@ -993,6 +993,35 @@
           </div>
           <div id="search-results">(not searched)</div>
         </details>
+        <details id="llama-swap" class="ops-collapse">
+          <summary>
+            <strong>Models</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Models?"
+              aria-expanded="false"
+              aria-controls="help-llama-swap"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-llama-swap" hidden>
+            Which models llama-swap currently has loaded on lovelace, for
+            reference when picking a model in the Chat tab. Not configured —
+            no <code>--llama-swap-url</code> was passed to the gateway — shows
+            a "not configured" note. Configured but unreachable — llama-swap
+            is stopped, e.g. during a training run — shows a "stopped" note
+            instead of an empty table. Tap <b>Refresh</b> to re-check.
+          </div>
+          <div id="llama-swap-empty" style="color: #888; font-size: 0.85rem">
+            (not fetched)
+          </div>
+          <div id="llama-swap-rows"></div>
+          <div style="margin-top: 6px">
+            <button id="llama-swap-refresh">Refresh</button>
+          </div>
+        </details>
         <details id="perm-rules" class="ops-collapse" hidden>
           <summary>
             <strong>Permission rules</strong
@@ -7213,6 +7242,51 @@
       }
 
       $('daemons-refresh-gpus').onclick = () => void runGpuRefresh();
+
+      async function runLlamaSwapRefresh() {
+        const empty = $('llama-swap-empty');
+        const rows = $('llama-swap-rows');
+        rows.innerHTML = '';
+        empty.textContent = '(checking…)';
+        empty.style.display = '';
+        try {
+          const res = await fetch('/rc/llama-swap', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 404) {
+            empty.textContent = 'not configured — gateway has no --llama-swap-url';
+            return;
+          }
+          if (!res.ok) {
+            empty.textContent = 'failed to reach gateway (' + res.status + ')';
+            return;
+          }
+          const data = await res.json();
+          if (!data.available) {
+            empty.textContent = 'llama-swap stopped or unreachable';
+            return;
+          }
+          if (!data.models || data.models.length === 0) {
+            empty.textContent = 'no models configured in llama-swap';
+            return;
+          }
+          empty.style.display = 'none';
+          for (const m of data.models) {
+            const row = document.createElement('div');
+            const badge = m.loaded ? '🟢 loaded' : '⚪ unloaded';
+            row.textContent =
+              m.id + (m.aliases && m.aliases.length ? ' (' + m.aliases.join(', ') + ')' : '') + ' — ' + badge;
+            rows.appendChild(row);
+          }
+        } catch (err) {
+          empty.style.display = '';
+          empty.textContent = 'failed to reach gateway: ' + err.message;
+        }
+      }
+      $('llama-swap-refresh').onclick = () => void runLlamaSwapRefresh();
+      $('llama-swap').addEventListener('toggle', () => {
+        if ($('llama-swap').open) void runLlamaSwapRefresh();
+      });
 
       // loadDaemonManifest() and the watched-session auto-restore (below)
       // both used to run unconditionally here at script-load. They now run
