@@ -2560,7 +2560,7 @@
           }
           if (ctxInfo) {
             ctxInfo.currentModelId = modelId;
-            const m = ctxInfo.availableModels.find((x) => x.modelId === modelId);
+            const m = (ctxInfo.availableModels || []).find((x) => x.modelId === modelId);
             ctxInfo.modelName = m ? m.name : modelId;
             renderFooter();
           }
