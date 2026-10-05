@@ -16,27 +16,28 @@ export async function probeLlamaSwapStatus(
   try {
     const res = await fetchImpl(`${baseUrl}/v1/models`);
     if (!res.ok) return { available: false, models: [] };
-    const body = await res.json();
+    const body = (await res.json()) as { data?: unknown } | null;
     if (!body || !Array.isArray(body.data)) {
       return { available: false, models: [] };
     }
-    const models = body.data
+    const models = (body.data as unknown[])
       .filter(
         (m: unknown) => m && typeof (m as { id?: unknown }).id === 'string',
       )
-      .map(
-        (m: {
+      .map((m: unknown) => {
+        const model = m as {
           id: string;
           aliases?: unknown;
           status?: { value?: unknown };
-        }) => ({
-          id: m.id,
-          aliases: Array.isArray(m.aliases)
-            ? m.aliases.filter((a) => typeof a === 'string')
+        };
+        return {
+          id: model.id,
+          aliases: Array.isArray(model.aliases)
+            ? model.aliases.filter((a) => typeof a === 'string')
             : [],
-          loaded: m.status?.value === 'loaded',
-        }),
-      );
+          loaded: model.status?.value === 'loaded',
+        };
+      });
     return { available: true, models };
   } catch {
     return { available: false, models: [] };
