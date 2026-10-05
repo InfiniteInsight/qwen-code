@@ -18,6 +18,7 @@ import type {
   DaemonSessionSupportedCommandsStatus,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  SetModelResult,
   RestoreSessionRequest,
   DaemonRestoredSession,
   DaemonCapabilities,
@@ -115,6 +116,11 @@ export interface SessionDaemon {
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean; clientId?: string },
   ): Promise<DaemonApprovalModeResult>;
+  setSessionModel(
+    sessionId: string,
+    modelId: string,
+    clientId?: string,
+  ): Promise<SetModelResult>;
   sessionContext(
     sessionId: string,
     clientId?: string,
@@ -936,6 +942,16 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonApprovalModeResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.setSessionApprovalMode(sessionId, mode, opts),
+    );
+  }
+
+  async setSessionModel(
+    sessionId: string,
+    modelId: string,
+    clientId?: string,
+  ): Promise<SetModelResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.setSessionModel(sessionId, modelId, clientId),
     );
   }
 
