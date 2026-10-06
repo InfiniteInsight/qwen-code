@@ -709,6 +709,14 @@
           >
             Switch model
           </div>
+          <div style="padding: 0.6rem 1rem; border-bottom: 1px solid #333">
+            <input
+              type="text"
+              id="model-picker-filter"
+              placeholder="Filter models…"
+              style="width: 100%; box-sizing: border-box"
+            />
+          </div>
           <div id="model-picker-rows" style="max-height: 50vh; overflow: auto"></div>
           <div
             style="padding: 0.6rem 1rem; text-align: right; border-top: 1px solid #333"
@@ -2469,9 +2477,38 @@
           return;
         }
         const dlg = $('model-picker-dialog');
+        const filterInput = $('model-picker-filter');
+        filterInput.value = '';
+        renderModelPickerRows('');
+        dlg.showModal();
+        filterInput.focus();
+      }
+
+      // Renders #model-picker-rows filtered by a case-insensitive substring
+      // match against each model's display name AND its raw modelId (so a
+      // hashed `qwen-route:v1:<hash>` entry — unannotated, no friendly name —
+      // is still findable by typing part of the hash). Empty query shows
+      // everything; no matches shows a message instead of a blank list.
+      function renderModelPickerRows(query) {
+        const dlg = $('model-picker-dialog');
         const rows = $('model-picker-rows');
         rows.innerHTML = '';
-        for (const m of ctxInfo.availableModels) {
+        const needle = query.trim().toLowerCase();
+        const matches = ctxInfo.availableModels.filter(
+          (m) =>
+            !needle ||
+            m.name.toLowerCase().includes(needle) ||
+            m.modelId.toLowerCase().includes(needle),
+        );
+        if (matches.length === 0) {
+          const empty = document.createElement('div');
+          empty.textContent = 'No models match.';
+          empty.style.padding = '0.6rem 1rem';
+          empty.style.color = '#888';
+          rows.appendChild(empty);
+          return;
+        }
+        for (const m of matches) {
           const row = document.createElement('button');
           row.type = 'button';
           const current = m.modelId === ctxInfo.currentModelId;
@@ -2491,7 +2528,6 @@
           });
           rows.appendChild(row);
         }
-        dlg.showModal();
       }
 
       // Approval-mode switcher (task #27): POST /session/:id/approval-mode
@@ -8453,6 +8489,9 @@
           $('model-picker-dialog').close();
         }
       });
+      $('model-picker-filter').addEventListener('input', (e) =>
+        renderModelPickerRows(e.target.value),
+      );
 
       function rewindUserTurns() {
         return Array.from(
