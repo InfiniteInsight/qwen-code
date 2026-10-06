@@ -301,9 +301,8 @@
             back to an earlier turn (a turn picker appears once you choose one).
             <b>Reconnect</b> only appears after the automatic self-heal gives up
             after repeated retries — tap it to re-attach the event stream by
-            hand. <b>Model</b> switches the model backing this session
-            immediately; entries without a residency badge in Operations →
-            Models are still selectable.
+            hand. Tap the model name in the status bar below the transcript
+            to switch models.
           </div>
           <button
             id="cancel-turn"
@@ -336,16 +335,6 @@
             id="session-verb-result"
             style="color: #888; font-size: 0.85rem"
           ></span>
-          <div id="model-switch-row" style="margin-top: 0.6rem; display: none">
-            <label
-              >Model
-              <select id="model-switch-select"></select>
-            </label>
-            <span
-              id="model-switch-result"
-              style="color: #888; font-size: 0.85rem"
-            ></span>
-          </div>
           <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
             <label
               >Rewind to
@@ -711,6 +700,22 @@
             word-break: break-word;
           "
         ></div>
+        <dialog
+          id="model-picker-dialog"
+          style="padding: 0; border: 1px solid #333; border-radius: 8px; max-width: 24rem; width: 90vw"
+        >
+          <div
+            style="padding: 0.8rem 1rem; font-weight: 600; border-bottom: 1px solid #333"
+          >
+            Switch model
+          </div>
+          <div id="model-picker-rows" style="max-height: 50vh; overflow: auto"></div>
+          <div
+            style="padding: 0.6rem 1rem; text-align: right; border-top: 1px solid #333"
+          >
+            <button type="button" id="model-picker-cancel">Cancel</button>
+          </div>
+        </dialog>
         <div
           id="session-title"
           hidden
@@ -2389,19 +2394,42 @@
         const hasModes =
           Array.isArray(ctxInfo.availableModes) &&
           ctxInfo.availableModes.length > 1;
-        const parts = [];
-        parts.push('🧠 ' + ctxInfo.modelName);
+        const hasModels =
+          Array.isArray(ctxInfo.availableModels) &&
+          ctxInfo.availableModels.length > 1;
+        f.innerHTML = '';
+        // The model name is tappable (opens the picker dialog) only when
+        // there's more than one model to switch to — same guard the mode
+        // picker below uses for its own select vs. plain text.
+        const modelSpan = document.createElement('span');
+        modelSpan.textContent = '🧠 ' + ctxInfo.modelName;
+        if (hasModels) {
+          modelSpan.id = 'footer-model-name';
+          modelSpan.style.cursor = 'pointer';
+          modelSpan.style.textDecoration = 'underline dotted';
+          modelSpan.title = 'Tap to switch model';
+          modelSpan.setAttribute('role', 'button');
+          modelSpan.tabIndex = 0;
+          modelSpan.addEventListener('click', openModelPicker);
+          modelSpan.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              openModelPicker();
+            }
+          });
+        }
+        f.append(modelSpan);
+        const rest = [];
         if (liveIn > 0 || liveOut > 0) {
-          parts.push(fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out');
+          rest.push(fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out');
         }
         // The mode name renders as text only when there is no picker (a single
         // available mode); otherwise the select below carries it.
-        if (!hasModes && ctxInfo.modeName) parts.push(ctxInfo.modeName);
-        if (ctxInfo.cwd) parts.push(ctxInfo.cwd);
-        const text = document.createElement('span');
-        text.textContent = parts.join('   ·   ');
-        f.innerHTML = '';
-        f.append(text);
+        if (!hasModes && ctxInfo.modeName) rest.push(ctxInfo.modeName);
+        if (ctxInfo.cwd) rest.push(ctxInfo.cwd);
+        if (rest.length) {
+          f.append(document.createTextNode('   ·   ' + rest.join('   ·   ')));
+        }
         if (hasModes) {
           const sel = document.createElement('select');
           sel.id = 'footer-mode';
@@ -2431,26 +2459,39 @@
         f.style.display = '';
       }
 
-      // Model switcher (Chat tab Session controls, issue #52): populates the
-      // select from ctxInfo.availableModels, hidden until there's at least
-      // one entry — mirrors renderFooter's own "hide until there's data"
-      // convention for the approval-mode select above.
-      function renderModelSwitch() {
-        const row = $('model-switch-row');
-        const sel = $('model-switch-select');
+      // Model picker (footer model name, issue #52): tapping the name opens
+      // a <dialog> listing ctxInfo.availableModels, current one marked.
+      // Picking a row closes the dialog and fires the switch; picking the
+      // current model, Cancel, Escape, or a tap on the backdrop just closes
+      // it with no change.
+      function openModelPicker() {
         if (!ctxInfo || !ctxInfo.availableModels || ctxInfo.availableModels.length === 0) {
-          row.style.display = 'none';
           return;
         }
-        sel.innerHTML = '';
+        const dlg = $('model-picker-dialog');
+        const rows = $('model-picker-rows');
+        rows.innerHTML = '';
         for (const m of ctxInfo.availableModels) {
-          const o = document.createElement('option');
-          o.value = m.modelId;
-          o.textContent = m.name;
-          if (m.modelId === ctxInfo.currentModelId) o.selected = true;
-          sel.appendChild(o);
+          const row = document.createElement('button');
+          row.type = 'button';
+          const current = m.modelId === ctxInfo.currentModelId;
+          row.textContent = (current ? '✓ ' : '   ') + m.name;
+          row.style.display = 'block';
+          row.style.width = '100%';
+          row.style.textAlign = 'left';
+          row.style.border = 'none';
+          row.style.background = 'none';
+          row.style.padding = '0.5rem 1rem';
+          row.style.cursor = 'pointer';
+          row.style.font = 'inherit';
+          if (current) row.style.fontWeight = '600';
+          row.addEventListener('click', () => {
+            dlg.close();
+            if (!current) void switchModel(m.modelId);
+          });
+          rows.appendChild(row);
         }
-        row.style.display = '';
+        dlg.showModal();
       }
 
       // Approval-mode switcher (task #27): POST /session/:id/approval-mode
@@ -2522,21 +2563,15 @@
         }
       }
 
-      // Model switcher (Chat tab Session controls, issue #52):
-      // POST /session/:id/model with {modelId}. Mirrors
-      // changeApprovalMode's structure: on 200 the footer and ctxInfo are
-      // updated in place; on failure (or network error) the select reverts
-      // to the previous model and the error is surfaced in the result note.
-      async function changeModel(sel) {
+      // Model picker (issue #52): POST /session/:id/model with {modelId}.
+      // Mirrors changeApprovalMode's structure minus the select-revert (the
+      // dialog is already closed by the time this runs, so there's nothing
+      // to revert visually) — on 200 the footer and ctxInfo update in
+      // place; on failure (or network error) the error is surfaced via the
+      // shared status line.
+      async function switchModel(modelId) {
         const id = watchedSessionId;
         if (!id) return;
-        const modelId = sel.value;
-        const prev = ctxInfo ? ctxInfo.currentModelId : modelId;
-        const setNote = (msg) => {
-          const n = $('model-switch-result');
-          if (n) n.textContent = msg;
-        };
-        setNote('');
         try {
           const res = await fetch('/session/' + encodeURIComponent(id) + '/model', {
             method: 'POST',
@@ -2548,14 +2583,12 @@
           });
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
-            sel.value = prev;
             const detail =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs a write-scoped token'
                 : (body.error || 'failed (' + res.status + ')') +
                   (body.code ? ' (' + body.code + ')' : '');
-            setNote(detail);
-            setStatus(detail);
+            setStatus('model switch failed: ' + detail);
             return;
           }
           if (ctxInfo) {
@@ -2564,12 +2597,8 @@
             ctxInfo.modelName = m ? m.name : modelId;
             renderFooter();
           }
-          setNote('switched to ' + (ctxInfo ? ctxInfo.modelName : modelId));
         } catch (err) {
-          sel.value = prev;
-          const detail = 'model switch failed: ' + err.message;
-          setNote(detail);
-          setStatus(detail);
+          setStatus('model switch failed: ' + err.message);
         }
       }
 
@@ -4115,7 +4144,6 @@
           if (!res.ok) return; // footer stays hidden; not fatal to watching
           ctxInfo = parseContext(await res.json());
           renderFooter();
-          renderModelSwitch();
           // rc-workspace-scoping (#28): watching a session in a non-default
           // workspace targets the workspace controls at it — but only when
           // nothing is explicitly selected (never hijack a manual choice)
@@ -4272,12 +4300,13 @@
                   modeName: '',
                   currentModeId: '',
                   availableModes: [],
+                  availableModels: [],
+                  currentModelId: '',
                   cwd: '',
                 };
               ctxInfo.modelName = mid;
               ctxInfo.currentModelId = mid;
               renderFooter();
-              renderModelSwitch();
             }
             return addSystem('model switched to ' + (mid || '?'), false);
           }
@@ -8412,11 +8441,18 @@
       const rewindTurnPick = $('rewind-turn-pick');
       const rewindPickResult = $('rewind-pick-result');
 
-      // Model switcher (issue #52): one-time change listener; see
-      // changeModel/renderModelSwitch above.
-      $('model-switch-select').addEventListener('change', (e) =>
-        changeModel(e.target),
+      // Model picker (issue #52): Cancel button, and a tap on the dialog's
+      // own backdrop (the <dialog> element itself is the click target only
+      // when the click lands outside its content box) both close without
+      // choosing. Escape-to-close is native <dialog> behavior, free.
+      $('model-picker-cancel').addEventListener('click', () =>
+        $('model-picker-dialog').close(),
       );
+      $('model-picker-dialog').addEventListener('click', (e) => {
+        if (e.target === $('model-picker-dialog')) {
+          $('model-picker-dialog').close();
+        }
+      });
 
       function rewindUserTurns() {
         return Array.from(
