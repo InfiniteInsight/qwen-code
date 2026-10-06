@@ -103,6 +103,7 @@
     },
     "baseline-browser-mapping": "^2.9.19",
     "normalize-package-data": "^7.0.1",
+    "proxy-addr": "^2.0.8",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "@types/react": "^19.2.0",
@@ -167,7 +168,7 @@
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "ink": "^7.0.3",
-    "simple-git": "^3.36.0"
+    "simple-git": "^4.0.2"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",
