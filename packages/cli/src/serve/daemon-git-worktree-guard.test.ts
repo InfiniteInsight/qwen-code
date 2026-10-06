@@ -115,8 +115,6 @@ describe('createDaemonToolGuard', () => {
   it.each([
     'git -C `echo /outside/repo` reset --hard',
     'git -C ~/repos/other-checkout reset --hard',
-    "git $'-C' /outside/repo reset --hard",
-    "$'git' -C /outside/repo reset --hard",
     'git $(echo -C) /outside/repo reset --hard',
     'git -C /outside/repo* reset --hard',
   ])('denies shell-expansion relocation forms %#', async (command) => {
@@ -125,6 +123,28 @@ describe('createDaemonToolGuard', () => {
     await expect(guard(request(command))).resolves.toMatchObject({
       allowed: false,
       reason: expect.stringContaining('dynamic repository location'),
+    });
+  });
+
+  // shell-quote 1.9 didn't understand bash's $'...' (ANSI-C) quoting and
+  // mis-tokenized it into a bogus `${}`-prefixed env-var-expansion artifact,
+  // which happened to trip this guard's "dynamic/unresolved token" path.
+  // shell-quote >=1.11 parses it correctly into the plain literal `-C` /
+  // `git`, so the guard now resolves it to an actual (nonexistent, in this
+  // test) path and denies via the "unresolvable target" branch instead -
+  // still a deny, just via the branch a correctly-parsed literal target
+  // takes (and if the target existed, it would deny via "outside the
+  // session working directory" instead - verified by reading
+  // evaluateGitInvocation's realpath/isWithinRoot path).
+  it.each([
+    "git $'-C' /outside/repo reset --hard",
+    "$'git' -C /outside/repo reset --hard",
+  ])('denies ANSI-C-quoted relocation forms %#', async (command) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(command))).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('/outside/repo'),
     });
   });
 
