@@ -135,6 +135,8 @@ import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
+import { createTerminalOpenRoute } from './routes/terminals.js';
+import type { TerminalRequestLog } from './terminals.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
 import {
   createListTokensRoute,
@@ -183,6 +185,18 @@ export interface GatewayDeps {
   daemon: SessionDaemon;
   store: TokenStore;
   pairing: PairingService;
+  /**
+   * Host-terminal request log (issue #49). The `POST /rc/terminals` route
+   * mounts only when this is set AND `daemon` can resolve a session's endpoint,
+   * so a gateway without one (or a plain single-daemon wiring) simply lacks the
+   * route instead of accepting requests nothing will service.
+   */
+  terminalRequests?: TerminalRequestLog;
+  /**
+   * The qwen command a host terminal should run (issue #49). Must name a build
+   * that supports `--attach-daemon`; defaults to `qwen` on PATH.
+   */
+  terminalQwenArgv?: string[];
   /** Audit log path; defaults to ~/.qwen/rc/audit.log. */
   auditPath?: string;
   /** Static web-client root; defaults to the package's public/ dir. */
@@ -761,6 +775,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before touching the daemon)
     createSessionCreateRoute(deps.daemon, audit),
   );
+  // POST /rc/terminals — open a terminal on the gateway's own host showing one
+  // conversation (issue #49). Write-scoped like /session. Mounted whenever a
+  // request log is wired; when the attached `daemon` cannot resolve a session
+  // endpoint the route answers 501 rather than the gateway silently lacking it.
+  if (deps.terminalRequests) {
+    app.post(
+      '/rc/terminals',
+      requireScope(WRITE, audit),
+      subActorBan,
+      createTerminalOpenRoute(deps.daemon, deps.terminalRequests, audit, {
+        qwenArgv: deps.terminalQwenArgv,
+      }),
+    );
+  }
   // POST /session/:id/resume — reactivate a past (ended) conversation on its
   // workspace's daemon so a phone can pick it back up (add-resume-conversations).
   // Write-scoped; bare namespace. enforceSessionLock binds a session-locked

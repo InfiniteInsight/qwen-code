@@ -5949,6 +5949,28 @@
       // before the auth gate has validated it. doPair() (above) still calls
       // both directly on a fresh pair.
 
+      // issue #49: ask the gateway to open a terminal on its own host mirroring one
+      // conversation. Best-effort by design: a host with no launcher app running
+      // (or a gateway that cannot service it) just leaves the conversation
+      // browser-only, so a failure is a status note and never blocks the chat.
+      async function requestHostTerminal(id) {
+        try {
+          const res = await fetch('/rc/terminals', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ sessionId: id }),
+          });
+          if (res.status === 202) {
+            setStatus('terminal opening on the host…');
+          }
+        } catch (e) {
+          // Ignored: nothing here should interrupt a working conversation.
+        }
+      }
+
       // Create (or attach to) a daemon session, then hand off to Watch so the
       // composer opens on it immediately. `cwd` empty → the daemon's bound
       // workspace. Needs a write/owner token.
@@ -5994,6 +6016,8 @@
             // No freeform id field anymore: hand straight to the watch.
             lastSeenEventId = null;
             startWatch(j.sessionId); // connect the stream + open the composer
+            // issue #49: mirror this conversation in a terminal on the host.
+            void requestHostTerminal(j.sessionId);
           } else if (res.status === 401 || res.status === 403) {
             setStatus('not authorized — needs a write/owner token');
           } else if (res.status === 502) {
