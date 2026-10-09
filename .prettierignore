@@ -24,3 +24,4 @@ packages/vscode-ide-companion/schemas/settings.schema.json
 packages/cli/src/services/insight/templates/insightTemplate.ts
 packages/cua-driver/
 packages/desktop/
+packages/rc-gateway/public/vendor/

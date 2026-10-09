@@ -38,6 +38,7 @@ export default tseslint.config(
       'packages/desktop-shell/src-tauri/target/**',
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
+      'packages/rc-gateway/public/vendor/**', // generated minified third-party bundle
     ],
   },
   eslint.configs.recommended,

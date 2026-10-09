@@ -628,6 +628,14 @@ describe('gateway app', () => {
     expect(res.headers.get('content-type')).toMatch(/javascript/);
   });
 
+  it('serves the vendored virtual-core at /ui/vendor/virtual-core.js without auth', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/vendor/virtual-core.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/javascript/);
+    expect(await res.text()).toContain('Virtualizer');
+  });
+
   it('serves the enrollment UI at /ui/index.html', async () => {
     const { url } = await boot();
     const res = await fetch(`${url}/ui/index.html`);
