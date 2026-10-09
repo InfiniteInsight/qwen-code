@@ -1944,10 +1944,24 @@
       const setStatus = (m) => {
         $('status').textContent = m;
       };
-      const log = (m) => {
-        const el = $('log');
-        el.textContent += m + '\n';
+      // Raw-frame log, bounded: every SSE frame is logged, so an uncapped
+      // textContent += grew without limit and re-flattened the whole string
+      // per frame. Keep only the newest LOG_MAX_LINES lines (one text node
+      // each) and, while the raw view is hidden, skip the DOM entirely.
+      const LOG_MAX_LINES = 500;
+      const logLines = [];
+      const appendCapped = (el, line) => {
+        el.appendChild(document.createTextNode(line));
+        while (el.childNodes.length > LOG_MAX_LINES)
+          el.removeChild(el.firstChild);
         el.scrollTop = el.scrollHeight;
+      };
+      const log = (m) => {
+        logLines.push(m + '\n');
+        if (logLines.length > LOG_MAX_LINES) logLines.shift();
+        const el = $('log');
+        if (el.style.display === 'none') return;
+        appendCapped(el, m + '\n');
       };
       const cards = new Map();
 
@@ -6433,6 +6447,14 @@
         const raw = $('raw-toggle').checked;
         $('log').style.display = raw ? '' : 'none';
         $('transcript').style.display = raw ? 'none' : '';
+        if (raw) {
+          // Hidden-time frames live only in logLines; rebuild the view.
+          const el = $('log');
+          el.replaceChildren(
+            ...logLines.map((l) => document.createTextNode(l)),
+          );
+          el.scrollTop = el.scrollHeight;
+        }
       };
 
       // Owner event stream (cycle 54): fetch-based SSE consumer of GET
@@ -6444,9 +6466,9 @@
       let eventsController = null;
       const eventLog = (m) => {
         const el = $('events');
-        if (el.textContent === '(not connected)') el.textContent = '';
-        el.textContent += m + '\n';
-        el.scrollTop = el.scrollHeight;
+        if (el.firstChild && el.firstChild.nodeValue === '(not connected)')
+          el.textContent = '';
+        appendCapped(el, m + '\n');
       };
       $('stop-events').onclick = () => {
         if (eventsController) eventsController.abort();
