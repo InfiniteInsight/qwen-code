@@ -1181,6 +1181,7 @@ export async function main() {
           extensionRefreshState,
           attachDaemonUrl: argv.attachDaemon,
           attachDaemonToken: argv.daemonToken,
+          attachDaemonSession: argv.attachSession,
         },
       );
       // Clean up corruption env vars so subsequent relaunch children

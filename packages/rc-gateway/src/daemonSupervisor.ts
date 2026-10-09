@@ -81,6 +81,18 @@ export interface DaemonHandle {
    * does not own the lifecycle of a daemon it did not start.
    */
   whenExited?: Promise<DaemonExit>;
+  /**
+   * Loopback base URL this handle talks to. The host-terminal launcher
+   * (issue #49) hands it to a terminal that attaches to the same daemon.
+   */
+  url: string;
+  /**
+   * The daemon's `QWEN_SERVER_TOKEN`. Undefined when the daemon was reached
+   * without one (attach mode against a tokenless daemon) or an injected
+   * spawner omitted it — callers that must authenticate a new client treat
+   * that as unavailable rather than guessing.
+   */
+  token: string | undefined;
 }
 
 /**
@@ -226,6 +238,10 @@ export async function startDaemon(
   // SAME health-poll + DaemonClient handle below.
   let daemon: DaemonClient;
   let kill: (signal?: NodeJS.Signals) => void;
+  // Endpoint material for the host-terminal launcher (issue #49); set by
+  // whichever branch below builds `daemon`.
+  let url: string;
+  let token: string | undefined;
   // Set once the spawned daemon process terminates before we deem it healthy;
   // `exitSignal` resolves to 'exited' so we can RACE it against a (possibly
   // slow) health attempt rather than wait for health to return first.
@@ -240,17 +256,26 @@ export async function startDaemon(
       baseUrl: opts.attach.url,
       token: opts.attach.token,
     });
+    url = opts.attach.url;
+    token = opts.attach.token;
     kill = () => {}; // never kill a daemon we did not start
   } else {
-    const token = randomBytes(32).toString('base64url');
+    const freshToken = randomBytes(32).toString('base64url');
     const port = opts.port ?? 0;
     spawned = opts.spawner
-      ? opts.spawner(token)
-      : defaultSpawner(token, opts.qwenBin ?? 'qwen', port, opts.workspaceCwd);
+      ? opts.spawner(freshToken)
+      : defaultSpawner(
+          freshToken,
+          opts.qwenBin ?? 'qwen',
+          port,
+          opts.workspaceCwd,
+        );
     daemon = new DaemonClient({
       baseUrl: spawned.baseUrl,
       token: spawned.token,
     });
+    url = spawned.baseUrl;
+    token = spawned.token;
     kill = spawned.kill;
     // `whenExited` resolves (never rejects), so this can't leak an unhandled
     // rejection even when the daemon exits long after startup.
@@ -311,6 +336,8 @@ export async function startDaemon(
     },
     attached,
     whenExited: spawned?.whenExited,
+    url,
+    token,
   };
 }
 

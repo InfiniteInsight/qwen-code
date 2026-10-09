@@ -175,6 +175,7 @@ export interface CliArgs {
   experimentalAcp: boolean | undefined;
   attachDaemon: string | undefined;
   daemonToken: string | undefined;
+  attachSession: string | undefined;
   experimentalLsp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
@@ -739,6 +740,11 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description:
             "Bearer token for --attach-daemon (the daemon's QWEN_SERVER_TOKEN)",
+        })
+        .option('attach-session', {
+          type: 'string',
+          description:
+            'With --attach-daemon, show that one session instead of the workspace default. Needed when the workspace holds several sessions (the web UI creates them with scope "thread"), so each terminal can mirror the conversation it was opened for.',
         })
         .option('experimental-skills', {
           type: 'boolean',

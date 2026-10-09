@@ -58,6 +58,7 @@ export type AuditAction =
   | 'scope_denied'
   | 'token_expired_max_age'
   | 'session_created'
+  | 'terminal_requested'
   | 'session_attached'
   | 'session_detached'
   | 'permission_voted'
