@@ -384,6 +384,16 @@ export default tseslint.config(
       },
     },
   },
+  // rc-gateway's static web viewer scripts run in the browser (vendor/ is
+  // ignored above).
+  {
+    files: ['packages/rc-gateway/public/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
 
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
