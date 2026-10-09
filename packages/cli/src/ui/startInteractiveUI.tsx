@@ -70,6 +70,8 @@ export interface StartInteractiveUIOptions {
   extensionRefreshState?: ExtensionRefreshState;
   attachDaemonUrl?: string;
   attachDaemonToken?: string;
+  /** Show one specific daemon session rather than the workspace default. */
+  attachDaemonSession?: string;
 }
 
 export async function startInteractiveUI(
@@ -206,12 +208,11 @@ export async function startInteractiveUI(
                           version={version}
                           initializationResult={initializationResult}
                           initialUseVirtualViewport={useVP}
-                          extensionRefreshState={
-                            options.extensionRefreshState
-                          }
+                          extensionRefreshState={options.extensionRefreshState}
                           repaintViewport={resizeReflow.repaint}
                           daemonUrl={options.attachDaemonUrl}
                           daemonToken={options.attachDaemonToken ?? ''}
+                          sessionId={options.attachDaemonSession}
                         />
                       ) : (
                         <AppContainer

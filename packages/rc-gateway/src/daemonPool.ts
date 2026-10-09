@@ -46,11 +46,26 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
 
+/** Where a daemon can be reached and how to authenticate to it. */
+export interface DaemonEndpoint {
+  /** Loopback base URL, e.g. `http://127.0.0.1:46135`. */
+  url: string;
+  /** The daemon's `QWEN_SERVER_TOKEN`; undefined when it has none. */
+  token: string | undefined;
+  /** The workspace this daemon is bound to — the directory a host terminal
+   * opens in, so the terminal and the conversation share one cwd. */
+  workspaceCwd: string;
+}
+
 /** Result of spawning a new daemon bound to a workspace. */
 export interface PooledDaemonSpawn {
   client: DaemonClient;
   stop: () => Promise<void>;
   workspaceCwd: string;
+  /** Endpoint material, captured at spawn so a host terminal can attach to
+   * this daemon later (issue #49). Absent → the workspace's endpoint is
+   * unknown and terminal requests for it are refused. */
+  endpoint?: DaemonEndpoint;
   /** Fired exactly once when the daemon child process exits (any reason).
    * The pool fills this at spawn time (add-mid-turn-recovery: death
    * detection); the spawner wires the child's exit into it. */
@@ -98,6 +113,14 @@ export interface SessionDaemon {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession>;
+  /**
+   * Optional host-terminal support (issue #49): where to point a terminal that
+   * wants to attach to this session. Optional so a plain `DaemonClient` still
+   * structurally satisfies `SessionDaemon` with no changes; only `DaemonPool`
+   * implements it. Callers treat absence as "this gateway cannot open host
+   * terminals" rather than failing the request that asked.
+   */
+  daemonEndpointForSession?(sessionId: string): DaemonEndpoint | undefined;
   sessionSupportedCommands(
     sessionId: string,
     clientId?: string,
@@ -226,6 +249,9 @@ export interface DaemonPoolOptions {
   /** The boot daemon, already running, used when a create omits cwd. */
   defaultDaemon: DaemonClient;
   defaultWorkspaceCwd: string;
+  /** Endpoint of the boot daemon, used for terminal requests against the
+   * default workspace (issue #49). Absent → those requests are refused. */
+  defaultEndpoint?: DaemonEndpoint;
   /** Spawn a NEW daemon bound to `cwd`; returns once it is reachable. */
   spawn: (cwd: string) => Promise<PooledDaemonSpawn>;
   maxDaemons?: number; // default 3
@@ -247,6 +273,8 @@ interface Entry {
   stop: () => Promise<void>;
   sessions: Set<string>;
   lastUsed: number;
+  /** Copied from `PooledDaemonSpawn` (issue #49). */
+  endpoint?: DaemonEndpoint;
   /** Set by `markDead`; a second trigger (exit event + transport error
    * racing) is a no-op. */
   dead: boolean;
@@ -441,6 +469,7 @@ export class DaemonPool implements SessionDaemon {
           stop: s.stop,
           sessions: new Set(),
           lastUsed: this.now(),
+          endpoint: s.endpoint,
           dead: false,
         };
         // Identity-guarded exit wiring (see `markDead`'s `expectedEntry`):
@@ -688,6 +717,29 @@ export class DaemonPool implements SessionDaemon {
     if (!e) throw new UnknownSessionError(id); // daemon was reaped
     e.lastUsed = this.now();
     return e.client;
+  }
+
+  /**
+   * Endpoint + token of the daemon owning `sessionId` (issue #49), so a host
+   * terminal can attach to the SAME session and mirror it both ways. Returns
+   * undefined when the owning daemon was registered without endpoint material
+   * (a stub spawner in tests, or a boot daemon the gateway cannot authenticate
+   * to) — callers refuse the request rather than hand a terminal a URL it
+   * cannot use. Throws `UnknownSessionError` like `daemonForSession`.
+   */
+  daemonEndpointForSession(sessionId: string): DaemonEndpoint | undefined {
+    const key = this.ownerOf.get(sessionId);
+    if (key === undefined) throw new UnknownSessionError(sessionId);
+    if (key === this.defaultWorkspaceCwd) {
+      const ep = this.opts.defaultEndpoint;
+      return ep ? { ...ep, workspaceCwd: key } : undefined;
+    }
+    const e = this.byWorkspace.get(key);
+    if (!e) throw new UnknownSessionError(sessionId); // daemon was reaped
+    e.lastUsed = this.now();
+    // The pool's key is the canonicalized cwd, so it wins over whatever the
+    // spawner recorded — a terminal must `cd` to the same path the daemon binds.
+    return e.endpoint ? { ...e.endpoint, workspaceCwd: key } : undefined;
   }
 
   private removeSession(id: string): void {

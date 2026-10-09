@@ -35,10 +35,17 @@ export interface DaemonAppContainerProps {
   repaintViewport?: () => void;
   daemonUrl: string;
   daemonToken: string;
+  /**
+   * Which session to show. Omitted → the daemon's bound-workspace session.
+   * Needed to mirror ONE conversation when the workspace holds several (the
+   * web UI opens them with `scope:'thread'`), since `createOrAttach` with an
+   * empty request always resolves the workspace default, not a given thread.
+   */
+  sessionId?: string;
 }
 
 export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
-  const { daemonUrl, daemonToken, ...appProps } = props;
+  const { daemonUrl, daemonToken, sessionId, ...appProps } = props;
   const [driver, setDriver] = useState<DaemonSessionClient | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,8 +57,12 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
           baseUrl: daemonUrl,
           token: daemonToken,
         });
-        // Omit workspaceCwd → attach to the daemon's bound workspace session.
-        const session = await DaemonSessionClient.createOrAttach(client, {});
+        // With an id, load THAT session (already seeded with history replay by
+        // the SDK). Without one, omit workspaceCwd → the daemon's bound
+        // workspace session.
+        const session = sessionId
+          ? await DaemonSessionClient.load(client, sessionId)
+          : await DaemonSessionClient.createOrAttach(client, {});
         if (!cancelled) setDriver(session);
       } catch (e) {
         if (!cancelled) setError((e as Error)?.message ?? String(e));
@@ -60,7 +71,7 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
     return () => {
       cancelled = true;
     };
-  }, [daemonUrl, daemonToken]);
+  }, [daemonUrl, daemonToken, sessionId]);
 
   if (error) {
     return (

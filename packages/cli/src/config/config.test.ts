@@ -411,6 +411,26 @@ describe('parseArguments', () => {
     expect(argv.insecure).toBe(true);
   });
 
+  it('parses --attach-session alongside --attach-daemon', async () => {
+    process.argv = ['node', 'script.js'];
+    const defaultArgv = await parseArguments();
+    expect(defaultArgv.attachSession).toBeUndefined();
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--attach-daemon',
+      'http://127.0.0.1:4180',
+      '--daemon-token',
+      'tok',
+      '--attach-session',
+      'abc123',
+    ];
+    const argv = await parseArguments();
+    expect(argv.attachDaemon).toBe('http://127.0.0.1:4180');
+    expect(argv.attachSession).toBe('abc123');
+  });
+
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
     // the synthetic structured_output terminal contract. The yargs check

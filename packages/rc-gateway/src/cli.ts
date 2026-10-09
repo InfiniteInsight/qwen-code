@@ -42,6 +42,11 @@ import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
+import {
+  TerminalRequestLog,
+  defaultTerminalLogPath,
+  terminalQwenArgv,
+} from './terminals.js';
 import { PushStore } from './pushStore.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
 import { ApnsJwtSigner } from './nativePush/apnsJwt.js';
@@ -424,6 +429,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const pushStore = await PushStore.open(
     join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
   );
+  // Host-terminal requests (issue #49): the gateway is the only writer; the
+  // Windows-side launcher app reads it and keeps its own cursor. Requests carry
+  // the daemon token, so the file is 0600 like the other credential stores.
+  const terminalRequests = TerminalRequestLog.open(
+    defaultTerminalLogPath(homedir()),
+  );
   // APNs device-token subscriptions for the iOS native shell
   // (add-native-mobile-shells). Always opened so the register/delete endpoints
   // and the token-revoke cascade are live; the APNs SENDER + capability gating
@@ -519,6 +530,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const daemonPool = new DaemonPool({
     defaultDaemon: handle.daemon,
     defaultWorkspaceCwd,
+    // Host-terminal material (issue #49): the boot daemon's own endpoint, so a
+    // conversation on the default workspace can be opened in a host terminal.
+    defaultEndpoint: {
+      url: handle.url,
+      token: handle.token,
+      workspaceCwd: defaultWorkspaceCwd,
+    },
     // Reuses the exact boot path above (startDaemon → defaultSpawner →
     // `qwen serve`), parameterized with the requested workspace on a freshly
     // allocated loopback port instead of the fixed boot port.
@@ -529,6 +547,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         client: spawned.daemon,
         stop: spawned.stop,
         workspaceCwd: cwd,
+        endpoint: {
+          url: spawned.url,
+          token: spawned.token,
+          workspaceCwd: cwd,
+        },
       };
       // add-mid-turn-recovery: wire the child's exit into the pool's death
       // detection. `whenExited` settles (never rejects), so a daemon dying
@@ -726,6 +749,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     daemon: daemonPool,
     store,
     pairing,
+    terminalRequests,
+    terminalQwenArgv: terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN),
     vapid,
     pushStore,
     apnsStore,
@@ -1973,6 +1998,34 @@ if (process.argv[2] === 'serve') {
       // eslint-disable-next-line no-console
       console.error(`search: ${(err as Error).message}`);
     }
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'terminals') {
+  // `qwen-rc terminals pending [--after=<n>] --json` — the host-terminal request
+  // log (issue #49), for the Windows launcher app. The launcher reads requests
+  // this way instead of over HTTP so the daemon token never crosses the
+  // network; it stores its own cursor and passes it as --after.
+  const args = process.argv.slice(3);
+  const sub = args[0] ?? 'pending';
+  void (async () => {
+    if (sub !== 'pending') {
+      // eslint-disable-next-line no-console
+      console.error(`terminals: unknown subcommand '${sub}'`);
+      process.exit(2);
+    }
+    const afterFlag = args.find((a) => a.startsWith('--after='));
+    const after = afterFlag ? Number(afterFlag.slice('--after='.length)) : 0;
+    const log = TerminalRequestLog.open(defaultTerminalLogPath(homedir()));
+    const all = await log.readAll();
+    const requests = all.slice(
+      Number.isFinite(after) && after > 0 ? Math.floor(after) : 0,
+    );
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({ cursor: all.length, requests }));
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`terminals: ${(err as Error).message}`);
     process.exit(1);
   });
 } else if (process.argv[2] === 'reindex') {

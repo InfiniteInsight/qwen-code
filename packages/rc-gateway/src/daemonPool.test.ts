@@ -1321,3 +1321,87 @@ describe('DaemonPool workspace scoping (rc-workspace-scoping, #28)', () => {
     expect(h.pool.workspaces().sort()).toEqual(['/proj/a', '/proj/b']);
   });
 });
+
+describe('DaemonPool.daemonEndpointForSession', () => {
+  /** Pool that records endpoint material on spawn, like the real spawner. */
+  function makeEndpointPool(opts: {
+    defaultEndpoint?: { url: string; token: string | undefined };
+    withEndpoint?: boolean;
+  }) {
+    return new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      ...(opts.defaultEndpoint
+        ? {
+            defaultEndpoint: {
+              workspaceCwd: '/home/evan',
+              ...opts.defaultEndpoint,
+            },
+          }
+        : {}),
+      spawn: async (cwd) => ({
+        client: fakeClient(cwd),
+        stop: async () => {},
+        workspaceCwd: cwd,
+        ...(opts.withEndpoint === false
+          ? {}
+          : {
+              endpoint: {
+                url: `http://127.0.0.1:4${cwd.length}00`,
+                token: 'tok-' + cwd,
+                workspaceCwd: cwd,
+              },
+            }),
+      }),
+    });
+  }
+
+  it('resolves the boot daemon for a session on the default workspace', async () => {
+    const pool = makeEndpointPool({
+      defaultEndpoint: { url: 'http://127.0.0.1:4180', token: 'boot-tok' },
+    });
+    const s = await pool.createOrAttachSession({});
+    expect(pool.daemonEndpointForSession(s.sessionId)).toEqual({
+      url: 'http://127.0.0.1:4180',
+      token: 'boot-tok',
+      workspaceCwd: '/home/evan',
+    });
+  });
+
+  it('resolves the owning pooled daemon, not the boot one', async () => {
+    const pool = makeEndpointPool({
+      defaultEndpoint: { url: 'http://127.0.0.1:4180', token: 'boot-tok' },
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    const ep = pool.daemonEndpointForSession(s.sessionId);
+    expect(ep?.token).toBe('tok-/proj/a');
+    expect(ep?.workspaceCwd).toBe('/proj/a');
+  });
+
+  it('reports the canonicalized cwd so the terminal cd matches the daemon', async () => {
+    const pool = makeEndpointPool({ withEndpoint: true });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a/' });
+    expect(pool.daemonEndpointForSession(s.sessionId)?.workspaceCwd).toBe(
+      '/proj/a',
+    );
+  });
+
+  it('is undefined when the boot daemon has no endpoint registered', async () => {
+    const pool = makeEndpointPool({});
+    const s = await pool.createOrAttachSession({});
+    expect(pool.daemonEndpointForSession(s.sessionId)).toBeUndefined();
+  });
+
+  it('is undefined for a daemon spawned without endpoint material', async () => {
+    const pool = makeEndpointPool({ withEndpoint: false });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    expect(pool.daemonEndpointForSession(s.sessionId)).toBeUndefined();
+  });
+
+  it('throws for a session the pool does not own', () => {
+    const pool = makeEndpointPool({});
+    expect(() => pool.daemonEndpointForSession('nope')).toThrow(
+      UnknownSessionError,
+    );
+  });
+});
