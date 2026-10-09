@@ -57,10 +57,32 @@
     var subagentTypes = new Map(); // parentToolCallId -> child type label
     var subToolIndex = new WeakMap(); // sub -> Map(child toolCallId -> entry)
 
+    // A listener (the view) that throws must never abort the mutation that
+    // triggered it: operations assign pointers and edit `items` around their
+    // emits, so an escaping error would leave state half-updated (a duplicate
+    // assistant item on the next chunk, an orphaned live thought, an
+    // uncleareable fork row). So every listener runs, errors are reported out
+    // of band (reportError in browsers, console.error elsewhere) rather than
+    // rethrown, and emit() itself never throws.
+    function reportListenerError(err) {
+      try {
+        if (typeof globalThis.reportError === 'function')
+          globalThis.reportError(err);
+        else globalThis.console.error('transcript listener failed', err);
+      } catch {
+        // reporting must never throw into the model
+      }
+    }
     function emit(ev) {
       // Copy so a listener may unsubscribe while being notified.
       var ls = listeners.slice();
-      for (var i = 0; i < ls.length; i++) ls[i](ev);
+      for (var i = 0; i < ls.length; i++) {
+        try {
+          ls[i](ev);
+        } catch (err) {
+          reportListenerError(err);
+        }
+      }
     }
     function emitAppend(item) {
       emit({ type: 'append', item: item });

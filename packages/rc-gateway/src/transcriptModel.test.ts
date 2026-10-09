@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -469,5 +469,95 @@ describe('TranscriptModel', () => {
     off();
     m.addUser('b');
     expect(seen).toEqual(['append']);
+  });
+
+  describe('a throwing subscriber', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    // Listener errors are reported (reportError, else console.error), never
+    // thrown into the mutation that triggered them.
+    function throwOnce(m: Model): void {
+      let armed = true;
+      m.subscribe(() => {
+        if (armed) {
+          armed = false;
+          throw new Error('view render bug');
+        }
+      });
+    }
+    function quietReports(): ReturnType<typeof vi.fn> {
+      vi.stubGlobal('reportError', undefined);
+      const spy = vi.fn();
+      vi.spyOn(console, 'error').mockImplementation(spy);
+      return spy;
+    }
+
+    it('does not stop the next assistant chunk from coalescing into the same item', () => {
+      const reported = quietReports();
+      const { m } = setup();
+      throwOnce(m);
+      m.appendAssistant('he');
+      m.appendAssistant('llo');
+      expect(m.items.length).toBe(1);
+      expect(m.items[0].text).toBe('hello');
+      expect(m.curAsst).toBe(m.items[0]);
+      expect(reported).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not orphan a live thought: finishThought still folds it', () => {
+      quietReports();
+      const { m } = setup();
+      throwOnce(m);
+      m.appendThought('pondering');
+      m.appendAssistant('answer');
+      expect(m.items.map((i) => i.kind)).toEqual(['thought', 'asst']);
+      expect(m.items[0].live).toBe(false);
+      expect(m.items[0].durLabel).toBe('<1s');
+    });
+
+    it('does not leave the processing or fork row uncleareable', () => {
+      quietReports();
+      const { m } = setup();
+      throwOnce(m);
+      m.showProcessing();
+      m.hideProcessing();
+      expect(m.items.length).toBe(0);
+
+      const { m: m2 } = setup();
+      m2.appendAssistant('a');
+      throwOnce(m2);
+      m2.placeFork(1);
+      expect(m2.forkItem).not.toBeNull();
+      m2.clearFork();
+      expect(m2.items.some((i) => i.kind === 'fork')).toBe(false);
+    });
+
+    it('does not stop other subscribers from receiving the event', () => {
+      const reported = quietReports();
+      const { m } = setup();
+      const seen: string[] = [];
+      m.subscribe(() => {
+        throw new Error('first listener fails');
+      });
+      m.subscribe((ev) => seen.push(ev.type));
+      m.addUser('hi');
+      expect(seen).toEqual(['append']);
+      expect(reported).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports through reportError when the host provides it', () => {
+      const reportError = vi.fn();
+      vi.stubGlobal('reportError', reportError);
+      const { m } = setup();
+      const boom = new Error('boom');
+      m.subscribe(() => {
+        throw boom;
+      });
+      m.addUser('hi');
+      expect(reportError).toHaveBeenCalledWith(boom);
+    });
   });
 });
