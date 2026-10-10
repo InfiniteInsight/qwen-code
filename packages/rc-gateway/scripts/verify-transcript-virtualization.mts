@@ -18,9 +18,23 @@
  * transcript-model.js and transcript-view.js from the gateway, imports the
  * vendored /ui/vendor/virtual-core.js, and mounts the view in its own `#vt`
  * scroller (max-height 75vh, overflow-y auto) — not the page's #transcript.
+ *
+ * Section `page` drives the shipped public/index.html: each scenario boots its
+ * own gateway + stub daemon (with that scenario's frames, the stream held
+ * open) and browser, opens /ui/ and works through the page's globals
+ * (startWatch, renderFrame, addUser, transcriptModel, transcriptView, ...).
+ * `window.prompt`/`confirm` dialogs are dismissed. P9 runs
+ * scripts/measure-viewer-growth.mts at 200, 1000 and 2000 turns.
+ *
+ *   ONLY=P4 npx tsx scripts/verify-transcript-virtualization.mts page
  */
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import type { Page } from 'playwright';
-import { bootViewer, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+
+const execFileAsync = promisify(execFile);
 
 // ---- In-page test page --------------------------------------------------
 
@@ -830,8 +844,1013 @@ async function runViewSection(viewer: Viewer): Promise<Result[]> {
   return results;
 }
 
+// ---- Section `page`: the shipped index.html -------------------------------
+
+// Plain JS for the same reason as HELPERS_JS. Installed with addInitScript, so
+// it runs before the page's own scripts; it reads the page's globals
+// (transcriptModel, transcriptView, renderFrame, ...) only when called.
+const PAGE_HELPERS_JS = String.raw`
+(function () {
+  'use strict';
+  function scroller() {
+    return document.getElementById('transcript');
+  }
+  function view() {
+    return typeof transcriptView === 'undefined' ? undefined : transcriptView;
+  }
+  function frame() {
+    return new Promise(function (resolve) {
+      requestAnimationFrame(function () {
+        resolve();
+      });
+    });
+  }
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+  function gap() {
+    var s = scroller();
+    return s.scrollHeight - s.scrollTop - s.clientHeight;
+  }
+  function snapshot() {
+    var s = scroller();
+    var v = view();
+    return [
+      s.scrollTop,
+      s.scrollHeight,
+      s.clientHeight,
+      v ? v.mountedCount() : -1,
+      s.querySelectorAll('*').length,
+    ].join('|');
+  }
+  // As __vt.settle: true once geometry and the mounted set held still for
+  // 8 frames (and minMs passed); false after 5 s.
+  async function settle(minMs) {
+    var start = performance.now();
+    var last = '';
+    var same = 0;
+    while (performance.now() - start < 5000) {
+      await frame();
+      var s = snapshot();
+      if (s === last) same++;
+      else {
+        same = 0;
+        last = s;
+      }
+      if (same >= 8 && performance.now() - start >= (minMs || 0)) return true;
+    }
+    return false;
+  }
+  function row(id) {
+    return scroller().querySelector('.vrow[data-id="' + id + '"]');
+  }
+  // Ids of the rows whose box intersects the transcript's visible area.
+  function visibleIds() {
+    var box = scroller().getBoundingClientRect();
+    var out = [];
+    scroller()
+      .querySelectorAll('.vrow')
+      .forEach(function (r) {
+        var b = r.getBoundingClientRect();
+        if (b.bottom > box.top && b.top < box.bottom && b.height > 0) {
+          out.push(Number(r.getAttribute('data-id')));
+        }
+      });
+    return out;
+  }
+  // Scroll the transcript from the top to the bottom in half-viewport steps
+  // and return every item id that was visible at some point.
+  async function sweep() {
+    var s = scroller();
+    var seen = new Set();
+    s.scrollTop = 0;
+    await settle(200);
+    for (var k = 0; k < 5000; k++) {
+      visibleIds().forEach(function (id) {
+        seen.add(id);
+      });
+      if (gap() <= 1) break;
+      s.scrollTop += Math.max(16, Math.floor(s.clientHeight / 2));
+      await settle(0);
+    }
+    return Array.from(seen);
+  }
+  function update(u) {
+    renderFrame({ type: 'session_update', data: { update: u } });
+  }
+  // One live turn as the page sees it: the local echo of the sent prompt,
+  // the daemon's user record, an optional tool call, the answer, the end.
+  function liveTurn(prompt, answer, toolId) {
+    addUser(prompt);
+    update({ sessionUpdate: 'user_message_chunk', content: { text: prompt } });
+    if (toolId) {
+      update({
+        sessionUpdate: 'tool_call',
+        toolCallId: toolId,
+        title: 'grep',
+        status: 'completed',
+      });
+    }
+    update({ sessionUpdate: 'agent_message_chunk', content: { text: answer } });
+    renderFrame({ type: 'turn_complete', data: {} });
+  }
+  window.__pg = {
+    view: view,
+    frame: frame,
+    sleep: sleep,
+    gap: gap,
+    settle: settle,
+    row: row,
+    visibleIds: visibleIds,
+    sweep: sweep,
+    update: update,
+    liveTurn: liveTurn,
+  };
+})();
+`;
+
+// ---- Types of the page's globals ------------------------------------------
+
+interface PgItem {
+  id: number;
+  kind: string;
+  text?: string;
+  err?: boolean;
+  turn?: number;
+  mode?: string;
+  note?: string;
+  busy?: boolean;
+  toolCallId?: string;
+}
+interface PgModel {
+  items: PgItem[];
+  readonly curAsst: PgItem | null;
+  readonly forkItem: PgItem | null;
+  userTurns(): PgItem[];
+}
+declare const transcriptModel: PgModel;
+declare const transcriptView: VtView | null;
+declare const startWatch: (
+  id: string,
+  fromEventId?: number | null,
+  title?: string,
+) => Promise<void>;
+declare let lastSeenEventId: number | null;
+declare const renderFrame: (ev: unknown) => void;
+declare const addUser: (text: string) => void;
+declare const clearTranscript: () => void;
+declare const showProcessing: () => void;
+declare const renderTool: (u: Record<string, unknown>) => void;
+declare const appendSubagentText: (parentId: string, text: string) => void;
+declare const userTurnsSeen: number;
+declare const forkTurnCount: number;
+declare const __pg: {
+  view(): VtView | null | undefined;
+  frame(): Promise<void>;
+  sleep(ms: number): Promise<void>;
+  gap(): number;
+  settle(minMs?: number): Promise<boolean>;
+  row(id: number): HTMLElement | null;
+  visibleIds(): number[];
+  sweep(): Promise<number[]>;
+  update(u: Record<string, unknown>): void;
+  liveTurn(prompt: string, answer: string, toolId?: string): void;
+};
+
+// ---- Frames ----------------------------------------------------------------
+
+/** Daemon frames for the stub, ids 1..n in order. */
+class Frames {
+  readonly list: Frame[] = [];
+  ev(type: string, data: unknown = {}): this {
+    this.list.push({ id: this.list.length + 1, type, data });
+    return this;
+  }
+  upd(update: Record<string, unknown>): this {
+    return this.ev('session_update', { update });
+  }
+  user(text: string): this {
+    return this.upd({ sessionUpdate: 'user_message_chunk', content: { text } });
+  }
+  asst(text: string): this {
+    return this.upd({
+      sessionUpdate: 'agent_message_chunk',
+      content: { text },
+    });
+  }
+  thought(text: string): this {
+    return this.upd({
+      sessionUpdate: 'agent_thought_chunk',
+      content: { text },
+    });
+  }
+  toolCall(id: string, title: string, status: string): this {
+    return this.upd({
+      sessionUpdate: 'tool_call',
+      toolCallId: id,
+      title,
+      status,
+    });
+  }
+  toolUpdate(id: string, status: string): this {
+    return this.upd({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: id,
+      status,
+    });
+  }
+  done(): this {
+    return this.ev('turn_complete');
+  }
+}
+
+/** A frame the transcript ignores: marks the stream as connected. */
+const READY: Frame[] = new Frames().ev('client_joined').list;
+
+/**
+ * `turns` replayed turns of user record, thought, tool call + update and
+ * `chunks` assistant chunks, then turn_complete: 5 + chunks frames per turn.
+ * The transcript gets a thought, a tool and an assistant item per turn plus
+ * one fork row under the last answer (3 * turns + 1 items).
+ */
+function replayFrames(turns: number, chunks: number): Frame[] {
+  const f = new Frames();
+  for (let t = 1; t <= turns; t++) {
+    f.user(`question ${t}`)
+      .thought(`thinking about turn ${t}. `)
+      .toolCall(`tc-${t}`, 'read_file', 'in_progress')
+      .toolUpdate(`tc-${t}`, 'completed');
+    for (let k = 0; k < chunks; k++) {
+      f.asst(`turn ${t} chunk ${k}: lorem ipsum dolor sit amet. `);
+    }
+    f.done();
+  }
+  return f.list;
+}
+
+// ---- Runner ------------------------------------------------------------------
+
+interface PageRun {
+  viewer: Viewer;
+  page: Page;
+  consoleErrors: string[];
+}
+type PageScenario =
+  | {
+      name: string;
+      /** Stub frames (default READY); the stream is held open. */
+      frames?: () => Frame[];
+      /** Runs before navigation (routes). */
+      before?: (page: Page) => Promise<void>;
+      /** Wait for transcriptView before run() (default true). */
+      waitView?: boolean;
+      /** Also fail on console errors (page errors always fail). */
+      noConsoleErrors?: boolean;
+      run: (r: PageRun) => Promise<string>;
+    }
+  | { name: string; standalone: () => Promise<string> };
+
+const VIEWER_SCRIPT = 'scripts/measure-viewer-growth.mts';
+const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
+
+async function waitView(page: Page, timeoutMs = 10_000): Promise<void> {
+  try {
+    await page.waitForFunction(() => __pg.view() != null, null, {
+      timeout: timeoutMs,
+    });
+  } catch {
+    throw new Error(`transcriptView not attached within ${timeoutMs} ms`);
+  }
+}
+
+async function watch(page: Page, sessionId: string): Promise<void> {
+  await page.evaluate((id) => {
+    lastSeenEventId = null;
+    void startWatch(id);
+  }, sessionId);
+}
+
+/** Polls until the page has seen frame `lastId`; returns the elapsed ms. */
+async function waitForFrame(
+  page: Page,
+  lastId: number,
+  timeoutMs: number,
+): Promise<number> {
+  const t0 = Date.now();
+  for (;;) {
+    const got = await page.evaluate(() => lastSeenEventId);
+    if (got !== null && got >= lastId) return Date.now() - t0;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(
+        `replay stalled at frame ${got} of ${lastId} after ${timeoutMs} ms`,
+      );
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
+async function settlePage(page: Page, minMs = 200): Promise<void> {
+  const ok = await page.evaluate((ms) => __pg.settle(ms), minMs);
+  expect(ok, 'transcript did not settle within 5 s');
+}
+
+interface Growth {
+  turns: number;
+  finished: boolean;
+  replayMs: number;
+  transcriptNodes: number;
+  totalNodes: number;
+  perChunkMs: number;
+  jsHeapMb: number;
+  rendererRssMb: number;
+}
+
+async function measureGrowth(turns: number): Promise<Growth> {
+  const { stdout } = await execFileAsync('npx', ['tsx', VIEWER_SCRIPT], {
+    cwd: PKG_DIR,
+    env: { ...process.env, TURNS: String(turns) },
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 900_000,
+  });
+  const at = stdout.indexOf('{');
+  expect(at >= 0, `no JSON from ${VIEWER_SCRIPT} at ${turns} turns`);
+  return JSON.parse(stdout.slice(at)) as Growth;
+}
+
+const P1_TURNS = 5000;
+
+const PAGE_SCENARIOS: PageScenario[] = [
+  {
+    name: 'P1 replay',
+    frames: () => replayFrames(P1_TURNS, 2),
+    run: async ({ page, viewer }) => {
+      const last = P1_TURNS * 7;
+      await watch(page, viewer.sessionId);
+      const ms = await waitForFrame(page, last, 300_000);
+      await settlePage(page);
+      const r = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        const tail = items[items.length - 1];
+        return {
+          items: items.length,
+          mounted: transcriptView!.mountedCount(),
+          rows: document.querySelectorAll('#transcript .vrow').length,
+          gap: __pg.gap(),
+          tailKind: tail ? tail.kind : '',
+          tailVisible: !!tail && __pg.visibleIds().includes(tail.id),
+        };
+      });
+      expect(
+        r.items === 3 * P1_TURNS + 1,
+        `model has ${r.items} items, expected ${3 * P1_TURNS + 1}`,
+      );
+      expect(
+        r.mounted > 0 && r.mounted < 60,
+        `mountedCount() = ${r.mounted}, expected 1..59`,
+      );
+      expect(r.rows === r.mounted, `${r.rows} .vrow != ${r.mounted} mounted`);
+      expect(r.gap <= 2, `not pinned after the replay: gap=${r.gap}`);
+      expect(
+        r.tailKind === 'fork' && r.tailVisible,
+        `last item ${r.tailKind} visible=${r.tailVisible}`,
+      );
+      return `${last} frames in ${ms} ms; items=${r.items} mounted=${r.mounted}`;
+    },
+  },
+  {
+    name: 'P2 rewind picker',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 10_000);
+      const prompts: string[] = [];
+      for (let i = 1; i <= 300; i++) {
+        prompts.push(
+          `prompt ${i}:\n   tell me\tabout  ` +
+            'lorem ipsum dolor sit amet consectetur adipiscing elit '.repeat(3),
+        );
+      }
+      await page.evaluate((ps) => {
+        for (const p of ps) addUser(p);
+      }, prompts);
+      await settlePage(page);
+      const state = await page.evaluate(() => {
+        const first = transcriptModel.userTurns()[0];
+        return {
+          mounted: transcriptView!.mountedCount(),
+          firstMounted: !!(first && __pg.row(first.id)),
+        };
+      });
+      expect(
+        state.mounted < 60 && !state.firstMounted,
+        `expected most turns unmounted: mounted=${state.mounted} first=${state.firstMounted}`,
+      );
+      await page.evaluate(() =>
+        document.getElementById('rewind-chat')!.click(),
+      );
+      const opts = await page.evaluate(() => {
+        const sel = document.getElementById(
+          'rewind-turn-pick',
+        ) as HTMLSelectElement;
+        return {
+          texts: Array.from(sel.options).map((o) => o.textContent ?? ''),
+          values: Array.from(sel.options).map((o) => o.value),
+          value: sel.value,
+        };
+      });
+      const preview = (p: string) => p.replace(/\s+/g, ' ').trim().slice(0, 60);
+      expect(opts.texts.length === 301, `${opts.texts.length} options`);
+      expect(opts.texts[0]!.startsWith('Start'), `first ${opts.texts[0]}`);
+      const want300 = 'Turn 300: ' + preview(prompts[299]!);
+      expect(
+        opts.texts[300] === want300,
+        `option 300 ${JSON.stringify(opts.texts[300])} != ${JSON.stringify(want300)}`,
+      );
+      const want1 = 'Turn 1: ' + preview(prompts[0]!);
+      expect(
+        opts.texts[1] === want1,
+        `option 1 ${JSON.stringify(opts.texts[1])} != ${JSON.stringify(want1)}`,
+      );
+      expect(
+        opts.values[300] === '300' && opts.value === '300',
+        `values ${opts.values[300]} selected ${opts.value}`,
+      );
+      return `301 options with ${state.mounted} rows mounted; ${JSON.stringify(opts.texts[300])}`;
+    },
+  },
+  {
+    name: 'P3 session_rewound cut',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 10_000);
+      await page.evaluate(() => {
+        for (let i = 1; i <= 300; i++) {
+          __pg.liveTurn('question ' + i, 'answer ' + i, 'tc-' + i);
+        }
+      });
+      const before = await page.evaluate(() => ({
+        users: transcriptModel.userTurns().length,
+        seen: userTurnsSeen,
+        fork: transcriptModel.forkItem ? transcriptModel.forkItem.turn : -1,
+      }));
+      expect(
+        before.users === 300 && before.seen === 300 && before.fork === 300,
+        `setup: ${JSON.stringify(before)}`,
+      );
+      await page.evaluate(() =>
+        renderFrame({ type: 'session_rewound', data: { toTurn: 100 } }),
+      );
+      await settlePage(page);
+      const r = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        const tail = items[items.length - 1]!;
+        return {
+          users: transcriptModel.userTurns().length,
+          items: items.length,
+          tailKind: tail.kind,
+          tailText: tail.text,
+          seen: userTurnsSeen,
+          forkTurns: forkTurnCount,
+          forkItem: !!transcriptModel.forkItem,
+          forkRows: document.querySelectorAll('#transcript .bubble-fork')
+            .length,
+          tailShown: __pg.visibleIds().includes(tail.id),
+          tailDom: __pg.row(tail.id)?.textContent ?? null,
+          gap: __pg.gap(),
+          mounted: transcriptView!.mountedCount(),
+        };
+      });
+      expect(r.users === 100, `${r.users} user turns after the cut`);
+      expect(r.items === 301, `${r.items} items, expected 100 * 3 + 1`);
+      expect(
+        r.tailKind === 'system' && r.tailText === 'rewound to turn 100',
+        `last item ${r.tailKind} ${JSON.stringify(r.tailText)}`,
+      );
+      expect(r.seen === 100, `userTurnsSeen = ${r.seen}`);
+      expect(r.forkTurns === 100, `forkTurnCount = ${r.forkTurns}`);
+      expect(!r.forkItem && r.forkRows === 0, 'fork row survived the cut');
+      expect(
+        r.tailShown && r.tailDom === 'rewound to turn 100',
+        `system note not shown: ${JSON.stringify(r.tailDom)}`,
+      );
+      expect(r.gap <= 2, `not pinned after the cut: gap=${r.gap}`);
+      expect(r.mounted < 60, `mounted ${r.mounted}`);
+      // The dropped turns' tool bookkeeping is gone: a late update for one of
+      // them starts a new row instead of editing a cut item.
+      const late = await page.evaluate(() => {
+        __pg.update({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-150',
+          status: 'failed',
+        });
+        const items = transcriptModel.items;
+        const tail = items[items.length - 1]!;
+        return { items: items.length, id: tail.toolCallId };
+      });
+      expect(
+        late.items === 302 && late.id === 'tc-150',
+        `late tool update: ${JSON.stringify(late)}`,
+      );
+      // A malformed target cuts nothing and keeps the counters.
+      const bad = await page.evaluate(() => {
+        renderFrame({ type: 'session_rewound', data: {} });
+        const items = transcriptModel.items;
+        return {
+          users: transcriptModel.userTurns().length,
+          seen: userTurnsSeen,
+          tail: items[items.length - 1]!.text,
+          items: items.length,
+        };
+      });
+      expect(
+        bad.users === 100 &&
+          bad.seen === 100 &&
+          bad.items === 303 &&
+          bad.tail === 'rewound to turn ?',
+        `malformed rewind: ${JSON.stringify(bad)}`,
+      );
+      return `300 -> ${r.users} user turns, ${r.items} items, tail ${JSON.stringify(r.tailText)}`;
+    },
+  },
+  {
+    name: 'P4 fork row',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 10_000);
+      // Where the fork item sits relative to the newest assistant item, in
+      // the model and in the DOM.
+      const read = () =>
+        page.evaluate(() => {
+          const items = transcriptModel.items;
+          const forks = items.filter((i) => i.kind === 'fork');
+          let lastAsst = -1;
+          for (let i = 0; i < items.length; i++) {
+            if (items[i]!.kind === 'asst') lastAsst = i;
+          }
+          const f = forks[0];
+          const fRow = f ? __pg.row(f.id) : null;
+          const aRow = lastAsst >= 0 ? __pg.row(items[lastAsst]!.id) : null;
+          const sel = fRow ? fRow.querySelector('select') : null;
+          return {
+            forks: forks.length,
+            forkRows: document.querySelectorAll('#transcript .bubble-fork')
+              .length,
+            afterAsst: !!f && items[lastAsst + 1] === f,
+            turn: f ? f.turn : -1,
+            domNext: !!fRow && !!aRow && aRow.nextElementSibling === fRow,
+            button: fRow?.querySelector('button')?.textContent ?? null,
+            mode: sel ? sel.value : null,
+            options: sel ? Array.from(sel.options).map((o) => o.value) : [],
+            asstText: lastAsst >= 0 ? items[lastAsst]!.text : null,
+          };
+        });
+      await page.evaluate(() => __pg.liveTurn('first question', 'answer one'));
+      await settlePage(page, 0);
+      const s1 = await read();
+      expect(
+        s1.forks === 1 && s1.forkRows === 1,
+        `turn 1: ${s1.forks} fork items, ${s1.forkRows} rows`,
+      );
+      expect(s1.afterAsst && s1.turn === 1, `turn 1: ${JSON.stringify(s1)}`);
+      expect(
+        s1.domNext,
+        'turn 1: fork row is not the next row after the answer',
+      );
+      expect(s1.button === 'Fork from here', `button ${s1.button}`);
+      expect(
+        s1.mode === 'include' && s1.options.join(',') === 'include,empty',
+        `select ${s1.mode} [${s1.options.join(',')}]`,
+      );
+      await page.evaluate(() => {
+        addUser('second question');
+        __pg.update({
+          sessionUpdate: 'user_message_chunk',
+          content: { text: 'second question' },
+        });
+        __pg.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'answer two' },
+        });
+        __pg.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'p4-tool',
+          title: 'grep',
+          status: 'completed',
+        });
+        __pg.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'answer two, after the tool' },
+        });
+        renderFrame({ type: 'turn_complete', data: {} });
+      });
+      await settlePage(page, 0);
+      const s2 = await read();
+      expect(
+        s2.forks === 1 && s2.forkRows === 1 && s2.turn === 2,
+        `turn 2: ${JSON.stringify(s2)}`,
+      );
+      expect(
+        s2.afterAsst && s2.asstText === 'answer two, after the tool',
+        `turn 2: fork not under the newest answer: ${JSON.stringify(s2)}`,
+      );
+      expect(
+        s2.domNext,
+        'turn 2: fork row is not the next row after the answer',
+      );
+      // A late chunk of the same turn moves the row under the newer answer.
+      await page.evaluate(() => {
+        __pg.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'p4-late',
+          title: 'grep',
+          status: 'completed',
+        });
+        __pg.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'late chunk' },
+        });
+      });
+      await settlePage(page, 0);
+      const s3 = await read();
+      expect(
+        s3.forks === 1 &&
+          s3.turn === 2 &&
+          s3.afterAsst &&
+          s3.asstText === 'late chunk' &&
+          s3.domNext,
+        `late chunk: ${JSON.stringify(s3)}`,
+      );
+      await page.selectOption('#transcript .bubble-fork select', 'empty');
+      // The prompt for a fork name is dismissed: no request, no state change.
+      await page.click('#transcript .bubble-fork button');
+      await page.waitForTimeout(200);
+      const s4 = await page.evaluate(() => {
+        const f = transcriptModel.forkItem!;
+        return { mode: f.mode, busy: !!f.busy, note: f.note ?? '' };
+      });
+      expect(
+        s4.mode === 'empty' && !s4.busy && s4.note === '',
+        `after select + dismissed click: ${JSON.stringify(s4)}`,
+      );
+      return `fork follows the newest answer (turn ${s3.turn}); mode stored as ${s4.mode}`;
+    },
+  },
+  {
+    name: 'P5 raw toggle',
+    noConsoleErrors: true,
+    frames: () => {
+      const f = new Frames();
+      for (let i = 1; i <= 25; i++) {
+        f.asst(`answer ${i}`).toolCall(`raw-${i}`, `tool ${i}`, 'in_progress');
+        for (let k = 0; k < 24; k++) f.ev('client_joined');
+      }
+      return f.list;
+    },
+    run: async ({ page, viewer }) => {
+      const total = 25 * 26;
+      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      const raw = await page.evaluate(() => ({
+        checked: (document.getElementById('raw-toggle') as HTMLInputElement)
+          .checked,
+        hidden:
+          getComputedStyle(document.getElementById('transcript')!).display ===
+          'none',
+      }));
+      expect(raw.checked && raw.hidden, `raw on: ${JSON.stringify(raw)}`);
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, total, 30_000);
+      await page.waitForTimeout(300);
+      const hidden = await page.evaluate(() => ({
+        items: transcriptModel.items.length,
+        logLines: document.getElementById('log')!.childNodes.length,
+        lastLog: document.getElementById('log')!.lastChild?.textContent ?? '',
+      }));
+      expect(hidden.items === 50, `${hidden.items} items while hidden`);
+      expect(hidden.logLines === 500, `#log holds ${hidden.logLines} lines`);
+      expect(
+        hidden.lastLog.includes(`"id":${total},`),
+        `newest #log line ${JSON.stringify(hidden.lastLog.slice(0, 80))}`,
+      );
+      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      await settlePage(page);
+      const shown = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        return {
+          gap: __pg.gap(),
+          tailVisible: __pg.visibleIds().includes(items[items.length - 1]!.id),
+          pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
+        };
+      });
+      expect(shown.gap <= 2, `not pinned after raw off: gap=${shown.gap}`);
+      expect(shown.tailVisible, 'newest item not visible after raw off');
+      expect(shown.pill, 'jump-to-bottom pill shown while pinned');
+      const seen = await page.evaluate(() => __pg.sweep());
+      const ids = await page.evaluate(() =>
+        transcriptModel.items.map((i) => i.id),
+      );
+      const missing = ids.filter((id) => !seen.includes(id));
+      expect(
+        missing.length === 0,
+        `${missing.length}/50 items never visible: ${missing.join(',')}`,
+      );
+      const after = await page.evaluate(
+        () => document.getElementById('log')!.childNodes.length,
+      );
+      expect(after === 500, `#log holds ${after} lines after raw off`);
+      return `50 items appended while hidden, all ${seen.length} visible after raw off; #log ${hidden.logLines} lines`;
+    },
+  },
+  {
+    name: 'P6 late bundle',
+    waitView: false,
+    noConsoleErrors: true,
+    frames: () => replayFrames(250, 3),
+    before: async (page) => {
+      await page.route('**/ui/vendor/virtual-core.js', async (route) => {
+        await new Promise((r) => setTimeout(r, 1500));
+        await route.continue();
+      });
+    },
+    run: async ({ page, viewer }) => {
+      const total = 250 * 8;
+      const t0 = Date.now();
+      await watch(page, viewer.sessionId);
+      // Frames arrive (and are buffered in the model) before the view exists.
+      let early = { view: false, items: 0 };
+      while (Date.now() - t0 < 1400) {
+        early = await page.evaluate(() => ({
+          view: __pg.view() != null,
+          items: transcriptModel.items.length,
+        }));
+        if (early.view || early.items > 0) break;
+        await page.waitForTimeout(20);
+      }
+      expect(
+        !early.view && early.items > 0,
+        `nothing buffered before the bundle: ${JSON.stringify(early)}`,
+      );
+      await waitView(page, 15_000);
+      const attachedMs = Date.now() - t0;
+      await waitForFrame(page, total, 60_000);
+      await settlePage(page);
+      const r = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        return {
+          items: items.length,
+          mounted: transcriptView!.mountedCount(),
+          sizer: !!document.querySelector('#transcript .vsizer'),
+          gap: __pg.gap(),
+          tailVisible: __pg.visibleIds().includes(items[items.length - 1]!.id),
+          pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
+        };
+      });
+      expect(r.items === 751, `${r.items} items, expected 751`);
+      expect(r.sizer, 'no .vsizer: the view did not use the bundle');
+      expect(
+        r.mounted > 0 && r.mounted < 60,
+        `mountedCount() = ${r.mounted}, expected 1..59`,
+      );
+      expect(r.gap <= 2, `not pinned: gap=${r.gap}`);
+      expect(r.tailVisible, 'newest item not visible');
+      expect(r.pill, 'jump-to-bottom pill shown while pinned');
+      return `${early.items} items buffered before the view; attached after ${attachedMs} ms; mounted=${r.mounted}`;
+    },
+  },
+  {
+    name: 'P7 bundle 404',
+    frames: () => replayFrames(100, 2),
+    before: async (page) => {
+      await page.route('**/ui/vendor/virtual-core.js', (route) =>
+        route.abort(),
+      );
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 100 * 7, 30_000);
+      await settlePage(page);
+      const r = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        const rows = Array.from(
+          document.querySelectorAll('#transcript .vrow'),
+        ).map((el) => Number(el.getAttribute('data-id')));
+        return {
+          items: items.length,
+          ids: items.map((i) => i.id),
+          rows,
+          mounted: transcriptView!.mountedCount(),
+          sizer: !!document.querySelector('#transcript .vsizer'),
+          gap: __pg.gap(),
+          lastText: __pg.row(items[items.length - 2]!.id)?.textContent ?? null,
+          lastModel: items[items.length - 2]!.text ?? null,
+        };
+      });
+      expect(r.items === 301, `${r.items} items, expected 301`);
+      expect(!r.sizer, '.vsizer present without the bundle');
+      expect(
+        r.rows.length === r.items && r.rows.join() === r.ids.join(),
+        `${r.rows.length} rows for ${r.items} items (or out of order)`,
+      );
+      expect(r.mounted === r.items, `mountedCount() = ${r.mounted}`);
+      expect(
+        (r.lastText ?? '').endsWith(r.lastModel ?? '\u0000'),
+        `last answer ${JSON.stringify(r.lastText)}`,
+      );
+      expect(r.gap <= 2, `fallback not pinned: gap=${r.gap}`);
+      return `fallback rendered all ${r.rows.length} items`;
+    },
+  },
+  {
+    name: 'P8 session switch',
+    frames: () => replayFrames(20, 2),
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 20 * 7, 30_000);
+      await page.evaluate(() => {
+        renderTool({
+          toolCallId: 'p8-agent',
+          title: 'agent',
+          status: 'in_progress',
+        });
+        appendSubagentText('p8-agent', 'child working');
+        showProcessing();
+      });
+      await settlePage(page, 0);
+      await page.evaluate(() => {
+        document.getElementById('transcript')!.scrollTop = 0;
+      });
+      await settlePage(page);
+      const before = await page.evaluate(() => ({
+        items: transcriptModel.items.length,
+        rows: document.querySelectorAll('#transcript .vrow').length,
+        pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
+      }));
+      expect(before.items === 63, `setup: ${before.items} items`);
+      expect(!before.pill, 'pill hidden while scrolled to the top');
+      await page.evaluate(() => clearTranscript());
+      await settlePage(page);
+      const cleared = await page.evaluate(() => ({
+        items: transcriptModel.items.length,
+        rows: document.querySelectorAll('#transcript .vrow').length,
+        bubbles: document.querySelectorAll(
+          '#transcript .bubble, #transcript .system, #transcript .bubble-fork',
+        ).length,
+        mounted: transcriptView!.mountedCount(),
+        seen: userTurnsSeen,
+        forkTurns: forkTurnCount,
+        pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
+      }));
+      expect(
+        cleared.items === 0 &&
+          cleared.rows === 0 &&
+          cleared.bubbles === 0 &&
+          cleared.mounted === 0,
+        `after clearTranscript(): ${JSON.stringify(cleared)}`,
+      );
+      expect(
+        cleared.seen === 0 && cleared.forkTurns === 0,
+        `counters not reset: ${JSON.stringify(cleared)}`,
+      );
+      expect(cleared.pill, 'pill still shown on an empty transcript');
+      // The processing and subagent clocks stopped with the clear.
+      const writes = await page.evaluate(async () => {
+        let n = 0;
+        const mo = new MutationObserver((recs) => {
+          n += recs.length;
+        });
+        mo.observe(document.getElementById('transcript')!, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+        });
+        await __pg.sleep(1500);
+        mo.disconnect();
+        return n;
+      });
+      expect(writes === 0, `${writes} transcript mutations after the clear`);
+      // A switch to another session: the transcript holds one replay only.
+      await watch(page, '99999999-8888-7777-6666-555555555555');
+      await waitForFrame(page, 20 * 7, 30_000);
+      await settlePage(page);
+      const switched = await page.evaluate(() => ({
+        items: transcriptModel.items.length,
+        seen: userTurnsSeen,
+        gap: __pg.gap(),
+      }));
+      expect(
+        switched.items === 61 && switched.seen === 20,
+        `after the switch: ${JSON.stringify(switched)}`,
+      );
+      expect(switched.gap <= 2, `not pinned after the switch: ${switched.gap}`);
+      return `${before.items} items -> 0 -> ${switched.items} after the switch`;
+    },
+  },
+  {
+    name: 'P9 curve',
+    standalone: async () => {
+      const runs: Growth[] = [];
+      for (const turns of [200, 1000, 2000]) {
+        const g = await measureGrowth(turns);
+        console.log(
+          `  ${turns} turns: replay ${g.replayMs} ms, nodes ${g.totalNodes} ` +
+            `(transcript ${g.transcriptNodes}), ${g.perChunkMs} ms/chunk, ` +
+            `heap ${g.jsHeapMb} MB, rss ${g.rendererRssMb} MB`,
+        );
+        expect(g.finished, `${turns}-turn replay did not finish`);
+        runs.push(g);
+      }
+      const [small, , big] = runs as [Growth, Growth, Growth];
+      expect(
+        Math.abs(big.totalNodes - small.totalNodes) <= 0.1 * small.totalNodes,
+        `nodes ${small.totalNodes} -> ${big.totalNodes} (> 10%)`,
+      );
+      expect(
+        big.perChunkMs <= 2 * small.perChunkMs,
+        `per-chunk ${small.perChunkMs} -> ${big.perChunkMs} ms (> 2x)`,
+      );
+      return runs
+        .map((g) => `${g.turns}: ${g.totalNodes} nodes ${g.perChunkMs} ms`)
+        .join('; ');
+    },
+  },
+];
+
+async function runPageScenario(
+  s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
+): Promise<string> {
+  const viewer = await bootViewer({
+    frames: s.frames ? s.frames() : READY,
+    holdOpenMs: 600_000,
+  });
+  const { page, url } = viewer;
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('pageerror', (e) => pageErrors.push(e.message));
+  page.on('console', (m) => {
+    if (m.type() === 'error') consoleErrors.push(m.text());
+  });
+  page.on('dialog', (d) => void d.dismiss());
+  try {
+    await page.addInitScript({ content: PAGE_HELPERS_JS });
+    if (s.before) await s.before(page);
+    await page.goto(`${url}/ui/`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof startWatch === 'function');
+    if (s.waitView !== false) {
+      await waitView(page);
+      await page.waitForSelector('#transcript', { state: 'visible' });
+    }
+    const detail = await s.run({ viewer, page, consoleErrors });
+    expect(
+      pageErrors.length === 0,
+      `uncaught page errors: ${pageErrors.join(' | ')}`,
+    );
+    if (s.noConsoleErrors) {
+      expect(
+        consoleErrors.length === 0,
+        `console errors: ${consoleErrors.join(' | ')}`,
+      );
+    }
+    return detail;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const extra = pageErrors.length
+      ? ` [page errors: ${pageErrors.join(' | ')}]`
+      : '';
+    throw new Error(msg.split('\n')[0] + extra);
+  } finally {
+    await viewer.close();
+  }
+}
+
+// Every page scenario boots its own gateway, stub (with its own frames) and
+// browser, so the section's shared viewer is unused. `ONLY=P4` runs the
+// scenarios whose name starts with that prefix.
+async function runPageSection(): Promise<Result[]> {
+  const only = process.env['ONLY'];
+  const results: Result[] = [];
+  for (const s of PAGE_SCENARIOS) {
+    if (only && !s.name.startsWith(only)) continue;
+    let result: Result;
+    try {
+      const detail =
+        'standalone' in s ? await s.standalone() : await runPageScenario(s);
+      result = { name: s.name, ok: true, detail };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      result = { name: s.name, ok: false, detail: msg.split('\n')[0]! };
+    }
+    console.log(
+      `${result.ok ? 'PASS' : 'FAIL'} ${result.name} — ${result.detail}`,
+    );
+    results.push(result);
+  }
+  return results;
+}
+
 const SECTIONS: Record<string, (viewer: Viewer) => Promise<Result[]>> = {
   view: runViewSection,
+  page: runPageSection,
 };
 
 async function main(): Promise<void> {
