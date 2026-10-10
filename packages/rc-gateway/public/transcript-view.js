@@ -293,8 +293,10 @@
       setText(b, m.item.text);
     }
 
-    // "Fork from here" under a completed assistant turn. The view only
-    // reports clicks; the page writes busy/note back and touches the item.
+    // "Fork from here" under a completed assistant turn. The view stores the
+    // chosen transcript mode on the item (item.mode) and reports the button
+    // click (onFork) and, if the page asks, the mode change (onForkMode);
+    // the page writes busy/note back and touches the item.
     function buildFork(m) {
       var item = m.item;
       var b = el('div', 'bubble-fork');
@@ -546,7 +548,11 @@
       return scroller.getClientRects().length > 0;
     }
     // virtual-core's measureElement option (used by its ResizeObserver and
-    // by measureElement(row)); otherwise the same as its default.
+    // by measureElement(row)). Only the hidden case is ours; the rest is
+    // virtual-core's default measureElement: the observer's border box if
+    // there is one, else (a call without an entry, its synchronous path)
+    // the size already known for the row, else offsetHeight. measureRows()
+    // below sets real heights itself where that known size may be stale.
     function measureRow(row, entry, instance) {
       var index = instance.indexFromElement(row);
       var known = instance.itemSizeCache.get(

@@ -54,3 +54,79 @@ describe('vendored @tanstack/virtual-core', () => {
     expect(firstLine).toMatch(/^\/\*.*@tanstack\/virtual-core 3\.17\.0.*\*\/$/);
   });
 });
+
+// public/transcript-view.js drives a Virtualizer without a framework adapter
+// and reaches past the typed API in places. These checks make a vendor bump
+// that renames or drops any of those members fail here, not in the browser.
+describe('Virtualizer members transcript-view.js relies on', () => {
+  type Instance = Record<string, unknown> & {
+    options: Record<string, unknown>;
+  };
+  type ScrollCall = { offset: number; adjustments: number | undefined };
+
+  async function make(calls: ScrollCall[] = []): Promise<Instance> {
+    const mod = (await import(pathToFileURL(vendored).href)) as {
+      Virtualizer: new (opts: Record<string, unknown>) => Instance;
+    };
+    return new mod.Virtualizer({
+      count: 3,
+      getScrollElement: () => null,
+      estimateSize: () => 40,
+      getItemKey: (i: number) => 100 + i,
+      scrollToFn: (offset: number, o: { adjustments?: number }) => {
+        calls.push({ offset, adjustments: o.adjustments });
+      },
+      observeElementRect: () => {},
+      observeElementOffset: () => {},
+    });
+  }
+
+  it('has the methods and fields the view uses', async () => {
+    const v = await make();
+    for (const name of [
+      // typed API
+      'setOptions',
+      'getVirtualItems',
+      'getTotalSize',
+      'scrollToEnd',
+      'scrollToOffset',
+      'getOffsetForIndex',
+      'measure',
+      'measureElement',
+      'resizeItem',
+      'indexFromElement',
+      // framework-adapter lifecycle
+      '_didMount',
+      '_willUpdate',
+    ]) {
+      expect({ name, type: typeof v[name] }).toEqual({
+        name,
+        type: 'function',
+      });
+    }
+    expect(v['itemSizeCache']).toBeInstanceOf(Map);
+    expect((v.options['getItemKey'] as (i: number) => number)(2)).toBe(102);
+    // Read for the estimate's width; written after a relayout's scroll.
+    expect(v['scrollRect']).toBeNull();
+    expect('scrollOffset' in v).toBe(true);
+    // Zeroed by the view to cancel a stale iOS correction (see below).
+    expect(v['_iosDeferredAdjustment']).toBe(0);
+    // measureElement(null) drops detached rows; it must accept null.
+    expect(() =>
+      (v['measureElement'] as (node: null) => void)(null),
+    ).not.toThrow();
+  });
+
+  it('replays _iosDeferredAdjustment once settled, so zeroing it cancels the replay', async () => {
+    const calls: ScrollCall[] = [];
+    const v = await make(calls);
+    const flush = v['_flushIosDeferredIfReady'] as () => void;
+    expect(typeof flush).toBe('function');
+    v['_iosDeferredAdjustment'] = 37;
+    flush();
+    expect(calls).toEqual([{ offset: 0, adjustments: 37 }]);
+    expect(v['_iosDeferredAdjustment']).toBe(0);
+    flush();
+    expect(calls).toHaveLength(1);
+  });
+});

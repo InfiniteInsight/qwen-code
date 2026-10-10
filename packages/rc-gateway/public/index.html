@@ -2015,7 +2015,9 @@
       let asstThisTurn = false; // current turn produced an assistant bubble
 
       // Strip terminal control chars (the daemon may emit them); keep \n and \t.
-      // textContent is used everywhere below, so there's no HTML-injection path.
+      // Transcript text reaches the DOM only through transcript-view.js,
+      // which writes text nodes / textContent, so there's no HTML-injection
+      // path.
       const clean = TranscriptModel.clean;
       const strOr = (v, d) => (typeof v === 'string' && v ? clean(v) : d);
 
@@ -2075,9 +2077,6 @@
             $('jump-bottom').hidden = near;
           },
           onFork: (item) => void doForkHere(watchedSessionId, item),
-          onForkMode: (item, mode) => {
-            item.mode = mode;
-          },
         });
       }
       import('./vendor/virtual-core.js')
@@ -4280,8 +4279,8 @@
       // ---- Per-message "Fork from here" (add-session-forking web gap) ------
       // A small action under the last assistant bubble of a completed turn:
       // the model's `fork` item (turn, mode, note, busy), which the view
-      // renders as a button + transcript-mode select + note and whose clicks
-      // it reports (onFork / onForkMode).
+      // renders as a button + transcript-mode select + note. The view keeps
+      // the selected mode on the item and reports the click (onFork).
       // Clicking POSTs /session/:id/fork { fromTurn, transcript, name? }
       // where fromTurn = the number of user turns answered so far (the
       // daemon's turnResolver reads it as "keep the first N user turns").
