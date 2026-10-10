@@ -24,6 +24,9 @@
   'use strict';
 
   var NEAR_BOTTOM_PX = 80;
+  // After a finger that moved the transcript lifts, iOS may keep scrolling
+  // (momentum); virtual-core waits this long before treating it as settled.
+  var GESTURE_TAIL_MS = 150;
   var ROW_FLOW = 'display:flex;flex-direction:column;';
   var ROW_VIRTUAL =
     'position:absolute;top:0;left:8px;right:8px;' +
@@ -615,6 +618,55 @@
       else scroller.scrollTop = scroller.scrollHeight;
     }
 
+    // On iOS WebKit (detected by user agent) virtual-core does not apply its
+    // scroll corrections while a finger is down or the scroller is
+    // scrolling: it sums them in the private _iosDeferredAdjustment and
+    // replays the sum once everything has settled. The sum only fits the
+    // position it was computed at. Once the reader has scrolled away from
+    // the end, or the view is at the end anyway, replaying it would move
+    // the reader (back toward the bottom, or up from the end). The field is
+    // checked by src/vendorVirtualCore.test.ts.
+    function dropPendingCorrection() {
+      if (virtualizer && virtualizer._iosDeferredAdjustment) {
+        virtualizer._iosDeferredAdjustment = 0;
+      }
+    }
+
+    // ---- Touch gestures -------------------------------------------------------
+    // While a finger is on the transcript the view does not write the scroll
+    // position to follow new content: that would fight the finger, and on
+    // iOS each write keeps virtual-core's pending correction growing (see
+    // above). Following resumes when the gesture is over: at once if the
+    // finger never moved the transcript, or GESTURE_TAIL_MS after it lifts
+    // (iOS momentum) if it did.
+    var touching = false;
+    var touchScrolled = false; // the transcript scrolled during this touch
+    var tailTimer = null;
+    function gestureActive() {
+      return touching || tailTimer !== null;
+    }
+    function onTouchStart() {
+      touching = true;
+      touchScrolled = false;
+      if (tailTimer !== null) clearTimeout(tailTimer);
+      tailTimer = null;
+    }
+    function onTouchEnd(e) {
+      if (!touching || (e.touches && e.touches.length)) return;
+      touching = false;
+      if (touchScrolled) {
+        tailTimer = setTimeout(function () {
+          tailTimer = null;
+          schedule();
+        }, GESTURE_TAIL_MS);
+      } else {
+        schedule();
+      }
+    }
+    scroller.addEventListener('touchstart', onTouchStart, { passive: true });
+    scroller.addEventListener('touchend', onTouchEnd, { passive: true });
+    scroller.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
     var structural = true;
 
     function pass() {
@@ -667,10 +719,11 @@
         } else if (hold) {
           follow = false;
           keepHeld();
-        } else if (follow) {
+        } else if (follow && !gestureActive()) {
           follow = false;
           if (nearBottom && gapPx() > 1) toEnd();
         }
+        if (virtualizer && gapPx() <= 1) dropPendingCorrection();
       }
       hold = null;
     }
@@ -726,10 +779,17 @@
       if (!nb) follow = false;
       if (nb !== nearBottom) {
         nearBottom = nb;
+        // Corrections pending from while the view sat at the end must not
+        // pull the reader back there (see dropPendingCorrection).
+        if (!nb) dropPendingCorrection();
         if (opts.onNearBottomChange) opts.onNearBottomChange(nb);
       }
     }
-    scroller.addEventListener('scroll', refreshNearBottom, { passive: true });
+    function onScroll() {
+      if (touching) touchScrolled = true;
+      refreshNearBottom();
+    }
+    scroller.addEventListener('scroll', onScroll, { passive: true });
 
     // Derive everything from the event and `items`: during an append the
     // model's own pointers (curAsst, forkItem, ...) may not be set yet.
@@ -782,8 +842,13 @@
         rafId = 0;
         if (timer) clearInterval(timer);
         timer = null;
+        if (tailTimer !== null) clearTimeout(tailTimer);
+        tailTimer = null;
         unsubscribe();
-        scroller.removeEventListener('scroll', refreshNearBottom);
+        scroller.removeEventListener('scroll', onScroll);
+        scroller.removeEventListener('touchstart', onTouchStart);
+        scroller.removeEventListener('touchend', onTouchEnd);
+        scroller.removeEventListener('touchcancel', onTouchEnd);
         if (unmountVirtualizer) unmountVirtualizer();
         host.remove();
         if (virtualizer) scroller.style.overflowAnchor = savedOverflowAnchor;

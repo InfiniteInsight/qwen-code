@@ -27,6 +27,7 @@
  * scripts/measure-viewer-growth.mts at 200, 1000 and 2000 turns.
  *
  *   ONLY=P4 npx tsx scripts/verify-transcript-virtualization.mts page
+ *   ONLY=V2,V9 npx tsx scripts/verify-transcript-virtualization.mts view
  */
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -151,6 +152,12 @@ const HELPERS_JS = String.raw`
     return scroller.querySelector('.vrow[data-id="' + id + '"]');
   }
 
+  // A synthetic touch event on the scroller: virtual-core and the view only
+  // look at the event type (and the view at touches.length, absent here).
+  function touch(type) {
+    scroller.dispatchEvent(new Event(type));
+  }
+
   // Rows whose box intersects the scroller's visible area.
   function visibleRows() {
     var box = scroller.getBoundingClientRect();
@@ -178,6 +185,7 @@ const HELPERS_JS = String.raw`
     sleep: sleep,
     settle: settle,
     row: row,
+    touch: touch,
     visibleRows: visibleRows,
     text: text,
     activeIntervals: function () {
@@ -210,6 +218,7 @@ const VT_CSS = `
 const VT_HTML = `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>transcript view scenarios</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>${VT_CSS}</style></head>
 <body>
 <div id="vt" style="max-height:75vh;overflow-y:auto"></div>
@@ -259,6 +268,7 @@ declare const __vt: {
   sleep(ms: number): Promise<void>;
   settle(minMs?: number): Promise<boolean>;
   row(id: number): HTMLElement | null;
+  touch(type: string): void;
   visibleRows(): number;
   text(n: number, seed: number): string;
   activeIntervals(): number;
@@ -280,6 +290,74 @@ async function settle(page: Page, minMs = 200): Promise<void> {
 
 async function gap(page: Page): Promise<number> {
   return page.evaluate(() => __vt.gap());
+}
+
+// `ONLY=V9,P4` runs just those scenarios (matched on the name's first word).
+function selected(name: string): boolean {
+  const only = process.env['ONLY'];
+  if (!only) return true;
+  const id = name.split(' ')[0];
+  return only.split(',').some((s) => s.trim() === id);
+}
+
+async function routeVt(page: Page, origin: string): Promise<void> {
+  await page.route(`${origin}/ui/__vt.html`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: VT_HTML,
+    }),
+  );
+}
+
+// virtual-core takes its iOS WebKit path (deferred scroll corrections) by
+// user agent alone, so Chromium with an iPhone UA runs that path.
+const MOBILE_UA = {
+  ios:
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ' +
+    'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  android:
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/129.0 Mobile Safari/537.36',
+};
+
+/**
+ * Runs `fn` on the test page in a fresh phone-sized context (390x844, touch)
+ * of the section's browser, with the given user agent. Page and console
+ * errors there fail the scenario.
+ */
+async function onPhone<T>(
+  page: Page,
+  userAgent: string,
+  fn: (p: Page) => Promise<T>,
+): Promise<T> {
+  const ctx = await page
+    .context()
+    .browser()!
+    .newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+      hasTouch: true,
+      userAgent,
+    });
+  const errors: string[] = [];
+  try {
+    const p = await ctx.newPage();
+    p.on('pageerror', (e) => errors.push(e.message));
+    p.on('console', (m) => {
+      if (m.type() === 'error') errors.push(m.text());
+    });
+    const origin = new URL(page.url()).origin;
+    await routeVt(p, origin);
+    await p.goto(`${origin}/ui/__vt.html`);
+    await p.evaluate(() => __vt.loadCore());
+    const out = await fn(p);
+    expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+    return out;
+  } finally {
+    await ctx.close();
+  }
 }
 
 // ---- Section `view`: TranscriptView against a test-owned container -------
@@ -803,17 +881,108 @@ const VIEW_SCENARIOS: Scenario[] = [
       return `running -> ${JSON.stringify(s2.head)}; same after remount`;
     },
   },
+  {
+    // On iOS WebKit (detected by user agent) virtual-core defers its scroll
+    // corrections while a finger is down or the scroller is scrolling and
+    // replays their sum once things settle. A finger rests on the transcript
+    // while the answer streams; then the reader either drags up 1500 px and
+    // lets go (must stay exactly there, jump pill shown) or just lets go
+    // (must still follow the end). Same checks with an Android user agent.
+    name: 'V9 touch while streaming',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      for (const [os, ua] of Object.entries(MOBILE_UA)) {
+        await onPhone(page, ua, async (p) => {
+          const seen: string[] = [];
+          const cases = [
+            { chunks: 1, drag: true, end: 'touchend' },
+            { chunks: 1, drag: false, end: 'touchend' },
+            { chunks: 20, drag: true, end: 'touchend' },
+            { chunks: 20, drag: false, end: 'touchend' },
+            { chunks: 20, drag: false, end: 'touchcancel' },
+          ];
+          for (const { chunks, drag, end } of cases) {
+            const r = await p.evaluate(
+              async ([chunks, drag, end]) => {
+                __vt.setup(true);
+                __vt.addTurns(60, 330, 0);
+                __vt.model.addUser('stream please');
+                __vt.model.appendAssistant('start ');
+                const settled = await __vt.settle(400);
+                const s = __vt.scroller;
+                const gapBefore = __vt.gap();
+                // Pinned for the touch part even if the first render was
+                // not (reported separately above).
+                __vt.view.scrollToEnd();
+                const pinned = await __vt.settle(400);
+                const gapPinned = __vt.gap();
+                __vt.touch('touchstart');
+                const held = s.scrollTop;
+                for (let k = 0; k < chunks; k++) {
+                  __vt.model.appendAssistant(__vt.text(216, 100 + k) + ' ');
+                  await __vt.frame();
+                  await __vt.frame();
+                }
+                const heldMoved = s.scrollTop - held;
+                if (drag) s.scrollTop -= 1500;
+                await __vt.frame();
+                const top = s.scrollTop;
+                __vt.touch(end);
+                await __vt.sleep(700);
+                const settledAfter = await __vt.settle(300);
+                return {
+                  settled: settled && pinned && settledAfter,
+                  gapBefore: Math.round(gapBefore),
+                  gapPinned: Math.round(gapPinned),
+                  heldMoved: Math.round(heldMoved),
+                  moved: Math.round(s.scrollTop - top),
+                  gap: Math.round(__vt.gap()),
+                  near: __vt.view.isNearBottom(),
+                };
+              },
+              [chunks, drag, end] as const,
+            );
+            const what = `${os} ${chunks} chunk(s) ${drag ? 'drag up' : 'no drag'} ${end}`;
+            if (!r.settled) problems.push(`${what}: did not settle`);
+            if (r.gapBefore > 2) {
+              problems.push(`${what}: initial render ${r.gapBefore}px short`);
+            }
+            if (r.gapPinned > 2) {
+              problems.push(`${what}: scrollToEnd() ${r.gapPinned}px short`);
+            }
+            // Under a resting finger the view does not scroll to follow
+            // (on Android virtual-core itself still keeps the end in view).
+            if (os === 'ios' && Math.abs(r.heldMoved) > 2) {
+              problems.push(
+                `${what}: scrolled ${r.heldMoved}px under the finger`,
+              );
+            }
+            if (drag) {
+              if (Math.abs(r.moved) > 2) {
+                problems.push(`${what}: moved ${r.moved}px after release`);
+              }
+              if (r.near) problems.push(`${what}: pill hidden (gap ${r.gap})`);
+            } else if (r.gap > 2 || !r.near) {
+              problems.push(`${what}: not pinned (gap ${r.gap})`);
+            }
+            seen.push(
+              `${chunks}${drag ? 'd' : ''}${end === 'touchcancel' ? 'c' : ''}: ` +
+                (drag ? `moved ${r.moved}` : `gap ${r.gap}`),
+            );
+          }
+          details.push(`${os} [${seen.join(', ')}]`);
+        });
+      }
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
+  },
 ];
 
 async function runViewSection(viewer: Viewer): Promise<Result[]> {
   const { page, url } = viewer;
-  await page.route(`${url}/ui/__vt.html`, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html; charset=utf-8',
-      body: VT_HTML,
-    }),
-  );
+  await routeVt(page, url);
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => {
@@ -821,6 +990,7 @@ async function runViewSection(viewer: Viewer): Promise<Result[]> {
   });
   const results: Result[] = [];
   for (const s of VIEW_SCENARIOS) {
+    if (!selected(s.name)) continue;
     errors.length = 0;
     let result: Result;
     try {
@@ -1928,13 +2098,12 @@ async function runPageScenario(
 }
 
 // Every page scenario boots its own gateway, stub (with its own frames) and
-// browser, so the section's shared viewer is unused. `ONLY=P4` runs the
-// scenarios whose name starts with that prefix.
+// browser, so the section's shared viewer is unused. `ONLY=P4` runs that
+// scenario only (see selected()).
 async function runPageSection(): Promise<Result[]> {
-  const only = process.env['ONLY'];
   const results: Result[] = [];
   for (const s of PAGE_SCENARIOS) {
-    if (only && !s.name.startsWith(only)) continue;
+    if (!selected(s.name)) continue;
     let result: Result;
     try {
       const detail =
