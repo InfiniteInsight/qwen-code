@@ -106,6 +106,10 @@
     var nearBottom = gapPx() < NEAR_BOTTOM_PX;
     // Re-pin after the next pass: content changed while near the bottom.
     var follow = nearBottom;
+    // A user expand/collapse of a thought: { item, top } where `top` is the
+    // clicked header's offset in the viewport. The next pass keeps it there.
+    var hold = null;
+    var quiet = false; // the current model event is that toggle's own touch
 
     // ---- Bubbles ----------------------------------------------------------
 
@@ -125,9 +129,17 @@
       var b = el('div', 'bubble thought');
       m.head = el('span', 'thought-head');
       m.thoughtBody = el('span', 'thought-body', item.text);
+      // Like the old head.onclick: the header stays where it is and the
+      // body opens (or closes) below it; this never scrolls to the bottom.
       m.head.addEventListener('click', function () {
+        hold = { item: item, top: viewportTop(m.head) };
         item.expanded = !item.expanded;
-        model.touch(item);
+        quiet = true;
+        try {
+          model.touch(item);
+        } finally {
+          quiet = false;
+        }
       });
       b.appendChild(m.head);
       b.appendChild(m.thoughtBody);
@@ -613,12 +625,43 @@
         if (pendingEnd) {
           pendingEnd = false;
           follow = false;
+          hold = null;
           toEnd();
+        } else if (hold) {
+          follow = false;
+          keepHeld();
         } else if (follow) {
           follow = false;
           if (nearBottom && gapPx() > 1) toEnd();
         }
       }
+      hold = null;
+    }
+
+    function viewportTop(node) {
+      return (
+        node.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+      );
+    }
+
+    // Put a toggled thought's header back where the user clicked it, undoing
+    // any shift this pass caused (virtual-core keeps a growing row's bottom
+    // in place when the view sits at the end).
+    function keepHeld() {
+      var m = mounted.get(hold.item.id);
+      if (m && m.head && m.head.isConnected) {
+        var drift = viewportTop(m.head) - hold.top;
+        if (Math.abs(drift) > 0.5) {
+          if (virtualizer) {
+            virtualizer.scrollToOffset(scroller.scrollTop + drift);
+          } else {
+            scroller.scrollTop += drift;
+          }
+        }
+      }
+      // The view may no longer reach the end (or may again): the scroll
+      // position can come out unchanged, so no scroll event says so.
+      refreshNearBottom();
     }
 
     function schedule() {
@@ -641,7 +684,7 @@
 
     // ---- Wiring ---------------------------------------------------------------
 
-    function onScroll() {
+    function refreshNearBottom() {
       var nb = gapPx() < NEAR_BOTTOM_PX;
       if (!nb) follow = false;
       if (nb !== nearBottom) {
@@ -649,7 +692,7 @@
         if (opts.onNearBottomChange) opts.onNearBottomChange(nb);
       }
     }
-    scroller.addEventListener('scroll', onScroll, { passive: true });
+    scroller.addEventListener('scroll', refreshNearBottom, { passive: true });
 
     // Derive everything from the event and `items`: during an append the
     // model's own pointers (curAsst, forkItem, ...) may not be set yet.
@@ -667,7 +710,8 @@
           if (!isLive(it) || items.lastIndexOf(it) < 0) live.delete(it);
         });
       }
-      if (nearBottom) follow = true;
+      // A thought toggle is the user's own action, not new content.
+      if (nearBottom && !quiet) follow = true;
       syncTimer();
       schedule();
     });
@@ -702,7 +746,7 @@
         if (timer) clearInterval(timer);
         timer = null;
         unsubscribe();
-        scroller.removeEventListener('scroll', onScroll);
+        scroller.removeEventListener('scroll', refreshNearBottom);
         if (unmountVirtualizer) unmountVirtualizer();
         host.remove();
         if (virtualizer) scroller.style.overflowAnchor = savedOverflowAnchor;

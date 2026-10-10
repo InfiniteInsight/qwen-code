@@ -503,6 +503,95 @@ const VIEW_SCENARIOS: Scenario[] = [
     },
   },
   {
+    // Today's head.onclick only toggles `hidden`: nothing scrolls, so the
+    // clicked header stays put and the body opens downward.
+    name: 'V5b expand-latest-while-pinned',
+    run: async (page) => {
+      const details: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        await page.evaluate((v) => {
+          __vt.setup(v);
+          const m = __vt.model;
+          __vt.addTurns(30, 300, 0);
+          m.addUser('think hard');
+          m.appendThought('pondering ' + __vt.text(3000, 5));
+          m.finishThought();
+        }, virtual);
+        await settle(page);
+        const tid = await page.evaluate(() => {
+          const items = __vt.model.items;
+          const last = items[items.length - 1];
+          return last.kind === 'thought' ? last.id : -1;
+        });
+        expect(tid > 0, `${mode}: latest item is not the thought`);
+        const read = () =>
+          page.evaluate((id) => {
+            const row = __vt.row(id);
+            const head = row && row.querySelector('.thought-head');
+            const body = row && row.querySelector('.thought-body');
+            return {
+              top: head ? head.getBoundingClientRect().top : null,
+              hidden: body ? (body as HTMLElement).hidden : null,
+              bodyHeight: body ? body.getBoundingClientRect().height : 0,
+              gap: __vt.gap(),
+              near: __vt.view.isNearBottom(),
+            };
+          }, tid);
+        const s0 = await read();
+        expect(
+          s0.top !== null && s0.hidden === true,
+          `${mode}: folded thought not rendered`,
+        );
+        expect(s0.gap <= 2 && s0.near, `${mode}: not pinned: gap=${s0.gap}`);
+        const head = `#vt .vrow[data-id="${tid}"] .thought-head`;
+        await page.click(head);
+        await settle(page);
+        const s1 = await read();
+        expect(s1.hidden === false, `${mode}: body hidden after expand`);
+        expect(
+          s1.bodyHeight >= 200,
+          `${mode}: expanded body only ${s1.bodyHeight}px`,
+        );
+        expect(
+          s1.top !== null && Math.abs(s1.top - s0.top!) <= 2,
+          `${mode}: expand moved the head ${s0.top} -> ${s1.top}`,
+        );
+        expect(
+          s1.near === s1.gap < 80,
+          `${mode}: isNearBottom()=${s1.near} with gap=${s1.gap}`,
+        );
+        expect(!s1.near, `${mode}: still near the bottom (gap=${s1.gap})`);
+        await page.click(head);
+        await settle(page);
+        const s2 = await read();
+        expect(s2.hidden === true, `${mode}: body visible after collapse`);
+        expect(
+          s2.top !== null && Math.abs(s2.top - s0.top!) <= 2,
+          `${mode}: collapse moved the head ${s0.top} -> ${s2.top}`,
+        );
+        expect(
+          s2.near === s2.gap < 80,
+          `${mode}: isNearBottom()=${s2.near} with gap=${s2.gap}`,
+        );
+        // Streaming after the toggle still follows the bottom.
+        await page.evaluate(async () => {
+          for (let k = 0; k < 20; k++) {
+            __vt.model.appendAssistant(__vt.text(200, 40 + k));
+            await __vt.frame();
+          }
+        });
+        await settle(page);
+        const g = await gap(page);
+        expect(g <= 2, `${mode}: streaming after the toggle: gap=${g}`);
+        details.push(
+          `${mode}: head ${s0.top} -> ${s1.top} -> ${s2.top}, body ${Math.round(s1.bodyHeight)}px`,
+        );
+      }
+      return details.join('; ');
+    },
+  },
+  {
     name: 'V6 fallback mode',
     run: async (page) => {
       await page.evaluate(() => {
