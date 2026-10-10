@@ -198,14 +198,15 @@ const HELPERS_JS = String.raw`
     return scroller.querySelector('.vrow[data-id="' + id + '"]');
   }
 
-  // The row crossing (or starting at) the scroller's top edge, and its
-  // offset from that edge.
+  // The top-most row still visible at the scroller's top edge (the one
+  // crossing it, or the next one when the edge falls between two rows), and
+  // its offset from that edge.
   function topRow() {
     var top = scroller.getBoundingClientRect().top;
     var best = null;
     scroller.querySelectorAll('.vrow').forEach(function (r) {
       var b = r.getBoundingClientRect();
-      if (b.top - top <= 0 && b.bottom - top > 0) {
+      if (b.bottom - top > 0 && (!best || b.top - top < best.y)) {
         best = { id: Number(r.getAttribute('data-id')), y: b.top - top };
       }
     });
@@ -220,6 +221,16 @@ const HELPERS_JS = String.raw`
   // Scrolls up by step px at a time (at most maxSteps times) and returns,
   // per step, how far the row at the top edge moved beyond the scroll itself
   // (0: the content moved exactly with the scroll; null: the row is gone).
+  // Scrolls from the top to the end a viewport at a time, so every row is
+  // mounted (and measured) once at the current width.
+  async function sweepDown() {
+    scroller.scrollTop = 0;
+    await settle(200);
+    for (var k = 0; k < 2000 && gap() > 1; k++) {
+      scroller.scrollTop += scroller.clientHeight;
+      await settle(0);
+    }
+  }
   async function scrollBack(step, maxSteps) {
     var out = [];
     for (var i = 0; i < maxSteps; i++) {
@@ -270,6 +281,7 @@ const HELPERS_JS = String.raw`
     row: row,
     touch: touch,
     topRow: topRow,
+    sweepDown: sweepDown,
     scrollBack: scrollBack,
     rafClock: rafClock,
     visibleRows: visibleRows,
@@ -358,6 +370,7 @@ declare const __vt: {
   row(id: number): HTMLElement | null;
   touch(type: string): void;
   topRow(): { id: number; y: number } | null;
+  sweepDown(): Promise<void>;
   scrollBack(step: number, maxSteps: number): Promise<Array<number | null>>;
   rafClock: { on: boolean; ms: number };
   visibleRows(): number;
@@ -1127,6 +1140,101 @@ const VIEW_SCENARIOS: Scenario[] = [
         return (
           `${abs.length} steps, max jump ${max}px; per-append frame ` +
           `${small.toFixed(2)} ms (200 turns) / ${big.toFixed(2)} ms (2000)`
+        );
+      }),
+  },
+  {
+    // virtual-core keeps every row's measured height until the row is
+    // measured again, also across a width change (a phone rotating). Rows
+    // measured in portrait and then unmounted are re-measured on the way
+    // back in landscape, and the text lurches as in V10. After rotating,
+    // scrolling back must behave as on a transcript laid out in landscape
+    // from the start (whose rows enter with their estimate). Pinned at the
+    // end the view stays there; a reader in the middle keeps the row at the
+    // top edge where it was.
+    name: 'V11 rotate the phone',
+    run: async (page) =>
+      onPhone(page, MOBILE_UA.android, async (p) => {
+        const readTop = () =>
+          p.evaluate(() => {
+            const a = __vt.topRow();
+            return {
+              id: a ? a.id : -1,
+              y: a ? Math.round(a.y) : 0,
+              gap: Math.round(__vt.gap()),
+              near: __vt.view.isNearBottom(),
+            };
+          });
+        const rotate = async (width: number, height: number) => {
+          await p.setViewportSize({ width, height });
+          expect(
+            await p.evaluate(() => __vt.settle(400)),
+            'did not settle after the rotation',
+          );
+        };
+        const jumps = (steps: Array<number | null>) => {
+          const abs = steps.filter((v) => v !== null).map((v) => Math.abs(v!));
+          return {
+            n: abs.length,
+            lost: steps.length - abs.length,
+            max: Math.max(0, ...abs),
+            list: steps.join(','),
+          };
+        };
+        // Baseline: laid out in landscape from the start.
+        await p.setViewportSize({ width: 844, height: 390 });
+        const base = jumps(
+          await p.evaluate(async () => {
+            __vt.setup(true);
+            __vt.addTurns(30, 1000, 0);
+            await __vt.settle(400);
+            return __vt.scrollBack(300, 20);
+          }),
+        );
+        // Every row measured in portrait, then rotated at the end.
+        await p.setViewportSize({ width: 390, height: 844 });
+        await p.evaluate(async () => {
+          __vt.setup(true);
+          __vt.addTurns(30, 1000, 0);
+          await __vt.sweepDown();
+        });
+        const end0 = await readTop();
+        expect(end0.gap <= 2 && end0.near, `not at the end: ${end0.gap}`);
+        await rotate(844, 390);
+        const end1 = await readTop();
+        const back = jumps(await p.evaluate(() => __vt.scrollBack(300, 20)));
+        // A reader in the middle rotates back to portrait.
+        await p.evaluate(async () => {
+          __vt.scroller.scrollTop = __vt.scroller.scrollHeight / 2;
+          await __vt.settle(400);
+        });
+        const mid0 = await readTop();
+        await rotate(390, 844);
+        const mid1 = await readTop();
+        const problems: string[] = [];
+        if (end1.gap > 2 || !end1.near) {
+          problems.push(`left the end on rotating: gap ${end1.gap}`);
+        }
+        if (back.n < 10 || base.n < 10) {
+          problems.push(`only ${back.n} (baseline ${base.n}) steps`);
+        }
+        if (back.lost) problems.push(`${back.lost} step(s) lost the top row`);
+        if (back.max > base.max + 2) {
+          problems.push(
+            `text jumped up to ${back.max}px scrolling back after rotating ` +
+              `(${base.max}px laid out in landscape): [${back.list}]`,
+          );
+        }
+        if (mid1.id !== mid0.id || Math.abs(mid1.y - mid0.y) > 2) {
+          problems.push(
+            `reader moved on rotating: row ${mid0.id}@${mid0.y} -> ${mid1.id}@${mid1.y}`,
+          );
+        }
+        expect(problems.length === 0, problems.join('; '));
+        return (
+          `end kept (gap ${end1.gap}); scrolling back max jump ${back.max}px ` +
+          `(landscape from the start ${base.max}px); reader row ` +
+          `${mid0.id}@${mid0.y} -> ${mid1.id}@${mid1.y}`
         );
       }),
   },

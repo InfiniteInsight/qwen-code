@@ -413,6 +413,8 @@
     var vopts = null;
     var unmountVirtualizer = null;
     var savedOverflowAnchor = '';
+    var lastWidth = 0; // the scroller's last non-zero width
+    var relayoutFrom = null; // the reader's place when the width changed
 
     // virtual-core estimates every row it has not measured each time it
     // rebuilds its layout (on every append), so a text's line count is
@@ -483,7 +485,23 @@
         initialOffset: function () {
           return scroller.scrollTop;
         },
-        observeElementRect: core.observeElementRect,
+        // Also notes width changes (a phone rotating, a window resized; a
+        // hidden scroller reports 0, which is not one): see relayout().
+        // This observer reports before virtual-core's row observer reacts
+        // to the new row heights (it was created first), so the reader's
+        // place is still the one they were reading.
+        observeElementRect: function (instance, cb) {
+          return core.observeElementRect(instance, function (rect) {
+            if (rect.width) {
+              if (lastWidth && rect.width !== lastWidth && !relayoutFrom) {
+                relayoutFrom = readerPlace();
+                schedule();
+              }
+              lastWidth = rect.width;
+            }
+            cb(rect);
+          });
+        },
         observeElementOffset: core.observeElementOffset,
         scrollToFn: core.elementScroll,
         measureElement: measureRow,
@@ -728,6 +746,7 @@
         patchClocks(now, written);
       }
       if (virtualizer) {
+        if (relayoutFrom && rendered()) relayout();
         if (written.length) measureRows(written, false);
         setSizerHeight();
         // Measuring newly mounted rows can move the others or change which
@@ -770,13 +789,71 @@
       );
     }
 
+    // The scroller's width changed. virtual-core keeps every measured height
+    // until that row is measured again, so rows measured at the old width
+    // would be corrected only once scrolled back into view, which moves the
+    // text (it does not compensate while the reader scrolls backward).
+    // Instead drop all measurements (rows not mounted fall back to their
+    // estimate), re-measure the mounted rows now, and put the reader back
+    // where they were when the width changed (see readerPlace).
+    function relayout() {
+      var place = relayoutFrom;
+      relayoutFrom = null;
+      virtualizer.measure();
+      var list = [];
+      mounted.forEach(function (m) {
+        list.push(m);
+      });
+      measureRows(list, false);
+      if (place.end) {
+        pendingEnd = true;
+      } else if (place.item) {
+        // The old scroll offset points somewhere else in the new layout.
+        // Go to the row's new position now, and tell virtual-core at once
+        // (it otherwise learns the offset from the next scroll event, as
+        // its own setOptions does), so this pass mounts the rows around it;
+        // keepHeld() then corrects what measuring them shifts.
+        var index = items.indexOf(place.item);
+        virtualizer.getTotalSize(); // lays out with the new sizes
+        var at =
+          index < 0 ? null : virtualizer.getOffsetForIndex(index, 'start');
+        if (at) {
+          scroller.scrollTop = at[0] - place.top;
+          virtualizer.scrollOffset = scroller.scrollTop;
+        }
+        if (!hold) hold = place;
+      }
+    }
+    // The end when following it; otherwise the last row starting at or
+    // above the top edge (else the first one below it) and its offset from
+    // the edge. Row tops are still the old layout's here: only heights have
+    // reflowed to the new width.
+    function readerPlace() {
+      if (nearBottom) return { end: true };
+      var edge = scroller.getBoundingClientRect().top;
+      var above = null;
+      var below = null;
+      mounted.forEach(function (m) {
+        var y = m.row.getBoundingClientRect().top - edge;
+        var place = { item: m.item, top: y, row: true };
+        if (y <= 0) {
+          if (!above || y > above.top) above = place;
+        } else if (!below || y < below.top) {
+          below = place;
+        }
+      });
+      return above || below || { end: false };
+    }
+
     // Put a toggled thought's header back where the user clicked it, undoing
     // any shift this pass caused (virtual-core keeps a growing row's bottom
-    // in place when the view sits at the end).
+    // in place when the view sits at the end); after a width change, the
+    // same for the row at the top edge.
     function keepHeld() {
       var m = mounted.get(hold.item.id);
-      if (m && m.head && m.head.isConnected) {
-        var drift = viewportTop(m.head) - hold.top;
+      var node = m && (hold.row ? m.row : m.head);
+      if (node && node.isConnected) {
+        var drift = viewportTop(node) - hold.top;
         if (Math.abs(drift) > 0.5) {
           if (virtualizer) {
             virtualizer.scrollToOffset(scroller.scrollTop + drift);
