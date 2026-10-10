@@ -636,6 +636,22 @@ describe('gateway app', () => {
     expect(await res.text()).toContain('Virtualizer');
   });
 
+  it('serves the transcript model at /ui/transcript-model.js without auth', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/transcript-model.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/javascript/);
+    expect(await res.text()).toContain('TranscriptModel');
+  });
+
+  it('serves the transcript view at /ui/transcript-view.js without auth', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/transcript-view.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/javascript/);
+    expect(await res.text()).toContain('TranscriptView');
+  });
+
   it('serves the enrollment UI at /ui/index.html', async () => {
     const { url } = await boot();
     const res = await fetch(`${url}/ui/index.html`);

@@ -9,8 +9,11 @@
  * growth (issue InfiniteInsight/Qwen-Code-Remote#57). Boots the real gateway
  * against the stub daemon, replays a synthetic N-turn session into the shipped
  * public/index.html in headless Chromium, and reports JS heap, DOM node count,
- * the size of the hidden raw-JSON log, and per-chunk streaming cost. It also
- * attributes heap to the transcript vs. the raw log by clearing each in turn.
+ * the size of the hidden raw-JSON log, and per-chunk streaming cost (both the
+ * synchronous frame handling, `perChunkMs`, and the main-thread time per
+ * chunk with one chunk per animation frame, `perChunkFrameMs`, which includes
+ * deferred rendering). It also attributes heap to the transcript vs. the raw
+ * log by clearing each in turn.
  *
  *   npx tsx scripts/measure-viewer-growth.mts
  *   TURNS=3000 CHUNKS=30 npx tsx scripts/measure-viewer-growth.mts
@@ -108,21 +111,67 @@ async function main(): Promise<void> {
     logChars: document.getElementById('log')?.textContent?.length ?? 0,
   }));
 
-  // Per-chunk streaming cost with the grown page (one assistant chunk).
-  const perChunkMs = await page.evaluate(() => {
-    const N = 200;
-    const t = performance.now();
-    for (let i = 0; i < N; i++)
-      renderFrame({
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { text: 'x' },
+  // Per-chunk streaming cost with the grown page (one assistant chunk). Both
+  // numbers are the best of several rounds: GC pauses, timers and scheduler
+  // noise only ever add time, and at these sizes they would dominate one
+  // sample.
+  //
+  // First with one chunk per animation frame, as main-thread time (CDP
+  // TaskDuration): this includes the render work a view defers to the frame.
+  // It runs first so the streamed bubble is a realistic size.
+  const taskMs = async (): Promise<number> => {
+    const { metrics } = await cdp.send('Performance.getMetrics');
+    return (metrics.find((x) => x.name === 'TaskDuration')?.value ?? 0) * 1000;
+  };
+  const FRAME_ROUNDS = 3;
+  const FRAME_CHUNKS = 60;
+  let perChunkFrameMs = Infinity;
+  for (let round = 0; round < FRAME_ROUNDS; round++) {
+    const before = await taskMs();
+    await page.evaluate(async (n) => {
+      for (let i = 0; i < n; i++) {
+        renderFrame({
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'x' },
+            },
           },
-        },
-      });
-    return (performance.now() - t) / N;
+        });
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }, FRAME_CHUNKS);
+    perChunkFrameMs = Math.min(
+      perChunkFrameMs,
+      ((await taskMs()) - before) / FRAME_CHUNKS,
+    );
+  }
+
+  // Then the synchronous frame handling alone, in batches of 200 until a
+  // round's total is well above performance.now()'s resolution (~0.1 ms): a
+  // virtualized page handles 200 chunks in a small fraction of that.
+  const perChunkMs = await page.evaluate(() => {
+    let best = Infinity;
+    for (let round = 0; round < 5; round++) {
+      let n = 0;
+      const t = performance.now();
+      do {
+        for (let i = 0; i < 200; i++)
+          renderFrame({
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { text: 'x' },
+              },
+            },
+          });
+        n += 200;
+      } while (performance.now() - t < 50 && n < 50000);
+      best = Math.min(best, (performance.now() - t) / n);
+    }
+    return best;
   });
 
   const heapAll = await heapMb();
@@ -142,7 +191,8 @@ async function main(): Promise<void> {
             i === samples.length - 1,
         ),
         ...stats,
-        perChunkMs: Number(perChunkMs.toFixed(3)),
+        perChunkMs: Number(perChunkMs.toFixed(6)),
+        perChunkFrameMs: Number(perChunkFrameMs.toFixed(4)),
         jsHeapMb: Number(heapAll.toFixed(1)),
         rendererRssMb: Number(rssMb.toFixed(0)),
       },

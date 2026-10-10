@@ -1113,6 +1113,8 @@ type PageScenario =
   | { name: string; standalone: () => Promise<string> };
 
 const VIEWER_SCRIPT = 'scripts/measure-viewer-growth.mts';
+const TRANSCRIPT_ASSET =
+  /\/ui\/(transcript-model\.js|transcript-view\.js|vendor\/virtual-core\.js)$/;
 const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
 
 async function waitView(page: Page, timeoutMs = 10_000): Promise<void> {
@@ -1163,6 +1165,7 @@ interface Growth {
   transcriptNodes: number;
   totalNodes: number;
   perChunkMs: number;
+  perChunkFrameMs: number;
   jsHeapMb: number;
   rendererRssMb: number;
 }
@@ -1747,6 +1750,86 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
+    // Another tab (or the raw-JSON view) hides #transcript with
+    // display:none; every row then measures 0. Coming back must find the
+    // reader where they were, and a pinned transcript at the new end.
+    name: 'P10 hide and show',
+    frames: () => replayFrames(40, 2),
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 40 * 7, 30_000);
+      await settlePage(page);
+      const read = () =>
+        page.evaluate(() => {
+          const s = document.getElementById('transcript')!;
+          const ids = __pg.visibleIds();
+          return {
+            top: s.scrollTop,
+            first: ids.length ? Math.min(...ids) : -1,
+            gap: __pg.gap(),
+            pill: (document.getElementById('jump-bottom') as HTMLElement)
+              .hidden,
+          };
+        });
+      await page.evaluate(() => {
+        const s = document.getElementById('transcript')!;
+        s.scrollTop = Math.floor(s.scrollHeight / 2);
+      });
+      await settlePage(page);
+      const s0 = await read();
+      expect(s0.gap > 200 && !s0.pill, `setup: ${JSON.stringify(s0)}`);
+      await page.click('.tab[data-tab="diag"]');
+      await page.waitForTimeout(300);
+      await page.click('.tab[data-tab="chat"]');
+      await settlePage(page);
+      const s1 = await read();
+      expect(
+        Math.abs(s1.top - s0.top) <= 2 && s1.first === s0.first && !s1.pill,
+        `tab round trip moved the reader: ${JSON.stringify(s0)} -> ${JSON.stringify(s1)}`,
+      );
+      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      await page.waitForTimeout(300);
+      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      await settlePage(page);
+      const s2 = await read();
+      expect(
+        Math.abs(s2.top - s0.top) <= 2 && s2.first === s0.first && !s2.pill,
+        `raw round trip moved the reader: ${JSON.stringify(s0)} -> ${JSON.stringify(s2)}`,
+      );
+      // Pinned, and the answer grows while the transcript is hidden.
+      await page.click('#jump-bottom');
+      await settlePage(page);
+      await page.click('.tab[data-tab="diag"]');
+      await page.evaluate(() =>
+        __pg.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: ' tail while hidden' },
+        }),
+      );
+      await page.waitForTimeout(300);
+      await page.click('.tab[data-tab="chat"]');
+      await settlePage(page);
+      const s3 = await page.evaluate(() => {
+        const asst = transcriptModel.curAsst!;
+        return {
+          gap: __pg.gap(),
+          pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
+          text: __pg.row(asst.id)?.textContent ?? null,
+          shown: __pg.visibleIds().includes(asst.id),
+        };
+      });
+      expect(
+        s3.gap <= 2 && s3.pill,
+        `pinned transcript not at the end after the tab: ${JSON.stringify(s3)}`,
+      );
+      expect(
+        s3.shown && (s3.text ?? '').endsWith(' tail while hidden'),
+        `hidden-time chunk not shown: ${JSON.stringify(s3.text)}`,
+      );
+      return `reader kept at ${Math.round(s0.top)} (item ${s0.first}); pinned view followed the hidden-time chunk`;
+    },
+  },
+  {
     name: 'P9 curve',
     standalone: async () => {
       const runs: Growth[] = [];
@@ -1754,7 +1837,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
         const g = await measureGrowth(turns);
         console.log(
           `  ${turns} turns: replay ${g.replayMs} ms, nodes ${g.totalNodes} ` +
-            `(transcript ${g.transcriptNodes}), ${g.perChunkMs} ms/chunk, ` +
+            `(transcript ${g.transcriptNodes}), ${g.perChunkMs} ms/chunk ` +
+            `(${g.perChunkFrameMs} ms/chunk with its frame), ` +
             `heap ${g.jsHeapMb} MB, rss ${g.rendererRssMb} MB`,
         );
         expect(g.finished, `${turns}-turn replay did not finish`);
@@ -1769,8 +1853,17 @@ const PAGE_SCENARIOS: PageScenario[] = [
         big.perChunkMs <= 2 * small.perChunkMs,
         `per-chunk ${small.perChunkMs} -> ${big.perChunkMs} ms (> 2x)`,
       );
+      // Rendering is deferred to the animation frame: hold the frame-inclusive
+      // cost to the same bound.
+      expect(
+        big.perChunkFrameMs <= 2 * small.perChunkFrameMs,
+        `per-chunk with its frame ${small.perChunkFrameMs} -> ${big.perChunkFrameMs} ms (> 2x)`,
+      );
       return runs
-        .map((g) => `${g.turns}: ${g.totalNodes} nodes ${g.perChunkMs} ms`)
+        .map(
+          (g) =>
+            `${g.turns}: ${g.totalNodes} nodes ${g.perChunkMs}/${g.perChunkFrameMs} ms`,
+        )
         .join('; ');
     },
   },
@@ -1788,7 +1881,18 @@ async function runPageScenario(
   const pageErrors: string[] = [];
   page.on('pageerror', (e) => pageErrors.push(e.message));
   page.on('console', (m) => {
-    if (m.type() === 'error') consoleErrors.push(m.text());
+    if (m.type() !== 'error') return;
+    const where = m.location().url;
+    // Best-effort endpoints the page tolerates (permission overlays, the
+    // clients manifest, lineage) answer 404 in the harness, and the browser
+    // logs each as an error. Only a failed transcript asset counts.
+    if (
+      m.text().startsWith('Failed to load resource') &&
+      !TRANSCRIPT_ASSET.test(where)
+    ) {
+      return;
+    }
+    consoleErrors.push(`${m.text()} @ ${where}`);
   });
   page.on('dialog', (d) => void d.dismiss());
   try {

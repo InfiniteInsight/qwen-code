@@ -456,6 +456,7 @@
         observeElementRect: core.observeElementRect,
         observeElementOffset: core.observeElementOffset,
         scrollToFn: core.elementScroll,
+        measureElement: measureRow,
         gap: 8,
         paddingStart: 8,
         paddingEnd: 8,
@@ -480,6 +481,29 @@
       if (host.style.height !== h) host.style.height = h;
     }
 
+    // While the scroller is not rendered (display:none on it or an
+    // ancestor: another tab, the raw-JSON view) every row measures 0.
+    // Recording that would collapse the sizer and the browser would clamp
+    // the scroll position, so hidden rows keep their known size.
+    function rendered() {
+      return scroller.getClientRects().length > 0;
+    }
+    // virtual-core's measureElement option (used by its ResizeObserver and
+    // by measureElement(row)); otherwise the same as its default.
+    function measureRow(row, entry, instance) {
+      var index = instance.indexFromElement(row);
+      var known = instance.itemSizeCache.get(
+        instance.options.getItemKey(index),
+      );
+      if (!row.getClientRects().length) {
+        return known !== undefined ? known : estimate(items[index]);
+      }
+      var box = entry && entry.borderBoxSize && entry.borderBoxSize[0];
+      if (box) return Math.round(box.blockSize);
+      if (!entry && known !== undefined) return known;
+      return row.offsetHeight;
+    }
+
     // Measure rows in the same pass that changed them, so positions, the
     // sizer and any scroll correction land before paint (the ResizeObserver
     // would only report them after it). virtual-core applies its correction
@@ -487,6 +511,15 @@
     // so the sizer is grown first: a correction must not be clamped by a
     // sizer that still has the old total.
     function measureRows(list, fresh) {
+      if (!rendered()) {
+        // Only register new rows; they are measured once shown again.
+        if (fresh) {
+          for (var f = 0; f < list.length; f++) {
+            virtualizer.measureElement(list[f].row);
+          }
+        }
+        return;
+      }
       var cache = virtualizer.itemSizeCache; // item.id -> measured height
       var heights = [];
       var grow = 0;
@@ -627,6 +660,10 @@
           follow = false;
           hold = null;
           toEnd();
+          // Already at the end (e.g. the content just shrank to fit, as
+          // after a clear): the scroll position does not change, so no
+          // scroll event reports that the view is at the bottom now.
+          refreshNearBottom();
         } else if (hold) {
           follow = false;
           keepHeld();
