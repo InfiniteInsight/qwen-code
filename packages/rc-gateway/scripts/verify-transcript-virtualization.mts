@@ -212,6 +212,14 @@ const HELPERS_JS = String.raw`
     });
     return best;
   }
+  // A row's top and bottom relative to the scroller's top edge.
+  function rowBox(id) {
+    var r = row(id);
+    if (!r) return null;
+    var edge = scroller.getBoundingClientRect().top;
+    var b = r.getBoundingClientRect();
+    return { top: b.top - edge, bottom: b.bottom - edge };
+  }
   function rowTop(id) {
     var r = row(id);
     return r
@@ -281,6 +289,7 @@ const HELPERS_JS = String.raw`
     row: row,
     touch: touch,
     topRow: topRow,
+    rowBox: rowBox,
     sweepDown: sweepDown,
     scrollBack: scrollBack,
     rafClock: rafClock,
@@ -370,6 +379,7 @@ declare const __vt: {
   row(id: number): HTMLElement | null;
   touch(type: string): void;
   topRow(): { id: number; y: number } | null;
+  rowBox(id: number): { top: number; bottom: number } | null;
   sweepDown(): Promise<void>;
   scrollBack(step: number, maxSteps: number): Promise<Array<number | null>>;
   rafClock: { on: boolean; ms: number };
@@ -1410,6 +1420,93 @@ const VIEW_SCENARIOS: Scenario[] = [
           `${mid0.id}@${mid0.y} -> ${mid1.id}@${mid1.y}`
         );
       }),
+  },
+  {
+    // A reader scrolled up into the answer that is still streaming: the
+    // viewport's top edge is inside that (growing) row, 400 px above the end
+    // or 40 px below the row's start. The text grows below them; nothing
+    // they are reading may move, and the jump pill stays shown. Desktop,
+    // Android and iPhone user agents, and the iPhone with a resting finger.
+    name: 'V12 reader inside the streaming answer',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      const read = (p: Page, pos: string, touch: boolean) =>
+        p.evaluate(
+          async ([pos, touch]) => {
+            const s = __vt.scroller;
+            __vt.setup(true);
+            const m = __vt.model;
+            __vt.addTurns(20, 330, 0);
+            m.addUser('stream please');
+            m.appendAssistant('start ' + __vt.text(9000, 999));
+            await __vt.settle(400);
+            const items = m.items;
+            const id = items[items.length - 1]!.id;
+            if (pos === 'end400') {
+              s.scrollTop = s.scrollHeight - s.clientHeight - 400;
+            } else {
+              const b0 = __vt.rowBox(id);
+              if (b0) s.scrollTop += b0.top + 40;
+            }
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const b1 = __vt.rowBox(id);
+            const inside = !!b1 && b1.top < 0 && b1.bottom > 0;
+            const top0 = s.scrollTop;
+            const node = __vt.row(id)?.querySelector('.bubble') ?? s;
+            if (touch) {
+              node.dispatchEvent(new Event('touchstart', { bubbles: true }));
+            }
+            const moves: number[] = [];
+            for (let k = 0; k < 10; k++) {
+              m.appendAssistant(' ' + __vt.text(300, 200 + k));
+              await __vt.frame();
+              await __vt.frame();
+              moves.push(Math.round(s.scrollTop - top0));
+            }
+            if (touch) {
+              node.dispatchEvent(new Event('touchend', { bubbles: true }));
+              await __vt.sleep(700);
+            }
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            return {
+              inside,
+              moves,
+              moved: Math.round(s.scrollTop - top0),
+              near: __vt.view.isNearBottom(),
+            };
+          },
+          [pos, touch] as const,
+        );
+      const check = async (p: Page, what: string, touch: boolean) => {
+        const seen: string[] = [];
+        for (const pos of ['end400', 'start40']) {
+          const r = await read(p, pos, touch);
+          const tag = `${what} ${pos}`;
+          const worst = Math.max(...r.moves.map(Math.abs), Math.abs(r.moved));
+          if (!r.inside)
+            problems.push(`${tag}: top edge not inside the answer`);
+          if (worst > 2) {
+            problems.push(
+              `${tag}: reader moved ${r.moved}px (per chunk [${r.moves.join(',')}])`,
+            );
+          }
+          if (r.near) problems.push(`${tag}: pill hidden`);
+          seen.push(`${pos} ${r.moved}`);
+        }
+        details.push(`${what}: ${seen.join(', ')}`);
+      };
+      await check(page, 'desktop', false);
+      await onPhone(page, MOBILE_UA.android, (p) => check(p, 'android', false));
+      await onPhone(page, MOBILE_UA.ios, async (p) => {
+        await check(p, 'ios', false);
+        await check(p, 'ios+finger', true);
+      });
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
   },
 ];
 

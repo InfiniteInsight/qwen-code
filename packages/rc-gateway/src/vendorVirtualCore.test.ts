@@ -117,6 +117,35 @@ describe('Virtualizer members transcript-view.js relies on', () => {
     ).not.toThrow();
   });
 
+  it('asks shouldAdjustScrollPositionOnItemSizeChange whether a resize moves the scroll position', async () => {
+    const calls: ScrollCall[] = [];
+    const v = await make(calls);
+    const getTotalSize = v['getTotalSize'] as () => number;
+    const resizeItem = v['resizeItem'] as (i: number, size: number) => void;
+    const asked: Array<{ index: number; end: number; delta: number }> = [];
+    let answer = true;
+    let instance: unknown = null;
+    v['shouldAdjustScrollPositionOnItemSizeChange'] = (
+      item: { index: number; end: number },
+      delta: number,
+      inst: unknown,
+    ) => {
+      asked.push({ index: item.index, end: item.end, delta });
+      instance = inst;
+      return answer;
+    };
+    getTotalSize(); // lays the three 40 px rows out
+    resizeItem(0, 60);
+    expect(asked).toEqual([{ index: 0, end: 40, delta: 20 }]);
+    expect(instance).toBe(v);
+    expect(calls).toEqual([{ offset: 0, adjustments: 20 }]);
+    answer = false;
+    getTotalSize();
+    resizeItem(1, 70);
+    expect(asked[1]).toEqual({ index: 1, end: 100, delta: 30 });
+    expect(calls).toHaveLength(1);
+  });
+
   it('replays _iosDeferredAdjustment once settled, so zeroing it cancels the replay', async () => {
     const calls: ScrollCall[] = [];
     const v = await make(calls);

@@ -520,6 +520,25 @@
       };
       try {
         virtualizer = new core.Virtualizer(vopts);
+        // When a row changes height while the view is not at the end,
+        // virtual-core's default moves the scroll position by the change
+        // for any row that starts above the viewport, to keep what is below
+        // it in place. For the answer that is still streaming, with the
+        // reader inside it, that carried the reader along with the text
+        // appended below them. Correct only for rows wholly above the
+        // viewport (as browser scroll anchoring does), and still never
+        // while the reader scrolls backward (as the default). Staying at
+        // the end while the last row grows is decided before this rule.
+        virtualizer.shouldAdjustScrollPositionOnItemSizeChange = function (
+          item,
+          delta,
+          instance,
+        ) {
+          return (
+            item.end <= scroller.scrollTop &&
+            instance.scrollDirection !== 'backward'
+          );
+        };
         unmountVirtualizer = virtualizer._didMount();
         virtualizer._willUpdate();
       } catch (err) {
