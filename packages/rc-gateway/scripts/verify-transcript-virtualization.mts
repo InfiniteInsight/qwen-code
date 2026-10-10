@@ -27,7 +27,7 @@
  * scripts/measure-viewer-growth.mts at 200, 1000 and 2000 turns.
  *
  *   ONLY=P4 npx tsx scripts/verify-transcript-virtualization.mts page
- *   ONLY=V2,V9 npx tsx scripts/verify-transcript-virtualization.mts view
+ *   ONLY=V9,V10 npx tsx scripts/verify-transcript-virtualization.mts view
  */
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +64,22 @@ const HELPERS_JS = String.raw`
     return realClearInterval.call(window, id);
   };
 
+  // Time spent in requestAnimationFrame callbacks (the view's render pass,
+  // virtual-core's scroll reconciliation) while rafClock.on is set.
+  var rafClock = { on: false, ms: 0 };
+  var realRaf = window.requestAnimationFrame;
+  window.requestAnimationFrame = function (cb) {
+    return realRaf.call(window, function (t) {
+      if (!rafClock.on) return cb(t);
+      var t0 = performance.now();
+      try {
+        cb(t);
+      } finally {
+        rafClock.ms += performance.now() - t0;
+      }
+    });
+  };
+
   var WORDS = ['lorem', 'ipsum', 'dolor', 'sit', 'amet', 'consectetur',
     'adipiscing', 'elit', 'sed', 'do', 'eiusmod', 'tempor'];
   function text(n, seed) {
@@ -97,6 +113,36 @@ const HELPERS_JS = String.raw`
     for (var i = 0; i < n; i++) {
       state.model.addUser(text(chars, seed + 2 * i));
       state.model.appendAssistant(text(chars, seed + 2 * i + 1));
+    }
+  }
+
+  var FENCE = String.fromCharCode(96, 96, 96); // a code fence
+  // A markdown-style answer, as the daemon sends them: a short list and an
+  // 18-line code block (bubbles keep newlines: white-space: pre-wrap).
+  function md(t) {
+    var s = 'Here is what I found for turn ' + t + ':\n\n' +
+      '1. First point about the code path\n2. Second point\n' +
+      '3. Third point\n\n' + FENCE + 'ts\n';
+    for (var i = 0; i < 18; i++) {
+      s += 'const value' + i + ' = compute(' + i + ');\n';
+    }
+    return s + FENCE + '\n\nThat should fix it.';
+  }
+  function addMdTurns(n, seed) {
+    for (var i = 0; i < n; i++) {
+      state.model.addUser(
+        'question ' + (seed + i) + ': why does the build fail on the phone?',
+      );
+      state.model.appendAssistant(md(seed + i));
+    }
+  }
+  // n turns, each answer made of that many short lines.
+  function addLineTurns(n, lines) {
+    var answer = '';
+    for (var i = 0; i < lines; i++) answer += 'line ' + i + '\n';
+    for (var j = 0; j < n; j++) {
+      state.model.addUser('question ' + j);
+      state.model.appendAssistant(answer + j);
     }
   }
 
@@ -152,6 +198,41 @@ const HELPERS_JS = String.raw`
     return scroller.querySelector('.vrow[data-id="' + id + '"]');
   }
 
+  // The row crossing (or starting at) the scroller's top edge, and its
+  // offset from that edge.
+  function topRow() {
+    var top = scroller.getBoundingClientRect().top;
+    var best = null;
+    scroller.querySelectorAll('.vrow').forEach(function (r) {
+      var b = r.getBoundingClientRect();
+      if (b.top - top <= 0 && b.bottom - top > 0) {
+        best = { id: Number(r.getAttribute('data-id')), y: b.top - top };
+      }
+    });
+    return best;
+  }
+  function rowTop(id) {
+    var r = row(id);
+    return r
+      ? r.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+      : null;
+  }
+  // Scrolls up by step px at a time (at most maxSteps times) and returns,
+  // per step, how far the row at the top edge moved beyond the scroll itself
+  // (0: the content moved exactly with the scroll; null: the row is gone).
+  async function scrollBack(step, maxSteps) {
+    var out = [];
+    for (var i = 0; i < maxSteps; i++) {
+      var a = topRow();
+      if (!a || scroller.scrollTop < step + 100) break;
+      scroller.scrollTop -= step;
+      await sleep(350);
+      var y = rowTop(a.id);
+      out.push(y === null ? null : Math.round(y - a.y - step));
+    }
+    return out;
+  }
+
   // A synthetic touch event on the scroller: virtual-core and the view only
   // look at the event type (and the view at touches.length, absent here).
   function touch(type) {
@@ -180,12 +261,17 @@ const HELPERS_JS = String.raw`
     loadCore: loadCore,
     setup: setup,
     addTurns: addTurns,
+    addMdTurns: addMdTurns,
+    addLineTurns: addLineTurns,
     gap: gap,
     frame: frame,
     sleep: sleep,
     settle: settle,
     row: row,
     touch: touch,
+    topRow: topRow,
+    scrollBack: scrollBack,
+    rafClock: rafClock,
     visibleRows: visibleRows,
     text: text,
     activeIntervals: function () {
@@ -263,12 +349,17 @@ declare const __vt: {
   loadCore(): Promise<string>;
   setup(virtual: boolean): void;
   addTurns(n: number, chars: number, seed: number): void;
+  addMdTurns(n: number, seed: number): void;
+  addLineTurns(n: number, lines: number): void;
   gap(): number;
   frame(): Promise<void>;
   sleep(ms: number): Promise<void>;
   settle(minMs?: number): Promise<boolean>;
   row(id: number): HTMLElement | null;
   touch(type: string): void;
+  topRow(): { id: number; y: number } | null;
+  scrollBack(step: number, maxSteps: number): Promise<Array<number | null>>;
+  rafClock: { on: boolean; ms: number };
   visibleRows(): number;
   text(n: number, seed: number): string;
   activeIntervals(): number;
@@ -977,6 +1068,67 @@ const VIEW_SCENARIOS: Scenario[] = [
       expect(problems.length === 0, problems.join('; '));
       return details.join('; ');
     },
+  },
+  {
+    // Rows above the viewport that were never measured enter with their
+    // estimated height, and virtual-core does not correct the scroll
+    // position for them while the reader scrolls up: a poor estimate shows
+    // as the text jumping. Typical answers (a list, a code block) are mostly
+    // newlines. Phone width, 300 px steps up from the end.
+    name: 'V10 scroll back through multi-line answers',
+    run: async (page) =>
+      onPhone(page, MOBILE_UA.android, async (p) => {
+        const steps = await p.evaluate(async () => {
+          __vt.setup(true);
+          __vt.addMdTurns(300, 0);
+          await __vt.settle(400);
+          return __vt.scrollBack(300, 25);
+        });
+        const lost = steps.filter((v) => v === null).length;
+        const abs = steps.filter((v) => v !== null).map((v) => Math.abs(v!));
+        const max = Math.max(0, ...abs);
+        const over = abs.filter((v) => v > 20).length;
+        expect(steps.length >= 20, `only ${steps.length} steps`);
+        expect(lost === 0, `${lost} step(s) lost the row at the top edge`);
+        expect(
+          max <= 20,
+          `text jumped up to ${max}px in one step (${over}/${abs.length} steps over 20px): [${steps.join(',')}]`,
+        );
+        // Every append makes virtual-core rebuild its layout, estimating
+        // each row it has not measured: the line count must come from a
+        // cache, not a fresh scan of every answer's text per frame.
+        const cost: number[] = [];
+        for (const n of [200, 2000]) {
+          cost.push(
+            await p.evaluate(async (n) => {
+              __vt.setup(true);
+              __vt.addLineTurns(n, 600);
+              await __vt.settle(300);
+              let best = Infinity;
+              for (let round = 0; round < 3; round++) {
+                __vt.rafClock.ms = 0;
+                __vt.rafClock.on = true;
+                for (let k = 0; k < 20; k++) {
+                  __vt.model.addUser('more ' + k);
+                  await __vt.frame();
+                }
+                __vt.rafClock.on = false;
+                best = Math.min(best, __vt.rafClock.ms / 20);
+              }
+              return best;
+            }, n),
+          );
+        }
+        const [small, big] = cost as [number, number];
+        expect(
+          big <= Math.max(4 * small, 2),
+          `per-append frame cost ${small.toFixed(2)} ms at 200 turns -> ${big.toFixed(2)} ms at 2000`,
+        );
+        return (
+          `${abs.length} steps, max jump ${max}px; per-append frame ` +
+          `${small.toFixed(2)} ms (200 turns) / ${big.toFixed(2)} ms (2000)`
+        );
+      }),
   },
 ];
 

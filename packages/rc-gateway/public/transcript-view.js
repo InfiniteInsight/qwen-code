@@ -70,8 +70,19 @@
   function textRef(text) {
     return { node: document.createTextNode(text), text: text };
   }
-  function lineCount(text, perLine) {
-    return Math.max(1, Math.ceil((text ? text.length : 0) / perLine));
+  // Wrapped lines of `text` at `perLine` characters a line. Bubbles keep
+  // newlines (white-space: pre-wrap), so each one starts a new line: a
+  // list or a code block is many short lines, not a few long ones.
+  function countLines(text, perLine) {
+    var n = 0;
+    var from = 0;
+    for (;;) {
+      var nl = text.indexOf('\n', from);
+      var len = (nl < 0 ? text.length : nl) - from;
+      n += Math.max(1, Math.ceil(len / perLine));
+      if (nl < 0) return n;
+      from = nl + 1;
+    }
   }
 
   function shapeOf(item) {
@@ -403,6 +414,20 @@
     var unmountVirtualizer = null;
     var savedOverflowAnchor = '';
 
+    // virtual-core estimates every row it has not measured each time it
+    // rebuilds its layout (on every append), so a text's line count is
+    // kept per item (or subagent) until the text or the width changes.
+    var lineCache = new WeakMap(); // item or sub -> { text, perLine, n }
+    function lineCount(owner, text, perLine) {
+      if (!text) return 1;
+      var c = lineCache.get(owner);
+      if (!c || c.text !== text || c.perLine !== perLine) {
+        c = { text: text, perLine: perLine, n: countLines(text, perLine) };
+        lineCache.set(owner, c);
+      }
+      return c.n;
+    }
+
     // Rough per-kind heights for rows never measured yet (wrapped text at
     // ~8 px per character of the bubble width, ~21 px per line).
     function estimate(item) {
@@ -413,15 +438,17 @@
       switch (item.kind) {
         case 'user':
         case 'asst':
-          return 38 + 21 * lineCount(item.text, perLine);
+          return 38 + 21 * lineCount(item, item.text, perLine);
         case 'thought':
           return item.durLabel != null && !item.expanded
             ? 37
-            : 38 + 21 * lineCount(item.text, perLine);
+            : 38 + 21 * lineCount(item, item.text, perLine);
         case 'tool':
           return item.sub
             ? 70 +
-                21 * (item.sub.tools.length + lineCount(item.sub.text, perLine))
+                21 *
+                  (item.sub.tools.length +
+                    lineCount(item.sub, item.sub.text, perLine))
             : 37;
         case 'system':
           return 20;
