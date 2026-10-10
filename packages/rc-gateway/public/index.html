@@ -1746,6 +1746,27 @@
     <script src="transcript-model.js"></script>
     <script src="transcript-view.js"></script>
     <script>
+      // transcript-model.js did not load (network, blocked): the script
+      // below would stop at its first use of TranscriptModel and take
+      // pairing, tabs and everything else with it. An inert stand-in (holds
+      // nothing, ignores every call) keeps the page running;
+      // attachTranscriptView() then says why the transcript is empty.
+      if (typeof TranscriptModel === 'undefined') {
+        window.TranscriptModel = {
+          missing: true,
+          clean: (t) =>
+            typeof t === 'string'
+              ? t.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+              : '',
+          createTranscriptModel: () =>
+            new Proxy(
+              { items: [], curAsst: null, forkItem: null, userTurns: () => [] },
+              { get: (model, key) => (key in model ? model[key] : () => {}) },
+            ),
+        };
+      }
+    </script>
+    <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
       const WATCHED_KEY = 'qwen-rc:watched-session';
@@ -2001,11 +2022,49 @@
       // The view needs the vendored virtual-core bundle, an ES module. Until
       // the import settles transcriptView is null: frames only update the
       // model, and the view renders everything buffered when it attaches. A
-      // failed import (404, blocked) gets the view's render-all fallback
-      // rather than a blank transcript.
+      // failed import (404, blocked), or a bundle the view cannot start
+      // with, gets the view's render-all fallback rather than a blank
+      // transcript; a transcript script that did not load gets a note.
       let transcriptView = null;
+      function transcriptFailed(msg) {
+        const note = document.createElement('div');
+        note.className = 'system err';
+        note.textContent = msg + ' Reload the page to try again.';
+        $('transcript').appendChild(note);
+        setStatus(msg);
+      }
       function attachTranscriptView(virtualCore) {
-        transcriptView = TranscriptView.createTranscriptView({
+        if (TranscriptModel.missing || typeof TranscriptView === 'undefined') {
+          transcriptFailed('The transcript viewer files failed to load.');
+          return;
+        }
+        try {
+          transcriptView = createTranscriptView(virtualCore);
+        } catch (err) {
+          console.error('transcript view failed to start:', err);
+          try {
+            if (virtualCore) transcriptView = createTranscriptView(null);
+          } catch (again) {
+            console.error('transcript view failed to start:', again);
+          }
+          const why = err && err.message ? err.message : String(err);
+          if (!transcriptView) {
+            transcriptFailed(
+              'The transcript viewer failed to start (' + why + ').',
+            );
+            return;
+          }
+          setStatus(
+            'The virtualized transcript failed to start (' +
+              why +
+              '); showing every message instead.',
+          );
+        }
+        // The view reports changes only: seed the pill from its state now.
+        $('jump-bottom').hidden = transcriptView.isNearBottom();
+      }
+      function createTranscriptView(virtualCore) {
+        return TranscriptView.createTranscriptView({
           model: transcriptModel,
           scroller: $('transcript'),
           virtualCore,
@@ -2020,8 +2079,6 @@
             item.mode = mode;
           },
         });
-        // The view reports changes only: seed the pill from its state now.
-        $('jump-bottom').hidden = transcriptView.isNearBottom();
       }
       import('./vendor/virtual-core.js')
         .catch(() => null)

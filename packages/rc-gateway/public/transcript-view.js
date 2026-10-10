@@ -498,9 +498,18 @@
           schedule();
         },
       };
-      virtualizer = new core.Virtualizer(vopts);
-      unmountVirtualizer = virtualizer._didMount();
-      virtualizer._willUpdate();
+      try {
+        virtualizer = new core.Virtualizer(vopts);
+        unmountVirtualizer = virtualizer._didMount();
+        virtualizer._willUpdate();
+      } catch (err) {
+        // Leave the scroller as it was (no observers, no sizer), so the
+        // caller can retry with virtualCore: null.
+        if (unmountVirtualizer) unmountVirtualizer();
+        host.remove();
+        scroller.style.overflowAnchor = savedOverflowAnchor;
+        throw err;
+      }
     } else {
       host = el('div', 'vlist');
       scroller.appendChild(host);

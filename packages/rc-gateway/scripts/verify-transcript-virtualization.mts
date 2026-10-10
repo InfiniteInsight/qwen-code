@@ -1480,6 +1480,62 @@ async function settlePage(page: Page, minMs = 200): Promise<void> {
   expect(ok, 'transcript did not settle within 5 s');
 }
 
+/**
+ * A transcript script failed to load: #transcript shows a visible "reload"
+ * note, and the page's other UI initialized (app shown after the auth check,
+ * the pair button wired, tabs switch, frames are handled without errors).
+ */
+async function checkTranscriptMissing(
+  page: Page,
+  viewer: Viewer,
+): Promise<string> {
+  const note = () =>
+    page.evaluate(() => {
+      const t = document.getElementById('transcript')!;
+      return {
+        text: t.textContent ?? '',
+        shown: t.getClientRects().length > 0,
+      };
+    });
+  try {
+    await page.waitForFunction(
+      () =>
+        /reload/i.test(
+          document.getElementById('transcript')!.textContent ?? '',
+        ),
+      null,
+      { timeout: 10_000 },
+    );
+  } catch {
+    throw new Error(
+      `no failure note in #transcript: ${JSON.stringify((await note()).text)}`,
+    );
+  }
+  await page.waitForFunction(
+    () => !document.getElementById('app-body')!.hidden,
+    null,
+    { timeout: 10_000 },
+  );
+  const ui = await page.evaluate(() => ({
+    pairWired:
+      typeof (document.getElementById('pair') as HTMLButtonElement).onclick ===
+      'function',
+  }));
+  expect(ui.pairWired, 'pair button not wired');
+  await page.click('.tab[data-tab="diag"]');
+  const diag = await page.evaluate(() =>
+    document.getElementById('pane-diag')!.classList.contains('active'),
+  );
+  expect(diag, 'the Diagnostics tab did not open');
+  await page.click('.tab[data-tab="chat"]');
+  await watch(page, viewer.sessionId);
+  await waitForFrame(page, 5 * 7, 30_000);
+  const n = await note();
+  expect(n.shown, '#transcript not shown on the Chat tab');
+  expect(/reload/i.test(n.text), 'failure note gone after the watch');
+  return `note ${JSON.stringify(n.text)}; tabs and frames work`;
+}
+
 interface Growth {
   turns: number;
   finished: boolean;
@@ -2149,6 +2205,97 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `hidden-time chunk not shown: ${JSON.stringify(s3.text)}`,
       );
       return `reader kept at ${Math.round(s0.top)} (item ${s0.first}); pinned view followed the hidden-time chunk`;
+    },
+  },
+  {
+    // The bundle loads but the view cannot start with it (here its
+    // Virtualizer constructor throws, as an internals mismatch would): the
+    // page falls back to rendering every item and says what went wrong.
+    name: 'P11 view fails to start',
+    waitView: false,
+    frames: () => replayFrames(100, 2),
+    before: async (page) => {
+      await page.route('**/ui/vendor/virtual-core.js', (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'text/javascript',
+          body: [
+            'export class Virtualizer {',
+            '  constructor() { throw new Error("virtualizer boom"); }',
+            '}',
+            'export const observeElementRect = () => {};',
+            'export const observeElementOffset = () => {};',
+            'export const elementScroll = () => {};',
+          ].join('\n'),
+        }),
+      );
+    },
+    run: async ({ page, viewer, consoleErrors }) => {
+      await waitView(page);
+      const s0 = await page.evaluate(() => ({
+        status: document.getElementById('status')!.textContent ?? '',
+        anchor: getComputedStyle(document.getElementById('transcript')!)
+          .overflowAnchor,
+      }));
+      expect(
+        s0.status.includes('virtualizer boom'),
+        `status line ${JSON.stringify(s0.status)}`,
+      );
+      expect(
+        consoleErrors.some((e) => e.includes('virtualizer boom')),
+        `error not logged: ${JSON.stringify(consoleErrors)}`,
+      );
+      expect(s0.anchor !== 'none', 'overflow-anchor left at none');
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 100 * 7, 30_000);
+      await settlePage(page);
+      const r = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        const rows = Array.from(
+          document.querySelectorAll('#transcript .vrow'),
+        ).map((el) => Number(el.getAttribute('data-id')));
+        return {
+          items: items.length,
+          ids: items.map((i) => i.id),
+          rows,
+          sizers: document.querySelectorAll('#transcript .vsizer').length,
+          gap: __pg.gap(),
+        };
+      });
+      expect(r.items === 301, `${r.items} items, expected 301`);
+      expect(r.sizers === 0, `${r.sizers} .vsizer left by the failed view`);
+      expect(
+        r.rows.length === r.items && r.rows.join() === r.ids.join(),
+        `${r.rows.length} rows for ${r.items} items (or out of order)`,
+      );
+      expect(r.gap <= 2, `fallback not pinned: gap=${r.gap}`);
+      return `fallback rendered all ${r.rows.length} items; status ${JSON.stringify(s0.status)}`;
+    },
+  },
+  {
+    // transcript-model.js did not load: the transcript says so, and the
+    // rest of the page (pairing, tabs, frame handling) still works.
+    name: 'P12 model script missing',
+    waitView: false,
+    frames: () => replayFrames(5, 2),
+    before: async (page) => {
+      await page.route('**/ui/transcript-model.js', (route) => route.abort());
+    },
+    run: async ({ page, viewer }) => checkTranscriptMissing(page, viewer),
+  },
+  {
+    // The same for transcript-view.js: the model still records the frames.
+    name: 'P13 view script missing',
+    waitView: false,
+    frames: () => replayFrames(5, 2),
+    before: async (page) => {
+      await page.route('**/ui/transcript-view.js', (route) => route.abort());
+    },
+    run: async ({ page, viewer }) => {
+      const detail = await checkTranscriptMissing(page, viewer);
+      const items = await page.evaluate(() => transcriptModel.items.length);
+      expect(items === 16, `model holds ${items} items, expected 16`);
+      return `${detail}; model holds ${items} items`;
     },
   },
   {
