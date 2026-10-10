@@ -1083,6 +1083,179 @@ const VIEW_SCENARIOS: Scenario[] = [
     },
   },
   {
+    // Touch events stay aimed at the element the finger came down on. When
+    // that element leaves the DOM mid-touch (the live thinking bubble is
+    // folded by the first answer chunk, a row is unmounted), its touchend
+    // never reaches the scroller. (A) a finger on the live thought when the
+    // answer starts, lifted on the detached node: the answer must still be
+    // followed. (B) a row touched, dragged out of the mounted range and
+    // lifted there, then the reader taps the jump pill: following must
+    // resume. (C) as B, but the reader stays in the middle and a row wholly
+    // above the viewport grows: the text they read must not move (iOS:
+    // virtual-core must not stay in its finger-down state).
+    name: 'V9b touched row removed mid-touch',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      for (const [os, ua] of Object.entries(MOBILE_UA)) {
+        await onPhone(page, ua, async (p) => {
+          const a = await p.evaluate(async () => {
+            __vt.setup(true);
+            const m = __vt.model;
+            __vt.addTurns(30, 330, 0);
+            m.addUser('think, then answer');
+            m.appendThought('thinking hard about it. ');
+            await __vt.settle(400);
+            __vt.view.scrollToEnd();
+            await __vt.settle(400);
+            const items = m.items;
+            const row = __vt.row(items[items.length - 1]!.id);
+            const th = row && row.querySelector('.bubble');
+            if (!th) return null;
+            th.dispatchEvent(new Event('touchstart', { bubbles: true }));
+            m.appendAssistant('answer: ' + __vt.text(200, 7));
+            await __vt.frame();
+            await __vt.frame();
+            await __vt.sleep(100);
+            const detached = !th.isConnected;
+            th.dispatchEvent(new Event('touchend', { bubbles: true }));
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const gaps: number[] = [];
+            for (let k = 0; k < 10; k++) {
+              m.appendAssistant(' ' + __vt.text(300, 50 + k));
+              await __vt.frame();
+              await __vt.frame();
+              gaps.push(Math.round(__vt.gap()));
+            }
+            await __vt.sleep(700);
+            await __vt.settle(200);
+            return {
+              detached,
+              gaps,
+              gap: Math.round(__vt.gap()),
+              near: __vt.view.isNearBottom(),
+            };
+          });
+          const b = await p.evaluate(async () => {
+            __vt.setup(true);
+            const m = __vt.model;
+            const s = __vt.scroller;
+            __vt.addTurns(60, 330, 0);
+            m.addUser('stream please');
+            m.appendAssistant('start ' + __vt.text(1000, 9));
+            await __vt.settle(400);
+            s.scrollTop -= 1200;
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const top = __vt.topRow();
+            const row = top && __vt.row(top.id);
+            const target = row && row.querySelector('.bubble');
+            if (!target) return null;
+            target.dispatchEvent(new Event('touchstart', { bubbles: true }));
+            s.scrollTop = 0;
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const detached = !target.isConnected;
+            target.dispatchEvent(new Event('touchend', { bubbles: true }));
+            await __vt.sleep(300);
+            __vt.view.scrollToEnd(); // the jump pill
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const gapPinned = Math.round(__vt.gap());
+            const gaps: number[] = [];
+            for (let k = 0; k < 10; k++) {
+              m.appendAssistant(' ' + __vt.text(300, 70 + k));
+              await __vt.frame();
+              await __vt.frame();
+              gaps.push(Math.round(__vt.gap()));
+            }
+            await __vt.sleep(700);
+            await __vt.settle(200);
+            return {
+              detached,
+              gapPinned,
+              gaps,
+              gap: Math.round(__vt.gap()),
+              near: __vt.view.isNearBottom(),
+            };
+          });
+          const c = await p.evaluate(async () => {
+            __vt.setup(true);
+            const m = __vt.model;
+            const s = __vt.scroller;
+            __vt.addTurns(60, 330, 0);
+            await __vt.settle(400);
+            s.scrollTop = Math.floor(s.scrollHeight / 2);
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const top = __vt.topRow();
+            const row = top && __vt.row(top.id);
+            const target = row && row.querySelector('.bubble');
+            if (!target) return null;
+            target.dispatchEvent(new Event('touchstart', { bubbles: true }));
+            s.scrollTop -= 3000;
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const detached = !target.isConnected;
+            target.dispatchEvent(new Event('touchend', { bubbles: true }));
+            await __vt.sleep(700);
+            await __vt.settle(300);
+            // A mounted row wholly above the viewport grows by several lines.
+            const ref = __vt.topRow();
+            if (!ref) return null;
+            const at = m.items.findIndex((i) => i.id === ref.id);
+            const above = m.items[at - 2];
+            if (!above || !__vt.row(above.id)) return null;
+            above.text += ' ' + __vt.text(600, 3);
+            m.touch(above);
+            await __vt.frame();
+            await __vt.frame();
+            await __vt.sleep(400);
+            await __vt.settle(200);
+            const r = __vt.row(ref.id);
+            const y = r
+              ? r.getBoundingClientRect().top - s.getBoundingClientRect().top
+              : null;
+            return {
+              detached,
+              moved: y === null ? null : Math.round(y - ref.y),
+            };
+          });
+          if (!a || !b || !c) {
+            problems.push(`${os}: setup failed (${!!a}/${!!b}/${!!c})`);
+            return;
+          }
+          if (!a.detached || !b.detached || !c.detached) {
+            problems.push(`${os}: touched node not detached`);
+          }
+          const aMax = Math.max(...a.gaps);
+          if (aMax > 2 || a.gap > 2 || !a.near) {
+            problems.push(
+              `${os} A (thought folded): not following, gaps [${a.gaps.join(',')}] end ${a.gap}`,
+            );
+          }
+          const bMax = Math.max(...b.gaps);
+          if (b.gapPinned > 2 || bMax > 2 || b.gap > 2 || !b.near) {
+            problems.push(
+              `${os} B (row unmounted, pill): not following, pinned ${b.gapPinned}, gaps [${b.gaps.join(',')}] end ${b.gap}`,
+            );
+          }
+          if (c.moved === null || Math.abs(c.moved) > 2) {
+            problems.push(
+              `${os} C (row above grows): reader's text moved ${c.moved}px`,
+            );
+          }
+          details.push(
+            `${os} A max gap ${aMax}, B max gap ${bMax}, C moved ${c.moved}`,
+          );
+        });
+      }
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
+  },
+  {
     // Rows above the viewport that were never measured enter with their
     // estimated height, and virtual-core does not correct the scroll
     // position for them while the reader scrolls up: a poor estimate shows

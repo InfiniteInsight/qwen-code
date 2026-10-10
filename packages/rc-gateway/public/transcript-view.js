@@ -702,18 +702,45 @@
     var touching = false;
     var touchScrolled = false; // the transcript scrolled during this touch
     var tailTimer = null;
+    // Touch events stay aimed at the node the finger came down on. If that
+    // node leaves the DOM mid-touch (a live bubble folded, a row unmounted),
+    // its touchend no longer bubbles to the scroller, so it is listened to
+    // on the node itself as well.
+    var touchNode = null;
     function gestureActive() {
       return touching || tailTimer !== null;
     }
-    function onTouchStart() {
+    function untrackTouchNode() {
+      if (!touchNode) return;
+      touchNode.removeEventListener('touchend', onTouchEnd);
+      touchNode.removeEventListener('touchcancel', onTouchEnd);
+      touchNode = null;
+    }
+    function onTouchStart(e) {
       touching = true;
       touchScrolled = false;
       if (tailTimer !== null) clearTimeout(tailTimer);
       tailTimer = null;
+      untrackTouchNode();
+      var node = e.target;
+      if (node && node !== scroller && node.addEventListener) {
+        touchNode = node;
+        node.addEventListener('touchend', onTouchEnd, { passive: true });
+        node.addEventListener('touchcancel', onTouchEnd, { passive: true });
+      }
     }
     function onTouchEnd(e) {
       if (!touching || (e.touches && e.touches.length)) return;
       touching = false;
+      untrackTouchNode();
+      // virtual-core follows the finger with its own touchstart/touchend
+      // listeners on the scroller and ignores touchcancel. An end it does
+      // not get as a touchend (a cancel, or one from a node no longer in
+      // the scroller) would leave it holding back its scroll corrections
+      // on iOS until some later touch ends: hand it one.
+      if (e.type !== 'touchend' || !scroller.contains(e.target)) {
+        scroller.dispatchEvent(new Event('touchend'));
+      }
       if (touchScrolled) {
         tailTimer = setTimeout(function () {
           tailTimer = null;
@@ -968,6 +995,7 @@
         scroller.removeEventListener('touchstart', onTouchStart);
         scroller.removeEventListener('touchend', onTouchEnd);
         scroller.removeEventListener('touchcancel', onTouchEnd);
+        untrackTouchNode();
         if (unmountVirtualizer) unmountVirtualizer();
         host.remove();
         if (virtualizer) scroller.style.overflowAnchor = savedOverflowAnchor;
