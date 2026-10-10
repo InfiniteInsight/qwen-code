@@ -218,9 +218,6 @@ const HELPERS_JS = String.raw`
       ? r.getBoundingClientRect().top - scroller.getBoundingClientRect().top
       : null;
   }
-  // Scrolls up by step px at a time (at most maxSteps times) and returns,
-  // per step, how far the row at the top edge moved beyond the scroll itself
-  // (0: the content moved exactly with the scroll; null: the row is gone).
   // Scrolls from the top to the end a viewport at a time, so every row is
   // mounted (and measured) once at the current width.
   async function sweepDown() {
@@ -231,6 +228,9 @@ const HELPERS_JS = String.raw`
       await settle(0);
     }
   }
+  // Scrolls up by step px at a time (at most maxSteps times) and returns,
+  // per step, how far the row at the top edge moved beyond the scroll itself
+  // (0: the content moved exactly with the scroll; null: the row is gone).
   async function scrollBack(step, maxSteps) {
     var out = [];
     for (var i = 0; i < maxSteps; i++) {
@@ -1017,7 +1017,7 @@ const VIEW_SCENARIOS: Scenario[] = [
                 const s = __vt.scroller;
                 const gapBefore = __vt.gap();
                 // Pinned for the touch part even if the first render was
-                // not (reported separately above).
+                // not (gapBefore reports that one).
                 __vt.view.scrollToEnd();
                 const pinned = await __vt.settle(400);
                 const gapPinned = __vt.gap();
