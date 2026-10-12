@@ -10,6 +10,7 @@ import type {
   DaemonSessionSummary,
 } from '@qwen-code/sdk';
 import type { PolicyEnforcer } from '../policy/enforcer.js';
+import { isGoneSessionError } from '../daemonPool.js';
 
 /**
  * The subset of `PushNotifier` the pump drives. Kept structural so tests
@@ -99,6 +100,14 @@ export class SessionEventPump {
 
   private readonly loops = new Map<string, Loop>();
   /**
+   * Sessions whose subscription the daemon REFUSED (a gone id). Kept so the
+   * next reconcile does not spawn a replacement loop: the daemon still LISTS
+   * these sessions, so without this the set is re-spawned on every poll tick and
+   * the refusal repeats forever (#59). Cleared when the id leaves the list, so
+   * a session that genuinely comes back is tried again.
+   */
+  private readonly refused = new Set<string>();
+  /**
    * Last-observed active-prompt state per session, for true→false edge detection
    * (idle suggestions). Tracked only when `onSessionIdle` is wired; cleared on
    * session-drop and `stop()` so it never outlives the loops.
@@ -167,7 +176,9 @@ export class SessionEventPump {
     if (this.stopped) return;
     const ids = new Set(list.map((s) => s.sessionId));
     for (const s of list) {
-      if (!this.loops.has(s.sessionId)) this.spawnLoop(s);
+      if (!this.loops.has(s.sessionId) && !this.refused.has(s.sessionId)) {
+        this.spawnLoop(s);
+      }
       this.detectIdleEdge(s);
     }
     for (const [id, loop] of this.loops) {
@@ -177,6 +188,11 @@ export class SessionEventPump {
         this.loops.delete(id);
         this.activePrompt.delete(id);
       }
+    }
+    // Forget a refused id once it leaves the list, so a session that comes back
+    // gets a fresh attempt rather than a permanent silence.
+    for (const id of this.refused) {
+      if (!ids.has(id)) this.refused.delete(id);
     }
   }
 
@@ -255,13 +271,31 @@ export class SessionEventPump {
           );
           this.onDispatch?.(s.sessionId, ev);
         }
-      } catch {
+      } catch (err) {
         if (loop.ctrl.signal.aborted) break;
+        if (isGoneSessionError(err)) {
+          // The daemon refuses to stream this id at all, so a reconnect buys one
+          // more refused request per backoff, forever. Stop tracking it.
+          this.dropAsGone(s.sessionId, loop);
+          return;
+        }
         // Otherwise fall through to backoff + reconnect.
       }
       if (!loop.active || this.stopped) break;
       await this.sleep(this.reconnectMs);
     }
+  }
+
+  /**
+   * Stop tracking a session the daemon will not stream. The id is recorded so
+   * {@link reconcile} does not immediately re-spawn the loop for a session the
+   * daemon still lists.
+   */
+  private dropAsGone(sessionId: string, loop: Loop): void {
+    this.refused.add(sessionId);
+    loop.active = false;
+    this.loops.delete(sessionId);
+    this.activePrompt.delete(sessionId);
   }
 
   /** Aborts every loop and clears the poll interval. Leaves no open handles. */
@@ -277,5 +311,6 @@ export class SessionEventPump {
     }
     this.loops.clear();
     this.activePrompt.clear();
+    this.refused.clear();
   }
 }

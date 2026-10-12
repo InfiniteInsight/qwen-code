@@ -295,6 +295,23 @@ export class UnknownSessionError extends Error {
   }
 }
 
+/**
+ * True when a subscription failure means "this daemon will not stream this
+ * session" rather than "try again shortly". Two shapes reach a caller: the
+ * pool's own `UnknownSessionError` (it holds no record of the id) and the
+ * daemon's HTTP 404, which the SDK surfaces with `status`.
+ *
+ * Anything that retries blindly on this generates one refused request per
+ * backoff, forever, because the daemon keeps LISTING the session it refuses to
+ * stream. One owner for the test so the retry sites cannot drift apart.
+ */
+export function isGoneSessionError(err: unknown): boolean {
+  return (
+    err instanceof UnknownSessionError ||
+    (err as { status?: unknown } | undefined)?.status === 404
+  );
+}
+
 /** Thrown when `getOrSpawn` needs to spawn a daemon for a new workspace but
  * the pool is at `maxDaemons` and every entry is busy (no idle victim to
  * evict). Routes map this to a `503 workspace_pool_full`. */

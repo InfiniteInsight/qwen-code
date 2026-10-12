@@ -6,7 +6,7 @@
 
 import type { RequestHandler, Response } from 'express';
 import {
-  UnknownSessionError,
+  isGoneSessionError,
   type RecoveryState,
   type SessionDaemon,
 } from '../daemonPool.js';
@@ -118,15 +118,11 @@ function firstFrameOrIdle<T>(
  * the web UI treats only 401/403/404 as terminal, so a masked 404 leaves it
  * re-subscribing to a dead id indefinitely (#59 — 9.4k 404s/hour on the live
  * gateway after a restart, which kills every session id). Same mapping as the
- * sibling GET /session/:id/status. `UnknownSessionError` (the pool has no
- * record of the id) carries neither a status nor a "not found" substring, so
- * the class is tested explicitly.
+ * sibling GET /session/:id/status; the gone-vs-transient test itself lives in
+ * `isGoneSessionError` so the push pump cannot drift from it.
  */
 function respondSubscribeFailure(res: Response, err: unknown): void {
-  const notFound =
-    err instanceof UnknownSessionError ||
-    (err as { status?: unknown } | undefined)?.status === 404;
-  if (notFound) {
+  if (isGoneSessionError(err)) {
     res
       .status(404)
       .json({ error: 'Session not found', code: 'session_not_found' });

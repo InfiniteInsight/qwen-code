@@ -358,4 +358,150 @@ describe('SessionEventPump', () => {
       await pump.stop(); // must not throw
     });
   });
+
+  describe('a session the daemon refuses to stream (#59)', () => {
+    /**
+     * A `DaemonClient` stand-in that counts subscription attempts per session.
+     * Unlike the stub daemon, this one keeps LISTING a session it refuses to
+     * stream — the exact shape of the live incident: `GET /sessions` returns the
+     * dead id, `GET /events` answers 404, so every reconcile re-spawns a loop
+     * that only earns another refused request.
+     */
+    function countingDaemon(opts: {
+      sessions: () => Array<{ sessionId: string }>;
+      refuse?: (sessionId: string, attempt: number) => Error | undefined;
+      frames?: DaemonEvent[];
+    }): { client: DaemonClient; attempts: (id: string) => number } {
+      const counts = new Map<string, number>();
+      const client = {
+        capabilities: async () => ({ workspaceCwd: '/w' }),
+        listWorkspaceSessions: async () =>
+          opts.sessions().map((s) => ({ ...s, workspaceCwd: '/w' })),
+        subscribeEvents: (
+          sessionId: string,
+          sub?: { signal?: AbortSignal },
+        ) => {
+          const attempt = (counts.get(sessionId) ?? 0) + 1;
+          counts.set(sessionId, attempt);
+          const err = opts.refuse?.(sessionId, attempt);
+          if (err) throw err;
+          return heldStream(
+            opts.frames ?? [{ type: 'session_update' }],
+            sub?.signal,
+          );
+        },
+      } as unknown as DaemonClient;
+      return {
+        client,
+        attempts: (id) => counts.get(id) ?? 0,
+      };
+    }
+
+    /** The daemon's own 404 for an id it has no record of (see daemonPool). */
+    const goneError = (id: string): Error =>
+      Object.assign(new Error(`Unknown session: ${id}`), { status: 404 });
+
+    /**
+     * Emits `frames`, then stays subscribed until the subscription is aborted —
+     * what a real SSE connection does. Returning after the last frame instead
+     * would send the loop straight into a backoff-free reconnect (these tests
+     * inject `reconnectMs: 0` and a no-op sleep), spinning without real I/O.
+     */
+    async function* heldStream(
+      frames: DaemonEvent[],
+      signal?: AbortSignal,
+    ): AsyncIterable<DaemonEvent> {
+      for (const f of frames) yield f;
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) resolve();
+        else signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    }
+
+    it('refuses once and stops re-subscribing while the id stays listed', async () => {
+      const dispatched: string[] = [];
+      const { client, attempts } = countingDaemon({
+        sessions: () => [{ sessionId: 's1' }, { sessionId: 's2' }],
+        // s1 is a dead id the daemon still lists; s2 is healthy.
+        refuse: (id) => (id === 's1' ? goneError(id) : undefined),
+      });
+      pump = new SessionEventPump(client, fakeNotifier([]), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        onDispatch: (id) => dispatched.push(id),
+      });
+      await pump.start();
+      // Many poll ticks: without the refused set, s1 gets one attempt each.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(attempts('s1')).toBe(1);
+      // The healthy session is unaffected — its loop still streams.
+      expect(attempts('s2')).toBeGreaterThanOrEqual(1);
+      expect(dispatched).toContain('s2');
+    });
+
+    it('drops a refused subscription without scheduling a reconnect', async () => {
+      // The live incident was ~1 refused request per second per dead session:
+      // the loop's own backoff reconnect. A gone id must exit the loop instead
+      // of entering it, so no backoff sleep is ever scheduled for it.
+      const sleeps: number[] = [];
+      const { client, attempts } = countingDaemon({
+        sessions: () => [{ sessionId: 's1' }],
+        refuse: () => goneError('s1'),
+      });
+      pump = new SessionEventPump(client, undefined, {
+        pollMs: 5,
+        reconnectMs: 1,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          await new Promise((r) => setTimeout(r, ms));
+        },
+      });
+      await pump.start();
+      await new Promise((r) => setTimeout(r, 60));
+      expect(attempts('s1')).toBe(1);
+      expect(sleeps).toEqual([]);
+    });
+
+    it('tries a refused session again after it leaves and re-enters the list', async () => {
+      let listed = true;
+      const { client, attempts } = countingDaemon({
+        sessions: () => (listed ? [{ sessionId: 's1' }] : []),
+        refuse: (id) => goneError(id),
+      });
+      pump = new SessionEventPump(client, undefined, {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+      });
+      await pump.start();
+      await new Promise((r) => setTimeout(r, 80));
+      expect(attempts('s1')).toBe(1);
+      // The id leaves the list (daemon forgot it), then comes back (a real
+      // new session reusing the id): the refusal must not be permanent.
+      listed = false;
+      await new Promise((r) => setTimeout(r, 60));
+      expect(attempts('s1')).toBe(1); // forgotten, not retried while unlisted
+      listed = true;
+      await new Promise((r) => setTimeout(r, 60));
+      expect(attempts('s1')).toBe(2);
+    });
+
+    it('reconnects after a non-gone subscription error', async () => {
+      const { client, attempts } = countingDaemon({
+        sessions: () => [{ sessionId: 's1' }],
+        // A dropped connection, not a gone session: self-heal must still work.
+        refuse: (_id, attempt) =>
+          attempt < 3 ? new Error('socket hang up') : undefined,
+      });
+      pump = new SessionEventPump(client, undefined, {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+      });
+      await pump.start();
+      await waitFor(() => attempts('s1') >= 3);
+      expect(attempts('s1')).toBeGreaterThanOrEqual(3);
+    });
+  });
 });
