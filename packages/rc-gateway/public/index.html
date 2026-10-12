@@ -5111,7 +5111,12 @@
         } catch {
           return; // transport blip — the stream's own reconnect handles it
         }
-        if (res.status !== 200) return; // 404/502 — nothing to draw
+        if (res.status === 404) {
+          // Gone, not busy: nothing to redraw now or later (#59).
+          forgetGoneSession('session ended on the host — start or resume one');
+          return;
+        }
+        if (res.status !== 200) return; // 502 — nothing to draw, keep polling
         const body = await res.json().catch(() => null);
         if (!body || !Array.isArray(body.pendingInteractions)) return;
         // Older daemons omit pendingInteractions entirely — the absence
@@ -5287,6 +5292,24 @@
         watchedSessionCwd = null;
       }
 
+      // #59: a 404 means the daemon no longer knows this session, so the
+      // stream can never resume and the status poll has nothing left to
+      // redraw. Drop the watch the way Unwatch does, including
+      // watchedSessionId itself — the pending-cards poll is gated only on
+      // that, so leaving it set keeps the poll running against a dead id.
+      // A 502 (daemon blip) is the opposite case and keeps polling.
+      function forgetGoneSession(message) {
+        clearWatchRetry();
+        watchRetryAttempt = 0;
+        $('reconnect').style.display = 'none';
+        clearPersistedWatch();
+        showSessionTitle(null);
+        watchedSessionTitle = null;
+        watchedSessionId = null;
+        if (controller) controller.abort();
+        setStatus(message);
+      }
+
       $('stop').onclick = () => {
         // Unwatch is a deliberate stop: cancel any pending self-heal
         // retry, so the watch is not resurrected after the user left it.
@@ -5296,6 +5319,9 @@
         clearPersistedWatch();
         showSessionTitle(null);
         watchedSessionTitle = null;
+        // The pending-cards poll is gated only on watchedSessionId, so an
+        // Unwatch that left it set kept polling the daemon every 5s (#59).
+        watchedSessionId = null;
         if (controller) controller.abort();
       };
 

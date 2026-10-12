@@ -10,7 +10,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
-import type { RecoveryState } from '../daemonPool.js';
+import { UnknownSessionError, type RecoveryState } from '../daemonPool.js';
 import { createSessionEventsRoute } from './sessionEvents.js';
 import { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
@@ -250,6 +250,45 @@ describe('session-events proxy', () => {
     const url = await mountGateway(daemon);
     const res = await fetch(`${url}/session/${SESS}/events`);
     expect(res.status).toBe(502);
+  });
+
+  it('maps a daemon 404 to session_not_found, not the retryable 502', async () => {
+    // #59: a gone session surfaced as 502, which the watcher treats as
+    // recoverable — so clients re-subscribed to a dead id indefinitely
+    // (9.4k 404s/hour on the live gateway after a restart).
+    stub = await startStubDaemon({ eventsStatus: 404 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon);
+    const res = await fetch(`${url}/session/${SESS}/events`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: 'session_not_found' });
+  });
+
+  it('maps UnknownSessionError (pool has no record of the id) to 404 too', async () => {
+    // The pool rejects before any daemon call, and its error text is
+    // "Unknown session: <id>" — no 404 status and no "not found" substring,
+    // so only the class check catches it.
+    const gone = {
+      subscribeEvents: () => ({
+        next: () => Promise.reject(new UnknownSessionError(SESS)),
+      }),
+    };
+    const app = express();
+    app.get(
+      '/session/:id/events',
+      createSessionEventsRoute(
+        gone as unknown as DaemonClient,
+        new ConnectionRegistry(),
+      ),
+    );
+    const s: Server = await new Promise((resolve) => {
+      const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
+    });
+    gateway = s;
+    const port = (s.address() as AddressInfo).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/${SESS}/events`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: 'session_not_found' });
   });
 
   it('sends headers + client_joined promptly for a reachable-but-idle session', async () => {
