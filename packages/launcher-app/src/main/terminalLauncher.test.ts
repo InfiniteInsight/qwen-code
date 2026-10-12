@@ -160,6 +160,19 @@ describe('drainTerminalRequests', () => {
     const out = await drainTerminalRequests(9, new Set(), deps);
     expect(out.cursor).toBe(9);
     expect(out.opened).toEqual([]);
+    // Reported as its own state: an unreadable queue must not look like an
+    // empty one, since the tray line is the only output a packaged app has.
+    expect(out.fetchFailed).toBe(true);
+  });
+
+  it('reports an empty queue as readable', async () => {
+    const deps = {
+      runWsl: async () => ({ code: 0, stdout: page([], 9) }),
+      execWt: async () => {},
+    };
+    expect((await drainTerminalRequests(9, new Set(), deps)).fetchFailed).toBe(
+      false,
+    );
   });
 
   it('never advances past what the log reports', async () => {
