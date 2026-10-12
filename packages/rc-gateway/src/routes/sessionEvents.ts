@@ -5,7 +5,11 @@
  */
 
 import type { RequestHandler, Response } from 'express';
-import type { RecoveryState, SessionDaemon } from '../daemonPool.js';
+import {
+  UnknownSessionError,
+  type RecoveryState,
+  type SessionDaemon,
+} from '../daemonPool.js';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
@@ -105,6 +109,32 @@ function firstFrameOrIdle<T>(
     if (e === idle) return { pending: next };
     throw e;
   });
+}
+
+/**
+ * Map a failed upstream subscribe onto a response before any headers went out.
+ *
+ * A session the daemon no longer knows must be a 404, not the generic 502:
+ * the web UI treats only 401/403/404 as terminal, so a masked 404 leaves it
+ * re-subscribing to a dead id indefinitely (#59 — 9.4k 404s/hour on the live
+ * gateway after a restart, which kills every session id). Same mapping as the
+ * sibling GET /session/:id/status. `UnknownSessionError` (the pool has no
+ * record of the id) carries neither a status nor a "not found" substring, so
+ * the class is tested explicitly.
+ */
+function respondSubscribeFailure(res: Response, err: unknown): void {
+  const notFound =
+    err instanceof UnknownSessionError ||
+    (err as { status?: unknown } | undefined)?.status === 404;
+  if (notFound) {
+    res
+      .status(404)
+      .json({ error: 'Session not found', code: 'session_not_found' });
+    return;
+  }
+  res
+    .status(502)
+    .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
 }
 
 export function createSessionEventsRoute(
@@ -304,15 +334,12 @@ export function createSessionEventsRoute(
           // Daemon stream ended gracefully: emit client_left before closing.
           writePresenceLeft(res, actorTokenId, 'disconnect');
           res.end();
-        } catch {
+        } catch (err) {
           if (abort.signal.aborted) {
             writePresenceLeft(res, actorTokenId, 'disconnect');
             res.end();
           } else if (!res.headersSent) {
-            res.status(502).json({
-              error: 'Daemon unavailable',
-              code: 'daemon_unavailable',
-            });
+            respondSubscribeFailure(res, err);
           } else {
             res.end();
           }
@@ -406,17 +433,14 @@ export function createSessionEventsRoute(
       // Daemon stream ended gracefully: emit client_left before closing.
       writePresenceLeft(res, actorTokenId, 'disconnect');
       res.end();
-    } catch {
+    } catch (err) {
       if (abort.signal.aborted) {
         // Client disconnected (or token evicted): try to emit client_left
         // before the socket disappears. Guard: socket may already be gone.
         writePresenceLeft(res, actorTokenId, 'disconnect');
         res.end();
       } else if (!res.headersSent) {
-        res.status(502).json({
-          error: 'Daemon unavailable',
-          code: 'daemon_unavailable',
-        });
+        respondSubscribeFailure(res, err);
       } else {
         res.end();
       }
