@@ -14,8 +14,12 @@ directories:
 
 files:
   - 'dist/**'
+  - 'assets/**'
   - 'package.json'
 
 win:
   target:
     - 'dir'
+  # Tray icon (issue #49 follow-up) — the app must be visible without a window,
+  # and this is also the exe icon. Native .ico, so no conversion step.
+  icon: 'assets/icon.ico'

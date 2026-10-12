@@ -46,6 +46,12 @@ export interface DrainResult {
   failed: Array<{ id: string; error: string }>;
   /** Requests skipped because a tab for that session is already open. */
   skipped: string[];
+  /**
+   * The queue could not be read at all (no `qwen-rc`, gateway down). Distinct
+   * from an empty queue: the caller cannot tell "nothing to do" from "cannot
+   * see anything" without this, and a packaged app has no console to say so.
+   */
+  fetchFailed: boolean;
 }
 
 /** How to reach the WSL side and Windows Terminal. Injectable for tests. */
@@ -145,10 +151,12 @@ export async function drainTerminalRequests(
     opened: [],
     failed: [],
     skipped: [],
+    fetchFailed: false,
   };
   if (run.code !== 0 && page.requests.length === 0) {
     // Nothing readable came back (gateway down, `qwen-rc` not on PATH). Leave
     // the cursor put so the next tick retries the same window.
+    result.fetchFailed = true;
     return result;
   }
   // The page is a contiguous slice starting at `cursor`, so the cursor is just
