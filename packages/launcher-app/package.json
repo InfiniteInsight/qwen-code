@@ -10,15 +10,18 @@
     "start": "npm run build && electron .",
     "test": "vitest run",
     "test:ci": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "package:win": "electron-builder --win --x64",
+    "metadata:win": "node scripts/apply-exe-metadata.mjs"
   },
   "dependencies": {
     "qrcode": "^1.5.3"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.5",
     "electron": "^32.0.0",
     "electron-builder": "^24.13.3",
     "esbuild": "^0.23.0",
-    "@types/qrcode": "^1.5.5"
+    "resedit": "^3.1.0"
   }
 }
