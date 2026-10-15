@@ -9,29 +9,20 @@
  * growth (issue InfiniteInsight/Qwen-Code-Remote#57). Boots the real gateway
  * against the stub daemon, replays a synthetic N-turn session into the shipped
  * public/index.html in headless Chromium, and reports JS heap, DOM node count,
- * the size of the hidden raw-JSON log, and per-chunk streaming cost. It also
- * attributes heap to the transcript vs. the raw log by clearing each in turn.
+ * the size of the hidden raw-JSON log, and per-chunk streaming cost (both the
+ * synchronous frame handling, `perChunkMs`, and the main-thread time per
+ * chunk with one chunk per animation frame, `perChunkFrameMs`, which includes
+ * deferred rendering). It also attributes heap to the transcript vs. the raw
+ * log by clearing each in turn.
  *
  *   npx tsx scripts/measure-viewer-growth.mts
  *   TURNS=3000 CHUNKS=30 npx tsx scripts/measure-viewer-growth.mts
  */
-import { mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { AddressInfo } from 'node:net';
-import { chromium } from 'playwright';
-import { DaemonClient } from '@qwen-code/sdk';
-import { startStubDaemon } from '../src/testing/stubDaemon.js';
-import { TokenStore } from '../src/tokenStore.js';
-import { PairingService } from '../src/pairing.js';
-import { createGatewayApp } from '../src/server.js';
+import { bootViewer, type Frame } from './lib/viewerHarness.mjs';
 
 const TURNS = Number(process.env['TURNS'] ?? 2000);
 const CHUNKS = Number(process.env['CHUNKS'] ?? 20);
-const SESSION = '11111111-2222-3333-4444-555555555555';
-
-type Frame = { id: number; type: string; data: unknown };
 
 function buildFrames(): Frame[] {
   const frames: Frame[] = [];
@@ -68,29 +59,9 @@ function buildFrames(): Frame[] {
 
 async function main(): Promise<void> {
   const frames = buildFrames();
-  const stub = await startStubDaemon({ frames, holdOpenMs: 600_000 });
-  const dir = mkdtempSync(join(tmpdir(), 'rc-measure-'));
-  const store = await TokenStore.open(join(dir, 'tokens.json'));
-  const { token } = await store.issue(['owner'], 'measure');
-  const { app } = createGatewayApp({
-    daemon: new DaemonClient({ baseUrl: stub.baseUrl }),
-    store,
-    pairing: new PairingService(),
-    auditPath: join(dir, 'audit.log'),
-  });
-  const server = await new Promise<import('node:http').Server>((resolve) => {
-    const s = app.listen(0, '127.0.0.1', () => resolve(s));
-  });
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-
-  const browser = await chromium.launch({
-    args: ['--enable-precise-memory-info'],
-    executablePath: process.env['CHROMIUM_PATH'] || undefined,
-  });
-  const page = await browser.newPage();
-  await page.addInitScript((t) => {
-    localStorage.setItem('qwen-rc-token', t);
-  }, token);
+  const viewer = await bootViewer({ frames, holdOpenMs: 600_000 });
+  const { page, url } = viewer;
+  const browser = page.context().browser()!;
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Performance.enable');
   const heapMb = async (): Promise<number> => {
@@ -121,7 +92,7 @@ async function main(): Promise<void> {
   page.on('pageerror', (e) => console.error('pageerror', e.message));
   await page.evaluate((id) => {
     void startWatch(id);
-  }, SESSION);
+  }, viewer.sessionId);
   const samples: Array<{ s: number; frames: number }> = [];
   const deadline = Date.now() + Number(process.env['TIMEOUT_S'] ?? 240) * 1000;
   for (;;) {
@@ -140,21 +111,67 @@ async function main(): Promise<void> {
     logChars: document.getElementById('log')?.textContent?.length ?? 0,
   }));
 
-  // Per-chunk streaming cost with the grown page (one assistant chunk).
-  const perChunkMs = await page.evaluate(() => {
-    const N = 200;
-    const t = performance.now();
-    for (let i = 0; i < N; i++)
-      renderFrame({
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { text: 'x' },
+  // Per-chunk streaming cost with the grown page (one assistant chunk). Both
+  // numbers are the best of several rounds: GC pauses, timers and scheduler
+  // noise only ever add time, and at these sizes they would dominate one
+  // sample.
+  //
+  // First with one chunk per animation frame, as main-thread time (CDP
+  // TaskDuration): this includes the render work a view defers to the frame.
+  // It runs first so the streamed bubble is a realistic size.
+  const taskMs = async (): Promise<number> => {
+    const { metrics } = await cdp.send('Performance.getMetrics');
+    return (metrics.find((x) => x.name === 'TaskDuration')?.value ?? 0) * 1000;
+  };
+  const FRAME_ROUNDS = 3;
+  const FRAME_CHUNKS = 60;
+  let perChunkFrameMs = Infinity;
+  for (let round = 0; round < FRAME_ROUNDS; round++) {
+    const before = await taskMs();
+    await page.evaluate(async (n) => {
+      for (let i = 0; i < n; i++) {
+        renderFrame({
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'x' },
+            },
           },
-        },
-      });
-    return (performance.now() - t) / N;
+        });
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }, FRAME_CHUNKS);
+    perChunkFrameMs = Math.min(
+      perChunkFrameMs,
+      ((await taskMs()) - before) / FRAME_CHUNKS,
+    );
+  }
+
+  // Then the synchronous frame handling alone, in batches of 200 until a
+  // round's total is well above performance.now()'s resolution (~0.1 ms): a
+  // virtualized page handles 200 chunks in a small fraction of that.
+  const perChunkMs = await page.evaluate(() => {
+    let best = Infinity;
+    for (let round = 0; round < 5; round++) {
+      let n = 0;
+      const t = performance.now();
+      do {
+        for (let i = 0; i < 200; i++)
+          renderFrame({
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { text: 'x' },
+              },
+            },
+          });
+        n += 200;
+      } while (performance.now() - t < 50 && n < 50000);
+      best = Math.min(best, (performance.now() - t) / n);
+    }
+    return best;
   });
 
   const heapAll = await heapMb();
@@ -174,7 +191,8 @@ async function main(): Promise<void> {
             i === samples.length - 1,
         ),
         ...stats,
-        perChunkMs: Number(perChunkMs.toFixed(3)),
+        perChunkMs: Number(perChunkMs.toFixed(6)),
+        perChunkFrameMs: Number(perChunkFrameMs.toFixed(4)),
         jsHeapMb: Number(heapAll.toFixed(1)),
         rendererRssMb: Number(rssMb.toFixed(0)),
       },
@@ -183,9 +201,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  await browser.close();
-  server.close();
-  await stub.close();
+  await viewer.close();
 }
 
 declare const startWatch: (id: string) => Promise<void>;
