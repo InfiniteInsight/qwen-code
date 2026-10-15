@@ -385,9 +385,12 @@ export default tseslint.config(
     },
   },
   // rc-gateway's static web viewer scripts run in the browser (vendor/ is
-  // ignored above).
+  // ignored above). sw.js is excluded because it declares its own
+  // service-worker globals via a `/* global */` comment, which would
+  // otherwise trip no-redeclare against the built-in browser globals.
   {
     files: ['packages/rc-gateway/public/**/*.js'],
+    ignores: ['packages/rc-gateway/public/sw.js'],
     languageOptions: {
       globals: {
         ...globals.browser,
