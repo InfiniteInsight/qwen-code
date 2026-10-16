@@ -187,16 +187,104 @@
     }
 
     function buildTool(m, now) {
+      var item = m.item;
       var b = el('div', 'bubble tool');
       m.bubble = b;
-      m.toolBody = el('span');
+      m.toolBody = el('span', 'tool-head');
+      // keepHeld() looks the clicked line up as m.head, so the hold set below
+      // would find nothing and the row would drift when the detail opened.
+      m.head = m.toolBody;
       m.toolLabel = document.createTextNode('');
       m.toolBody.appendChild(m.toolLabel);
+      // The chevron is the only hint that the row opens; a call whose frames
+      // carried neither input nor result has nothing to open, so it gets none.
+      m.mark = el('span', 'tool-mark');
+      m.toolBody.appendChild(m.mark);
+      m.detail = null;
+      m.toolBody.addEventListener('click', function () {
+        if (!toolHasDetail(item)) return;
+        // Same hold the thought header uses: the tapped line stays where it is
+        // while the detail opens below it, instead of yanking to the bottom.
+        hold = { item: item, top: viewportTop(m.toolBody) };
+        item.expanded = !item.expanded;
+        quiet = true;
+        try {
+          model.touch(item);
+        } finally {
+          quiet = false;
+        }
+      });
       b.appendChild(m.toolBody);
       m.st = null;
       m.sub = null;
       patchTool(m, now);
       return b;
+    }
+    function toolHasDetail(item) {
+      return item.input !== undefined || item.result !== undefined;
+    }
+    // The detail is rendered as text rather than as structured DOM: it is read
+    // once, and a bounded text block cannot grow an unbounded row. An ACP
+    // ToolCallContent is a content / diff / terminal union.
+    var MAX_DETAIL = 4000;
+    function jsonish(v) {
+      try {
+        return JSON.stringify(v, null, 1);
+      } catch {
+        return String(v);
+      }
+    }
+    function contentText(c) {
+      if (typeof c === 'string') return c;
+      if (!c || typeof c !== 'object') return jsonish(c);
+      if (c.type === 'content') {
+        var inner = c.content;
+        if (inner && inner.type === 'text' && typeof inner.text === 'string')
+          return inner.text;
+        return '[' + ((inner && inner.type) || 'content') + ']';
+      }
+      if (c.type === 'diff') {
+        return (
+          String(c.path || '') +
+          '\n-' +
+          (typeof c.oldText === 'string' ? c.oldText : '') +
+          '\n+' +
+          (typeof c.newText === 'string' ? c.newText : '')
+        );
+      }
+      if (c.type === 'terminal') return '[terminal]';
+      return jsonish(c);
+    }
+    function valueText(v) {
+      if (Array.isArray(v)) return v.map(contentText).join('\n');
+      if (typeof v === 'string') return v;
+      return jsonish(v);
+    }
+    function clip(s) {
+      return s.length > MAX_DETAIL
+        ? s.slice(0, MAX_DETAIL) + '\n... ' + (s.length - MAX_DETAIL) + ' more'
+        : s;
+    }
+    // Memoised on the item: virtual-core re-estimates every unmeasured row each
+    // time it rebuilds its layout, and a large rawInput (a big write, say) must
+    // not be stringified once per append.
+    var detailCache = new WeakMap();
+    function toolDetailText(item) {
+      var c = detailCache.get(item);
+      if (c && c.input === item.input && c.result === item.result)
+        return c.text;
+      var parts = [];
+      if (item.input !== undefined)
+        parts.push('call\n' + valueText(item.input));
+      if (item.result !== undefined)
+        parts.push('result\n' + valueText(item.result));
+      var text = clip(parts.join('\n\n'));
+      detailCache.set(item, {
+        input: item.input,
+        result: item.result,
+        text: text,
+      });
+      return text;
     }
     function patchTool(m, now) {
       var item = m.item;
@@ -205,12 +293,25 @@
       if (item.status) {
         if (!m.st) {
           m.st = el('span', 'st');
-          m.toolBody.appendChild(m.st);
+          m.toolBody.insertBefore(m.st, m.mark);
         }
         setText(m.st, '  [' + item.status + ']');
       } else if (m.st) {
         m.st.remove();
         m.st = null;
+      }
+      var open = !!item.expanded && toolHasDetail(item);
+      setText(m.mark, toolHasDetail(item) ? (open ? ' ▾' : ' ▸') : '');
+      if (open) {
+        if (!m.detail) {
+          m.detail = el('div', 'tool-detail');
+          m.bubble.appendChild(m.detail);
+        }
+        var text = toolDetailText(item);
+        if (m.detail.textContent !== text) m.detail.textContent = text;
+        m.detail.hidden = false;
+      } else if (m.detail) {
+        m.detail.hidden = true;
       }
       if (item.sub) {
         if (!m.sub) m.sub = buildSub(m.bubble);
@@ -468,12 +569,17 @@
             ? 37
             : 38 + 21 * lineCount(item, item.text, perLine);
         case 'tool':
-          return item.sub
-            ? 70 +
+          return (
+            (item.sub
+              ? 70 +
                 21 *
                   (item.sub.tools.length +
                     lineCount(item.sub, item.sub.text, perLine))
-            : 37;
+              : 37) +
+            (item.expanded && toolHasDetail(item)
+              ? 21 * lineCount(item, toolDetailText(item), perLine)
+              : 0)
+          );
         case 'system':
           return 20;
         case 'fork':

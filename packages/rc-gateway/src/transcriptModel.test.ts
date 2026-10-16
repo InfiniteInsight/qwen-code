@@ -31,6 +31,8 @@ interface Item {
   label?: string;
   status?: string;
   notSent?: string;
+  input?: unknown;
+  result?: unknown;
   sub?: Sub | null;
   err?: boolean;
   turn?: number;
@@ -242,6 +244,87 @@ describe('TranscriptModel', () => {
     m.upsertTool({ title: 'a' });
     expect(m.items.length).toBe(2);
     expect(m.items[0].id).not.toBe(m.items[1].id);
+  });
+
+  // #64. The real frames, from createTranscriptToolCallStartUpdate and
+  // createTranscriptToolCallResultUpdate in acp-bridge: a start frame carries
+  // rawInput and an empty content, a result frame carries content plus rawOutput,
+  // and a status-only frame carries neither.
+  describe('tool input and result (#64)', () => {
+    const start = {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'tc1',
+      status: 'pending',
+      title: 'Read src/a.ts',
+      kind: 'read',
+      content: [],
+      rawInput: { file_path: '/x/src/a.ts' },
+    };
+    const result = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'tc1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'hello' } }],
+      rawOutput: { kind: 'text' },
+    };
+
+    it('the start frame keeps rawInput and starts collapsed', () => {
+      const { m } = setup();
+      m.upsertTool(start);
+      const tool = m.items[0];
+      expect(tool.expanded).toBe(false);
+      expect(tool.input).toEqual({ file_path: '/x/src/a.ts' });
+      expect(tool.result).toBeUndefined();
+    });
+
+    it('the result frame lands on the same item and keeps the input', () => {
+      const { m } = setup();
+      m.upsertTool(start);
+      m.upsertTool(result);
+      expect(m.items.length).toBe(1);
+      const tool = m.items[0];
+      expect(tool.status).toBe('completed');
+      expect(tool.result).toEqual(result.content);
+      expect(tool.input).toEqual({ file_path: '/x/src/a.ts' });
+    });
+
+    it('a status-only frame erases neither', () => {
+      const { m } = setup();
+      m.upsertTool(start);
+      m.upsertTool(result);
+      m.upsertTool({ toolCallId: 'tc1', status: 'in_progress' });
+      const tool = m.items[0];
+      expect(tool.status).toBe('in_progress');
+      expect(tool.result).toEqual(result.content);
+      expect(tool.input).toEqual({ file_path: '/x/src/a.ts' });
+    });
+
+    it('rawOutput is the result when content is empty', () => {
+      const { m } = setup();
+      m.upsertTool(start);
+      m.upsertTool({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc1',
+        status: 'completed',
+        content: [],
+        rawOutput: { stdout: 'hi' },
+      });
+      expect(m.items[0].result).toEqual({ stdout: 'hi' });
+    });
+
+    it('a frame with no input and no output has nothing to expand into', () => {
+      const { m } = setup();
+      m.upsertTool({ toolCallId: 'tc9', title: 'x', status: 'pending' });
+      const tool = m.items[0];
+      expect(tool.input).toBeUndefined();
+      expect(tool.result).toBeUndefined();
+    });
+
+    it('an empty rawInput object still counts as the call', () => {
+      const { m } = setup();
+      m.upsertTool({ ...start, rawInput: {} });
+      expect(m.items[0].input).toEqual({});
+    });
   });
 
   it('terminal tool status finishes its subagent', () => {

@@ -798,6 +798,155 @@ const VIEW_SCENARIOS: Scenario[] = [
     },
   },
   {
+    // #64. Tapping a tool row opens the call and its result, the head does not
+    // jump, the state lives on the item so it survives the virtual core
+    // rebuilding the row, and a call with nothing to show has no affordance.
+    name: 'V5c tool expand',
+    run: async (page) => {
+      await page.evaluate(() => {
+        __vt.setup(true);
+        const m = __vt.model;
+        m.addUser('read it');
+        m.upsertTool({
+          toolCallId: 'tc1',
+          title: 'Read src/a.ts',
+          status: 'pending',
+          rawInput: { file_path: '/x/src/a.ts' },
+        });
+        m.upsertTool({
+          toolCallId: 'tc1',
+          status: 'completed',
+          content: [
+            { type: 'content', content: { type: 'text', text: 'file body' } },
+          ],
+        });
+        // A frame that carried neither input nor output.
+        m.upsertTool({ toolCallId: 'tc2', title: 'Bare', status: 'pending' });
+        m.appendAssistant('answer');
+        __vt.addTurns(100, 300, 10);
+        // A call at the tail: the view sits at the end there, which is where
+        // opening a row can pull the tapped line out of place.
+        m.upsertTool({
+          toolCallId: 'tc3',
+          title: 'Tail call',
+          status: 'completed',
+          rawInput: { command: 'ls' },
+          rawOutput: 'a\nb\nc\nd\ne\nf\ng\nh',
+        });
+      });
+      await settle(page);
+      const ids = await page.evaluate(() => [
+        __vt.model.items.find((i) => i.toolCallId === 'tc1')!.id,
+        __vt.model.items.find((i) => i.toolCallId === 'tc2')!.id,
+        __vt.model.items.find((i) => i.toolCallId === 'tc3')!.id,
+      ]);
+      const tid = ids[0]!;
+      const bare = ids[1]!;
+      const tail = ids[2]!;
+      const read = (id: number) =>
+        page.evaluate((i) => {
+          const row = __vt.row(i);
+          const head = row && row.querySelector('.bubble.tool .tool-head');
+          const det = row && row.querySelector('.bubble.tool .tool-detail');
+          // Measured, not attribute read: the detail's own display rule would
+          // keep a hidden one on screen if the [hidden] reassert were missing.
+          const vis = !!det && !(det as HTMLElement).hidden && det.offsetHeight > 0;
+          return {
+            mounted: !!row,
+            head: head ? (head.textContent ?? '') : null,
+            top: head ? Math.round(head.getBoundingClientRect().top) : null,
+            // The detail node is only built once a row is opened, so "shown" is
+            // what the reader can see, not whether a node happens to exist.
+            shown: vis,
+            height: det ? det.offsetHeight : null,
+            rowText: row ? (row.textContent ?? '') : '',
+            detail: det ? (det.textContent ?? '') : null,
+          };
+        }, id);
+      await page.evaluate(() => {
+        __vt.scroller.scrollTop = 0;
+      });
+      await settle(page);
+      const s1 = await read(tid);
+      expect(s1.mounted, 'tool row is not mounted at the top');
+      expect(!s1.shown, 'tool detail is visible before the tap');
+      expect(
+        !s1.rowText.includes('file_path'),
+        'the call input is readable while the row is collapsed',
+      );
+      expect(
+        (s1.head ?? '').endsWith(' ▸'),
+        `collapsed head ${JSON.stringify(s1.head)}`,
+      );
+      const b1 = await read(bare);
+      expect(
+        !b1.shown && !/▸|▾/.test(b1.head ?? ''),
+        `a call with no detail got an affordance: ${JSON.stringify(b1.head)}`,
+      );
+      await page.click(`#vt .vrow[data-id="${tid}"] .tool-head`);
+      await settle(page, 0);
+      const s2 = await read(tid);
+      expect(s2.shown, 'detail still not shown after the tap');
+      expect(
+        !!s2.detail &&
+          s2.detail.includes('file_path') &&
+          s2.detail.includes('file body'),
+        `detail text ${JSON.stringify(s2.detail)}`,
+      );
+      expect((s2.head ?? '').endsWith(' ▾'), `expanded head ${s2.head}`);
+      expect(
+        s1.top !== null && s2.top !== null && Math.abs(s2.top - s1.top) <= 2,
+        `the tap moved the head ${s1.top} -> ${s2.top}`,
+      );
+      // Unmount and remount through the virtual core.
+      await page.evaluate(() => __vt.view.scrollToEnd());
+      await settle(page);
+      const s3 = await read(tid);
+      expect(!s3.mounted, 'tool row still mounted at the bottom');
+      await page.evaluate(() => {
+        __vt.scroller.scrollTop = 0;
+      });
+      await settle(page);
+      const s4 = await read(tid);
+      expect(s4.mounted, 'tool row did not remount');
+      expect(s4.shown, 'expanded state lost on remount');
+      expect(
+        !!s4.detail && s4.detail.includes('file body'),
+        'detail text lost on remount',
+      );
+      // Tapping the tail row while the view sits at the end: virtual-core
+      // keeps a growing row's bottom in place there, so without the hold the
+      // tapped line is pulled up by the height of the detail.
+      await page.evaluate(() => __vt.view.scrollToEnd());
+      await settle(page);
+      const t1 = await read(tail);
+      expect(
+        t1.mounted && !t1.shown,
+        `tail tool row is not collapsed at the end: ${JSON.stringify(t1.head)}`,
+      );
+      await page.click(`#vt .vrow[data-id="${tail}"] .tool-head`);
+      await settle(page, 0);
+      const t2 = await read(tail);
+      expect(t2.shown, 'tail detail did not open');
+      expect(
+        t1.top !== null && t2.top !== null && Math.abs(t2.top - t1.top) <= 2,
+        `tapping at the end moved the head ${t1.top} -> ${t2.top}`,
+      );
+      // Tap again to close: the detail node stays in the tree, hidden, so what
+      // the reader sees depends on the hidden flag surviving the patch pass.
+      // (This section has no index.html CSS; P16 covers the real page.)
+      await page.click(`#vt .vrow[data-id="${tail}"] .tool-head`);
+      await settle(page, 0);
+      const t3 = await read(tail);
+      expect(!t3.shown, `detail still on screen after closing: ${t3.height}`);
+      expect(
+        (t3.head ?? '').endsWith(' ▸'),
+        `head after closing ${JSON.stringify(t3.head)}`,
+      );
+      return `tool ${tid} opened without moving, stayed open across remount`;
+    },
+  },
+  {
     name: 'V6 fallback mode',
     run: async (page) => {
       await page.evaluate(() => {
@@ -2793,6 +2942,77 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `Edit again: ${JSON.stringify(back)}`,
       );
       return `marked '${st.marked[0]}' on the echo, text offered and restored`;
+    },
+  },
+  {
+    // The view section builds its own container, so index.html CSS never
+    // applies there: this is the only place the detail's real display is seen.
+    name: 'P16 tool detail on the real page',
+    frames: () => {
+      const f = new Frames();
+      f.user('read it').upd({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-css',
+        title: 'Read src/a.ts',
+        status: 'in_progress',
+        rawInput: { file_path: '/x/src/a.ts' },
+      });
+      f.upd({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-css',
+        status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'file body' } },
+        ],
+      });
+      return f.asst('answer').done().list;
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 5, 30_000);
+      await settlePage(page);
+      const read = () =>
+        page.evaluate(() => {
+          const d = document.querySelector(
+            '#transcript .tool-detail',
+          ) as HTMLElement | null;
+          const head = document.querySelector('#transcript .tool .tool-head');
+          return {
+            heads: document.querySelectorAll('#transcript .tool .tool-head')
+              .length,
+            mark: head ? (head.textContent ?? '') : '',
+            display: d ? getComputedStyle(d).display : null,
+            height: d ? d.offsetHeight : null,
+            text: d ? (d.textContent ?? '') : '',
+          };
+        });
+      const s1 = await read();
+      expect(s1.heads === 1, `${s1.heads} tool heads on screen`);
+      expect(
+        s1.height === null || s1.height === 0,
+        `detail is on screen before the tap: ${s1.height}`,
+      );
+      await page.click('#transcript .tool .tool-head');
+      await settlePage(page);
+      const s2 = await read();
+      expect(
+        s2.display === 'block' && (s2.height ?? 0) > 0,
+        `detail after the tap: ${JSON.stringify(s2)}`,
+      );
+      expect(
+        s2.text.includes('file_path') && s2.text.includes('file body'),
+        `detail text ${JSON.stringify(s2.text.slice(0, 60))}`,
+      );
+      await page.click('#transcript .tool .tool-head');
+      await settlePage(page);
+      const s3 = await read();
+      // The CSS guard: naming a display on .tool-detail would outrank the UA
+      // [hidden] rule, so a closed call would stay on screen.
+      expect(
+        s3.display === 'none' && s3.height === 0,
+        `detail after closing: ${JSON.stringify(s3)}`,
+      );
+      return `detail opened (block, ${s2.height}px) and closed (display none)`;
     },
   },
   {
