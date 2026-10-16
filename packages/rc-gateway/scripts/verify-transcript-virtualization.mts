@@ -351,6 +351,7 @@ interface VtModel {
   showProcessing(): void;
   hideProcessing(): void;
   upsertTool(u: Record<string, unknown>): void;
+  setPlan(entries: unknown[]): void;
   appendSubagentText(parentId: string, text: string): void;
   upsertSubagentTool(u: Record<string, unknown>, parentId: string): void;
   finishSubagent(parentId: string, status: string): void;
@@ -850,7 +851,8 @@ const VIEW_SCENARIOS: Scenario[] = [
           const det = row && row.querySelector('.bubble.tool .tool-detail');
           // Measured, not attribute read: the detail's own display rule would
           // keep a hidden one on screen if the [hidden] reassert were missing.
-          const vis = !!det && !(det as HTMLElement).hidden && det.offsetHeight > 0;
+          const vis =
+            !!det && !(det as HTMLElement).hidden && det.offsetHeight > 0;
           return {
             mounted: !!row,
             head: head ? (head.textContent ?? '') : null,
@@ -944,6 +946,97 @@ const VIEW_SCENARIOS: Scenario[] = [
         `head after closing ${JSON.stringify(t3.head)}`,
       );
       return `tool ${tid} opened without moving, stayed open across remount`;
+    },
+  },
+  {
+    name: 'V5d to-do row',
+    run: async (page) => {
+      await page.evaluate(() => {
+        __vt.setup(true);
+        const m = __vt.model;
+        m.addUser('do the thing');
+        m.setPlan([
+          { content: 'read the code', status: 'pending' },
+          { content: 'change it', status: 'pending' },
+        ]);
+        __vt.addTurns(100, 300, 10);
+      });
+      await settle(page);
+      // The view follows the appended turns to the end, so go back to the top
+      // where the to-do row sits.
+      await page.evaluate(() => {
+        __vt.scroller.scrollTop = 0;
+      });
+      await settle(page);
+      const pid = await page.evaluate(
+        () => __vt.model.items.find((i) => i.kind === 'plan')!.id,
+      );
+      const read = () =>
+        page.evaluate((i) => {
+          const row = __vt.row(i);
+          const body = row && row.querySelector('.bubble.plan .plan-list');
+          return {
+            mounted: !!row,
+            rows: document.querySelectorAll('#vt .bubble.plan').length,
+            text: body ? (body.textContent ?? '') : '',
+          };
+        }, pid);
+      const s1 = await read();
+      expect(s1.mounted, 'the to-do row is not mounted at the top');
+      expect(s1.rows === 1, `${s1.rows} to-do rows on screen`);
+      expect(
+        s1.text.includes('2 open') && s1.text.includes('read the code'),
+        `first frame ${JSON.stringify(s1.text)}`,
+      );
+      // The daemon re-emits the whole list: the same row is rewritten, the
+      // completed entry leaves it, and the count is what says it happened.
+      await page.evaluate(() => {
+        __vt.model.setPlan([
+          { content: 'read the code', status: 'completed' },
+          { content: 'change it', status: 'in_progress' },
+          { content: 'test it', status: 'pending' },
+        ]);
+      });
+      await settle(page, 0);
+      const s2 = await read();
+      expect(s2.rows === 1, `${s2.rows} to-do rows after an update`);
+      expect(
+        s2.text.includes('1 of 3 done') &&
+          !s2.text.includes('read the code') &&
+          s2.text.includes('▸ change it'),
+        `after a completion ${JSON.stringify(s2.text)}`,
+      );
+      // A long plan is bounded, and says how many are off screen.
+      await page.evaluate(() => {
+        const many: unknown[] = [];
+        for (let k = 0; k < 12; k++) {
+          many.push({ content: `step ${k}`, status: 'pending' });
+        }
+        __vt.model.setPlan(many);
+      });
+      await settle(page, 0);
+      const s3 = await read();
+      expect(
+        s3.text.includes('step 0') &&
+          !s3.text.includes('step 6') &&
+          s3.text.includes('6 more'),
+        `bounded list ${JSON.stringify(s3.text)}`,
+      );
+      // Through the virtual core and back: the state is on the item, so the
+      // row comes back as it was.
+      await page.evaluate(() => __vt.view.scrollToEnd());
+      await settle(page);
+      expect(!(await read()).mounted, 'to-do row still mounted at the end');
+      await page.evaluate(() => {
+        __vt.scroller.scrollTop = 0;
+      });
+      await settle(page);
+      const s4 = await read();
+      expect(s4.mounted, 'to-do row did not remount');
+      expect(s4.text === s3.text, 'to-do row came back different');
+      return `one row rewritten in place; ${s2.text
+        .split('\n')[0]
+        .trim()}; bounded with a hidden count; survived remount`;
     },
   },
   {
@@ -3013,6 +3106,115 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `detail after closing: ${JSON.stringify(s3)}`,
       );
       return `detail opened (block, ${s2.height}px) and closed (display none)`;
+    },
+  },
+  {
+    name: 'P17 to-do strip outlives the transcript',
+    frames: () => {
+      const f = new Frames();
+      const plan = (entries: Array<[string, string]>) =>
+        f.upd({
+          sessionUpdate: 'plan',
+          entries: entries.map(([content, status]) => ({
+            content,
+            priority: 'medium',
+            status,
+          })),
+        });
+      f.user('do the thing');
+      plan([
+        ['read the code', 'pending'],
+        ['change it', 'pending'],
+        ['test it', 'pending'],
+      ]);
+      plan([
+        ['read the code', 'completed'],
+        ['change it', 'in_progress'],
+        ['test it', 'pending'],
+        ['ship it', 'pending'],
+      ]);
+      // Long enough that the row near the top is genuinely off screen when the
+      // view sits at the end.
+      for (let k = 0; k < 40; k++) {
+        f.asst(`turn ${k}: lorem ipsum dolor sit amet consectetur elit. `);
+      }
+      return f.done().list;
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 44, 30_000);
+      await settlePage(page);
+      const read = () =>
+        page.evaluate(() => {
+          const box = document.getElementById('plan') as HTMLDivElement;
+          const r = box.getBoundingClientRect();
+          return {
+            hidden: box.hidden,
+            onScreen:
+              box.offsetHeight > 0 && r.top < innerHeight && r.bottom > 0,
+            count: document.getElementById('plan-count')!.textContent ?? '',
+            rows: document.getElementById('plan-rows')!.textContent ?? '',
+            moreHidden: (document.getElementById('plan-more') as HTMLDivElement)
+              .hidden,
+            bubbles: document.querySelectorAll('#transcript .bubble.plan')
+              .length,
+            // Counted on the model, not the DOM: these rows sit near the top,
+            // where the virtual core has unmounted them, so a DOM query would
+            // read zero whatever the cause.
+            dumps: transcriptModel.items.filter(
+              (i) => i.kind === 'system' && (i.text ?? '').includes('Plan:'),
+            ).length,
+          };
+        });
+      const s1 = await read();
+      expect(!s1.hidden, 'the strip is hidden while a plan exists');
+      expect(
+        s1.count === '1 of 4 done',
+        `strip count ${JSON.stringify(s1.count)}`,
+      );
+      expect(
+        s1.rows.includes('change it') && !s1.rows.includes('read the code'),
+        `strip rows ${JSON.stringify(s1.rows)}`,
+      );
+      expect(s1.moreHidden, 'the strip says a hidden count it has no use for');
+      // The old dump left a `Plan:` block per frame; there is one row now.
+      expect(s1.bubbles === 1, `${s1.bubbles} to-do rows in the transcript`);
+      expect(s1.dumps === 0, `${s1.dumps} stacked Plan: dumps left behind`);
+      // The property the strip exists for: the reader is at the newest output,
+      // the row is off screen, and the list is still on screen.
+      const far = await page.evaluate(() => {
+        const items = transcriptModel.items;
+        const plan = items.find((i) => i.kind === 'plan')!;
+        return { seen: __pg.visibleIds().includes(plan.id) };
+      });
+      expect(
+        !far.seen,
+        'the to-do row is still on screen, so this proves nothing',
+      );
+      expect(
+        s1.onScreen,
+        `the strip is off screen at the end: ${JSON.stringify(s1)}`,
+      );
+      return `one row (no ${s1.dumps} dumps); strip held "${s1.count}" with the row off screen`;
+    },
+  },
+  {
+    name: 'P18 a session with no plan shows no strip',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        transcriptModel.addUser('hello');
+        transcriptModel.appendAssistant('hi there');
+      });
+      await settlePage(page);
+      const s = await page.evaluate(() => ({
+        hidden: (document.getElementById('plan') as HTMLDivElement).hidden,
+        rows: document.querySelectorAll('#transcript .bubble.plan').length,
+      }));
+      expect(s.hidden, 'the strip is shown for a session that never planned');
+      expect(s.rows === 0, `${s.rows} to-do rows without any plan frame`);
+      return 'no plan frame, no strip and no row';
     },
   },
   {

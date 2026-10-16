@@ -596,6 +596,16 @@
             word-break: break-word;
             opacity: 0.92;
           }
+          /* The session's to-do row (#65): one row, rewritten by each plan
+             frame, so it reads as a list rather than a log. */
+          #transcript .bubble.plan {
+            background: #101728;
+            border-left: 2px solid #4a6fb0;
+          }
+          #transcript .plan .plan-list {
+            white-space: pre-wrap;
+            word-break: break-word;
+          }
           /* Subagent activity nested inside the parent agent's tool row. */
           #transcript .subagent {
             margin: 6px 0 0 6px;
@@ -777,6 +787,45 @@
         <div id="transcript-wrap">
           <div id="transcript"></div>
           <button id="jump-bottom" hidden>↓ jump to bottom</button>
+        </div>
+        <!-- The run's to-do list, kept outside the transcript so it is still on
+             screen while the reader scrolls (#65). The transcript row is the
+             history; this is "where is the run up to". The page scrolls as a
+             document, so the strip is pinned to the bottom of the viewport
+             while the session is on screen and settles above the composer at
+             the end of the page. Hidden until a plan frame arrives, so a
+             session that never plans shows nothing. -->
+        <div
+          id="plan"
+          hidden
+          style="
+            position: sticky;
+            bottom: 8px;
+            z-index: 3;
+            margin-top: 8px;
+            padding: 6px 8px;
+            background: #101728;
+            border: 1px solid #26344d;
+            border-left: 2px solid #4a6fb0;
+            border-radius: 6px;
+            font-size: 0.82rem;
+            color: #c7d3ea;
+          "
+        >
+          <div>
+            <span style="font-weight: 600">to-do</span>
+            <span id="plan-count" aria-live="polite" style="margin-left: 6px"></span>
+          </div>
+          <div
+            id="plan-rows"
+            style="
+              margin-top: 4px;
+              white-space: pre-wrap;
+              word-break: break-word;
+              color: #e6e6e6;
+            "
+          ></div>
+          <div id="plan-more" hidden style="color: #8fa0c0; font-size: 0.78rem"></div>
         </div>
         <section id="composer" style="display: none">
           <div
@@ -2235,6 +2284,7 @@
         asstThisTurn = false;
         clearCrashBanner(); // a new watch starts with no crash banner
         clearUnsent(); // and with no leftover refused-send draft
+        renderPlanStrip(); // and with no to-do list from the session before
         scrollTranscript(true); // a new watch follows the newest content
         renderFooter();
       }
@@ -2290,21 +2340,34 @@
         transcriptModel.upsertTool(u);
         scrollTranscript();
       }
+      // The daemon re-emits the whole list every time it changes, so this upserts the
+      // one to-do row (#65) instead of leaving a `Plan:` block per frame the way
+      // the old dump did, which stacked a near-identical block per update.
       function renderPlan(entries) {
-        if (!Array.isArray(entries)) return;
-        const lines = entries
-          .slice(0, 20)
-          .map(
-            (e, i) =>
-              i +
-              1 +
-              '. [' +
-              strOr(e && e.status, '?') +
-              '] ' +
-              strOr(e && e.content, ''),
-          )
-          .join('\n');
-        if (lines) addSystem('Plan:\n' + lines, false);
+        transcriptModel.setPlan(entries);
+        scrollTranscript();
+        renderPlanStrip();
+      }
+      const PLAN_STRIP_ROWS = 3;
+      // The same state read again, outside the transcript: the row scrolls away
+      // with the history, and this is the answer to "where is the run up to".
+      // Bounded tighter than the row, since this one is always on screen.
+      function renderPlanStrip() {
+        const p = transcriptModel.planItem;
+        const box = $('plan');
+        if (!p) {
+          box.hidden = true;
+          return;
+        }
+        const open = p.open || [];
+        $('plan-count').textContent =
+          p.done > 0 ? p.done + ' of ' + p.total + ' done' : p.total + ' open';
+        const shown = open.slice(0, PLAN_STRIP_ROWS);
+        $('plan-rows').textContent = shown.map((e) => e.text).join('\n');
+        const off = open.length - shown.length;
+        $('plan-more').textContent = off > 0 ? '+' + off + ' more' : '';
+        $('plan-more').hidden = off <= 0;
+        box.hidden = false;
       }
       // ---- Session status footer (model · tokens · mode · cwd) --------------
       // Model / approval mode / cwd come from GET /session/:id/context; live
