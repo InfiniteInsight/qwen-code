@@ -145,9 +145,12 @@
     }
 
     // ---- Plain rows -------------------------------------------------------
+    // addUser hands back the item it created: the viewer needs a reference to
+    // this exact message to mark it not sent when the POST carrying it turns
+    // out to have been rejected.
     function addUser(text) {
       resetTurn();
-      push(newItem('user', { text: clean(text) }));
+      return push(newItem('user', { text: clean(text) }));
     }
     function appendAssistant(text) {
       finishThought();
