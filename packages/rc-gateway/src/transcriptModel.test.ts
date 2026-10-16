@@ -135,6 +135,67 @@ describe('TranscriptModel', () => {
     expect(events).toEqual(['append', 'reset']);
   });
 
+  // #63. Every tool frame ends the current bubble (upsertTool calls
+  // resetTurn), so the chunk right after a tool call opens a new item. A blank
+  // chunk must not open an empty row, the way finishThought already refuses to
+  // keep a blank thought.
+  it('blank delta after a tool call opens no bubble (#63)', () => {
+    const { m, events } = setup();
+    m.appendAssistant('before');
+    m.upsertTool({ toolCallId: 't1', title: 'Read file', status: 'pending' });
+    const before = events.length;
+    m.appendAssistant(' \n ');
+    expect(m.items.map((i) => i.kind)).toEqual(['asst', 'tool']);
+    expect(m.curAsst).toBeNull();
+    expect(events.slice(before)).toEqual([]);
+  });
+
+  it('blank delta as the first frame of a turn opens no bubble (#63)', () => {
+    const { m } = setup();
+    m.appendAssistant('');
+    m.appendAssistant('  ');
+    m.appendAssistant('\x00\x07'); // control chars only: clean() empties it
+    expect(m.items.length).toBe(0);
+    expect(m.curAsst).toBeNull();
+  });
+
+  it('a delta that starts blank then carries text yields one bubble (#63)', () => {
+    const { m } = setup();
+    m.upsertTool({ toolCallId: 't1', status: 'pending' });
+    m.appendAssistant(' ');
+    m.appendAssistant('Hello');
+    m.appendAssistant(' there');
+    expect(m.items.map((i) => i.kind)).toEqual(['tool', 'asst']);
+    expect(m.items[1].text).toBe('Hello there');
+  });
+
+  it('a blank delta inside a live bubble is kept (#63)', () => {
+    const { m } = setup();
+    m.appendAssistant('line\n');
+    m.appendAssistant('   ');
+    m.appendAssistant('next');
+    expect(m.items.length).toBe(1);
+    expect(m.items[0].text).toBe('line\n   next');
+  });
+
+  it('a turn with two tool calls keeps two bubbles in frame order (#63)', () => {
+    const { m } = setup();
+    m.appendAssistant('first');
+    m.appendAssistant(' still first');
+    m.upsertTool({ toolCallId: 't1', status: 'completed' });
+    m.appendAssistant(' \n'); // the delta that used to become an empty row
+    m.appendAssistant('between');
+    m.upsertTool({ toolCallId: 't2', status: 'completed' });
+    m.appendAssistant('last');
+    expect(m.items.map((i) => `${i.kind}:${i.text ?? i.label}`)).toEqual([
+      'asst:first still first',
+      'tool:t1',
+      'asst:between',
+      'tool:t2',
+      'asst:last',
+    ]);
+  });
+
   it('thought duration labels', () => {
     const labels: Array<[number, string]> = [
       [400, '<1s'],

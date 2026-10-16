@@ -151,11 +151,20 @@
     }
     function appendAssistant(text) {
       finishThought();
+      var t = clean(text);
       if (!curAsst) {
-        curAsst = push(newItem('asst', { text: clean(text) }));
+        // A blank delta must not open a bubble. Every tool frame ends the turn
+        // (upsertTool -> resetTurn), so the chunk right after a tool call
+        // starts a new item, and the model streams whitespace and control
+        // chars as their own chunks: without this guard each tool call leaves
+        // an empty row. Same rule finishThought applies to a blank thought.
+        // Once a bubble exists the delta is appended as-is, because real text
+        // may legitimately be separated by whitespace.
+        if (!t.trim()) return;
+        curAsst = push(newItem('asst', { text: t }));
         return;
       }
-      curAsst.text += clean(text);
+      curAsst.text += t;
       emitUpdate(curAsst);
     }
     function appendThought(text) {
