@@ -33,6 +33,10 @@ export interface BootViewerOptions {
   frames?: Frame[];
   /** Keep the stub's SSE response open this long after the frames (ms). */
   holdOpenMs?: number;
+  /** Status the stub answers POST /session/:id/prompt with (default 200). */
+  promptStatus?: number;
+  /** ms the stub holds a prompt open before answering (models a long turn). */
+  promptDelayMs?: number;
 }
 
 export interface Viewer {
@@ -52,6 +56,8 @@ export async function bootViewer(
   const stub = await startStubDaemon({
     frames: opts.frames,
     holdOpenMs: opts.holdOpenMs,
+    promptStatus: opts.promptStatus,
+    promptDelayMs: opts.promptDelayMs,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));

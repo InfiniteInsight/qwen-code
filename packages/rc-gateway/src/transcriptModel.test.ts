@@ -30,6 +30,7 @@ interface Item {
   toolCallId?: string;
   label?: string;
   status?: string;
+  notSent?: string;
   sub?: Sub | null;
   err?: boolean;
   turn?: number;
@@ -46,7 +47,7 @@ interface Model {
   curAsst: Item | null;
   forkItem: Item | null;
   subscribe(fn: (ev: Ev) => void): () => void;
-  addUser(text: string): void;
+  addUser(text: string): Item;
   appendAssistant(text: string): void;
   appendThought(text: string): void;
   finishThought(): void;
@@ -404,6 +405,18 @@ describe('TranscriptModel', () => {
     m.clearFork();
     expect(m.forkItem).toBeNull();
     expect(m.items.some((i) => i.kind === 'fork')).toBe(false);
+  });
+
+  it('addUser returns the item it created so the caller can mark it later (#62)', () => {
+    const { m, events } = setup();
+    const item = m.addUser('do the thing');
+    expect(item.kind).toBe('user');
+    expect(item.text).toBe('do the thing');
+    expect(m.items[0]).toBe(item);
+    const before = events.length;
+    item.notSent = 'session was busy';
+    m.touch(item);
+    expect(events.slice(before)).toEqual(['update']);
   });
 
   it('userTurns lists user items in order', () => {

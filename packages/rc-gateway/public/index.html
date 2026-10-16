@@ -487,6 +487,19 @@
             background: #1d4ed8;
             color: #fff;
           }
+          /* A user message the daemon never accepted (#62): the echo stays so
+             the turn keeps its shape, but it says it did not go through. */
+          #transcript .user .not-sent {
+            display: block;
+            margin-top: 4px;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            opacity: 0.9;
+          }
+          #transcript .user .not-sent[hidden] {
+            display: none;
+          }
           #transcript .asst {
             align-self: flex-start;
             background: #26292e;
@@ -742,6 +755,34 @@
           <button id="jump-bottom" hidden>↓ jump to bottom</button>
         </div>
         <section id="composer" style="display: none">
+          <div
+            id="unsent"
+            aria-live="polite"
+            hidden
+            style="
+              margin-bottom: 6px;
+              padding: 6px 8px;
+              background: #2a1f24;
+              border-left: 2px solid #f38ba8;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #f0c4cf;
+            "
+          >
+            <span id="unsent-note"></span>
+            <span
+              id="unsent-text"
+              style="
+                display: block;
+                margin-top: 4px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                color: #e6e6e6;
+              "
+            ></span>
+            <button id="unsent-restore" type="button">Edit again</button>
+            <button id="unsent-dismiss" type="button">Discard</button>
+          </div>
           <textarea
             id="prompt"
             rows="3"
@@ -2169,12 +2210,14 @@
         forkTurnCount = 0;
         asstThisTurn = false;
         clearCrashBanner(); // a new watch starts with no crash banner
+        clearUnsent(); // and with no leftover refused-send draft
         scrollTranscript(true); // a new watch follows the newest content
         renderFooter();
       }
       function addUser(text) {
-        transcriptModel.addUser(text);
+        const item = transcriptModel.addUser(text);
         scrollTranscript(true);
+        return item;
       }
       function appendAssistant(text) {
         transcriptModel.appendAssistant(text);
@@ -5269,14 +5312,57 @@
         }
       };
 
+      // A send the daemon refused before the turn started (#62). The text lands here
+      // rather than back in the composer, so a failure that surfaces after the
+      // user has started their next message can never overwrite it.
+      let unsent = null; // { text, note }
+      function clearUnsent() {
+        unsent = null;
+        $('unsent').hidden = true;
+        $('unsent-note').textContent = '';
+        $('unsent-text').textContent = '';
+      }
+      function offerUnsent(text, note) {
+        if ($('prompt').value.trim()) {
+          addSystem('not sent (' + note + '): ' + text, true);
+          return;
+        }
+        unsent = { text, note };
+        $('unsent-note').textContent = 'not sent: ' + note;
+        $('unsent-text').textContent = text;
+        $('unsent').hidden = false;
+      }
+      $('unsent-restore').onclick = () => {
+        if (!unsent) return clearUnsent();
+        if ($('prompt').value.trim()) {
+          return setStatus('the composer has a draft: clear it to restore');
+        }
+        $('prompt').value = unsent.text;
+        clearUnsent();
+        $('prompt').focus();
+      };
+      $('unsent-dismiss').onclick = clearUnsent;
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
         if (!watchedSessionId) return setStatus('watch a session first');
         $('send').disabled = true;
         setStatus('sending…');
-        addUser(prompt); // echo locally; the daemon's user_message_chunk is ignored
+        // Cleared on dispatch, not on the response. POST /session/:id/prompt is
+        // long-lived by design (it awaits the whole turn and returns its
+        // stopReason), so clearing after it holds the sent text on screen for
+        // the duration of the turn and then discards whatever was typed in the
+        // meantime.
+        $('prompt').value = '';
+        // echo locally; the daemon's user_message_chunk is ignored
+        const echoed = addUser(prompt);
         showProcessing(); // visible feedback until the turn's first frame
+        // Set only when the daemon refused before the turn began, so the echo
+        // can say so. A dropped socket is NOT in this set: #38, the turn keeps
+        // running when a backgrounded client's socket dies, so its outcome is
+        // unknown rather than failed.
+        let refused = null;
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
@@ -5291,18 +5377,30 @@
           );
           if (res.status === 200) {
             const json = await res.json().catch(() => ({}));
-            $('prompt').value = '';
             setStatus('sent: ' + (json.stopReason || 'ok'));
             clearCrashBanner(); // a prompt was accepted: the banner is stale
-          } else if (res.status === 400) {
-            hideProcessing();
-            setStatus('empty prompt');
-          } else if (res.status === 401 || res.status === 403) {
-            hideProcessing();
-            setStatus('not authorized');
+            clearUnsent(); // an earlier refusal is now stale
           } else {
             hideProcessing();
-            setStatus('send failed (' + res.status + ')');
+            if (res.status === 400) {
+              setStatus('empty prompt');
+              refused = 'rejected: empty prompt';
+            } else if (res.status === 401 || res.status === 403) {
+              setStatus('not authorized');
+              refused = 'not authorized';
+            } else if (res.status === 502) {
+              setStatus('daemon unavailable');
+              refused = 'daemon unavailable';
+            } else if (res.status === 503) {
+              // The per-session slot was still held when queueWaitMs ran out:
+              // the prompt never reached the daemon.
+              setStatus('session was busy');
+              refused = 'session was busy';
+            } else {
+              // 504 is a turn the gateway cancelled after it ran, and any other
+              // status says nothing about delivery: report, mark nothing.
+              setStatus('send failed (' + res.status + ')');
+            }
           }
         } catch (e) {
           // issue #38: the common network failure here is a backgrounded
@@ -5312,6 +5410,11 @@
           setStatus('connection dropped — the reply may still be streaming');
         } finally {
           $('send').disabled = false;
+        }
+        if (refused) {
+          echoed.notSent = refused;
+          transcriptModel.touch(echoed);
+          offerUnsent(prompt, refused);
         }
       };
 

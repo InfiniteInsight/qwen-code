@@ -135,7 +135,22 @@
       m.body = textRef(item.text);
       body.appendChild(m.body.node);
       b.appendChild(body);
+      // A user message the daemon never accepted keeps its echo but says so:
+      // the row is already on screen when the POST is in flight, and removing
+      // it would take everything after it with it.
+      m.notSent = null;
+      if (item.kind === 'user') {
+        m.notSent = el('span', 'not-sent');
+        b.appendChild(m.notSent);
+      }
+      if (m.notSent) patchUser(m);
       return b;
+    }
+    function patchUser(m) {
+      syncTextNode(m.body, m.item.text);
+      var note = m.item.notSent ? 'not sent: ' + m.item.notSent : '';
+      if (m.notSent.textContent !== note) m.notSent.textContent = note;
+      m.notSent.hidden = !note;
     }
 
     function buildThought(m) {
@@ -356,6 +371,7 @@
       if (shapeOf(m.item) !== m.shape) return build(m, now);
       switch (m.shape) {
         case 'user':
+          return patchUser(m);
         case 'asst':
         case 'thought-live':
           return syncTextNode(m.body, m.item.text);
@@ -441,6 +457,10 @@
       var perLine = Math.max(16, Math.floor(((width - 16) * 0.92 - 20) / 8));
       switch (item.kind) {
         case 'user':
+          return (
+            38 +
+            21 * (lineCount(item, item.text, perLine) + (item.notSent ? 1 : 0))
+          );
         case 'asst':
           return 38 + 21 * lineCount(item, item.text, perLine);
         case 'thought':

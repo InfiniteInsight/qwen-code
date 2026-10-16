@@ -1802,6 +1802,8 @@ type PageScenario =
       name: string;
       /** Stub frames (default READY); the stream is held open. */
       frames?: () => Frame[];
+      /** Stub prompt behaviour: a slow turn, or one it refuses outright. */
+      stub?: { promptStatus?: number; promptDelayMs?: number };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
       /** Wait for transcriptView before run() (default true). */
@@ -2677,6 +2679,123 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
+    // #62. POST /session/:id/prompt is long-lived (it answers when the turn
+    // ends), so clearing the composer on the response leaves the sent text on
+    // screen for the whole turn and then throws away whatever was typed while
+    // it ran. The stub holds this turn open so the window is observable.
+    name: 'P14 composer clears at dispatch',
+    stub: { promptDelayMs: 5_000 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'first message';
+        void (document.getElementById('send') as HTMLButtonElement).onclick!();
+      });
+      const mid = await page.evaluate(() => ({
+        inflight: (document.getElementById('send') as HTMLButtonElement)
+          .disabled,
+        box: (document.getElementById('prompt') as HTMLTextAreaElement).value,
+        echo: transcriptModel.items
+          .filter((i) => i.kind === 'user')
+          .map((i) => i.text),
+      }));
+      expect(mid.inflight, 'the prompt POST had already resolved');
+      expect(
+        mid.box === '',
+        `composer still holds the sent text mid-turn: ${JSON.stringify(
+          mid.box,
+        )}`,
+      );
+      expect(
+        mid.echo.length === 1 && mid.echo[0] === 'first message',
+        `local echo: ${JSON.stringify(mid.echo)}`,
+      );
+      // The next message is typed while the first turn is still running.
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'next draft';
+      });
+      await page.waitForFunction(
+        () => !(document.getElementById('send') as HTMLButtonElement).disabled,
+        null,
+        { timeout: 30_000 },
+      );
+      const after = await page.evaluate(
+        () => (document.getElementById('prompt') as HTMLTextAreaElement).value,
+      );
+      expect(
+        after === 'next draft',
+        `the late clear destroyed the draft: ${JSON.stringify(after)}`,
+      );
+      return 'box empty mid-turn, draft intact after the turn';
+    },
+  },
+  {
+    // #62. A prompt the gateway refuses before the turn begins must not leave a
+    // user message that reads as if it ran, and must not lose its text.
+    name: 'P15 refused send is marked and offered back',
+    before: async (page) => {
+      await page.route('**/session/*/prompt', (route) =>
+        route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: '{"error":"queue_timeout","code":"queue_timeout"}',
+        }),
+      );
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'do the thing';
+        void (document.getElementById('send') as HTMLButtonElement).onclick!();
+      });
+      await page.waitForFunction(
+        () => !(document.getElementById('send') as HTMLButtonElement).disabled,
+        null,
+        { timeout: 20_000 },
+      );
+      await settlePage(page);
+      const st = await page.evaluate(() => ({
+        hidden: (document.getElementById('unsent') as HTMLDivElement).hidden,
+        note: document.getElementById('unsent-note')!.textContent,
+        text: document.getElementById('unsent-text')!.textContent,
+        box: (document.getElementById('prompt') as HTMLTextAreaElement).value,
+        marked: transcriptModel.items
+          .filter((i) => i.kind === 'user')
+          .map((i) => (i as { notSent?: string }).notSent ?? ''),
+        shown: Array.from(
+          document.querySelectorAll('#transcript .not-sent'),
+        ).map((n) => n.textContent ?? ''),
+      }));
+      expect(
+        !st.hidden && st.text === 'do the thing' && !!st.note,
+        `refused-send strip: ${JSON.stringify(st)}`,
+      );
+      expect(
+        st.marked.length === 1 && st.marked[0] !== '',
+        `echo not marked: ${JSON.stringify(st.marked)}`,
+      );
+      expect(
+        st.shown.length === 1 && st.shown[0] === 'not sent: ' + st.marked[0],
+        `marker on screen: ${JSON.stringify(st.shown)}`,
+      );
+      await page.click('#unsent-restore');
+      const back = await page.evaluate(() => ({
+        box: (document.getElementById('prompt') as HTMLTextAreaElement).value,
+        hidden: (document.getElementById('unsent') as HTMLDivElement).hidden,
+      }));
+      expect(
+        back.box === 'do the thing' && back.hidden,
+        `Edit again: ${JSON.stringify(back)}`,
+      );
+      return `marked '${st.marked[0]}' on the echo, text offered and restored`;
+    },
+  },
+  {
     name: 'P9 curve',
     standalone: async () => {
       const runs: Growth[] = [];
@@ -2722,6 +2841,8 @@ async function runPageScenario(
   const viewer = await bootViewer({
     frames: s.frames ? s.frames() : READY,
     holdOpenMs: 600_000,
+    promptStatus: s.stub?.promptStatus,
+    promptDelayMs: s.stub?.promptDelayMs,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
