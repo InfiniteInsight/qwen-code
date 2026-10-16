@@ -278,21 +278,39 @@
       emitUpdate(tool);
     }
 
+    // The call itself and what came back, kept verbatim for the view to render
+    // when the row is expanded (#64). A start frame carries rawInput and an
+    // empty content; a result frame carries content, or rawOutput when there is
+    // no content; a status-only frame carries neither, so it must not clear what
+    // is already there. An empty content is not a result: treating it as one
+    // would leave every pending call showing an empty output.
+    function toolResult(u) {
+      if (Array.isArray(u.content) && u.content.length > 0) return u.content;
+      return u.rawOutput === undefined ? undefined : u.rawOutput;
+    }
+
     function upsertTool(u) {
       resetTurn();
       var id = strOr(u.toolCallId, '');
       var status = strOr(u.status, '');
+      var input = u.rawInput;
+      var result = toolResult(u);
       var tool = id ? toolIndex.get(id) : null;
       if (tool) {
         tool.label = toolLabel(u, id, tool.label);
         tool.status = status;
+        if (input !== undefined) tool.input = input;
+        if (result !== undefined) tool.result = result;
       } else {
         tool = newItem('tool', {
           toolCallId: id,
           label: toolLabel(u, id, ''),
           status: status,
           sub: null,
+          expanded: false,
         });
+        if (input !== undefined) tool.input = input;
+        if (result !== undefined) tool.result = result;
         if (id) toolIndex.set(id, tool);
       }
       // The parent agent tool reaching a terminal status settles the nested

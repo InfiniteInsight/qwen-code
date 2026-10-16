@@ -572,6 +572,30 @@
           #transcript .tool .st {
             opacity: 0.7;
           }
+          /* Tap the head to open the call and its result (#64). Bounded both
+             ways, so an expanded row cannot blow out the transcript height.
+             No display rule here on purpose: the detail is a div, so it is
+             block by default, and naming a display would outrank the UA
+             [hidden] rule and leave a closed detail on screen. */
+          #transcript .tool .tool-head {
+            cursor: pointer;
+            user-select: none;
+          }
+          #transcript .tool .tool-mark {
+            opacity: 0.6;
+          }
+          #transcript .tool .tool-detail {
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: #101728;
+            border-left: 2px solid #3a4a7a;
+            border-radius: 4px;
+            max-height: 320px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            opacity: 0.92;
+          }
           /* Subagent activity nested inside the parent agent's tool row. */
           #transcript .subagent {
             margin: 6px 0 0 6px;
