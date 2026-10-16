@@ -319,6 +319,43 @@
       }
     }
 
+    // ---- To-do row ---------------------------------------------------------
+    // One row for the whole session, rewritten by each plan frame. Completed
+    // entries leave the list and live on in the count, the way the CLI drops
+    // them. The list is bounded so a 200-entry plan cannot make one unbounded
+    // row, and the row says how many are off screen rather than leaving them
+    // off silently.
+    var MAX_PLAN_ROWS = 6;
+    var PLAN_MARKS = { pending: '▫', in_progress: '▸', failed: '✕' };
+    function planLines(item) {
+      var open = item.open || [];
+      var lines = [
+        item.done > 0
+          ? '☐ ' + item.done + ' of ' + item.total + ' done'
+          : '☐ ' + item.total + ' open',
+      ];
+      var shown = open.slice(0, MAX_PLAN_ROWS);
+      for (var i = 0; i < shown.length; i++) {
+        lines.push((PLAN_MARKS[shown[i].status] || '▫') + ' ' + shown[i].text);
+      }
+      if (open.length > shown.length) {
+        lines.push('▸ ' + (open.length - shown.length) + ' more');
+      }
+      return lines.join('\n');
+    }
+    function buildPlan(m) {
+      var b = el('div', 'bubble plan');
+      b.appendChild(el('div', 'role', 'to-do'));
+      m.planBody = el('span', 'plan-list');
+      b.appendChild(m.planBody);
+      patchPlan(m);
+      return b;
+    }
+    function patchPlan(m) {
+      var text = planLines(m.item);
+      if (m.planBody.textContent !== text) m.planBody.textContent = text;
+    }
+
     // Subagent activity nested in the parent tool bubble: head (status, live
     // timer), the child's text, then its tool rows.
     function buildSub(bubble) {
@@ -456,6 +493,7 @@
       tool: buildTool,
       processing: buildProcessing,
       system: buildSystem,
+      plan: buildPlan,
       fork: buildFork,
     };
 
@@ -480,6 +518,8 @@
           return patchThought(m);
         case 'tool':
           return patchTool(m, now);
+        case 'plan':
+          return patchPlan(m);
         case 'processing':
           return patchProcessing(m, now);
         case 'fork':
@@ -582,6 +622,8 @@
           );
         case 'system':
           return 20;
+        case 'plan':
+          return 20 + 21 * lineCount(item, planLines(item), perLine);
         case 'fork':
           return 24;
         default:

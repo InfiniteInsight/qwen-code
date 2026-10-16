@@ -33,6 +33,9 @@ interface Item {
   notSent?: string;
   input?: unknown;
   result?: unknown;
+  open?: Array<{ text: string; status: string }>;
+  done?: number;
+  total?: number;
   sub?: Sub | null;
   err?: boolean;
   turn?: number;
@@ -48,12 +51,14 @@ interface Model {
   items: Item[];
   curAsst: Item | null;
   forkItem: Item | null;
+  planItem: Item | null;
   subscribe(fn: (ev: Ev) => void): () => void;
   addUser(text: string): Item;
   appendAssistant(text: string): void;
   appendThought(text: string): void;
   finishThought(): void;
   addSystem(text: string, err?: boolean): void;
+  setPlan(entries: unknown[]): void;
   upsertTool(u: Record<string, unknown>): void;
   setSubagentType(parentId: string, type: string): void;
   appendSubagentText(parentId: string, text: string): void;
@@ -626,6 +631,130 @@ describe('TranscriptModel', () => {
     off();
     m.addUser('b');
     expect(seen).toEqual(['append']);
+  });
+
+  describe('to-do list (#65)', () => {
+    const entry = (content: string, status: string) => ({
+      content,
+      priority: 'medium',
+      status,
+    });
+
+    const plans = (m: Model) =>
+      m.items.filter((i) => i.kind === 'plan').map((i) => i.id);
+
+    it('one row per session, updated in place by the newest frame', () => {
+      const { m, events } = setup();
+      m.addUser('go');
+      m.setPlan([entry('a', 'pending'), entry('b', 'pending')]);
+      const first = m.planItem;
+      expect(first!.kind).toBe('plan');
+      m.setPlan([entry('a', 'completed'), entry('b', 'in_progress')]);
+      // The daemon re-emits the whole list on every change: one append, then
+      // updates only.
+      expect(events).toEqual(['append', 'append', 'update']);
+      expect(m.planItem).toBe(first);
+      expect(plans(m)).toHaveLength(1);
+      expect(first!.open).toEqual([{ text: 'b', status: 'in_progress' }]);
+      expect(first!.done).toBe(1);
+      expect(first!.total).toBe(2);
+    });
+
+    it('completed entries leave the list and are counted, not dropped silently', () => {
+      const { m } = setup();
+      m.setPlan([
+        entry('a', 'pending'),
+        entry('b', 'pending'),
+        entry('c', 'pending'),
+      ]);
+      m.setPlan([
+        entry('a', 'completed'),
+        entry('b', 'completed'),
+        entry('c', 'pending'),
+      ]);
+      const p = m.planItem;
+      expect(p!.open.map((e) => e.text)).toEqual(['c']);
+      expect([p!.done, p!.total]).toEqual([2, 3]);
+    });
+
+    it('a failed entry stays on screen, since dropping it hides the news', () => {
+      const { m } = setup();
+      m.setPlan([entry('a', 'failed'), entry('b', 'completed')]);
+      const p = m.planItem;
+      expect(p!.open).toEqual([{ text: 'a', status: 'failed' }]);
+      expect([p!.done, p!.total]).toEqual([1, 2]);
+    });
+
+    it('a frame with nothing usable leaves no row at all', () => {
+      const { m } = setup();
+      m.setPlan([]);
+      m.setPlan(undefined as unknown as []);
+      m.setPlan([null, { content: '', status: 'pending' }] as unknown as []);
+      expect(m.items).toEqual([]);
+      expect(m.planItem).toBe(null);
+    });
+
+    it('a blank entry is not counted, so the total stays what is readable', () => {
+      const { m } = setup();
+      m.setPlan([entry('a', 'pending'), { status: 'pending' } as unknown]);
+      const p = m.planItem;
+      expect(p!.open.map((e) => e.text)).toEqual(['a']);
+      expect([p!.done, p!.total]).toEqual([0, 1]);
+    });
+
+    it('the row keeps its place while the transcript grows around it', () => {
+      const { m } = setup();
+      m.addUser('one');
+      m.setPlan([entry('a', 'pending')]);
+      const first = m.planItem;
+      const place = m.items.indexOf(first!);
+      for (let k = 0; k < 20; k++) {
+        m.appendAssistant(`chunk ${k}`);
+        m.upsertTool({ toolCallId: `t${k}`, title: 'x', status: 'completed' });
+      }
+      m.setPlan([entry('a', 'completed'), entry('b', 'pending')]);
+      expect(m.planItem).toBe(first);
+      expect(m.items.indexOf(first!)).toBe(place);
+      expect(m.items.filter((i) => i.kind === 'plan')).toHaveLength(1);
+    });
+
+    it('clear drops the row and a later frame starts a fresh one', () => {
+      const { m } = setup();
+      m.setPlan([entry('a', 'pending')]);
+      const first = m.planItem;
+      m.clear();
+      expect(m.planItem).toBe(null);
+      m.setPlan([entry('z', 'pending')]);
+      expect(m.planItem).not.toBe(first);
+      expect(plans(m)).toHaveLength(1);
+    });
+
+    it('a rewind that never reached the row keeps updating that row', () => {
+      const { m } = setup();
+      m.addUser('one');
+      m.setPlan([entry('a', 'pending')]);
+      const first = m.planItem;
+      m.addUser('two');
+      expect(m.cutAtUserTurn(1)).toBe(true);
+      expect(m.planItem).toBe(first);
+      m.setPlan([entry('a', 'completed'), entry('b', 'pending')]);
+      // Without the pointer the next frame would push a second row under it.
+      expect(plans(m)).toHaveLength(1);
+      expect(m.planItem!.open.map((e) => e.text)).toEqual(['b']);
+    });
+
+    it('a rewind that drops the row lets the next frame start a fresh one', () => {
+      const { m } = setup();
+      m.addUser('one');
+      m.setPlan([entry('a', 'pending')]);
+      const first = m.planItem;
+      m.addUser('two');
+      expect(m.cutAtUserTurn(0)).toBe(true);
+      expect(m.planItem).toBe(null);
+      m.setPlan([entry('z', 'pending')]);
+      expect(plans(m)).toHaveLength(1);
+      expect(m.planItem!.id).not.toBe(first!.id);
+    });
   });
 
   describe('a throwing subscriber', () => {

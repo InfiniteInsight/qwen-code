@@ -37,6 +37,10 @@
     cancelled: true,
   };
 
+  // PlanEntryStatus is pending | in_progress | completed (plus failed on the
+  // replay path). Only a completed entry leaves the to-do list.
+  var PLAN_DONE_STATUSES = { completed: true };
+
   function durationLabel(secs) {
     if (secs < 1) return '<1s';
     if (secs < 60) return Math.round(secs) + 's';
@@ -53,6 +57,7 @@
     var curThought = null;
     var processingItem = null;
     var forkItem = null;
+    var planItem = null;
     var toolIndex = new Map(); // toolCallId -> tool item
     var subagentTypes = new Map(); // parentToolCallId -> child type label
     var subToolIndex = new WeakMap(); // sub -> Map(child toolCallId -> entry)
@@ -320,6 +325,44 @@
       else emitUpdate(tool);
     }
 
+    // ---- To-do list (plan frames) ------------------------------------------
+    // The daemon re-emits the whole list every time it changes, so this upserts
+    // one row instead of leaving a block per frame (#65). A completed entry
+    // leaves the visible list the way the CLI drops it, while the totals stay so
+    // progress is still legible. Only 'completed' leaves: the replay path can
+    // also carry 'failed', and dropping that would hide the one entry most worth
+    // reading.
+    function planTally(entries) {
+      var open = [];
+      var done = 0;
+      for (var i = 0; i < entries.length; i++) {
+        var text = entries[i] ? strOr(entries[i].content, '') : '';
+        if (!text) continue;
+        var status = strOr(entries[i].status, '');
+        if (PLAN_DONE_STATUSES[status]) done++;
+        else open.push({ text: text, status: status });
+      }
+      return { open: open, done: done, total: open.length + done };
+    }
+
+    // A frame that is empty or malformed changes nothing, so a session that
+    // never plans never grows the row.
+    function setPlan(entries) {
+      if (!Array.isArray(entries) || entries.length === 0) return;
+      var t = planTally(entries);
+      if (t.total === 0) return;
+      if (!planItem) {
+        planItem = push(
+          newItem('plan', { open: t.open, done: t.done, total: t.total }),
+        );
+        return;
+      }
+      planItem.open = t.open;
+      planItem.done = t.done;
+      planItem.total = t.total;
+      emitUpdate(planItem);
+    }
+
     // ---- Fork row ---------------------------------------------------------
     function clearFork() {
       var f = forkItem;
@@ -363,6 +406,7 @@
       curAsst = null;
       forkItem = null;
       processingItem = null;
+      planItem = null;
     }
 
     // Remove the keep-th (0-based) user item and everything after it. Fewer
@@ -378,9 +422,15 @@
       }
       var f = forkItem;
       var p = processingItem;
+      var pl = planItem;
       dropBookkeeping();
       if (f) detach(f);
       if (p) detach(p);
+      // The to-do row is live state, but a rewind that never reached it leaves
+      // it standing: keep pointing at it, or the next frame would push a second
+      // row under the old one. If the cut did drop it, stay null and let the
+      // next frame start a fresh one.
+      if (pl && items.lastIndexOf(pl) >= 0) planItem = pl;
       // A live thought that survived (no cut) folds like any turn reset.
       finishThought();
       emit({ type: 'reset' });
@@ -414,12 +464,16 @@
       get forkItem() {
         return forkItem;
       },
+      get planItem() {
+        return planItem;
+      },
       subscribe: subscribe,
       addUser: addUser,
       appendAssistant: appendAssistant,
       appendThought: appendThought,
       finishThought: finishThought,
       addSystem: addSystem,
+      setPlan: setPlan,
       upsertTool: upsertTool,
       setSubagentType: setSubagentType,
       appendSubagentText: appendSubagentText,
