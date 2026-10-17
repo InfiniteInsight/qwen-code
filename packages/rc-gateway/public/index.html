@@ -2209,17 +2209,94 @@
         if (force) transcriptView.scrollToEnd();
         else transcriptView.followIfPinned();
       }
-      // ---- Processing indicator (feedback between send and first frame) ---
+      // ---- Processing indicator (feedback while a turn is running) -------
       // After a send, the reply can take several seconds (gateway → daemon →
       // first model token). Show a quiet "thinking" row with a live elapsed
       // timer (ticked by the view); hide it the moment any first-frame of
       // the turn arrives.
-      function hideProcessing() {
-        transcriptModel.hideProcessing();
+      //
+      // #71: that was its whole design, and it was too narrow. It was armed
+      // once at send and disarmed by the first prose or thought chunk, so it
+      // could not cover the rest of the turn. A turn that then ran several
+      // tool calls, or a subagent, or simply paused before its next chunk,
+      // showed nothing at all, which is the "long periods of time, maybe after
+      // tool calls" the report described. It is now driven by whether the
+      // transcript is quiet rather than by whether anything has arrived yet:
+      // any frame hides it, because a frame is itself proof of work, and it
+      // returns once the transcript has gone quiet for a beat while the turn is
+      // still open. A running tool row also holds it back, so the two never
+      // compete for the same attention.
+      const PROCESSING_QUIET_MS = 1200;
+      // Whether a turn is in progress as far as this viewer can tell. Armed
+      // only by a send of ours, deliberately. An incoming user_message_chunk
+      // would be the tempting arm point, since it is how a turn started on the
+      // laptop would become visible here, but replayed history carries no
+      // turn_complete (see that case below), so arming on it would leave an
+      // idle replayed session claiming work without end. A turn started
+      // elsewhere therefore shows no indicator here, which is a gap worth its
+      // own fix rather than a guess at one.
+      let turnOpen = false;
+      // Top-level tool calls whose status is not terminal. Their own rows are
+      // the indicator while they run.
+      const runningToolIds = new Set();
+      let processingShown = false;
+      let quietTimer = null;
+      function setProcessing(on) {
+        if (on === processingShown) return;
+        processingShown = on;
+        if (on) {
+          transcriptModel.showProcessing();
+          scrollTranscript();
+        } else {
+          transcriptModel.hideProcessing();
+        }
+      }
+      function stopQuietWatch() {
+        if (quietTimer) {
+          clearTimeout(quietTimer);
+          quietTimer = null;
+        }
+      }
+      // Called for every frame that reaches the transcript. Proof of work
+      // arrives, so the indicator stands down and the beat restarts.
+      function noteFrameActivity() {
+        stopQuietWatch();
+        setProcessing(false);
+        if (!turnOpen) return;
+        quietTimer = setTimeout(() => {
+          quietTimer = null;
+          // Re-check at fire time: a tool may have started during the beat.
+          if (turnOpen && runningToolIds.size === 0) setProcessing(true);
+        }, PROCESSING_QUIET_MS);
+      }
+      // The turn boundary. Everything that ends a turn routes through here so
+      // the indicator cannot be left claiming work that stopped.
+      function endTurn() {
+        turnOpen = false;
+        runningToolIds.clear();
+        stopQuietWatch();
+        setProcessing(false);
+      }
+      // A running tool row is itself proof of work, and a better one than a
+      // spinner, so it holds the indicator back while it lasts. Terminal
+      // statuses match the model's TERMINAL_TOOL_STATUSES.
+      function noteToolFrame(id, status) {
+        if (!id) return;
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          runningToolIds.delete(id);
+          // The row just settled, so the transcript went quiet. That is exactly
+          // the gap this indicator exists for, so restart the beat.
+          noteFrameActivity();
+          return;
+        }
+        runningToolIds.add(id);
+        stopQuietWatch();
+        setProcessing(false);
       }
       function showProcessing() {
-        transcriptModel.showProcessing();
-        scrollTranscript();
+        turnOpen = true;
+        stopQuietWatch();
+        setProcessing(true);
       }
       // ---- Crash-recovery banner (add-mid-turn-recovery §7) ---------------
       // `session_interrupted` / `session_recovered` are WAL-persisted markers,
@@ -2256,7 +2333,7 @@
           (notRecovered ? ' and not recovered' : '');
         el.hidden = false;
         // Not recovered = the turn is over; stop the processing timer.
-        if (notRecovered) hideProcessing();
+        if (notRecovered) endTurn();
       }
       function showRecoveredNote() {
         if (recoveredNoteTimer) clearTimeout(recoveredNoteTimer);
@@ -2279,6 +2356,10 @@
       function clearTranscript() {
         // Every item, the tool/subagent bookkeeping and the turn pointers.
         transcriptModel.clear();
+        // #71: a new watch has not started any turn of ours, and replayed
+        // history does not carry turn_complete, so the indicator has to be
+        // closed out here rather than inherited from the session before.
+        endTurn();
         ctxInfo = null;
         liveIn = 0;
         liveOut = 0;
@@ -4229,6 +4310,11 @@
 
       function renderSessionUpdate(u) {
         if (!u || typeof u !== 'object') return;
+        // #71: every frame that reaches here is proof that work is happening,
+        // so it both stands the indicator down and restarts the quiet beat.
+        // Doing it once here rather than at each branch is what keeps the
+        // subagent path from being forgotten the way the first-frame path was.
+        noteFrameActivity();
         const su = u.sessionUpdate;
         const text = u.content && u.content.text;
         // Subagent frames are tagged with the parent Agent tool call's id —
@@ -4260,7 +4346,11 @@
           return;
         }
         if (su === 'agent_message_chunk' && text) {
-          hideProcessing(); // the turn's first frame has arrived
+          // #71: the hide that used to sit here is now the quiet beat's job. It
+          // runs once at the top of this function for every frame, which is
+          // what the two separate hides here could not do: they stopped the
+          // indicator and restarted nothing, so the rest of the turn was
+          // uncovered.
           // First agent chunk after a user record = one completed turn
           // boundary (the value "Fork from here" posts as fromTurn).
           if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
@@ -4273,11 +4363,15 @@
           return;
         }
         if (su === 'agent_thought_chunk' && text) {
-          hideProcessing(); // the turn's first frame has arrived
           return appendThought(text);
         }
-        if (su === 'tool_call' || su === 'tool_call_update')
+        if (su === 'tool_call' || su === 'tool_call_update') {
+          // #71: a running tool row is the better indicator while it lasts, and
+          // the moment it settles is one of the gaps this indicator exists for,
+          // so the frame carries its id and status to the quiet beat.
+          noteToolFrame(u.toolCallId, u.status);
           return renderTool(u);
+        }
         if (su === 'plan') return renderPlan(u.entries);
       }
       // Turn a relayed daemon frame into transcript UI. Permission cards are
@@ -4289,17 +4383,26 @@
           case 'session_update':
             return renderSessionUpdate(ev.data && ev.data.update);
           case 'stream_error':
+            // #71: these three end a session without ever sending
+            // turn_complete, so without this the indicator would keep claiming
+            // work for a session that has stopped. A dropped socket is
+            // deliberately not among them: the turn really is still running
+            // there (issue #38), and the replay on reconnect brings the frames
+            // that close it out.
+            endTurn();
             return addSystem(
               'error: ' + strOr(ev.data && ev.data.error, 'stream_error'),
               true,
             );
           case 'session_died':
+            endTurn();
             return addSystem(
               'session ended: ' +
                 strOr(ev.data && ev.data.reason, 'session_died'),
               true,
             );
           case 'client_evicted':
+            endTurn();
             return addSystem(
               'disconnected: ' +
                 strOr(ev.data && ev.data.reason, 'client_evicted'),
@@ -4359,7 +4462,10 @@
             // carries no turn_complete, so historical turns stay button-less
             // by design (fork them from the Sessions/fork panels instead).
             finishThought();
-            hideProcessing();
+            // #71: endTurn rather than the bare hide this used to be. The
+            // indicator is now held open across the whole turn, so the turn's
+            // end is the only thing that is allowed to stop it.
+            endTurn();
             // #70: this turn is over, so the send button must come back now.
             // The prompt request awaits the whole turn and may never settle,
             // and its own finally is the only thing that re-enables the
@@ -5501,7 +5607,9 @@
             clearCrashBanner(); // a prompt was accepted: the banner is stale
             clearUnsent(); // an earlier refusal is now stale
           } else {
-            hideProcessing();
+            // #71: the daemon refused before the turn began, so there is no
+            // turn to keep an indicator open for.
+            endTurn();
             if (res.status === 400) {
               setStatus('empty prompt');
               refused = 'rejected: empty prompt';
