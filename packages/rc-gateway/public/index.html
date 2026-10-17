@@ -793,8 +793,10 @@
              history; this is "where is the run up to". The page scrolls as a
              document, so the strip is pinned to the bottom of the viewport
              while the session is on screen and settles above the composer at
-             the end of the page. Hidden until a plan frame arrives, so a
-             session that never plans shows nothing. -->
+             the end of the page. With no to-do list it does not go quiet: it
+             says that in words (#72), because a strip hidden by default and a
+             strip hidden by a fault look identical and the reader has no way
+             to tell a working feature from a missing one. -->
         <div
           id="plan"
           hidden
@@ -815,6 +817,22 @@
           <div>
             <span style="font-weight: 600">to-do</span>
             <span id="plan-count" aria-live="polite" style="margin-left: 6px"></span>
+          </div>
+          <!-- The absence, in words (#72). Shown when the session has
+               produced content and no plan frame has arrived for it, so a
+               session with no to-do list reads as a stated fact rather than
+               as the same silence a dropped frame would leave. -->
+          <div
+            id="plan-empty"
+            hidden
+            style="
+              margin-top: 4px;
+              color: #9fb0cc;
+              font-size: 0.8rem;
+            "
+          >
+            <span id="plan-empty-note"></span>
+            <button id="plan-empty-dismiss" type="button">Dismiss</button>
           </div>
           <div
             id="plan-rows"
@@ -2262,6 +2280,9 @@
       function noteFrameActivity() {
         stopQuietWatch();
         setProcessing(false);
+        // The to-do strip shares this beat: while frames are arriving it has
+        // no standing to declare that no plan is coming. (#72)
+        notePlanFrameActivity();
         if (!turnOpen) return;
         quietTimer = setTimeout(() => {
           quietTimer = null;
@@ -2370,6 +2391,15 @@
         asstThisTurn = false;
         clearCrashBanner(); // a new watch starts with no crash banner
         clearUnsent(); // and with no leftover refused-send draft
+        // The strip's two per-session facts go with the session they describe,
+        // or the next one would inherit the last one's verdict: a session that
+        // never plans would open wearing the previous session's fault. (#72)
+        planFramesSeen = 0;
+        planEmptyDismissed = false;
+        if (planQuietTimer) {
+          clearTimeout(planQuietTimer);
+          planQuietTimer = null;
+        }
         renderPlanStrip(); // and with no to-do list from the session before
         scrollTranscript(true); // a new watch follows the newest content
         renderFooter();
@@ -2430,31 +2460,90 @@
       // one to-do row (#65) instead of leaving a `Plan:` block per frame the way
       // the old dump did, which stacked a near-identical block per update.
       function renderPlan(entries) {
+        planFramesSeen += 1;
         transcriptModel.setPlan(entries);
+        // A frame arrived and the model kept nothing renderable from it. That
+        // is a fault rather than an absence, and it is the one case the raw log
+        // cannot already answer, since the log shows the frame but not what the
+        // strip made of it. (#72)
+        if (!transcriptModel.planItem) {
+          log('plan frame ' + planFramesSeen + ' held nothing to show');
+        }
         scrollTranscript();
         renderPlanStrip();
       }
       const PLAN_STRIP_ROWS = 3;
+      // Whether a plan frame has reached the session on screen, and whether
+      // the reader has dismissed the statement of its absence. Both are facts
+      // about one session, so both reset with the transcript. (#72)
+      let planFramesSeen = 0;
+      let planEmptyDismissed = false;
+      // The absence is stated only once the stream has gone quiet. A replay is
+      // a run of frames, and declaring "no to-do list" between two of them
+      // would state something the next frame proves false, so the beat is the
+      // same one the indicator uses and for the same reason.
+      let planQuietTimer = null;
+      function notePlanFrameActivity() {
+        if (planQuietTimer) clearTimeout(planQuietTimer);
+        planQuietTimer = setTimeout(() => {
+          planQuietTimer = null;
+          renderPlanStrip();
+        }, PROCESSING_QUIET_MS);
+      }
       // The same state read again, outside the transcript: the row scrolls away
       // with the history, and this is the answer to "where is the run up to".
       // Bounded tighter than the row, since this one is always on screen.
+      // Three states rather than two, because a strip that is hidden for "no
+      // plan" and hidden for "the frame went wrong" are the same screen, and
+      // the reader has no way to tell a working feature from a missing one.
+      // (#72)
       function renderPlanStrip() {
         const p = transcriptModel.planItem;
         const box = $('plan');
-        if (!p) {
+        if (p) {
+          $('plan-empty').hidden = true;
+          const open = p.open || [];
+          $('plan-count').textContent =
+            p.done > 0 ? p.done + ' of ' + p.total + ' done' : p.total + ' open';
+          const shown = open.slice(0, PLAN_STRIP_ROWS);
+          $('plan-rows').textContent = shown.map((e) => e.text).join('\n');
+          const off = open.length - shown.length;
+          $('plan-more').textContent = off > 0 ? '+' + off + ' more' : '';
+          $('plan-more').hidden = off <= 0;
+          box.hidden = false;
+          return;
+        }
+        // A frame arrived and produced nothing, which is the fault. Not
+        // dismissible: an explanation the reader can switch off is not one.
+        if (planFramesSeen > 0) {
+          $('plan-empty-note').textContent =
+            'a to-do frame arrived but held nothing to show';
+          $('plan-empty-dismiss').hidden = true;
+          $('plan-empty').hidden = false;
+          box.hidden = false;
+          return;
+        }
+        // Nothing has arrived. Say so, but only once there is a watched session
+        // with content behind it and the stream has settled, so the statement
+        // is about a session rather than about a replay still in progress.
+        if (
+          !watchedSessionId ||
+          planEmptyDismissed ||
+          planQuietTimer ||
+          transcriptModel.items.length === 0
+        ) {
           box.hidden = true;
           return;
         }
-        const open = p.open || [];
-        $('plan-count').textContent =
-          p.done > 0 ? p.done + ' of ' + p.total + ' done' : p.total + ' open';
-        const shown = open.slice(0, PLAN_STRIP_ROWS);
-        $('plan-rows').textContent = shown.map((e) => e.text).join('\n');
-        const off = open.length - shown.length;
-        $('plan-more').textContent = off > 0 ? '+' + off + ' more' : '';
-        $('plan-more').hidden = off <= 0;
+        $('plan-empty-note').textContent = 'no to-do list for this session';
+        $('plan-empty-dismiss').hidden = false;
+        $('plan-empty').hidden = false;
         box.hidden = false;
       }
+      $('plan-empty-dismiss').onclick = () => {
+        planEmptyDismissed = true;
+        renderPlanStrip();
+      };
       // ---- Session status footer (model · tokens · mode · cwd) --------------
       // Model / approval mode / cwd come from GET /session/:id/context; live
       // per-turn token counts come from the stream (agent_message_chunk frames

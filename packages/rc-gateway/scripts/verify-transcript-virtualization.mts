@@ -1956,6 +1956,11 @@ declare const renderTool: (u: Record<string, unknown>) => void;
 declare const PROCESSING_QUIET_MS: number;
 declare const endTurn: () => void;
 declare const renderSessionUpdate: (u: unknown) => void;
+// #72. The strip's per-session verdict and the raw log it writes the fault to,
+// so P24 can assert the fault is answerable from the page rather than only
+// visible on it.
+declare let planFramesSeen: number;
+declare const logLines: string[];
 declare const appendSubagentText: (parentId: string, text: string) => void;
 declare const userTurnsSeen: number;
 declare const forkTurnCount: number;
@@ -3568,6 +3573,135 @@ const PAGE_SCENARIOS: PageScenario[] = [
       );
 
       return `armed, quiet mid-turn -> back, running tool -> held, tool settled -> back, turn over -> stays down (beat ${beat} ms)`;
+    },
+  },
+  {
+    // #72. The strip used to have one rendering for two states that mean
+    // opposite things: "this session has no plan" and "the plan frame went
+    // wrong". A reader could not tell a working feature from a missing one, so
+    // the absence is now stated in words, and the fault has its own words.
+    // Asserted on the real page because the question is what is on screen.
+    name: 'P24 the to-do strip says which absence it is',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const beat = await page.evaluate(() => PROCESSING_QUIET_MS);
+      const wait = (ms: number) =>
+        new Promise((resolve) => setTimeout(resolve, ms));
+      const state = () =>
+        page.evaluate(() => {
+          const box = document.getElementById('plan') as HTMLDivElement;
+          const empty = document.getElementById(
+            'plan-empty',
+          ) as HTMLDivElement;
+          return {
+            shown: !box.hidden && box.offsetHeight > 0,
+            note: empty.hidden ? '' : (document.getElementById('plan-empty-note')!.textContent ?? ''),
+            rows: (document.getElementById('plan-rows')!.textContent ?? '').trim(),
+            count: document.getElementById('plan-count')!.textContent ?? '',
+            dismissHidden: (
+              document.getElementById('plan-empty-dismiss') as HTMLButtonElement
+            ).hidden,
+            frames: planFramesSeen,
+          };
+        });
+
+      // A session with content and no plan frame of any kind.
+      await page.evaluate(() => {
+        addUser('what is the plan');
+        renderSessionUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'reading the code now' },
+        });
+      });
+      // The claim has to wait for the stream to settle. A replay may still be
+      // carrying a plan, and declaring "no to-do list" mid-replay would state
+      // something the next frame proves false.
+      const early = await state();
+      expect(
+        !early.shown,
+        `the strip declared an absence before the stream settled (${JSON.stringify(early)})`,
+      );
+
+      await wait(beat + 700);
+      const absent = await state();
+      expect(
+        absent.shown && absent.note === 'no to-do list for this session',
+        `a session with no plan said nothing, which is the #72 defect (${JSON.stringify(absent)})`,
+      );
+      expect(!absent.dismissHidden, 'the stated absence cannot be dismissed');
+
+      // Dismissing is the answer to the cost of stating it: the fact has been
+      // said once, so the strip gets out of the way.
+      await page.evaluate(() =>
+        (
+          document.getElementById('plan-empty-dismiss') as HTMLButtonElement
+        ).click!(),
+      );
+      const dismissed = await state();
+      expect(
+        !dismissed.shown,
+        `dismissing the absence left it on screen (${JSON.stringify(dismissed)})`,
+      );
+
+      // The other meaning. A plan frame arrives and the model keeps nothing
+      // renderable from it, which is a fault and must not borrow the words of
+      // the ordinary empty case.
+      await page.evaluate(() =>
+        renderSessionUpdate({ sessionUpdate: 'plan', entries: [] }),
+      );
+      const fault = await state();
+      expect(
+        fault.shown &&
+          fault.note === 'a to-do frame arrived but held nothing to show',
+        `a plan frame that produced nothing was not reported as a fault (${JSON.stringify(fault)})`,
+      );
+      expect(
+        fault.dismissHidden,
+        'a fault offered a way to switch the explanation off',
+      );
+      expect(
+        fault.frames === 1,
+        `the fault did not reach the per-session count (${fault.frames})`,
+      );
+      const traced = await page.evaluate(
+        () => logLines.filter((l) => l.includes('held nothing to show')).length,
+      );
+      expect(
+        traced > 0,
+        'the fault left no trace in the raw log, so it is not answerable from the page',
+      );
+
+      // A real plan replaces the explanation with the list, and the
+      // dismissed flag must not suppress it.
+      await page.evaluate(() =>
+        renderSessionUpdate({
+          sessionUpdate: 'plan',
+          entries: [
+            { content: 'read the code', priority: 'medium', status: 'completed' },
+            { content: 'change it', priority: 'medium', status: 'pending' },
+          ],
+        }),
+      );
+      const list = await state();
+      expect(
+        list.shown && list.note === '' && list.rows.includes('change it'),
+        `a real plan did not take the strip back (${JSON.stringify(list)})`,
+      );
+      expect(
+        list.count === '1 of 2 done',
+        `strip count ${JSON.stringify(list.count)}`,
+      );
+
+      // The per-session facts go with the session. Without the reset the next
+      // one would open wearing this one's fault.
+      await page.evaluate(() => clearTranscript());
+      const next = await state();
+      expect(
+        !next.shown,
+        `the fault carried into a new session (${JSON.stringify(next)})`,
+      );
+      return `absence stated, dismissed, fault told apart from it and traced in the log, list regained, nothing inherited`;
     },
   },
   {
