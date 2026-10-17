@@ -1951,6 +1951,11 @@ declare const addUser: (text: string) => void;
 declare const clearTranscript: () => void;
 declare const showProcessing: () => void;
 declare const renderTool: (u: Record<string, unknown>) => void;
+// #71. The indicator's own state and the length of the beat that drives it, so
+// P23 can wait one beat out rather than guess at a wall-clock number.
+declare const PROCESSING_QUIET_MS: number;
+declare const endTurn: () => void;
+declare const renderSessionUpdate: (u: unknown) => void;
 declare const appendSubagentText: (parentId: string, text: string) => void;
 declare const userTurnsSeen: number;
 declare const forkTurnCount: number;
@@ -3468,6 +3473,101 @@ const PAGE_SCENARIOS: PageScenario[] = [
       );
 
       return `live -> ${JSON.stringify(live)}; stale -> ${JSON.stringify(stale)}; never -> ${JSON.stringify(never)}; no report -> ${JSON.stringify(blind)}`;
+    },
+  },
+  {
+    // #71. The indicator was armed at send and disarmed by the first prose or
+    // thought chunk, so it could not cover the rest of the turn, which is the
+    // reported "long periods of time, maybe after tool calls" with no sign of
+    // work. It is now driven by whether the transcript has gone quiet while the
+    // turn is still open. Counted on the model rather than the DOM: the
+    // virtualizer unmounts rows, so a DOM count reads zero whatever the cause.
+    name: 'P23 the indicator covers the quiet gaps of a turn',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const beat = await page.evaluate(() => PROCESSING_QUIET_MS);
+      const wait = (ms: number) =>
+        new Promise((resolve) => setTimeout(resolve, ms));
+      const thinking = () =>
+        page.evaluate(
+          () =>
+            (
+              transcriptModel.items as Array<{ kind: string }>
+            ).filter((i) => i.kind === 'processing').length,
+        );
+
+      // A turn of ours, armed the way the send handler arms it.
+      await page.evaluate(() => showProcessing());
+      const armed = await thinking();
+      expect(armed === 1, `arming a turn showed ${armed} indicators`);
+
+      // Proof of work arrives, so it stands down. This is the old design's
+      // whole behaviour, kept: a streaming turn does not also get a spinner.
+      await page.evaluate(() =>
+        renderSessionUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'first words of the answer' },
+        }),
+      );
+      const streaming = await thinking();
+      expect(
+        streaming === 0,
+        `the indicator competed with streaming text (${streaming})`,
+      );
+
+      // The defect. The transcript has gone quiet mid-turn, which is the state
+      // that used to stay blank for the rest of the turn.
+      await wait(beat + 700);
+      const gap = await thinking();
+      expect(
+        gap === 1,
+        `a quiet gap mid-turn showed nothing, which is the #71 defect (${gap})`,
+      );
+
+      // A running tool row is better evidence than a spinner, so it holds the
+      // indicator back for as long as it lasts.
+      await page.evaluate(() =>
+        renderSessionUpdate({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-running-1',
+          status: 'running',
+        }),
+      );
+      await wait(beat + 700);
+      const duringTool = await thinking();
+      expect(
+        duringTool === 0,
+        `the indicator doubled up with a running tool row (${duringTool})`,
+      );
+
+      // The row settling is one of the gaps the indicator exists for.
+      await page.evaluate(() =>
+        renderSessionUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-running-1',
+          status: 'completed',
+        }),
+      );
+      await wait(beat + 700);
+      const afterTool = await thinking();
+      expect(
+        afterTool === 1,
+        `no indicator in the gap after a tool settled (${afterTool})`,
+      );
+
+      // The other half of the contract: once the turn is over it must stay
+      // down, or it would claim work that stopped, which is the same error
+      // pointed the other way.
+      await page.evaluate(() => endTurn());
+      await wait(beat + 700);
+      const ended = await thinking();
+      expect(
+        ended === 0,
+        `the indicator outlived the turn and is claiming work that stopped (${ended})`,
+      );
+
+      return `armed, quiet mid-turn -> back, running tool -> held, tool settled -> back, turn over -> stays down (beat ${beat} ms)`;
     },
   },
   {
