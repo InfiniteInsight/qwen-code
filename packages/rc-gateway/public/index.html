@@ -6049,7 +6049,31 @@
             body: JSON.stringify({ sessionId: id }),
           });
           if (res.status === 202) {
-            setStatus('terminal opening on the host…');
+            // 202 means the request was written down, which is not the same
+            // claim as "a terminal is opening". The gateway now reports whether
+            // its launcher has been heard from, so the note can match what is
+            // actually likely rather than always promising a window. An older
+            // gateway that reports nothing lands in the last branch and says so
+            // instead of guessing well.
+            const j = await res.json().catch(() => ({}));
+            const ago = Math.round((j.launcherSeenMsAgo ?? 0) / 1000);
+            if (j.launcherState === 'live') {
+              setStatus('terminal opening on the host…');
+            } else if (j.launcherState === 'stale') {
+              setStatus(
+                'terminal queued on the host, but its launcher stopped checking in ' +
+                  ago +
+                  ' s ago, so no window will open until it runs again',
+              );
+            } else if (j.launcherState === 'never') {
+              setStatus(
+                'terminal queued on the host, but no launcher has ever checked in here, so no window will open',
+              );
+            } else {
+              setStatus(
+                'terminal queued on the host; cannot tell whether a launcher is running',
+              );
+            }
             return;
           }
           // Every other outcome is named. #49 asked for best-effort, and it

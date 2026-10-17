@@ -3389,6 +3389,88 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
+    // #69's other half. P21 covers a request the gateway refused outright; this
+    // covers the one it accepted, which used to always say "opening on the host"
+    // off a 202 alone. 202 only means the request was written down, so the note
+    // now follows the gateway's report of whether its launcher is checking in.
+    name: 'P22 an accepted host-terminal request qualifies the window',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // The route is swapped per case rather than once because each case is a
+      // different thing the gateway could truthfully report, and the status line
+      // is the only surface where the difference is visible.
+      const answer = async (body: string) => {
+        await page.unrouteAll();
+        await page.route('**/rc/terminals', (route) =>
+          route.fulfill({
+            status: 202,
+            contentType: 'application/json',
+            body,
+          }),
+        );
+        await page.evaluate(() => {
+          setStatus('sent: stop');
+          return requestHostTerminal('sess-1');
+        });
+      };
+      // Waited for rather than read straight back, same as P21: the failure
+      // being guarded is a branch not being taken, which otherwise leaves the
+      // sentinel above in place for an immediate read to pass on.
+      const say = async (needle: string) => {
+        await page.waitForFunction(
+          (n: string) =>
+            (
+              document.getElementById('status') as HTMLDivElement
+            ).textContent?.includes(n) === true,
+          needle,
+          { timeout: 8_000 },
+        );
+        return page.evaluate(
+          () => document.getElementById('status')!.textContent ?? '',
+        );
+      };
+
+      await answer(
+        '{"requestId":"r1","launcherState":"live","launcherSeenMsAgo":1500}',
+      );
+      const live = await say('opening on the host');
+      expect(
+        !live.includes('queued'),
+        `a live launcher should still promise a window: ${JSON.stringify(live)}`,
+      );
+
+      await answer(
+        '{"requestId":"r1","launcherState":"stale","launcherSeenMsAgo":60000}',
+      );
+      const stale = await say('stopped checking in');
+      expect(
+        stale.includes('60 s ago') && !stale.includes('opening'),
+        `a stale launcher was not qualified: ${JSON.stringify(stale)}`,
+      );
+
+      await answer(
+        '{"requestId":"r1","launcherState":"never","launcherSeenMsAgo":null}',
+      );
+      const never = await say('no launcher has ever checked in');
+      expect(
+        !never.includes('opening'),
+        `a host with no launcher promised a window: ${JSON.stringify(never)}`,
+      );
+
+      // An older gateway answers 202 with just the id. Guessing well there is
+      // what produced the note this replaces, so the absence has to be said.
+      await answer('{"requestId":"r1"}');
+      const blind = await say('cannot tell whether a launcher is running');
+      expect(
+        !blind.includes('opening'),
+        `a gateway that reports nothing guessed well: ${JSON.stringify(blind)}`,
+      );
+
+      return `live -> ${JSON.stringify(live)}; stale -> ${JSON.stringify(stale)}; never -> ${JSON.stringify(never)}; no report -> ${JSON.stringify(blind)}`;
+    },
+  },
+  {
     name: 'P9 curve',
     standalone: async () => {
       const runs: Growth[] = [];

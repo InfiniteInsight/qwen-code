@@ -14,6 +14,21 @@ import {
 } from '../terminals.js';
 
 /**
+ * The launcher's poll interval, which it drives from its own main process
+ * (`launcher-app/src/main/main.ts`, `TERMINAL_POLL_MS`). Duplicated rather than
+ * imported because the launcher is a separate app with its own build, and the
+ * only thing this needs is how long a silence is normal.
+ */
+export const LAUNCHER_POLL_MS = 4_000;
+
+/**
+ * A launcher that has missed three polls is treated as gone. Three is the same
+ * tolerance the bridge registry uses for a missed heartbeat, so the two liveness
+ * notions on this host do not disagree about what "stopped" means.
+ */
+export const LAUNCHER_STALE_MS = 3 * LAUNCHER_POLL_MS;
+
+/**
  * POST /rc/terminals — ask the gateway to open a terminal on its own host
  * showing one conversation (issue #49).
  *
@@ -28,10 +43,17 @@ import {
  * Deriving it from the session id is also what keeps a client from naming an
  * arbitrary directory to get a shell in.
  *
- * The response carries only the request id. The daemon token stays on the host
- * filesystem (in the request log, mode 0600) and is never sent over the network:
- * the launcher reads the log locally rather than fetching it, which is why this
- * is the only HTTP surface the feature needs.
+ * The response carries the request id plus what was known about the launcher at
+ * the moment of the request. The id alone invited a lie: 202 means the request
+ * was written down, and a client that reports it as "opening a terminal" is
+ * claiming a future it cannot support. `launcherState` says whether anyone is
+ * on this host who could act on it, which is the difference between "a tab will
+ * appear" and "this is queued and may sit there".
+ *
+ * The daemon token stays on the host filesystem (in the request log, mode 0600)
+ * and is never sent over the network: the launcher reads the log locally rather
+ * than fetching it, which is why this is the only HTTP surface the feature
+ * needs.
  *
  * Audit records the session id and request id only — no paths, no tokens.
  */
@@ -110,6 +132,18 @@ export function createTerminalOpenRoute(
       detail: { requestId: request.id },
     });
 
-    res.status(202).json({ requestId: request.id });
+    // Read after the append so the answer describes the host as of now rather
+    // than as of whenever this request landed. A missing or unreadable marker
+    // is reported as such rather than defaulted to live: guessing live is the
+    // optimistic direction, and the optimistic direction is what produced the
+    // "opening on the host" note that this replaces.
+    const { state, seenMsAgo } =
+      await requests.launcherLiveness(LAUNCHER_STALE_MS);
+
+    res.status(202).json({
+      requestId: request.id,
+      launcherState: state,
+      launcherSeenMsAgo: seenMsAgo,
+    });
   };
 }

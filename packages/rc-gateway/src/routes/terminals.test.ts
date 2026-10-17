@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTerminalOpenRoute } from './terminals.js';
+import { createTerminalOpenRoute, LAUNCHER_STALE_MS } from './terminals.js';
 import { TerminalRequestLog } from '../terminals.js';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 
@@ -105,13 +105,18 @@ describe('POST /rc/terminals', () => {
     expect(await log.readAll()).toEqual([]);
   });
 
-  it('queues the request and returns only its id', async () => {
+  it('queues the request and reports the launcher it could not see', async () => {
     const out = await call(
       daemonWith(() => ENDPOINT),
       { sessionId: SESSION },
     );
     expect(out.status).toBe(202);
     expect(typeof out.body?.requestId).toBe('string');
+    // Nothing has ever polled on this temp host, so the honest answer is
+    // "never". Defaulting this to live is the optimistic direction, and the
+    // optimistic direction is what had the viewer promising a window.
+    expect(out.body?.launcherState).toBe('never');
+    expect(out.body?.launcherSeenMsAgo).toBeNull();
     // The token must never be echoed to the calling client.
     expect(JSON.stringify(out.body)).not.toContain('secret-tok');
 
@@ -123,6 +128,49 @@ describe('POST /rc/terminals', () => {
       workspaceCwd: ENDPOINT.workspaceCwd,
       daemonToken: 'secret-tok',
     });
+  });
+
+  it('reports the launcher live once its poll has been seen', async () => {
+    await log.recordPoll(0);
+    const out = await call(
+      daemonWith(() => ENDPOINT),
+      { sessionId: SESSION },
+    );
+    expect(out.body?.launcherState).toBe('live');
+    expect(typeof out.body?.launcherSeenMsAgo).toBe('number');
+  });
+
+  it('reports a launcher whose polls stopped, with how long ago', async () => {
+    // A clock behind the route's, so the marker reads as three missed polls
+    // old. This is the state that used to answer "terminal opening on the
+    // host" while no window could ever arrive.
+    const past = TerminalRequestLog.open(join(dir, 'terminal-requests.jsonl'), {
+      now: () => Date.now() - LAUNCHER_STALE_MS - 5_000,
+    });
+    await past.recordPoll(0);
+    const out = await call(
+      daemonWith(() => ENDPOINT),
+      { sessionId: SESSION },
+    );
+    expect(out.body?.launcherState).toBe('stale');
+    expect((out.body?.launcherSeenMsAgo as number) >= LAUNCHER_STALE_MS).toBe(
+      true,
+    );
+  });
+
+  it('still answers 202 with the request when liveness cannot be read', async () => {
+    // Liveness is reporting. A host that cannot read the marker still has to be
+    // able to queue its terminal.
+    await writeFile(join(dir, 'terminal-launcher-heartbeat.json'), '{oops', {
+      encoding: 'utf8',
+    });
+    const out = await call(
+      daemonWith(() => ENDPOINT),
+      { sessionId: SESSION },
+    );
+    expect(out.status).toBe(202);
+    expect(out.body?.launcherState).toBe('unreadable');
+    expect(await log.readAll()).toHaveLength(1);
   });
 
   it('audits the session and request id without path or token', async () => {
