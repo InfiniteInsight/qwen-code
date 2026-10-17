@@ -6050,9 +6050,31 @@
           });
           if (res.status === 202) {
             setStatus('terminal opening on the host…');
+            return;
           }
+          // Every other outcome is named. #49 asked for best-effort, and it
+          // stays best-effort in the sense that matters: a host with no
+          // launcher must never block a chat. It was never meant to mean
+          // silent. Only 202 produced a note before this, so a 409/501/404 or a
+          // dead network left no trace and the reader could not tell "no
+          // launcher is running" from "nothing was ever asked for".
+          const why =
+            res.status === 501
+              ? 'this gateway cannot open host terminals'
+              : res.status === 409
+                ? 'no credentials for this session on the host'
+                : res.status === 404
+                  ? 'the host does not know this session'
+                  : res.status === 400
+                    ? 'the host rejected the terminal request'
+                    : 'the host refused the terminal request (' +
+                      res.status +
+                      ')';
+          setStatus('no terminal on the host: ' + why);
         } catch (e) {
-          // Ignored: nothing here should interrupt a working conversation.
+          // Still cannot interrupt a working conversation, but it is said: this
+          // is the gateway being unreachable, not the feature declining.
+          setStatus('no terminal on the host: the gateway did not answer');
         }
       }
 
