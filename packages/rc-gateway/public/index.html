@@ -2229,6 +2229,11 @@
       // new watch starts (clearTranscript).
       let crashBanner = null; // banner element, created lazily
       let recoveredNoteTimer = null; // auto-fade timer for the recovered note
+      // #70: set only while a prompt request is in flight; turn_complete and
+      // the send watchdog call it so the request cannot hold the send button
+      // open past the end of the turn. Declared here rather than beside the
+      // send handler because the frame handler above it reads it.
+      let abandonPendingSend = null;
       function ensureCrashBanner() {
         if (!crashBanner) {
           crashBanner = document.createElement('div');
@@ -4355,6 +4360,12 @@
             // by design (fork them from the Sessions/fork panels instead).
             finishThought();
             hideProcessing();
+            // #70: this turn is over, so the send button must come back now.
+            // The prompt request awaits the whole turn and may never settle,
+            // and its own finally is the only thing that re-enables the
+            // button — so abandon it here rather than leaving the button
+            // hostage to a request whose reason for existing has ended.
+            if (abandonPendingSend) abandonPendingSend('turn');
             // A turn can't end while an Agent tool is still in flight —
             // settle any indicator whose terminal update never arrived.
             transcriptModel.settleAllSubagents();
@@ -5430,11 +5441,32 @@
       };
       $('unsent-dismiss').onclick = clearUnsent;
 
+      // #70. POST /session/:id/prompt is long-lived by design (it awaits the
+      // whole turn and returns its stopReason) and this request carried no
+      // timeout, so a connection that neither resolved nor rejected left the
+      // send button disabled until a page refresh. The request is bounded two
+      // ways: the watchdog abandons a request that cannot settle, and
+      // turn_complete abandons one whose turn is provably over. Both go through
+      // one channel so the await always settles and the finally below is the
+      // only place that returns the button.
+      const SEND_HOLD_LIMIT_MS = 3 * 60 * 1000;
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
         if (!watchedSessionId) return setStatus('watch a session first');
         $('send').disabled = true;
+        const sendAbort = new AbortController();
+        let sendAbandoned = null;
+        const abandon = (why) => {
+          sendAbandoned = why;
+          sendAbort.abort();
+        };
+        abandonPendingSend = abandon;
+        const sendWatchdog = setTimeout(
+          () => abandonPendingSend && abandonPendingSend('watchdog'),
+          SEND_HOLD_LIMIT_MS,
+        );
         setStatus('sending…');
         // Cleared on dispatch, not on the response. POST /session/:id/prompt is
         // long-lived by design (it awaits the whole turn and returns its
@@ -5455,6 +5487,7 @@
             '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
             {
               method: 'POST',
+              signal: sendAbort.signal,
               headers: {
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
@@ -5490,13 +5523,33 @@
             }
           }
         } catch (e) {
-          // issue #38: the common network failure here is a backgrounded
-          // app's socket dying mid-turn — the daemon keeps running the turn,
-          // so this is not a failed send; the reply streams in when the
-          // watch reconnects (visibilitychange).
-          setStatus('connection dropped — the reply may still be streaming');
+          if (sendAbandoned === 'watchdog') {
+            // Abandoned here rather than lost by the network, and said so: the
+            // turn may still be running, so this is not reported as a failed
+            // send, but the button is back and the next prompt is the user's
+            // call.
+            setStatus(
+              'send still running after 3 min — you can send again; a second prompt may be refused until this turn ends',
+            );
+          } else if (sendAbandoned === 'turn') {
+            setStatus('sent: turn ended');
+          } else {
+            // issue #38: the common network failure here is a backgrounded
+            // app's socket dying mid-turn — the daemon keeps running the turn,
+            // so this is not a failed send; the reply streams in when the
+            // watch reconnects (visibilitychange).
+            setStatus('connection dropped — the reply may still be streaming');
+          }
         } finally {
-          $('send').disabled = false;
+          clearTimeout(sendWatchdog);
+          // Only the send still holding the registration may touch the button.
+          // A turn_complete-abandoned send can settle after the user has
+          // already sent again, and letting it re-enable would free the button
+          // mid-turn of a send that is genuinely still running.
+          if (abandonPendingSend === abandon) {
+            abandonPendingSend = null;
+            $('send').disabled = false;
+          }
         }
         if (refused) {
           echoed.notSent = refused;
