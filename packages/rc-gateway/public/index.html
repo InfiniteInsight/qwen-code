@@ -355,7 +355,11 @@
             ></span>
           </div>
         </details>
-        <details id="dir-picker" class="ops-collapse" open>
+        <!-- Collapsed by default, like every other ops-collapse on this page.
+           Its body is a directory form that is only wanted before a
+           conversation exists, and open it measured 947px tall, which pushed
+           the transcript entirely below the fold. -->
+        <details id="dir-picker" class="ops-collapse">
           <summary>
             <strong>New conversation</strong
             ><button
