@@ -3215,6 +3215,83 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
+    // The reason the viewer read as "my conversation is missing": with the
+    // New conversation panel open by default it measured 947px, which pushed
+    // the transcript entirely below the fold at a 720px viewport. This guards
+    // that the conversation is on screen the moment the page loads, with no
+    // scrolling, so it goes red if a panel is made default-open again or if
+    // enough chrome is added above the transcript to bury it.
+    name: 'P25 the transcript is on screen at load',
+    frames: () => {
+      const f = new Frames();
+      const plan = (entries: Array<[string, string]>) =>
+        f.upd({
+          sessionUpdate: 'plan',
+          entries: entries.map(([content, status]) => ({
+            content,
+            priority: 'medium',
+            status,
+          })),
+        });
+      f.user('do the thing');
+      plan([
+        ['read the code', 'pending'],
+        ['change it', 'pending'],
+        ['test it', 'pending'],
+      ]);
+      plan([
+        ['read the code', 'completed'],
+        ['change it', 'in_progress'],
+        ['test it', 'pending'],
+        ['ship it', 'pending'],
+      ]);
+      for (let k = 0; k < 40; k++) {
+        f.asst(`turn ${k}: lorem ipsum dolor sit amet consectetur elit. `);
+      }
+      return f.done().list;
+    },
+    run: async ({ page, viewer }) => {
+      // The height the bug was reported at. Deliberately not the harness
+      // default: at a tall viewport the transcript clears the fold whatever
+      // the panels do, so a short one is the only height that can go red.
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 44, 30_000);
+      await settlePage(page);
+      const g = await page.evaluate(() => {
+        const tr = document.getElementById('transcript') as HTMLDivElement;
+        const dp = document.getElementById(
+          'dir-picker',
+        ) as HTMLDetailsElement;
+        const tb = tr.getBoundingClientRect();
+        return {
+          dirPickerOpen: dp.open,
+          docHeight: document.documentElement.scrollHeight,
+          scrollY: Math.round(scrollY),
+          transcript: [Math.round(tb.top), Math.round(tb.bottom)],
+          transcriptOnScreen:
+            tb.top < innerHeight && tb.bottom > 0 && tr.offsetHeight > 0,
+        };
+      });
+      // Nothing here scrolls the page: the property is about load state, so a
+      // scrollY that is not zero would mean the assertion below was measured
+      // after something had already moved the document.
+      expect(g.scrollY === 0, `the page had already scrolled to ${g.scrollY}`);
+      expect(
+        !g.dirPickerOpen,
+        'the New conversation panel is open by default again, which is what ' +
+          'pushed the transcript below the fold',
+      );
+      expect(
+        g.transcriptOnScreen,
+        `the transcript is below the fold at load, viewport 720 and it sits ` +
+          `at ${JSON.stringify(g.transcript)} of a ${g.docHeight}px document`,
+      );
+      return `transcript ${JSON.stringify(g.transcript)} visible in a 720px ` +
+        `viewport, document ${g.docHeight}px, panel collapsed`;
+    },
+  },
+  {
     name: 'P18 a session with no plan shows no strip',
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
