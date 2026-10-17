@@ -29,6 +29,13 @@
         font: inherit;
         cursor: pointer;
       }
+      /* Most of this page signals a request in flight by disabling the button
+         that started it, so a disabled button that still looks pressable reads
+         as a broken control rather than as a busy one. */
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
       #status {
         min-height: 1.2em;
         color: #444;
@@ -790,8 +797,8 @@
         </div>
         <!-- The run's to-do list, kept outside the transcript so it is still on
              screen while the reader scrolls (#65). The transcript row is the
-             history; this is "where is the run up to". The page scrolls as a
-             document, so the strip is pinned to the bottom of the viewport
+             history; this is "where is the run up to". The transcript scrolls
+             in its own box, so this is pinned to the bottom of the viewport
              while the session is on screen and settles above the composer at
              the end of the page. With no to-do list it does not go quiet: it
              says that in words (#72), because a strip hidden by default and a
@@ -5651,6 +5658,10 @@
         if (!prompt) return setStatus('empty prompt');
         if (!watchedSessionId) return setStatus('watch a session first');
         $('send').disabled = true;
+        // The reason line goes to #status at the top of the page, which is off
+        // screen from the composer, so the held button carries it too.
+        const sendLabel = $('send').textContent;
+        $('send').textContent = 'waiting…';
         const sendAbort = new AbortController();
         let sendAbandoned = null;
         const abandon = (why) => {
@@ -5746,6 +5757,7 @@
           if (abandonPendingSend === abandon) {
             abandonPendingSend = null;
             $('send').disabled = false;
+            $('send').textContent = sendLabel;
           }
         }
         if (refused) {
