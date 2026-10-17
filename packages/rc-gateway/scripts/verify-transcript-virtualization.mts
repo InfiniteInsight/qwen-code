@@ -1944,6 +1944,8 @@ declare let lastSeenEventId: number | null;
 // send watchdog and turn_complete both fire it, so a scenario can drive the
 // release without waiting out the watchdog's 3-minute timer.
 declare let abandonPendingSend: ((why: string) => void) | null;
+declare const requestHostTerminal: (id: string) => Promise<void>;
+declare const setStatus: (m: string) => void;
 declare const renderFrame: (ev: unknown) => void;
 declare const addUser: (text: string) => void;
 declare const clearTranscript: () => void;
@@ -3320,6 +3322,70 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `echo carries a not-sent mark: ${JSON.stringify(st.marks)}`,
       );
       return 'button back, reason stated, no false not-sent claim';
+    },
+  },
+  {
+    // #69's browser half. A host-terminal request is best-effort so that a
+    // machine with no launcher cannot block a chat, but it was silent as well
+    // as best-effort: only 202 wrote a status and the catch was empty, so every
+    // other outcome left no trace. Best-effort must mean non-blocking, not
+    // unreported.
+    name: 'P21 a refused host-terminal request says why',
+    before: async (page) => {
+      await page.route('**/rc/terminals', (route) =>
+        route.fulfill({
+          status: 501,
+          contentType: 'application/json',
+          body: '{"error":"This gateway cannot open host terminals","code":"host_terminals_unsupported"}',
+        }),
+      );
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        setStatus('sent: stop');
+        return requestHostTerminal('sess-1');
+      });
+      // Waited for rather than read straight back: the regression this guards
+      // is silence, and a silent path would leave the previous status in place
+      // for an immediate read to pass on. The predicate is written out inline
+      // because it is serialised into the page, where no outer binding exists.
+      await page.waitForFunction(
+        () =>
+          (
+            document.getElementById('status') as HTMLDivElement
+          ).textContent?.includes('no terminal on the host') === true,
+        null,
+        { timeout: 8_000 },
+      );
+      const refused = await page.evaluate(
+        () => document.getElementById('status')!.textContent ?? '',
+      );
+      expect(
+        refused.includes('cannot open host terminals'),
+        `the 501 reason was not carried: ${JSON.stringify(refused)}`,
+      );
+      // And a request that never got an answer at all: the gateway being
+      // unreachable is a different fact from the feature declining.
+      await page.unrouteAll();
+      await page.route('**/rc/terminals', (route) => route.abort());
+      await page.evaluate(() => {
+        setStatus('sent: stop');
+        return requestHostTerminal('sess-1');
+      });
+      await page.waitForFunction(
+        () =>
+          (
+            document.getElementById('status') as HTMLDivElement
+          ).textContent?.includes('did not answer') === true,
+        null,
+        { timeout: 8_000 },
+      );
+      const dead = await page.evaluate(
+        () => document.getElementById('status')!.textContent ?? '',
+      );
+      return `501 -> ${JSON.stringify(refused)}; aborted -> ${JSON.stringify(dead)}`;
     },
   },
   {
