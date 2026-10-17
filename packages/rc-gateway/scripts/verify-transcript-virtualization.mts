@@ -3251,13 +3251,35 @@ const PAGE_SCENARIOS: PageScenario[] = [
           'hold the turn';
         void (document.getElementById('send') as HTMLButtonElement).onclick!();
       });
-      const held = await page.evaluate(() => ({
-        disabled: (document.getElementById('send') as HTMLButtonElement)
-          .disabled,
-        inflight: abandonPendingSend != null,
-      }));
+      const held = await page.evaluate(() => {
+        const btn = document.getElementById('send') as HTMLButtonElement;
+        const cs = getComputedStyle(btn);
+        return {
+          disabled: btn.disabled,
+          inflight: abandonPendingSend != null,
+          label: btn.textContent ?? '',
+          cursor: cs.cursor,
+          opacity: Number.parseFloat(cs.opacity),
+        };
+      });
       expect(held.disabled, 'the send button was never held');
       expect(held.inflight, 'no send was registered as in flight');
+      // A held button that still looks pressable is the reported fault: a press
+      // on a disabled button is swallowed with no trace at all, so being held
+      // has to be visible on the button itself. The reason line goes to #status
+      // at the top of the page, which is off screen from the composer.
+      expect(
+        held.cursor === 'not-allowed',
+        `the held button still looks pressable, cursor: ${held.cursor}`,
+      );
+      expect(
+        held.opacity < 1,
+        `the held button is undimmed, opacity: ${held.opacity}`,
+      );
+      expect(
+        held.label.includes('waiting'),
+        `the held button says nothing about being held: ${JSON.stringify(held.label)}`,
+      );
       // The turn ends over the watch while the POST is still hanging.
       await page.evaluate(() => {
         renderFrame({ type: 'turn_complete', data: {} });
