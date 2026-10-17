@@ -4363,7 +4363,7 @@
             // #70: this turn is over, so the send button must come back now.
             // The prompt request awaits the whole turn and may never settle,
             // and its own finally is the only thing that re-enables the
-            // button — so abandon it here rather than leaving the button
+            // button, so abandon it here rather than leaving the button
             // hostage to a request whose reason for existing has ended.
             if (abandonPendingSend) abandonPendingSend('turn');
             // A turn can't end while an Agent tool is still in flight —
@@ -5529,16 +5529,16 @@
             // send, but the button is back and the next prompt is the user's
             // call.
             setStatus(
-              'send still running after 3 min — you can send again; a second prompt may be refused until this turn ends',
+              'send still running after 3 min, you can send again; a second prompt may be refused until this turn ends',
             );
           } else if (sendAbandoned === 'turn') {
             setStatus('sent: turn ended');
           } else {
             // issue #38: the common network failure here is a backgrounded
-            // app's socket dying mid-turn — the daemon keeps running the turn,
+            // app's socket dying mid-turn, the daemon keeps running the turn,
             // so this is not a failed send; the reply streams in when the
             // watch reconnects (visibilitychange).
-            setStatus('connection dropped — the reply may still be streaming');
+            setStatus('connection dropped, the reply may still be streaming');
           }
         } finally {
           clearTimeout(sendWatchdog);
