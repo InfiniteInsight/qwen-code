@@ -1940,6 +1940,10 @@ declare const startWatch: (
   title?: string,
 ) => Promise<void>;
 declare let lastSeenEventId: number | null;
+// #70: the page's one channel for abandoning an in-flight prompt request. The
+// send watchdog and turn_complete both fire it, so a scenario can drive the
+// release without waiting out the watchdog's 3-minute timer.
+declare let abandonPendingSend: ((why: string) => void) | null;
 declare const renderFrame: (ev: unknown) => void;
 declare const addUser: (text: string) => void;
 declare const clearTranscript: () => void;
@@ -3215,6 +3219,107 @@ const PAGE_SCENARIOS: PageScenario[] = [
       expect(s.hidden, 'the strip is shown for a session that never planned');
       expect(s.rows === 0, `${s.rows} to-do rows without any plan frame`);
       return 'no plan frame, no strip and no row';
+    },
+  },
+  {
+    // #70. The prompt POST awaits the whole turn, so the send button was held
+    // by that request: one that never settled left the button disabled until a
+    // page refresh. The turn ending is the real release signal, so the button
+    // must come back on turn_complete with the request still open. The 3 s
+    // bound below is what makes this a test rather than a restatement of
+    // P14: the stub holds this request for 12 s, so a button that is only
+    // released by the request cannot come back inside it.
+    name: 'P19 turn_complete returns the send button mid-request',
+    stub: { promptDelayMs: 12_000 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'hold the turn';
+        void (document.getElementById('send') as HTMLButtonElement).onclick!();
+      });
+      const held = await page.evaluate(() => ({
+        disabled: (document.getElementById('send') as HTMLButtonElement)
+          .disabled,
+        inflight: abandonPendingSend != null,
+      }));
+      expect(held.disabled, 'the send button was never held');
+      expect(held.inflight, 'no send was registered as in flight');
+      // The turn ends over the watch while the POST is still hanging.
+      await page.evaluate(() => {
+        renderFrame({ type: 'turn_complete', data: {} });
+      });
+      await page.waitForFunction(
+        () => !(document.getElementById('send') as HTMLButtonElement).disabled,
+        null,
+        { timeout: 3_000 },
+      );
+      const after = await page.evaluate(() => ({
+        status: document.getElementById('status')!.textContent ?? '',
+        inflight: abandonPendingSend != null,
+      }));
+      expect(
+        after.status.includes('turn ended'),
+        `the release said nothing about itself: ${JSON.stringify(after)}`,
+      );
+      expect(!after.inflight, 'the abandoned send is still registered');
+      return 'button back on turn_complete, request still open';
+    },
+  },
+  {
+    // #70. The watchdog is the same release channel, fired by a timer rather
+    // than by a frame. Its timer is 3 minutes and is not the thing under test,
+    // so this drives the channel exactly as the timer callback does and pins
+    // the outcome: the button returns, the reason is stated, and a send of
+    // unknown outcome is NOT reported as unsent, because the turn may still be
+    // running and claiming otherwise would be its own false statement.
+    name: 'P20 abandoning a hung send reports it without a false not-sent',
+    stub: { promptDelayMs: 12_000 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'into a dead connection';
+        void (document.getElementById('send') as HTMLButtonElement).onclick!();
+      });
+      const held = await page.evaluate(() => ({
+        disabled: (document.getElementById('send') as HTMLButtonElement)
+          .disabled,
+        inflight: abandonPendingSend != null,
+      }));
+      expect(held.disabled, 'the send button was never held');
+      expect(held.inflight, 'no send was registered as in flight');
+      await page.evaluate(() => {
+        abandonPendingSend?.('watchdog');
+      });
+      await page.waitForFunction(
+        () => !(document.getElementById('send') as HTMLButtonElement).disabled,
+        null,
+        { timeout: 3_000 },
+      );
+      const st = await page.evaluate(() => ({
+        status: document.getElementById('status')!.textContent ?? '',
+        unsentHidden: (document.getElementById('unsent') as HTMLDivElement)
+          .hidden,
+        marks: transcriptModel.items
+          .filter((i) => i.kind === 'user')
+          .map((i) => (i as { notSent?: string }).notSent ?? ''),
+      }));
+      expect(
+        st.status.includes('still running'),
+        `the abandon was silent: ${JSON.stringify(st)}`,
+      );
+      expect(
+        st.unsentHidden,
+        'a send of unknown outcome was reported as unsent',
+      );
+      expect(
+        st.marks.length === 1 && st.marks[0] === '',
+        `echo carries a not-sent mark: ${JSON.stringify(st.marks)}`,
+      );
+      return 'button back, reason stated, no false not-sent claim';
     },
   },
   {
