@@ -18,7 +18,7 @@
  * gateway appends requests, launcher appends its own results elsewhere.
  */
 
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -51,17 +51,45 @@ export interface TerminalRequestLogOptions {
 }
 
 /**
+ * Whether a host terminal has any chance of appearing right now, read from the
+ * launcher's own poll traffic. A request route answers 202 for "written down",
+ * which says nothing about anyone being there to act on it, so this is what
+ * turns that 202 into a statement a caller can pass on honestly.
+ */
+export interface LauncherLiveness {
+  /**
+   * - `live` a poll landed inside the stale window, so the request will be taken
+   * - `stale` polls were arriving and stopped, so the launcher went away
+   * - `never` no marker exists, so no launcher has run on this host
+   * - `unreadable` a marker exists but holds nothing usable
+   *
+   * `stale` and `never` are kept apart because the next step differs: one is a
+   * launcher to restart, the other is a feature never set up on this machine.
+   */
+  state: 'live' | 'stale' | 'never' | 'unreadable';
+  /** Ms since the last poll, or null when there is nothing to measure from. */
+  seenMsAgo: number | null;
+}
+
+/** Base name of the launcher's liveness marker, kept beside the request log. */
+const LAUNCHER_HEARTBEAT_BASENAME = 'terminal-launcher-heartbeat.json';
+
+/**
  * Append-only JSONL request log. Sole writer is the gateway process; the
  * launcher only reads it and keeps its own cursor, so concurrent writes are
  * impossible by construction. A missing file reads as empty (never created
  * until the first request, so a host that never uses this gains no file).
  */
 export class TerminalRequestLog {
+  private readonly heartbeatPath: string;
+
   private constructor(
     private readonly filePath: string,
     private readonly now: () => number,
     private readonly newId: () => string,
-  ) {}
+  ) {
+    this.heartbeatPath = join(dirname(filePath), LAUNCHER_HEARTBEAT_BASENAME);
+  }
 
   static open(
     filePath: string,
@@ -117,6 +145,52 @@ export class TerminalRequestLog {
   async since(cursor: number): Promise<TerminalRequest[]> {
     const all = await this.readAll();
     return all.slice(Math.max(0, cursor));
+  }
+
+  /**
+   * Record that the launcher polled the request log. The poll IS the heartbeat:
+   * the launcher already drives this command on its own interval, so liveness
+   * costs no new traffic and no new process to keep alive.
+   *
+   * The marker is a separate file because the request log's one-writer rule is
+   * what makes it lock free. That rule survives here: this file's only writer is
+   * the poll process, and the gateway still writes nothing but the request log.
+   * `writeFile` rather than append, so the file stays one small object instead
+   * of growing without limit on a host that polls every few seconds forever.
+   */
+  async recordPoll(cursor: number): Promise<void> {
+    await mkdir(dirname(this.heartbeatPath), { recursive: true });
+    await writeFile(
+      this.heartbeatPath,
+      JSON.stringify({ at: this.now(), cursor }),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+  }
+
+  /** Read the marker and judge it against `staleMs`. See LauncherLiveness. */
+  async launcherLiveness(staleMs: number): Promise<LauncherLiveness> {
+    let raw: string;
+    try {
+      raw = await readFile(this.heartbeatPath, 'utf8');
+    } catch {
+      return { state: 'never', seenMsAgo: null };
+    }
+    const at = heartbeatAt(raw);
+    if (at === null) return { state: 'unreadable', seenMsAgo: null };
+    const ago = this.now() - at;
+    return { state: ago <= staleMs ? 'live' : 'stale', seenMsAgo: ago };
+  }
+}
+
+/** Pull the timestamp out of a heartbeat, or null when it carries none. */
+function heartbeatAt(raw: string): number | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const at = (parsed as Record<string, unknown>)['at'];
+    return typeof at === 'number' && Number.isFinite(at) ? at : null;
+  } catch {
+    return null;
   }
 }
 

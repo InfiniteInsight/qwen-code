@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -187,5 +187,93 @@ describe('defaultTerminalLogPath', () => {
     expect(defaultTerminalLogPath('/home/evan')).toBe(
       '/home/evan/.qwen/rc/terminal-requests.jsonl',
     );
+  });
+});
+
+describe('launcher liveness (#69)', () => {
+  const marker = () => join(dir, 'terminal-launcher-heartbeat.json');
+  const clock = (t: { at: number }) =>
+    TerminalRequestLog.open(file, { now: () => t.at });
+  const STALE = 12_000;
+
+  it('says never rather than guessing live when nothing has polled', async () => {
+    const log = TerminalRequestLog.open(file);
+    expect(await log.launcherLiveness(STALE)).toEqual({
+      state: 'never',
+      seenMsAgo: null,
+    });
+  });
+
+  it('reports live inside the window and how long ago', async () => {
+    const t = { at: 100_000 };
+    const log = clock(t);
+    await log.recordPoll(7);
+    t.at = 105_000;
+    expect(await log.launcherLiveness(STALE)).toEqual({
+      state: 'live',
+      seenMsAgo: 5_000,
+    });
+  });
+
+  it('reports stale once the window has passed', async () => {
+    const t = { at: 100_000 };
+    const log = clock(t);
+    await log.recordPoll(7);
+    t.at = 100_000 + STALE + 1;
+    const l = await log.launcherLiveness(STALE);
+    expect(l.state).toBe('stale');
+    expect(l.seenMsAgo).toBe(STALE + 1);
+  });
+
+  it('keeps the boundary itself inside the window', async () => {
+    const t = { at: 100_000 };
+    const log = clock(t);
+    await log.recordPoll(1);
+    t.at = 100_000 + STALE;
+    expect((await log.launcherLiveness(STALE)).state).toBe('live');
+  });
+
+  it('reports an unreadable marker as itself, not as never and not as live', async () => {
+    // Both of those would be a wrong answer with a different next step: "never"
+    // sends the reader to set the feature up, and "live" promises a window.
+    await writeFile(marker(), 'not json at all', { encoding: 'utf8' });
+    expect(await TerminalRequestLog.open(file).launcherLiveness(STALE)).toEqual(
+      { state: 'unreadable', seenMsAgo: null },
+    );
+    await writeFile(marker(), JSON.stringify({ at: '100' }), {
+      encoding: 'utf8',
+    });
+    expect(
+      (await TerminalRequestLog.open(file).launcherLiveness(STALE)).state,
+    ).toBe('unreadable');
+  });
+
+  it('rewrites the marker so a host polling forever does not grow a file', async () => {
+    const t = { at: 100_000 };
+    const log = clock(t);
+    for (let i = 0; i < 5; i++) {
+      t.at += 1_000;
+      await log.recordPoll(i);
+    }
+    const raw = await readFile(marker(), 'utf8');
+    // The last write wins outright rather than appending, so the file holds one
+    // object no matter how long the host has been up.
+    expect(JSON.parse(raw)).toEqual({ at: 105_000, cursor: 4 });
+    expect(raw.split('\n')).toHaveLength(1);
+  });
+
+  it('leaves the request log alone, so its one-writer rule holds', async () => {
+    // The lock freeness of the request log rests on the gateway being its only
+    // writer. The heartbeat is the launcher's traffic, so it belongs in its own
+    // file; if it ever shared the log, that invariant would be gone.
+    const log = TerminalRequestLog.open(file);
+    await log.recordPoll(3);
+    expect(await log.readAll()).toEqual([]);
+    expect(await log.since(0)).toEqual([]);
+  });
+
+  it('keeps the marker owner only, matching the request log', async () => {
+    await TerminalRequestLog.open(file).recordPoll(1);
+    expect(((await stat(marker())).mode & 0o777).toString(8)).toBe('600');
   });
 });

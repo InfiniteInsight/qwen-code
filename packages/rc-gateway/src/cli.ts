@@ -2020,6 +2020,17 @@ if (process.argv[2] === 'serve') {
     const requests = all.slice(
       Number.isFinite(after) && after > 0 ? Math.floor(after) : 0,
     );
+    // This invocation is the launcher's heartbeat, so it is stamped here rather
+    // than by anything the launcher itself has to remember to send. Best
+    // effort on purpose: a host whose marker cannot be written still has to be
+    // able to open its terminals, so liveness reporting degrades instead of the
+    // feature failing.
+    try {
+      await log.recordPoll(all.length);
+    } catch {
+      // eslint-disable-next-line no-console
+      console.error('terminals: could not record the poll heartbeat');
+    }
     // eslint-disable-next-line no-console
     console.log(JSON.stringify({ cursor: all.length, requests }));
     process.exit(0);
