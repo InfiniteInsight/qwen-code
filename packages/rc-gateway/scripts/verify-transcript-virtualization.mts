@@ -1959,6 +1959,10 @@ declare let watchedSessionId: string | null;
 declare let curDirPath: string | null;
 declare let pastConvosCwd: string | null;
 declare let pastConvos: unknown[];
+// #70. The outbox and its drain, so P29 can drive the drain directly rather
+// than needing a whole turn to end on cue.
+declare let outbox: string[];
+declare const drainOutbox: (attempt: number) => void;
 declare const clearTranscript: () => void;
 declare const showProcessing: () => void;
 declare const renderTool: (u: Record<string, unknown>) => void;
@@ -4131,6 +4135,133 @@ const PAGE_SCENARIOS: PageScenario[] = [
       );
 
       return `load path filled ${JSON.stringify(fed.dir)} on its own (${fed.count} conversations found), list matches the folder on screen, control drawn by a list arriving rather than by the watch`;
+    },
+  },
+  {
+    // #70. "I should be able to queue messages whenever." Send is held for the
+    // whole turn on purpose, two shipped scenarios assert that hold, so the
+    // ability to queue arrived as its own control. This guards the control and,
+    // more importantly, the two ways the drain could take something from the
+    // reader: sending over a draft the send path would clear, and reporting a
+    // queue as waiting when the button is not actually free.
+    name: 'P29 a message can be queued during a turn and goes when the turn ends',
+    stub: { promptDelayMs: 2_500 },
+    run: async ({ page, viewer }) => {
+      const here = viewer.sessionId;
+      const state = () =>
+        page.evaluate(() => ({
+          held: (document.getElementById('send') as HTMLButtonElement).disabled,
+          queueable: !document.getElementById('queue')!.hidden,
+          strip:
+            !document.getElementById('queued')!.hidden &&
+            document.getElementById('queued')!.offsetHeight > 0,
+          waiting:
+            document.getElementById('queued-text')!.textContent ?? '',
+          draft: (document.getElementById('prompt') as HTMLTextAreaElement).value,
+          queued: outbox.slice(),
+          stored: localStorage.getItem('qwen-rc:outbox:' + watchedSessionId),
+        }));
+
+      await watch(page, here);
+      await waitForFrame(page, 1, 30_000);
+
+      // Quiet when there is nothing to do, the same rule the to-do strip and the
+      // conversation switcher follow. A Queue button outside a turn is a Send
+      // button that does not send.
+      const calm = await state();
+      expect(
+        !calm.queueable && !calm.strip,
+        `with no turn running the composer offered a queue it does not need (${JSON.stringify({ q: calm.queueable, s: calm.strip })})`,
+      );
+
+      // During a turn the way to queue is on screen. This is the whole of the
+      // ask: the user should not have to refresh to make progress.
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'the turn is running';
+        (document.getElementById('send') as HTMLButtonElement).click!();
+      });
+      const held = await state();
+      expect(
+        held.held,
+        'the send button was not held during the turn, so this scenario is not testing what it is written to test',
+      );
+      expect(
+        held.queueable,
+        'Send is held for the whole turn and nothing on screen offered to queue during it, which is the #70 complaint',
+      );
+
+      // Capture: the text leaves the composer and is shown as waiting. Shown,
+      // not held in a variable, because text the reader cannot see reads as lost.
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'queued while busy';
+        (document.getElementById('queue') as HTMLButtonElement).click!();
+      });
+      const queued = await state();
+      expect(
+        queued.draft.trim() === '',
+        `queueing left the text in the composer, so the next thought would be sent on top of it (${JSON.stringify(queued.draft)})`,
+      );
+      expect(
+        queued.strip && queued.waiting.includes('queued while busy'),
+        `the queued message is not shown waiting (${JSON.stringify({ s: queued.strip, w: queued.waiting })})`,
+      );
+      expect(
+        queued.queued.length === 1 && String(queued.stored ?? '').includes('queued while busy'),
+        `the queued message is not held across a reload (${JSON.stringify({ q: queued.queued, st: queued.stored })})`,
+      );
+
+      // The drain must not take a draft. The send path clears the composer at
+      // dispatch, so dispatching over text being typed would remove it with no
+      // way to get it back.
+      //
+      // This has to be reached with Send free, and that is the whole of the
+      // point. Drained while the turn still holds the button, the drain stops at
+      // its own wait-for-the-button branch and never gets to the branch the
+      // guard is the only thing protecting, so the assertion reads green with the
+      // guard deleted. Mutation-proving this found exactly that.
+      await page.waitForFunction(() => abandonPendingSend === null);
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value =
+          'a draft being typed';
+        drainOutbox(0);
+      });
+      const overDraft = await state();
+      expect(
+        overDraft.draft.includes('a draft being typed'),
+        `the drain dispatched over a draft and the send path cleared it (${JSON.stringify(overDraft.draft)})`,
+      );
+      expect(
+        overDraft.queued.length === 1,
+        `the drain dropped the queued message while refusing to send over a draft (${JSON.stringify(overDraft.queued)})`,
+      );
+
+      // The composer is free now, so the same drain goes.
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value = '';
+        drainOutbox(0);
+      });
+      const gone = await state();
+      expect(
+        gone.queued.length === 0 && gone.stored === null,
+        `the drain left the message queued with the composer free (${JSON.stringify({ q: gone.queued, st: gone.stored })})`,
+      );
+
+      // Counted on the model, not the DOM, and it is the real send path that put
+      // it there, since the drain presses Send rather than copying the request.
+      const sent = await page.evaluate(() =>
+        transcriptModel.items
+          .map((i) => i.text ?? '')
+          .join('\n')
+          .includes('queued while busy'),
+      );
+      expect(
+        sent,
+        'the drain emptied the queue without the text reaching the transcript, so the message was thrown away rather than sent',
+      );
+
+      return 'quiet outside a turn, on screen during one, captured and shown and stored, refuses to send over a draft, goes through Send when free';
     },
   },
   {
