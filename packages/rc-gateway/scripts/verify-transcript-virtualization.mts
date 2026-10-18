@@ -3675,12 +3675,14 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    // #72. The strip used to have one rendering for two states that mean
-    // opposite things: "this session has no plan" and "the plan frame went
-    // wrong". A reader could not tell a working feature from a missing one, so
-    // the absence is now stated in words, and the fault has its own words.
+    // #72 made the strip narrate its own absence, on the grounds that a hidden
+    // strip and a broken one look alike. Reversed on the reader's instruction:
+    // the strip shows up only once the model has actually put something on it.
+    // The distinction #72 cared about is still answerable, from the raw log
+    // rather than from the page, so this guards both halves, quiet on screen and
+    // counted and worded in the log.
     // Asserted on the real page because the question is what is on screen.
-    name: 'P24 the to-do strip says which absence it is',
+    name: 'P24 the to-do strip stays out until the model puts work on it',
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
@@ -3690,17 +3692,10 @@ const PAGE_SCENARIOS: PageScenario[] = [
       const state = () =>
         page.evaluate(() => {
           const box = document.getElementById('plan') as HTMLDivElement;
-          const empty = document.getElementById(
-            'plan-empty',
-          ) as HTMLDivElement;
           return {
             shown: !box.hidden && box.offsetHeight > 0,
-            note: empty.hidden ? '' : (document.getElementById('plan-empty-note')!.textContent ?? ''),
             rows: (document.getElementById('plan-rows')!.textContent ?? '').trim(),
             count: document.getElementById('plan-count')!.textContent ?? '',
-            dismissHidden: (
-              document.getElementById('plan-empty-dismiss') as HTMLButtonElement
-            ).hidden,
             frames: planFramesSeen,
           };
         });
@@ -3714,50 +3709,36 @@ const PAGE_SCENARIOS: PageScenario[] = [
         });
       });
       // The claim has to wait for the stream to settle. A replay may still be
-      // carrying a plan, and declaring "no to-do list" mid-replay would state
+      // carrying a plan, and asserting "stay out" mid-replay would assert
       // something the next frame proves false.
       const early = await state();
       expect(
         !early.shown,
-        `the strip declared an absence before the stream settled (${JSON.stringify(early)})`,
+        `the strip appeared before the stream settled (${JSON.stringify(early)})`,
       );
 
       await wait(beat + 700);
       const absent = await state();
       expect(
-        absent.shown && absent.note === 'no to-do list for this session',
-        `a session with no plan said nothing, which is the #72 defect (${JSON.stringify(absent)})`,
+        !absent.shown,
+        `a session with no plan put a strip on screen (${JSON.stringify(absent)})`,
       );
-      expect(!absent.dismissHidden, 'the stated absence cannot be dismissed');
-
-      // Dismissing is the answer to the cost of stating it: the fact has been
-      // said once, so the strip gets out of the way.
-      await page.evaluate(() =>
-        (
-          document.getElementById('plan-empty-dismiss') as HTMLButtonElement
-        ).click!(),
-      );
-      const dismissed = await state();
       expect(
-        !dismissed.shown,
-        `dismissing the absence left it on screen (${JSON.stringify(dismissed)})`,
+        absent.frames === 0,
+        `a session with no plan counted plan frames (${absent.frames})`,
       );
 
       // The other meaning. A plan frame arrives and the model keeps nothing
-      // renderable from it, which is a fault and must not borrow the words of
-      // the ordinary empty case.
+      // renderable from it. On screen it is now indistinguishable from the
+      // ordinary absence, by design, so the guard moves to the two places that
+      // can still tell them apart, the per-session count and the raw log.
       await page.evaluate(() =>
         renderSessionUpdate({ sessionUpdate: 'plan', entries: [] }),
       );
       const fault = await state();
       expect(
-        fault.shown &&
-          fault.note === 'a to-do frame arrived but held nothing to show',
-        `a plan frame that produced nothing was not reported as a fault (${JSON.stringify(fault)})`,
-      );
-      expect(
-        fault.dismissHidden,
-        'a fault offered a way to switch the explanation off',
+        !fault.shown,
+        `a plan frame that held nothing still put a strip on screen (${JSON.stringify(fault)})`,
       );
       expect(
         fault.frames === 1,
@@ -3771,8 +3752,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         'the fault left no trace in the raw log, so it is not answerable from the page',
       );
 
-      // A real plan replaces the explanation with the list, and the
-      // dismissed flag must not suppress it.
+      // A real plan is the one thing that earns the strip a place on screen.
       await page.evaluate(() =>
         renderSessionUpdate({
           sessionUpdate: 'plan',
@@ -3784,8 +3764,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
       );
       const list = await state();
       expect(
-        list.shown && list.note === '' && list.rows.includes('change it'),
-        `a real plan did not take the strip back (${JSON.stringify(list)})`,
+        list.shown && list.rows.includes('change it'),
+        `a real plan did not put the strip on screen (${JSON.stringify(list)})`,
       );
       expect(
         list.count === '1 of 2 done',
@@ -3793,14 +3773,14 @@ const PAGE_SCENARIOS: PageScenario[] = [
       );
 
       // The per-session facts go with the session. Without the reset the next
-      // one would open wearing this one's fault.
+      // one would open wearing this one's list.
       await page.evaluate(() => clearTranscript());
       const next = await state();
       expect(
         !next.shown,
-        `the fault carried into a new session (${JSON.stringify(next)})`,
+        `the list carried into a new session (${JSON.stringify(next)})`,
       );
-      return `absence stated, dismissed, fault told apart from it and traced in the log, list regained, nothing inherited`;
+      return `quiet with no plan, quiet and counted and logged on an empty frame, on screen only for a real list, nothing inherited`;
     },
   },
   {
