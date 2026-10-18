@@ -2317,15 +2317,25 @@
       // still open. A running tool row also holds it back, so the two never
       // compete for the same attention.
       const PROCESSING_QUIET_MS = 1200;
-      // Whether a turn is in progress as far as this viewer can tell. Armed
-      // only by a send of ours, deliberately. An incoming user_message_chunk
-      // would be the tempting arm point, since it is how a turn started on the
-      // laptop would become visible here, but replayed history carries no
-      // turn_complete (see that case below), so arming on it would leave an
-      // idle replayed session claiming work without end. A turn started
-      // elsewhere therefore shows no indicator here, which is a gap worth its
-      // own fix rather than a guess at one.
+      // Whether a turn is in progress as far as this viewer can tell. Armed by a
+      // send of ours, and since #73 also by a turn that starts while we watch.
       let turnOpen = false;
+      // Whether the frames arriving right now are replayed history rather than
+      // live ones. This is what makes the second arm point safe to have. Replay
+      // carries no turn_complete (see that case below), so a turn armed from a
+      // replayed frame could never be disarmed, and every idle session with a
+      // prompt history would claim work forever on every attach.
+      //
+      // The daemon replays only for a subscriber that sent a cursor, and it
+      // closes that replay with an id-less replay_complete sentinel even when
+      // the replay held nothing (acp-bridge/src/eventBus.ts:767 and :936). So the
+      // cursor is what asks for a replay, which is why this is armed from the
+      // cursor rather than from the sentinel: a watch with no cursor has no
+      // replay to be inside of, and keying the arm on the sentinel alone would
+      // leave that path uncovered, the trap recorded at bridge.ts:8970. A daemon
+      // too old to send the sentinel leaves this set for a cursor-bearing watch,
+      // and the result is the old behaviour: no indicator, never a false claim.
+      let insideReplay = false;
       // Top-level tool calls whose status is not terminal. Their own rows are
       // the indicator while they run.
       const runningToolIds = new Set();
@@ -4456,6 +4466,16 @@
         if (su === 'user_message_chunk') {
           userTurnsSeen += 1;
           asstThisTurn = false;
+          // #73: the second arm point. A turn started on the laptop reaches this
+          // transcript as one of these frames, and a live one means a prompt was
+          // just accepted, so the work is real and this can say so at once
+          // rather than waiting for the beat. Gated on insideReplay because a
+          // replayed one means nothing of the kind: replay carries no
+          // turn_complete to ever stand it down, so arming there would leave
+          // every idle session with a prompt history claiming work forever on
+          // every attach, which is the failure that made the ungated version
+          // unusable.
+          if (!insideReplay) showProcessing();
           return;
         }
         if (su === 'agent_message_chunk' && text) {
@@ -4634,6 +4654,15 @@
               false,
             );
           }
+          case 'replay_complete':
+            // #73: the end of history. The bus pushes this id-less sentinel at
+            // the close of a cursor replay even when the replay carried nothing
+            // (acp-bridge/src/eventBus.ts:936), so it marks the transition on
+            // every path that replays at all. From here the frames are live, so
+            // the arm above becomes eligible. It carries no id, so it is never
+            // written to the WAL and can never come back as a replayed boundary.
+            insideReplay = false;
+            return;
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // usage_tick, permission_* (rendered as cards)
           default:
@@ -6435,6 +6464,14 @@
               Array.isArray(j.compactedReplay) ? j.compactedReplay : [],
               Array.isArray(j.liveJournal) ? j.liveJournal : [],
             );
+            // These frames are the load response's history, not the stream's, so the
+            // cursor below has not been sent yet and cannot have armed the gate.
+            // They are replay by definition, so the gate is set by hand here.
+            // Without this the historical user records would arm the indicator
+            // and nothing would ever stand it down, which is the exact failure
+            // the gate exists to prevent. startWatch re-derives it from its own
+            // cursor immediately after.
+            insideReplay = true;
             for (const f of replay) renderFrame(f);
             let from = 0;
             if (typeof j.lastEventId === 'number') {
@@ -6660,6 +6697,11 @@
         persistWatch();
         try {
           const headers = { Authorization: 'Bearer ' + token() };
+          // Asking for a cursor is what asks for a replay, so this is the one
+          // place that can say whether the frames about to arrive are history.
+          // No cursor means the daemon replays nothing at all, which is why this
+          // is set from the cursor and not from the sentinel. See insideReplay.
+          insideReplay = fromEventId != null;
           if (fromEventId != null) {
             headers['Last-Event-ID'] = String(fromEventId);
           }
