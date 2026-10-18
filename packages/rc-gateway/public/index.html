@@ -1897,6 +1897,14 @@
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
       const WATCHED_KEY = 'qwen-rc:watched-session';
+      // #50. Which conversation THIS window is on, per-window, so a second window
+      // can hold a second conversation. WATCHED_KEY stays what it was, the last
+      // conversation used anywhere on this origin, because that is what carries a
+      // conversation from the phone to the laptop and what rebuilds the page after
+      // a mobile screen-off discard. The two are read in that order: this window's
+      // own pointer wins when it has one, and a window that has never picked
+      // adopts the shared one, which is exactly what happened before it existed.
+      const WINDOW_KEY = 'qwen-rc:window-session';
 
       // Auth gate (add-rc-viewer-ui-reorg task 1): #auth-gate (pairing only)
       // and #app-body (everything else) are mutually exclusive. Later tasks
@@ -5356,23 +5364,29 @@
 
       function persistWatch() {
         if (watchedSessionId) {
-          localStorage.setItem(
-            WATCHED_KEY,
-            JSON.stringify({
-              sessionId: watchedSessionId,
-              lastEventId: lastSeenEventId,
-              title: watchedSessionTitle,
-              // issue #46: the resync self-heal (re-resume after a bus-epoch
-              // change) needs the workspace cwd, which a fresh page load
-              // otherwise has no source for — persist it with the watch.
-              cwd: watchedSessionCwd,
-            }),
-          );
+          const pointer = JSON.stringify({
+            sessionId: watchedSessionId,
+            lastEventId: lastSeenEventId,
+            title: watchedSessionTitle,
+            // issue #46: the resync self-heal (re-resume after a bus-epoch
+            // change) needs the workspace cwd, which a fresh page load
+            // otherwise has no source for — persist it with the watch.
+            cwd: watchedSessionCwd,
+          });
+          localStorage.setItem(WATCHED_KEY, pointer);
+          // #50: the same record per-window. sessionStorage is not shared between
+          // windows on the origin, so this is what lets a second window keep a
+          // second conversation instead of being moved by whoever wrote last.
+          sessionStorage.setItem(WINDOW_KEY, pointer);
         }
       }
 
       function clearPersistedWatch() {
         localStorage.removeItem(WATCHED_KEY);
+        // #50: Unwatch means this window, so it clears this window's pointer. The
+        // shared one goes with it as it always has, which leaves a second window
+        // on its own conversation rather than dragging it along.
+        sessionStorage.removeItem(WINDOW_KEY);
         lastSeenEventId = null;
         watchedSessionCwd = null;
       }
@@ -7725,8 +7739,16 @@
       // discards the page), reconnect on reload.  The DOM is empty after a
       // full reload, so replay from event 0 to rebuild the transcript.
       // (visibilitychange keeps the DOM intact and tails from lastSeenEventId.)
+      // #50: this window's own pointer is read first, so a reload comes back on the
+      // conversation this window was looking at rather than on whichever window
+      // wrote the shared record last. A window that has never picked has no
+      // per-window record and falls through to the shared one, so the first load
+      // on a new device still lands on the conversation the other device was on,
+      // which is the mirroring that is wanted. Both records hold the same shape,
+      // so one parse serves either.
       function restoreWatchedSession() {
-        const raw = localStorage.getItem(WATCHED_KEY);
+        const raw =
+          sessionStorage.getItem(WINDOW_KEY) || localStorage.getItem(WATCHED_KEY);
         if (!raw) return;
         try {
           const { sessionId, lastEventId, title, cwd } = JSON.parse(raw);

@@ -77,7 +77,13 @@ export async function bootViewer(
     args: ['--enable-precise-memory-info'],
     executablePath: process.env['CHROMIUM_PATH'] || undefined,
   });
-  const page = await browser.newPage();
+  // An explicit context rather than browser.newPage(), which would create an
+  // implicit one that refuses a second page. A scenario that needs two windows
+  // on the same origin takes them from page.context(): they then share
+  // localStorage and do not share sessionStorage, which is the seam #50 turns
+  // on. Separate contexts would not model it, since each gets its own storage.
+  const context = await browser.newContext();
+  const page = await context.newPage();
   await page.addInitScript((t) => {
     localStorage.setItem('qwen-rc-token', t);
   }, token);
