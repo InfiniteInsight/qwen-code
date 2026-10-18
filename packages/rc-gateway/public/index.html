@@ -2564,11 +2564,16 @@
       function renderPlanStrip() {
         const p = transcriptModel.planItem;
         const box = $('plan');
-        if (!p) {
+        // "Has items" means open items, not a plan item. planTally sorts a done
+        // entry into `done` and everything else into `open`, so a plan whose
+        // every entry has finished has open.length === 0 and no row left to
+        // draw. The guard used to test only for the plan item, so that last frame
+        // left a strip standing on screen showing a tally over an empty row.
+        const open = p?.open || [];
+        if (open.length === 0) {
           box.hidden = true;
           return;
         }
-        const open = p.open || [];
         $('plan-count').textContent =
           p.done > 0 ? p.done + ' of ' + p.total + ' done' : p.total + ' open';
         const shown = open.slice(0, PLAN_STRIP_ROWS);
