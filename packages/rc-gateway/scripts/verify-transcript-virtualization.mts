@@ -3787,6 +3787,35 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `strip count ${JSON.stringify(list.count)}`,
       );
 
+      // The case this scenario stopped one frame short of: a plan in which every
+      // entry has finished. planTally sorts a completed entry into `done` and
+      // everything else into `open`, so this leaves the plan item in place with
+      // `open` empty, which is a tally standing over a row with nothing in it.
+      // The strip answers "where is the run up to", and once nothing is
+      // outstanding there is no answer left to give, so the list goes quiet on its
+      // own rather than staying on screen. The frame count is asserted alongside
+      // the absence so this cannot pass by the frame never arriving.
+      await page.evaluate(() =>
+        renderSessionUpdate({
+          sessionUpdate: 'plan',
+          entries: [
+            { content: 'read the code', priority: 'medium', status: 'completed' },
+            { content: 'change it', priority: 'medium', status: 'completed' },
+          ],
+        }),
+      );
+      const finished = await state();
+      expect(
+        finished.frames === list.frames + 1,
+        `the finished plan did not reach the per-session count ` +
+          `(${list.frames} -> ${finished.frames})`,
+      );
+      expect(
+        !finished.shown,
+        `a plan with every item done left the strip on screen ` +
+          `(${JSON.stringify(finished)})`,
+      );
+
       // The per-session facts go with the session. Without the reset the next
       // one would open wearing this one's list.
       await page.evaluate(() => clearTranscript());
