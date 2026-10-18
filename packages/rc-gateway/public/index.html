@@ -897,6 +897,38 @@
             <button id="unsent-restore" type="button">Edit again</button>
             <button id="unsent-dismiss" type="button">Discard</button>
           </div>
+          <!-- #70. What is waiting to go, always on screen while it waits. A
+               queued message that is only held in a variable is invisible and
+               reads as lost, which is the failure mode this must not ship with.
+               Discard is here because a queued message the reader no longer
+               wants has to be removable from where it is shown. -->
+          <div
+            id="queued"
+            aria-live="polite"
+            hidden
+            style="
+              margin-bottom: 6px;
+              padding: 6px 8px;
+              background: #1f2630;
+              border-left: 2px solid #8fa0c0;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #c8d2e0;
+            "
+          >
+            <span id="queued-note"></span>
+            <span
+              id="queued-text"
+              style="
+                display: block;
+                margin-top: 4px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                color: #e6e6e6;
+              "
+            ></span>
+            <button id="queued-discard" type="button">Discard</button>
+          </div>
           <textarea
             id="prompt"
             rows="3"
@@ -904,6 +936,15 @@
             placeholder="type a prompt to send to the watched session"
           ></textarea>
           <button id="send">Send</button>
+          <!-- #70. A separate control rather than making Send queue. Send is
+               held for the whole turn on purpose: it is the fix for the report
+               that Send looked pressable while doing nothing, and two verifier
+               scenarios press during a turn and assert it is disabled. Inverting
+               it would risk that complaint coming back, so the ability to queue
+               arrives as its own button and Send means what it always meant.
+               It is shown only while a send is in flight, because a queue button
+               outside a turn is a Send button that does not send. -->
+          <button id="queue" type="button" hidden>Queue</button>
           <button id="dictate">Dictate</button>
           <select id="dictate-lang" title="dictation language">
             <option value="">auto</option>
@@ -4544,6 +4585,11 @@
             // button, so abandon it here rather than leaving the button
             // hostage to a request whose reason for existing has ended.
             if (abandonPendingSend) abandonPendingSend('turn');
+            // #70: the turn is over, so anything waiting goes now. Drained after
+            // the abandon rather than before, because the abandon is what starts
+            // the send handler's finally freeing the button, and the drain waits
+            // on that button.
+            drainOutbox(0);
             // A turn can't end while an Agent tool is still in flight —
             // settle any indicator whose terminal update never arrived.
             transcriptModel.settleAllSubagents();
@@ -5394,6 +5440,9 @@
         // conversation comes through this function, manual watch, resume, deep
         // link, restore, and the unwatch and gone-session paths that name none.
         renderConvoSwitch();
+        // #70: the queue strip and the way to queue ride this same route, since
+        // both are about the conversation on screen rather than about the folder.
+        renderQueueControl();
       }
 
       function persistWatch() {
@@ -5444,6 +5493,12 @@
         // after the clear, or the control stays on screen offering a folder this
         // window is no longer on. The clear order is #59's and is left alone.
         renderConvoSwitch();
+        // #70: same ordering, same reason. The strip holds the leaving
+        // conversation's queue, so it comes down after the clear. The stored
+        // record is left on purpose: the conversation still exists, and a message
+        // the reader queued for it should still be waiting when they come back.
+        outbox = [];
+        renderQueued();
         if (controller) controller.abort();
         setStatus(message);
       }
@@ -5465,6 +5520,11 @@
         // leave a conversation, so a switcher still naming that folder here would
         // be the control lying about where they are.
         renderConvoSwitch();
+        // #70: the strip goes with the conversation for the same reason. The
+        // stored queue is kept, so a message queued for this conversation is
+        // still waiting if the reader comes back to it.
+        outbox = [];
+        renderQueued();
         if (controller) controller.abort();
       };
 
@@ -5641,6 +5701,142 @@
       };
       $('unsent-dismiss').onclick = clearUnsent;
 
+      // ---- #70 outbox ------------------------------------------------------
+      // "I should be able to queue messages whenever." Send is held for the
+      // whole turn on purpose, so queueing arrives as its own control rather
+      // than by making Send mean two things.
+      //
+      // It lives in localStorage keyed by session, not in a variable. An
+      // in-memory queue is gone on a refresh and says nothing when it goes,
+      // which is the failure mode this must not ship with: a message you are
+      // told is waiting and that then silently is not is worse than never
+      // having offered to wait. Keyed by session because a message typed for
+      // this conversation must not arrive in some other one.
+      //
+      // Dispatch goes through the Send button itself rather than a second copy
+      // of the send path. A second copy is a second thing to keep honest about
+      // retries, echoing, the watchdog and every status branch, and the send
+      // path is the most-reported-confusing part of this page.
+      const OUTBOX_PREFIX = 'qwen-rc:outbox:';
+      let outbox = [];
+
+      function outboxKey(id) {
+        return OUTBOX_PREFIX + id;
+      }
+
+      function loadOutbox(id) {
+        if (!id) return [];
+        try {
+          const raw = localStorage.getItem(outboxKey(id));
+          const arr = raw ? JSON.parse(raw) : [];
+          return Array.isArray(arr)
+            ? arr.filter((t) => typeof t === 'string' && t.trim())
+            : [];
+        } catch {
+          // A corrupt record is reported rather than swallowed: it holds text
+          // the reader believes is waiting.
+          setStatus('a queued message could not be read and was dropped');
+          return [];
+        }
+      }
+
+      function saveOutbox() {
+        if (!watchedSessionId) return;
+        if (outbox.length === 0) {
+          localStorage.removeItem(outboxKey(watchedSessionId));
+          return;
+        }
+        try {
+          localStorage.setItem(outboxKey(watchedSessionId), JSON.stringify(outbox));
+        } catch {
+          setStatus('could not keep the queued message across a reload');
+        }
+      }
+
+      function renderQueued() {
+        const box = $('queued');
+        if (!box) return;
+        if (outbox.length === 0) {
+          box.hidden = true;
+          $('queued-note').textContent = '';
+          $('queued-text').textContent = '';
+          return;
+        }
+        $('queued-note').textContent =
+          outbox.length === 1
+            ? 'queued, sends when this turn ends'
+            : 'queued: ' + outbox.length + ', send in order as turns end';
+        // Shown, not summarised. A reader who cannot see what is waiting cannot
+        // tell a queued message from a wrong one.
+        $('queued-text').textContent = outbox.join('\n');
+        box.hidden = false;
+      }
+
+      // The control only means something while a send is in flight, and that is
+      // exactly when Send is held. abandonPendingSend is set at the top of the
+      // send handler and cleared in its finally, so it is the send's own record
+      // of being in flight rather than a second flag that can drift from it.
+      function renderQueueControl() {
+        const btn = $('queue');
+        if (btn) btn.hidden = abandonPendingSend === null;
+        renderQueued();
+      }
+
+      $('queue').onclick = () => {
+        const text = $('prompt').value.trim();
+        if (!text) return setStatus('nothing to queue');
+        if (!watchedSessionId) return setStatus('watch a session first');
+        outbox = outbox.concat([text]);
+        // Cleared here, so the composer is free for the next thought. The text
+        // is not lost: it is on the queued strip and in storage.
+        $('prompt').value = '';
+        saveOutbox();
+        renderQueued();
+        setStatus('queued, sends when this turn ends');
+      };
+
+      $('queued-discard').onclick = () => {
+        const gone = outbox.length;
+        outbox = [];
+        saveOutbox();
+        renderQueued();
+        setStatus(gone === 1 ? 'queued message discarded' : 'queued messages discarded');
+      };
+
+      // Drain is bounded rather than instant. turn_complete abandons the in
+      // flight send, but the handler's finally, which is what frees Send, runs
+      // when that abandoned request settles, a beat later. Pressing a disabled
+      // Send would do nothing and the message would sit queued with no reason
+      // given, so this waits for the button and says so if it never comes.
+      function drainOutbox(attempt) {
+        if (outbox.length === 0) return;
+        // The send path clears the composer at dispatch. Dispatching over text
+        // the reader is typing would take that text with no way to get it back,
+        // so the queue waits and the reason is on screen.
+        if ($('prompt').value.trim()) {
+          setStatus('a queued message is waiting: clear the composer to send it');
+          return;
+        }
+        if ($('send').disabled) {
+          if (attempt >= 60) {
+            setStatus('a queued message is waiting: send is still held');
+            return;
+          }
+          setTimeout(() => drainOutbox(attempt + 1), 50);
+          return;
+        }
+        const text = outbox[0];
+        // Shifted before the press, so a send that is refused still does not
+        // leave the item queued behind an offer to put it back. A double send
+        // across two windows is settled by the gateway, which refuses the
+        // second with 409/503 and hands the text back through the unsent card.
+        outbox = outbox.slice(1);
+        saveOutbox();
+        renderQueued();
+        $('prompt').value = text;
+        $('send').click();
+      }
+
       // #70. POST /session/:id/prompt is long-lived by design (it awaits the
       // whole turn and returns its stopReason) and this request carried no
       // timeout, so a connection that neither resolved nor rejected left the
@@ -5667,6 +5863,9 @@
           sendAbort.abort();
         };
         abandonPendingSend = abandon;
+        // #70: the way to queue is on screen for exactly as long as Send is
+        // held, because that hold is the reason it exists.
+        renderQueueControl();
         const sendWatchdog = setTimeout(
           () => abandonPendingSend && abandonPendingSend('watchdog'),
           SEND_HOLD_LIMIT_MS,
@@ -5756,6 +5955,10 @@
             abandonPendingSend = null;
             $('send').disabled = false;
             $('send').textContent = sendLabel;
+            // #70: the hold is gone, so the reason to queue rather than send is
+            // gone with it. Redrawn here rather than in the drain, because a send
+            // that ends with nothing queued still has to take the control off.
+            renderQueueControl();
           }
         }
         if (refused) {
@@ -6433,6 +6636,12 @@
         $('reconnect').style.display = 'none';
         if (id !== watchedSessionId) clearIdleChips();
         watchedSessionId = id;
+        // #70: the queue belongs to the conversation, not to the window, so it is
+        // loaded by session id here. Moving to another conversation takes the
+        // strip off screen rather than discarding it, and coming back finds it
+        // still waiting. A queued message that followed the reader into some
+        // other conversation would be the failure this control exists to avoid.
+        outbox = loadOutbox(id);
         watchedSessionTitle = title || null;
         showSessionTitle(watchedSessionTitle);
         // issue #46: a re-tap / deep link / resume replaces the previous
