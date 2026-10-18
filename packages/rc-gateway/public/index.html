@@ -188,6 +188,30 @@
         margin: 0 8px;
         background: #888;
       }
+      /* The conversation column (#74). The chat pane is bounded to what the
+         viewport has left over, so the transcript, the to-do strip and the
+         composer are each reachable without scrolling the document. Before
+         this the transcript was capped at 75vh while the chrome above it
+         measured 389px, which is 54vh of a 720px window. The two together are
+         129vh, so the transcript crossed the fold at any height below 1556px and
+         the composer sat at 1015 of a 720px window, below the fold at load.
+         The :not([hidden]) guard is load-bearing: an author display beats the
+         user-agent [hidden] rule, so writing this as #app-body would show the
+         app before the token check passes. */
+      #app-body:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 4rem);
+      }
+      /* Only the chat pane becomes a column. The other three panes keep their
+         document flow, because their content is a form rather a conversation and
+         has no scroller of its own to bound. */
+      #pane-chat.active {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 0;
+        min-height: 0;
+      }
       .tab-pane {
         display: none;
       }
@@ -457,12 +481,26 @@
           #transcript {
             background: #111;
             border-radius: 6px;
+            /* flex instead of max-height: 75vh (#74). The cap was the other half
+               of the 129vh problem described above: chrome 389px plus a 75vh box
+               cannot both fit, so the box was always the thing that crossed the
+               fold. As a flex item it now takes exactly what the chrome, the
+               to-do strip and the composer leave, which is what puts the newest
+               row, the strip and the input all above the fold at once. */
             min-height: 60px;
-            max-height: 75vh;
+            flex: 1 1 0;
+            max-height: none;
             overflow-y: auto;
           }
           #transcript-wrap {
             position: relative;
+            /* The wrap is the flex item, so the 60px floor lives here too: a
+               flex item may otherwise shrink past its content. #jump-bottom is
+               absolutely positioned, so it takes no part in this. */
+            display: flex;
+            flex-direction: column;
+            flex: 1 1 0;
+            min-height: 60px;
           }
           #jump-bottom {
             position: absolute;
@@ -829,20 +867,21 @@
         </div>
         <!-- The run's to-do list, kept outside the transcript so it is still on
              screen while the reader scrolls (#65). The transcript row is the
-             history; this is "where is the run up to". The transcript scrolls
-             in its own box, so this is pinned to the bottom of the viewport
-             while the session is on screen and settles above the composer at
-             the end of the page. With no to-do list it does not go quiet: it
-             says that in words (#72), because a strip hidden by default and a
-             strip hidden by a fault look identical and the reader has no way
-             to tell a working feature from a missing one. -->
+             history; this is "where is the run up to". It takes its own row at
+             the bottom of the conversation window, between the transcript and the
+             composer, which is possible because the transcript box is bounded by
+             the column (#74) rather than by a 75vh cap. It used to be position:
+             sticky here, and that pin was the overlap: measured at a 720px window
+             with three rows it covered 78px of transcript pixels while the reader
+             was trying to read the newest output. Dropping the pin is what makes
+             the strip stop covering the transcript, and the bounded column is
+             what makes it reachable without the pin. It shows only while the list
+             has open items, and goes quiet when there are none, which includes
+             the case where every item is done. -->
         <div
           id="plan"
           hidden
           style="
-            position: sticky;
-            bottom: 8px;
-            z-index: 3;
             margin-top: 8px;
             padding: 6px 8px;
             background: #101728;

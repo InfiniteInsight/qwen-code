@@ -1124,6 +1124,37 @@
     }
     scroller.addEventListener('scroll', onScroll, { passive: true });
 
+    // The degraded path re-pins when the box itself changes height (#74).
+    // virtual-core re-anchors on every append, so the virtualized path does not
+    // need this; the render-all fallback writes its scroll position once and
+    // consumes `follow`, and a box resize is not a scroll event, so nothing
+    // re-arms it. Measured at a 720px window over a 301-item replay: the box went
+    // 351 -> 180 as the composer's contents arrived, then 180 -> 106 as
+    // #session-footer and #convo-switch above it filled in, all after the write,
+    // leaving the reader 74px short of the newest message.
+    // The test is arithmetic and not a threshold. A pure height change moves
+    // gapPx() by exactly the height lost, so a gap no larger than the loss is a
+    // reader who was at the end and is being left short by the layout. A larger
+    // gap is a reader who had scrolled up to read, and they are left where they
+    // are: this must not become a thing that yanks a reader who is not at the end.
+    var lastBoxHeight = 0;
+    function onBoxResize() {
+      if (virtualizer || destroyed) return;
+      var h = scroller.clientHeight;
+      var lost = lastBoxHeight - h;
+      lastBoxHeight = h;
+      if (lost <= 0) return;
+      var gap = gapPx();
+      if (gap > 1 && gap <= lost + 1) toEnd();
+      refreshNearBottom();
+    }
+    var boxResizeObserver = null;
+    if (typeof ResizeObserver === 'function') {
+      boxResizeObserver = new ResizeObserver(onBoxResize);
+      boxResizeObserver.observe(scroller);
+      lastBoxHeight = scroller.clientHeight;
+    }
+
     // Derive everything from the event and `items`: during an append the
     // model's own pointers (curAsst, forkItem, ...) may not be set yet.
     var unsubscribe = model.subscribe(function (ev) {
@@ -1179,6 +1210,10 @@
         tailTimer = null;
         unsubscribe();
         scroller.removeEventListener('scroll', onScroll);
+        if (boxResizeObserver) {
+          boxResizeObserver.unobserve(scroller);
+          boxResizeObserver = null;
+        }
         scroller.removeEventListener('touchstart', onTouchStart);
         scroller.removeEventListener('touchend', onTouchEnd);
         scroller.removeEventListener('touchcancel', onTouchEnd);
