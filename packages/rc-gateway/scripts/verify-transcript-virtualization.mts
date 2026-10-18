@@ -1948,6 +1948,10 @@ declare const requestHostTerminal: (id: string) => Promise<void>;
 declare const setStatus: (m: string) => void;
 declare const renderFrame: (ev: unknown) => void;
 declare const addUser: (text: string) => void;
+// #50. The conversation this window is on. Read rather than a storage key, so
+// P26 asserts which conversation a window came back on instead of pinning the
+// name or the store the pointer happens to live in.
+declare let watchedSessionId: string | null;
 declare const clearTranscript: () => void;
 declare const showProcessing: () => void;
 declare const renderTool: (u: Record<string, unknown>) => void;
@@ -3781,6 +3785,114 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `the list carried into a new session (${JSON.stringify(next)})`,
       );
       return `quiet with no plan, quiet and counted and logged on an empty frame, on screen only for a real list, nothing inherited`;
+    },
+  },
+  {
+    // #50. Two windows must be able to hold two different conversations. The
+    // watch pointer used to live only in localStorage, which is shared by every
+    // tab on the origin, so the last window to write it decided what every
+    // other window opened on its next reload. Cross-device mirroring of ONE
+    // conversation is wanted; a single pointer that also decides what each
+    // separate window is looking at is not, and no storage key name can do both.
+    // Asserted on two pages in one browser context on purpose: that is the
+    // configuration that shares localStorage and does not share sessionStorage,
+    // which is exactly the seam the fix rests on. Asserted by which conversation
+    // each window is on rather than by a key name, so the guard does not
+    // over-specify where the pointer is kept.
+    name: 'P26 two windows hold two different conversations',
+    run: async ({ page, viewer }) => {
+      const OTHER = '22222222-3333-4444-5555-666666666666';
+      const here = viewer.sessionId;
+
+      // Window A takes the harness session and marks it with a line only it should
+      // see. The gate is the first frame landing, not watchedSessionId: startWatch
+      // assigns that synchronously before its await on the event stream, and the
+      // clearTranscript that opens a from-0 replay runs after that await resolves,
+      // so waiting on the id releases before the clear and the marker is wiped by
+      // the hand-off that just asked for it. A frame can only land after that
+      // clear, so the frame is the honest signal.
+      await watch(page, here);
+      await waitForFrame(page, 1, 30_000);
+      await page.evaluate(() => addUser('alpha only'));
+      const onA = () =>
+        page.evaluate(() => ({
+          id: watchedSessionId,
+          text: transcriptModel.items
+            .map((i) => i.text ?? '')
+            .join('\n'),
+        }));
+
+      // Window B, same context, so it shares A's localStorage and token and
+      // does not share A's sessionStorage.
+      const ctx = page.context();
+      const b = await ctx.newPage();
+      try {
+        await b.addInitScript({ content: PAGE_HELPERS_JS });
+        await b.goto(`${viewer.url}/ui/`, { waitUntil: 'domcontentloaded' });
+        await b.waitForFunction(() => typeof startWatch === 'function');
+        await b.evaluate((id) => {
+          lastSeenEventId = null;
+          void startWatch(id);
+        }, OTHER);
+        // Same gate as window A, for the same reason.
+        await waitForFrame(b, 1, 30_000);
+        await b.evaluate(() => addUser('beta only'));
+        const onB = () =>
+          b.evaluate(() => ({
+            id: watchedSessionId,
+            text: transcriptModel.items
+              .map((i) => i.text ?? '')
+              .join('\n'),
+          }));
+
+        // Both are live at once, each on its own conversation.
+        const aFirst = await onA();
+        const bFirst = await onB();
+        expect(
+          aFirst.id === here,
+          `window A moved off its own conversation to ${JSON.stringify(aFirst.id)}`,
+        );
+        expect(
+          bFirst.id === OTHER,
+          `window B is on ${JSON.stringify(bFirst.id)}, expected ${OTHER}`,
+        );
+
+        // No cross-talk. This is the failure a reader would actually see: not a
+        // broken page, a message that appears to have gone to the wrong
+        // conversation.
+        expect(
+          aFirst.text.includes('alpha only') && !aFirst.text.includes('beta only'),
+          `window A's transcript is not its own (${JSON.stringify(aFirst.text)})`,
+        );
+        expect(
+          bFirst.text.includes('beta only') && !bFirst.text.includes('alpha only'),
+          `window B's transcript is not its own (${JSON.stringify(bFirst.text)})`,
+        );
+
+        // The case that breaks today. B wrote the shared pointer last, so a
+        // reload of A comes back on B's conversation.
+        await b.reload({ waitUntil: 'domcontentloaded' });
+        await b.waitForFunction(() => typeof startWatch === 'function');
+        await b.waitForFunction(() => watchedSessionId !== null);
+        const bReloaded = await onB();
+        expect(
+          bReloaded.id === OTHER,
+          `window B lost its own conversation across a reload (got ${JSON.stringify(bReloaded.id)})`,
+        );
+
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(() => typeof startWatch === 'function');
+        await page.waitForFunction(() => watchedSessionId !== null);
+        const aReloaded = await onA();
+        expect(
+          aReloaded.id === here,
+          `window A came back on window B's conversation after B wrote the shared pointer, which is the #50 defect (A got ${JSON.stringify(aReloaded.id)}, wanted ${here})`,
+        );
+
+        return `two windows on two conversations, no cross-talk, each keeps its own across a reload`;
+      } finally {
+        await b.close();
+      }
     },
   },
   {
