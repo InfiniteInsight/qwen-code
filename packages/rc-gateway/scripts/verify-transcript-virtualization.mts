@@ -4412,6 +4412,152 @@ const PAGE_SCENARIOS: PageScenario[] = [
       return `replayed -> ${replayed}, boundary -> ${boundary}, live -> ${live}, turn over -> ${ended}`;
     },
   },
+  {
+    // #74. The strip used to be position: sticky, bottom: 8px, and that pin is
+    // how it stayed reachable while the transcript overflowed the window: it
+    // floated over transcript pixels, measured at 78px of coverage with three
+    // rows open in a 720px window. The fault is not the pin and not the strip.
+    // It is that the transcript box was capped at 75vh while the chrome above it
+    // measured 410px, so the two together were 129vh and the box could not fit
+    // the window at any height below 1556px. Bounding the column is what lets
+    // the strip take its own row at the bottom of the conversation window
+    // instead of borrowing one, and it brings the composer above the fold with
+    // it, which sits at 1015 of a 720px window without it. Asserted on pixels
+    // because the claim is about pixels: what is above the fold, and what is
+    // lying over what.
+    name: 'P31 the strip takes the bottom of the window without covering the transcript',
+    frames: () => {
+      const f = new Frames();
+      const plan = (entries: Array<[string, string]>) =>
+        f.upd({
+          sessionUpdate: 'plan',
+          entries: entries.map(([content, status]) => ({
+            content,
+            priority: 'medium',
+            status,
+          })),
+        });
+      f.user('do the thing');
+      plan([
+        ['read the code', 'pending'],
+        ['change it', 'pending'],
+        ['test it', 'pending'],
+      ]);
+      plan([
+        ['read the code', 'completed'],
+        ['change it', 'in_progress'],
+        ['test it', 'pending'],
+        ['ship it', 'pending'],
+      ]);
+      for (let k = 0; k < 40; k++) {
+        f.asst(`turn ${k}: lorem ipsum dolor sit amet consectetur elit. `);
+      }
+      return f.done().list;
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 44, 30_000);
+      await settlePage(page);
+      const read = () =>
+        page.evaluate(() => {
+          const tr = document.getElementById('transcript') as HTMLDivElement;
+          const box = document.getElementById('plan') as HTMLDivElement;
+          const co = document.getElementById('composer') as HTMLDivElement;
+          const tb = tr.getBoundingClientRect();
+          const pb = box.getBoundingClientRect();
+          const cb = co.getBoundingClientRect();
+          return {
+            doc: document.documentElement.scrollHeight,
+            inner: innerHeight,
+            scrollY: Math.round(scrollY),
+            transcript: [Math.round(tb.top), Math.round(tb.bottom)],
+            transcriptWhole: tb.top >= 0 && tb.bottom <= innerHeight,
+            // The bound is a viewport and not a truncation: the box still holds
+            // more than it shows, so the change is not hiding content.
+            scrolls: tr.scrollHeight > tr.clientHeight,
+            stripShown: box.offsetHeight > 0,
+            strip: [Math.round(pb.top), Math.round(pb.bottom)],
+            stripWhole:
+              pb.height > 0 && pb.top >= 0 && pb.bottom <= innerHeight,
+            // Below the transcript is the placement that was asked for.
+            belowTranscript: pb.top >= tb.bottom,
+            // Positive means the strip is lying over transcript pixels.
+            covers: Math.round(
+              Math.min(tb.bottom, pb.bottom) - Math.max(tb.top, pb.top),
+            ),
+            composer: [Math.round(cb.top), Math.round(cb.bottom)],
+            composerWhole:
+              cb.height > 0 && cb.top >= 0 && cb.bottom <= innerHeight,
+          };
+        });
+      const lines: string[] = [];
+      // 720 is the height P25 uses and the height the fault was reported at.
+      // 1080 rides along so the scenario cannot pass on a rule that only binds
+      // when the window is nearly empty.
+      for (const height of [720, 1080]) {
+        await page.setViewportSize({ width: 1280, height });
+        // settlePage waits on the transcript, and a viewport change is a
+        // relayout and not new frames, so it needs its own beat.
+        await page.waitForTimeout(300);
+        await settlePage(page);
+        const g = await read();
+        // First, because a strip that is not on screen at all would satisfy
+        // every claim below by being nowhere.
+        expect(
+          g.stripShown,
+          `no strip in the ${height}px window, so the placement claims below ` +
+            'would pass vacuously',
+        );
+        expect(
+          g.doc <= g.inner + 1,
+          `the document is ${g.doc}px in a ${g.inner}px window at ${height}px, ` +
+            `so something is still below the fold: transcript ` +
+            `${JSON.stringify(g.transcript)}, strip ${JSON.stringify(g.strip)}, ` +
+            `composer ${JSON.stringify(g.composer)}`,
+        );
+        expect(
+          g.scrollY === 0,
+          `the page had scrolled to ${g.scrollY} at ${height}px`,
+        );
+        expect(
+          g.transcriptWhole,
+          `the transcript is not wholly above the fold at ${height}px: ` +
+            `${JSON.stringify(g.transcript)} of ${g.inner}`,
+        );
+        expect(
+          g.stripWhole,
+          `the strip is not wholly above the fold at ${height}px: ` +
+            `${JSON.stringify(g.strip)} of ${g.inner}`,
+        );
+        expect(
+          g.composerWhole,
+          `the composer is not wholly above the fold at ${height}px: ` +
+            `${JSON.stringify(g.composer)} of ${g.inner}`,
+        );
+        expect(
+          g.belowTranscript,
+          `the strip is not below the transcript at ${height}px: strip ` +
+            `${JSON.stringify(g.strip)} against transcript ` +
+            JSON.stringify(g.transcript),
+        );
+        expect(
+          g.covers <= 1,
+          `the strip covers ${g.covers}px of transcript pixels at ${height}px, ` +
+            'which is the overlap the pin used to cause',
+        );
+        expect(
+          g.scrolls,
+          `the transcript already shows all it holds at ${height}px, so this ` +
+            'window does not exercise the bound',
+        );
+        lines.push(
+          `${height}px: transcript ${JSON.stringify(g.transcript)}, strip ` +
+            `${JSON.stringify(g.strip)}, gap ${-g.covers}px`,
+        );
+      }
+      return `${lines.join('; ')}; the document fits the window at both heights`;
+    },
+  },
 ];
 
 async function runPageScenario(
