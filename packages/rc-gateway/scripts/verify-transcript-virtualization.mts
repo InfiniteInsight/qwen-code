@@ -3896,6 +3896,130 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
+    // #50. The switcher is the visible half of multi-conversation support, and
+    // the whole reason it exists as its own control is that the only previous
+    // route to another conversation lives inside #dir-picker, which is collapsed
+    // by default. So the load-bearing property is not that it lists
+    // conversations, it is that it is reachable WITHOUT opening that panel. An
+    // implementation that put it inside the panel would pass a test that only
+    // asked "does it list them", which is the assertion this one refuses to make
+    // on its own. Asserted on the real page because on-screen-ness is the claim.
+    name: 'P27 the way to another conversation is on screen without opening the panel',
+    run: async ({ page, viewer }) => {
+      const here = viewer.sessionId;
+      const OTHER = '22222222-3333-4444-5555-666666666666';
+      const CWD = '/home/evan/scratch';
+      // Gate on the first frame, not on watchedSessionId, for the reason P26
+      // documents: the id is assigned before the hand-off that clears the
+      // transcript, so waiting on it releases too early.
+      await watch(page, here);
+      await waitForFrame(page, 1, 30_000);
+
+      const state = () =>
+        page.evaluate(() => {
+          const box = document.getElementById('convo-switch') as HTMLDivElement;
+          const list = document.getElementById(
+            'convo-switch-list',
+          ) as HTMLSelectElement;
+          return {
+            shown: !box.hidden && box.offsetHeight > 0,
+            // The property the whole control exists for.
+            insidePanel: document
+              .getElementById('dir-picker')!
+              .contains(box),
+            panelOpen: (
+              document.getElementById('dir-picker') as HTMLDetailsElement
+            ).open,
+            options: Array.from(list.options).map((o) => o.textContent ?? ''),
+            picked: list.value,
+            note: document.getElementById('convo-switch-note')!.textContent ?? '',
+          };
+        });
+
+      // A folder with one conversation gets no control at all. A select holding
+      // the one option already chosen is a control that cannot do anything, and
+      // that reads as broken rather than as quiet.
+      await page.evaluate(
+        ([id, cwd]) => {
+          renderPastConversations([{ sessionId: id, title: 'only one' }], cwd, false);
+        },
+        [here, CWD],
+      );
+      const alone = await state();
+      expect(
+        !alone.shown,
+        `a folder with one conversation offered a control that can do nothing (${JSON.stringify(alone)})`,
+      );
+
+      // Two conversations, so there is somewhere to go.
+      await page.evaluate(
+        ([id, other, cwd]) => {
+          renderPastConversations(
+            [
+              { sessionId: id, title: 'the one on screen' },
+              { sessionId: other, title: 'the other one' },
+            ],
+            cwd,
+            false,
+          );
+        },
+        [here, OTHER, CWD],
+      );
+      const two = await state();
+      expect(
+        !two.insidePanel,
+        'the switcher is inside #dir-picker, so reaching another conversation costs the click this control exists to remove',
+      );
+      expect(
+        !two.panelOpen,
+        'the test assumed the panel is collapsed, which is what makes the assertion above mean anything',
+      );
+      expect(
+        two.shown,
+        `two conversations in the folder and no way to the other one on screen (${JSON.stringify(two)})`,
+      );
+      expect(
+        two.options.some((t) => t.includes('the other one')),
+        `the other conversation is not offered (${JSON.stringify(two.options)})`,
+      );
+      expect(
+        two.picked === here,
+        `the switcher marks ${JSON.stringify(two.picked)} as the conversation on screen, not ${here}`,
+      );
+      expect(
+        two.note.includes(CWD),
+        `the switcher does not say which folder it is listing (${JSON.stringify(two.note)})`,
+      );
+
+      // The list is the folder's whole set, not whatever the panel's filter
+      // currently happens to show. A switcher that inherited that view state
+      // would quietly drop conversations the reader cannot get back to.
+      await page.evaluate(() => {
+        const f = document.getElementById('past-filter') as HTMLInputElement;
+        f.value = 'nothing matches this';
+        f.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const filtered = await state();
+      expect(
+        filtered.shown &&
+          filtered.options.some((t) => t.includes('the other one')),
+        `the panel's filter took options off the switcher (${JSON.stringify(filtered.options)})`,
+      );
+
+      // Unwatching leaves nothing to switch from, so the control goes away
+      // rather than sitting on a stale folder.
+      await page.evaluate(() => {
+        (document.getElementById('stop') as HTMLButtonElement).click!();
+      });
+      const stopped = await state();
+      expect(
+        !stopped.shown,
+        `the switcher stayed on screen after Unwatch (${JSON.stringify(stopped)})`,
+      );
+      return `no control for one conversation, on screen with the panel shut for two, marks the one on screen, survives the panel filter, gone on Unwatch`;
+    },
+  },
+  {
     name: 'P9 curve',
     standalone: async () => {
       const runs: Growth[] = [];

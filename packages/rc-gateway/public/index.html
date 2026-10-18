@@ -794,6 +794,34 @@
             border-bottom: 1px solid #333;
           "
         ></div>
+        <!-- #50. The way to another conversation, kept OUTSIDE #dir-picker on
+             purpose. That panel is collapsed by default since #50, and the only
+             other route to a conversation, the Past conversations list, is inside
+             it, so leaving it there meant the switcher cost a click to find and
+             read as absent. A native select rather than a dialog: it needs no
+             open or close state of its own, it is keyboard and touch correct
+             without any help, and it cannot be left stranded open by a watch
+             change. Label text is set in JS so a folder with one conversation
+             does not read as a broken control. -->
+        <div
+          id="convo-switch"
+          hidden
+          style="
+            margin-top: 4px;
+            padding: 4px 8px;
+            font-size: 0.85rem;
+            color: #b0b8c1;
+            border-bottom: 1px solid #333;
+          "
+        >
+          <label
+            >conversation
+            <select
+              id="convo-switch-list"
+              style="max-width: 60%; margin-left: 6px"
+            ></select></label
+          ><span id="convo-switch-note" style="margin-left: 8px"></span>
+        </div>
         <div id="lineage" hidden></div>
         <div id="transcript-wrap">
           <div id="transcript"></div>
@@ -5360,6 +5388,12 @@
           el.textContent = '';
           el.hidden = true;
         }
+        // #50: the switcher marks which option is the conversation on screen, so it
+        // has to be redrawn whenever the conversation on screen changes. Hooked
+        // here rather than at each call site because every route that names a
+        // conversation comes through this function, manual watch, resume, deep
+        // link, restore, and the unwatch and gone-session paths that name none.
+        renderConvoSwitch();
       }
 
       function persistWatch() {
@@ -5405,6 +5439,11 @@
         showSessionTitle(null);
         watchedSessionTitle = null;
         watchedSessionId = null;
+        // #50: showSessionTitle above ran while watchedSessionId was still set, so
+        // the switcher was drawn against the conversation being left. Redrawn here,
+        // after the clear, or the control stays on screen offering a folder this
+        // window is no longer on. The clear order is #59's and is left alone.
+        renderConvoSwitch();
         if (controller) controller.abort();
         setStatus(message);
       }
@@ -5421,6 +5460,11 @@
         // The pending-cards poll is gated only on watchedSessionId, so an
         // Unwatch that left it set kept polling the daemon every 5s (#59).
         watchedSessionId = null;
+        // #50: redrawn after the clear for the same reason as in
+        // forgetGoneSession. Unwatch is the path a reader takes on purpose to
+        // leave a conversation, so a switcher still naming that folder here would
+        // be the control lying about where they are.
+        renderConvoSwitch();
         if (controller) controller.abort();
       };
 
@@ -5931,6 +5975,55 @@
       let pastFilter = ''; // issue #44: trimmed, lowercased filter text
       let pastTruncated = false;
 
+      // #50. The always-visible way to another conversation. Deliberately independent
+      // of #past-filter and the pager: those are view state for the panel, and a
+      // switcher that inherited them would offer only the filtered page and
+      // silently drop the rest of the folder. So it reads pastConvos whole.
+      // It shows only when there is a second conversation to go to. A select with
+      // one option in it is a control that does nothing, which reads as broken
+      // rather than as quiet, and the rule the to-do strip follows is the same one
+      // here: a control appears when it has something to do.
+      // createElement + textContent only, never innerHTML: titles are model data.
+      function renderConvoSwitch() {
+        const box = $('convo-switch');
+        const list = $('convo-switch-list');
+        const note = $('convo-switch-note');
+        const cwd = pastConvosCwd;
+        const others = pastConvos.filter(
+          (s) => s && s.sessionId !== watchedSessionId,
+        );
+        if (!watchedSessionId || !cwd || others.length === 0) {
+          box.hidden = true;
+          return;
+        }
+        list.textContent = '';
+        for (const s of pastConvos) {
+          if (!s || !s.sessionId) continue;
+          const opt = document.createElement('option');
+          opt.value = String(s.sessionId);
+          const title =
+            strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
+          const when = relativeTime(s.updatedAt);
+          opt.textContent = title + (when ? '  ·  ' + when : '');
+          opt.selected = s.sessionId === watchedSessionId;
+          list.appendChild(opt);
+        }
+        // Says which folder the list belongs to, since switching stays within
+        // one folder and a reader who wants another one needs to know that is the
+        // other control rather than this one failing to list it.
+        note.textContent = 'in ' + cwd;
+        box.hidden = false;
+      }
+
+      $('convo-switch-list').onchange = (e) => {
+        const id = e.target.value;
+        if (!id || id === watchedSessionId) return;
+        const s = pastConvos.find((x) => x && x.sessionId === id);
+        // Resume is the same hand-off the Past conversations rows use, so the
+        // switcher adds no second path onto a conversation.
+        void resumeConversation(id, pastConvosCwd, s ? strOr(s.title, '') : '');
+      };
+
       function renderPastConversations(sessions, cwd, truncated) {
         pastConvos = Array.isArray(sessions) ? sessions : [];
         if (cwd !== pastConvosCwd) {
@@ -5940,6 +6033,11 @@
         }
         pastConvosCwd = cwd;
         pastTruncated = Boolean(truncated);
+        // #50: fed from this same poll rather than its own, so the switcher cannot
+        // drift from the list. Called above the early returns below, because those
+        // are the list's view state (empty folder, a filter that matches nothing)
+        // and a switcher that sat past them would keep stale options up.
+        renderConvoSwitch();
         const box = $('past-list');
         const pager = $('past-pager');
         const scroll = box.scrollTop; // kept across same-page re-renders
