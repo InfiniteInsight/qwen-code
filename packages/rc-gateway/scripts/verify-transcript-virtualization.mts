@@ -1952,6 +1952,13 @@ declare const addUser: (text: string) => void;
 // P26 asserts which conversation a window came back on instead of pinning the
 // name or the store the pointer happens to live in.
 declare let watchedSessionId: string | null;
+// #50. The folder the load path landed on, and the folder the conversation list
+// was fetched FOR. Nothing but the load chain assigns either, so P28 can prove
+// the chain ran by watching them fill themselves rather than by calling a
+// function of its own and hoping that counted as proof.
+declare let curDirPath: string | null;
+declare let pastConvosCwd: string | null;
+declare let pastConvos: unknown[];
 declare const clearTranscript: () => void;
 declare const showProcessing: () => void;
 declare const renderTool: (u: Record<string, unknown>) => void;
@@ -4017,6 +4024,113 @@ const PAGE_SCENARIOS: PageScenario[] = [
         `the switcher stayed on screen after Unwatch (${JSON.stringify(stopped)})`,
       );
       return `no control for one conversation, on screen with the panel shut for two, marks the one on screen, survives the panel filter, gone on Unwatch`;
+    },
+  },
+  {
+    // #50. P27 hands the list to renderPastConversations itself, so it would
+    // keep passing if no real load ever reached that function. That is exactly
+    // the shape of the complaint this control exists to answer: something that
+    // works when it is driven and never appears on the page. So this covers the
+    // other half, that a default load feeds it, and it does it by watching the
+    // page fill its own state rather than by calling anything. The chain is
+    // capabilities -> browseTo -> renderDirList -> refreshPastConversations ->
+    // renderPastConversations -> renderConvoSwitch, and nothing but that chain
+    // assigns curDirPath or pastConvosCwd.
+    //
+    // The two halves are independently load-bearing. Remove the browse-time
+    // refresh and the first half fails; remove the renderConvoSwitch call from
+    // renderPastConversations and only the second does.
+    name: 'P28 a default load feeds the switcher without anything being driven',
+    run: async ({ page, viewer }) => {
+      // The premise that makes this control necessary at all: on a load the
+      // folder panel is shut, so everything inside it is off screen.
+      const premise = await page.evaluate(() => ({
+        panelOpen: (
+          document.getElementById('dir-picker') as HTMLDetailsElement
+        ).open,
+      }));
+      expect(
+        !premise.panelOpen,
+        'the folder panel came up open on a load, so the reachability this and P27 guard is not the property it is written to guard',
+      );
+
+      // Both of these are the load path doing its own work. The runner has
+      // already navigated, so waiting is the whole of the driving here.
+      await page.waitForFunction(() => curDirPath !== null);
+      await page.waitForFunction(() => pastConvosCwd !== null);
+      const fed = await page.evaluate(() => ({
+        dir: curDirPath,
+        list: pastConvosCwd,
+        count: pastConvos.length,
+      }));
+      expect(
+        fed.list === fed.dir,
+        `the conversation list was fetched for ${JSON.stringify(fed.list)} while the folder on screen is ${JSON.stringify(fed.dir)}, so the switcher would list some other folder's conversations`,
+      );
+
+      // The feed is real but the control still has to be drawn from it, and
+      // that is the half the removal of one call would break. Feeding through
+      // renderPastConversations is the same entry point the chain above just
+      // used, not a private path into the switcher.
+      //
+      // The order here is the whole of the test, and it was got wrong first.
+      // Watching a conversation draws the switcher on its own, because
+      // showSessionTitle hooks it, and on a real load the folder already holds
+      // conversations. So a scenario that only ever ADDED a conversation could be
+      // satisfied by that other hook and would pass with the feed hook deleted,
+      // which is exactly what happened when this was mutation-tested. Collapsing
+      // the list to the conversation already on screen first makes the correct
+      // answer NO control, so the only thing left that can bring it back is a
+      // list arriving with no change to the conversation on screen.
+      const here = viewer.sessionId;
+      const OTHER = '22222222-3333-4444-5555-666666666666';
+      await watch(page, here);
+      await waitForFrame(page, 1, 30_000);
+      await page.evaluate(
+        ([id, cwd]) => {
+          renderPastConversations([{ sessionId: id, title: 'only one' }], cwd, false);
+        },
+        [here, fed.dir],
+      );
+      const quiet = await page.evaluate(() => ({
+        shown:
+          !document.getElementById('convo-switch')!.hidden &&
+          document.getElementById('convo-switch')!.offsetHeight > 0,
+      }));
+      expect(
+        !quiet.shown,
+        `the switcher stayed on screen listing nothing but the conversation already on screen (${JSON.stringify(quiet)})`,
+      );
+
+      // The second conversation arrives with the conversation on screen
+      // unchanged. Nothing but the feed hook draws the control from this.
+      await page.evaluate(
+        ([id, other, cwd]) => {
+          renderPastConversations(
+            [
+              { sessionId: id, title: 'the one on screen' },
+              { sessionId: other, title: 'the other one' },
+            ],
+            cwd,
+            false,
+          );
+        },
+        [here, OTHER, fed.dir],
+      );
+      const grown = await page.evaluate(() => ({
+        shown:
+          !document.getElementById('convo-switch')!.hidden &&
+          document.getElementById('convo-switch')!.offsetHeight > 0,
+        panelOpen: (
+          document.getElementById('dir-picker') as HTMLDetailsElement
+        ).open,
+      }));
+      expect(
+        grown.shown && !grown.panelOpen,
+        `a conversation arrived in the folder while the switcher sat hidden, and it did not come on screen with the panel shut (${JSON.stringify(grown)})`,
+      );
+
+      return `load path filled ${JSON.stringify(fed.dir)} on its own (${fed.count} conversations found), list matches the folder on screen, control drawn by a list arriving rather than by the watch`;
     },
   },
   {
