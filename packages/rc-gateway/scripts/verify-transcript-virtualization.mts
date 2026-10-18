@@ -4302,6 +4302,87 @@ const PAGE_SCENARIOS: PageScenario[] = [
         .join('; ');
     },
   },
+  {
+    // #73. The indicator had one arm point: the local echo of a prompt this
+    // window sent. A turn started on the laptop therefore showed nothing at
+    // all, because its only arrival here is the daemon's user record. Adding
+    // that as the second arm point is the whole fix, and the danger is all in
+    // one fact: replay carries no turn_complete, so a turn armed from a
+    // replayed user record could never be stood down. Ungated, every idle
+    // session with a prompt history would claim work forever on every attach.
+    // So the arm is gated on being outside a replay, and this pins both halves.
+    //
+    // The negative half runs for real rather than being hand-fed: the frames
+    // below ARE the replay, `startWatch(id, 0)` is the cursor that asks for it,
+    // and the gate is armed by the viewer reading that cursor. The stub cannot
+    // express an id-less frame (stubDaemon.ts:586 writes `id` unconditionally),
+    // so the boundary frame is driven the way this file's own helpers drive
+    // `turn_complete`, and the positive half follows it.
+    name: 'P30 a replayed user record does not arm the indicator, a live one does',
+    frames: () => new Frames().user('started on the laptop').list,
+    run: async ({ page, viewer }) => {
+      const thinking = () =>
+        page.evaluate(
+          () =>
+            transcriptModel.items.filter((i) => i.kind === 'processing').length,
+        );
+
+      // The half that would have made the fix unusable. Cursor 0 asks for the
+      // whole journal, so the user record above arrives as history.
+      await page.evaluate((id) => {
+        lastSeenEventId = null;
+        void startWatch(id, 0);
+      }, viewer.sessionId);
+      // The composer only becomes visible once a watch is running, so this
+      // waits after the watch and not before it, which is the order its
+      // neighbours use. Waiting first cannot resolve.
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await waitForFrame(page, 1, 8_000);
+      const replayed = await thinking();
+      expect(
+        replayed === 0,
+        `a replayed user record armed the indicator (${replayed}). Replay has ` +
+          'no turn_complete to stand it down, so this is the permanent false ' +
+          'claim an idle session would carry on every attach',
+      );
+
+      // The boundary is a fence and not an arm point, so crossing it leaves
+      // the count exactly where it was.
+      await page.evaluate(() =>
+        renderFrame({ type: 'replay_complete', data: { replayedCount: 1 } }),
+      );
+      const boundary = await thinking();
+      expect(
+        boundary === 0,
+        `the replay boundary itself raised an indicator (${boundary})`,
+      );
+
+      // The half the issue exists for. Past the boundary a user record means a
+      // prompt was just accepted somewhere else, which is real work.
+      await page.evaluate(() =>
+        renderSessionUpdate({
+          sessionUpdate: 'user_message_chunk',
+          content: { text: 'a prompt from the laptop' },
+        }),
+      );
+      const live = await thinking();
+      expect(
+        live === 1,
+        `a live user record showed no indicator (${live}); this is the #73 gap`,
+      );
+
+      // And it is a turn like any other, so the boundary that ends a turn
+      // stands it down rather than leaving it running.
+      await page.evaluate(() => endTurn());
+      const ended = await thinking();
+      expect(
+        ended === 0,
+        `the indicator outlived the turn it came from (${ended})`,
+      );
+
+      return `replayed -> ${replayed}, boundary -> ${boundary}, live -> ${live}, turn over -> ${ended}`;
+    },
+  },
 ];
 
 async function runPageScenario(
