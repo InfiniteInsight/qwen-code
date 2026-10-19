@@ -75,6 +75,15 @@ export interface LauncherLiveness {
 const LAUNCHER_HEARTBEAT_BASENAME = 'terminal-launcher-heartbeat.json';
 
 /**
+ * How many distinct workspaces the session listing may union. The picker is an
+ * OWNER endpoint a UI polls, and each workspace adds a directory scan plus one
+ * open and first-line read per transcript it holds, so the union needs its own
+ * bound independent of the per-listing transcript cap. A host that has worked in
+ * more than this many workspaces still gets the most recent ones.
+ */
+export const RECENT_WORKSPACES_CAP = 16;
+
+/**
  * Append-only JSONL request log. Sole writer is the gateway process; the
  * launcher only reads it and keeps its own cursor, so concurrent writes are
  * impossible by construction. A missing file reads as empty (never created
@@ -145,6 +154,38 @@ export class TerminalRequestLog {
   async since(cursor: number): Promise<TerminalRequest[]> {
     const all = await this.readAll();
     return all.slice(Math.max(0, cursor));
+  }
+
+  /**
+   * The distinct `workspaceCwd`s this gateway has handed a terminal to, most
+   * recently used first, capped at `cap`.
+   *
+   * This is the bounded set the session listing unions so a conversation
+   * started in one workspace is selectable from another. Both halves matter:
+   * the live daemon pool cannot be the source because its idle reaper drops a
+   * workspace after 15 minutes, which would make dormant conversations vanish
+   * from a picker whose whole job is to show dormant ones; and scanning every
+   * project segment is unusable on a real host, where the segment root is
+   * mostly throwaway test workspaces. The request log is the record of where
+   * this gateway has actually worked, so it is both small and durable across
+   * reaping and restarts.
+   *
+   * A missing/unreadable log reads as empty, so a host that never opened a
+   * terminal keeps the single-workspace listing it has today.
+   */
+  async recentWorkspaces(cap: number): Promise<string[]> {
+    if (!(cap > 0)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const all = await this.readAll();
+    for (let i = all.length - 1; i >= 0; i--) {
+      const cwd = all[i].workspaceCwd;
+      if (!cwd || seen.has(cwd)) continue;
+      seen.add(cwd);
+      out.push(cwd);
+      if (out.length === cap) break;
+    }
+    return out;
   }
 
   /**

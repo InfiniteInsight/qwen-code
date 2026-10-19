@@ -137,6 +137,7 @@ import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
+import { RECENT_WORKSPACES_CAP } from './terminals.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
 import {
   createListTokensRoute,
@@ -955,17 +956,37 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.get(
     '/rc/sessions',
     requireScope(OWNER, audit),
-    createSessionListRoute(async (req) => {
-      const q = req.query.cwd;
-      if (typeof q === 'string' && q.length > 0) {
-        return resolve(q);
-      }
-      try {
-        return (await deps.daemon.capabilities()).workspaceCwd;
-      } catch {
-        return undefined;
-      }
-    }, audit),
+    createSessionListRoute(
+      async (req) => {
+        const q = req.query.cwd;
+        if (typeof q === 'string' && q.length > 0) {
+          return resolve(q);
+        }
+        try {
+          return (await deps.daemon.capabilities()).workspaceCwd;
+        } catch {
+          return undefined;
+        }
+      },
+      audit,
+      // rc-remote-discoverability (#82): a transcript is stored under the
+      // workspace it was RUN in, so listing the boot workspace alone hides every
+      // conversation started anywhere else, which is exactly what breaks
+      // picking up a phone conversation on the laptop. Union the workspaces this
+      // gateway has actually handed a terminal to: bounded, and durable across
+      // the pool's idle reaping, which reading the live pool would not be. An
+      // explicit `?cwd` stays confined to that one workspace, since that is what
+      // the per-workspace views ask for.
+      async (req) => {
+        const q = req.query.cwd;
+        if (typeof q === 'string' && q.length > 0) return [];
+        return (
+          (await deps.terminalRequests?.recentWorkspaces(
+            RECENT_WORKSPACES_CAP,
+          )) ?? []
+        );
+      },
+    ),
   );
   // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy
   // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
