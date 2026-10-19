@@ -8,6 +8,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { forwardedPeer } from '../tls/http2Front.js';
 
 /** Default token-bucket sizing: 50 burst, 10/s sustained. */
 const DEFAULT_BUCKET_CAPACITY = 50;
@@ -89,7 +90,12 @@ export function createHookIngestRoute(deps: HookIngestDeps): RequestHandler {
   let droppedSinceLastMirror = 0;
 
   return (req, res) => {
-    if (!isLoopbackRemote(req.socket.remoteAddress ?? undefined)) {
+    // The peer comes from forwardedPeer rather than req.socket directly: behind
+    // the HTTP/2 front every request arrives over the loopback hop, so the
+    // socket alone would read as loopback for remote browsers too. The header
+    // is only honoured when this process's front attested it, so a remote client
+    // cannot claim loopback, and an unresolvable peer still fails closed.
+    if (!isLoopbackRemote(forwardedPeer(req))) {
       void deps.audit?.record({
         action: 'hook_ingest_rejected',
         detail: { reason: 'non_loopback' },

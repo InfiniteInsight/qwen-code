@@ -39,6 +39,7 @@ import { getFreePort } from './freePort.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
 import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
+import { createHttp2Front } from './tls/http2Front.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
@@ -1166,11 +1167,26 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // http vs native-TLS https per the bind decision. The cert/key were already
   // read+validated above (before startDaemon) so a bad path fails fast without
   // orphaning the daemon; here we just hand the buffers to the https server.
-  const listener = acmeTls
-    ? createHttpsServer({ SNICallback: acmeTls.sniCallback }, app)
-    : tlsMaterial
-      ? createHttpsServer(tlsMaterial, app)
-      : app;
+  //
+  // A TLS bind fronts the same express app with HTTP/2. A browser caps HTTP/1.1
+  // at six connections per origin and each viewer tab holds two long-lived ones
+  // (the /rc/events stream plus the whole-turn prompt POST), so three tabs park
+  // every further request with no error and no output. HTTP/2 multiplexes the
+  // streams onto one connection. The app itself is still served over loopback
+  // HTTP/1.1, so routes keep a real req.socket. Cleartext binds cannot speak
+  // HTTP/2, which needs TLS, so they keep the plain app.
+  // QWEN_RC_NO_HTTP2=1 restores the previous https server without a rebuild.
+  const http2Disabled = process.env.QWEN_RC_NO_HTTP2 === '1';
+  const listener =
+    acmeTls && !http2Disabled
+      ? createHttp2Front(app, { sniCallback: acmeTls.sniCallback })
+      : tlsMaterial && !http2Disabled
+        ? createHttp2Front(app, tlsMaterial)
+        : acmeTls
+          ? createHttpsServer({ SNICallback: acmeTls.sniCallback }, app)
+          : tlsMaterial
+            ? createHttpsServer(tlsMaterial, app)
+            : app;
   const scheme = bind.mode === 'tls' || bind.mode === 'acme' ? 'https' : 'http';
   // mDNS advertise/suppress decision (add-mdns-discovery). Only a native-TLS
   // bind advertises; loopback and insecure-proxy are suppressed (the latter
