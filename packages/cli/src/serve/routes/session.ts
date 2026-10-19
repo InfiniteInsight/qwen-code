@@ -70,7 +70,10 @@ import {
   type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
-import type { SendBridgeError } from '../server/error-response.js';
+import {
+  errorMessage,
+  type SendBridgeError,
+} from '../server/error-response.js';
 import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';
 import {
   parseClientIdHeader,
@@ -4636,7 +4639,7 @@ export function registerSessionRoutes(
               if (daemonLog) {
                 const errName = err instanceof Error ? err.name : undefined;
                 daemonLog.warn(
-                  `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
+                  `prompt turn failed: ${errName ? `[${errName}] ` : ''}${errorMessage(err)}`,
                   { sessionId, promptId, clientId },
                 );
               }

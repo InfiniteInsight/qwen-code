@@ -13,8 +13,25 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
-import { sendBridgeError } from './error-response.js';
+import { errorMessage, sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
+
+describe('errorMessage', () => {
+  it('keeps an Error message', () => {
+    expect(errorMessage(new Error('turn blew up'))).toBe('turn blew up');
+  });
+
+  it('reads the message field of a JSON-RPC shaped rejection', () => {
+    const thrown = { code: -32603, message: 'agent stream closed' };
+    expect(errorMessage(thrown)).toBe('agent stream closed');
+  });
+
+  it('renders a message-less object instead of [object Object]', () => {
+    const thrown = { code: -32603, data: { retry: true } };
+    expect(errorMessage(thrown)).not.toBe('[object Object]');
+    expect(JSON.parse(errorMessage(thrown))).toEqual(thrown);
+  });
+});
 
 function responseMock(): {
   response: Response;
