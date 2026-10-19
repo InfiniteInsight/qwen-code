@@ -52,6 +52,7 @@ import {
 import type { AddressInfo } from 'node:net';
 import type { SecureContext } from 'node:tls';
 import { randomBytes } from 'node:crypto';
+import { isLoopbackHost } from '../bindSecurity.js';
 
 /** Carries the real client address across the front-to-inner hop. */
 export const PEER_HEADER = 'x-rc-peer';
@@ -151,6 +152,27 @@ export interface Http2FrontTls {
   ) => void;
 }
 
+export interface Http2FrontOptions {
+  /**
+   * Additionally bind the same TLS front to this loopback address on the same
+   * port. Naming a non-loopback address throws, so the option can only ever add
+   * a socket that is reachable from this host.
+   *
+   * Why it exists: a gateway bound to one non-loopback address is unreachable
+   * from its own machine when that address is a tailnet IP and the browser sits
+   * on the other side of a WSL boundary. The tailnet does not route between the
+   * two nodes of one physical laptop, but WSL forwards Windows loopback into the
+   * distro, so a loopback socket is the only path that works there.
+   *
+   * Trust note: reaching a front is what earns a peer attestation, so this lets
+   * a local process carry a peer address. It already could, because connecting
+   * to the gateway's own bind address from this host is an ordinary local
+   * connect, and `forwardableHeaders` rewrites rather than copies the peer
+   * fields, so the address a client is given is the one its own socket has.
+   */
+  loopbackBindHost?: string;
+}
+
 /**
  * The subset of a server the CLI uses. `listen` keeps the signature the
  * `https.Server` had so the call site does not change shape.
@@ -170,12 +192,26 @@ export interface FrontListener {
 export function createHttp2Front(
   app: RequestListener,
   tls: Http2FrontTls,
+  options: Http2FrontOptions = {},
 ): FrontListener {
+  // Fail before any bind rather than after: a caller that asks for a public
+  // second socket has mis-set something, and silently widening exposure is the
+  // one outcome this option must never produce.
+  if (
+    options.loopbackBindHost !== undefined &&
+    !isLoopbackHost(options.loopbackBindHost)
+  ) {
+    throw new Error(
+      `loopbackBindHost must be loopback, got ${options.loopbackBindHost}`,
+    );
+  }
+
   // Loopback on an ephemeral port: reachable from this host only, never a
   // public surface. Bounded by listen() so the bind order matches the server
   // the caller previously held.
   let inner: Server | undefined;
   let front: Http2SecureServer | undefined;
+  let loopback: Http2SecureServer | undefined;
 
   const handler = (req: Http2ServerRequest, res: Http2ServerResponse): void => {
     const innerAddress = inner?.address();
@@ -223,23 +259,50 @@ export function createHttp2Front(
     listen(port, host, onListening) {
       inner = createHttpServer(app);
       inner.listen(0, '127.0.0.1', () => {
-        front = createSecureServer(
-          {
-            ...(tls.key !== undefined ? { key: tls.key } : {}),
-            ...(tls.cert !== undefined ? { cert: tls.cert } : {}),
-            ...(tls.sniCallback ? { SNICallback: tls.sniCallback } : {}),
-            // Keeps every existing HTTP/1.1 consumer working: curl, hook
-            // runners, native clients, and ALPN clients that prefer h1.
-            allowHTTP1: true,
-          },
-          handler,
-        );
-        front.listen(port, host, onListening);
+        const secureOptions = {
+          ...(tls.key !== undefined ? { key: tls.key } : {}),
+          ...(tls.cert !== undefined ? { cert: tls.cert } : {}),
+          ...(tls.sniCallback ? { SNICallback: tls.sniCallback } : {}),
+          // Keeps every existing HTTP/1.1 consumer working: curl, hook
+          // runners, native clients, and ALPN clients that prefer h1.
+          allowHTTP1: true,
+        };
+        front = createSecureServer(secureOptions, handler);
+
+        // The extra bind is a convenience socket, so a collision on it must not
+        // take the public one down. `startPrimary` is idempotent because a
+        // listen error can arrive after the success callback has run.
+        let primaryStarted = false;
+        const startPrimary = (): void => {
+          if (primaryStarted) return;
+          primaryStarted = true;
+          front!.listen(port, host, onListening);
+        };
+
+        const extra = options.loopbackBindHost;
+        if (extra === undefined || extra === host) {
+          startPrimary();
+          return;
+        }
+
+        // Bound first, so onListening only ever fires once both are settled.
+        loopback = createSecureServer(secureOptions, handler);
+        loopback.once('error', (err: Error) => {
+          loopback = undefined;
+          // eslint-disable-next-line no-console
+          console.error(
+            `qwen-rc: loopback front NOT bound on ${extra}:${port} ` +
+              `(${err.message}); the public bind is unaffected`,
+          );
+          startPrimary();
+        });
+        loopback.listen(port, extra, startPrimary);
       });
     },
     async close() {
       const open: Array<Promise<void>> = [];
       if (front) open.push(new Promise((r) => front!.close(() => r())));
+      if (loopback) open.push(new Promise((r) => loopback!.close(() => r())));
       if (inner) open.push(new Promise((r) => inner!.close(() => r())));
       await Promise.all(open);
     },
