@@ -73,6 +73,43 @@ function getEpochState(walDir: string, sessionId: string): EpochState {
 const DEFAULT_IDLE_ATTACH_MS = 2000;
 
 /**
+ * Heartbeat cadence for the watched-session relay, matching the owner feed in
+ * `ownerEvents.ts`.
+ *
+ * Every write on this route is reactive to a daemon frame, so an idle watched
+ * session emits zero bytes. A socket that has half-opened (a suspended phone
+ * radio, a closed laptop lid, an idle tailnet or proxy path) then looks exactly
+ * like a healthy one: the browser reader parked on `read()` receives neither a
+ * rejection nor `{done: true}`, so the client's retry path is never reached and
+ * the transcript stops updating until the user re-selects the conversation or
+ * reloads the page.
+ *
+ * A comment line is the right primitive here. It forces a byte down the socket
+ * without advancing the client's `Last-Event-ID` cursor and without reaching
+ * its event parser.
+ */
+const HEARTBEAT_MS = 25_000;
+
+/**
+ * Arm the per-connection heartbeat and return its teardown. Every attach path
+ * calls the teardown from its `finally`, so the timer cannot outlive the
+ * response and hold a closed session open.
+ */
+function startHeartbeat(res: Response, ms: number): () => void {
+  const heartbeat = setInterval(() => {
+    if (res.writableEnded) return;
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      // Socket already gone; the route's own close/abort path owns teardown.
+    }
+  }, ms);
+  // Never let the heartbeat keep the process, or a test, alive.
+  if (typeof heartbeat.unref === 'function') heartbeat.unref();
+  return () => clearInterval(heartbeat);
+}
+
+/**
  * Default hold before a watcher on a recovering session gives up and gets its
  * 502 (add-mid-turn-recovery §3). Independent of the saga's own pace: a stuck
  * saga can never wedge a watcher forever.
@@ -149,6 +186,12 @@ export function createSessionEventsRoute(
   watchPresence?: WatchPresence,
   idleAttachMs: number = DEFAULT_IDLE_ATTACH_MS,
   recoveryAttachMs: number = DEFAULT_RECOVERY_ATTACH_MS,
+  /**
+   * Heartbeat cadence for this connection. Injectable so a test can observe a
+   * ping without waiting out the production 25s or faking timers around a real
+   * socket.
+   */
+  heartbeatMs: number = HEARTBEAT_MS,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -275,6 +318,7 @@ export function createSessionEventsRoute(
         req.on('close', () => abort.abort());
 
         let attached = false;
+        let stopHeartbeat = (): void => {};
         let unregisterUsage = (): void => {};
         let unregisterPromptEventsWal = (): void => {};
         let leaveWatch = (): void => {};
@@ -292,6 +336,9 @@ export function createSessionEventsRoute(
             Connection: 'keep-alive',
           });
           attached = true;
+          // Armed here rather than per-frame: the whole point is to cover the
+          // gap where the session has nothing to send.
+          stopHeartbeat = startHeartbeat(res, heartbeatMs);
           leaveWatch = watchPresence?.join(sessionId) ?? (() => {});
           void audit?.record({
             action: 'session_attached',
@@ -340,6 +387,7 @@ export function createSessionEventsRoute(
             res.end();
           }
         } finally {
+          stopHeartbeat();
           unregisterPromptEventsWal();
           unregisterUsage();
           leaveWatch();
@@ -372,6 +420,7 @@ export function createSessionEventsRoute(
       walDir !== undefined ? getEpochState(walDir, sessionId) : undefined;
 
     let attached = false;
+    let stopHeartbeat = (): void => {};
     let unregisterUsage = (): void => {};
     let unregisterPromptEvents = (): void => {};
     let leaveWatch = (): void => {};
@@ -390,6 +439,10 @@ export function createSessionEventsRoute(
         Connection: 'keep-alive',
       });
       attached = true;
+      // Armed here rather than per-frame: the whole point is to cover the gap
+      // where the session has nothing to send, which is exactly the state a
+      // freshly-created session is in when this path resolves idle.
+      stopHeartbeat = startHeartbeat(res, heartbeatMs);
       leaveWatch = watchPresence?.join(sessionId) ?? (() => {});
       void audit?.record({
         action: 'session_attached',
@@ -441,6 +494,7 @@ export function createSessionEventsRoute(
         res.end();
       }
     } finally {
+      stopHeartbeat();
       unregisterPromptEvents();
       unregisterUsage();
       leaveWatch();

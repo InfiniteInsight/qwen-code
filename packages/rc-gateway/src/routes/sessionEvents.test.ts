@@ -244,6 +244,58 @@ describe('session-events proxy', () => {
     expect(stub.lastEventIdHeader).toBe('5');
   });
 
+  // #83. An idle watched session used to emit zero bytes, so a half-open socket
+  // was indistinguishable from a healthy one and the browser reader parked on
+  // read() forever, which is the reported "the chat froze until I refreshed".
+  // The heartbeat is the only detector of that state, so this asserts the bytes
+  // actually arrive and that they cannot corrupt replay.
+  it('pings an idle watched stream so a dead socket is detectable', async () => {
+    // No frames + a held-open upstream = exactly the idle state that used to
+    // produce zero bytes. The short hold ends the stream so text() resolves.
+    const HB_SID = '33333333333333333333333333333333';
+    stub = await startStubDaemon({ frames: [], holdOpenMs: 400 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const app = express();
+    app.get(
+      '/session/:id/events',
+      createSessionEventsRoute(
+        daemon,
+        new ConnectionRegistry(),
+        undefined, // audit
+        undefined, // usageBroadcaster
+        undefined, // walDir
+        undefined, // promptEventBroadcaster
+        undefined, // watchPresence
+        50, // idleAttachMs: send headers without waiting for a frame
+        undefined, // recoveryAttachMs
+        40, // heartbeatMs
+      ),
+    );
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${HB_SID}/events`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+
+    // It repeats rather than firing once, so a long idle stretch stays covered.
+    const pings = body.split('\n\n').filter((b) => b.startsWith(': ping'));
+    expect(pings.length).toBeGreaterThanOrEqual(2);
+
+    // A comment line, never a frame: carrying data: or id: would hand the client
+    // a phantom event or advance its Last-Event-ID cursor, so a later reconnect
+    // would silently skip real frames.
+    for (const block of pings) {
+      expect(block).not.toContain('data:');
+      expect(block).not.toContain('id:');
+    }
+  });
+
   it('returns 502 when the daemon errors', async () => {
     stub = await startStubDaemon({ eventsStatus: 500 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
