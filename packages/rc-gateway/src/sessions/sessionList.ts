@@ -334,70 +334,126 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
  * `opts.max` (`truncated` reports the overflow). An unreadable first line lists
  * the session as a root rather than dropping it.
  */
-export async function listSessions(
-  chatsDir: string,
-  opts: { max?: number } = {},
-): Promise<SessionListResult> {
-  const max = opts.max ?? MAX_LIST_SESSIONS;
-
+async function scanValidIds(chatsDir: string): Promise<string[] | null> {
   let files: string[];
   try {
     files = await readdir(chatsDir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { sessions: [], truncated: false };
-    }
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
-
-  const ids = files
+  return files
     .filter((f) => f.endsWith('.jsonl'))
     .map((f) => f.slice(0, -'.jsonl'.length))
     .filter((id) => isValidSessionId(id))
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
 
-  const truncated = ids.length > max;
-  const capped = truncated ? ids.slice(0, max) : ids;
-
-  const entries: SessionEntry[] = [];
-  for (const id of capped) {
-    // The mtime is REQUIRED (it drives the most-recent-first sort), so a file
-    // that cannot be stat'd (broken symlink, vanished, EACCES) is SKIPPED
-    // rather than listed with a fabricated timestamp that would corrupt the
-    // sort — mirroring the "can't read → omit" contract of the listing.
-    let updatedAt: string;
-    try {
-      const stats = await stat(join(chatsDir, `${id}.jsonl`));
-      updatedAt = stats.mtime.toISOString();
-    } catch {
-      continue;
-    }
-    let parent: string | null;
-    try {
-      const first = await readFirstRecord(chatsDir, id);
-      parent = parentOf(first ? [first] : null);
-    } catch {
-      // Unreadable first line (e.g. EACCES) -> list it as a root, don't drop.
-      parent = null;
-    }
-    const info = await readSessionTitleInfo(chatsDir, id);
-    const preview = await readFirstUserMessage(chatsDir, id);
-    entries.push({
-      sessionId: id,
-      parentSessionId: parent,
-      ...(info ? { title: info.title, titleSource: info.titleSource } : {}),
-      updatedAt,
-      ...(preview ? { preview } : {}),
-    });
+/**
+ * Reads one transcript's listing entry. Returns `null` ONLY when the file
+ * cannot be stat'd: the mtime drives the most-recent-first sort, so a
+ * fabricated timestamp would corrupt it (the "can't read → omit" contract). An
+ * unreadable first line still lists the session as a root rather than drop it.
+ */
+async function readEntry(
+  chatsDir: string,
+  id: string,
+): Promise<SessionEntry | null> {
+  let updatedAt: string;
+  try {
+    const stats = await stat(join(chatsDir, `${id}.jsonl`));
+    updatedAt = stats.mtime.toISOString();
+  } catch {
+    return null;
   }
+  let parent: string | null;
+  try {
+    const first = await readFirstRecord(chatsDir, id);
+    parent = parentOf(first ? [first] : null);
+  } catch {
+    // Unreadable first line (e.g. EACCES) -> list it as a root, don't drop.
+    parent = null;
+  }
+  const info = await readSessionTitleInfo(chatsDir, id);
+  const preview = await readFirstUserMessage(chatsDir, id);
+  return {
+    sessionId: id,
+    parentSessionId: parent,
+    ...(info ? { title: info.title, titleSource: info.titleSource } : {}),
+    updatedAt,
+    ...(preview ? { preview } : {}),
+  };
+}
 
+/** Assembles and orders a finished listing (most recently active first). */
+function finishListing(entries: SessionEntry[]): SessionListItem[] {
   const sessions = assembleListing(entries);
-  // Sort by updatedAt descending (most recent first)
   sessions.sort((a, b) => {
     const aTime = new Date(a.updatedAt).getTime();
     const bTime = new Date(b.updatedAt).getTime();
     return bTime - aTime; // descending
   });
+  return sessions;
+}
 
-  return { sessions, truncated };
+/**
+ * Scans SEVERAL chats dirs as one listing.
+ *
+ * A transcript is stored under the workspace it was RUN in, so listing only one
+ * workspace hides every conversation started anywhere else. The caller supplies
+ * the set and it MUST stay bounded: the projects root on a real host is largely
+ * test-run litter, so scanning all of it is slow and floods the picker with
+ * throwaway workspaces.
+ *
+ * Session ids are globally unique, so an id present in two dirs lists once
+ * (first dir wins, dirs being ordered before the scan). `opts.max` caps the
+ * UNION rather than each dir, so the open-and-read bound is exactly the single
+ * scan's.
+ */
+export async function listSessionsAcross(
+  chatsDirs: string[],
+  opts: { max?: number } = {},
+): Promise<SessionListResult> {
+  const max = opts.max ?? MAX_LIST_SESSIONS;
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+  const homeOf = new Map<string, string>();
+  for (const dir of [...new Set(chatsDirs)].sort(cmp)) {
+    const ids = await scanValidIds(dir);
+    if (ids === null) continue; // no such workspace: contributes nothing
+    for (const id of ids) if (!homeOf.has(id)) homeOf.set(id, dir);
+  }
+
+  const ids = [...homeOf.keys()].sort(cmp);
+  const truncated = ids.length > max;
+  const capped = truncated ? ids.slice(0, max) : ids;
+
+  const entries: SessionEntry[] = [];
+  for (const id of capped) {
+    const entry = await readEntry(homeOf.get(id) as string, id);
+    if (entry) entries.push(entry);
+  }
+
+  return { sessions: finishListing(entries), truncated };
+}
+
+/**
+ * Scan a workspace chats dir into a fork-lineage listing. Mirrors the lineage
+ * route's source of truth (each transcript's first-record
+ * `forkedFrom.sessionId`), so `/rc/sessions` and `/session/:id/lineage`
+ * agree. A missing chats dir (ENOENT) is an empty listing, not an error.
+ *
+ * Filenames are filtered to syntactically valid `<id>.jsonl` (the same
+ * path-traversal guard lineage uses), sorted lexically, then capped at
+ * `opts.max` (`truncated` reports the overflow). An unreadable first line lists
+ * the session as a root rather than dropping it.
+ *
+ * Defined as the single-dir case of {@link listSessionsAcross} so the two paths
+ * cannot drift apart.
+ */
+export async function listSessions(
+  chatsDir: string,
+  opts: { max?: number } = {},
+): Promise<SessionListResult> {
+  return listSessionsAcross([chatsDir], opts);
 }

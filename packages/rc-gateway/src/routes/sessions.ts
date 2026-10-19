@@ -7,7 +7,7 @@
 import type { Request, RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
-import { listSessions } from '../sessions/sessionList.js';
+import { listSessionsAcross } from '../sessions/sessionList.js';
 
 /**
  * GET /rc/sessions — a flat, workspace-wide list of sessions with fork lineage:
@@ -26,10 +26,21 @@ import { listSessions } from '../sessions/sessionList.js';
  * can never escape the chats root. The on-disk scan (NOT the daemon's
  * active-only `listWorkspaceSessions`) is deliberate: dormant parents must
  * appear.
+ *
+ * `extraWorkspaces` widens the scan to the other workspaces this gateway has
+ * worked in, which is what makes a conversation started in one workspace
+ * selectable from another. It is called with the request and returns `[]` when
+ * the caller named a workspace explicitly, because `?cwd`/`:cwd` means "that
+ * workspace only" to the per-workspace views. Omitting it keeps the single
+ * workspace scan, which is the contract of the bare-namespace
+ * `/workspace/:cwd/sessions` proxy. Widening is not a privilege change: an
+ * OWNER token can already reach any one of these dirs by naming it in `?cwd`,
+ * so a union of dirs it can already enumerate one at a time grants nothing new.
  */
 export function createSessionListRoute(
   resolveWorkspaceCwd: (req: Request) => Promise<string | undefined>,
   audit?: AuditRecorder,
+  extraWorkspaces?: (req: Request) => Promise<string[]>,
 ): RequestHandler {
   return async (req, res) => {
     try {
@@ -41,7 +52,13 @@ export function createSessionListRoute(
         return;
       }
 
-      const result = await listSessions(resolveChatsDir(cwd));
+      const dirs = [resolveChatsDir(cwd)];
+      for (const extra of (await extraWorkspaces?.(req)) ?? []) {
+        const dir = resolveChatsDir(extra);
+        if (!dirs.includes(dir)) dirs.push(dir);
+      }
+
+      const result = await listSessionsAcross(dirs);
 
       // Privacy: count + truncated flag only — never the session ids.
       void audit?.record({
