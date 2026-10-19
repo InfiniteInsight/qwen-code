@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { loadOrCreateHookIngestToken } from '../agents/hookIngestToken.js';
+import { FRONT_ATTESTATION, PEER_HEADER } from '../tls/http2Front.js';
 import { createHookIngestRoute, type HookIngestDeps } from './hookIngest.js';
 
 let gateway: Server | undefined;
@@ -50,12 +51,18 @@ async function mount(over: Partial<HookIngestDeps> = {}) {
   return { url: `http://127.0.0.1:${port}`, seen, audit };
 }
 
-function post(url: string, body: unknown, token = 'hook-token-1') {
+function post(
+  url: string,
+  body: unknown,
+  token = 'hook-token-1',
+  extra: Record<string, string> = {},
+) {
   return fetch(`${url}/rc/hooks/ingest`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
+      ...extra,
     },
     body: JSON.stringify(body),
   });
@@ -94,6 +101,60 @@ describe('POST /rc/hooks/ingest', () => {
     expect(
       (seen[0] as Extract<OwnerEvent, { type: 'hook_event' }>).dropped,
     ).toBeUndefined();
+  });
+
+  // Behind the HTTP/2 front every request arrives over the loopback hop, so the
+  // socket alone reads as loopback for remote browsers too. These two pin that
+  // the gate consults the carried peer: revert it to req.socket.remoteAddress
+  // and the first one starts returning 202.
+  it('403s an attested remote peer although the hop socket is loopback', async () => {
+    const { url, seen, audit } = await mount();
+    const res = await post(
+      url,
+      { event: 'PreToolUse', payload: {} },
+      'hook-token-1',
+      {
+        [PEER_HEADER]: '203.0.113.9',
+        'x-rc-front': FRONT_ATTESTATION,
+      },
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe('loopback_only');
+    expect(seen).toHaveLength(0);
+    expect(audit.calls.some((c) => c.action === 'hook_ingest_rejected')).toBe(
+      true,
+    );
+  });
+
+  it('accepts an attested loopback peer, so the carried value is really read', async () => {
+    const { url, seen } = await mount();
+    const res = await post(
+      url,
+      { event: 'PreToolUse', payload: {} },
+      'hook-token-1',
+      {
+        [PEER_HEADER]: '127.0.0.1',
+        'x-rc-front': FRONT_ATTESTATION,
+      },
+    );
+    expect(res.status).toBe(202);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('ignores an unattested peer header, so loopback cannot be claimed by a client', async () => {
+    const { url, seen } = await mount();
+    // No attestation, so the header is inert and the real loopback socket is
+    // the authority. The point is that the header is not what granted access.
+    const res = await post(
+      url,
+      { event: 'PreToolUse', payload: {} },
+      'hook-token-1',
+      {
+        [PEER_HEADER]: '127.0.0.1',
+      },
+    );
+    expect(res.status).toBe(202);
+    expect(seen).toHaveLength(1);
   });
 
   it('401s a wrong token, audits hook_ingest_rejected, mirrors nothing', async () => {
