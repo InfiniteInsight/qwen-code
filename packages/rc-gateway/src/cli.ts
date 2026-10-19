@@ -12,7 +12,11 @@ import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
 import { join, basename } from 'node:path';
 import { createInterface } from 'node:readline';
-import { resolveBindSecurity, BindSecurityError } from './bindSecurity.js';
+import {
+  isLoopbackHost,
+  resolveBindSecurity,
+  BindSecurityError,
+} from './bindSecurity.js';
 import {
   MdnsConfigError,
   mdnsDecision,
@@ -251,6 +255,15 @@ export interface ServeOptions {
   daemonPort?: number;
   /** Bind host (default 127.0.0.1). A non-loopback host requires a TLS story. */
   host?: string;
+  /**
+   * Additionally bind the TLS front to this LOOPBACK host on the same port
+   * (`--loopback-bind <host>` / `QWEN_RC_LOOPBACK_BIND`). For a browser on this
+   * same machine that cannot route to `host`, which is the case when `host` is a
+   * tailnet address and the browser is on the far side of a WSL boundary. A
+   * non-loopback value is refused. No effect on a cleartext bind, which has no
+   * front to share.
+   */
+  loopbackBindHost?: string;
   /** PEM cert path for native TLS termination (with tlsKey). */
   tlsCert?: string;
   /** PEM private-key path for native TLS termination (with tlsCert). */
@@ -307,6 +320,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     insecureBehindProxy: opts.insecureBehindProxy,
     acmeDomains: opts.acmeDomains,
   });
+  // The second socket is only ever a convenience for a same-host browser, so it
+  // is refused for anything but loopback here too, where a mis-set flag reports
+  // as a BindSecurityError (clean message, exit 1) rather than a raw throw from
+  // inside the front at listen time.
+  if (opts.loopbackBindHost && !isLoopbackHost(opts.loopbackBindHost)) {
+    throw new BindSecurityError(
+      `--loopback-bind must name a loopback address, got ` +
+        `${opts.loopbackBindHost}. Use --host to bind a public interface.`,
+    );
+  }
   // Read AND validate the cert/key NOW (before spawning the daemon) so a bad
   // path OR malformed PEM fails fast with a clean BindSecurityError and never
   // orphans a daemon — keeping the "ENFORCE bind safety before any side effect"
@@ -1177,11 +1200,25 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // HTTP/2, which needs TLS, so they keep the plain app.
   // QWEN_RC_NO_HTTP2=1 restores the previous https server without a rebuild.
   const http2Disabled = process.env.QWEN_RC_NO_HTTP2 === '1';
+  // A cleartext bind has no front to share, and the loopback socket is a front
+  // feature, so it is dropped here rather than reaching the plain app path.
+  const loopbackHost =
+    opts.loopbackBindHost && !isLoopbackHost(bind.host)
+      ? opts.loopbackBindHost
+      : undefined;
   const listener =
     acmeTls && !http2Disabled
-      ? createHttp2Front(app, { sniCallback: acmeTls.sniCallback })
+      ? createHttp2Front(
+          app,
+          { sniCallback: acmeTls.sniCallback },
+          {
+            loopbackBindHost: loopbackHost,
+          },
+        )
       : tlsMaterial && !http2Disabled
-        ? createHttp2Front(app, tlsMaterial)
+        ? createHttp2Front(app, tlsMaterial, {
+            loopbackBindHost: loopbackHost,
+          })
         : acmeTls
           ? createHttpsServer({ SNICallback: acmeTls.sniCallback }, app)
           : tlsMaterial
@@ -1213,6 +1250,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
       `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
     ];
+    if (loopbackHost) {
+      banner.push(
+        `loopback front: ${scheme}://${loopbackHost}:${port}/ui/ ` +
+          '(this host only)',
+      );
+    } else if (opts.loopbackBindHost) {
+      banner.push(
+        `loopback front: not bound (--loopback-bind ${opts.loopbackBindHost} ` +
+          'needs a non-loopback --host and the HTTP/2 front)',
+      );
+    }
     if (bind.mode === 'insecure-proxy') {
       banner.push(
         '⚠ bound non-loopback as PLAIN HTTP (--insecure-behind-proxy): a ' +
@@ -1703,7 +1751,8 @@ async function confirm(question: string): Promise<boolean> {
 // Entrypoint: `qwen-rc serve`
 if (process.argv[2] === 'serve') {
   // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
-  //        --port <n> --daemon-port <n> --no-mdns --mdns-workspace-name <s>
+  //        --loopback-bind <h> --port <n> --daemon-port <n> --no-mdns
+  //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
@@ -1719,6 +1768,8 @@ if (process.argv[2] === 'serve') {
   const acmeDomain = flag('acme-domain');
   const serveOpts: ServeOptions = {
     host: flag('host'),
+    loopbackBindHost:
+      flag('loopback-bind') ?? process.env.QWEN_RC_LOOPBACK_BIND,
     tlsCert: flag('tls'),
     tlsKey: flag('tls-key'),
     insecureBehindProxy: argv.includes('--insecure-behind-proxy'),
