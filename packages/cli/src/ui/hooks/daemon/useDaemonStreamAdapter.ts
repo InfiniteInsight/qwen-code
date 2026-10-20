@@ -5,7 +5,7 @@
  */
 
 /**
- * Adapts `useDaemonStream` to the exact `useGeminiStream` signature + return
+ * Adapts `useDaemonStream` to the exact `useLlmStream` signature + return
  * type, so `AppContainer` can render a daemon-hosted session by swapping its
  * `useStream` prop (B-prime). It ignores the gemini-specific inputs, reads the
  * attached driver from {@link DaemonStreamContext}, and maps the daemon hook's
@@ -18,7 +18,7 @@
  * display + the permission prompt binding are a following slice.
  */
 import { useContext } from 'react';
-import type { useGeminiStream } from '../useGeminiStream.js';
+import type { useLlmStream } from '../use-llm-stream.js';
 import { useDaemonStream } from './useDaemonStream.js';
 import { DaemonStreamContext } from './DaemonStreamContext.js';
 
@@ -42,7 +42,7 @@ function toText(query: unknown): string {
   return '';
 }
 
-export const useDaemonStreamAdapter: typeof useGeminiStream = (
+export const useDaemonStreamAdapter: typeof useLlmStream = (
   _geminiClient,
   _history,
   addItem,

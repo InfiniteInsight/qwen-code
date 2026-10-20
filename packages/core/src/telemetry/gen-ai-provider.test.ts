@@ -34,11 +34,23 @@ describe('GenAI provider resolution', () => {
     ['https://idealab.alibaba-inc.com/api/openai/v1', 'dashscope'],
     ['https://gateway.alibaba-inc.com/dashscope/v1', 'dashscope'],
     ['https://model-gateway.aliyun-inc.com/dashscope/v1', 'dashscope'],
+    ['https://maas.qianwenaiapi.com/compatible-mode/v1', 'dashscope'],
+    ['https://maas.qwencloudapi.com/compatible-mode/v1', 'dashscope'],
+    [
+      'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      'dashscope',
+    ],
+    [
+      'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+      'dashscope',
+    ],
     ['https://example.openai.azure.com/openai/v1', 'azure.ai.openai'],
     ['https://example.services.ai.azure.com/models/v1', 'azure.ai.openai'],
     ['https://api.deepseek.com/v1', 'deepseek'],
     ['https://api.x.ai/v1', 'x_ai'],
     ['https://api.mistral.ai/v1', 'mistral_ai'],
+    ['https://api.moonshot.ai/v1', 'moonshot'],
+    ['https://api.moonshot.cn/v1', 'moonshot'],
     ['https://api.minimax.io/v1', 'minimax'],
     ['https://api.minimaxi.com/v1', 'minimax'],
     ['https://api.z.ai/api/paas/v4', 'z_ai'],
@@ -66,6 +78,18 @@ describe('GenAI provider resolution', () => {
       resolveGenAiProviderName({
         authType: 'openai',
         baseUrl: 'https://dashscope.aliyuncs.com.attacker.example/v1',
+      }),
+    ).toBe('openai');
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: 'https://maas.qianwenaiapi.com.attacker.example/v1',
+      }),
+    ).toBe('openai');
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: 'https://maas.qwencloudapi.com.attacker.example/v1',
       }),
     ).toBe('openai');
     expect(
@@ -126,9 +150,12 @@ describe('GenAI provider resolution', () => {
     ['MIMO_API_KEY', 'mimo'],
     ['ZAI_API_KEY', 'z_ai'],
     ['MODELSCOPE_API_KEY', 'modelscope'],
+    ['MOONSHOT_API_KEY', 'moonshot'],
     ['OPENAI_API_KEY', 'openai'],
     ['XIAOMI_MIMO_API_KEY', 'mimo'],
     ['OPENROUTER_API_KEY', 'openrouter'],
+    ['QWENCLOUD_API_KEY', 'dashscope'],
+    ['QWENCLOUD_TOKEN_PLAN_API_KEY', 'dashscope'],
     ['REQUESTY_API_KEY', 'requesty'],
   ])('uses %s as a provider hint for an unknown endpoint', (key, expected) => {
     expect(
