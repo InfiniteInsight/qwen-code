@@ -35,6 +35,7 @@ export const workspacePackageNames = new Set([
   '@qwen-code/qwen-code',
   '@qwen-code/qwen-code-core',
   '@qwen-code/qwen-live',
+  '@qwen-code/rc-gateway',
   '@qwen-code/sdk',
   '@qwen-code/web-shell',
   '@qwen-code/web-templates',

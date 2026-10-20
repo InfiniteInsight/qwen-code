@@ -47,6 +47,43 @@ function readWorkflow(relativePath) {
 
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
 
+// Fork layout: the ubuntu unit run is one lane per package (`test_cli`,
+// `test_core`, ...) on its own runner, not upstream's single `Run tests and
+// generate reports` step in the `test` job. The unit-step guards below iterate
+// the lanes, so a guarantee dropped from any one lane still reddens the guard.
+const UNIT_TEST_LANES = [
+  ['test_cli', 'Run cli tests and generate reports'],
+  ['test_core', 'Run core tests and generate reports'],
+  ['test_rc_gateway', 'Run rc-gateway tests and generate reports'],
+  ['test_web_shell', 'Run web-shell tests and generate reports'],
+  ['test_vscode', 'Run vscode-ide-companion tests and generate reports'],
+  ['test_sdk', 'Run sdk-typescript tests and generate reports'],
+  ['test_smalls', 'Run remaining package suites'],
+];
+
+function unitTestLanes() {
+  const ci = readWorkflow('.github/workflows/ci.yml');
+  return UNIT_TEST_LANES.map(([jobName, stepName]) => {
+    const job = getWorkflowJob(ci, jobName);
+    const step = getWorkflowStep(job, stepName);
+    // One command per executable line: indentation, blank lines and comments
+    // do not change what runs, a commented-out line does.
+    const code = step
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    return {
+      label: `${jobName}/${stepName}`,
+      step,
+      code,
+      testCommands: code.filter((line) =>
+        /\bnpm run test:(?:ci|scripts)\b/.test(line),
+      ),
+      jobTimeout: Number((job.match(/^ {4}timeout-minutes: (\d+)$/m) || [])[1]),
+    };
+  });
+}
+
 describe('package scripts', () => {
   it('keeps documented CI variable defaults in sync with workflows', () => {
     const guide = readWorkflow('docs/developers/development/ci-variables.md');
@@ -1142,60 +1179,53 @@ describe('package scripts', () => {
       'npm run test:ci:workspaces && npm run test:scripts',
     );
 
-    const step = getWorkflowStep(
-      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
-      'Run tests and generate reports',
-    );
-    expect(step).toContain(
-      'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
-    );
-    // 'off' must omit the flag rather than pass --retry=0, which would
-    // outrank a workspace's own config-level retry (sdk-typescript).
-    expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
-    expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
-    expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
-    expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+    for (const { label, step, testCommands } of unitTestLanes()) {
+      expect(step, `${label} retry count`).toContain(
+        'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
+      );
+      // 'off' must omit the flag rather than pass --retry=0, which would
+      // outrank a workspace's own config-level retry (sdk-typescript).
+      expect(step, `${label} off omits the flag`).toContain(
+        '[ "${VITEST_RETRY}" != \'off\' ]',
+      );
+      expect(step, `${label} builds the flag`).toContain(
+        'retry_arg=(--retry="${VITEST_RETRY}")',
+      );
+      // Each lane runs its own command list, so the flag has to reach every
+      // command in every lane; one unwrapped copy runs unretried.
+      expect(testCommands.length, `${label} runs a command`).toBeGreaterThan(0);
+      for (const command of testCommands) {
+        expect(command, `${label} ${command}`).toContain('"${retry_arg[@]}"');
+      }
+    }
   });
 
   it('drops DAC capabilities for root unit tests on both CI commands', () => {
     // The permission-bit probes in the workspaces and scripts/tests ask the
     // kernel, so on a root lane that keeps these capabilities every case
     // they gate skips, without failing.
-    const step = getWorkflowStep(
-      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
-      'Run tests and generate reports',
-    );
-    // The step's code, one command per entry: indentation, blank lines and
-    // comments do not change what runs, a commented-out line does.
-    const code = step
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith('#'));
     const setpriv =
       "test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')";
-    const branch = code.indexOf('if [ "$(id -u)" -eq 0 ]; then');
-    expect(branch).toBeGreaterThan(0);
-    expect(code.slice(branch - 1, branch + 5)).toEqual([
-      'test_runner=()',
-      'if [ "$(id -u)" -eq 0 ]; then',
-      'chown -R 0 "$GITHUB_WORKSPACE" "$HOME"',
-      "echo 'Dropping DAC override capabilities for root unit tests'",
-      setpriv,
-      'fi',
-    ]);
-    // Nothing else touches it (no unset, read or reset), and both test
-    // commands run under it, with no unwrapped copy beside them.
-    expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
-      'test_runner=()',
-      setpriv,
-      '"${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"',
-      '"${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"',
-    ]);
-    expect(
-      code.filter((line) =>
-        /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
-      ),
-    ).toHaveLength(2);
+    for (const { label, code, testCommands } of unitTestLanes()) {
+      const branch = code.indexOf('if [ "$(id -u)" -eq 0 ]; then');
+      expect(branch, `${label} root branch`).toBeGreaterThan(0);
+      expect(code.slice(branch - 1, branch + 5), `${label} branch`).toEqual([
+        'test_runner=()',
+        'if [ "$(id -u)" -eq 0 ]; then',
+        'chown -R 0 "$GITHUB_WORKSPACE" "$HOME"',
+        "echo 'Dropping DAC override capabilities for root unit tests'",
+        setpriv,
+        'fi',
+      ]);
+      // Nothing else touches it (no unset, read or reset), and every test
+      // command in the lane runs under it: the wrapped copies are exactly the
+      // lines that mention it, so no unwrapped command can sit beside them.
+      expect(
+        code.filter((line) => /\btest_runner\b/.test(line)),
+        `${label} uses`,
+      ).toEqual(['test_runner=()', setpriv, ...testCommands]);
+      expect(testCommands.length, `${label} runs a command`).toBeGreaterThan(0);
+    }
   });
 
   it('keeps every copy of the permission-bit probe identical', () => {
@@ -1235,11 +1265,16 @@ describe('package scripts', () => {
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
     // #10490's run 3 was cancelled at ~60 minutes, leaving behind
     // orphaned test processes; a stall reads as a timeout, not a failure.
-    const step = getWorkflowStep(
-      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
-      'Run tests and generate reports',
-    );
-    expect(step).toContain('timeout-minutes: 110');
+    for (const { label, step, jobTimeout } of unitTestLanes()) {
+      // A step-level bound below the job's is what turns a hang into a failed
+      // step with reports still uploaded, not a cancelled job.
+      const bound = step.match(/^ {8}timeout-minutes: (\d+)$/m);
+      expect(bound, `${label} step bound`).not.toBeNull();
+      expect(
+        Number(bound[1]),
+        `${label} under its ${jobTimeout}m job cap`,
+      ).toBeLessThan(jobTimeout);
+    }
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {

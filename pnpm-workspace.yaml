@@ -22,6 +22,11 @@ packages:
   - '!packages/desktop'
   - '!packages/live-host'
   - '!packages/mobile-shell'
+  # Fork-only, and excluded on purpose: as a workspace member its
+  # electron/electron-builder devDeps hoist into root node_modules, which fails
+  # scripts/check-desktop-isolation.js on every fork PR. It keeps its own
+  # committed lockfile instead.
+  - '!packages/launcher-app'
 
 # npm links every workspace package into the root node_modules; pnpm links
 # one only where it is a declared dependency. The root package therefore
@@ -56,6 +61,11 @@ overrides:
   'cliui>wrap-ansi': '7.0.0'
   baseline-browser-mapping: '^2.9.19'
   normalize-package-data: '^7.0.1'
+  # Fork security pins. npm reads the root `overrides:` block in package.json;
+  # pnpm reads only this block, so a pin that exists only there is silently
+  # dropped on the pnpm path and the graph falls back to the unpinned version.
+  proxy-addr: '^2.0.8'
+  shell-quote: '^1.11.0'
   react: '^19.2.4'
   react-dom: '^19.2.4'
   '@types/react': '^19.2.0'
@@ -97,6 +107,10 @@ allowBuilds:
   '@google/genai': true
   '@qwen-code/qwen-code-core@file:packages/core': true
   '@vscode/vsce-sign': true
+  # Its native binding is produced by this package's own install script, so
+  # ignoring the build leaves better-sqlite3 unusable at runtime. npm ran
+  # install scripts by default, so true preserves the pre-pnpm behaviour.
+  better-sqlite3: true
   esbuild: true
   # Darwin-only optional dependency whose install script is only
   # `node-gyp rebuild`; the macOS smoke install reports no ignored build for
