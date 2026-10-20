@@ -17,7 +17,7 @@ import {
   scaffoldSkill,
   removeSkill,
 } from '@qwen-code/qwen-code-core';
-import { levelLabel } from '../utils/skill-level-label.js';
+import { skillOriginLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -156,16 +156,11 @@ export const skillsCommand: SlashCommand = {
     // listing so users in those contexts still get something useful from
     // the bare command.
     const skills = await skillManager.listSkills();
-    // Reuse the central disabled-set provider so all surfaces
-    // (<available_skills>, /<name> completion, this list) agree on a
-    // single normalization pass instead of drifting independently.
-    const disabled =
-      context.services.config?.getDisabledSkillNames() ?? new Set<string>();
     const userInvocableSkills = skills.filter(
       (skill) => skill.userInvocable !== false,
     );
     const visibleSkills = userInvocableSkills.filter(
-      (s) => !disabled.has(s.name.toLowerCase()),
+      (skill) => context.services.config?.isSkillEnabled(skill) ?? true,
     );
     if (visibleSkills.length === 0) {
       const content =
@@ -196,7 +191,7 @@ export const skillsCommand: SlashCommand = {
     const lines = sortedSkills.map(
       (s) =>
         `  - ${s.name}${s.description ? `  ${sanitize(s.description, 80)}` : ''}` +
-        `${s.level ? `  (${levelLabel(s.level)})` : ''}`,
+        `${s.level ? `  ${skillOriginLabel(s)}` : ''}`,
     );
     return {
       type: 'message' as const,
