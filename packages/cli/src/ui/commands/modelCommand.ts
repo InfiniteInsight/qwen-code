@@ -158,6 +158,37 @@ function persistSetting(
   settings.setValue(resolveScope(settings, scopeOverride), path, value);
 }
 
+function resolvePersistedBaseUrl(
+  config: Config,
+  settings: LoadedSettings,
+  scopeOverride: SettingScope | undefined,
+  authType: AuthType,
+  modelId: string,
+): string {
+  const existingBaseUrl =
+    (settings.getValue(
+      resolveScope(settings, scopeOverride),
+      'model.baseUrl',
+    ) as string | undefined) ?? '';
+  try {
+    const available = config.getAvailableModelsForAuthType(authType);
+    const matches = available.filter((m) => m.id === modelId);
+    if (matches.length === 1) {
+      return matches[0].baseUrl ?? '';
+    }
+    if (
+      matches.length > 1 &&
+      existingBaseUrl !== '' &&
+      matches.some((m) => m.baseUrl === existingBaseUrl)
+    ) {
+      return existingBaseUrl;
+    }
+  } catch {
+    // Best-effort — fall through to empty string so next launch picks default.
+  }
+  return '';
+}
+
 async function switchMainModel(
   config: Config,
   settings: LoadedSettings,
@@ -185,12 +216,18 @@ async function switchMainModel(
         scopeOverride,
       );
       persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
-      // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
-      // by a previous model-picker selection — otherwise next launch would
-      // resolve to a different provider than this switch just chose. Use an
-      // empty-string tombstone so the clear overrides a lower-scope value (an
-      // undefined write is dropped from JSON and would not override on merge).
-      persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+      persistSetting(
+        settings,
+        'model.baseUrl',
+        resolvePersistedBaseUrl(
+          config,
+          settings,
+          scopeOverride,
+          parsed.authType,
+          parsed.modelId,
+        ),
+        scopeOverride,
+      );
     }
     return parsed.modelId;
   }
@@ -198,7 +235,18 @@ async function switchMainModel(
   await config.switchModel(currentAuthType, modelArg, undefined);
   if (persistSelection) {
     persistSetting(settings, 'model.name', modelArg, scopeOverride);
-    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    persistSetting(
+      settings,
+      'model.baseUrl',
+      resolvePersistedBaseUrl(
+        config,
+        settings,
+        scopeOverride,
+        currentAuthType,
+        modelArg,
+      ),
+      scopeOverride,
+    );
   }
   return modelArg;
 }
