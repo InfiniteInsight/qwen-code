@@ -154,3 +154,7 @@ brand-builds/
 # Dependencies install with pnpm from pnpm-lock.yaml; keep an npm install
 # from bringing the retired root lockfile back.
 /package-lock.json
+
+# Design critique snapshots written by the impeccable skill. Local review
+# history, not source: /impeccable polish reads it from the working tree.
+.impeccable/
