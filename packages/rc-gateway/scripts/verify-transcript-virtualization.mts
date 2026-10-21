@@ -3178,11 +3178,13 @@ const PAGE_SCENARIOS: PageScenario[] = [
       const read = () =>
         page.evaluate(() => {
           const box = document.getElementById('plan') as HTMLDivElement;
-          const r = box.getBoundingClientRect();
           return {
             hidden: box.hidden,
-            onScreen:
-              box.offsetHeight > 0 && r.top < innerHeight && r.bottom > 0,
+            // Not whether it is on screen: the strip is a row in normal flow
+            // below the chat window, and "visible without scrolling" was
+            // dropped on 2026-10-21. Whether it is in the document at all is
+            // the claim that still means something here.
+            shown: box.offsetHeight > 0,
             count: document.getElementById('plan-count')!.textContent ?? '',
             rows: document.getElementById('plan-rows')!.textContent ?? '',
             moreHidden: (document.getElementById('plan-more') as HTMLDivElement)
@@ -3211,8 +3213,10 @@ const PAGE_SCENARIOS: PageScenario[] = [
       // The old dump left a `Plan:` block per frame; there is one row now.
       expect(s1.bubbles === 1, `${s1.bubbles} to-do rows in the transcript`);
       expect(s1.dumps === 0, `${s1.dumps} stacked Plan: dumps left behind`);
-      // The property the strip exists for: the reader is at the newest output,
-      // the row is off screen, and the list is still on screen.
+      // The strip's reason for existing: the reader is at the newest output, the
+      // to-do row itself has been unmounted out of the capped box, and the list
+      // still reads. It is a row in normal flow below the chat window, so it is
+      // not on screen here; "visible without scrolling" was dropped 2026-10-21.
       const far = await page.evaluate(() => {
         const items = transcriptModel.items;
         const plan = items.find((i) => i.kind === 'plan')!;
@@ -3223,8 +3227,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
         'the to-do row is still on screen, so this proves nothing',
       );
       expect(
-        s1.onScreen,
-        `the strip is off screen at the end: ${JSON.stringify(s1)}`,
+        s1.shown,
+        `the strip is missing at the end: ${JSON.stringify(s1)}`,
       );
       return `one row (no ${s1.dumps} dumps); strip held "${s1.count}" with the row off screen`;
     },
@@ -3790,11 +3794,12 @@ const PAGE_SCENARIOS: PageScenario[] = [
       // The case this scenario stopped one frame short of: a plan in which every
       // entry has finished. planTally sorts a completed entry into `done` and
       // everything else into `open`, so this leaves the plan item in place with
-      // `open` empty, which is a tally standing over a row with nothing in it.
-      // The strip answers "where is the run up to", and once nothing is
-      // outstanding there is no answer left to give, so the list goes quiet on its
-      // own rather than staying on screen. The frame count is asserted alongside
-      // the absence so this cannot pass by the frame never arriving.
+      // `open` empty. The strip stays up and carries the tally, because it
+      // answers "where is the run up to" and a finished list is still that
+      // answer; a strip that disappears on the last frame is indistinguishable
+      // from one that broke (#72). Only the row list goes empty, since a done
+      // entry keeps no text. The frame count is asserted alongside so this
+      // cannot pass by the frame never arriving.
       await page.evaluate(() =>
         renderSessionUpdate({
           sessionUpdate: 'plan',
@@ -3811,9 +3816,20 @@ const PAGE_SCENARIOS: PageScenario[] = [
           `(${list.frames} -> ${finished.frames})`,
       );
       expect(
-        !finished.shown,
-        `a plan with every item done left the strip on screen ` +
+        finished.shown,
+        `a plan with every item done took the strip off screen, so the reader ` +
+          `cannot tell it finished from it having broken ` +
           `(${JSON.stringify(finished)})`,
+      );
+      expect(
+        finished.count === '2 of 2 done',
+        `strip count once every item finished ` +
+          `(${JSON.stringify(finished.count)})`,
+      );
+      expect(
+        finished.rows === '',
+        `the row list still named finished items ` +
+          `(${JSON.stringify(finished.rows)})`,
       );
 
       // The per-session facts go with the session. Without the reset the next
@@ -4413,19 +4429,17 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    // #74. The strip used to be position: sticky, bottom: 8px, and that pin is
-    // how it stayed reachable while the transcript overflowed the window: it
-    // floated over transcript pixels, measured at 78px of coverage with three
-    // rows open in a 720px window. The fault is not the pin and not the strip.
-    // It is that the transcript box was capped at 75vh while the chrome above it
-    // measured 410px, so the two together were 129vh and the box could not fit
-    // the window at any height below 1556px. Bounding the column is what lets
-    // the strip take its own row at the bottom of the conversation window
-    // instead of borrowing one, and it brings the composer above the fold with
-    // it, which sits at 1015 of a 720px window without it. Asserted on pixels
-    // because the claim is about pixels: what is above the fold, and what is
-    // lying over what.
-    name: 'P31 the strip takes the bottom of the window without covering the transcript',
+    // The chat window is sized the way it was before #74 bounded it: the
+    // transcript box carries its own max-height: 75vh cap and the document
+    // scrolls, rather than the column being pinned to calc(100vh - 4rem) with
+    // the box shrinking to whatever its siblings left. Bounding it that way
+    // squeezed the transcript onto its 60px floor at a 720px window, which is
+    // the "chat window is way too small" fault. The to-do strip takes its own
+    // row in normal flow below the chat window: it is not pinned to the foot
+    // of the viewport and it never overlaps the transcript, and it is reached
+    // by scrolling to the end of the document rather than held on screen.
+    // Asserted on pixels because the claim is about pixels.
+    name: 'P31 the chat window keeps its 75vh transcript and the strip sits below it',
     frames: () => {
       const f = new Frames();
       const plan = (entries: Array<[string, string]>) =>
@@ -4449,7 +4463,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
         ['test it', 'pending'],
         ['ship it', 'pending'],
       ]);
-      for (let k = 0; k < 40; k++) {
+      // Enough history to overflow a 75vh box at both heights the run below
+      // measures at, so `scrolls` tests the cap rather than a short transcript.
+      for (let k = 0; k < 120; k++) {
         f.asst(`turn ${k}: lorem ipsum dolor sit amet consectetur elit. `);
       }
       return f.done().list;
@@ -4462,32 +4478,33 @@ const PAGE_SCENARIOS: PageScenario[] = [
         page.evaluate(() => {
           const tr = document.getElementById('transcript') as HTMLDivElement;
           const box = document.getElementById('plan') as HTMLDivElement;
-          const co = document.getElementById('composer') as HTMLDivElement;
           const tb = tr.getBoundingClientRect();
           const pb = box.getBoundingClientRect();
-          const cb = co.getBoundingClientRect();
+          const cap = Math.round(innerHeight * 0.75);
           return {
-            doc: document.documentElement.scrollHeight,
             inner: innerHeight,
-            scrollY: Math.round(scrollY),
+            cap,
             transcript: [Math.round(tb.top), Math.round(tb.bottom)],
-            transcriptWhole: tb.top >= 0 && tb.bottom <= innerHeight,
-            // The bound is a viewport and not a truncation: the box still holds
-            // more than it shows, so the change is not hiding content.
+            transcriptHeight: tr.clientHeight,
+            // The original sizing: the box is capped at 75vh and scrolls its
+            // own history, so its height comes from the cap and not from
+            // whatever its siblings happened to leave over.
+            withinCap: tr.clientHeight <= cap + 1,
             scrolls: tr.scrollHeight > tr.clientHeight,
+            // The reported fault was the box collapsing onto its 60px floor, so
+            // the height alone is not enough to pass: it has to be the cap.
+            aboveFloor: tr.clientHeight > 60,
             stripShown: box.offsetHeight > 0,
             strip: [Math.round(pb.top), Math.round(pb.bottom)],
-            stripWhole:
-              pb.height > 0 && pb.top >= 0 && pb.bottom <= innerHeight,
-            // Below the transcript is the placement that was asked for.
-            belowTranscript: pb.top >= tb.bottom,
-            // Positive means the strip is lying over transcript pixels.
-            covers: Math.round(
-              Math.min(tb.bottom, pb.bottom) - Math.max(tb.top, pb.top),
-            ),
-            composer: [Math.round(cb.top), Math.round(cb.bottom)],
-            composerWhole:
-              cb.height > 0 && cb.top >= 0 && cb.bottom <= innerHeight,
+            // The strip is in normal flow below the chat window, so at the top
+            // of a full document it sits below the fold. What has to hold is
+            // that it never covers transcript pixels and never rides at the
+            // foot of the viewport the way the position: sticky pin did.
+            belowTranscript: pb.top >= tb.bottom - 1,
+            overlapsTranscript: pb.top < tb.bottom - 1,
+            pinned: Math.abs(innerHeight - 8 - pb.bottom) <= 1,
+            stripOnScreen:
+              pb.height > 0 && pb.top < innerHeight && pb.bottom > 0,
           };
         });
       const lines: string[] = [];
@@ -4496,6 +4513,10 @@ const PAGE_SCENARIOS: PageScenario[] = [
       // when the window is nearly empty.
       for (const height of [720, 1080]) {
         await page.setViewportSize({ width: 1280, height });
+        // The reachability check at the foot of this loop leaves the window
+        // scrolled, and the placement claims are about the strip's own row, so
+        // every height starts from the top of the document.
+        await page.evaluate(() => window.scrollTo(0, 0));
         // settlePage waits on the transcript, and a viewport change is a
         // relayout and not new frames, so it needs its own beat.
         await page.waitForTimeout(300);
@@ -4509,53 +4530,58 @@ const PAGE_SCENARIOS: PageScenario[] = [
             'would pass vacuously',
         );
         expect(
-          g.doc <= g.inner + 1,
-          `the document is ${g.doc}px in a ${g.inner}px window at ${height}px, ` +
-            `so something is still below the fold: transcript ` +
-            `${JSON.stringify(g.transcript)}, strip ${JSON.stringify(g.strip)}, ` +
-            `composer ${JSON.stringify(g.composer)}`,
+          g.scrolls,
+          `the transcript already shows all it holds at ${height}px, so this ` +
+            'window does not exercise the cap',
         );
         expect(
-          g.scrollY === 0,
-          `the page had scrolled to ${g.scrollY} at ${height}px`,
+          g.withinCap,
+          `the transcript is ${g.transcriptHeight}px in a ${g.inner}px window ` +
+            `at ${height}px, past its ${g.cap}px (75vh) cap`,
         );
         expect(
-          g.transcriptWhole,
-          `the transcript is not wholly above the fold at ${height}px: ` +
-            `${JSON.stringify(g.transcript)} of ${g.inner}`,
-        );
-        expect(
-          g.stripWhole,
-          `the strip is not wholly above the fold at ${height}px: ` +
-            `${JSON.stringify(g.strip)} of ${g.inner}`,
-        );
-        expect(
-          g.composerWhole,
-          `the composer is not wholly above the fold at ${height}px: ` +
-            `${JSON.stringify(g.composer)} of ${g.inner}`,
+          g.aboveFloor,
+          `the transcript is ${g.transcriptHeight}px at ${height}px, which is ` +
+            'its min-height floor and not its cap: this is the window that read ' +
+            'as too small',
         );
         expect(
           g.belowTranscript,
-          `the strip is not below the transcript at ${height}px: strip ` +
-            `${JSON.stringify(g.strip)} against transcript ` +
+          `the strip does not sit below the chat window at ${height}px: ` +
+            `strip ${JSON.stringify(g.strip)} transcript ` +
             JSON.stringify(g.transcript),
         );
         expect(
-          g.covers <= 1,
-          `the strip covers ${g.covers}px of transcript pixels at ${height}px, ` +
-            'which is the overlap the pin used to cause',
+          !g.overlapsTranscript,
+          `the strip covers the chat window at ${height}px: ` +
+            `strip ${JSON.stringify(g.strip)} transcript ` +
+            JSON.stringify(g.transcript),
         );
         expect(
-          g.scrolls,
-          `the transcript already shows all it holds at ${height}px, so this ` +
-            'window does not exercise the bound',
+          !g.pinned,
+          `the strip is pinned to the foot of the ${height}px window, which is ` +
+            `how it floated over transcript pixels: ` +
+            JSON.stringify(g.strip),
+        );
+        // Reachability, the property that survives dropping the pin: the strip
+        // holds the end of the document, so scrolling there finds it.
+        await page.evaluate(() =>
+          window.scrollTo(0, document.documentElement.scrollHeight),
+        );
+        await page.waitForTimeout(300);
+        const atEnd = await read();
+        expect(
+          atEnd.stripOnScreen,
+          `the strip is not on screen at the end of the ${height}px document: ` +
+            JSON.stringify(atEnd.strip),
         );
         lines.push(
-          `${height}px: transcript ${JSON.stringify(g.transcript)}, strip ` +
-            `${JSON.stringify(g.strip)}, gap ${-g.covers}px`,
+          `${height}px: transcript ${g.transcriptHeight}px (cap ${g.cap}), ` +
+            `strip ${JSON.stringify(g.strip)} below it, ` +
+            `${JSON.stringify(atEnd.strip)} at the end`,
         );
       }
-      return `${lines.join('; ')}; the document fits the window at both heights`;
+      return `${lines.join('; ')}; the transcript keeps its 75vh box at both heights`;
     },
   },
 ];
