@@ -42,3 +42,7 @@ packages/core/src/skills/bundled/browser-use/runtime/
 # next sync. eslint.config.js already ignores packages/mobile-mcp/** for the
 # same reason; .prettierignore had cua-driver but not its sibling.
 packages/mobile-mcp/
+# Hand-styled: the pre-commit lint-staged hook runs prettier --write on
+# *.html and rewrites the whole file, which buries a one-line change under
+# ~130 lines of reflow. Keep it out of the formatter's reach.
+packages/rc-gateway/public/index.html
