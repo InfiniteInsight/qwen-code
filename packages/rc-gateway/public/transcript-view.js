@@ -85,6 +85,157 @@
     }
   }
 
+  // ---- Markdown ---------------------------------------------------------
+  // Assistant text is markdown; the terminal renders it (ConversationMessages
+  // uses MarkdownDisplay), so the viewer showing it as literal characters is a
+  // parity gap (#93). The parser is the vendored markdown-it bundle, and its
+  // token stream is walked here into createElement/textContent calls: no HTML
+  // string is ever built, so the safety of the output does not depend on the
+  // parser's escaping. Two token-level properties carry that, and
+  // src/vendorMarkdownIt.test.ts pins both: with html:false raw HTML arrives as
+  // a text token rather than an html_block/html_inline, and a javascript:/data:
+  // link target never arrives as a link at all.
+  var MD_TAGS = {
+    p: 1,
+    h1: 1,
+    h2: 1,
+    h3: 1,
+    h4: 1,
+    h5: 1,
+    h6: 1,
+    ul: 1,
+    ol: 1,
+    li: 1,
+    blockquote: 1,
+    pre: 1,
+    code: 1,
+    em: 1,
+    strong: 1,
+    s: 1,
+    del: 1,
+    a: 1,
+    table: 1,
+    thead: 1,
+    tbody: 1,
+    tr: 1,
+    th: 1,
+    td: 1,
+    hr: 1,
+    br: 1,
+  };
+  // Only an absolute target of these schemes is made into a link. A relative
+  // one would resolve against the gateway's own origin, which the model does
+  // not own and the reader did not ask to visit.
+  var MD_HREF = /^(?:https?:|mailto:)/i;
+
+  function mdHrefOf(t) {
+    var attrs = t.attrs || [];
+    for (var i = 0; i < attrs.length; i++) {
+      if (attrs[i][0] === 'href') return attrs[i][1];
+    }
+    return null;
+  }
+
+  // An element for a nesting-1 token, or null to let its children attach to
+  // the parent unstyled (an unknown tag, or a link target we will not make).
+  function mdElement(md, t) {
+    if (!MD_TAGS[t.tag]) return null;
+    if (t.type === 'link_open') {
+      var href = mdHrefOf(t);
+      if (href === null || !MD_HREF.test(href) || !md.validateLink(href)) {
+        return null;
+      }
+      var a = document.createElement('a');
+      a.setAttribute('href', href);
+      // The viewer holds a live session; a link must not navigate it away.
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+      return a;
+    }
+    return document.createElement(t.tag);
+  }
+
+  function mdLeaf(t) {
+    switch (t.type) {
+      case 'code_inline':
+        return el('code', '', t.content);
+      case 'fence':
+      case 'code_block':
+        // The language rides in t.info, which is model-authored and
+        // unvalidated; markdown-it's own renderer puts it in a class name, so
+        // this does not. `pre code` is enough to style a block.
+        var pre = el('pre');
+        pre.appendChild(el('code', '', t.content));
+        return pre;
+      case 'hr':
+        return el('hr');
+      case 'hardbreak':
+      case 'softbreak':
+        // A soft break keeps the source's line: the text tokens hold no
+        // newlines, so this is what keeps the rendered height matching the
+        // raw-text line count that estimate() uses.
+        return el('br');
+      case 'image':
+        // No img element: model-authored text must not fetch a URL it names.
+        return t.content ? document.createTextNode(t.content) : null;
+      case 'html_block':
+      case 'html_inline':
+        // Unreachable with html:false (pinned by the vendor test). Text here
+        // anyway, so a parser change cannot turn this into an injection path.
+        return t.content ? document.createTextNode(t.content) : null;
+      default:
+        // text, and any leaf type a future parser adds: its literal content.
+        return t.content ? document.createTextNode(t.content) : null;
+    }
+  }
+
+  function mdWalk(md, tokens, parent) {
+    var stack = [parent];
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      var at = stack[stack.length - 1];
+      if (t.type === 'inline') {
+        if (t.children) mdWalk(md, t.children, at);
+        continue;
+      }
+      if (t.nesting === -1) {
+        // Pops whatever the matching open pushed, including the parent it
+        // pushed for a skipped element, so the stack stays balanced.
+        stack.pop();
+        continue;
+      }
+      if (t.nesting === 1) {
+        // A tight list's paragraph is hidden: markdown-it emits no element for
+        // it but still emits the inline token between, so its children go to
+        // the parent.
+        var node = t.hidden ? null : mdElement(md, t);
+        if (node) {
+          at.appendChild(node);
+          stack.push(node);
+        } else {
+          stack.push(at);
+        }
+        continue;
+      }
+      var leaf = mdLeaf(t);
+      if (leaf) at.appendChild(leaf);
+    }
+  }
+
+  // Markdown text -> nodes, or null when the parser cannot read it (the caller
+  // shows the text as typed instead).
+  function renderMarkdown(md, text) {
+    var tokens;
+    try {
+      tokens = md.parse(text, {});
+    } catch {
+      return null;
+    }
+    var frag = document.createDocumentFragment();
+    mdWalk(md, tokens, frag);
+    return frag;
+  }
+
   function shapeOf(item) {
     if (item.kind === 'thought') {
       return item.durLabel == null ? 'thought-live' : 'thought';
@@ -106,6 +257,21 @@
       opts.virtualCore && typeof opts.virtualCore.Virtualizer === 'function'
         ? opts.virtualCore
         : null;
+    // The page hands in the vendored markdown-it bundle the way it hands in
+    // virtual-core. Without it (404, blocked, a bundle that will not start),
+    // assistant text stays plain: the pre-#93 behaviour, not a blank row.
+    var md = null;
+    if (opts.markdownIt && typeof opts.markdownIt.MarkdownIt === 'function') {
+      try {
+        md = new opts.markdownIt.MarkdownIt({
+          html: false,
+          linkify: false,
+          typographer: false,
+        });
+      } catch {
+        md = null;
+      }
+    }
     var items = model.items;
 
     var mounted = new Map(); // item.id -> row entry
@@ -151,6 +317,33 @@
       var note = m.item.notSent ? 'not sent: ' + m.item.notSent : '';
       if (m.notSent.textContent !== note) m.notSent.textContent = note;
       m.notSent.hidden = !note;
+    }
+
+    // An assistant row renders markdown. Its body is a block container rather
+    // than the span a plain-text row holds, because markdown emits block
+    // elements. Streaming costs a full re-render per pass instead of the tail
+    // append the other text rows get: a growing row can change structure (`**
+    // bold` becomes an element only when it closes), so the O(delta) append is
+    // not available here. The pass is already batched to one rAF, and the
+    // re-render is skipped entirely while the text is unchanged.
+    function buildAsst(m) {
+      var b = el('div', 'bubble asst');
+      b.appendChild(el('div', 'role', TEXT_ROLES.asst));
+      m.mdBody = el('div', 'md');
+      m.mdText = null;
+      b.appendChild(m.mdBody);
+      patchAsst(m);
+      return b;
+    }
+    function patchAsst(m) {
+      var text = m.item.text;
+      if (m.mdText === text) return;
+      m.mdText = text;
+      var body = m.mdBody;
+      while (body.firstChild) body.removeChild(body.firstChild);
+      var frag = renderMarkdown(md, text);
+      // A text the parser cannot read is shown as typed, not dropped.
+      body.appendChild(frag || document.createTextNode(text));
     }
 
     function buildThought(m) {
@@ -487,7 +680,7 @@
 
     var BUILD = {
       user: buildText,
-      asst: buildText,
+      asst: md ? buildAsst : buildText,
       'thought-live': buildText,
       thought: buildThought,
       tool: buildTool,
@@ -512,6 +705,9 @@
         case 'user':
           return patchUser(m);
         case 'asst':
+          // With no parser the row was built by buildText and holds a text
+          // node, so it keeps the tail append.
+          return md ? patchAsst(m) : syncTextNode(m.body, m.item.text);
         case 'thought-live':
           return syncTextNode(m.body, m.item.text);
         case 'thought':
