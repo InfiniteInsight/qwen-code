@@ -262,6 +262,24 @@
     );
   }
 
+  // The full-size target has to be a blob: URL, because the browser blocks a
+  // top-level navigation to a data: one (measured, not assumed). Decoding lives
+  // here rather than in the model so the model stays DOM-free. The URL is minted
+  // at most once per item and never revoked: it is the same bytes the item
+  // already holds, and revoking would break a tab the reader left open.
+  function fullSizeUrl(item) {
+    if (typeof URL !== 'function' || typeof URL.createObjectURL !== 'function')
+      return '';
+    try {
+      var bin = atob(item.data);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return URL.createObjectURL(new Blob([bytes], { type: item.mime }));
+    } catch {
+      return '';
+    }
+  }
+
   function createTranscriptView(opts) {
     var model = opts.model;
     var scroller = opts.scroller;
@@ -690,9 +708,41 @@
       setText(m.note, item.note || '');
     }
 
+    function buildImage(m) {
+      var item = m.item;
+      var b = el('div', 'bubble image');
+      // A frame the model will not draw still says what arrived.
+      if (!item.data) {
+        b.appendChild(el('div', 'image-note', item.note));
+        return b;
+      }
+      var a = el('a', 'image-link');
+      // The viewer holds a live session, so full size never replaces it —
+      // same rule the markdown link branch applies.
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+      var img = el('img', 'image-thumb');
+      img.setAttribute('src', 'data:' + item.mime + ';base64,' + item.data);
+      img.setAttribute('alt', 'assistant image');
+      a.appendChild(img);
+      b.appendChild(a);
+      // The href is minted on the first tap rather than at mount: the browser
+      // blocks a top-level navigation to a data: URL, so it has to be a blob:
+      // one, and decoding a frame's bytes is not something a scroll past
+      // should pay for. The click handler runs before the anchor's activation,
+      // so the href set here is the one that same click follows.
+      a.addEventListener('click', function () {
+        if (a.getAttribute('href')) return;
+        var url = fullSizeUrl(item);
+        if (url) a.setAttribute('href', url);
+      });
+      return b;
+    }
+
     var BUILD = {
       user: buildText,
       asst: md ? buildAsst : buildText,
+      image: buildImage,
       'thought-live': buildText,
       thought: buildThought,
       tool: buildTool,
@@ -720,6 +770,11 @@
           // With no parser the row was built by buildText and holds a text
           // node, so it keeps the tail append.
           return md ? patchAsst(m) : syncTextNode(m.body, m.item.text);
+        case 'image':
+          // The frame carries the whole image in one go, so there is nothing
+          // to write after the build. Falling to the default would run
+          // patchSystem and restyle the row as a system line.
+          return;
         case 'thought-live':
           return syncTextNode(m.body, m.item.text);
         case 'thought':
@@ -812,6 +867,10 @@
           );
         case 'asst':
           return 38 + 21 * lineCount(item, item.text, perLine);
+        case 'image':
+          // A thumbnail is capped by the page's CSS at 240px of picture plus
+          // the bubble's padding; a row saying it cannot be drawn is one line.
+          return item.data ? 256 : 20;
         case 'thought':
           return item.durLabel != null && !item.expanded
             ? 37

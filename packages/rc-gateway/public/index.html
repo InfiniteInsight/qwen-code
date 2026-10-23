@@ -612,6 +612,32 @@
             color: #6cb6ff;
             text-decoration: underline;
           }
+          /* An assistant image (#100): the bytes are in the frame, so the
+             thumbnail is drawn from them and nothing is fetched. Padding goes
+             so the picture reaches the rounded corner, and the height cap is
+             what estimate() assumes for a row it has not measured yet. */
+          #transcript .image {
+            align-self: flex-start;
+            background: #26292e;
+            color: #e6e6e6;
+            padding: 0;
+            overflow: hidden;
+          }
+          #transcript .image .image-link {
+            display: block;
+            line-height: 0;
+          }
+          #transcript .image .image-thumb {
+            display: block;
+            max-width: 100%;
+            max-height: 240px;
+            object-fit: contain;
+          }
+          #transcript .image .image-note {
+            padding: 8px 10px;
+            font-size: 0.85rem;
+            color: #b9bfc7;
+          }
           #transcript .thought {
             align-self: flex-start;
             background: transparent;
@@ -2587,6 +2613,12 @@
       }
       function appendAssistant(text) {
         transcriptModel.appendAssistant(text);
+        scrollTranscript();
+      }
+      // An image the assistant produced. The bytes ride inline in the frame, so
+      // this fetches nothing and reaches no host the model named (#100).
+      function addAssistantImage(mimeType, data) {
+        transcriptModel.addImage(mimeType, data);
         scrollTranscript();
       }
       function appendThought(text) {
@@ -4586,6 +4618,16 @@
           // unusable.
           if (!insideReplay) showProcessing();
           return;
+        }
+        // An image the assistant produced arrives as an agent_message_chunk
+        // whose content block is an image, not text, so it reaches none of the
+        // text branches below and used to be dropped here (#100).
+        if (
+          su === 'agent_message_chunk' &&
+          u.content &&
+          u.content.type === 'image'
+        ) {
+          return addAssistantImage(u.content.mimeType, u.content.data);
         }
         if (su === 'agent_message_chunk' && text) {
           // #71: the hide that used to sit here is now the quiet beat's job. It

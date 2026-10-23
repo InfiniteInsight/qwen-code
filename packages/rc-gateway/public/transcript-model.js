@@ -197,6 +197,74 @@
       push(newItem('system', { text: clean(text), err: !!err }));
     }
 
+    // ---- Assistant images ----------------------------------------------------
+    // ACP carries an image the assistant produced as base64 inside the frame,
+    // so showing it contacts no host the model names. That is the whole reason
+    // this can render while a markdown image stays a hotlink: the rule the
+    // viewer enforces is about who gets contacted, not about where bytes came
+    // from. The bytes are still model-authored, so the type is checked against
+    // a list rather than trusted.
+    //
+    // Raster only. The full-size view opens a blob: URL in a new tab, and a
+    // blob document runs script in the gateway's own origin, so a model-chosen
+    // image/svg+xml would be a same-origin script sink.
+    var IMAGE_TYPES = {
+      'image/png': 1,
+      'image/jpeg': 1,
+      'image/jpg': 1,
+      'image/gif': 1,
+      'image/webp': 1,
+      'image/avif': 1,
+      'image/bmp': 1,
+    };
+
+    // One frame must not be able to push an unbounded string into the DOM.
+    // 3 MiB of image is above any screenshot the daemon realistically sends.
+    var MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+
+    // Exact for valid base64, which is all the wire carries.
+    function decodedBytes(b64) {
+      var pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+      return Math.max(0, Math.floor(b64.length / 4) * 3 - pad);
+    }
+
+    function sizeLabel(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    // The row is always created: a frame the viewer will not draw still says
+    // what arrived, rather than leaving the reader to wonder whether the
+    // assistant answered at all.
+    function addImage(mimeType, data) {
+      finishThought();
+      // The image is its own row, so text that follows opens the next bubble.
+      curAsst = null;
+      var mime = strOr(mimeType, '').toLowerCase();
+      var b64 = typeof data === 'string' ? data : '';
+      var bytes = decodedBytes(b64);
+      var item = newItem('image', {
+        mime: mime,
+        bytes: bytes,
+        data: null,
+        note: '',
+      });
+      if (!b64)
+        item.note = 'image' + (mime ? ' ' + mime : '') + ' carried no data';
+      else if (!IMAGE_TYPES[mime])
+        item.note = 'image type ' + mime + ' is not one the viewer opens';
+      else if (bytes > MAX_IMAGE_BYTES)
+        item.note =
+          'image ' +
+          sizeLabel(bytes) +
+          ' is over the ' +
+          sizeLabel(MAX_IMAGE_BYTES) +
+          ' limit';
+      else item.data = b64;
+      push(item);
+    }
+
     // ---- Tools and subagents ---------------------------------------------
     function toolLabel(u, id, previous) {
       // A later status-only update may omit title/kind: keep the first name.
@@ -473,6 +541,7 @@
       appendThought: appendThought,
       finishThought: finishThought,
       addSystem: addSystem,
+      addImage: addImage,
       setPlan: setPlan,
       upsertTool: upsertTool,
       setSubagentType: setSubagentType,
