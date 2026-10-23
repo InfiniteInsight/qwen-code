@@ -848,6 +848,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         : undefined,
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
+      // #96: the daemon's own flag list, read per request. The gateway block
+      // above stays whatever the gateway itself promises; this is the daemon's
+      // answer, so the UI can finally tell the two apart.
+      daemonStatus: () => deps.daemon.capabilities(),
     });
     app.get('/rc/capabilities', capabilityRoute);
     app.get('/capabilities', capabilityRoute);
