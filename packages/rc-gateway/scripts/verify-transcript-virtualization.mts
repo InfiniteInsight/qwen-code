@@ -4796,6 +4796,215 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #98: seven gateway surfaces shipped their backend before anything drew them.
+// They were placed under Settings rather than the main rail, so these two
+// scenarios assert placement and the honest state when a route is absent.
+// The absent lines are NOT stubbed: this harness gateway mounts several of
+// these routes conditionally, and a probe run showed which ones answer 404
+// for real (usage, peers, agents, policy-explain) and which answer 200 with
+// an empty list (cors, bridges, bans) or 403 (share whoami).
+const SURFACES = [
+  'usage-view',
+  'peers-view',
+  'policy-explain-view',
+  'cors-view',
+  'whoami-view',
+  'bridges-view',
+  'agents-view',
+] as const;
+
+const PLACEHOLDERS = ['(not loaded)', '(not browsed)', '(not asked)', '(not listed)'];
+
+// Waits for an output div to leave its placeholder and settle, then returns it.
+async function drawn(page: Page, id: string): Promise<string> {
+  await page.waitForFunction(
+    (p) => {
+      const el = document.getElementById(p.id);
+      const t = el ? (el.textContent || '').trim() : '';
+      return (
+        t.length > 0 && !t.startsWith('loading') && !t.startsWith('asking') && !p.ph.includes(t)
+      );
+    },
+    { id, ph: PLACEHOLDERS },
+    { timeout: 20_000 },
+  );
+  return page.evaluate(
+    (id) => (document.getElementById(id)?.textContent || '').trim(),
+    id,
+  );
+}
+
+// Opens a panel and clicks one of its buttons, since a closed <details> hides
+// its controls from Playwright's visibility check.
+async function press(page: Page, panel: string, button: string): Promise<void> {
+  await page.evaluate(
+    ({ panel, button }) => {
+      const det = document.getElementById(panel) as HTMLDetailsElement | null;
+      if (det) det.open = true;
+      (document.getElementById(button) as HTMLButtonElement | null)?.click();
+    },
+    { panel, button },
+  );
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P35 the seven unseen surfaces have screens under Settings',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.click('.tab[data-tab="settings"]');
+    const s = await page.evaluate((ids) => {
+      const settings = document.getElementById('pane-settings');
+      const chat = document.getElementById('pane-chat');
+      const rows = ids.map((id) => {
+        const det = document.getElementById(id);
+        const btn = det ? det.querySelector('.help-btn') : null;
+        const help = btn
+          ? document.getElementById(btn.getAttribute('aria-controls') || '')
+          : null;
+        return {
+          id,
+          exists: !!det,
+          inSettings: !!det && !!settings?.contains(det),
+          inChat: !!det && !!chat?.contains(det),
+          helpHidden: !!help && help.hidden,
+          helpLabelled: !!btn && !!btn.getAttribute('aria-label'),
+        };
+      });
+      return { rows };
+    }, [...SURFACES]);
+
+    for (const r of s.rows) {
+      expect(r.exists, `#${r.id} is not in the page at all`);
+      expect(r.inSettings, `#${r.id} is not inside #pane-settings`);
+      expect(!r.inChat, `#${r.id} sits in the chat pane, i.e. on the main screen`);
+      expect(r.helpLabelled, `#${r.id} has no labelled ? control`);
+      expect(r.helpHidden, `#${r.id} shows its help before it is asked for`);
+      // The guard above is only worth having if it can actually trip, so move
+      // one panel into the chat pane and re-run the same test on it.
+    }
+
+    // The inChat assertion above is only worth having if it can trip, so move
+    // one panel into the chat pane, re-run the SAME predicate on it, and put
+    // it back. Without this, an `inChat` that always returned false would pass.
+    const tripped = await page.evaluate(() => {
+      const det = document.getElementById('usage-view');
+      const chat = document.getElementById('pane-chat');
+      const settings = document.getElementById('pane-settings');
+      if (!det || !chat || !settings) return 'could not move the panel';
+      chat.appendChild(det);
+      const now = {
+        inChat: chat.contains(document.getElementById('usage-view')),
+        inSettings: settings.contains(document.getElementById('usage-view')),
+      };
+      settings.appendChild(det);
+      const back = settings.contains(document.getElementById('usage-view'));
+      return `${now.inChat}/${now.inSettings}/${back}`;
+    });
+    // inChat must flip true, inSettings false, and the restore must take.
+    expect(
+      tripped === 'true/false/true',
+      `placement guard is vacuous, moving a panel into the chat pane read ${tripped}`,
+    );
+
+    // The "?" is one delegated listener on document keyed on aria-controls,
+    // so prove it reaches all seven new panels rather than only the old ones.
+    const toggled: string[] = [];
+    for (const id of SURFACES) {
+      const shown = await page.evaluate((panelId) => {
+        const det = document.getElementById(panelId) as HTMLDetailsElement | null;
+        const btn = det?.querySelector('.help-btn') as HTMLButtonElement | null;
+        if (!btn) return 'no ? button';
+        btn.click();
+        const help = document.getElementById(btn.getAttribute('aria-controls') || '');
+        return help
+          ? `${!help.hidden}/${btn.getAttribute('aria-expanded')}`
+          : 'no help element';
+      }, id);
+      expect(
+        shown === 'true/true',
+        `#${id} ? did not reveal its help where it is read (got ${shown})`,
+      );
+      toggled.push(id);
+    }
+    return `${toggled.length} screens under Settings, none on the main screen, each ? reveals its help in place`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P36 an unseen surface says why it has nothing rather than showing a blank',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.click('.tab[data-tab="settings"]');
+
+    // Routes the harness gateway genuinely does not mount: the panel must name
+    // the absence, not render an empty table that reads as "no data".
+    const unmounted: Array<[string, string, string, string]> = [
+      ['usage-view', 'load-usage', 'usage-out', 'not enabled'],
+      ['peers-view', 'browse-peers', 'peers-out', 'no such route'],
+      ['agents-view', 'list-agents', 'agents-out', 'no such route'],
+    ];
+    for (const [panel, button, out, want] of unmounted) {
+      await press(page, panel, button);
+      const text = await drawn(page, out);
+      expect(
+        text.includes(want),
+        `${panel} drew ${JSON.stringify(text.slice(0, 80))}, expected it to say "${want}"`,
+      );
+    }
+
+    // A blank tool name must be caught here rather than sent and round-tripped
+    // into a 400, so prove the client guard fires without a request.
+    await press(page, 'policy-explain-view', 'run-explain');
+    const blank = await drawn(page, 'explain-out');
+    expect(
+      blank.includes('tool name is required'),
+      `an empty tool name was not caught client-side: ${JSON.stringify(blank)}`,
+    );
+
+    // With a tool named, the route itself is absent in this harness, which is
+    // the same fact as a 503: there is no policy to ask.
+    await page.fill('#explain-tool', 'read_file');
+    await press(page, 'policy-explain-view', 'run-explain');
+    const noPolicy = await drawn(page, 'explain-out');
+    expect(
+      noPolicy.includes('no policy loaded'),
+      `an unmounted policy route was reported as ${JSON.stringify(noPolicy)}`,
+    );
+
+    // An owner token is refused by /rc/share/whoami because `owner` implies
+    // write/approve/session:read but NOT share. The panel must state that
+    // fact rather than dress it up as a failure.
+    await press(page, 'whoami-view', 'whoami-btn');
+    const whoami = await drawn(page, 'whoami-out');
+    expect(
+      whoami.includes('not a share token'),
+      `the owner token's 403 was drawn as ${JSON.stringify(whoami)}`,
+    );
+
+    // Routes that ARE mounted answer 200 with an empty list, which must read
+    // as "nothing here" and not as an error.
+    await press(page, 'cors-view', 'list-cors');
+    const cors = await drawn(page, 'cors-out');
+    expect(
+      cors.includes('no admitted origins'),
+      `an empty allowlist was drawn as ${JSON.stringify(cors)}`,
+    );
+    await press(page, 'bridges-view', 'list-bridges');
+    const bridges = await drawn(page, 'bridges-out');
+    expect(
+      bridges.includes('no bridges registered'),
+      `an empty bridge registry was drawn as ${JSON.stringify(bridges)}`,
+    );
+    await press(page, 'bridges-view', 'list-bans');
+    const bans = await drawn(page, 'bridges-out');
+    expect(
+      bans.includes('no banned chat users'),
+      `an empty ban list was drawn as ${JSON.stringify(bans)}`,
+    );
+    return 'absent routes say so, an owner token is told it is not a share token, empty lists read as empty';
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
