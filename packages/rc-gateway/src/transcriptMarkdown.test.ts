@@ -183,13 +183,32 @@ describe('assistant markdown (#93)', () => {
     expect(row?.textContent).toContain('a chart');
   });
 
-  it('renders a table without carrying its style attribute', () => {
+  // A cell's alignment is the model's own intent, written as `:--` markers in
+  // the delimiter row rather than as markup, so it is the one non-link
+  // attribute worth copying. src/vendorMarkdownIt.test.ts pins that a cell can
+  // carry nothing else, which is what makes copying the whole value safe.
+  it('carries a table cell alignment into the cells', () => {
     model.appendAssistant('| a | b |\n|:--|--:|\n| 1 | 2 |\n');
     tick();
-    const row = asstRow();
-    expect(row?.querySelectorAll('table thead th')).toHaveLength(2);
-    expect(row?.querySelectorAll('tbody td')).toHaveLength(2);
-    for (const cell of [...(row?.querySelectorAll('th, td') ?? [])]) {
+    const cells = [...(asstRow()?.querySelectorAll('th, td') ?? [])];
+    expect(cells).toHaveLength(4);
+    expect(cells.map((c) => c.getAttribute('style'))).toEqual([
+      'text-align:left',
+      'text-align:right',
+      'text-align:left',
+      'text-align:right',
+    ]);
+  });
+
+  it('invent no alignment where the model asked for none', () => {
+    // No colons in the delimiter row, so the parser emits no style attribute at
+    // all. This is what separates copying from blanket styling: a copy that
+    // passed the test above by styling every cell would fail here.
+    model.appendAssistant('| c | d |\n|---|---|\n| 3 | 4 |\n');
+    tick();
+    const cells = [...(asstRow()?.querySelectorAll('th, td') ?? [])];
+    expect(cells).toHaveLength(4);
+    for (const cell of cells) {
       expect(cell.getAttribute('style')).toBeNull();
     }
   });

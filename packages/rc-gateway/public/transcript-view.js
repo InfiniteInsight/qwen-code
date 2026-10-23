@@ -128,20 +128,27 @@
   // not own and the reader did not ask to visit.
   var MD_HREF = /^(?:https?:|mailto:)/i;
 
-  function mdHrefOf(t) {
+  function mdAttrOf(t, name) {
     var attrs = t.attrs || [];
     for (var i = 0; i < attrs.length; i++) {
-      if (attrs[i][0] === 'href') return attrs[i][1];
+      if (attrs[i][0] === name) return attrs[i][1];
     }
     return null;
   }
+
+  // Table alignment is the one attribute copied off a token that is not a link.
+  // markdown-it puts it in a style attribute on th/td and nowhere else.
+  // src/vendorMarkdownIt.test.ts pins that a cell can carry no other attribute
+  // and that its value is always a text-align, which is what makes copying the
+  // whole value, rather than parsing the alignment back out of it, safe.
+  var MD_CELL_TAGS = { th: 1, td: 1 };
 
   // An element for a nesting-1 token, or null to let its children attach to
   // the parent unstyled (an unknown tag, or a link target we will not make).
   function mdElement(md, t) {
     if (!MD_TAGS[t.tag]) return null;
     if (t.type === 'link_open') {
-      var href = mdHrefOf(t);
+      var href = mdAttrOf(t, 'href');
       if (href === null || !MD_HREF.test(href) || !md.validateLink(href)) {
         return null;
       }
@@ -152,7 +159,12 @@
       a.setAttribute('rel', 'noopener noreferrer');
       return a;
     }
-    return document.createElement(t.tag);
+    var node = document.createElement(t.tag);
+    if (MD_CELL_TAGS[t.tag]) {
+      var style = mdAttrOf(t, 'style');
+      if (style !== null) node.setAttribute('style', style);
+    }
+    return node;
   }
 
   function mdLeaf(t) {
