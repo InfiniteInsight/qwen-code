@@ -208,4 +208,38 @@ describe('token stream transcript-view.js relies on', () => {
     expect(md.validateLink('#frag')).toBe(true);
     expect(md.validateLink('/rel')).toBe(true);
   });
+
+  // transcript-view.js copies the whole style attribute onto th/td (#101), which
+  // is safe only because the parser emits nothing else. Pin that here: a vendor
+  // bump that started emitting another attribute, or another property inside
+  // style, would otherwise widen what model-authored text can set on a row, and
+  // nothing in the tree would notice. The document is broad on purpose, because
+  // the guard is about the whole emitted set rather than tables alone.
+  it('emits no attribute beyond the set the copier relies on', async () => {
+    const md = await make();
+    const src =
+      '| l | c | r |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |\n\n' +
+      '# h\n\n[l](https://e.test/a) ![alt](https://e.test/i.png) **b**\n\n' +
+      '- i\n\n> q\n\n```js\nx\n```\n\n---\n';
+    const names = new Set<string>();
+    const styles = new Set<string>();
+    walk(md.parse(src, {}), (t) => {
+      for (const [name, value] of t.attrs ?? []) {
+        names.add(`${t.tag}::${name}`);
+        if (name === 'style') styles.add(value);
+      }
+    });
+    expect([...names].sort()).toEqual([
+      'a::href',
+      'img::alt',
+      'img::src',
+      'td::style',
+      'th::style',
+    ]);
+    expect([...styles].sort()).toEqual([
+      'text-align:center',
+      'text-align:left',
+      'text-align:right',
+    ]);
+  });
 });
