@@ -1893,6 +1893,256 @@
             >
           </div>
         </details>
+        <!-- #98. Seven gateway surfaces shipped their backend before anything
+             drew them, so the owner could not see them at all. They live here
+             rather than in the chat pane because none of them is something you
+             look at every session: this is the part of the page you open to
+             check on something. -->
+        <details id="usage-view" class="ops-collapse">
+          <summary>
+            <strong>Usage</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Usage?"
+              aria-expanded="false"
+              aria-controls="help-usage-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-usage-view" hidden>
+            Cost and token totals the gateway recorded, grouped by session,
+            client, chat user, or model. Pick a window and a grouping, then tap
+            <b>Load usage</b>. An owner token sees every row; a lesser token
+            sees only its own. The gateway only keeps these when cost tracking
+            is turned on, so on a gateway that never wired a usage store this
+            says <b>not enabled</b> instead of showing an empty table.
+          </div>
+          <div class="ops-note">
+            (cost and token totals; needs cost tracking on the gateway)
+          </div>
+          <div>
+            <select id="usage-group" title="group rows by">
+              <option value="session">by session</option>
+              <option value="client">by client</option>
+              <option value="sub_actor">by chat user</option>
+              <option value="model">by model</option>
+            </select>
+            <input
+              id="usage-since"
+              type="text"
+              size="8"
+              value="24h"
+              title="window start: 24h, 7d, or a date"
+            />
+            <button id="load-usage">Load usage</button>
+          </div>
+          <div id="usage-out">(not loaded)</div>
+        </details>
+        <details id="peers-view" class="ops-collapse">
+          <summary>
+            <strong>LAN daemons</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are LAN daemons?"
+              aria-expanded="false"
+              aria-controls="help-peers-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-peers-view" hidden>
+            Asks this gateway to search the local network for other qwen-rc
+            daemons advertising themselves over mDNS. Tap <b>Browse LAN</b> and
+            wait: the search runs for about five seconds before it answers,
+            which is how discovery works rather than a hang. Shows each
+            daemon's name, host, port, version, and workspace. Needs owner
+            scope, and says <b>discovery unavailable</b> when this gateway was
+            installed without the mDNS dependency.
+          </div>
+          <div class="ops-note">(mDNS browse, takes about 5s; requires owner scope)</div>
+          <div><button id="browse-peers">Browse LAN</button></div>
+          <div id="peers-out">(not browsed)</div>
+        </details>
+        <details id="policy-explain-view" class="ops-collapse">
+          <summary>
+            <strong>Policy dry-run</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Policy dry-run?"
+              aria-expanded="false"
+              aria-controls="help-policy-explain-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-policy-explain-view" hidden>
+            Asks the live policy what it <b>would</b> decide about a tool call,
+            without running anything. Enter a tool name, optionally a path and
+            an operation, then tap <b>Explain</b>. The answer is the decision
+            plus the rule trail that produced it, so you can see which rule
+            fired instead of guessing. Nothing is executed and nothing is
+            stored. Needs owner scope, and says <b>no policy loaded</b> when
+            this gateway runs without a policy file.
+          </div>
+          <div class="ops-note">
+            (dry-run against the live policy; requires owner scope)
+          </div>
+          <div>
+            <input
+              id="explain-tool"
+              type="text"
+              size="14"
+              placeholder="tool name"
+            />
+            <input id="explain-path" type="text" size="14" placeholder="path" />
+            <select id="explain-op" title="operation">
+              <option value="">any</option>
+              <option value="read">read</option>
+              <option value="write">write</option>
+              <option value="execute">execute</option>
+            </select>
+            <button id="run-explain">Explain</button>
+          </div>
+          <div id="explain-out">(not asked)</div>
+        </details>
+        <details id="cors-view" class="ops-collapse">
+          <summary>
+            <strong>Browser origins</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Browser origins?"
+              aria-expanded="false"
+              aria-controls="help-cors-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-cors-view" hidden>
+            Which web origins this gateway will accept cross-origin requests
+            from. Most arrive on their own when someone pairs a browser. Tap
+            <b>List origins</b> to see them, <b>Admit</b> to add one by hand,
+            <b>Remove</b> to drop one. A row marked <b>config</b> came from the
+            gateway's config file rather than from pairing, so it cannot be
+            removed here: the refusal says to edit the config instead. Needs
+            owner scope.
+          </div>
+          <div class="ops-note">(CORS allowlist; requires owner scope)</div>
+          <div>
+            <button id="list-cors">List origins</button>
+            <input
+              id="cors-origin"
+              type="text"
+              size="18"
+              placeholder="https://host"
+            />
+            <button id="admit-cors">Admit</button>
+          </div>
+          <div id="cors-out">(not listed)</div>
+        </details>
+        <details id="whoami-view" class="ops-collapse">
+          <summary>
+            <strong>Share identity</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Share identity?"
+              aria-expanded="false"
+              aria-controls="help-whoami-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-whoami-view" hidden>
+            What a shared link sees about itself: which session it is locked
+            to, whether it can only watch or also approve, its label, when it
+            expires, and how many uses are left. Tap <b>Who am I</b>. This
+            answers for a share token only, and an owner token does not carry
+            the share scope, so on this page the honest result is
+            <b>a share token answers this</b> rather than a share. It is here
+            because the route exists for the links you create above, and a
+            paste-able link is worth checking from the receiving side.
+          </div>
+          <div class="ops-note">
+            (a share token's own view; an owner token is refused)
+          </div>
+          <div><button id="whoami-btn">Who am I</button></div>
+          <div id="whoami-out">(not asked)</div>
+        </details>
+        <details id="bridges-view" class="ops-collapse">
+          <summary>
+            <strong>Chat bridges</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Chat bridges?"
+              aria-expanded="false"
+              aria-controls="help-bridges-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-bridges-view" hidden>
+            The chat services currently registered with this gateway: each
+            bridge's name, which token owns it, when it last sent a heartbeat,
+            and what its chat service can actually render (buttons, markdown,
+            threads, message size). Tap <b>List bridges</b> to load them, or
+            <b>List banned</b> for the chat users barred from this gateway. A
+            bridge that misses its heartbeats is dropped automatically, so an
+            absent row means it is not connected rather than that it was
+            deleted. Needs owner scope.
+          </div>
+          <div class="ops-note">(registered bridges and bans; requires owner scope)</div>
+          <div>
+            <button id="list-bridges">List bridges</button>
+            <button id="list-bans">List banned</button>
+          </div>
+          <div id="bridges-out">(not listed)</div>
+        </details>
+        <details id="agents-view" class="ops-collapse">
+          <summary>
+            <strong>Background agents</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Background agents?"
+              aria-expanded="false"
+              aria-controls="help-agents-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-agents-view" hidden>
+            Agents this gateway has spawned to work on their own, each backed by
+            a real session. Tap <b>List agents</b> to see them with their
+            status, the task they were given, and their cost so far; filter by
+            status to find the ones still running. <b>Steer</b> sends a further
+            instruction into that agent's session and <b>Stop</b> cancels it.
+            Starting an agent is not offered here on purpose: it opens a real
+            session and starts spending, which is what the chat pane is for.
+            Listing needs read scope; steering and stopping need send scope.
+          </div>
+          <div class="ops-note">
+            (gateway-spawned agents; send scope to steer or stop)
+          </div>
+          <div>
+            <select id="agents-status" title="filter by status">
+              <option value="">any status</option>
+              <option value="running">running</option>
+              <option value="blocked">blocked</option>
+              <option value="completed">completed</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+              <option value="orphaned">orphaned</option>
+            </select>
+            <button id="list-agents">List agents</button>
+          </div>
+          <div id="agents-out">(not listed)</div>
+        </details>
       </div>
       <div class="tab-pane" id="pane-diag">
         <details id="watch-stream" class="ops-collapse">
@@ -9789,6 +10039,526 @@
           out.appendChild(b);
         } catch (e) {
           out.textContent = 'fork error: ' + e;
+        }
+      };
+
+      // #98. Seven gateway surfaces whose backend shipped before anything drew
+      // them. Each one answers with a fact the owner can only learn by reading
+      // it, and three of those answers look identical if a handler flattens
+      // them: the route is not mounted on this gateway, the caller's token
+      // lacks the scope, or the store is genuinely empty. Every branch below
+      // keeps its own words, and every server field reaches the DOM through
+      // textContent, like the rest of the page.
+      async function codeOf(res) {
+        try {
+          const b = await res.json();
+          return b && b.code ? b.code : res.status;
+        } catch {
+          return res.status;
+        }
+      }
+      // A read-only surface: returns the parsed body, or null after it has
+      // already drawn why there is no body. `notMounted` is the per-route
+      // wording for a 404, because an absent route means something different
+      // on every one of these panels.
+      async function surfaceGet(path, out, notMounted) {
+        if (!token()) {
+          setStatus('pair first');
+          return null;
+        }
+        out.textContent = 'loading…';
+        try {
+          const res = await fetch(path, {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 404) {
+            out.textContent = notMounted;
+            return null;
+          }
+          if (res.status === 503) {
+            out.textContent = 'unavailable: ' + (await codeOf(res));
+            return null;
+          }
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized for this'
+                : 'failed (' + (await codeOf(res)) + ')';
+            return null;
+          }
+          return await res.json();
+        } catch (e) {
+          out.textContent = 'error: ' + e;
+          return null;
+        }
+      }
+      function infoRow(text) {
+        const row = document.createElement('div');
+        row.className = 'token-row';
+        const info = document.createElement('span');
+        info.textContent = text;
+        row.appendChild(info);
+        return row;
+      }
+
+      // GET /rc/usage?group_by=&since= — the route is mounted only when a
+      // usage store is wired, so a 404 here means cost tracking is off on this
+      // gateway rather than that the call was wrong. Owner sees every row; a
+      // lesser token sees only its own, and the route applies that filter
+      // itself, so nothing here narrows the result a second time.
+      $('load-usage').onclick = async () => {
+        const out = $('usage-out');
+        const q =
+          '?group_by=' +
+          encodeURIComponent($('usage-group').value) +
+          '&since=' +
+          encodeURIComponent($('usage-since').value.trim() || '24h');
+        const body = await surfaceGet(
+          '/rc/usage' + q,
+          out,
+          'not enabled — this gateway has no usage store',
+        );
+        if (!body) return;
+        const rows = Array.isArray(body.rows) ? body.rows : [];
+        out.textContent = '';
+        if (rows.length === 0) {
+          out.textContent = '(no rows in that window)';
+          return;
+        }
+        for (const r of rows) {
+          const eff = r.efficiency || {};
+          const per1k =
+            eff.costCentsPer1kOutputTokens === null ||
+            eff.costCentsPer1kOutputTokens === undefined
+              ? 'no output tokens'
+              : eff.costCentsPer1kOutputTokens.toFixed(2) + ' c/1k out';
+          out.appendChild(
+            infoRow(
+              (r.displayLabel || r.key || 'unlabeled') +
+                '  in ' +
+                r.tokensIn +
+                '  out ' +
+                r.tokensOut +
+                '  cached ' +
+                r.tokensCached +
+                '  ' +
+                r.costCents.toFixed(2) +
+                ' cents  ' +
+                per1k,
+            ),
+          );
+        }
+      };
+
+      // GET /rc/peers — an mDNS browse that blocks for about five seconds by
+      // design. 503 means the optional discovery dependency is not installed,
+      // which is an install fact, not a failure to retry. The button is held
+      // down for the whole browse so a second tap cannot start a second one.
+      $('browse-peers').onclick = async () => {
+        const out = $('peers-out');
+        const btn = $('browse-peers');
+        btn.disabled = true;
+        try {
+          const body = await surfaceGet(
+            '/rc/peers',
+            out,
+            'no such route on this gateway',
+          );
+          if (!body) return;
+          const peers = Array.isArray(body.peers) ? body.peers : [];
+          out.textContent = '';
+          if (peers.length === 0) {
+            out.textContent = '(nothing answering on the LAN)';
+            return;
+          }
+          for (const p of peers) {
+            out.appendChild(
+              infoRow(
+                (p.name || 'unnamed') +
+                  '  ' +
+                  p.host +
+                  ':' +
+                  p.port +
+                  '  v' +
+                  (p.version || '?') +
+                  '  ' +
+                  (p.tlsRequired ? 'tls' : 'no tls') +
+                  '  ' +
+                  (p.workspace || ''),
+              ),
+            );
+          }
+        } finally {
+          btn.disabled = false;
+        }
+      };
+
+      // POST /policy/explain — a dry-run against the live policy. Two facts here
+      // are worth drawing rather than summarising: `source` separates "a rule
+      // matched" from "nothing matched and the default answered", which a
+      // bare allow/deny word would collapse; and a matched rule carrying
+      // `quotaNotEvaluated` won this dry-run WITHOUT its per-window quota
+      // being consulted, so live it could be skipped instead. Suppressing
+      // that flag would make the dry-run promise an outcome it never tested.
+      $('run-explain').onclick = async () => {
+        const out = $('explain-out');
+        const tool = $('explain-tool').value.trim();
+        if (!tool) {
+          out.textContent = 'a tool name is required';
+          return;
+        }
+        if (!token()) {
+          setStatus('pair first');
+          return;
+        }
+        const body = { tool };
+        const p = $('explain-path').value.trim();
+        if (p) body.path = p;
+        const op = $('explain-op').value;
+        if (op) body.operation = op;
+        out.textContent = 'asking…';
+        try {
+          const res = await fetch('/policy/explain', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify(body),
+          });
+          // The route is mounted only when a policy exists, so an absent
+          // route (404, answered in HTML by the router) and the route's own
+          // 503 are the same fact: this gateway has no policy to ask.
+          if (res.status === 503 || res.status === 404) {
+            out.textContent = 'no policy loaded on this gateway';
+            return;
+          }
+          if (!res.ok) {
+            out.textContent = 'explain failed: ' + (await codeOf(res));
+            return;
+          }
+          const data = await res.json();
+          const d = data.decision || {};
+          out.textContent = '';
+          out.appendChild(
+            infoRow(
+              d.action +
+                '  (' +
+                (d.source === 'default' ? 'no rule matched, the default answered' : 'a rule matched') +
+                (d.ruleId ? ', rule ' + d.ruleId : '') +
+                (d.reason ? ', ' + d.reason : '') +
+                (d.requireScope ? ', needs scope ' + d.requireScope : '') +
+                ')',
+            ),
+          );
+          for (const t of Array.isArray(data.trace) ? data.trace : []) {
+            out.appendChild(
+              infoRow(
+                '#' +
+                  t.index +
+                  '  ' +
+                  (t.id || 'unnamed rule') +
+                  '  ' +
+                  t.status +
+                  '  ' +
+                  t.reason +
+                  (t.action ? '  → ' + t.action : '') +
+                  (t.quotaNotEvaluated
+                    ? '  (quota NOT consulted: live it may be skipped once its window is full)'
+                    : ''),
+              ),
+            );
+          }
+        } catch (e) {
+          out.textContent = 'explain error: ' + e;
+        }
+      };
+
+      // /rc/cors — an allowlist, so the panel is list, admit, remove. A
+      // config-sourced origin is listed but the store refuses to delete it
+      // (409), because the config file is its source of truth: the row says
+      // that instead of offering a Remove that can only fail.
+      async function listCorsOrigins() {
+        const out = $('cors-out');
+        const body = await surfaceGet(
+          '/rc/cors',
+          out,
+          'no such route on this gateway',
+        );
+        if (!body) return;
+        const origins = Array.isArray(body.origins) ? body.origins : [];
+        out.textContent = '';
+        if (origins.length === 0) {
+          out.textContent = '(no admitted origins)';
+          return;
+        }
+        for (const o of origins) {
+          const row = document.createElement('div');
+          row.className = 'token-row';
+          const info = document.createElement('span');
+          info.textContent =
+            o.origin +
+            '  [' +
+            o.source +
+            ']' +
+            (o.admittedByTokenId ? '  by ' + o.admittedByTokenId : '');
+          row.appendChild(info);
+          if (o.source === 'config') {
+            const note = document.createElement('span');
+            note.textContent = 'set in the config file; edit that to remove it';
+            row.appendChild(note);
+          } else {
+            const btn = document.createElement('button');
+            btn.textContent = 'Remove';
+            btn.onclick = async () => {
+              btn.disabled = true;
+              try {
+                const res = await fetch(
+                  '/rc/cors/' + encodeURIComponent(o.origin),
+                  {
+                    method: 'DELETE',
+                    headers: { Authorization: 'Bearer ' + token() },
+                  },
+                );
+                if (res.ok) await listCorsOrigins();
+                else {
+                  btn.disabled = false;
+                  setStatus('remove failed: ' + (await codeOf(res)));
+                }
+              } catch (e) {
+                btn.disabled = false;
+                setStatus('remove error: ' + e);
+              }
+            };
+            row.appendChild(btn);
+          }
+          out.appendChild(row);
+        }
+      }
+      $('list-cors').onclick = listCorsOrigins;
+      $('admit-cors').onclick = async () => {
+        const out = $('cors-out');
+        if (!token()) {
+          setStatus('pair first');
+          return;
+        }
+        const origin = $('cors-origin').value.trim();
+        if (!origin) {
+          out.textContent = 'enter an origin to admit';
+          return;
+        }
+        try {
+          const res = await fetch('/rc/cors', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ origin }),
+          });
+          if (!res.ok) {
+            out.textContent = 'admit failed: ' + (await codeOf(res));
+            return;
+          }
+          $('cors-origin').value = '';
+          await listCorsOrigins();
+        } catch (e) {
+          out.textContent = 'admit error: ' + e;
+        }
+      };
+
+      // GET /rc/share/whoami — answers for a SHARE token only, and `owner`
+      // implies write/approve/session:read but NOT share (scopes.ts), so this
+      // page's own token is refused by design. Drawing that as a failure would
+      // be wrong: the honest line is that the route describes a guest link,
+      // and the way to try it is to open one of the links created above.
+      $('whoami-btn').onclick = async () => {
+        const out = $('whoami-out');
+        if (!token()) {
+          setStatus('pair first');
+          return;
+        }
+        out.textContent = 'asking…';
+        try {
+          const res = await fetch('/rc/share/whoami', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 403) {
+            out.textContent =
+              'this page holds an owner token, which is not a share token: ' +
+              'open one of the share links above to see this from the ' +
+              'receiving side';
+            return;
+          }
+          if (!res.ok) {
+            out.textContent = 'whoami failed: ' + (await codeOf(res));
+            return;
+          }
+          const s = await res.json();
+          out.textContent = '';
+          out.appendChild(
+            infoRow(
+              (s.label || 'unlabelled') +
+                '  ' +
+                s.scope +
+                '  session ' +
+                (s.sessionId || 'unlocked') +
+                '  expires ' +
+                (s.expiresAt || 'never') +
+                '  uses left ' +
+                (s.usesRemaining === null ? 'unlimited' : s.usesRemaining),
+            ),
+          );
+        } catch (e) {
+          out.textContent = 'whoami error: ' + e;
+        }
+      };
+
+      // GET /rc/bridges and /rc/bridges/bans. The registry is in-memory and
+      // advisory — a bridge re-registers on reconnect and a missed heartbeat
+      // prunes it — so an absent row means "not connected right now", not
+      // "deleted". The help text says so because the list reads as durable.
+      $('list-bridges').onclick = async () => {
+        const out = $('bridges-out');
+        const body = await surfaceGet(
+          '/rc/bridges',
+          out,
+          'no such route on this gateway',
+        );
+        if (!body) return;
+        const bridges = Array.isArray(body.bridges) ? body.bridges : [];
+        out.textContent = '';
+        if (bridges.length === 0) {
+          out.textContent = '(no bridges registered right now)';
+          return;
+        }
+        for (const b of bridges) {
+          out.appendChild(
+            infoRow(
+              (b.displayName || b.id) +
+                '  id ' +
+                b.id +
+                '  token ' +
+                b.tokenId +
+                '  seen ' +
+                new Date(b.registeredAt).toISOString() +
+                '  ' +
+                (b.supportsActions ? 'actions ' : '') +
+                'markdown:' +
+                (b.supportsMarkdown || 'none') +
+                '  ' +
+                (b.supportsThreads ? 'threads ' : '') +
+                (b.supportsEdits ? 'edits ' : '') +
+                '  max ' +
+                (b.maxMessageBytes || '?') +
+                'B/' +
+                (b.maxMessageChars || '?') +
+                'ch',
+            ),
+          );
+        }
+      };
+      $('list-bans').onclick = async () => {
+        const out = $('bridges-out');
+        const body = await surfaceGet(
+          '/rc/bridges/bans',
+          out,
+          'no such route on this gateway',
+        );
+        if (!body) return;
+        const banned = Array.isArray(body.banned) ? body.banned : [];
+        out.textContent = '';
+        if (banned.length === 0) {
+          out.textContent = '(no banned chat users)';
+          return;
+        }
+        for (const s of banned) out.appendChild(infoRow('banned: ' + s));
+      };
+
+      // GET /rc/agents — a workspace-wide list; a session-locked caller is
+      // confined to its own session by the route itself, so the panel draws
+      // what comes back without narrowing it again. Steering uses window.prompt
+      // like the fork panel above rather than a second inline form.
+      $('list-agents').onclick = async () => {
+        const out = $('agents-out');
+        const st = $('agents-status').value;
+        const body = await surfaceGet(
+          '/rc/agents' + (st ? '?status=' + encodeURIComponent(st) : ''),
+          out,
+          'no such route on this gateway',
+        );
+        if (!body) return;
+        const agents = Array.isArray(body.agents) ? body.agents : [];
+        out.textContent = '';
+        if (agents.length === 0) {
+          out.textContent = '(no agents)';
+          return;
+        }
+        for (const a of agents) {
+          const row = document.createElement('div');
+          row.className = 'token-row';
+          const info = document.createElement('span');
+          info.textContent =
+            a.status +
+            '  ' +
+            (a.agentType || 'agent') +
+            '  ' +
+            (a.task || '') +
+            '  session ' +
+            a.sessionId +
+            (a.costMicrocents === undefined
+              ? ''
+              : '  ' + (a.costMicrocents / 1000000).toFixed(2) + ' cents') +
+            (a.finishedAt ? '  finished ' + a.finishedAt : '');
+          row.appendChild(info);
+          const steer = document.createElement('button');
+          steer.textContent = 'Steer';
+          steer.onclick = async () => {
+            const content = window.prompt('Instruction for this agent:');
+            if (!content) return;
+            steer.disabled = true;
+            try {
+              const res = await fetch(
+                '/rc/agents/' + encodeURIComponent(a.agentId) + '/message',
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: 'Bearer ' + token(),
+                  },
+                  body: JSON.stringify({ content }),
+                },
+              );
+              setStatus(
+                res.ok ? 'steered' : 'steer failed: ' + (await codeOf(res)),
+              );
+            } catch (e) {
+              setStatus('steer error: ' + e);
+            }
+            steer.disabled = false;
+          };
+          row.appendChild(steer);
+          const stop = document.createElement('button');
+          stop.textContent = 'Stop';
+          stop.onclick = async () => {
+            stop.disabled = true;
+            try {
+              const res = await fetch(
+                '/rc/agents/' + encodeURIComponent(a.agentId) + '/cancel',
+                { method: 'POST', headers: { Authorization: 'Bearer ' + token() } },
+              );
+              if (res.ok) info.textContent = 'cancelled  ' + info.textContent;
+              else {
+                stop.disabled = false;
+                setStatus('stop failed: ' + (await codeOf(res)));
+              }
+            } catch (e) {
+              stop.disabled = false;
+              setStatus('stop error: ' + e);
+            }
+          };
+          row.appendChild(stop);
+          out.appendChild(row);
         }
       };
 
