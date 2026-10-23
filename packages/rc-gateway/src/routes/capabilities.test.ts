@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
+import type { DaemonCapabilities } from '@qwen-code/sdk';
 import { createCapabilityRoute } from './capabilities.js';
 import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
 
@@ -30,6 +31,104 @@ async function mount(
     close: () => new Promise((r) => server.close(r)),
   };
 }
+
+describe('the daemon block (#96)', () => {
+  it('relays the daemon list verbatim under a distinct key', async () => {
+    const { base, close } = await mount({
+      daemonStatus: async () => ({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['session_btw', 'realtime_voice'],
+        modelServices: [],
+        qwenCodeVersion: '0.25.3',
+      }),
+    });
+    try {
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      expect(body.remoteControl.daemon).toMatchObject({
+        available: true,
+        features: ['session_btw', 'realtime_voice'],
+        qwenCodeVersion: '0.25.3',
+      });
+      // A distinct key: the daemon answer never overwrites the gateway claims.
+      expect(body.remoteControl.version).toBe(RC_PROTOCOL_VERSION);
+      expect(body.remoteControl.pairingEnabled).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('the daemon read degrades', () => {
+  it('still answers with the gateway block when the daemon read throws', async () => {
+    const { base, close } = await mount({
+      daemonStatus: async () => {
+        throw new Error('daemon unreachable');
+      },
+    });
+    try {
+      const r = await fetch(`${base}/rc/capabilities`);
+      const body = await r.json();
+      // The marker, not a 5xx: a dead daemon must cost the daemon list only.
+      expect(r.status).toBe(200);
+      expect(body.remoteControl.daemon).toEqual({ available: false });
+      expect(body.remoteControl.workspaceControl.permissions).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('the daemon read budget', () => {
+  it('answers within its budget when the read hangs', async () => {
+    const hang = new Promise<never>(() => {});
+    const { base, close } = await mount({
+      daemonBudgetMs: 50,
+      daemonStatus: () => hang,
+    });
+    try {
+      const t0 = Date.now();
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      expect(Date.now() - t0).toBeLessThan(2000);
+      expect(body.remoteControl.daemon).toEqual({ available: false });
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('an unwired daemon', () => {
+  it('omits the key rather than claiming an empty list', async () => {
+    const { base, close } = await mount({});
+    try {
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      expect(body.remoteControl.daemon).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('the marker cannot be shadowed', () => {
+  it('keeps available:true when the daemon sends its own available field', async () => {
+    const { base, close } = await mount({
+      daemonStatus: async () =>
+        ({
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_btw'],
+          modelServices: [],
+          available: false,
+        }) as unknown as DaemonCapabilities,
+    });
+    try {
+      const body = await (await fetch(`${base}/rc/capabilities`)).json();
+      expect(body.remoteControl.daemon.available).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+});
 
 describe('GET /rc/capabilities', () => {
   it('401s without an authenticated client', async () => {
