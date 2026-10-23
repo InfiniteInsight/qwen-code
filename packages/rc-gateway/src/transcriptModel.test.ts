@@ -633,6 +633,73 @@ describe('TranscriptModel', () => {
     expect(seen).toEqual(['append']);
   });
 
+  describe('assistant image (#100)', () => {
+    // A real 1x1 PNG, so the byte count is checked against Node's own decoder
+    // rather than a literal that could be wrong in the same way the code is.
+    const PNG =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    it('makes one image row from the frame bytes and starts a new bubble after it', () => {
+      const { m, events } = setup();
+      m.appendAssistant('here is the chart:');
+      m.addImage('image/png', PNG);
+      m.appendAssistant('as you can see');
+      expect(m.items.map((i) => i.kind)).toEqual(['asst', 'image', 'asst']);
+      const img = m.items[1];
+      expect(img.mime).toBe('image/png');
+      expect(img.data).toBe(PNG);
+      expect(img.bytes).toBe(Buffer.from(PNG, 'base64').length);
+      expect(img.note).toBe('');
+      // The image is its own row, so the text that follows is a second bubble.
+      expect(m.curAsst).toBe(m.items[2]);
+      expect(events).toEqual(['append', 'append', 'append']);
+    });
+
+    it('folds a live thought the way any other assistant frame does', () => {
+      const { m, clock } = setup();
+      m.appendThought('looking');
+      clock.t = 2600;
+      m.addImage('image/png', PNG);
+      expect(m.items[0].live).toBe(false);
+      expect(m.items[0].durLabel).toBe('2s');
+    });
+
+    it('lowercases the type, since the wire is not case-controlled', () => {
+      const { m } = setup();
+      m.addImage('IMAGE/PNG', PNG);
+      expect(m.items[0].mime).toBe('image/png');
+      expect(m.items[0].data).toBe(PNG);
+    });
+
+    it('opens no document for a type that could carry script', () => {
+      const { m } = setup();
+      m.addImage('image/svg+xml', PNG);
+      const img = m.items[0];
+      expect(img.data).toBeNull();
+      expect(img.note).toContain('image/svg+xml');
+      // The row still exists: the reader learns what arrived.
+      expect(img.kind).toBe('image');
+    });
+
+    it('keeps a huge frame out of the DOM but says what it was', () => {
+      const { m } = setup();
+      // Just over the cap once decoded, so it is the boundary that fails.
+      const big = 'A'.repeat(4 * 1024 * 1024 + 4);
+      m.addImage('image/png', big);
+      const img = m.items[0];
+      expect(img.data).toBeNull();
+      expect(img.bytes).toBe(Buffer.from(big, 'base64').length);
+      expect(img.note).toContain('MB');
+    });
+
+    it('a frame with no bytes still leaves a row', () => {
+      const { m } = setup();
+      m.addImage('image/png', '');
+      expect(m.items[0].data).toBeNull();
+      expect(m.items[0].note).toContain('carried no data');
+    });
+  });
+
   describe('to-do list (#65)', () => {
     const entry = (content: string, status: string) => ({
       content,
