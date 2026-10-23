@@ -516,6 +516,102 @@
             background: #26292e;
             color: #e6e6e6;
           }
+          /* Assistant text is markdown (#93). The bubble's pre-wrap suits the
+             plain-text fallback and code; rendered prose reflows instead, and
+             soft breaks arrive as <br>, so the source's line count survives.
+             Headings stay at the body size and bold, like the terminal renders
+             them: a size change here would also make estimate()'s per-line
+             height wrong for every unmeasured row. */
+          #transcript .asst .md {
+            white-space: normal;
+          }
+          #transcript .asst .md > *:first-child {
+            margin-top: 0;
+          }
+          #transcript .asst .md > *:last-child {
+            margin-bottom: 0;
+          }
+          #transcript .asst .md p,
+          #transcript .asst .md ul,
+          #transcript .asst .md ol,
+          #transcript .asst .md blockquote,
+          #transcript .asst .md pre,
+          #transcript .asst .md table,
+          #transcript .asst .md h1,
+          #transcript .asst .md h2,
+          #transcript .asst .md h3,
+          #transcript .asst .md h4,
+          #transcript .asst .md h5,
+          #transcript .asst .md h6 {
+            margin: 6px 0;
+          }
+          #transcript .asst .md h1,
+          #transcript .asst .md h2,
+          #transcript .asst .md h3,
+          #transcript .asst .md h4,
+          #transcript .asst .md h5,
+          #transcript .asst .md h6 {
+            font-weight: 700;
+          }
+          #transcript .asst .md ul,
+          #transcript .asst .md ol {
+            padding-left: 22px;
+          }
+          #transcript .asst .md li {
+            margin: 2px 0;
+          }
+          #transcript .asst .md blockquote {
+            margin-left: 0;
+            padding-left: 8px;
+            border-left: 2px solid #3a3f47;
+            color: #b9bfc7;
+          }
+          #transcript .asst .md pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 6px 0;
+            padding: 6px 8px;
+            background: #1a1d21;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            overflow-x: auto;
+          }
+          #transcript .asst .md code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.9em;
+          }
+          #transcript .asst .md pre code {
+            background: none;
+            padding: 0;
+            font-size: 0.9em;
+          }
+          #transcript .asst .md :not(pre) > code {
+            background: #1a1d21;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 0 4px;
+          }
+          #transcript .asst .md table {
+            border-collapse: collapse;
+            display: block;
+            max-width: 100%;
+            overflow-x: auto;
+          }
+          #transcript .asst .md th,
+          #transcript .asst .md td {
+            border: 1px solid #30363d;
+            padding: 3px 7px;
+            text-align: left;
+          }
+          #transcript .asst .md hr {
+            border: 0;
+            border-top: 1px solid #30363d;
+            margin: 8px 0;
+          }
+          #transcript .asst .md a {
+            color: #6cb6ff;
+            text-decoration: underline;
+          }
           #transcript .thought {
             align-self: flex-start;
             background: transparent;
@@ -2237,17 +2333,18 @@
         $('transcript').appendChild(note);
         setStatus(msg);
       }
-      function attachTranscriptView(virtualCore) {
+      function attachTranscriptView(virtualCore, markdownIt) {
         if (TranscriptModel.missing || typeof TranscriptView === 'undefined') {
           transcriptFailed('The transcript viewer files failed to load.');
           return;
         }
         try {
-          transcriptView = createTranscriptView(virtualCore);
+          transcriptView = createTranscriptView(virtualCore, markdownIt);
         } catch (err) {
           console.error('transcript view failed to start:', err);
           try {
-            if (virtualCore) transcriptView = createTranscriptView(null);
+            if (virtualCore)
+              transcriptView = createTranscriptView(null, markdownIt);
           } catch (again) {
             console.error('transcript view failed to start:', again);
           }
@@ -2267,11 +2364,12 @@
         // The view reports changes only: seed the pill from its state now.
         $('jump-bottom').hidden = transcriptView.isNearBottom();
       }
-      function createTranscriptView(virtualCore) {
+      function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
           model: transcriptModel,
           scroller: $('transcript'),
           virtualCore,
+          markdownIt,
           // While the user is reading history (scrolled up), show the
           // floating "jump to bottom" pill; it hides again once we reach
           // the bottom ("near" = within a bubble's height of the end).
@@ -2281,9 +2379,16 @@
           onFork: (item) => void doForkHere(watchedSessionId, item),
         });
       }
-      import('./vendor/virtual-core.js')
-        .catch(() => null)
-        .then(attachTranscriptView);
+      // Both vendored bundles are optional: each import's own catch turns a
+      // 404 into null, and the view then drops to its render-all rows and its
+      // plain-text assistant rows. One failing bundle must not cost the other's
+      // benefit, so neither import gates the other.
+      Promise.all([
+        import('./vendor/virtual-core.js').catch(() => null),
+        import('./vendor/markdown-it.js').catch(() => null),
+      ]).then(([virtualCore, markdownIt]) =>
+        attachTranscriptView(virtualCore, markdownIt),
+      );
 
       $('jump-bottom').addEventListener('click', () => {
         scrollTranscript(true);

@@ -2089,7 +2089,7 @@ type PageScenario =
 
 const VIEWER_SCRIPT = 'scripts/measure-viewer-growth.mts';
 const TRANSCRIPT_ASSET =
-  /\/ui\/(transcript-model\.js|transcript-view\.js|vendor\/virtual-core\.js)$/;
+  /\/ui\/(transcript-model\.js|transcript-view\.js|vendor\/virtual-core\.js|vendor\/markdown-it\.js)$/;
 const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
 
 async function waitView(page: Page, timeoutMs = 10_000): Promise<void> {
@@ -2214,6 +2214,35 @@ async function measureGrowth(turns: number): Promise<Growth> {
 }
 
 const P1_TURNS = 5000;
+
+// The sample P32 sends: heading, emphasis, inline code, a list, a fenced block,
+// raw HTML, a hostile link target, and one real link. The fence ticks are built
+// rather than typed so this string stays free of backticks.
+function mdFrames(): Frame[] {
+  const tick = String.fromCharCode(96);
+  const fence = tick.repeat(3);
+  const f = new Frames();
+  f.user('make **this** bold');
+  f.asst(
+    [
+      '# Heading',
+      '',
+      'Body with **bold** and ' + tick + 'code' + tick + '.',
+      '',
+      '- one',
+      '- two',
+      '',
+      fence + 'js',
+      'const a = 1;',
+      fence,
+      '',
+      '<img src=x onerror=alert(1)>',
+      '',
+      '[bad](javascript:alert(1)) [good](https://example.com/a)',
+    ].join('\n'),
+  );
+  return f.done().list;
+}
 
 const PAGE_SCENARIOS: PageScenario[] = [
   {
@@ -4585,6 +4614,105 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
 ];
+
+// Appended here rather than written inline in the array above: that edit kept
+// arriving incomplete, so the entry is added in pieces from a clean anchor.
+PAGE_SCENARIOS.push({
+  name: 'P32 assistant markdown on the real page',
+  // The jsdom tests cannot see this file's stylesheet, so the CSS half of #93
+  // is checked here. Claims stay scoped to the assistant bubble: a substring
+  // read off #transcript is satisfied by the echoed prompt row.
+  noConsoleErrors: true,
+  frames: () => mdFrames(),
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 3, 30_000);
+    await settlePage(page);
+    const s = await page.evaluate(() => {
+      const row = document.querySelector('#transcript .bubble.asst');
+      const md = row ? row.querySelector('.md') : null;
+      const pre = row ? row.querySelector('pre') : null;
+      const good = row ? row.querySelector('a[href^="https"]') : null;
+      const h1 = row ? row.querySelector('h1') : null;
+      const strong = row ? row.querySelector('strong') : null;
+      const code = row ? row.querySelector(':not(pre) > code') : null;
+      return {
+        row: !!row,
+        h1: h1 ? h1.textContent || '' : '',
+        strong: strong ? strong.textContent || '' : '',
+        code: code ? code.textContent || '' : '',
+        li: row ? row.querySelectorAll('ul li').length : 0,
+        pre: pre ? pre.textContent || '' : '',
+        mdWrap: md ? getComputedStyle(md).whiteSpace : null,
+        preWrap: pre ? getComputedStyle(pre).whiteSpace : null,
+        rowText: row ? row.textContent || '' : '',
+        imgs: document.querySelectorAll('#transcript img').length,
+        badLinks: document.querySelectorAll(
+          '#transcript a[href^="javascript"]',
+        ).length,
+        anchors: row ? row.querySelectorAll('a').length : 0,
+        goodHref: good ? good.getAttribute('href') : null,
+        goodTarget: good ? good.getAttribute('target') : null,
+        mounted: Array.from(
+          document.querySelectorAll('#transcript .bubble'),
+        ).length,
+      };
+    });
+    expect(s.row, 'no assistant row on screen, so the checks below are vacuous');
+    expect(s.h1 === 'Heading', 'heading rendered as ' + JSON.stringify(s.h1));
+    expect(s.strong === 'bold', 'strong rendered as ' + JSON.stringify(s.strong));
+    expect(s.code === 'code', 'inline code rendered as ' + JSON.stringify(s.code));
+    expect(s.li === 2, s.li + ' list items, expected 2');
+    expect(s.pre.includes('const a = 1;'), 'fence text ' + s.pre);
+    // The CSS half: prose reflows while the code block keeps the source's
+    // whitespace. Naming a display on .md would outrank this and leave the
+    // bubble's pre-wrap in force.
+    expect(
+      s.mdWrap === 'normal',
+      '.md white-space is ' + JSON.stringify(s.mdWrap) + ', expected normal',
+    );
+    expect(
+      s.preWrap === 'pre-wrap' || s.preWrap === 'pre',
+      'pre white-space is ' + JSON.stringify(s.preWrap) + ', expected pre-wrap',
+    );
+    // Safety on the shipped page, not only in the walker.
+    expect(s.imgs === 0, s.imgs + ' img elements in the transcript');
+    expect(s.badLinks === 0, s.badLinks + ' javascript: links in the transcript');
+    expect(
+      s.rowText.includes('<img src=x onerror=alert(1)>'),
+      'the raw HTML is not shown as typed',
+    );
+    expect(
+      s.anchors === 1,
+      s.anchors + ' links in the assistant row, expected only the https one',
+    );
+    expect(
+      s.goodHref === 'https://example.com/a',
+      'link href ' + JSON.stringify(s.goodHref),
+    );
+    expect(
+      s.goodTarget === '_blank',
+      'link target ' +
+        JSON.stringify(s.goodTarget) +
+        ': a link must not navigate the viewer away from its session',
+    );
+    // The "assistant only" half is not checked here: the virtualizer recycles
+    // rows outside the viewport, so on this page a user row is not something
+    // the DOM can be asked about. It is covered in transcriptMarkdown.test.ts,
+    // which attaches with virtualCore null and so holds every row.
+    return (
+      'h1/strong/code/2 items/fence rendered; prose ' +
+      s.mdWrap +
+      ' with pre ' +
+      s.preWrap +
+      '; 0 img, 0 javascript: link, 1 https link at target ' +
+      s.goodTarget +
+      '; ' +
+      s.mounted +
+      ' bubbles mounted'
+    );
+  },
+});
 
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
