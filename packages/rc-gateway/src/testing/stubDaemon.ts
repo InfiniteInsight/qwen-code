@@ -200,6 +200,20 @@ export interface StubDaemonOptions {
    * `['review']`).
    */
   supportedSkills?: string[];
+  /**
+   * Commands reported by GET /session/:id/supported-commands (default `[]`).
+   * Each entry is a `DaemonAvailableCommand` (`name`, optional `description`,
+   * `input`, `_meta`). A test that exercises the Commands panel's session rows
+   * or the invoke route's membership guard sets this, since the default empty
+   * list advertises nothing.
+   */
+  supportedCommands?: unknown[];
+  /**
+   * Status for GET /session/:id/supported-commands (default 200). Non-200 makes
+   * the list read fail, which is how a test drives the invoke route's
+   * fail-closed path.
+   */
+  supportedCommandsStatus?: number;
   /** Status for GET /session/:id/context (default 200). Non-200 → { error }. */
   contextStatusCode?: number;
   /** Full body to return from GET /session/:id/context (overrides the default). */
@@ -618,11 +632,16 @@ export async function startStubDaemon(
   });
 
   app.get('/session/:id/supported-commands', (req, res) => {
+    const status = opts.supportedCommandsStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
     res.json({
       v: 1,
       sessionId: req.params.id,
       availableSkills: opts.supportedSkills ?? ['review'],
-      availableCommands: [],
+      availableCommands: opts.supportedCommands ?? [],
     });
   });
 
@@ -764,9 +783,7 @@ export async function startStubDaemon(
       res.status(status).json(opts.setModelBody ?? { error: 'stub' });
       return;
     }
-    res
-      .status(200)
-      .json(opts.setModelResult ?? { modelId: req.body?.modelId });
+    res.status(200).json(opts.setModelResult ?? { modelId: req.body?.modelId });
   });
 
   app.post('/session/:id/prompt', (req, res) => {
