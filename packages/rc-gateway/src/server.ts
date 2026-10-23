@@ -131,6 +131,10 @@ import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
+import {
+  createSupportedCommandsRoute,
+  createSessionCommandInvokeRoute,
+} from './routes/supportedCommands.js';
 import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
@@ -700,6 +704,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionContextRoute(deps.daemon),
   );
+  // GET /session/:id/supported-commands — read-scope; relays the daemon's
+  // per-session slash command list so the Commands panel can list what the
+  // watched session supports alongside the gateway's own file commands.
+  // Bare namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/supported-commands',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSupportedCommandsRoute(deps.daemon),
+  );
   // GET /session/:id/status — read-scope; relays the daemon's per-session
   // status summary (including pendingInteractions) so the web UI can
   // reconstruct question/permission cards a dropped event stream lost.
@@ -1018,6 +1032,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap command invocations per chat user
     createInvokeCommandRoute(deps.daemon, commandLoader, audit),
+  );
+  // POST /session/:id/supported-commands/:name — write-scope; runs one of the
+  // watched session's own slash commands by posting `/name args` as that
+  // session's prompt text. The name is checked against the daemon's advertised
+  // list first, so an unlisted name is refused instead of reaching the model.
+  // Own audit action (`session_command_invoked`) and own error shape, which is
+  // what a panel invoke needs to be distinguishable from a typed message.
+  app.post(
+    '/session/:id/supported-commands/:name',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap command invocations per chat user
+    createSessionCommandInvokeRoute(deps.daemon, audit),
   );
   app.get(
     '/rc/commands',
