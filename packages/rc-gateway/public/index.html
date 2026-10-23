@@ -144,9 +144,10 @@
         font-family: ui-monospace, monospace;
         overflow-wrap: anywhere;
       }
-      /* The Commands panel lists two different systems side by side, so every
-         row says which one it came from: a merged list without the tag would
-         read as one set of facts (#95). */
+      /* The house tag for "which system this came from". The Commands panel
+         needs it because a merged list without the tag would read as one set
+         of facts (#95); the mic needs it because a control that borrows a
+         browser API must not read as the product's own engine (#97). */
       .cmd-kind {
         font-size: 0.68rem;
         border: 1px solid #ccc;
@@ -1083,6 +1084,20 @@
                outside a turn is a Send button that does not send. -->
           <button id="queue" type="button" hidden>Queue</button>
           <button id="dictate">Dictate</button>
+          <!-- #97. The engine is named where the control is drawn. A mic icon
+               alone reads as the product's voice stack; what runs here is the
+               browser's Web Speech API, a different engine with different
+               accuracy and language coverage that is simply absent in some
+               browsers. The gateway has no transcribe route to offer instead,
+               so the honest fix is the label. It is a sibling of the button,
+               not part of its text, because the button's textContent is
+               rewritten to "Stop" while a session is open. -->
+          <span
+            class="cmd-kind"
+            id="dictate-engine"
+            title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
+            >browser</span
+          >
           <select id="dictate-lang" title="dictation language">
             <option value="">auto</option>
             <option value="en-US">English (US)</option>
@@ -9788,9 +9803,18 @@
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         const dictate = $('dictate');
         const interimEl = $('dictate-interim');
+        const engineEl = $('dictate-engine');
         if (!SR) {
+          // The tag changes with the state it describes. Leaving "browser" on a
+          // dead control would replace one false promise with another, and the
+          // absence is the fact worth drawing here: there is no other engine to
+          // fall back to, because the gateway has no transcribe route. (#97)
           dictate.disabled = true;
-          dictate.title = 'voice input not supported in this browser';
+          dictate.title =
+            'dictation needs a browser speech engine, and this browser has none';
+          engineEl.textContent = 'no browser engine';
+          engineEl.title =
+            'the gateway has no transcribe route, so there is no other engine to fall back to';
           $('dictate-lang').disabled = true;
           $('dictate-autosend').disabled = true;
           return;

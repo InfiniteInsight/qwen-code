@@ -4714,6 +4714,88 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// Appended for the same reason as P32: the array edit kept arriving incomplete.
+// #97. The mic is the browser's Web Speech API, not the product's voice stack,
+// and the gateway has no transcribe route to offer in its place. Both states
+// are pinned: naming the engine when there is one, and naming the absence when
+// there is not. Headless Chromium has no SpeechRecognition at all, so the
+// absent state is the page's own and needs no help; the present state is
+// reached by installing an engine before the page script runs. Each state
+// needs its own boot, because an init script cannot be swapped after load.
+PAGE_SCENARIOS.push({
+  name: 'P33 the mic names the engine behind it',
+  before: async (page) => {
+    await page.addInitScript({
+      content: 'window.SpeechRecognition = function () {};',
+    });
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    const s = await page.evaluate(() => {
+      const tag = document.getElementById('dictate-engine');
+      const mic = document.getElementById('dictate') as HTMLButtonElement;
+      return {
+        tag: tag ? tag.textContent : null,
+        shown: tag ? tag.getClientRects().length > 0 : false,
+        beside: tag
+          ? tag.previousElementSibling === mic
+          : false,
+        disabled: mic ? mic.disabled : null,
+      };
+    });
+    expect(
+      s.tag === 'browser',
+      `the tag reads ${JSON.stringify(s.tag)}, expected "browser"`,
+    );
+    expect(s.shown, 'the engine tag is not on screen, so it labels nothing');
+    expect(s.beside, 'the engine tag is not beside the mic it labels');
+    expect(!s.disabled, 'the mic is disabled with an engine installed');
+    return 'engine installed: tag "browser" on screen beside a live mic';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P34 the mic names the missing engine',
+  // Headless Chromium DOES expose SpeechRecognition, so the absent state has
+  // to be made rather than assumed: the first run of this scenario failed its
+  // own precondition check and said so, which is the fact worth recording.
+  // Deleting both names is what a Firefox or Safari user arrives with.
+  before: async (page) => {
+    await page.addInitScript({
+      content:
+        "Object.defineProperty(window, 'SpeechRecognition', { value: undefined, configurable: true });" +
+        "Object.defineProperty(window, 'webkitSpeechRecognition', { value: undefined, configurable: true });",
+    });
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    const s = await page.evaluate(() => {
+      const tag = document.getElementById('dictate-engine');
+      const mic = document.getElementById('dictate') as HTMLButtonElement;
+      return {
+        tag: tag ? tag.textContent : null,
+        shown: tag ? tag.getClientRects().length > 0 : false,
+        disabled: mic ? mic.disabled : null,
+        sr: !!(
+          (window as { SpeechRecognition?: unknown }).SpeechRecognition ||
+          (window as { webkitSpeechRecognition?: unknown })
+            .webkitSpeechRecognition
+        ),
+      };
+    });
+    expect(!s.sr, 'an engine was present, so this scenario proved nothing');
+    expect(
+      s.tag === 'no browser engine',
+      `the tag reads ${JSON.stringify(s.tag)}, expected "no browser engine"`,
+    );
+    expect(s.shown, 'the engine tag is not on screen, so it labels nothing');
+    expect(s.disabled, 'the mic is live with no engine behind it');
+    return 'no engine: tag "no browser engine" on screen, mic disabled';
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
