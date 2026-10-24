@@ -39,6 +39,8 @@ import {
   type DaemonRewindResult,
   type DaemonRewindSnapshotInfo,
   type DaemonSessionContextUsageStatus,
+  type DaemonSessionExportFormat,
+  type DaemonSessionExportResult,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -167,6 +169,10 @@ export interface SessionDaemon {
     opts?: { detail?: boolean },
     clientId?: string,
   ): Promise<DaemonSessionContextUsageStatus>;
+  exportSession(
+    sessionId: string,
+    opts?: { format?: DaemonSessionExportFormat; clientId?: string },
+  ): Promise<DaemonSessionExportResult>;
   sessionStatus(
     sessionId: string,
     clientId?: string,
@@ -989,6 +995,15 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionContextUsageStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionContextUsage(sessionId, opts, clientId),
+    );
+  }
+
+  async exportSession(
+    sessionId: string,
+    opts?: { format?: DaemonSessionExportFormat; clientId?: string },
+  ): Promise<DaemonSessionExportResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.exportSession(sessionId, opts),
     );
   }
 

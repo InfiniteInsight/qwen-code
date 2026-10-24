@@ -3113,6 +3113,22 @@
           sel.addEventListener('change', () => changeApprovalMode(sel, cb));
           f.append(sel, cbl, note);
         }
+        // Export (issue #108): a remote holds a token but no disk, so the only
+        // way to get a conversation out of here is to ask the gateway for it.
+        // The route takes any format the daemon supports; this is one button
+        // for markdown, the form a person pastes somewhere else.
+        const ex = document.createElement('button');
+        ex.id = 'footer-export';
+        ex.type = 'button';
+        ex.textContent = 'export';
+        ex.title = 'Download this conversation as markdown';
+        ex.style.marginLeft = '10px';
+        ex.addEventListener('click', () => void exportConversation());
+        const exNote = document.createElement('span');
+        exNote.id = 'footer-export-note';
+        exNote.style.marginLeft = '6px';
+        exNote.style.fontSize = '12px';
+        f.append(ex, exNote);
         f.style.display = '';
       }
 
@@ -4873,6 +4889,58 @@
           if (ctxInfo) renderFooter();
         } catch {
           /* transient; leave the fill as-is */
+        }
+      }
+
+      // Says why the export did not happen. The reason is the useful part:
+      // "open it first" is something to act on, a bare "failed" is not.
+      function setExportNote(text) {
+        const n = $('footer-export-note');
+        if (n) n.textContent = text ? ' ' + text : '';
+      }
+
+      // Downloads the watched conversation (issue #108). The gateway answers
+      // with JSON rather than the file itself, because the token rides in an
+      // Authorization header and no anchor can carry one, so the file is
+      // rebuilt here from {content, mimeType, filename} and saved with a
+      // programmatic click.
+      async function exportConversation() {
+        const id = watchedSessionId;
+        if (!id || !token()) return;
+        const btn = $('footer-export');
+        if (btn) btn.disabled = true;
+        setExportNote('');
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/export?format=md',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          const body = await res.json().catch(() => null);
+          if (!res.ok || !body) {
+            setExportNote(
+              body && body.code === 'session_not_loaded'
+                ? 'open this conversation first'
+                : 'failed (' + String((body && body.code) || res.status) + ')',
+            );
+            return;
+          }
+          const blob = new Blob([String(body.content)], {
+            type: String(body.mimeType || 'text/markdown'),
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = String(body.filename || 'conversation.md');
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          // Revoking on the same tick can cancel the save before the browser
+          // has read the blob, so the URL outlives the click.
+          setTimeout(() => URL.revokeObjectURL(url), 30000);
+        } catch {
+          setExportNote('failed (network)');
+        } finally {
+          if (btn) btn.disabled = false;
         }
       }
 
