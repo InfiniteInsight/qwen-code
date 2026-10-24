@@ -138,6 +138,27 @@ export interface SessionDaemon {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<unknown>;
 
+  /**
+   * One stored attachment, as `{ data, mimeType }` with the bytes base64
+   * encoded by the SDK. Kept `unknown` because that pair is the daemon's
+   * answer about its own storage.
+   */
+  readSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown>;
+  /**
+   * Drop one stored attachment. The boolean is the daemon saying whether an id
+   * it was given actually matched something, so it travels rather than being
+   * turned into a status by this layer.
+   */
+  removeSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown>;
+
   // The visible queue (add-capability-parity #110, second slice). Signatures
   // mirror `DaemonClient`'s exactly, including its trailing `opts` object, so
   // a plain `DaemonClient` still satisfies this interface. Returns stay
@@ -1161,6 +1182,26 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<unknown> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.listSessionAttachments(sessionId, opts),
+    );
+  }
+
+  async readSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.readSessionAttachment(sessionId, attachmentId, opts),
+    );
+  }
+
+  async removeSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.removeSessionAttachment(sessionId, attachmentId, opts),
     );
   }
 

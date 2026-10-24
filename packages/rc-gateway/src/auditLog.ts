@@ -150,6 +150,7 @@ export type AuditAction =
   | 'subagent_cancel_failed'
   | 'session_exported'
   | 'attachment_uploaded'
+  | 'attachment_removed'
   | 'pending_prompt_removed'
   | 'mid_turn_message_withdrawn';
 
@@ -252,6 +253,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'subagent_cancel_failed',
   'session_exported',
   'attachment_uploaded',
+  'attachment_removed',
   'pending_prompt_removed',
   'mid_turn_message_withdrawn',
 ];

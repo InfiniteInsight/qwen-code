@@ -91,6 +91,10 @@ export interface StubDaemon {
     | undefined;
   /** Session id of the most recent GET /session/:id/attachments. */
   lastAttachmentListSessionId: string | undefined;
+  /** What the most recent GET .../attachments/:attachmentId carried. */
+  lastAttachmentRead: { sessionId: string; attachmentId: string } | undefined;
+  /** What the most recent DELETE .../attachments/:attachmentId carried. */
+  lastAttachmentRemove: { sessionId: string; attachmentId: string } | undefined;
   /** Session id of the most recent GET /session/:id/pending-prompts. */
   lastPendingPromptsSessionId: string | undefined;
   /** What the most recent DELETE /session/:id/pending-prompts/:promptId carried. */
@@ -383,6 +387,37 @@ export interface StubDaemonOptions {
   attachmentListErrorBody?: unknown;
   /** Full body for GET /session/:id/attachments (overrides the default). */
   attachmentListResult?: unknown;
+  /** Status for GET /session/:id/attachments/:attachmentId (default 200). */
+  attachmentReadStatus?: number;
+  /** JSON body to return on a non-200 GET .../:attachmentId. */
+  attachmentReadErrorBody?: unknown;
+  /**
+   * Raw bytes the GET .../:attachmentId answers with on success. The daemon
+   * serves the file itself, not a JSON envelope: the SDK base64 encodes the
+   * response body and reads the media type off the response header
+   * (DaemonClient.ts:4858), so a stub that answered with JSON would get
+   * encoded twice and the test would pass on the shape while proving nothing
+   * about the bytes.
+   */
+  attachmentReadBody?: string;
+  /**
+   * Media type the GET .../:attachmentId answers with. Defaults to
+   * application/octet-stream rather than a text type: express appends
+   * `; charset=utf-8` to any text/* Content-Type whatever the body type
+   * (verified on 4.22.2), so a text default would put a suffix in the relayed
+   * media type that the gateway had nothing to do with.
+   */
+  attachmentReadContentType?: string;
+  /** Status for DELETE /session/:id/attachments/:attachmentId (default 200). */
+  attachmentRemoveStatus?: number;
+  /** JSON body to return on a non-200 DELETE .../:attachmentId. */
+  attachmentRemoveErrorBody?: unknown;
+  /**
+   * Value the DELETE .../:attachmentId answers with on success. Defaults to
+   * `true`; set it false to exercise the double-tap case, where the daemon
+   * answers that nothing matched without refusing.
+   */
+  attachmentRemoveResult?: boolean;
   /** Status for GET /session/:id/pending-prompts (default 200). */
   pendingPromptsStatus?: number;
   pendingPromptsErrorBody?: unknown;
@@ -453,6 +488,12 @@ export async function startStubDaemon(
         }
       | undefined,
     lastAttachmentListSessionId: undefined as string | undefined,
+    lastAttachmentRead: undefined as
+      | { sessionId: string; attachmentId: string }
+      | undefined,
+    lastAttachmentRemove: undefined as
+      | { sessionId: string; attachmentId: string }
+      | undefined,
     lastPendingPromptsSessionId: undefined as string | undefined,
     lastPendingPromptRemove: undefined as
       | { sessionId: string; promptId: string }
@@ -1106,6 +1147,45 @@ export async function startStubDaemon(
     );
   });
 
+  // The read answers with the file itself, which is what the daemon does, so
+  // what the gateway relays is the SDK's framing of these bytes rather than
+  // something this file composed.
+  app.get('/session/:id/attachments/:attachmentId', (req, res) => {
+    state.lastAttachmentRead = {
+      sessionId: String(req.params.id),
+      attachmentId: String(req.params.attachmentId),
+    };
+    const status = opts.attachmentReadStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.attachmentReadErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res
+      .status(200)
+      .set(
+        'Content-Type',
+        opts.attachmentReadContentType ?? 'application/octet-stream',
+      )
+      .send(Buffer.from(opts.attachmentReadBody ?? 'attachment body'));
+  });
+
+  app.delete('/session/:id/attachments/:attachmentId', (req, res) => {
+    state.lastAttachmentRemove = {
+      sessionId: String(req.params.id),
+      attachmentId: String(req.params.attachmentId),
+    };
+    const status = opts.attachmentRemoveStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.attachmentRemoveErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json({ removed: opts.attachmentRemoveResult ?? true });
+  });
+
   // #110: the visible queue. Bodies match the daemon's own shapes: a pending
   // prompt carries `state` ('running' for the one in flight, 'queued' for the
   // FIFO) and the mid-turn snapshot is three fields, not one list, because a
@@ -1451,6 +1531,12 @@ export async function startStubDaemon(
     },
     get lastAttachmentListSessionId() {
       return state.lastAttachmentListSessionId;
+    },
+    get lastAttachmentRead() {
+      return state.lastAttachmentRead;
+    },
+    get lastAttachmentRemove() {
+      return state.lastAttachmentRemove;
     },
     get lastPendingPromptsSessionId() {
       return state.lastPendingPromptsSessionId;

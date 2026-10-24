@@ -151,6 +151,8 @@ import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 /** #109: session attachments (uploads + the list that confirms them). */
 import {
   createAttachmentListRoute,
+  createAttachmentReadRoute,
+  createAttachmentRemoveRoute,
   createAttachmentUploadRoute,
   gateJsonBody,
   rawAttachmentBody,
@@ -870,6 +872,30 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createAttachmentListRoute(deps.daemon),
+  );
+  // GET /session/:id/attachments/:attachmentId — write-scope. The list above
+  // sits at session-read because it names files the transcript already
+  // implies; this one returns their contents, and #107 settled that host file
+  // contents sit at WRITE. No rate limiter, unlike the upload: a read costs
+  // the daemon nothing, and the cap above exists because an upload costs disk.
+  app.get(
+    '/session/:id/attachments/:attachmentId',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    createAttachmentReadRoute(deps.daemon),
+  );
+  // DELETE /session/:id/attachments/:attachmentId — write-scope, carrying the
+  // upload's guard set. The rate limiter that a stop request is exempt from
+  // applies here: removing a file is never the emergency action, so throttling
+  // it cannot harm the person it is applied to.
+  app.delete(
+    '/session/:id/attachments/:attachmentId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap deletions per chat user
+    createAttachmentRemoveRoute(deps.daemon, audit),
   );
   // GET /session/:id/pending-prompts — session-read-scope, mirroring /export.
   // The queue is part of the conversation's own state, and seeing it is the
