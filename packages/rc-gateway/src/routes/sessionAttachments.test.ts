@@ -14,6 +14,8 @@ import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
   createAttachmentListRoute,
+  createAttachmentReadRoute,
+  createAttachmentRemoveRoute,
   createAttachmentUploadRoute,
   gateJsonBody,
   rawAttachmentBody,
@@ -47,6 +49,14 @@ async function mountGateway(
     createAttachmentUploadRoute(daemon, audit),
   );
   app.get('/session/:id/attachments', createAttachmentListRoute(daemon));
+  app.get(
+    '/session/:id/attachments/:attachmentId',
+    createAttachmentReadRoute(daemon),
+  );
+  app.delete(
+    '/session/:id/attachments/:attachmentId',
+    createAttachmentRemoveRoute(daemon, audit),
+  );
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -83,6 +93,16 @@ function fakeDaemon(
         record('list', args);
         boom();
         return [{ attachmentId: 'att-x', name: 'log.txt' }];
+      },
+      readSessionAttachment: async (...args: unknown[]) => {
+        record('read', args);
+        boom();
+        return { data: 'cmF3IHN0dWZm', mimeType: 'text/plain' };
+      },
+      removeSessionAttachment: async (...args: unknown[]) => {
+        record('remove', args);
+        boom();
+        return true;
       },
     } as unknown as SessionDaemon,
   };
@@ -354,5 +374,245 @@ describe('GET /session/:id/attachments', () => {
 
     expect(res.status).toBe(403);
     expect(body).toEqual({ error: 'not trusted', code: 'trust_required' });
+  });
+});
+
+describe('GET /session/:id/attachments/:attachmentId', () => {
+  it('relays the stored bytes and the daemon media type untouched', async () => {
+    // A media type the gateway could not plausibly have chosen on its own, so
+    // an exact match here is evidence of a relay rather than of a re-description.
+    stub = await startStubDaemon({
+      attachmentReadBody: 'the bytes the phone sent',
+      attachmentReadContentType: 'image/png',
+    });
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+    );
+
+    const res = await fetch(base + '/session/s-9/attachments/att-1');
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(200);
+    // The pair arrives exactly as the daemon framed it: the gateway neither
+    // decodes the payload nor substitutes its own media type.
+    expect(body).toEqual({
+      data: Buffer.from('the bytes the phone sent').toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(stub.lastAttachmentRead).toEqual({
+      sessionId: 's-9',
+      attachmentId: 'att-1',
+    });
+  });
+
+  it('decodes to the bytes that were stored, not to a re-framed copy', async () => {
+    // The base64 has to survive the trip unchanged in both directions: what a
+    // viewer hands back to the daemon has to be the file that went in.
+    stub = await startStubDaemon({ attachmentReadBody: 'round trip' });
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+    );
+
+    const res = await fetch(base + '/session/s-9/attachments/att-1');
+    const body = await jsonOf(res);
+
+    const data = body['data'] as string;
+    expect(Buffer.from(data, 'base64').toString()).toBe('round trip');
+    expect(body['mimeType']).toBe('application/octet-stream');
+  });
+
+  it('passes the session and the attachment id through as separate arguments', async () => {
+    const fake = fakeDaemon();
+    const base = await mountGateway(fake.daemon);
+
+    await fetch(base + '/session/s-42/attachments/att-77');
+
+    expect(fake.calls).toEqual([{ kind: 'read', args: ['s-42', 'att-77'] }]);
+  });
+
+  it('maps a bare 404 to 502 attachments_unsupported', async () => {
+    // The shared verdict: a daemon with no attachment route at all is a
+    // capability gap, not an answer about the file it was asked for.
+    const fake = fakeDaemon('throw', refusal(404, { error: 'no route' }));
+    const base = await mountGateway(fake.daemon);
+
+    const res = await fetch(base + '/session/s-1/attachments/att-1');
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(502);
+    expect(body['code']).toBe('attachments_unsupported');
+  });
+
+  it('relays a shaped refusal', async () => {
+    const fake = fakeDaemon(
+      'throw',
+      refusal(403, { errorKind: 'trust_required', error: 'not trusted' }),
+    );
+    const base = await mountGateway(fake.daemon);
+
+    const res = await fetch(base + '/session/s-1/attachments/att-1');
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(403);
+    expect(body).toEqual({ error: 'not trusted', code: 'trust_required' });
+  });
+
+  it('maps a transport failure to 502 daemon_unavailable', async () => {
+    const fake = fakeDaemon('throw', new Error('socket hang up'));
+    const base = await mountGateway(fake.daemon);
+
+    const res = await fetch(base + '/session/s-1/attachments/att-1');
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(502);
+    expect(body['code']).toBe('daemon_unavailable');
+  });
+
+  it('audits nothing, because a read names neither a path nor a payload', async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const audit = {
+      record: (entry: Record<string, unknown>) => {
+        rows.push(entry);
+      },
+    } as unknown as AuditRecorder;
+    stub = await startStubDaemon();
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+      audit,
+    );
+
+    const res = await fetch(base + '/session/s-9/attachments/att-1');
+
+    expect(res.status).toBe(200);
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe('DELETE /session/:id/attachments/:attachmentId', () => {
+  it('removes the file the daemon confirms it removed', async () => {
+    stub = await startStubDaemon();
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+    );
+
+    const res = await fetch(base + '/session/s-9/attachments/att-1', {
+      method: 'DELETE',
+    });
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ removed: true });
+    expect(stub.lastAttachmentRemove).toEqual({
+      sessionId: 's-9',
+      attachmentId: 'att-1',
+    });
+  });
+
+  it('keeps a second tap a 200 when the daemon found nothing to remove', async () => {
+    // The daemon answered, it did not refuse. Reporting that as a fault would
+    // tell the caller something broke when all that happened is that the file
+    // was already gone.
+    stub = await startStubDaemon({ attachmentRemoveResult: false });
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+    );
+
+    const res = await fetch(base + '/session/s-9/attachments/att-1', {
+      method: 'DELETE',
+    });
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ removed: false });
+  });
+
+  it('audits the deletion against the session, not the file id', async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const audit = {
+      record: (entry: Record<string, unknown>) => {
+        rows.push(entry);
+      },
+    } as unknown as AuditRecorder;
+    stub = await startStubDaemon();
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+      audit,
+    );
+
+    const res = await fetch(base + '/session/s-7/attachments/att-9', {
+      method: 'DELETE',
+    });
+
+    expect(res.status).toBe(200);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({ action: 'attachment_removed', target: 's-7' });
+    // The id is the daemon's own key and says nothing a reader could act on.
+    expect(JSON.stringify(rows)).not.toContain('att-9');
+  });
+
+  it('audits nothing when the removal failed', async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const audit = {
+      record: (entry: Record<string, unknown>) => {
+        rows.push(entry);
+      },
+    } as unknown as AuditRecorder;
+    const fake = fakeDaemon('throw', new Error('socket hang up'));
+    const base = await mountGateway(fake.daemon, audit);
+
+    await fetch(base + '/session/s-1/attachments/att-1', {
+      method: 'DELETE',
+    });
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('relays a shaped refusal without auditing it', async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const audit = {
+      record: (entry: Record<string, unknown>) => {
+        rows.push(entry);
+      },
+    } as unknown as AuditRecorder;
+    const fake = fakeDaemon(
+      'throw',
+      refusal(409, {
+        errorKind: 'attachment_in_use',
+        error: 'the file is open',
+        hint: 'stop the run first',
+      }),
+    );
+    const base = await mountGateway(fake.daemon, audit);
+
+    const res = await fetch(base + '/session/s-1/attachments/att-1', {
+      method: 'DELETE',
+    });
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(409);
+    expect(body).toEqual({
+      error: 'the file is open',
+      code: 'attachment_in_use',
+      hint: 'stop the run first',
+    });
+    expect(rows).toHaveLength(0);
+  });
+
+  it('maps a bare 404 to 502 attachments_unsupported', async () => {
+    stub = await startStubDaemon({
+      attachmentRemoveStatus: 404,
+      attachmentRemoveErrorBody: { error: 'no route' },
+    });
+    const base = await mountGateway(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+    );
+
+    const res = await fetch(base + '/session/s-9/attachments/att-1', {
+      method: 'DELETE',
+    });
+    const body = await jsonOf(res);
+
+    expect(res.status).toBe(502);
+    expect(body['code']).toBe('attachments_unsupported');
   });
 });

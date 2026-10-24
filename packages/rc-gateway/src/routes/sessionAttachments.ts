@@ -248,3 +248,77 @@ export function createAttachmentListRoute(
     }
   };
 }
+
+/**
+ * GET /session/:id/attachments/:attachmentId - one stored file back out.
+ *
+ * The SDK fetches the bytes and hands them over base64 in `{ data, mimeType }`
+ * (DaemonClient.ts:4838), so the pair is relayed as it arrived rather than
+ * decoded and re-served as a body. Re-encoding here would put a second
+ * transform between the phone and the daemon, and `mimeType` is the daemon's
+ * own answer about what it stored, which a gateway-chosen Content-Type would
+ * overwrite.
+ *
+ * WRITE-scoped, not SESSION_READ like the list above. The list reveals names
+ * and metadata, which the transcript already implies; this reveals the file's
+ * contents, and the rule carried from #107 is that host file contents sit at
+ * WRITE. No audit row, matching those sibling reads: a read's only identifying
+ * field is a path or an id, and paths stay out of records, so a row could name
+ * neither the file nor what it contained.
+ */
+export function createAttachmentReadRoute(
+  daemon: Pick<SessionDaemon, 'readSessionAttachment'>,
+): RequestHandler {
+  return async (req, res) => {
+    try {
+      res
+        .status(200)
+        .json(
+          await daemon.readSessionAttachment(
+            req.params.id,
+            req.params.attachmentId,
+          ),
+        );
+    } catch (err) {
+      sendAttachmentError(res, err);
+    }
+  };
+}
+
+/**
+ * DELETE /session/:id/attachments/:attachmentId - remove one stored file.
+ *
+ * The boolean is the daemon saying whether the id matched something, so
+ * `removed: false` stays a 200: it answered, it did not refuse, and turning a
+ * double-tap into an error would report a fault where there was none.
+ *
+ * Audited because it destroys a file someone else may be relying on, naming
+ * the session rather than the file for the same reason an upload does. Carries
+ * the upload's guard set including the rate limiter: unlike a stop request,
+ * which is never throttled because it is the emergency action, removing a file
+ * is never urgent, so a cap on it cannot hurt the person it applies to.
+ */
+export function createAttachmentRemoveRoute(
+  daemon: Pick<SessionDaemon, 'removeSessionAttachment'>,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return async (req, res) => {
+    const sessionId = req.params.id;
+    let result: unknown;
+    try {
+      result = await daemon.removeSessionAttachment(
+        sessionId,
+        req.params.attachmentId,
+      );
+    } catch (err) {
+      sendAttachmentError(res, err);
+      return;
+    }
+    void audit?.record({
+      action: 'attachment_removed',
+      actorTokenId: req.rcClient?.id,
+      target: sessionId,
+    });
+    res.status(200).json({ removed: result === true });
+  };
+}
