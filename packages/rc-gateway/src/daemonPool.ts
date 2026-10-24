@@ -174,6 +174,11 @@ export interface SessionDaemon {
     sessionId: string,
     req: { workspaceCwd: string },
   ): Promise<DaemonRestoredSession>;
+  cancelSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
   // Daemon-global methods: no session id, but workspace-scoped — each takes
@@ -1068,6 +1073,24 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonRestoredSession> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.loadSession(sessionId, req, clientId),
+    );
+  }
+
+  /**
+   * Cancels one running subagent, leaving the parent turn alive. Distinct from
+   * `cancel`, which aborts the whole turn — that difference is the reason this
+   * route exists. `subagentRef` is the PARENT transcript's tool-call id (the
+   * daemon matches it against `task.toolUseId`), the same value the viewer
+   * already holds as `_meta.parentToolCallId`, so no new identifier needs
+   * plumbing.
+   */
+  async cancelSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.cancelSubagentSession(sessionId, subagentRef, clientId),
     );
   }
 

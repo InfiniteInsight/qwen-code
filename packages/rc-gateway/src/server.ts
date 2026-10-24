@@ -139,6 +139,7 @@ import {
 import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
+import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
@@ -745,6 +746,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionCancelRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/subagents/:subagentRef/cancel — write-scope; stops ONE
+  // running subagent while the parent turn survives. Same guard set as
+  // /session/:id/cancel (and the same no-rate-limit rationale: a stop request
+  // is never rate-limited), because cancelling one child is strictly less
+  // destructive than cancelling the turn that spawned it.
+  app.post(
+    '/session/:id/subagents/:subagentRef/cancel',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
+    createSubagentCancelRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',

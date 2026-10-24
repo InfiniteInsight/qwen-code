@@ -2689,6 +2689,8 @@
             $('jump-bottom').hidden = near;
           },
           onFork: (item) => void doForkHere(watchedSessionId, item),
+          onCancelSubagent: (item) =>
+            void doCancelSubagent(watchedSessionId, item),
         });
       }
       // Both vendored bundles are optional: each import's own catch turns a
@@ -5189,6 +5191,49 @@
         } catch (e) {
           show(false, 'fork error: ' + e);
         }
+      }
+
+      // ---- Stop ONE subagent (issue #110) ----------------------------------
+      // The nested subagent row's cancel button. Distinct from the Stop
+      // button, which throws away the whole turn: this asks the daemon to
+      // cancel just this child while the parent keeps going.
+      //
+      // busy/note live on item.sub (not on a closure) so a row scrolled away
+      // and rebuilt still shows the in-flight state, the same contract
+      // doForkHere uses with item.busy/item.note. The child settles on the
+      // daemon's own event stream, so nothing is patched here on success.
+      async function doCancelSubagent(sessionId, item) {
+        const sub = item && item.sub;
+        // The daemon matches this against task.toolUseId, i.e. the PARENT
+        // Agent tool's call id, which is what the model keys the sub on.
+        const ref = item && item.toolCallId;
+        const show = (busy, note) => {
+          if (sub) {
+            sub.cancelBusy = busy;
+            sub.cancelNote = note;
+          }
+          transcriptModel.touch(item);
+        };
+        if (!sessionId) return show(false, 'watch a session first');
+        if (!token()) return show(false, 'pair first');
+        if (!ref) return show(false, 'no reference for this subagent');
+        if (
+          !window.confirm(
+            'Stop this subagent? The rest of the turn keeps running.',
+          )
+        )
+          return;
+        show(true, 'stopping...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sessionId) +
+            '/subagents/' +
+            encodeURIComponent(ref) +
+            '/cancel',
+          { method: 'POST' },
+        );
+        if (!r.ok) return show(false, 'stop failed: ' + r.code);
+        show(false, 'stopped');
       }
 
       const token = () => localStorage.getItem(TOKEN_KEY);
