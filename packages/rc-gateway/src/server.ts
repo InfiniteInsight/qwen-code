@@ -155,6 +155,13 @@ import {
   gateJsonBody,
   rawAttachmentBody,
 } from './routes/sessionAttachments.js';
+/** #110: the visible queue (pending prompts and mid-turn messages). */
+import {
+  createMidTurnMessageRemoveRoute,
+  createMidTurnMessagesRoute,
+  createPendingPromptRemoveRoute,
+  createPendingPromptsRoute,
+} from './routes/sessionQueue.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
@@ -861,6 +868,47 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createAttachmentListRoute(deps.daemon),
+  );
+  // GET /session/:id/pending-prompts — session-read-scope, mirroring /export.
+  // The queue is part of the conversation's own state, and seeing it is the
+  // point: issue #84 accepts a prompt mid-turn with 202 and then discards it,
+  // so a queue nobody can look at cannot be told apart from a lost message.
+  app.get(
+    '/session/:id/pending-prompts',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createPendingPromptsRoute(deps.daemon),
+  );
+  // DELETE /session/:id/pending-prompts/:promptId — write-scope. Same guard set
+  // as /session/:id/cancel and for the same reason: dropping a queued prompt is
+  // a stop request, and a stop request is never rate-limited.
+  app.delete(
+    '/session/:id/pending-prompts/:promptId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403 (a stop request is never rate-limited)
+    createPendingPromptRemoveRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/mid-turn-messages — session-read-scope. The daemon's
+  // reconciliation snapshot, so a client can see what is still waiting instead
+  // of re-sending it at the idle boundary.
+  app.get(
+    '/session/:id/mid-turn-messages',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createMidTurnMessagesRoute(deps.daemon),
+  );
+  // DELETE /session/:id/mid-turn-messages/:messageId — write-scope; withdraws a
+  // typed message before the daemon delivers it. Same guard set as the pending
+  // prompt removal above.
+  app.delete(
+    '/session/:id/mid-turn-messages/:messageId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403 (a stop request is never rate-limited)
+    createMidTurnMessageRemoveRoute(deps.daemon, audit),
   );
   // POST /session — create (or attach to) a session so a freshly-paired client
   // (the web UI's "New conversation" button) has one to watch and prompt.
