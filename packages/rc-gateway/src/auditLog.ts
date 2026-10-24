@@ -149,7 +149,9 @@ export type AuditAction =
   | 'subagent_cancelled'
   | 'subagent_cancel_failed'
   | 'session_exported'
-  | 'attachment_uploaded';
+  | 'attachment_uploaded'
+  | 'pending_prompt_removed'
+  | 'mid_turn_message_withdrawn';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -250,6 +252,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'subagent_cancel_failed',
   'session_exported',
   'attachment_uploaded',
+  'pending_prompt_removed',
+  'mid_turn_message_withdrawn',
 ];
 
 export interface AuditEntry {

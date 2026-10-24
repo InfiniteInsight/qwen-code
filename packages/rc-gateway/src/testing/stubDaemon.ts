@@ -91,6 +91,16 @@ export interface StubDaemon {
     | undefined;
   /** Session id of the most recent GET /session/:id/attachments. */
   lastAttachmentListSessionId: string | undefined;
+  /** Session id of the most recent GET /session/:id/pending-prompts. */
+  lastPendingPromptsSessionId: string | undefined;
+  /** What the most recent DELETE /session/:id/pending-prompts/:promptId carried. */
+  lastPendingPromptRemove: { sessionId: string; promptId: string } | undefined;
+  /** Session id of the most recent GET /session/:id/mid-turn-messages. */
+  lastMidTurnMessagesSessionId: string | undefined;
+  /** What the most recent DELETE /session/:id/mid-turn-messages/:messageId carried. */
+  lastMidTurnMessageRemove:
+    | { sessionId: string; messageId: string }
+    | undefined;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -371,6 +381,22 @@ export interface StubDaemonOptions {
   attachmentListErrorBody?: unknown;
   /** Full body for GET /session/:id/attachments (overrides the default). */
   attachmentListResult?: unknown;
+  /** Status for GET /session/:id/pending-prompts (default 200). */
+  pendingPromptsStatus?: number;
+  pendingPromptsErrorBody?: unknown;
+  pendingPromptsResult?: unknown;
+  /** Status for DELETE /session/:id/pending-prompts/:promptId (default 200). */
+  removePendingPromptStatus?: number;
+  removePendingPromptErrorBody?: unknown;
+  removePendingPromptResult?: unknown;
+  /** Status for GET /session/:id/mid-turn-messages (default 200). */
+  midTurnMessagesStatus?: number;
+  midTurnMessagesErrorBody?: unknown;
+  midTurnMessagesResult?: unknown;
+  /** Status for DELETE /session/:id/mid-turn-messages/:messageId (default 200). */
+  removeMidTurnMessageStatus?: number;
+  removeMidTurnMessageErrorBody?: unknown;
+  removeMidTurnMessageResult?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -419,6 +445,14 @@ export async function startStubDaemon(
         }
       | undefined,
     lastAttachmentListSessionId: undefined as string | undefined,
+    lastPendingPromptsSessionId: undefined as string | undefined,
+    lastPendingPromptRemove: undefined as
+      | { sessionId: string; promptId: string }
+      | undefined,
+    lastMidTurnMessagesSessionId: undefined as string | undefined,
+    lastMidTurnMessageRemove: undefined as
+      | { sessionId: string; messageId: string }
+      | undefined,
   };
   const app = express();
   // The same arrangement the gateway uses, for the same reason: an attachment
@@ -1063,6 +1097,87 @@ export async function startStubDaemon(
     );
   });
 
+  // #110: the visible queue. Bodies match the daemon's own shapes: a pending
+  // prompt carries `state` ('running' for the one in flight, 'queued' for the
+  // FIFO) and the mid-turn snapshot is three fields, not one list, because a
+  // caller reconciles against the settled and promoted rings as well.
+  app.get('/session/:id/pending-prompts', (req, res) => {
+    state.lastPendingPromptsSessionId = req.params.id;
+    const status = opts.pendingPromptsStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.pendingPromptsErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.pendingPromptsResult ?? {
+        pendingPrompts: [
+          {
+            promptId: 'p-run',
+            text: 'the one in flight',
+            queuedAt: 1700000000000,
+            state: 'running',
+          },
+          {
+            promptId: 'p-queue',
+            text: 'waiting its turn',
+            queuedAt: 1700000000500,
+            state: 'queued',
+          },
+        ],
+      },
+    );
+  });
+
+  app.delete('/session/:id/pending-prompts/:promptId', (req, res) => {
+    state.lastPendingPromptRemove = {
+      sessionId: req.params.id,
+      promptId: req.params.promptId,
+    };
+    const status = opts.removePendingPromptStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.removePendingPromptErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(opts.removePendingPromptResult ?? { removed: true });
+  });
+
+  app.get('/session/:id/mid-turn-messages', (req, res) => {
+    state.lastMidTurnMessagesSessionId = req.params.id;
+    const status = opts.midTurnMessagesStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.midTurnMessagesErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.midTurnMessagesResult ?? {
+        messages: [{ messageId: 'm-1', text: 'typed mid-turn' }],
+        settledMessageIds: ['m-old'],
+        promotedMessageIds: [],
+      },
+    );
+  });
+
+  app.delete('/session/:id/mid-turn-messages/:messageId', (req, res) => {
+    state.lastMidTurnMessageRemove = {
+      sessionId: req.params.id,
+      messageId: req.params.messageId,
+    };
+    const status = opts.removeMidTurnMessageStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.removeMidTurnMessageErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(opts.removeMidTurnMessageResult ?? { removed: true });
+  });
+
   app.get('/session/:id/rewind/snapshots', (_req, res) => {
     res.json({ snapshots: opts.rewindSnapshots ?? [] });
   });
@@ -1296,6 +1411,18 @@ export async function startStubDaemon(
     },
     get lastAttachmentListSessionId() {
       return state.lastAttachmentListSessionId;
+    },
+    get lastPendingPromptsSessionId() {
+      return state.lastPendingPromptsSessionId;
+    },
+    get lastPendingPromptRemove() {
+      return state.lastPendingPromptRemove;
+    },
+    get lastMidTurnMessagesSessionId() {
+      return state.lastMidTurnMessagesSessionId;
+    },
+    get lastMidTurnMessageRemove() {
+      return state.lastMidTurnMessageRemove;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

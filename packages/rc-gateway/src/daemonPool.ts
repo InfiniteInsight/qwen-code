@@ -137,6 +137,31 @@ export interface SessionDaemon {
     sessionId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<unknown>;
+
+  // The visible queue (add-capability-parity #110, second slice). Signatures
+  // mirror `DaemonClient`'s exactly, including its trailing `opts` object, so
+  // a plain `DaemonClient` still satisfies this interface. Returns stay
+  // `unknown`: the daemon owns the queue shape, and the whole point of the
+  // route is to show the caller what the daemon actually holds rather than a
+  // gateway-side summary of it.
+  getPendingPrompts(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown>;
+  removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown>;
+  getMidTurnMessages(
+    sessionId: string,
+    opts?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<unknown>;
+  removeMidTurnMessage(
+    sessionId: string,
+    messageId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown>;
   subscribeEvents(
     sessionId: string,
     opts?: SubscribeOptions,
@@ -1122,6 +1147,44 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<unknown> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.listSessionAttachments(sessionId, opts),
+    );
+  }
+
+  async getPendingPrompts(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.getPendingPrompts(sessionId, opts),
+    );
+  }
+
+  async removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.removePendingPrompt(sessionId, promptId, opts),
+    );
+  }
+
+  async getMidTurnMessages(
+    sessionId: string,
+    opts?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.getMidTurnMessages(sessionId, opts),
+    );
+  }
+
+  async removeMidTurnMessage(
+    sessionId: string,
+    messageId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.removeMidTurnMessage(sessionId, messageId, opts),
     );
   }
 
