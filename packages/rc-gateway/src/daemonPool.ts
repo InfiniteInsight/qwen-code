@@ -35,16 +35,29 @@ import type {
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
+  type DaemonArchiveSessionsResult,
   type DaemonRewindResult,
   type DaemonRewindSnapshotInfo,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
+  type DaemonUnarchiveSessionsResult,
   type DaemonWorkspaceMcpReloadOptions,
   type DaemonWorkspacePermissionsStatus,
   type DaemonWorkspaceSettingsStatus,
 } from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
+
+/**
+ * Per-id outcome of `POST /sessions/delete`. Named here because the SDK
+ * declares this shape inline on `DaemonClient.deleteSessionsData` and never
+ * exports a name for it, so the pool cannot spell it any other way.
+ */
+export interface DaemonDeleteSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
+}
 
 /** Where a daemon can be reached and how to authenticate to it. */
 export interface DaemonEndpoint {
@@ -234,6 +247,30 @@ export interface SessionDaemon {
     options?: DaemonWorkspaceMcpReloadOptions,
     workspaceCwd?: string,
   ): Promise<DaemonWorkspaceMcpInitializeResult>;
+
+  // -- Sessions at rest (add-capability-parity #111) --------------------
+  // Batch actions over stored transcripts, workspace-scoped like the block
+  // above. Signatures mirror `DaemonClient`'s SHIPPED two parameters with
+  // `workspaceCwd` appended, so a plain `DaemonClient` still satisfies this
+  // interface (it takes fewer parameters, which is structurally fine).
+  // `workspaceCwd` is a pool-routing argument only: it picks which pooled
+  // daemon to call and is never forwarded to the client.
+
+  archiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonArchiveSessionsResult>;
+  unarchiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonUnarchiveSessionsResult>;
+  deleteSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonDeleteSessionsResult>;
 
   /** The session's recovery state (add-mid-turn-recovery §3). Optional — a
    * plain `DaemonClient` has no recovery behind it, so the events route
@@ -1180,6 +1217,44 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonWorkspaceMcpInitializeResult> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.reloadWorkspaceMcp(options),
+    );
+  }
+
+  // -- Sessions at rest (add-capability-parity #111) --------------------
+  // The daemon's batch transcript actions. `workspaceCwd` resolves the target
+  // daemon the same way the workspace-control block above does and is never
+  // forwarded — the client's own second parameter is a daemon clientId, so
+  // passing the cwd there would be read as an identity, not a target. The
+  // daemon's per-id outcome is returned untouched so a partial failure stays
+  // visible.
+
+  archiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonArchiveSessionsResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.archiveSessionsData(sessionIds, clientId),
+    );
+  }
+
+  unarchiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonUnarchiveSessionsResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.unarchiveSessionsData(sessionIds, clientId),
+    );
+  }
+
+  deleteSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonDeleteSessionsResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.deleteSessionsData(sessionIds, clientId),
     );
   }
 

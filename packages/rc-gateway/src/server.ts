@@ -129,6 +129,7 @@ import { BridgeRegistry } from './bridges/registry.js';
 import { InviteStore } from './bridges/inviteStore.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
+import { createSessionRestRoute } from './routes/sessionRest.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
 import {
@@ -1027,6 +1028,31 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         return undefined;
       }
     }, audit),
+  );
+  // The "sessions at rest" actions (add-capability-parity #111): batch archive /
+  // unarchive / delete over stored transcripts. OWNER-scoped like the listing
+  // they act on — these reach every transcript in a workspace, not one session,
+  // so they carry the same posture as `/rc/sessions` rather than a session's
+  // WRITE. Delete is irreversible and the route refuses it without
+  // `confirm: true`; that guard lives server-side, so it holds for clients that
+  // never draw a dialog.
+  app.post(
+    '/rc/sessions/archive',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    createSessionRestRoute(deps.daemon, 'archive', audit),
+  );
+  app.post(
+    '/rc/sessions/unarchive',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    createSessionRestRoute(deps.daemon, 'unarchive', audit),
+  );
+  app.post(
+    '/rc/sessions/delete',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    createSessionRestRoute(deps.daemon, 'delete', audit),
   );
   app.post(
     '/session/:id/command/:name',
