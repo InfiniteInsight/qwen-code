@@ -116,6 +116,27 @@ export interface SessionDaemon {
   capabilities(): Promise<DaemonCapabilities>;
   closeSession(sessionId: string, clientId?: string): Promise<void>;
   cancel(sessionId: string, clientId?: string): Promise<void>;
+
+  // Attachments (add-capability-parity #109, first slice). Signatures mirror
+  // `DaemonClient`'s exactly, including its trailing `opts` object rather
+  // than the bare `clientId` used by `cancel` above, so a plain `DaemonClient`
+  // still satisfies this interface. The chunked `chunks` then `complete`
+  // sequence is deliberately NOT modelled here: `DaemonClient` probes the
+  // daemon once (`supportsAttachmentChunks` at its :4517) and picks the
+  // single-POST fallback itself, so a gateway-side re-implementation would
+  // fork a decision the SDK already owns. Return stays `unknown` because the
+  // daemon owns the reference shape.
+  uploadSessionAttachment(
+    sessionId: string,
+    data: Blob,
+    name: string,
+    mimeType: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown>;
+  listSessionAttachments(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown>;
   subscribeEvents(
     sessionId: string,
     opts?: SubscribeOptions,
@@ -1080,6 +1101,27 @@ export class DaemonPool implements SessionDaemon {
   async cancel(sessionId: string, clientId?: string): Promise<void> {
     await this.withSessionDeathTrigger(sessionId, (client) =>
       client.cancel(sessionId, clientId),
+    );
+  }
+
+  async uploadSessionAttachment(
+    sessionId: string,
+    data: Blob,
+    name: string,
+    mimeType: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.uploadSessionAttachment(sessionId, data, name, mimeType, opts),
+    );
+  }
+
+  async listSessionAttachments(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.listSessionAttachments(sessionId, opts),
     );
   }
 

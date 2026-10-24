@@ -148,6 +148,13 @@ import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
+/** #109: session attachments (uploads + the list that confirms them). */
+import {
+  createAttachmentListRoute,
+  createAttachmentUploadRoute,
+  gateJsonBody,
+  rawAttachmentBody,
+} from './routes/sessionAttachments.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
@@ -445,7 +452,11 @@ export interface GatewayApp {
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const app = express();
-  app.use(express.json());
+  // The JSON parser is wrapped rather than mounted bare: an attachment upload
+  // carries the file itself as the request body with the file's own media
+  // type, and a parser that claimed that body would drain the stream before
+  // the route's raw parser could read it. See routes/sessionAttachments.ts.
+  app.use(gateJsonBody(express.json()));
 
   const registry = new ConnectionRegistry();
 
@@ -824,6 +835,32 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         );
       },
     }),
+  );
+  // POST /session/:id/attachments?name=<file name> — write-scope; pushes one
+  // file into the session as the raw request body. Same guard set as /prompt
+  // (an upload is a user-initiated write into a conversation, and a phone is
+  // the natural place to send a photo or a log), including the rate limiter:
+  // unlike a stop request, an upload costs disk and bandwidth, so bridge
+  // fan-in needs a per-chat-user cap. `rawAttachmentBody` reads the file and
+  // refuses an oversize body with 413 before it is buffered.
+  app.post(
+    '/session/:id/attachments',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap uploads per chat user
+    rawAttachmentBody,
+    createAttachmentUploadRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/attachments — session-read-scope, mirroring /export: the
+  // names and metadata the daemon returns are part of the conversation, and
+  // the route reveals nothing the transcript does not already hold.
+  app.get(
+    '/session/:id/attachments',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createAttachmentListRoute(deps.daemon),
   );
   // POST /session — create (or attach to) a session so a freshly-paired client
   // (the web UI's "New conversation" button) has one to watch and prompt.
