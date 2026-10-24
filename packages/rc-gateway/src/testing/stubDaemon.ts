@@ -225,6 +225,14 @@ export interface StubDaemonOptions {
    * default). The default reports a real fill against a 262144-token window.
    */
   contextUsageStatus?: unknown;
+  /** Status for GET /session/:id/export (default 200). Non-200 → { error }. */
+  exportStatusCode?: number;
+  /**
+   * Body for GET /session/:id/export (default a short markdown document). The
+   * daemon serves this route as raw file bytes, so the stub sends a string
+   * rather than a JSON body.
+   */
+  exportContent?: string;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -740,6 +748,50 @@ export async function startStubDaemon(
         formattedText: 'Context usage: 65536/262144',
       },
     );
+  });
+
+  app.get('/session/:id/export', (req, res) => {
+    const status = opts.exportStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const formats = ['html', 'md', 'json', 'jsonl'];
+    const mime: Record<string, string> = {
+      html: 'text/html; charset=utf-8',
+      md: 'text/markdown; charset=utf-8',
+      json: 'application/json; charset=utf-8',
+      jsonl: 'application/x-ndjson; charset=utf-8',
+    };
+    const requested =
+      typeof req.query['format'] === 'string' ? req.query['format'] : '';
+    // The daemon owns the format vocabulary and answers one it does not know
+    // with 400 + allowedFormats. The stub refuses the same way, because a stub
+    // that only ever said 200 could not prove the gateway relays a refusal
+    // rather than laundering it.
+    if (requested.length > 0 && !formats.includes(requested)) {
+      res.status(400).json({
+        error: 'Invalid export format',
+        code: 'invalid_export_format',
+        format: requested,
+        allowedFormats: formats,
+      });
+      return;
+    }
+    const format = requested.length > 0 ? requested : 'html';
+    // Raw file bytes plus the two headers the SDK rebuilds
+    // {content, filename, mimeType} from. A JSON body here would let the
+    // gateway pass a test for a response shape the real daemon never sends.
+    const content =
+      opts.exportContent ?? `# session ${String(req.params.id).slice(0, 8)}\n`;
+    res
+      .status(200)
+      .set('Content-Type', mime[format] ?? 'text/plain')
+      .set(
+        'Content-Disposition',
+        `attachment; filename="session-${String(req.params.id).slice(0, 8)}.${format}"`,
+      )
+      .send(content);
   });
 
   app.get('/session/:id/status', (req, res) => {

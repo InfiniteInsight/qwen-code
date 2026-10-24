@@ -133,6 +133,7 @@ import { createSessionRestRoute } from './routes/sessionRest.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js';
+import { createSessionExportRoute } from './routes/sessionExport.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -716,6 +717,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionContextUsageRoute(deps.daemon),
+  );
+  // GET /session/:id/export — read-scope; hands the caller a copy of the whole
+  // conversation, which the remote otherwise has no way to do (the daemon token
+  // rides in a header, so no browser can follow a link to the daemon's own file
+  // route). JSON rather than bytes for the same reason. Bare namespace, 1:1
+  // with the daemon route.
+  app.get(
+    '/session/:id/export',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionExportRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
