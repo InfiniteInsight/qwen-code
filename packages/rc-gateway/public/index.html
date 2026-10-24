@@ -2880,6 +2880,7 @@
         ctxInfo = null;
         liveIn = 0;
         liveOut = 0;
+        ctxUsage = null;
         // A new watch starts with a fresh turn count (replayed history
         // re-establishes it frame by frame) and no placed fork button.
         userTurnsSeen = 0;
@@ -3008,15 +3009,22 @@
         box.hidden = false;
       }
       // ---- Session status footer (model · tokens · mode · cwd) --------------
-      // Model / approval mode / cwd come from GET /session/:id/context; live
-      // per-turn token counts come from the stream (agent_message_chunk frames
-      // carry _meta.usage). The running daemon doesn't expose the context-window
-      // size for an env-configured model, so we show raw in/out token counts
-      // (no context-fill %). The model name updates on `model_switched` too.
+      // Model / approval mode / cwd come from GET /session/:id/context; the
+      // context FILL comes from GET /session/:id/context-usage, which is a
+      // different route reporting a different fact (that one is configured
+      // state, this one is how full the live window is). Per-turn in/out
+      // counts still come from the stream (agent_message_chunk frames carry
+      // _meta.usage) and are the fallback when the usage read has no window
+      // for the model, which is the case for an env-configured model with no
+      // declared size: the daemon answers those with a zero window rather than
+      // an error. The model name updates on `model_switched` too.
       let caps = null; // GET /rc/capabilities body (task #27 gating)
       let ctxInfo = null; // { modelName, modeName, currentModeId, availableModes, cwd }
       let liveIn = 0; // last turn's prompt (input) tokens
       let liveOut = 0; // last turn's completion (output) tokens
+      // { total, window, estimated } from GET /session/:id/context-usage, or
+      // null when that read has not answered or reported no window.
+      let ctxUsage = null;
 
       const fmtK = (n) =>
         typeof n === 'number' && n >= 1000
@@ -3059,7 +3067,17 @@
         }
         f.append(modelSpan);
         const rest = [];
-        if (liveIn > 0 || liveOut > 0) {
+        if (ctxUsage) {
+          // The daemon's own marker for "I estimated this, no provider count",
+          // shown rather than dropped: a fill is a much stronger claim when it
+          // is measured than when it is counted locally.
+          rest.push(
+            (ctxUsage.estimated ? '~' : '') +
+              fmtK(ctxUsage.total) +
+              '/' +
+              fmtK(ctxUsage.window),
+          );
+        } else if (liveIn > 0 || liveOut > 0) {
           rest.push(fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out');
         }
         // The mode name renders as text only when there is no picker (a single
@@ -4829,7 +4847,36 @@
         }
       }
 
-      // Fork-lineage breadcrumb (add-session-forking): GET /session/:id/lineage
+      // Pull the live context FILL. Separate from fetchContext because it is a
+      // separate daemon route reporting a separate fact, and because it has to
+      // be re-read after each turn while the configured state does not.
+      // A zero window is not a fill of 0%: an env-configured model with no
+      // declared size answers with zeros, so that case leaves ctxUsage null
+      // and the footer keeps showing the stream's in/out counts.
+      async function fetchContextUsage(id) {
+        if (!id || !token()) return;
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/context-usage',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) return; // leave the last fill standing; not fatal
+          const body = await res.json();
+          const u = (body && body.usage) || {};
+          const total = typeof u.totalTokens === 'number' ? u.totalTokens : 0;
+          const window =
+            typeof u.contextWindowSize === 'number' ? u.contextWindowSize : 0;
+          ctxUsage =
+            window > 0
+              ? { total, window, estimated: u.isEstimated === true }
+              : null;
+          if (ctxInfo) renderFooter();
+        } catch {
+          /* transient; leave the fill as-is */
+        }
+      }
+
+            // Fork-lineage breadcrumb (add-session-forking): GET /session/:id/lineage
       // (OWNER). chain[0] is the session itself, chain[1] its parent — show
       // "parent: <name> @ <id>" in #lineage above the transcript only for
       // FORKED sessions (chain.length > 1). Best-effort: a non-owner token
@@ -5052,6 +5099,9 @@
             // A turn can't end while an Agent tool is still in flight —
             // settle any indicator whose terminal update never arrived.
             transcriptModel.settleAllSubagents();
+            // The turn is what moved the fill, so re-read it now rather than
+            // leaving the footer on the figure from before the turn ran.
+            void fetchContextUsage(watchedSessionId);
             if (asstThisTurn && transcriptModel.curAsst) placeForkButton();
             return;
           case 'session_rewound': {
@@ -7261,6 +7311,7 @@
           $('composer').style.display = '';
           if (fromEventId == null) clearTranscript();
           void fetchContext(id);
+          void fetchContextUsage(id);
           void renderLineage(id);
           void refreshIdleToggle();
           void loadPermRules(false); // task #27: refresh the rules for this workspace

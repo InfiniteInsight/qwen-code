@@ -218,6 +218,13 @@ export interface StubDaemonOptions {
   contextStatusCode?: number;
   /** Full body to return from GET /session/:id/context (overrides the default). */
   contextStatus?: unknown;
+  /** Status for GET /session/:id/context-usage (default 200). Non-200 → { error }. */
+  contextUsageStatusCode?: number;
+  /**
+   * Full body to return from GET /session/:id/context-usage (overrides the
+   * default). The default reports a real fill against a 262144-token window.
+   */
+  contextUsageStatus?: unknown;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -690,6 +697,47 @@ export async function startStubDaemon(
           },
           configOptions: [],
         },
+      },
+    );
+  });
+
+  app.get('/session/:id/context-usage', (req, res) => {
+    const status = opts.contextUsageStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    // A real fill against a 262144-token window: 25% used. The numbers are the
+    // daemon's own shape, so a test that reads one field cannot accidentally
+    // be reading a different route's payload.
+    res.status(200).json(
+      opts.contextUsageStatus ?? {
+        v: 1,
+        sessionId: req.params.id,
+        workspaceCwd: cwd,
+        usage: {
+          modelName: 'qwen3-coder:30b',
+          totalTokens: 65536,
+          contextWindowSize: 262144,
+          breakdown: {
+            systemPrompt: 4096,
+            builtinTools: 8192,
+            mcpTools: 0,
+            memoryFiles: 1024,
+            skills: 512,
+            messages: 51712,
+            freeSpace: 196608,
+            autocompactBuffer: 0,
+          },
+          builtinTools: [],
+          mcpTools: [],
+          memoryFiles: [],
+          skills: [],
+          isEstimated: false,
+          showDetails: req.query['detail'] === 'true',
+        },
+        formattedText: 'Context usage: 65536/262144',
       },
     );
   });

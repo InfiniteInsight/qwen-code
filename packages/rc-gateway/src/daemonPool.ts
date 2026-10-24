@@ -38,6 +38,7 @@ import {
   type DaemonArchiveSessionsResult,
   type DaemonRewindResult,
   type DaemonRewindSnapshotInfo,
+  type DaemonSessionContextUsageStatus,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -161,6 +162,11 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionContextStatus>;
+  sessionContextUsage(
+    sessionId: string,
+    opts?: { detail?: boolean },
+    clientId?: string,
+  ): Promise<DaemonSessionContextUsageStatus>;
   sessionStatus(
     sessionId: string,
     clientId?: string,
@@ -973,6 +979,16 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionContextStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionContext(sessionId, clientId),
+    );
+  }
+
+  async sessionContextUsage(
+    sessionId: string,
+    opts?: { detail?: boolean },
+    clientId?: string,
+  ): Promise<DaemonSessionContextUsageStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionContextUsage(sessionId, opts, clientId),
     );
   }
 
