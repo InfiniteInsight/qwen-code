@@ -74,6 +74,14 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.ENTER_WORKTREE]: 'deny',
   [ToolNames.EXIT_WORKTREE]: 'deny',
   [ToolNames.WORKFLOW]: 'deny',
+  // Launching a workflow is a side effect, so it is classified exactly like the
+  // sibling above. This entry is also behaviour-NEUTRAL: classifyAgentTool below
+  // already returns 'deny' for any name absent from this map, so workflow_run was
+  // denied before it was written down. The map is declared `satisfies
+  // Record<CoreToolName, ...>`, which is exhaustive over the registry, so the
+  // name added at tool-names.ts:68 had to be named here for packages/core to
+  // compile at all. That compile failure, not a policy change, is #91.
+  [ToolNames.WORKFLOW_RUN]: 'deny',
   [ToolNames.ARTIFACT]: 'deny',
   [ToolNames.RECORD_ARTIFACT]: 'deny',
   [ToolNames.RECORD_SOURCE]: 'deny',
