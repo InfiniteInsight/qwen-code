@@ -162,6 +162,8 @@ import {
   createPendingPromptRemoveRoute,
   createPendingPromptsRoute,
 } from './routes/sessionQueue.js';
+/** #111: which sessions in a workspace are actually open right now. */
+import { createSessionLiveStateRoute } from './routes/sessionLiveState.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
@@ -1135,6 +1137,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       },
     ),
   );
+  // GET /rc/sessions/live-state — the workspace's live attachment snapshot
+  // (add-capability-parity #111). OWNER-scoped like the listing it decorates:
+  // the payload names every live session in a workspace, which is the same
+  // class of information as the transcript listing above, so it cannot sit at a
+  // looser scope than that listing without granting something new. No
+  // `recordActivity`: the rail polls this, and marking the device working on
+  // every poll would keep a phone that is only watching looking active. No
+  // audit row either, matching the sibling reads in #107 and #109.
+  app.get(
+    '/rc/sessions/live-state',
+    requireScope(OWNER, audit),
+    createSessionLiveStateRoute(deps.daemon),
+  );
+
   // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy
   // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
   // so remote clients can enumerate sessions at the same URL shape they would use

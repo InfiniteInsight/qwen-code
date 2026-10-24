@@ -101,6 +101,8 @@ export interface StubDaemon {
   lastMidTurnMessageRemove:
     | { sessionId: string; messageId: string }
     | undefined;
+  /** Workspace the most recent GET .../sessions/live-state named, decoded. */
+  lastLiveStateWorkspace: string | undefined;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -397,6 +399,12 @@ export interface StubDaemonOptions {
   removeMidTurnMessageStatus?: number;
   removeMidTurnMessageErrorBody?: unknown;
   removeMidTurnMessageResult?: unknown;
+  /** Status for GET /workspaces/:workspace/sessions/live-state (default 200).
+   * Set 404 with no `liveStateErrorBody` to stand for a daemon that
+   * advertises the capability tag without serving the route. */
+  liveStateStatus?: number;
+  liveStateErrorBody?: unknown;
+  liveStateResult?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -453,6 +461,7 @@ export async function startStubDaemon(
     lastMidTurnMessageRemove: undefined as
       | { sessionId: string; messageId: string }
       | undefined,
+    lastLiveStateWorkspace: undefined as string | undefined,
   };
   const app = express();
   // The same arrangement the gateway uses, for the same reason: an attachment
@@ -1178,6 +1187,37 @@ export async function startStubDaemon(
     res.status(200).json(opts.removeMidTurnMessageResult ?? { removed: true });
   });
 
+  // #111: the workspace live-state snapshot. The body carries the daemon's own
+  // shape, `v` and `catalogVersion` included, because those are equality tokens
+  // a caller compares against the snapshot it already holds.
+  app.get('/workspaces/:workspace/sessions/live-state', (req, res) => {
+    state.lastLiveStateWorkspace = req.params.workspace;
+    const status = opts.liveStateStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.liveStateErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.liveStateResult ?? {
+        v: 1,
+        catalogVersion: { generation: 'g-1', revision: 7 },
+        sessions: [
+          {
+            sessionId: 's-live',
+            clientCount: 2,
+            hasActivePrompt: true,
+            activeWorkState: 'active',
+            isWaitingForPermission: false,
+            isWaitingForUserQuestion: false,
+            updatedAt: '2026-10-24T20:00:00.000Z',
+          },
+        ],
+      },
+    );
+  });
+
   app.get('/session/:id/rewind/snapshots', (_req, res) => {
     res.json({ snapshots: opts.rewindSnapshots ?? [] });
   });
@@ -1423,6 +1463,9 @@ export async function startStubDaemon(
     },
     get lastMidTurnMessageRemove() {
       return state.lastMidTurnMessageRemove;
+    },
+    get lastLiveStateWorkspace() {
+      return state.lastLiveStateWorkspace;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
