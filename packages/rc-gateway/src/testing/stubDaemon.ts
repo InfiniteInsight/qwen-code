@@ -72,6 +72,14 @@ export interface StubDaemon {
   lastToolToggleName: string | undefined;
   /** Body of the most recent POST /workspace/mcp/reload request. */
   lastMcpReloadBody: unknown;
+  /** Query the most recent GET /list request carried. */
+  lastListQuery: Record<string, unknown> | undefined;
+  /** Query the most recent GET /glob request carried. */
+  lastGlobQuery: Record<string, unknown> | undefined;
+  /** Query the most recent GET /file request carried. */
+  lastFileQuery: Record<string, unknown> | undefined;
+  /** Query the most recent GET /file/bytes request carried. */
+  lastFileBytesQuery: Record<string, unknown> | undefined;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -316,6 +324,30 @@ export interface StubDaemonOptions {
   mcpReloadStatus?: number;
   /** Full body for POST /workspace/mcp/reload on success. */
   mcpReloadResult?: { accepted: boolean };
+  /** Status for GET /list (default 200). Non-200 -> error body. */
+  listStatus?: number;
+  /** JSON body to return on a non-200 GET /list response. */
+  listErrorBody?: unknown;
+  /** Full body for GET /list (overrides the default shape). */
+  listResult?: unknown;
+  /** Status for GET /glob (default 200). Non-200 -> error body. */
+  globStatus?: number;
+  /** JSON body to return on a non-200 GET /glob response. */
+  globErrorBody?: unknown;
+  /** Full body for GET /glob (overrides the default shape). */
+  globResult?: unknown;
+  /** Status for GET /file (default 200). Non-200 -> error body. */
+  fileStatus?: number;
+  /** JSON body to return on a non-200 GET /file response. */
+  fileErrorBody?: unknown;
+  /** Full body for GET /file (overrides the default shape). */
+  fileResult?: unknown;
+  /** Status for GET /file/bytes (default 200). Non-200 -> error body. */
+  fileBytesStatus?: number;
+  /** JSON body to return on a non-200 GET /file/bytes response. */
+  fileBytesErrorBody?: unknown;
+  /** Full body for GET /file/bytes (overrides the default shape). */
+  fileBytesResult?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -352,6 +384,10 @@ export async function startStubDaemon(
     lastToolToggleBody: undefined as unknown,
     lastToolToggleName: undefined as string | undefined,
     lastMcpReloadBody: undefined as unknown,
+    lastListQuery: undefined as Record<string, unknown> | undefined,
+    lastGlobQuery: undefined as Record<string, unknown> | undefined,
+    lastFileQuery: undefined as Record<string, unknown> | undefined,
+    lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
   };
   const app = express();
   app.use(express.json());
@@ -794,6 +830,112 @@ export async function startStubDaemon(
       .send(content);
   });
 
+  // -- Workspace file reads (add-capability-parity #107) ----------------
+  // The daemon's four reads answer JSON (the SDK calls r.json() on each), so
+  // the stub does too. Each records the query it received: the gateway's job
+  // is to carry the caller's path/pattern through to the daemon, and a stub
+  // that never looked at what arrived could not prove it happened.
+
+  app.get('/list', (req, res) => {
+    state.lastListQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.listStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.listErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.listResult ?? {
+        kind: 'list',
+        path: String(req.query['path'] ?? '.'),
+        entries: [
+          { name: 'src', kind: 'directory', ignored: false },
+          { name: 'README.md', kind: 'file', ignored: false },
+          { name: 'node_modules', kind: 'directory', ignored: true },
+        ],
+        truncated: false,
+        matchedIgnore: null,
+      },
+    );
+  });
+
+  app.get('/glob', (req, res) => {
+    state.lastGlobQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.globStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.globErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.globResult ?? {
+        kind: 'glob',
+        pattern: String(req.query['pattern'] ?? ''),
+        cwd: '',
+        matches: ['src/index.ts'],
+        count: 1,
+        truncated: false,
+        durationMs: 3,
+      },
+    );
+  });
+
+  app.get('/file/bytes', (req, res) => {
+    state.lastFileBytesQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.fileBytesStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.fileBytesErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = String(req.query['path'] ?? 'img.png');
+    res.status(200).json(
+      opts.fileBytesResult ?? {
+        kind: 'file_bytes',
+        path: target,
+        offset: 0,
+        sizeBytes: 8,
+        returnedBytes: 8,
+        truncated: false,
+        contentBase64: Buffer.from('pngbytes').toString('base64'),
+      },
+    );
+  });
+
+  app.get('/file', (req, res) => {
+    state.lastFileQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.fileStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.fileErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = String(req.query['path'] ?? 'README.md');
+    res.status(200).json(
+      opts.fileResult ?? {
+        kind: 'file',
+        path: target,
+        content: '# hello\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 8,
+        returnedBytes: 8,
+        truncated: false,
+        matchedIgnore: null,
+        originalLineCount: 2,
+        nextCursor: null,
+        hasMore: false,
+      },
+    );
+  });
+
   app.get('/session/:id/status', (req, res) => {
     const status = opts.sessionStatusCode ?? 200;
     if (status !== 200) {
@@ -1050,6 +1192,18 @@ export async function startStubDaemon(
     },
     get lastMcpReloadBody() {
       return state.lastMcpReloadBody;
+    },
+    get lastListQuery() {
+      return state.lastListQuery;
+    },
+    get lastGlobQuery() {
+      return state.lastGlobQuery;
+    },
+    get lastFileQuery() {
+      return state.lastFileQuery;
+    },
+    get lastFileBytesQuery() {
+      return state.lastFileBytesQuery;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

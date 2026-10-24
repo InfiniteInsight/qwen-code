@@ -1869,6 +1869,40 @@
             "
           ></div>
         </details>
+        <details id="ws-files" class="ops-collapse" hidden>
+          <summary>
+            <strong>Workspace files</strong
+            ><span
+              id="ws-files-target"
+              style="margin-left: 6px; font-size: 0.8rem; color: #888"
+            ></span
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Workspace files?"
+              aria-expanded="false"
+              aria-controls="help-ws-files"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-files" hidden>
+            Browses the files in the workspace the agent works on. Tap a folder
+            to enter it, or a file to read it. A long file pages in with
+            <b>more</b>; a binary one is offered as raw bytes. Needs write
+            scope.
+          </div>
+          <div class="ops-note">(reads: write scope)</div>
+          <div
+            id="ws-files-body"
+            style="
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+            "
+          ></div>
+        </details>
         <details id="ui-prefs" class="ops-collapse">
           <summary>
             <strong>UI preferences</strong
@@ -3316,7 +3350,17 @@
       // Last-rendered workspace GET snapshots (issue #34 drift detection).
       // Each loader writes its freshest data here so a self-change made in
       // this tab does not masquerade as an external change on refocus.
-      const wsLastData = { trust: null, mcp: null, tools: null, perms: null };
+      const wsLastData = {
+        trust: null,
+        mcp: null,
+        tools: null,
+        files: null,
+        perms: null,
+      };
+
+      // Where the file browser is parked inside the workspace. Relative to
+      // the workspace root, which the daemon spells '.'.
+      let wsFilesPath = '.';
       let wsLastFocusCheck = 0;
 
       // rc-workspace-scoping (#28): the workspace the workspace-control
@@ -3353,6 +3397,7 @@
           'ws-trust-target',
           'ws-mcp-target',
           'ws-tools-target',
+          'ws-files-target',
           'perm-rules-target',
         ]) {
           const el = $(id);
@@ -3418,7 +3463,9 @@
         wsLastData.trust = null;
         wsLastData.mcp = null;
         wsLastData.tools = null;
+        wsLastData.files = null;
         wsLastData.perms = null;
+        wsFilesPath = '.';
         renderWsTargetLabels();
         const form = $('ws-mcp-form');
         if (form) form.hidden = true;
@@ -3430,6 +3477,9 @@
         );
         renderWsSectionPlaceholder('ws-tools-body', 'Load', (n) =>
           loadWorkspaceTools(n),
+        );
+        renderWsSectionPlaceholder('ws-files-body', 'Load', (n) =>
+          loadWorkspaceFiles(n),
         );
         loadPermRules(false);
       }
@@ -4780,6 +4830,346 @@
         }
       }
 
+      // -- Workspace files (add-capability-parity #107) --------------------
+      // The gateway always mounts these four reads, so the gateway cannot say
+      // whether they answer; only the daemon can. The gate therefore reads the
+      // daemon's own list, passed through verbatim under remoteControl.daemon
+      // (#96), rather than the gateway's static workspaceControl block.
+      function daemonHasFeature(name) {
+        const dm = caps && caps.remoteControl && caps.remoteControl.daemon;
+        return !!(
+          dm &&
+          dm.available &&
+          Array.isArray(dm.features) &&
+          dm.features.includes(name)
+        );
+      }
+
+      // The gateway's own refusal says scope_required; a daemon refusal
+      // relays its errorKind (path_outside_workspace, not_found, trust...).
+      // Collapsing the two would tell someone to fetch a better token when
+      // the token is fine and the path is the problem.
+      function wsFilesErrorText(status, e) {
+        if (e.code === 'scope_required') return 'requires write scope';
+        if (e.code === 'file_reads_unsupported')
+          return 'this daemon has no file routes';
+        return (
+          (e.error || 'failed') +
+          ' (' +
+          status +
+          ')' +
+          (e.hint ? ' - ' + e.hint : '')
+        );
+      }
+
+      function wsFilesJoin(dir, name) {
+        return !dir || dir === '.' ? name : dir + '/' + name;
+      }
+
+      function wsFilesParent(p) {
+        const i = p.lastIndexOf('/');
+        return i < 0 ? '.' : p.slice(0, i);
+      }
+
+      // GET /rc/workspace/list. The listing is the daemon's, including its
+      // order and its ignored flags, so neither is re-sorted or filtered here.
+      async function loadWorkspaceFiles(notify) {
+        const body = $('ws-files-body');
+        try {
+          const res = await fetch(
+            wsTargetQuery(
+              '/rc/workspace/list?path=' + encodeURIComponent(wsFilesPath),
+            ),
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          body.innerHTML = '';
+          const status = wsSectionStatusEl('ws-files-status');
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent = wsFilesErrorText(res.status, e);
+            body.append(status);
+            if (notify)
+              setStatus('workspace files load failed: ' + status.textContent);
+            return;
+          }
+          const data = await res.json();
+          wsLastData.files = data;
+          renderWorkspaceListing(data);
+        } catch (err) {
+          body.innerHTML = '';
+          const status = wsSectionStatusEl('ws-files-status');
+          status.textContent = 'load failed: ' + err.message;
+          body.append(status);
+          if (notify) setStatus('workspace files load failed: ' + err.message);
+        }
+      }
+
+      function renderWorkspaceListing(data) {
+        const body = $('ws-files-body');
+        const path = typeof data.path === 'string' ? data.path : wsFilesPath;
+        wsFilesPath = path;
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;gap:8px';
+        const here = document.createElement('strong');
+        here.textContent = path || '.';
+        here.style.cssText = 'font-size:12px;flex:1;word-break:break-all';
+        head.appendChild(here);
+        if (path && path !== '.') {
+          const up = document.createElement('button');
+          up.textContent = 'up';
+          up.addEventListener('click', () => {
+            wsFilesPath = wsFilesParent(path);
+            void loadWorkspaceFiles(false);
+          });
+          head.appendChild(up);
+        }
+        const refresh = document.createElement('button');
+        refresh.textContent = 'refresh';
+        refresh.addEventListener('click', () => void loadWorkspaceFiles(false));
+        head.appendChild(refresh);
+
+        const findRow = document.createElement('div');
+        findRow.style.cssText = 'display:flex;gap:6px';
+        const find = document.createElement('input');
+        find.placeholder = 'find by pattern, e.g. src/**/*.ts';
+        find.style.flex = '1';
+        find.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') void runWorkspaceGlob(find.value.trim());
+        });
+        const findBtn = document.createElement('button');
+        findBtn.textContent = 'find';
+        findBtn.addEventListener('click', () =>
+          void runWorkspaceGlob(find.value.trim()),
+        );
+        findRow.append(find, findBtn);
+
+        const list = document.createElement('div');
+        list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+        if (!entries.length) {
+          const none = document.createElement('div');
+          none.textContent = '(empty directory)';
+          none.style.cssText = 'font-size:12px;opacity:0.5';
+          list.appendChild(none);
+        }
+        for (const entry of entries) {
+          if (!entry || typeof entry.name !== 'string') continue;
+          const isDir = entry.kind === 'directory';
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:8px';
+          const btn = document.createElement('button');
+          btn.textContent = isDir ? entry.name + '/' : entry.name;
+          btn.style.cssText = 'text-align:left';
+          const child = wsFilesJoin(path, entry.name);
+          btn.addEventListener('click', () => {
+            if (isDir) {
+              wsFilesPath = child;
+              void loadWorkspaceFiles(false);
+            } else {
+              void openWorkspaceFile(child);
+            }
+          });
+          const note = document.createElement('span');
+          note.style.cssText = 'font-size:12px;opacity:0.6';
+          const parts = [];
+          if (entry.kind && entry.kind !== 'file' && entry.kind !== 'directory')
+            parts.push(entry.kind);
+          if (entry.ignored) parts.push('ignored');
+          note.textContent = parts.join(' \u00b7 ');
+          row.append(btn, note);
+          list.appendChild(row);
+        }
+        const status = wsSectionStatusEl('ws-files-status');
+        if (data.truncated)
+          status.textContent = 'listing truncated at the daemon cap';
+        body.append(head, findRow, list, status);
+      }
+
+      // GET /rc/workspace/glob. The daemon returns names only and no kinds,
+      // so every hit is offered as a file: a directory match simply fails when
+      // opened, and the daemon's own message is shown rather than guessed at.
+      async function runWorkspaceGlob(pattern) {
+        if (!pattern) return;
+        const view = wsFilesViewEl();
+        view.innerHTML = '';
+        // Its own status element: borrowing the listing's would move it out of
+        // the listing and leave that section with no line to report into.
+        const status = wsSectionStatusEl('ws-files-glob-status');
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;gap:8px';
+        const title = document.createElement('strong');
+        title.textContent = 'find: ' + pattern;
+        title.style.cssText = 'font-size:12px;flex:1;word-break:break-all';
+        const close = document.createElement('button');
+        close.textContent = 'close';
+        close.addEventListener('click', () => view.remove());
+        head.append(title, close);
+        view.appendChild(head);
+        try {
+          const res = await fetch(
+            wsTargetQuery(
+              '/rc/workspace/glob?pattern=' + encodeURIComponent(pattern),
+            ),
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent = wsFilesErrorText(res.status, e);
+            view.appendChild(status);
+            return;
+          }
+          const data = await res.json();
+          const matches = Array.isArray(data.matches) ? data.matches : [];
+          const list = document.createElement('div');
+          list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+          if (!matches.length) {
+            const none = document.createElement('div');
+            none.textContent = '(no matches)';
+            none.style.cssText = 'font-size:12px;opacity:0.5';
+            list.appendChild(none);
+          }
+          for (const m of matches) {
+            if (typeof m !== 'string') continue;
+            const row = document.createElement('div');
+            const btn = document.createElement('button');
+            btn.textContent = m;
+            btn.style.cssText = 'text-align:left;word-break:break-all';
+            btn.addEventListener('click', () => void openWorkspaceFile(m));
+            row.appendChild(btn);
+            list.appendChild(row);
+          }
+          const bits = [];
+          if (typeof data.count === 'number') bits.push(data.count + ' matches');
+          if (data.truncated) bits.push('truncated at the daemon cap');
+          status.textContent = bits.join(' \u00b7 ');
+          view.append(list, status);
+        } catch (err) {
+          status.textContent = 'find failed: ' + err.message;
+          view.appendChild(status);
+        }
+      }
+
+      function wsFilesViewEl() {
+        let v = $('ws-files-view');
+        if (!v) {
+          v = document.createElement('div');
+          v.id = 'ws-files-view';
+          v.style.cssText =
+            'display:flex;flex-direction:column;gap:6px;border-top:1px solid #333;padding-top:6px';
+          $('ws-files-body').appendChild(v);
+        }
+        return v;
+      }
+
+      // GET /rc/workspace/file. The window fields are the contract: a
+      // truncated read says so, and nextCursor/hasMore page the rest, so a
+      // long file is never shown as though it were whole.
+      async function openWorkspaceFile(relPath, cursor) {
+        const view = wsFilesViewEl();
+        if (!cursor) {
+          view.innerHTML = '';
+          const head = document.createElement('div');
+          head.style.cssText = 'display:flex;align-items:center;gap:8px';
+          const title = document.createElement('strong');
+          title.textContent = relPath;
+          title.style.cssText = 'font-size:12px;flex:1;word-break:break-all';
+          const close = document.createElement('button');
+          close.textContent = 'close';
+          close.addEventListener('click', () => view.remove());
+          head.append(title, close);
+          view.appendChild(head);
+        }
+        const status = wsSectionStatusEl('ws-files-file-status');
+        if (!status.isConnected) view.appendChild(status);
+        status.textContent = 'reading...';
+        try {
+          let url = '/rc/workspace/file?path=' + encodeURIComponent(relPath);
+          if (cursor) url += '&cursor=' + encodeURIComponent(cursor);
+          const res = await fetch(wsTargetQuery(url), {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 422) {
+            const e = await res.json().catch(() => ({}));
+            if (e.code === 'binary_file') return void renderWorkspaceBytes(relPath);
+            status.textContent = wsFilesErrorText(422, e);
+            return;
+          }
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent = wsFilesErrorText(res.status, e);
+            return;
+          }
+          const data = await res.json();
+          let pre = view.querySelector('pre');
+          if (!pre) {
+            pre = document.createElement('pre');
+            pre.style.cssText =
+              'margin:0;padding:6px;background:#111;border:1px solid #333;max-height:420px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word';
+            view.appendChild(pre);
+          }
+          if (typeof data.content === 'string') pre.textContent += data.content;
+          const bits = [];
+          if (typeof data.sizeBytes === 'number')
+            bits.push(data.sizeBytes + ' bytes');
+          if (data.truncated) bits.push('window truncated');
+          status.textContent = bits.join(' \u00b7 ');
+          const oldMore = view.querySelector('[data-role=more]');
+          if (oldMore) oldMore.remove();
+          if (data.hasMore && data.nextCursor) {
+            const more = document.createElement('button');
+            more.textContent = 'more';
+            more.dataset.role = 'more';
+            more.addEventListener('click', () =>
+              void openWorkspaceFile(relPath, data.nextCursor),
+            );
+            view.appendChild(more);
+          }
+        } catch (err) {
+          status.textContent = 'read failed: ' + err.message;
+        }
+      }
+
+      // A 422 binary_file is the daemon's cue that the path is not text, and
+      // GET /rc/workspace/file/bytes is the answer. Offered as a download
+      // rather than pasted into the page as base64.
+      async function renderWorkspaceBytes(relPath) {
+        const view = wsFilesViewEl();
+        const status = wsSectionStatusEl('ws-files-file-status');
+        if (!status.isConnected) view.appendChild(status);
+        status.textContent = 'binary file, fetching bytes...';
+        try {
+          const res = await fetch(
+            wsTargetQuery(
+              '/rc/workspace/file/bytes?path=' + encodeURIComponent(relPath),
+            ),
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            status.textContent = wsFilesErrorText(res.status, e);
+            return;
+          }
+          const data = await res.json();
+          const b64 =
+            typeof data.contentBase64 === 'string' ? data.contentBase64 : '';
+          const old = $('ws-files-dl');
+          if (old) old.remove();
+          const a = document.createElement('a');
+          a.id = 'ws-files-dl';
+          a.textContent = 'download ' + String(data.returnedBytes || 0) + ' bytes';
+          a.href = 'data:application/octet-stream;base64,' + b64;
+          a.download = relPath.split('/').pop() || 'file';
+          a.style.cssText = 'font-size:12px';
+          view.appendChild(a);
+          status.textContent =
+            (typeof data.sizeBytes === 'number'
+              ? data.sizeBytes + ' bytes'
+              : 'bytes') + (data.truncated ? ' (window truncated)' : '');
+        } catch (err) {
+          status.textContent = 'byte read failed: ' + err.message;
+        }
+      }
+
       // A usage-bearing frame (_meta.usage) updates the live token counts. The
       // footer only shows once we know a model, so an early usage frame is kept.
       function updateLiveTokens(usage) {
@@ -5427,6 +5817,16 @@
             'load tool settings',
             loadWorkspaceTools,
           ],
+          // The file reads are NOT in the static block above: the gateway
+          // always mounts /rc/workspace/{list,glob,file,file/bytes}, so it
+          // cannot say whether they answer. Only the daemon's own list can,
+          // so this section is revealed by the daemon's tag instead.
+          'ws-files': [
+            daemonHasFeature('workspace_file_read'),
+            'ws-files-body',
+            'load workspace files',
+            loadWorkspaceFiles,
+          ],
         };
         for (const [id, [on, bodyId, label, loader]] of Object.entries(
           sections,
@@ -5444,6 +5844,7 @@
           wc.trust ||
           wc.mcp ||
           wc.tools ||
+          daemonHasFeature('workspace_file_read') ||
           permRulesGate()
         );
         const targetSec = $('ws-target');

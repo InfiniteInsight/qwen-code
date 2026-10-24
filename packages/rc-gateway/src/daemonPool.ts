@@ -45,6 +45,8 @@ import {
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
   type DaemonUnarchiveSessionsResult,
+  type DaemonWorkspaceFile,
+  type DaemonWorkspaceFileBytes,
   type DaemonWorkspaceMcpReloadOptions,
   type DaemonWorkspacePermissionsStatus,
   type DaemonWorkspaceSettingsStatus,
@@ -264,6 +266,37 @@ export interface SessionDaemon {
     options?: DaemonWorkspaceMcpReloadOptions,
     workspaceCwd?: string,
   ): Promise<DaemonWorkspaceMcpInitializeResult>;
+
+  // -- Workspace files (add-capability-parity #107) ---------------------
+  // The daemon's read-only file surface. Signatures mirror `DaemonClient`'s
+  // SHIPPED parameters with `workspaceCwd` appended, so a plain
+  // `DaemonClient` still satisfies this interface. `workspaceCwd` picks which
+  // pooled daemon answers and is never forwarded; for the two reads that
+  // already carry a `clientId` it stays BEHIND it, because a cwd in that slot
+  // would be read as an identity rather than a target (same reason as
+  // `requestWorkspaceTrustChange` above). Return types stay `unknown` where
+  // the SDK leaves them `unknown`: the daemon owns those shapes and the
+  // gateway relays them instead of re-describing a shape it does not own.
+
+  dirList(dirPath: string, workspaceCwd?: string): Promise<unknown>;
+  glob(pattern: string, workspaceCwd?: string): Promise<unknown>;
+  readWorkspaceFile(
+    filePath: string,
+    opts?: {
+      maxBytes?: number;
+      line?: number;
+      limit?: number;
+      cursor?: string;
+    },
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFile>;
+  readWorkspaceFileBytes(
+    filePath: string,
+    opts?: { offset?: number; maxBytes?: number },
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileBytes>;
 
   // -- Sessions at rest (add-capability-parity #111) --------------------
   // Batch actions over stored transcripts, workspace-scoped like the block
@@ -1271,6 +1304,45 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonWorkspaceMcpInitializeResult> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.reloadWorkspaceMcp(options),
+    );
+  }
+
+  dirList(dirPath: string, workspaceCwd?: string): Promise<unknown> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.dirList(dirPath),
+    );
+  }
+
+  glob(pattern: string, workspaceCwd?: string): Promise<unknown> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.glob(pattern),
+    );
+  }
+
+  readWorkspaceFile(
+    filePath: string,
+    opts?: {
+      maxBytes?: number;
+      line?: number;
+      limit?: number;
+      cursor?: string;
+    },
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFile> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.readWorkspaceFile(filePath, opts, clientId),
+    );
+  }
+
+  readWorkspaceFileBytes(
+    filePath: string,
+    opts?: { offset?: number; maxBytes?: number },
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileBytes> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.readWorkspaceFileBytes(filePath, opts, clientId),
     );
   }
 
