@@ -100,6 +100,12 @@ import {
   createWorkspaceToolsCatalogRoute,
 } from './routes/workspaceTools.js';
 import { createWorkspaceMcpRoutes } from './routes/workspaceMcp.js';
+import {
+  createWorkspaceFileBytesRoute,
+  createWorkspaceFileRoute,
+  createWorkspaceGlobRoute,
+  createWorkspaceListRoute,
+} from './routes/workspaceFiles.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import { createPermissionOverlayRoutes } from './routes/permissionOverlays.js';
@@ -1614,6 +1620,46 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     workspaceMcp.servers,
+  );
+
+  // Workspace file browser (add-capability-parity #107, read-only first
+  // slice). WRITE-scoped like GET /rc/fs and the workspace settings/tools
+  // reads above: these return file CONTENTS from the host, which is strictly
+  // more sensitive than the tools catalog that already sits at WRITE, so they
+  // cannot be chat-scope. No audit row, matching those sibling reads: a file
+  // read's only identifying field is its path, and paths are deliberately kept
+  // out of every audit record, so a row could name neither file nor content.
+  app.get(
+    '/rc/workspace/list',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceListRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/glob',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceGlobRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/file',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceFileRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/file/bytes',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceFileBytesRoute(deps.daemon),
   );
 
   if (deps.snooze) {
