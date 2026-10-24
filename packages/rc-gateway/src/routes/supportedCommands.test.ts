@@ -162,6 +162,7 @@ describe('POST /session/:id/supported-commands/:name', () => {
     opts: Parameters<typeof startStubDaemon>[0],
     scopes: RcScope[],
     audit?: AuditRecorder,
+    promptTimeoutMs?: number,
   ): Promise<string> {
     stub = await startStubDaemon(opts);
     const app = express();
@@ -172,6 +173,7 @@ describe('POST /session/:id/supported-commands/:name', () => {
       createSessionCommandInvokeRoute(
         new DaemonClient({ baseUrl: stub.baseUrl }),
         audit,
+        promptTimeoutMs,
       ),
     );
     return listen(app);
@@ -316,5 +318,64 @@ describe('POST /session/:id/supported-commands/:name', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'session_not_found',
     );
+  });
+
+  it('504s prompt_timeout when the turn never settles, and audits it as timed out', async () => {
+    const audit = new FakeAudit();
+    // The fault this guard exists for. daemon.prompt() resolves at END OF TURN,
+    // so a turn that never settles leaves this route's await pending forever:
+    // the button stuck, and the daemon's 5-slot admission never freed. The stub
+    // holds the POST open past the bound, which is the same unbounded await from
+    // the route's side.
+    const url = await mountInvoke(
+      { supportedCommands: sessionCommands, promptDelayMs: 5_000 },
+      [WRITE],
+      audit,
+      40,
+    );
+
+    const res = await fetch(`${url}/session/${SID}/supported-commands/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(504);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'prompt_timeout',
+    );
+    // The command WAS invoked, so it is audited — as timed out, with no
+    // stopReason and never the args.
+    expect(audit.entries).toHaveLength(1);
+    expect(audit.entries[0]!.detail).toEqual({ name: 'diff', timedOut: true });
+  });
+
+  it('treats a client disconnect as a departed client, not a timeout', async () => {
+    const audit = new FakeAudit();
+    const url = await mountInvoke(
+      { supportedCommands: sessionCommands, promptDelayMs: 300 },
+      [WRITE],
+      audit,
+      30_000,
+    );
+
+    const controller = new AbortController();
+    const pending = fetch(`${url}/session/${SID}/supported-commands/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    // Without this the assertion below would also pass on a route that never
+    // reached the daemon at all, proving nothing.
+    expect(stub!.lastPromptBody).toBeDefined();
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 60));
+
+    // #38: a disconnect stops the WAIT, never the turn. Calling it a timeout
+    // would both answer a client that has gone and log a turn that is still
+    // running as though it had failed.
+    expect(audit.entries).toHaveLength(0);
   });
 });

@@ -286,6 +286,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     scopes: RcScope[];
     audit?: AuditRecorder;
     stubOpts?: Parameters<typeof startStubDaemon>[0];
+    promptTimeoutMs?: number;
   }): Promise<{ url: string; daemon: DaemonClient }> {
     stub = await startStubDaemon(opts.stubOpts);
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
@@ -296,7 +297,12 @@ describe('POST /rc/session/:id/command/:name', () => {
       fakeClient(opts.scopes),
       requireScope(WRITE, opts.audit),
       enforceSessionLock(opts.audit),
-      createInvokeCommandRoute(daemon, commandLoader(opts.audit), opts.audit),
+      createInvokeCommandRoute(
+        daemon,
+        commandLoader(opts.audit),
+        opts.audit,
+        opts.promptTimeoutMs,
+      ),
     );
     const url = await listen(app);
     return { url, daemon };
@@ -421,6 +427,38 @@ describe('POST /rc/session/:id/command/:name', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'daemon_unavailable',
     );
+  });
+
+  it('504s prompt_timeout when the turn never settles, and audits it as timed out', async () => {
+    await writeFile(join(workspaceDir, 'echo.md'), cmd('echo'));
+    const audit = new FakeAudit();
+    // The fault this guard exists for: daemon.prompt() resolves at END OF TURN,
+    // so a turn that never settles left this await pending forever, holding a
+    // daemon admission slot and wedging the session's whole prompt queue. The
+    // stub holds the POST open past the bound, the same unbounded await seen
+    // from the route's side.
+    const { url } = await bootInvoke({
+      scopes: [SESSION_READ, WRITE],
+      audit,
+      stubOpts: { promptDelayMs: 5_000 },
+      promptTimeoutMs: 40,
+    });
+    const res = await fetch(`${url}/session/s1/command/echo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(504);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'prompt_timeout',
+    );
+    // The command WAS invoked, so it is still audited — as timed out, with no
+    // stopReason, and never the resolved body.
+    const invoked = audit.entries.find(
+      (e) => e.action === 'slash_command_invoked',
+    );
+    expect(invoked).toBeDefined();
+    expect(invoked!.detail).toMatchObject({ name: 'echo', timedOut: true });
   });
 
   // A capturing fake daemon so we can assert the RESOLVED prompt text (the stub

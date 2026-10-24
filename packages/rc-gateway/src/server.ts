@@ -1035,7 +1035,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap command invocations per chat user
-    createInvokeCommandRoute(deps.daemon, commandLoader, audit),
+    createInvokeCommandRoute(
+      deps.daemon,
+      commandLoader,
+      audit,
+      deps.promptTimeoutMs,
+    ),
   );
   // POST /session/:id/supported-commands/:name — write-scope; runs one of the
   // watched session's own slash commands by posting `/name args` as that
@@ -1050,7 +1055,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap command invocations per chat user
-    createSessionCommandInvokeRoute(deps.daemon, audit),
+    createSessionCommandInvokeRoute(deps.daemon, audit, deps.promptTimeoutMs),
   );
   app.get(
     '/rc/commands',
