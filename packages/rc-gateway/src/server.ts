@@ -132,6 +132,7 @@ import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionRestRoute } from './routes/sessionRest.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
+import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -705,6 +706,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionContextRoute(deps.daemon),
+  );
+  // GET /session/:id/context-usage — read-scope; relays the daemon's
+  // per-session context USAGE (how full the window is), which is a different
+  // fact from the configured state /context reports and shares no fields with
+  // it. Bare namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/context-usage',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionContextUsageRoute(deps.daemon),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
