@@ -5005,6 +5005,162 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  // #89. The rail is a scan of the on-disk chats dir, so a conversation whose
+  // transcript has not been written yet gets no row at all: the device that did
+  // not start it cannot see it, cannot resume it, and cannot tell it apart from
+  // one that already ended. Only the daemon's in-memory snapshot knows it is
+  // there, so the load-bearing property is that the list is merged with that
+  // snapshot rather than merely annotated where rows already exist. Asserted on
+  // the real page because the row itself is the claim, and a badge on existing
+  // rows would pass a test that never asked for the missing one.
+  name: 'P37 a conversation with no transcript is listed, and an unreadable snapshot changes nothing',
+  waitView: false,
+  run: async ({ page }) => {
+    const CWD = '/home/evan/scratch';
+    const DISK = '11111111-2222-3333-4444-555555555555';
+    const LIVEONLY = '77777777-8888-9999-0000-111111111111';
+    const now = new Date().toISOString();
+
+    // Both reads are intercepted rather than served, because the harness wires a
+    // bare DaemonClient and that route answers 502 here for every scenario.
+    await page.route(/\/rc\/sessions\?/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessions: [{ sessionId: DISK, title: 'on disk', updatedAt: now }],
+          truncated: false,
+        }),
+      }),
+    );
+    const liveBody = JSON.stringify({
+      v: 1,
+      catalogVersion: { generation: 'g-1', revision: 4 },
+      sessions: [
+        {
+          sessionId: DISK,
+          clientCount: 2,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+        {
+          sessionId: LIVEONLY,
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+      ],
+    });
+    await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: liveBody,
+      }),
+    );
+
+    const readRows = () =>
+      page.evaluate(() => {
+        const box = document.getElementById('past-list') as HTMLDivElement;
+        return Array.from(box.querySelectorAll('.token-row')).map((el) => {
+          const row = el as HTMLElement;
+          const line = row.firstElementChild as HTMLElement;
+          const kids = Array.from(line.children) as HTMLElement[];
+          return {
+            label: kids[0]?.textContent ?? '',
+            marks: kids.slice(1).map((k) => k.textContent ?? ''),
+            buttons: Array.from(row.querySelectorAll('button')).map(
+              (b) => b.textContent ?? '',
+            ),
+          };
+        });
+      });
+
+    // curDirPath is what the page sets when it browses into a folder, and the
+    // render is skipped unless it matches the cwd being refreshed. Set here so
+    // the call below goes all the way through rather than returning early.
+    await page.evaluate(([cwd]) => {
+      curDirPath = cwd;
+      return refreshPastConversations(cwd);
+    }, [CWD, 0]);
+    const rows = await readRows();
+
+    expect(
+      rows.length === 2,
+      `the rail listed ${rows.length} rows, wanted the transcript row plus the transcript-less one (${JSON.stringify(rows)})`,
+    );
+    // The live-only row is the whole point of #89, so it has to be the row that
+    // is NOT on disk. Its label is the session-id fallback because it has no
+    // title, and no separator, because it has no mtime either.
+    const only = rows.find((r) => r.label.startsWith('session 77777777'));
+    expect(
+      !!only,
+      `the conversation with no transcript is not in the rail at all (${JSON.stringify(rows.map((r) => r.label))})`,
+    );
+    expect(
+      !only!.label.includes('\u00b7'),
+      `the transcript-less row shows a separator with nothing after it (${JSON.stringify(only!.label)})`,
+    );
+    expect(
+      only!.marks.includes('open'),
+      `the transcript-less row does not say it is open (${JSON.stringify(only)})`,
+    );
+    // No delete on that row: its confirm text promises a transcript is removed
+    // for good, and there is no transcript to remove.
+    expect(
+      only!.buttons.length === 0,
+      `the transcript-less row offers a delete that cannot do what its confirm says (${JSON.stringify(only!.buttons)})`,
+    );
+
+    const disk = rows.find((r) => r.label.startsWith('on disk'));
+    expect(!!disk, `the row that was already listed went missing (${JSON.stringify(rows)})`);
+    expect(
+      disk!.label.includes('\u00b7'),
+      `the test assumed the disk row shows a time, so the marker assertions below mean anything (${JSON.stringify(disk!.label)})`,
+    );
+    expect(
+      disk!.marks.includes('open'),
+      `the snapshot names this conversation and the row does not say so (${JSON.stringify(disk)})`,
+    );
+    expect(
+      disk!.buttons.includes('delete'),
+      `a conversation that has a transcript lost its delete (${JSON.stringify(disk!.buttons)})`,
+    );
+
+    // The honesty property. A snapshot the page cannot read is NOT a statement
+    // that nothing is open: the route can be unsupported on an older daemon, or
+    // refused by the per-workspace trust check. The list must come back exactly
+    // as the disk scan alone, because an unreadable snapshot that emptied the
+    // rail would be worse than never having tried.
+    await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Daemon unavailable', code: 'daemon_unavailable' }),
+      }),
+    );
+    await page.evaluate(([cwd]) => refreshPastConversations(cwd), [CWD, 0]);
+    const blind = await readRows();
+    expect(
+      blind.length === 1 && blind[0]!.label.startsWith('on disk'),
+      `an unreadable snapshot changed the list rather than leaving it as the disk scan (${JSON.stringify(blind.map((r) => r.label))})`,
+    );
+    expect(
+      !blind[0]!.marks.includes('open'),
+      `with no snapshot the row still claims to be open, which is a claim about state it cannot know (${JSON.stringify(blind[0])})`,
+    );
+    expect(
+      blind[0]!.buttons.includes('delete'),
+      `with no snapshot the surviving row lost its delete (${JSON.stringify(blind[0]!.buttons)})`,
+    );
+
+    return `2 rows with the transcript-less one listed as open and undeletable; an unreadable snapshot leaves the disk row alone and unmarked`;
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {

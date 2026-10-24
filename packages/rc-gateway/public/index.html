@@ -7315,20 +7315,44 @@
           const label = document.createElement('span');
           const title =
             strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
-          label.textContent = title + '  ·  ' + relativeTime(s.updatedAt);
+          // A live-only row has no transcript, so it has no mtime to show.
+          // relativeTime answers '' for a missing timestamp, and appending the
+          // separator anyway would leave the row reading "session 1a2b3c45  · "
+          // with nothing after it.
+          const when = relativeTime(s.updatedAt);
+          label.textContent = title + (when ? '  ·  ' + when : '');
           label.style.cssText = 'flex:1 1 auto;min-width:0';
+          line.appendChild(label);
+          // issue #89: the marker is the whole point of the merge. It comes
+          // from the daemon's own snapshot rather than the transcript, so it
+          // says something the disk scan cannot. Muted rather than bright:
+          // this is a state of the conversation, not a call to action.
+          if (s.live) {
+            const tag = document.createElement('span');
+            tag.textContent = 'open';
+            tag.style.cssText =
+              'flex:0 0 auto;font-size:0.7rem;color:#9aa0a6';
+            line.appendChild(tag);
+          }
           // issue #111: the one at-rest action the rail can offer safely. The
           // row itself opens the conversation, so the button stops the click --
           // otherwise deleting and resuming would both fire off one press.
-          const del = document.createElement('button');
-          del.textContent = 'delete';
-          del.style.cssText = 'flex:0 0 auto;font-size:0.7rem;opacity:0.6';
-          del.onclick = (ev) => {
-            ev.stopPropagation();
-            void deletePastConversation(s.sessionId, title, cwd);
-          };
-          line.appendChild(label);
-          line.appendChild(del);
+          //
+          // A live-only row is offered no delete. Its confirm text promises the
+          // transcript "is removed for good", and there is no transcript to
+          // remove, so the button would describe an act it cannot perform. It
+          // is also the one row that is certainly in use on another device
+          // right now, which is the worst subject for an irreversible action.
+          if (!s.liveOnly) {
+            const del = document.createElement('button');
+            del.textContent = 'delete';
+            del.style.cssText = 'flex:0 0 auto;font-size:0.7rem;opacity:0.6';
+            del.onclick = (ev) => {
+              ev.stopPropagation();
+              void deletePastConversation(s.sessionId, title, cwd);
+            };
+            line.appendChild(del);
+          }
           row.appendChild(line);
           if (s.preview) {
             const prev = document.createElement('span');
@@ -7382,16 +7406,87 @@
       // lands — guards a slow response from an earlier browse arriving AFTER
       // a newer one (fetch for A in flight, browse to B completes first, A's
       // response must not clobber B's list).
+      // #89: the rail's list is a scan of the on-disk chats dir, so a
+      // conversation that has not written a transcript yet has no row for a
+      // marker to land on, and the newest conversation, the one just started
+      // on the other device, is precisely the one that cannot be found. The
+      // daemon's live-state snapshot is the only source that knows such a
+      // session exists, so the rail reads it beside the list.
+      //
+      // Returns null when the daemon said nothing usable. That is NOT the same
+      // as an empty snapshot: the route can be unsupported on an older build,
+      // refused by the per-workspace trust check, or met by a daemon that is
+      // restarting, and none of those is a statement about any conversation.
+      // A caller must therefore render the list exactly as it would without
+      // this feature, rather than letting an unreadable snapshot read as
+      // "nothing here is open".
+      async function readLiveStates(cwd) {
+        try {
+          const res = await fetch(
+            '/rc/sessions/live-state?workspace=' + encodeURIComponent(cwd),
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) return null;
+          const j = await res.json();
+          if (!j || !Array.isArray(j.sessions)) return null;
+          const m = new Map();
+          for (const s of j.sessions) {
+            if (s && typeof s.sessionId === 'string') m.set(s.sessionId, s);
+          }
+          return m;
+        } catch {
+          return null;
+        }
+      }
+
+      // Merged before the filter and the pager, so a conversation that exists
+      // only in memory is searchable and paginable like any other row. Live-
+      // only rows go first: they have no transcript mtime to sort by, and
+      // `updatedAt` is documented as recency for ordering only and is absent
+      // before a prompt first reaches running, so there is no honest position
+      // for them inside the dated list. They are also, by nature, the
+      // conversations someone is in right now, which is where the top of a
+      // recency list already puts the newest work.
+      function mergeLiveSessions(sessions, live) {
+        const list = Array.isArray(sessions) ? sessions : [];
+        if (!live) return list;
+        const seen = new Set();
+        const marked = list.map((s) => {
+          if (s && live.has(s.sessionId)) {
+            seen.add(s.sessionId);
+            return { ...s, live: true };
+          }
+          return s;
+        });
+        const only = [];
+        for (const [id, st] of live) {
+          if (seen.has(id)) continue;
+          only.push({
+            sessionId: id,
+            live: true,
+            liveOnly: true,
+            updatedAt: typeof st.updatedAt === 'string' ? st.updatedAt : undefined,
+          });
+        }
+        return only.concat(marked);
+      }
+
       async function refreshPastConversations(cwd) {
         if (!cwd || !token()) {
           renderPastConversations([], cwd);
           return;
         }
         try {
-          const res = await fetch(
-            '/rc/sessions?cwd=' + encodeURIComponent(cwd),
-            { headers: { Authorization: 'Bearer ' + token() } },
-          );
+          // One tick, both reads. The snapshot rides this poll rather than
+          // keeping a timer of its own, so the list and its markers cannot
+          // drift apart by a poll interval, and the rail gains a request
+          // rather than a second cadence.
+          const [res, live] = await Promise.all([
+            fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
+              headers: { Authorization: 'Bearer ' + token() } },
+            ),
+            readLiveStates(cwd),
+          ]);
           if (!res.ok) {
             if (cwd === curDirPath) renderPastConversations([], cwd);
             return;
@@ -7400,7 +7495,11 @@
           if (cwd !== curDirPath) return; // superseded by a newer browse
           // issue #36: pass the server's `truncated` flag through so the
           // 500-file cap is visible in the list.
-          renderPastConversations(body.sessions, cwd, body.truncated);
+          renderPastConversations(
+            mergeLiveSessions(body.sessions, live),
+            cwd,
+            body.truncated,
+          );
         } catch {
           if (cwd === curDirPath) renderPastConversations([], cwd);
         }
