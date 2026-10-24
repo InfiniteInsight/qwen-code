@@ -139,7 +139,13 @@ export type AuditAction =
   | 'permission_overlay_set'
   | 'permission_overlay_revoked'
   | 'session_command_invoked'
-  | 'session_command_unavailable';
+  | 'session_command_unavailable'
+  | 'sessions_archived'
+  | 'sessions_unarchived'
+  | 'sessions_deleted'
+  | 'sessions_archive_failed'
+  | 'sessions_unarchive_failed'
+  | 'sessions_delete_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -230,6 +236,12 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'permission_overlay_revoked',
   'session_command_invoked',
   'session_command_unavailable',
+  'sessions_archived',
+  'sessions_unarchived',
+  'sessions_deleted',
+  'sessions_archive_failed',
+  'sessions_unarchive_failed',
+  'sessions_delete_failed',
 ];
 
 export interface AuditEntry {
