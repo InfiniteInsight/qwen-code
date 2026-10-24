@@ -6746,11 +6746,26 @@
           row.className = 'token-row';
           row.style.cursor = 'pointer';
           row.style.cssText += 'display:flex;flex-direction:column;gap:1px';
+          const line = document.createElement('span');
+          line.style.cssText = 'display:flex;align-items:baseline;gap:6px';
           const label = document.createElement('span');
           const title =
             strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
           label.textContent = title + '  ·  ' + relativeTime(s.updatedAt);
-          row.appendChild(label);
+          label.style.cssText = 'flex:1 1 auto;min-width:0';
+          // issue #111: the one at-rest action the rail can offer safely. The
+          // row itself opens the conversation, so the button stops the click --
+          // otherwise deleting and resuming would both fire off one press.
+          const del = document.createElement('button');
+          del.textContent = 'delete';
+          del.style.cssText = 'flex:0 0 auto;font-size:0.7rem;opacity:0.6';
+          del.onclick = (ev) => {
+            ev.stopPropagation();
+            void deletePastConversation(s.sessionId, title, cwd);
+          };
+          line.appendChild(label);
+          line.appendChild(del);
+          row.appendChild(line);
           if (s.preview) {
             const prev = document.createElement('span');
             prev.textContent = s.preview;
@@ -6950,6 +6965,29 @@
         } catch (e) {
           setStatus('resume failed: ' + e);
         }
+      }
+
+      async function deletePastConversation(sessionId, title, cwd) {
+        if (!token()) return setStatus('pair first');
+        if (
+          !window.confirm(
+            'Delete "' + title + '"? Its transcript is removed for good.',
+          )
+        )
+          return;
+        setStatus('deleting...');
+        const req = { sessionIds: [sessionId], confirm: true };
+        if (cwd) req.cwd = cwd;
+        const r = await rcCall('/rc/sessions/delete', {
+          method: 'POST',
+          body: JSON.stringify(req),
+        });
+        if (!r.ok) return setStatus('delete failed: ' + r.code);
+        const gone = (r.body && r.body.removed) || [];
+        if (!gone.includes(sessionId)) return setStatus('not deleted');
+        if (sessionId === watchedSessionId) $('stop').onclick();
+        setStatus('deleted');
+        void refreshPastConversations(cwd);
       }
 
       $('continue-last').onclick = () => {
