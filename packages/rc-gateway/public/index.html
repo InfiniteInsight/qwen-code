@@ -6414,6 +6414,24 @@
       // replay, network error, clean end) retries up to watchRetryMax
       // times, then hands back to the user with an enabled Watch button
       // in Diagnostics.
+      // issue #113: replayFrom replays ids STRICTLY GREATER than the cursor
+      // and truncates when the cursor is older than `earliest - 1`, so
+      // `earliest - 1` is the oldest cursor that still replays the earliest
+      // retained frame. Asking for `earliest` itself would drop that frame.
+      // An unreadable body or a null earliestAvailableId (reason 'no_wal',
+      // nothing left on disk) falls back to the old null cursor rather than
+      // inventing one.
+      async function replayCursorFromBody(res) {
+        let body;
+        try {
+          body = await res.json();
+        } catch {
+          return null;
+        }
+        const earliest = body && body.data && body.data.earliestAvailableId;
+        return Number.isFinite(earliest) && earliest >= 0 ? earliest - 1 : null;
+      }
+
       function scheduleWatchRetry(status) {
         clearWatchRetry();
         if (!watchedSessionId || !token()) return;
@@ -6450,7 +6468,15 @@
           // (the visibilitychange handler reconnects on return instead).
           if (document.hidden) return;
           if (!watchedSessionId || !token() || watchStreamAlive) return;
-          if (!$('watch').disabled) return; // a watch is already in flight
+          // A watch button still disabled means some OTHER startWatch is
+          // already in flight (it sets the flag at its top and the finally
+          // clears it on the way out), so standing down is right. Reading
+          // this the other way round made the whole self-heal dead: this
+          // timer is always scheduled from inside a startWatch that has
+          // already unwound through that finally, so the flag is always
+          // false here, and the old `!disabled` test returned on every
+          // attempt. See issue #113.
+          if ($('watch').disabled) return;
           startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }, delay);
       }
@@ -7862,9 +7888,15 @@
               $('reconnect').style.display = 'none';
               clearPersistedWatch();
             } else {
-              // 412: our resume point fell out of the WAL — the retry
-              // re-subscribes from the beginning (full replay).
-              if (res.status === 412) lastSeenEventId = null;
+              // issue #113: the 412 body names the oldest id the WAL still
+              // holds. A null cursor sends no Last-Event-ID header, and the
+              // comment above startWatch says that means the daemon replays
+              // nothing at all — so the retry reconnected onto an empty
+              // stream and clearTranscript() blanked a conversation that is
+              // intact on disk. Retry from the boundary replayFrom vouches
+              // for instead.
+              if (res.status === 412)
+                lastSeenEventId = await replayCursorFromBody(res);
               scheduleWatchRetry(res.status);
             }
             // issue #46: a failed stream connect must not strand a pending

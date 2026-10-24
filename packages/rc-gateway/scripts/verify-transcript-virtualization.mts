@@ -5161,6 +5161,96 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// Appended for the same reason as P32: the array edit kept arriving incomplete.
+//
+// issue #113. A reload re-attaches to the conversation it was showing, and the
+// first thing that connect can do is answer 412: the cursor it sent has fallen
+// out of the WAL. The gateway's body already names the oldest id it still holds
+// (sessionEvents.ts:297-303), and the client used to throw that value away and
+// retry with no cursor at all, which the comment above startWatch says means the
+// daemon replays nothing. So the reload blanked a conversation that is intact on
+// disk, which is the reported symptom.
+//
+// The stub replays every frame whatever the cursor says (stubDaemon.ts:742-788
+// reads the header and ignores it), so "rows came back" would pass with the bug
+// still in place. What carries the assertion here is the header the retry
+// actually puts on the wire, recorded from the request rather than from the
+// page's own idea of what it asked for.
+PAGE_SCENARIOS.push({
+  name: 'P38 a reload whose first connect 412s re-subscribes at the WAL horizon',
+  waitView: false,
+  frames: () => new Frames().asst('the reply that was still on disk').done().list,
+  run: async ({ page, viewer }) => {
+    const sent: Array<string | null> = [];
+    await page.route(/\/session\/[^/]+\/events$/, async (route) => {
+      sent.push(route.request().headers()['last-event-id'] ?? null);
+      if (sent.length === 1) {
+        await route.fulfill({
+          status: 412,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            type: 'replay_truncated',
+            data: { earliestAvailableId: 12, reason: 'older_than_wal_horizon' },
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    // Cursor 0 is what restoreWatchedSession sends on a reload (index.html:9253).
+    await page.evaluate((id) => {
+      lastSeenEventId = null;
+      void startWatch(id, 0);
+    }, viewer.sessionId);
+
+    // The first retry is scheduled 1s out, so this waits for the wire rather
+    // than assuming the self-heal ran.
+    const deadline = Date.now() + 10_000;
+    while (sent.length < 2 && Date.now() < deadline) {
+      await page.waitForTimeout(100);
+    }
+    expect(
+      sent.length >= 2,
+      `the 412 never produced a second connect (attempts: ${JSON.stringify(sent)}) — ` +
+        'self-heal state at the deadline: ' +
+        (await page.evaluate(
+          () =>
+            `hidden=${document.hidden} watch.disabled=${$('watch').disabled} ` +
+            `streamAlive=${watchStreamAlive} watchedId=${watchedSessionId != null} ` +
+            `retryAttempt=${watchRetryAttempt} timerPending=${watchRetryTimer != null} ` +
+            `lastSeen=${lastSeenEventId}`,
+        )),
+    );
+    // replayFrom replays ids STRICTLY GREATER than the cursor and honours only
+    // the predecessor boundary, so 11 is what recovers frame 12. Asking for 12
+    // would drop it.
+    expect(
+      sent[1] === '11',
+      `the retry asked for Last-Event-ID ${JSON.stringify(sent[1])}, wanted "11" ` +
+        `(the 412 named 12 as the oldest held; attempts: ${JSON.stringify(sent)})`,
+    );
+
+    await waitForFrame(page, 2, 8_000);
+    // The cursor is written from the SSE id line (index.html:7930-7935) before
+    // the data line is rendered, so waitForFrame can report the frame arrived
+    // while the model is still empty. Wait on the model rather than assume the
+    // render has landed, or this asserts a race instead of the rebuild.
+    const itemsDeadline = Date.now() + 8_000;
+    let items = 0;
+    for (;;) {
+      items = await page.evaluate(() => transcriptModel.items.length);
+      if (items > 0 || Date.now() > itemsDeadline) break;
+      await page.waitForTimeout(100);
+    }
+    expect(
+      items > 0,
+      `the reload rebuilt nothing: ${items} items after recovering the cursor`,
+    );
+    return `412 at cursor 0 retried at Last-Event-ID 11 and rebuilt ${items} items`;
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
