@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { DaemonSessionSummary } from '@qwen-code/sdk';
 import type { DaemonRewindSnapshotInfo } from '@qwen-code/sdk/daemon';
+import { gateJsonBody } from '../routes/sessionAttachments.js';
 
 export interface StubDaemon {
   baseUrl: string;
@@ -80,6 +81,16 @@ export interface StubDaemon {
   lastFileQuery: Record<string, unknown> | undefined;
   /** Query the most recent GET /file/bytes request carried. */
   lastFileBytesQuery: Record<string, unknown> | undefined;
+  /** What the most recent POST /session/:id/attachments carried. */
+  lastAttachmentUpload:
+    | {
+        name: unknown;
+        contentType: string | undefined;
+        byteLength: number;
+      }
+    | undefined;
+  /** Session id of the most recent GET /session/:id/attachments. */
+  lastAttachmentListSessionId: string | undefined;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -348,6 +359,18 @@ export interface StubDaemonOptions {
   fileBytesErrorBody?: unknown;
   /** Full body for GET /file/bytes (overrides the default shape). */
   fileBytesResult?: unknown;
+  /** Status for POST /session/:id/attachments (default 201). */
+  attachmentUploadStatus?: number;
+  /** JSON body to return on a non-201 POST /session/:id/attachments. */
+  attachmentUploadErrorBody?: unknown;
+  /** Full body for POST /session/:id/attachments on success. */
+  attachmentUploadResult?: unknown;
+  /** Status for GET /session/:id/attachments (default 200). */
+  attachmentListStatus?: number;
+  /** JSON body to return on a non-200 GET /session/:id/attachments. */
+  attachmentListErrorBody?: unknown;
+  /** Full body for GET /session/:id/attachments (overrides the default). */
+  attachmentListResult?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -388,9 +411,22 @@ export async function startStubDaemon(
     lastGlobQuery: undefined as Record<string, unknown> | undefined,
     lastFileQuery: undefined as Record<string, unknown> | undefined,
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
+    lastAttachmentUpload: undefined as
+      | {
+          name: unknown;
+          contentType: string | undefined;
+          byteLength: number;
+        }
+      | undefined,
+    lastAttachmentListSessionId: undefined as string | undefined,
   };
   const app = express();
-  app.use(express.json());
+  // The same arrangement the gateway uses, for the same reason: an attachment
+  // upload carries the file as the request body with the file's own media
+  // type, so a JSON file would be claimed and drained here before this stub's
+  // raw reader could count the bytes. Reuses the gateway's rule rather than
+  // restating it, so the two sides cannot drift.
+  app.use(gateJsonBody(express.json()));
 
   // -- Workspace control (rc-workspace-permissions) -------------------------
   // Daemon-global endpoints (no session id). Default responses mirror the
@@ -977,6 +1013,56 @@ export async function startStubDaemon(
     }
   });
 
+  // #109: the attachment routes. The upload carries the file as the raw body
+  // with its own media type, so this route reads it with a raw parser rather
+  // than the JSON parser mounted globally (which only claims application/json
+  // and would leave the bytes unconsumed). What it records is the name, the
+  // media type and the byte count: the gateway's job is to carry all three
+  // through, and a stub that ignored them could not prove that happened.
+  app.post(
+    '/session/:id/attachments',
+    express.raw({ type: () => true }),
+    (req, res) => {
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      state.lastAttachmentUpload = {
+        name: req.query['name'],
+        contentType: req.headers['content-type'],
+        byteLength: body.length,
+      };
+      const status = opts.attachmentUploadStatus ?? 201;
+      if (status !== 201) {
+        res
+          .status(status)
+          .json(opts.attachmentUploadErrorBody ?? { error: 'stub error' });
+        return;
+      }
+      res.status(201).json(
+        opts.attachmentUploadResult ?? {
+          attachmentId: 'att-1',
+          name: String(req.query['name'] ?? ''),
+          mimeType: req.headers['content-type'] ?? 'application/octet-stream',
+          size: body.length,
+        },
+      );
+    },
+  );
+
+  app.get('/session/:id/attachments', (req, res) => {
+    state.lastAttachmentListSessionId = req.params.id;
+    const status = opts.attachmentListStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.attachmentListErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.attachmentListResult ?? {
+        attachments: [{ attachmentId: 'att-1', name: 'log.txt', size: 12 }],
+      },
+    );
+  });
+
   app.get('/session/:id/rewind/snapshots', (_req, res) => {
     res.json({ snapshots: opts.rewindSnapshots ?? [] });
   });
@@ -1204,6 +1290,12 @@ export async function startStubDaemon(
     },
     get lastFileBytesQuery() {
       return state.lastFileBytesQuery;
+    },
+    get lastAttachmentUpload() {
+      return state.lastAttachmentUpload;
+    },
+    get lastAttachmentListSessionId() {
+      return state.lastAttachmentListSessionId;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
