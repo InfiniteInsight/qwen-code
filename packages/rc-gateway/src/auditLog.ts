@@ -145,7 +145,9 @@ export type AuditAction =
   | 'sessions_deleted'
   | 'sessions_archive_failed'
   | 'sessions_unarchive_failed'
-  | 'sessions_delete_failed';
+  | 'sessions_delete_failed'
+  | 'subagent_cancelled'
+  | 'subagent_cancel_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -242,6 +244,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'sessions_archive_failed',
   'sessions_unarchive_failed',
   'sessions_delete_failed',
+  'subagent_cancelled',
+  'subagent_cancel_failed',
 ];
 
 export interface AuditEntry {

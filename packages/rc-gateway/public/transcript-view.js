@@ -537,7 +537,7 @@
         m.detail.hidden = true;
       }
       if (item.sub) {
-        if (!m.sub) m.sub = buildSub(m.bubble);
+        if (!m.sub) m.sub = buildSub(m.bubble, m);
         patchSub(m.sub, item.sub, now);
       }
     }
@@ -581,7 +581,7 @@
 
     // Subagent activity nested in the parent tool bubble: head (status, live
     // timer), the child's text, then its tool rows.
-    function buildSub(bubble) {
+    function buildSub(bubble, m) {
       var host = el('div', 'subagent');
       var head = el('div', 'subagent-head');
       var r = {
@@ -593,10 +593,27 @@
         text: null,
         textBody: null,
         tools: [],
+        // issue #110: stop ONE running child without throwing away the turn.
+        // The ref is the parent tool's call id, which is what the daemon
+        // matches against `task.toolUseId`; busy/note live on item.sub so a
+        // row scrolled away and rebuilt still shows them (same contract as
+        // the fork button's item.busy/item.note).
+        ref: (m.item && m.item.toolCallId) || '',
+        cancel: null,
+        cancelNote: null,
       };
       head.appendChild(r.spin);
       head.appendChild(r.msg);
       head.appendChild(r.time);
+      r.cancel = el('button', 'subagent-cancel', 'cancel');
+      r.cancel.type = 'button';
+      r.cancel.title = 'stop this subagent, keep the rest of the turn';
+      r.cancel.addEventListener('click', function () {
+        if (opts.onCancelSubagent) opts.onCancelSubagent(m.item);
+      });
+      r.cancelNote = el('span', 'subagent-cancel-note');
+      head.appendChild(r.cancel);
+      head.appendChild(r.cancelNote);
       host.appendChild(head);
       bubble.appendChild(host);
       return r;
@@ -625,6 +642,15 @@
         setText(r.msg, who + 'running');
       }
       patchSubClock(r, s, now);
+      // Only a child that is actually running can be stopped, and a row
+      // rebuilt after settling must not offer it. busy/note come from the
+      // page via item.sub, the same contract the fork button uses, so a row
+      // scrolled away and rebuilt still shows the in-flight state.
+      var stoppable = !s.done && !!r.ref;
+      if (r.cancel.hidden !== !stoppable) r.cancel.hidden = !stoppable;
+      var busy = !!s.cancelBusy;
+      if (r.cancel.disabled !== busy) r.cancel.disabled = busy;
+      setText(r.cancelNote, s.cancelNote || '');
       if (s.text && !r.text) {
         r.text = el('div', 'subagent-text');
         r.textBody = textRef('');
