@@ -198,6 +198,20 @@ export interface SessionDaemon {
     sessionId: string,
   ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]>;
+
+  /**
+   * The workspace's memory-only live-state snapshot: which sessions are
+   * attached right now, with how many clients, and whether each is waiting on
+   * a permission or a question. Keyed by workspace, not session, and answered
+   * only by the daemon that OWNS that workspace, so this resolves through the
+   * pool like the other workspace-scoped calls rather than the default daemon
+   * (which cannot see another workspace's attachments).
+   *
+   * Typed `Promise<unknown>`: the payload is the daemon's own
+   * `DaemonWorkspaceSessionLiveState`, whose `v` token and `catalogVersion`
+   * are equality tokens the caller compares, not fields to reinterpret.
+   */
+  getSessionLiveState(workspaceCwd?: string): Promise<unknown>;
   setSessionApprovalMode(
     sessionId: string,
     mode: DaemonApprovalMode,
@@ -1278,6 +1292,19 @@ export class DaemonPool implements SessionDaemon {
   listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]> {
     return this.withDefaultDeathTrigger(() =>
       this.opts.defaultDaemon.listWorkspaceSessions(workspaceCwd),
+    );
+  }
+
+  getSessionLiveState(workspaceCwd?: string): Promise<unknown> {
+    // The selector is the daemon's OWN cwd, so an omitted or default-looking
+    // target has to be resolved here rather than passed through: the route
+    // cannot name a workspace it does not know the canonical path of, and
+    // asking `capabilities()` for it would add a round trip to every poll.
+    const key = this.isDefault(workspaceCwd)
+      ? this.defaultWorkspaceCwd
+      : this.normalizeCwd(workspaceCwd!);
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.getWorkspaceSessionLiveState(key),
     );
   }
 
