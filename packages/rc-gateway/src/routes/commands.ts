@@ -94,11 +94,16 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
  * POST /session/:id/command/:name — resolve a command's body template and
  * post it as a normal session prompt via `daemon.prompt()`. Mounted behind the
  * session pipeline (requireScope(WRITE) → recordActivity → enforceSessionLock).
+ *
+ * The turn is BOUNDED by `promptTimeoutMs`, the same knob the composer route and
+ * the session-command route read. See routes/supportedCommands.ts for why an
+ * unbounded await here is not merely a slow request.
  */
 export function createInvokeCommandRoute(
   daemon: SessionDaemon,
   loader: CommandLoader,
   audit?: AuditRecorder,
+  promptTimeoutMs = 600_000,
 ): RequestHandler {
   return async (req, res) => {
     const cmds = await loader.load();
@@ -193,10 +198,20 @@ export function createInvokeCommandRoute(
       file: fileContext,
     });
 
-    // Abort the (long-lived) daemon turn if the client disconnects. Listen on
-    // the response, not the request — identical to the prompt route.
+    // Bounded the same way as the session-command route: a disconnect stops the
+    // wait and leaves the turn running (#38), while the timer stops a turn that
+    // never settles from holding a daemon admission slot — and so the session's
+    // whole prompt queue — forever. Full reasoning there.
     const controller = new AbortController();
-    res.on('close', () => controller.abort());
+    let abortSource = '';
+    const timer = setTimeout(() => {
+      abortSource = 'timer';
+      controller.abort();
+    }, promptTimeoutMs);
+    res.on('close', () => {
+      if (abortSource === '') abortSource = 'disconnect';
+      controller.abort();
+    });
 
     let result;
     try {
@@ -206,14 +221,30 @@ export function createInvokeCommandRoute(
         controller.signal,
       );
     } catch {
+      if (abortSource === 'timer') {
+        void audit?.record({
+          action: 'slash_command_invoked',
+          actorTokenId: req.rcClient?.id,
+          target: req.params.id,
+          detail: { name: cmd.name, timedOut: true },
+        });
+        if (!res.closed) {
+          res
+            .status(504)
+            .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
+        }
+        return;
+      }
       if (controller.signal.aborted) return;
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
+    } finally {
+      clearTimeout(timer);
     }
 
-    if (controller.signal.aborted) return;
+    if (abortSource === 'disconnect') return;
 
     void audit?.record({
       action: 'slash_command_invoked',

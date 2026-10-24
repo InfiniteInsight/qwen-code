@@ -89,12 +89,15 @@ export function createSupportedCommandsRoute(
  * The `args` text is NEVER audited — same rule as the prompt route. The audit
  * record carries the command name and the turn's stopReason only.
  *
- * Like the sibling POST /session/:id/command/:name, a client disconnect aborts
- * the daemon turn.
+ * The turn is BOUNDED by `promptTimeoutMs`, the composer route's own knob. It
+ * aborts a turn that never settles, which is the only thing that stops one
+ * stalled command from holding a daemon admission slot, and so the session's
+ * whole prompt queue, indefinitely. See the await below.
  */
 export function createSessionCommandInvokeRoute(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
+  promptTimeoutMs = 600_000,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -144,10 +147,35 @@ export function createSessionCommandInvokeRoute(
         ? `/${name} ${body.args}`
         : `/${name}`;
 
-    // Abort the (long-lived) daemon turn if the client disconnects — identical
-    // to the file-command invoke route.
+    // Two ways this await can end without a finished turn, and the catch has to
+    // tell them apart.
+    //
+    // A client disconnect stops the WAIT only; the turn itself keeps running,
+    // which is routes/prompt.ts's rule (#38) that a backgrounded phone must not
+    // lose its turn. There is nothing left to answer, so return silently.
+    //
+    // The timer is what this route was missing. daemon.prompt() resolves at END
+    // OF TURN, so a turn that never settles left this await pending forever:
+    // the panel's Invoke button stuck on "invoking…" with it, and, because the
+    // daemon caps admission at 5 pending prompts per session, every later
+    // prompt on that session then answering 503 `queue full`. Aborting is what
+    // actually frees the slot: the SDK's _awaitTurnComplete sends
+    // cancel(sessionId, {cancelReason:'interrupted'}) when its signal aborts
+    // (DaemonClient.ts:6466-6474), reaching acpAgent.cancel() and the aborts it
+    // applies to calls still waiting at admission (acpAgent.ts:7246). A timer
+    // that merely stopped the wait would free nothing.
+    //
+    // Same knob and same 504 shape as the composer route (routes/prompt.ts:81).
     const controller = new AbortController();
-    res.on('close', () => controller.abort());
+    let abortSource = '';
+    const timer = setTimeout(() => {
+      abortSource = 'timer';
+      controller.abort();
+    }, promptTimeoutMs);
+    res.on('close', () => {
+      if (abortSource === '') abortSource = 'disconnect';
+      controller.abort();
+    });
 
     let result;
     try {
@@ -157,14 +185,36 @@ export function createSessionCommandInvokeRoute(
         controller.signal,
       );
     } catch {
+      if (abortSource === 'timer') {
+        // The command WAS invoked, then this route cancelled its turn. No
+        // stopReason, because there isn't one.
+        void audit?.record({
+          action: 'session_command_invoked',
+          actorTokenId: req.rcClient?.id,
+          subActor: req.rcClient?.subActor,
+          target: sessionId,
+          detail: { name, timedOut: true },
+        });
+        if (!res.closed) {
+          res
+            .status(504)
+            .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
+        }
+        return;
+      }
       if (controller.signal.aborted) return;
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
+    } finally {
+      clearTimeout(timer);
     }
 
-    if (controller.signal.aborted) return;
+    // A timer that fired only after the turn had already resolved is not a
+    // failure: the SDK cancels from its catch path alone, so nothing was
+    // interrupted and the stopReason it returned is real.
+    if (abortSource === 'disconnect') return;
 
     void audit?.record({
       action: 'session_command_invoked',
