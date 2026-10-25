@@ -87,6 +87,12 @@ export interface StubDaemon {
    * only prove that by reading what actually arrived here.
    */
   lastTranscriptQuery: Record<string, unknown> | undefined;
+  /**
+   * Query the most recent GET /session/:id/turn-index request carried. Same
+   * reason as the transcript one: the gateway relays the paging parameters
+   * untouched, so a test can only prove that by reading what arrived here.
+   */
+  lastTurnIndexQuery: Record<string, unknown> | undefined;
   /** What the most recent POST /session/:id/attachments carried. */
   lastAttachmentUpload:
     | {
@@ -292,6 +298,14 @@ export interface StubDaemonOptions {
   transcriptStatusCode?: number;
   /** Full body for GET /session/:id/transcript (overrides the default page). */
   transcriptPage?: unknown;
+  /**
+   * Status for GET /session/:id/turn-index (default 200). Non-200 makes the
+   * read fail, which is how a test proves the gateway relays the daemon's
+   * paging refusal instead of laundering it into a 502.
+   */
+  turnIndexStatusCode?: number;
+  /** Full body for GET /session/:id/turn-index (overrides the default page). */
+  turnIndexPage?: unknown;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -505,6 +519,7 @@ export async function startStubDaemon(
     lastFileQuery: undefined as Record<string, unknown> | undefined,
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
+    lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
     lastAttachmentUpload: undefined as
       | {
           name: unknown;
@@ -1038,6 +1053,55 @@ export async function startStubDaemon(
       ],
       nextCursor: 'eyJyZWNvcmRJZCI6IjIifQ',
       hasMore: true,
+      startTime: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  app.get('/session/:id/turn-index', (req, res) => {
+    state.lastTurnIndexQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.turnIndexStatusCode ?? 200;
+    if (status !== 200) {
+      // The daemon answers a `start` with no `snapshot` with 400 +
+      // `invalid_transcript_cursor`. The stub refuses the same way so a test can
+      // prove the gateway passes that verdict through rather than laundering it.
+      res.status(status).json({
+        error: 'Invalid turn index paging parameters',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (opts.turnIndexPage !== undefined) {
+      res.status(200).json(opts.turnIndexPage);
+      return;
+    }
+    res.status(200).json({
+      v: 1,
+      sessionId: String(req.params.id),
+      snapshot: 'sn-1',
+      totalTurns: 2,
+      start: 0,
+      turns: [
+        // Real DaemonSessionTurnIndexEntry shapes. A made-up entry here would
+        // let a caller that understands nothing still report a two-turn index.
+        {
+          ordinal: 0,
+          turnId: 'turn-1',
+          kind: 'prompt',
+          promptId: 'prompt-1',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          label: 'first turn',
+        },
+        {
+          ordinal: 1,
+          turnId: 'turn-2',
+          kind: 'prompt',
+          promptId: 'prompt-2',
+          timestamp: '2026-01-01T00:01:00.000Z',
+          label: 'second turn',
+        },
+      ],
       startTime: '2026-01-01T00:00:00.000Z',
     });
   });
@@ -1620,6 +1684,9 @@ export async function startStubDaemon(
     },
     get lastTranscriptQuery() {
       return state.lastTranscriptQuery;
+    },
+    get lastTurnIndexQuery() {
+      return state.lastTurnIndexQuery;
     },
     get lastAttachmentUpload() {
       return state.lastAttachmentUpload;

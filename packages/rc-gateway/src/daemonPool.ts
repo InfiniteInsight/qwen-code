@@ -46,6 +46,8 @@ import {
   type DaemonSessionExportResult,
   type DaemonSessionTranscriptPage,
   type DaemonSessionTranscriptPageOptions,
+  type DaemonSessionTurnIndexPage,
+  type DaemonSessionTurnIndexPageOptions,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -265,6 +267,10 @@ export interface SessionDaemon {
     sessionId: string,
     opts?: DaemonSessionTranscriptPageOptions,
   ): Promise<DaemonSessionTranscriptPage>;
+  getSessionTurnIndexPage(
+    sessionId: string,
+    opts?: DaemonSessionTurnIndexPageOptions,
+  ): Promise<DaemonSessionTurnIndexPage>;
   sessionStatus(
     sessionId: string,
     clientId?: string,
@@ -1151,6 +1157,15 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionTranscriptPage> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.getSessionTranscriptPage(sessionId, opts),
+    );
+  }
+
+  async getSessionTurnIndexPage(
+    sessionId: string,
+    opts?: DaemonSessionTurnIndexPageOptions,
+  ): Promise<DaemonSessionTurnIndexPage> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.getSessionTurnIndexPage(sessionId, opts),
     );
   }
 
