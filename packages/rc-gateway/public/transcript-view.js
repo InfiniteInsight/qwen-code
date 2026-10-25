@@ -39,6 +39,46 @@
     'thought-live': 'thinking',
   };
 
+  // Only the two message kinds carry a stamp: the tool, thought and system rows
+  // are viewer-constructed, so a time on them would be this browser's clock
+  // rather than the record's.
+  var STAMPED = { user: true, asst: true };
+  // Eastern by default, and the IANA name rather than 'EST': the abbreviation is
+  // a fixed offset and would sit an hour out for the half the year EDT is in.
+  var STAMP_ZONE = 'America/New_York';
+  var stampFmt; // built on first use; false means the zone is unusable
+  function stampText(item) {
+    var t = item && item.time;
+    if (typeof t !== 'number' || !Number.isFinite(t)) return '';
+    if (stampFmt === undefined) {
+      try {
+        stampFmt = new Intl.DateTimeFormat('en-US', {
+          timeZone: STAMP_ZONE,
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+        });
+      } catch {
+        // An unusable zone yields no stamp rather than a wrong one: a silently
+        // mis-zoned time is the failure this whole feature exists to avoid.
+        stampFmt = false;
+      }
+    }
+    if (!stampFmt) return '';
+    return stampFmt.format(new Date(t));
+  }
+  // The stamp rides the role line instead of getting a line of its own: a second
+  // line per row would move every height the virtualizer has already cached.
+  function roleLine(shape, item) {
+    var r = el('div', 'role', TEXT_ROLES[shape]);
+    if (item && STAMPED[item.kind]) {
+      var t = stampText(item);
+      if (t) r.appendChild(el('span', 'stamp', ' \u00b7 ' + t));
+    }
+    return r;
+  }
+
   function clock(secs) {
     return secs >= 60
       ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's'
@@ -326,7 +366,7 @@
     function buildText(m) {
       var item = m.item;
       var b = el('div', 'bubble ' + item.kind);
-      b.appendChild(el('div', 'role', TEXT_ROLES[m.shape]));
+      b.appendChild(roleLine(m.shape, item));
       var body = el('span');
       m.body = textRef(item.text);
       body.appendChild(m.body.node);
@@ -358,7 +398,7 @@
     // re-render is skipped entirely while the text is unchanged.
     function buildAsst(m) {
       var b = el('div', 'bubble asst');
-      b.appendChild(el('div', 'role', TEXT_ROLES.asst));
+      b.appendChild(roleLine('asst', m.item));
       m.mdBody = el('div', 'md');
       m.mdText = null;
       b.appendChild(m.mdBody);

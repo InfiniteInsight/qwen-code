@@ -1919,6 +1919,8 @@ interface PgItem {
   id: number;
   kind: string;
   text?: string;
+  /** The send time (#80), from the frame envelope or the local echo. */
+  time?: number;
   err?: boolean;
   turn?: number;
   mode?: string;
@@ -1947,7 +1949,7 @@ declare let abandonPendingSend: ((why: string) => void) | null;
 declare const requestHostTerminal: (id: string) => Promise<void>;
 declare const setStatus: (m: string) => void;
 declare const renderFrame: (ev: unknown) => void;
-declare const addUser: (text: string) => void;
+declare const addUser: (text: string, time?: number) => PgItem;
 // #50. The conversation this window is on. Read rather than a storage key, so
 // P26 asserts which conversation a window came back on instead of pinning the
 // name or the store the pointer happens to live in.
@@ -1970,7 +1972,7 @@ declare const renderTool: (u: Record<string, unknown>) => void;
 // P23 can wait one beat out rather than guess at a wall-clock number.
 declare const PROCESSING_QUIET_MS: number;
 declare const endTurn: () => void;
-declare const renderSessionUpdate: (u: unknown) => void;
+declare const renderSessionUpdate: (u: unknown, sentAt?: number) => void;
 // #72. The strip's per-session verdict and the raw log it writes the fault to,
 // so P24 can assert the fault is answerable from the page rather than only
 // visible on it.
@@ -1997,21 +1999,37 @@ declare const __pg: {
 /** Daemon frames for the stub, ids 1..n in order. */
 class Frames {
   readonly list: Frame[] = [];
-  ev(type: string, data: unknown = {}): this {
-    this.list.push({ id: this.list.length + 1, type, data });
+  /** `meta` is the frame ENVELOPE the real EventBus stamps at publish. */
+  ev(
+    type: string,
+    data: unknown = {},
+    meta?: Record<string, unknown>,
+  ): this {
+    this.list.push({
+      id: this.list.length + 1,
+      type,
+      data,
+      ...(meta !== undefined ? { _meta: meta } : {}),
+    });
     return this;
   }
-  upd(update: Record<string, unknown>): this {
-    return this.ev('session_update', { update });
+  upd(
+    update: Record<string, unknown>,
+    meta?: Record<string, unknown>,
+  ): this {
+    return this.ev('session_update', { update }, meta);
   }
   user(text: string): this {
     return this.upd({ sessionUpdate: 'user_message_chunk', content: { text } });
   }
-  asst(text: string): this {
-    return this.upd({
-      sessionUpdate: 'agent_message_chunk',
-      content: { text },
-    });
+  asst(text: string, meta?: Record<string, unknown>): this {
+    return this.upd(
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { text },
+      },
+      meta,
+    );
   }
   thought(text: string): this {
     return this.upd({
@@ -5853,6 +5871,169 @@ PAGE_SCENARIOS.push({
     );
 
     return `only running rows offer stop; the request carries the task id and the kind; cancelled:true reads as stopped; a 200 with cancelled:false does NOT; a disabled-workspace refusal names itself; a transport failure names daemon_unavailable`;
+  },
+});
+
+// Three different instants, so no assertion can be satisfied by a row that
+// happens to share another row's time.
+const SENT_AT = 1_700_000_000_000;
+const TURN2_AT = 1_700_003_600_000;
+const ECHO_AT = 1_700_010_800_000;
+
+/**
+ * The viewer's formatter run here rather than read back from the page, so the
+ * expected string derives from the pinned zone and not from whatever the view
+ * happened to produce. Chromium's ICU puts a narrow no-break space before
+ * AM/PM where Node's puts an ordinary one, so both sides fold to plain spaces.
+ */
+function eastern(ms: number): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+    .format(new Date(ms))
+    .replace(/[\u202f\u00a0]/g, ' ');
+}
+
+const fold = (t: string | null): string | null =>
+  t === null ? null : t.replace(/[\u202f\u00a0]/g, ' ');
+
+const wantStamp = (ms: number) => ` \u00b7 ${eastern(ms)}`;
+
+PAGE_SCENARIOS.push({
+  name: 'P42 a message row says when it was sent, in the zone the viewer pins rather than the browser\u2019s',
+  // This box runs America/New_York, so an Eastern assertion made here would
+  // also pass if the view leaked the browser's own zone. Moving the browser to
+  // Kolkata (+5:30, most of a day out) is what makes the assertion bite.
+  before: async (page) => {
+    // Playwright pins the zone at context creation, which the harness owns, so
+    // move this one page over CDP instead of widening the harness for it.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setTimezoneOverride', {
+      timezoneId: 'Asia/Kolkata',
+    });
+  },
+  // Three turns, each opened by a tool frame: the model closes the current
+  // assistant bubble on a tool call (upsertTool -> resetTurn), NOT on
+  // turn_complete, so back-to-back asst frames would all land in one row and
+  // the per-message assertion below would be vacuous.
+  frames: () => {
+    const f = new Frames();
+    for (const [i, stamp] of [
+      [1, SENT_AT],
+      [2, TURN2_AT],
+      // The third turn carries no send time at all: the row must draw no
+      // stamp. An absent time reaching the formatter would print
+      // "Dec 31, 1969" and read like a real date.
+      [3, null],
+    ] as Array<[number, number | null]>) {
+      f.toolCall(`tc-${i}`, 'read_file', 'in_progress').toolUpdate(
+        `tc-${i}`,
+        'completed',
+      );
+      f.asst(
+        `answer ${i}. `,
+        stamp === null ? undefined : { serverTimestamp: stamp },
+      );
+      f.done();
+    }
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 12, 30_000);
+    await settlePage(page);
+
+    // The echo is the only user row the viewer ever draws: a replayed
+    // user_message_chunk is counted, not rendered, so there is no record-side
+    // time for it and its send moment is this browser's own.
+    const echoId = await page.evaluate(
+      (t) => addUser('typed prompt', t).id,
+      ECHO_AT,
+    );
+    await settlePage(page);
+
+    const read = (rowId: number) =>
+      page.evaluate((id) => {
+        const row = __pg.row(id);
+        const sp = row ? row.querySelector('.stamp') : null;
+        const it = transcriptModel.items.find((i) => i.id === id);
+        return {
+          found: !!it,
+          time: it && typeof it.time === 'number' ? it.time : null,
+          stamp: sp ? (sp.textContent ?? '') : null,
+          inRole: !!(
+            sp &&
+            sp.parentElement &&
+            sp.parentElement.classList.contains('role')
+          ),
+        };
+      }, rowId);
+
+    const asstIds = await page.evaluate(() =>
+      transcriptModel.items
+        .filter((i) => i.kind === 'asst')
+        .map((i) => i.id),
+    );
+    const allKinds = await page.evaluate(() =>
+      transcriptModel.items.map((i) => i.kind).join(','),
+    );
+    expect(
+      asstIds.length === 3,
+      `${asstIds.length} assistant rows, expected 3 (items: ${allKinds})`,
+    );
+
+    // Row 1: the envelope's send time reached the model untouched, and it is
+    // drawn INSIDE the existing role line, so no row grew a second line and
+    // the row-height cache never sees a different measurement.
+    const one = await read(asstIds[0]!);
+    expect(one.time === SENT_AT, `stamped row time=${one.time}`);
+    expect(
+      fold(one.stamp) === wantStamp(SENT_AT),
+      `stamped row reads ${JSON.stringify(one.stamp)}, expected ${JSON.stringify(
+        wantStamp(SENT_AT),
+      )}`,
+    );
+    expect(
+      one.inRole,
+      'the stamp sits outside the role line, so it moves row height',
+    );
+
+    // Row 2: each row carries its OWN time. A single shared "now" would render
+    // both rows identically, which is the failure this guards.
+    const two = await read(asstIds[1]!);
+    expect(
+      two.time === TURN2_AT,
+      `second row time=${two.time}, expected its own send time`,
+    );
+    expect(fold(two.stamp) === wantStamp(TURN2_AT), `second row reads ${JSON.stringify(two.stamp)}`);
+    expect(
+      fold(one.stamp) !== fold(two.stamp),
+      'both rows drew the same time, so the stamp is not per-message',
+    );
+
+    // Row 3: the negative case. No send time on the frame means no stamp, not
+    // a zero-time stamp.
+    const three = await read(asstIds[2]!);
+    expect(three.time === null, `an unstamped row grew a time (${three.time})`);
+    expect(
+      three.stamp === null,
+      `an unstamped row drew a stamp (${JSON.stringify(three.stamp)})`,
+    );
+
+    // The user echo, the other kind the issue names.
+    const user = await read(echoId);
+    expect(user.time === ECHO_AT, `echo row time=${user.time}`);
+    expect(
+      fold(user.stamp) === wantStamp(ECHO_AT),
+      `echo row reads ${JSON.stringify(user.stamp)}`,
+    );
+    expect(user.inRole, 'the echo stamp sits outside the role line');
+
+    return `the envelope send time reaches the row untouched (${eastern(SENT_AT)}); each row carries its own, so it is per-message; the stamp rides inside the role line so no row grows; the user echo is stamped; a frame with no send time draws no stamp; all of it under a browser pinned to Kolkata, so the zone is the viewer's, not the browser's`;
   },
 });
 

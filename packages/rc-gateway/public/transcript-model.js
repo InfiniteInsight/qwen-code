@@ -153,11 +153,11 @@
     // addUser hands back the item it created: the viewer needs a reference to
     // this exact message to mark it not sent when the POST carrying it turns
     // out to have been rejected.
-    function addUser(text) {
+    function addUser(text, time) {
       resetTurn();
-      return push(newItem('user', { text: clean(text) }));
+      return push(newItem('user', { text: clean(text), time: time }));
     }
-    function appendAssistant(text) {
+    function appendAssistant(text, time) {
       finishThought();
       var t = clean(text);
       if (!curAsst) {
@@ -169,7 +169,9 @@
         // Once a bubble exists the delta is appended as-is, because real text
         // may legitimately be separated by whitespace.
         if (!t.trim()) return;
-        curAsst = push(newItem('asst', { text: t }));
+        // The bubble keeps the time it OPENED at, not the last delta's: this is
+        // when the message was sent, and a later chunk must not move it.
+        curAsst = push(newItem('asst', { text: t, time: time }));
         return;
       }
       curAsst.text += t;

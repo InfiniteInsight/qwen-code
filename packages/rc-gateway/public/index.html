@@ -511,6 +511,15 @@
             opacity: 0.6;
             margin-bottom: 2px;
           }
+          /* The send time rides inside the role line (#80), so it inherits that
+             line's height and no row ever grows a pixel. Lowercase, because
+             `Oct 22, 3:04 PM` uppercased reads as a shout. */
+          #transcript .stamp {
+            text-transform: none;
+            letter-spacing: 0;
+            font-weight: 400;
+            opacity: 0.75;
+          }
           #transcript .user {
             align-self: flex-end;
             background: #1d4ed8;
@@ -2986,13 +2995,13 @@
         scrollTranscript(true); // a new watch follows the newest content
         renderFooter();
       }
-      function addUser(text) {
-        const item = transcriptModel.addUser(text);
+      function addUser(text, time) {
+        const item = transcriptModel.addUser(text, time);
         scrollTranscript(true);
         return item;
       }
-      function appendAssistant(text) {
-        transcriptModel.appendAssistant(text);
+      function appendAssistant(text, time) {
+        transcriptModel.appendAssistant(text, time);
         scrollTranscript();
       }
       // An image the assistant produced. The bytes ride inline in the frame, so
@@ -5422,7 +5431,7 @@
         }
       }
 
-      function renderSessionUpdate(u) {
+      function renderSessionUpdate(u, sentAt) {
         if (!u || typeof u !== 'object') return;
         // #71: every frame that reaches here is proof that work is happening,
         // so it both stands the indicator down and restarts the quiet beat.
@@ -5489,7 +5498,7 @@
           // boundary (the value "Fork from here" posts as fromTurn).
           if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
           asstThisTurn = true;
-          appendAssistant(text);
+          appendAssistant(text, sentAt);
           // A turn may span several assistant bubbles (tool calls between
           // them) — keep the current turn's fork button under the LATEST one.
           const fork = transcriptModel.forkItem;
@@ -5511,11 +5520,20 @@
       // Turn a relayed daemon frame into transcript UI. Permission cards are
       // handled separately (in #cards); noise frames are suppressed here and
       // remain visible via the raw-JSON toggle.
+      // The send time rides the frame ENVELOPE. The EventBus stamps
+      // `_meta.serverTimestamp` when it publishes, and the WAL keeps it, so a
+      // replay from cursor 0 reports the same value the live row did. The inner
+      // ACP payload has its own `_meta` (usage, parenting) and no clock at all,
+      // so reading it here would find nothing.
+      function frameStamp(ev) {
+        const t = ev && ev._meta && ev._meta.serverTimestamp;
+        return typeof t === 'number' && Number.isFinite(t) ? t : undefined;
+      }
       function renderFrame(ev) {
         if (!ev || typeof ev !== 'object') return;
         switch (ev.type) {
           case 'session_update':
-            return renderSessionUpdate(ev.data && ev.data.update);
+            return renderSessionUpdate(ev.data && ev.data.update, frameStamp(ev));
           case 'stream_error':
             // #71: these three end a session without ever sending
             // turn_complete, so without this the indicator would keep claiming
@@ -6991,7 +7009,7 @@
         // meantime.
         $('prompt').value = '';
         // echo locally; the daemon's user_message_chunk is ignored
-        const echoed = addUser(prompt);
+        const echoed = addUser(prompt, Date.now());
         showProcessing(); // visible feedback until the turn's first frame
         // Set only when the daemon refused before the turn began, so the echo
         // can say so. A dropped socket is NOT in this set: #38, the turn keeps
