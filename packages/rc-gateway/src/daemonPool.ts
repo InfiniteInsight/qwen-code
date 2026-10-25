@@ -44,6 +44,8 @@ import {
   type DaemonSessionContextUsageStatus,
   type DaemonSessionExportFormat,
   type DaemonSessionExportResult,
+  type DaemonSessionTranscriptPage,
+  type DaemonSessionTranscriptPageOptions,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -259,6 +261,10 @@ export interface SessionDaemon {
     sessionId: string,
     opts?: { format?: DaemonSessionExportFormat; clientId?: string },
   ): Promise<DaemonSessionExportResult>;
+  getSessionTranscriptPage(
+    sessionId: string,
+    opts?: DaemonSessionTranscriptPageOptions,
+  ): Promise<DaemonSessionTranscriptPage>;
   sessionStatus(
     sessionId: string,
     clientId?: string,
@@ -1136,6 +1142,15 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionExportResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.exportSession(sessionId, opts),
+    );
+  }
+
+  async getSessionTranscriptPage(
+    sessionId: string,
+    opts?: DaemonSessionTranscriptPageOptions,
+  ): Promise<DaemonSessionTranscriptPage> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.getSessionTranscriptPage(sessionId, opts),
     );
   }
 
