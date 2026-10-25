@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import type { DaemonRewindSnapshotInfo } from '@qwen-code/sdk/daemon';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
-import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { resolveChatsDir, archiveChatsDirOf } from '../sessions/chatsPath.js';
 import { createRewindRoute, type RewindDaemon } from './rewind.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import { SessionWal, decodeSegment } from '../wal.js';
@@ -597,6 +597,26 @@ describe('POST /session/:id/rewind', () => {
     const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
     expect(wal.count()).toBe(0);
     wal.close();
+  });
+
+  it('409 session_archived when the transcript is filed away, not missing', async () => {
+    // Discriminating pair with the 404 below: same "no active transcript"
+    // lookup, opposite answer, decided purely by the file sitting in
+    // `chats/archive`.
+    await writeTranscript(1, archiveChatsDirOf(chatsDir));
+    const { daemon, rewindCalls, resumeCalls } = fakeDaemon({
+      snapshots: makeSnapshots(1),
+    });
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit });
+
+    const res = await postRewind(url, { toTurn: 0 });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'session_archived' });
+    // The daemon is never touched, and nothing is written or audited.
+    expect(rewindCalls).toHaveLength(0);
+    expect(resumeCalls).toHaveLength(0);
+    expect(audit.calls).toHaveLength(0);
   });
 
   it('404 session_transcript_not_found when no workspace has the transcript', async () => {

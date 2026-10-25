@@ -12,6 +12,7 @@ import {
   resolveChatsDir,
   isValidSessionId,
   findSessionChatsDir,
+  isSessionArchived,
 } from '../sessions/chatsPath.js';
 import { readParentRecords } from '../sessions/forkStore.js';
 import { walkLineage } from '../sessions/lineage.js';
@@ -66,6 +67,24 @@ export function createLineageRoute(
         chatsDir = await findSessionChatsDir(sessionId);
       }
       if (!chatsDir) {
+        // 409 for a filed-away session, so the chain is not reported as a
+        // conversation that never was. Lineage reads transcripts straight off
+        // disk and never calls the daemon, so this route is the one place an
+        // archived chain COULD be walked - and it deliberately is not, because
+        // D20 ruled archived rows unpressable and leaking an ancestor chain
+        // around that ruling would be a boundary hole, not a feature.
+        if (
+          await isSessionArchived(
+            sessionId,
+            trustedCwd ? resolveChatsDir(trustedCwd) : undefined,
+          )
+        ) {
+          res.status(409).json({
+            error: 'Session is archived - restore it before reading lineage',
+            code: 'session_archived',
+          });
+          return;
+        }
         res.status(404).json({
           error: 'Session not found',
           code: 'session_not_found',

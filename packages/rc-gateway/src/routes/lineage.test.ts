@@ -12,7 +12,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
-import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { resolveChatsDir, archiveChatsDirOf } from '../sessions/chatsPath.js';
 import { requireScope } from '../auth.js';
 import { OWNER, SESSION_READ, type RcScope } from '../scopes.js';
 import { createLineageRoute } from './lineage.js';
@@ -151,6 +151,20 @@ describe('GET /session/:id/lineage', () => {
     const res = await fetch(`${base}/session/${FORK}/lineage`);
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe('session_not_found');
+    expect(audit.calls).toHaveLength(0);
+  });
+
+  it('409s an archived session instead of claiming it never existed', async () => {
+    // The transcript is filed in `chats/archive`, so the trusted stat and the
+    // scan both miss it. A 404 here told the operator to go looking for a
+    // conversation that exists; 409 + the daemon's own code says restore it.
+    await writeTranscript(FORK, undefined, archiveChatsDirOf(chatsDir));
+    const audit = fakeAudit();
+    const base = await mount({ audit, cwd: CWD });
+    const res = await fetch(`${base}/session/${FORK}/lineage`);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'session_archived' });
+    // Nothing was read, so nothing is audited.
     expect(audit.calls).toHaveLength(0);
   });
 
