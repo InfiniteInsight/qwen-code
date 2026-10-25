@@ -91,6 +91,20 @@ export function resolveChatsDir(
 }
 
 /**
+ * The dir a workspace's ARCHIVED transcripts live in. Mirrors core's
+ * `getArchiveChatsDir()` (sessionService.ts:954), which is `<chatsDir>/archive`
+ * — archiving MOVES the transcript rather than flagging it, so a caller that
+ * only reads the chats dir cannot see an archived conversation at all.
+ *
+ * Derived from an already-resolved chats dir rather than from a cwd, so the
+ * archive layout is stated once and cannot drift from wherever the caller's
+ * chats dir came from.
+ */
+export function archiveChatsDirOf(chatsDir: string): string {
+  return join(chatsDir, 'archive');
+}
+
+/**
  * The directory holding this workspace's BM25 search index — a sibling of the
  * `chats` dir under the same project segment, so it is keyed to the same
  * `sanitizeCwd(cwd)` and two workspaces can never read each other's index. The

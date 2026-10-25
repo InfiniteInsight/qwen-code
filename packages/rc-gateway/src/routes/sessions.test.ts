@@ -12,7 +12,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve as pathResolve } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
-import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { archiveChatsDirOf, resolveChatsDir } from '../sessions/chatsPath.js';
 import { requireScope } from '../auth.js';
 import { OWNER, SESSION_READ, type RcScope } from '../scopes.js';
 import { createSessionListRoute } from './sessions.js';
@@ -296,5 +296,79 @@ describe('GET /rc/sessions — OWNER gate', () => {
     const res = await fetch(`${base}/rc/sessions`);
     expect(res.status).toBe(200);
     expect((await res.json()).sessions).toHaveLength(1);
+  });
+});
+
+describe('GET /rc/sessions — ?archiveState=archived (issue #111)', () => {
+  it('lists the archived transcripts, marked, and leaves the active one out', async () => {
+    await writeTranscript(ROOT);
+    await writeTranscriptAt(archiveChatsDirOf(chatsDir), FORK);
+    const audit = fakeAudit();
+    const base = await mount(CWD, audit);
+
+    const res = await fetch(`${base}/rc/sessions?archiveState=archived`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string; archived?: boolean }>;
+    };
+    expect(body.sessions).toEqual([
+      {
+        sessionId: FORK,
+        forks: [],
+        updatedAt: expect.any(String),
+        archived: true,
+      },
+    ]);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'session_list_read',
+      detail: { count: 1, truncated: false },
+    });
+  });
+
+  it('the default listing is unchanged: it never sees the archive dir', async () => {
+    await writeTranscript(ROOT);
+    await writeTranscriptAt(archiveChatsDirOf(chatsDir), FORK);
+    const audit = fakeAudit();
+    const base = await mount(CWD, audit);
+
+    const res = await fetch(`${base}/rc/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    // The archived transcript is absent, and the live row carries no marker, so
+    // every consumer of this route sees exactly what it saw before.
+    expect(body.sessions).toEqual([
+      { sessionId: ROOT, forks: [], updatedAt: expect.any(String) },
+    ]);
+  });
+
+  it('a missing archive dir is an empty 200, not a 500', async () => {
+    await writeTranscript(ROOT);
+    const base = await mount(CWD, fakeAudit());
+    const res = await fetch(`${base}/rc/sessions?archiveState=archived`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessions: [], truncated: false });
+  });
+
+  it('refuses an unknown state with 400 before scanning, and audits nothing', async () => {
+    await writeTranscript(ROOT);
+    const audit = fakeAudit();
+    const base = await mount(CWD, audit);
+    const res = await fetch(`${base}/rc/sessions?archiveState=every`);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_archive_state');
+    expect(audit.calls).toHaveLength(0);
+  });
+
+  it('archiveState=active is the same listing as no parameter at all', async () => {
+    await writeTranscript(ROOT);
+    await writeTranscriptAt(archiveChatsDirOf(chatsDir), FORK);
+    const base = await mount(CWD, fakeAudit());
+    const bare = await (await fetch(`${base}/rc/sessions`)).json();
+    const explicit = await (
+      await fetch(`${base}/rc/sessions?archiveState=active`)
+    ).json();
+    expect(explicit).toEqual(bare);
   });
 });
