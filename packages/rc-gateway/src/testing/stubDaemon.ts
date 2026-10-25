@@ -118,8 +118,18 @@ export interface StubDaemon {
 }
 
 export interface StubDaemonOptions {
-  /** Frames to emit on /session/:id/events, as {id, type, data}. */
-  frames?: Array<{ id: number; type: string; data: unknown }>;
+  /**
+   * Frames to emit on /session/:id/events, as {id, type, data}. `_meta` is
+   * optional and emitted verbatim when set, so a test can drive the fields the
+   * real EventBus stamps (`serverTimestamp`, `usage`) and assert the relay
+   * preserves them.
+   */
+  frames?: Array<{
+    id: number;
+    type: string;
+    data: unknown;
+    _meta?: Record<string, unknown>;
+  }>;
   /**
    * Extra frames emitted on /session/:id/events immediately after `frames`,
    * for tests that want to script permission-request notifications a
@@ -773,7 +783,13 @@ export async function startStubDaemon(
       // DaemonClient ignores it, but downstream EventSource clients use it).
       res.write(`id: ${f.id}\n`);
       res.write(
-        `data: ${JSON.stringify({ v: 1, id: f.id, type: f.type, data: f.data })}\n\n`,
+        `data: ${JSON.stringify({
+          v: 1,
+          id: f.id,
+          type: f.type,
+          data: f.data,
+          ...(f._meta !== undefined ? { _meta: f._meta } : {}),
+        })}\n\n`,
       );
     }
     if (opts.holdOpenMs) {

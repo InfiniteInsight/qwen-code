@@ -550,6 +550,55 @@ describe('session-events WAL integration', () => {
     expect(daemonFrames2[0]!.data).toContain('"text":"two"');
   });
 
+  it('carries the daemon send time through live relay and WAL replay', async () => {
+    // The stamp a viewer draws on a message must be the moment the event was
+    // published, and it must be the SAME value whether the row arrived live or
+    // was replayed from a cursor. A replay that re-stamps with Date.now() gives
+    // every older message the moment the page was opened, which is worse than
+    // no time at all, so both legs are asserted.
+    const sessionId = '88888888888888888888888888888888';
+    const stamp = 1_700_000_000_000;
+    stub = await startStubDaemon({
+      frames: [
+        {
+          id: 1,
+          type: 'session_update',
+          data: { text: 'one' },
+          _meta: { serverTimestamp: stamp, usage: { inputTokens: 7 } },
+        },
+      ],
+    });
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-meta-'));
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, walDir);
+
+    type Stamped = { _meta?: { serverTimestamp?: number } };
+
+    const res1 = await fetch(`${url}/session/${sessionId}/events`);
+    expect(res1.status).toBe(200);
+    const live = (await readFrames(res1)).filter((f) => f.id !== undefined);
+    expect(live.map((f) => f.id)).toEqual(['1']);
+    expect((JSON.parse(live[0]!.data) as Stamped)._meta?.serverTimestamp).toBe(
+      stamp,
+    );
+
+    // Reconnect from the genesis cursor: the replayed row must report the
+    // original publish time, not a fresh one.
+    await stub.close();
+    stub = await startStubDaemon({ frames: [] });
+    const daemon2 = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url2 = await mountGateway(daemon2, undefined, walDir);
+    const res2 = await fetch(`${url2}/session/${sessionId}/events`, {
+      headers: { 'Last-Event-ID': '0' },
+    });
+    expect(res2.status).toBe(200);
+    const replayed = (await readFrames(res2)).filter((f) => f.id !== undefined);
+    expect(replayed.map((f) => f.id)).toEqual(['1']);
+    expect(
+      (JSON.parse(replayed[0]!.data) as Stamped)._meta?.serverTimestamp,
+    ).toBe(stamp);
+  });
+
   it('returns 412 with replay_truncated when Last-Event-ID is before WAL horizon', async () => {
     const sessionId = '33333333333333333333333333333333';
     const walDir = mkdtempSync(join(tmpdir(), 'rc-se-wal-'));
