@@ -152,7 +152,9 @@ export type AuditAction =
   | 'attachment_uploaded'
   | 'attachment_removed'
   | 'pending_prompt_removed'
-  | 'mid_turn_message_withdrawn';
+  | 'mid_turn_message_withdrawn'
+  | 'task_cancelled'
+  | 'task_cancel_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -256,6 +258,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'attachment_removed',
   'pending_prompt_removed',
   'mid_turn_message_withdrawn',
+  'task_cancelled',
+  'task_cancel_failed',
 ];
 
 export interface AuditEntry {

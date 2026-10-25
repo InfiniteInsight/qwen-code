@@ -148,6 +148,7 @@ import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
+import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
 /** #109: session attachments (uploads + the list that confirms them). */
@@ -831,6 +832,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSubagentCancelRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/tasks/:taskId/cancel — write-scope; stops ONE run (an
+  // agent, shell, monitor or workflow task) and leaves the session and every
+  // other run alive. Same guard set and the same no-rate-limit rationale as the
+  // two cancels above it, because stopping one run is strictly less destructive
+  // than stopping the turn that spawned it. This is the act half of the run log:
+  // D22 put the task list on the wire, D24 drew it, and the row a reader sees is
+  // now the row they can stop.
+  app.post(
+    '/session/:id/tasks/:taskId/cancel',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
+    createSessionTaskCancelRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',

@@ -34,6 +34,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonSubagentSessionResolution,
   DaemonSessionTasksStatus,
+  DaemonSessionTaskWithWorkflowStatus,
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
@@ -280,6 +281,12 @@ export interface SessionDaemon {
     subagentRef: string,
     clientId?: string,
   ): Promise<{ cancelled: boolean }>;
+  cancelSessionTask(
+    sessionId: string,
+    taskId: string,
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    clientId?: string,
+  ): Promise<{ cancelled: boolean; reason?: string }>;
   resolveSubagentSession(
     sessionId: string,
     subagentRef: string,
@@ -1349,6 +1356,29 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<{ cancelled: boolean }> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.cancelSubagentSession(sessionId, subagentRef, clientId),
+    );
+  }
+
+  /**
+   * Stops ONE run (an agent, shell, monitor or workflow task) while leaving the
+   * session and any other run alive. Distinct from `cancel`, which aborts the
+   * whole turn, and from `cancelSubagentSession`, which reaches a child through
+   * the PARENT's tool-call id: this one is keyed by the task id the run log
+   * itself prints, so the row a reader sees is the row they can stop.
+   *
+   * The daemon's verdict is returned rather than collapsed. A workflow kind on
+   * an untrusted workspace answers `{cancelled: false, reason: 'disabled'}`,
+   * which is an answer about policy, not a failure to reach the daemon — the
+   * caller has to be able to tell those apart.
+   */
+  async cancelSessionTask(
+    sessionId: string,
+    taskId: string,
+    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    clientId?: string,
+  ): Promise<{ cancelled: boolean; reason?: string }> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionTaskCancel(sessionId, taskId, kind, clientId),
     );
   }
 
