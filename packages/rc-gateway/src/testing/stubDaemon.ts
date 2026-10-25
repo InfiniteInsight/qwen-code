@@ -81,6 +81,12 @@ export interface StubDaemon {
   lastFileQuery: Record<string, unknown> | undefined;
   /** Query the most recent GET /file/bytes request carried. */
   lastFileBytesQuery: Record<string, unknown> | undefined;
+  /**
+   * Query the most recent GET /session/:id/transcript request carried. The
+   * gateway relays the caller's paging parameters untouched, so a test can
+   * only prove that by reading what actually arrived here.
+   */
+  lastTranscriptQuery: Record<string, unknown> | undefined;
   /** What the most recent POST /session/:id/attachments carried. */
   lastAttachmentUpload:
     | {
@@ -278,6 +284,14 @@ export interface StubDaemonOptions {
    * rather than a JSON body.
    */
   exportContent?: string;
+  /**
+   * Status for GET /session/:id/transcript (default 200). Non-200 makes the
+   * page read fail, which is how a test proves the gateway relays the daemon's
+   * paging refusal instead of laundering it into a 502.
+   */
+  transcriptStatusCode?: number;
+  /** Full body for GET /session/:id/transcript (overrides the default page). */
+  transcriptPage?: unknown;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -490,6 +504,7 @@ export async function startStubDaemon(
     lastGlobQuery: undefined as Record<string, unknown> | undefined,
     lastFileQuery: undefined as Record<string, unknown> | undefined,
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
+    lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
     lastAttachmentUpload: undefined as
       | {
           name: unknown;
@@ -964,6 +979,51 @@ export async function startStubDaemon(
         `attachment; filename="session-${String(req.params.id).slice(0, 8)}.${format}"`,
       )
       .send(content);
+  });
+
+  app.get('/session/:id/transcript', (req, res) => {
+    // Records the query the caller's request carried. The gateway relays the
+    // paging parameters rather than re-deriving them, so this is the only
+    // place a test can see whether they survived the trip.
+    state.lastTranscriptQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.transcriptStatusCode ?? 200;
+    if (status !== 200) {
+      // The daemon answers a bad anchor combination with 400 +
+      // `invalid_transcript_cursor`. The stub refuses the same way so a test
+      // can prove the gateway passes that verdict through.
+      res.status(status).json({
+        error: 'Invalid transcript cursor and anchor combination',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (opts.transcriptPage !== undefined) {
+      res.status(200).json(opts.transcriptPage);
+      return;
+    }
+    res.status(200).json({
+      v: 1,
+      sessionId: String(req.params.id),
+      events: [
+        {
+          id: 1,
+          v: 1,
+          type: 'user_message',
+          data: { text: 'first record' },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'assistant_message',
+          data: { text: 'second record' },
+        },
+      ],
+      nextCursor: 'eyJyZWNvcmRJZCI6IjIifQ',
+      hasMore: true,
+      startTime: '2026-01-01T00:00:00.000Z',
+    });
   });
 
   // -- Workspace file reads (add-capability-parity #107) ----------------
@@ -1541,6 +1601,9 @@ export async function startStubDaemon(
     },
     get lastFileBytesQuery() {
       return state.lastFileBytesQuery;
+    },
+    get lastTranscriptQuery() {
+      return state.lastTranscriptQuery;
     },
     get lastAttachmentUpload() {
       return state.lastAttachmentUpload;

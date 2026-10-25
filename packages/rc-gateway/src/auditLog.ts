@@ -155,7 +155,8 @@ export type AuditAction =
   | 'mid_turn_message_withdrawn'
   | 'task_cancelled'
   | 'task_cancel_failed'
-  | 'ui_prefs_set';
+  | 'ui_prefs_set'
+  | 'session_transcript_read';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -262,6 +263,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'task_cancelled',
   'task_cancel_failed',
   'ui_prefs_set',
+  'session_transcript_read',
 ];
 
 export interface AuditEntry {

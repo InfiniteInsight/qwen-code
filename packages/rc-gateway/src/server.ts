@@ -140,6 +140,7 @@ import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js';
 import { createSessionExportRoute } from './routes/sessionExport.js';
+import { createSessionTranscriptRoute } from './routes/sessionTranscript.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -767,6 +768,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionExportRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/transcript — read-scope, sitting beside /export. The
+  // viewer's transcript is whatever the live stream has handed it since the
+  // page opened; this is the daemon's STORED page, paged and readable from the
+  // first record. Query parameters are relayed untouched because the daemon
+  // owns which anchor combinations are legal. Bare namespace, 1:1 with the
+  // daemon route.
+  app.get(
+    '/session/:id/transcript',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionTranscriptRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
