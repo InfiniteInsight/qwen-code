@@ -5667,6 +5667,195 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P41 a running run can be stopped, and a run the daemon did not stop does not read as stopped',
+  waitView: false,
+  run: async ({ page }) => {
+    const SID = '11111111-2222-3333-4444-555555555555';
+    let tasks: Array<Record<string, unknown>> = [
+      {
+        kind: 'agent',
+        id: 'a-1',
+        label: 'reading rc-gateway routes',
+        description: 'd',
+        status: 'running',
+        startTime: 0,
+        runtimeMs: 4000,
+        subagentType: 'Explore',
+        isBackgrounded: false,
+      },
+      {
+        kind: 'shell',
+        id: 's-1',
+        label: 'pnpm test',
+        description: 'd',
+        status: 'completed',
+        startTime: 0,
+        runtimeMs: 2000,
+        command: 'pnpm test',
+        cwd: '/home/evan/secret-workdir',
+        exitCode: 0,
+      },
+      {
+        kind: 'monitor',
+        id: 'm-1',
+        label: 'watch build',
+        description: 'd',
+        status: 'running',
+        startTime: 0,
+        runtimeMs: 1000,
+        command: 'tail -f build.log',
+        eventCount: 7,
+        lastEventTime: 1,
+      },
+    ];
+    await page.route(/\/session\/[0-9a-f-]+\/tasks$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ v: 1, sessionId: SID, now: Date.now(), tasks }),
+      }),
+    );
+
+    // The cancel endpoint is answered from mutable state so one page can be
+    // driven through every verdict the daemon can return.
+    const sends: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let cancelStatus = 200;
+    let cancelBody: Record<string, unknown> = { cancelled: true };
+    await page.route(
+      /\/session\/[0-9a-f-]+\/tasks\/[^/]+\/cancel$/,
+      (route) => {
+        const raw = route.request().postData() ?? '{}';
+        sends.push({
+          path: new URL(route.request().url()).pathname,
+          body: JSON.parse(raw) as Record<string, unknown>,
+        });
+        return route.fulfill({
+          status: cancelStatus,
+          contentType: 'application/json',
+          body: JSON.stringify(cancelBody),
+        });
+      },
+    );
+
+    const rows = () =>
+      page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll('#runs-body > div'),
+        ).map((d) => d.textContent ?? ''),
+      );
+    const listRuns = async () => {
+      await page.evaluate((id) => {
+        (document.getElementById('runs-id') as HTMLInputElement).value = id;
+      }, SID);
+      await page.evaluate(() =>
+        (document.getElementById('runs-list') as HTMLButtonElement).click(),
+      );
+      await page.waitForFunction(
+        () =>
+          !(
+            (document.getElementById('runs-body') as HTMLElement).textContent ??
+            ''
+          ).includes('loading'),
+        null,
+        { timeout: 8000 },
+      );
+      return rows();
+    };
+    /** Press the stop button on row `i` and wait for its verdict to land. */
+    const stopRow = async (i: number) => {
+      await page.evaluate((n) => {
+        const row = document.querySelectorAll('#runs-body > div')[n];
+        (
+          row?.querySelector('button') as HTMLButtonElement | null | undefined
+        )?.click();
+      }, i);
+      await page.waitForFunction(
+        (n) =>
+          /stopped|did not stop|not enabled|stop failed/.test(
+            document.querySelectorAll('#runs-body > div')[n]?.textContent ?? '',
+          ),
+        i,
+        { timeout: 8000 },
+      );
+      return rows();
+    };
+
+    const first = await listRuns();
+    expect(first.length === 3, `three runs were sent, ${first.length} rows drew`);
+    // Only the two running rows get a control. A settled row that offers stop
+    // is a button that can only ever 404.
+    const buttons = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#runs-body > div')).map(
+        (d) => d.querySelectorAll('button').length,
+      ),
+    );
+    expect(
+      buttons[0] === 1 && buttons[1] === 0 && buttons[2] === 1,
+      `stop buttons landed on the wrong rows (${JSON.stringify(buttons)})`,
+    );
+
+    // Stop the agent row. The body must carry the kind and the URL the task's
+    // own id, not the label the row prints.
+    cancelStatus = 200;
+    cancelBody = { sessionId: SID, taskId: 'a-1', cancelled: true };
+    const stopped = await stopRow(0);
+    expect(
+      sends.length === 1,
+      `the stop button sent ${sends.length} requests, expected 1`,
+    );
+    expect(
+      sends[0].path.endsWith('/tasks/a-1/cancel'),
+      `the stop request named something other than the task id (${sends[0].path})`,
+    );
+    expect(
+      sends[0].body['kind'] === 'agent',
+      `the stop body lost the kind (${JSON.stringify(sends[0].body)})`,
+    );
+    expect(
+      stopped[0].startsWith('stopped'),
+      `a cancelled run did not read as stopped (${JSON.stringify(stopped[0])})`,
+    );
+
+    // The load-bearing half: HTTP 200 with cancelled:false is NOT a stop. A
+    // handler that reads only res.ok prints "stopped" over a run that is still
+    // running, which is the flattened failure this route exists to avoid.
+    await listRuns();
+    cancelBody = { sessionId: SID, taskId: 'a-1', cancelled: false };
+    const refused = await stopRow(0);
+    expect(
+      !/stopped/.test(refused[0]),
+      `a run the daemon did not stop read as stopped (${JSON.stringify(refused[0])})`,
+    );
+    expect(
+      refused[0].includes('did not stop'),
+      `a refused stop was not named as one (${JSON.stringify(refused[0])})`,
+    );
+
+    // A policy refusal says why, because "workflow runs are not enabled here"
+    // is actionable and "the daemon did not stop it" is not.
+    await listRuns();
+    cancelBody = { cancelled: false, reason: 'disabled' };
+    const disabled = await stopRow(0);
+    expect(
+      disabled[0].includes('not enabled'),
+      `a disabled-workspace refusal lost its reason (${JSON.stringify(disabled[0])})`,
+    );
+
+    // A transport failure names the gateway code, not the daemon's message.
+    await listRuns();
+    cancelStatus = 502;
+    cancelBody = { error: 'Daemon unavailable', code: 'daemon_unavailable' };
+    const broke = await stopRow(0);
+    expect(
+      broke[0].includes('stop failed: daemon_unavailable'),
+      `a transport failure was not named (${JSON.stringify(broke[0])})`,
+    );
+
+    return `only running rows offer stop; the request carries the task id and the kind; cancelled:true reads as stopped; a 200 with cancelled:false does NOT; a disabled-workspace refusal names itself; a transport failure names daemon_unavailable`;
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
