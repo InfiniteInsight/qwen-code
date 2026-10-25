@@ -149,6 +149,7 @@ import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
+import { createSessionTasksRoute } from './routes/sessionTasks.js';
 /** #109: session attachments (uploads + the list that confirms them). */
 import {
   createAttachmentListRoute,
@@ -777,6 +778,15 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionStatusRoute(deps.daemon),
+  );
+  // GET /session/:id/tasks — read-scope; the run log (agent, shell, monitor and
+  // workflow tasks). 1:1 with the daemon's own route, and not audited, because a
+  // task read is a poll like the status and context reads beside it.
+  app.get(
+    '/session/:id/tasks',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionTasksRoute(deps.daemon),
   );
   // POST /session/:id/end — write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.
