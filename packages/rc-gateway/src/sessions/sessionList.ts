@@ -25,6 +25,14 @@ export interface SessionListItem {
   updatedAt: string;
   /** First user message preview (truncated to ~120 chars). Omitted when unreadable. */
   preview?: string;
+  /**
+   * True when this transcript sits in the archive dir. Omitted for an active
+   * conversation, so the common payload is unchanged. An archived row is NOT
+   * openable: the daemon refuses a transcript read on an archived session with
+   * `SessionArchivedError` (cli/src/serve/routes/session.ts:6535), so the only
+   * honest action on such a row is restore.
+   */
+  archived?: true;
 }
 
 /** A whole `/rc/sessions` listing plus a partial-scan flag. */
@@ -282,6 +290,8 @@ export interface SessionEntry {
   updatedAt: string;
   /** First user message preview. */
   preview?: string;
+  /** True when read out of the archive dir. See SessionListItem.archived. */
+  archived?: boolean;
 }
 
 /**
@@ -309,6 +319,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
       forks: [],
       updatedAt: e.updatedAt,
       ...(e.preview ? { preview: e.preview } : {}),
+      ...(e.archived ? { archived: true } : {}),
     });
   }
   for (const e of entries) {
@@ -412,13 +423,30 @@ function finishListing(entries: SessionEntry[]): SessionListItem[] {
  */
 export async function listSessionsAcross(
   chatsDirs: string[],
-  opts: { max?: number } = {},
+  opts: { max?: number; archivedDirs?: readonly string[] } = {},
 ): Promise<SessionListResult> {
   const max = opts.max ?? MAX_LIST_SESSIONS;
   const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const archivedSet = new Set(opts.archivedDirs ?? []);
+
+  // Archive dirs are scanned LAST, so an id sitting in BOTH states (core calls
+  // that 'conflict', sessionService.ts:1317) resolves to its live copy, which
+  // is the one the daemon will actually open.
+  //
+  // Within ONE workspace the lexical dir sort happens to do this already:
+  // `<chatsDir>` is a string prefix of `<chatsDir>/archive`, so it always sorts
+  // first. The ordering here is what carries it for a MULTI-workspace scan
+  // (the `extraWorkspaces` widening), where one workspace's archive dir sorts
+  // BEFORE another's chats dir -- `/w/aaa/chats/archive` < `/w/zzz/chats` --
+  // and a plain sort would then prefer an archived copy over a live one.
+  const unique = [...new Set(chatsDirs)];
+  const ordered = [
+    ...unique.filter((d) => !archivedSet.has(d)).sort(cmp),
+    ...unique.filter((d) => archivedSet.has(d)).sort(cmp),
+  ];
 
   const homeOf = new Map<string, string>();
-  for (const dir of [...new Set(chatsDirs)].sort(cmp)) {
+  for (const dir of ordered) {
     const ids = await scanValidIds(dir);
     if (ids === null) continue; // no such workspace: contributes nothing
     for (const id of ids) if (!homeOf.has(id)) homeOf.set(id, dir);
@@ -430,8 +458,11 @@ export async function listSessionsAcross(
 
   const entries: SessionEntry[] = [];
   for (const id of capped) {
-    const entry = await readEntry(homeOf.get(id) as string, id);
-    if (entry) entries.push(entry);
+    const dir = homeOf.get(id) as string;
+    const entry = await readEntry(dir, id);
+    if (!entry) continue;
+    if (archivedSet.has(dir)) entry.archived = true;
+    entries.push(entry);
   }
 
   return { sessions: finishListing(entries), truncated };

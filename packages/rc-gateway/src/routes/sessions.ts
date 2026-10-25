@@ -6,7 +6,7 @@
 
 import type { Request, RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
-import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { archiveChatsDirOf, resolveChatsDir } from '../sessions/chatsPath.js';
 import { listSessionsAcross } from '../sessions/sessionList.js';
 
 /**
@@ -58,7 +58,39 @@ export function createSessionListRoute(
         if (!dirs.includes(dir)) dirs.push(dir);
       }
 
-      const result = await listSessionsAcross(dirs);
+      // `?archiveState=archived` reads the archive dir instead of the chats dir. The
+      // default stays exactly what it always was — the chats dir alone — so an
+      // existing caller sees no change. Archive is a SEPARATE listing rather
+      // than rows added to the main one because an archived conversation
+      // cannot be opened: the daemon answers a transcript read on it with
+      // `SessionArchivedError` (cli/src/serve/routes/session.ts:6535), so
+      // mixing those rows into the live list would offer rows that are certain
+      // to fail when pressed.
+      // Named `archiveState` to match the daemon's own parameter for this axis
+      // (DaemonClient.ts:3100 sets `archiveState` on the workspace list), so one
+      // concept does not end up with two names across the two surfaces.
+      const archiveState = req.query['archiveState'];
+      if (
+        archiveState !== undefined &&
+        archiveState !== 'active' &&
+        archiveState !== 'archived'
+      ) {
+        res.status(400).json({
+          error: "archiveState must be 'active' or 'archived'",
+          code: 'invalid_archive_state',
+        });
+        return;
+      }
+      const archived = archiveState === 'archived';
+      const scanDirs = archived ? dirs.map(archiveChatsDirOf) : dirs;
+
+      // Every dir in the archived scan is an archive dir, so all its rows are
+      // marked. Passing the set rather than assuming it inside the scanner
+      // keeps the marker tied to where the transcript was actually read from.
+      const result = await listSessionsAcross(
+        scanDirs,
+        archived ? { archivedDirs: scanDirs } : {},
+      );
 
       // Privacy: count + truncated flag only — never the session ids.
       void audit?.record({

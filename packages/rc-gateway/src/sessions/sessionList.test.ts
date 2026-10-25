@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, utimes, symlink } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  writeFile,
+  utimes,
+  symlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,6 +22,7 @@ import {
   readSessionTitle,
   readSessionTitleInfo,
   listSessions,
+  listSessionsAcross,
   MAX_LIST_SESSIONS,
   type SessionEntry,
 } from './sessionList.js';
@@ -518,5 +526,112 @@ describe('readFirstUserMessage', () => {
     ].join('\n');
     await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
     expect(await readFirstUserMessage(dir, ID(1))).toBe('second');
+  });
+});
+
+describe('listSessionsAcross (archive state)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-archive-list-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('marks rows read out of an archive dir and leaves active rows bare', async () => {
+    const archive = join(dir, 'archive');
+    await mkdir(archive, { recursive: true });
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+    await writeFile(
+      join(archive, `${ID(2)}.jsonl`),
+      JSON.stringify({ sessionId: ID(2), type: 'user' }) + '\n',
+    );
+
+    const { sessions } = await listSessionsAcross([dir, archive], {
+      archivedDirs: [archive],
+    });
+    const byId = new Map(sessions.map((x) => [x.sessionId, x]));
+    expect(byId.get(ID(1))!.archived).toBeUndefined();
+    expect(byId.get(ID(2))!.archived).toBe(true);
+  });
+
+  it('an id present in BOTH states resolves to the active copy, whatever order the dirs arrive in', async () => {
+    // The conflict case core reports as location 'conflict'. The live copy is
+    // the one the daemon will open, so it must win even when the archive dir is
+    // named FIRST -- which is why the scanner orders the scan rather than
+    // trusting the caller's order or the lexical dir sort.
+    const archive = join(dir, 'archive');
+    await mkdir(archive, { recursive: true });
+    await writeFile(
+      join(archive, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+
+    const { sessions } = await listSessionsAcross([archive, dir], {
+      archivedDirs: [archive],
+    });
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].archived).toBeUndefined();
+  });
+
+  it('a live copy in another workspace beats an archived copy, even when the archived one sorts first', async () => {
+    // The multi-workspace case the scan ordering exists for. `archived` sits in
+    // a workspace whose archive dir sorts BEFORE the other workspace's chats
+    // dir, so a plain lexical dir sort would claim the id from the archive and
+    // mark it archived; the live copy must win instead. Dropping the explicit
+    // ordering in listSessionsAcross fails exactly this test.
+    const wsA = join(dir, 'aaa', 'chats');
+    const wsAArchive = join(wsA, 'archive');
+    const wsB = join(dir, 'zzz', 'chats');
+    await mkdir(wsAArchive, { recursive: true });
+    await mkdir(wsB, { recursive: true });
+    await writeFile(
+      join(wsAArchive, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+    await writeFile(
+      join(wsB, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+    // Precondition: the archive dir really does sort first, else this proves nothing.
+    expect(join(dir, 'aaa', 'chats', 'archive') < wsB).toBe(true);
+
+    const { sessions } = await listSessionsAcross([wsAArchive, wsB], {
+      archivedDirs: [wsAArchive],
+    });
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].archived).toBeUndefined();
+  });
+
+  it('an absent archive dir is an empty listing, not an error', async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+    const missing = join(dir, 'archive');
+    const { sessions } = await listSessionsAcross([dir, missing], {
+      archivedDirs: [missing],
+    });
+    expect(sessions.map((x) => x.sessionId)).toEqual([ID(1)]);
+  });
+
+  it('the default scan (no archivedDirs) is unchanged: no row carries the marker', async () => {
+    const archive = join(dir, 'archive');
+    await mkdir(archive, { recursive: true });
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) + '\n',
+    );
+    const { sessions } = await listSessionsAcross([dir]);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].archived).toBeUndefined();
   });
 });
