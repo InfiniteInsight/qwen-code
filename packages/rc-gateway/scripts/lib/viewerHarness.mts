@@ -26,7 +26,17 @@ import { TokenStore } from '../../src/tokenStore.js';
 import { PairingService } from '../../src/pairing.js';
 import { createGatewayApp } from '../../src/server.js';
 
-export type Frame = { id: number; type: string; data: unknown };
+/**
+ * `_meta` is the envelope the real EventBus stamps when it publishes
+ * (`serverTimestamp`, `usage`). The stub echoes it verbatim, so a page scenario
+ * can drive a send time without inventing a clock inside the ACP payload.
+ */
+export type Frame = {
+  id: number;
+  type: string;
+  data: unknown;
+  _meta?: Record<string, unknown>;
+};
 
 export interface BootViewerOptions {
   /** Frames the stub daemon replays on /session/:id/events. */
