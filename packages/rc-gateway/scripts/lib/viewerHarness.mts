@@ -25,6 +25,7 @@ import { startStubDaemon } from '../../src/testing/stubDaemon.js';
 import { TokenStore } from '../../src/tokenStore.js';
 import { PairingService } from '../../src/pairing.js';
 import { createGatewayApp } from '../../src/server.js';
+import { UiPrefsStore } from '../../src/uiPrefsStore.js';
 
 /**
  * `_meta` is the envelope the real EventBus stamps when it publishes
@@ -77,6 +78,10 @@ export async function bootViewer(
     store,
     pairing: new PairingService(),
     auditPath: join(dir, 'audit.log'),
+    // The page reads /rc/ui-prefs at boot. Left unmounted, every scenario
+    // would silently run the fallback path and the saved-zone feature could
+    // never be observed, so the harness carries it the way cli.ts does.
+    uiPrefs: await UiPrefsStore.open(join(dir, 'ui-prefs.json')),
   });
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));

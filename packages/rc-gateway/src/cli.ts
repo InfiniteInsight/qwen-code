@@ -53,6 +53,7 @@ import {
   terminalQwenArgv,
 } from './terminals.js';
 import { PushStore } from './pushStore.js';
+import { UiPrefsStore } from './uiPrefsStore.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
 import { ApnsJwtSigner } from './nativePush/apnsJwt.js';
 import { apnsHost } from './nativePush/apnsSender.js';
@@ -453,6 +454,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const pushStore = await PushStore.open(
     join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
   );
+  // Per-token display preferences (#80). Its own file rather than a field on
+  // the token record: the token store is auth material, and a display zone is
+  // not. Keyed per token because the zone describes the device reading.
+  const uiPrefs = await UiPrefsStore.open(
+    join(homedir(), '.qwen', 'rc', 'ui-prefs.json'),
+  );
   // Host-terminal requests (issue #49): the gateway is the only writer; the
   // Windows-side launcher app reads it and keeps its own cursor. Requests carry
   // the daemon token, so the file is 0600 like the other credential stores.
@@ -777,6 +784,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     terminalQwenArgv: terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN),
     vapid,
     pushStore,
+    uiPrefs,
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {

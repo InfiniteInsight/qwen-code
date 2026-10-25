@@ -154,7 +154,8 @@ export type AuditAction =
   | 'pending_prompt_removed'
   | 'mid_turn_message_withdrawn'
   | 'task_cancelled'
-  | 'task_cancel_failed';
+  | 'task_cancel_failed'
+  | 'ui_prefs_set';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -260,6 +261,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'mid_turn_message_withdrawn',
   'task_cancelled',
   'task_cancel_failed',
+  'ui_prefs_set',
 ];
 
 export interface AuditEntry {
