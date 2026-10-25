@@ -520,7 +520,13 @@ export function createSessionEventsRoute(
  */
 function appendToWal(
   wal: SessionWal | undefined,
-  ev: { id?: number; v?: number; type?: string; data?: unknown },
+  ev: {
+    id?: number;
+    v?: number;
+    type?: string;
+    data?: unknown;
+    _meta?: Record<string, unknown>;
+  },
 ): void {
   if (wal === undefined || ev.id === undefined) return;
   const frame: WalFrame = {
@@ -528,6 +534,7 @@ function appendToWal(
     v: (ev as { v?: number }).v ?? 1,
     type: ev.type ?? 'unknown',
     data: ev.data,
+    ...(ev._meta !== undefined ? { _meta: ev._meta } : {}),
   };
   wal.append(frame);
 }
@@ -551,7 +558,13 @@ function relayLiveFrame(
   epoch: EpochState | undefined,
   walDir: string | undefined,
   sessionId: string,
-  ev: { id?: number; v?: number; type?: string; data?: unknown },
+  ev: {
+    id?: number;
+    v?: number;
+    type?: string;
+    data?: unknown;
+    _meta?: Record<string, unknown>;
+  },
 ): void {
   if (ev.id === undefined) {
     writeFrame(res, ev);
@@ -574,6 +587,7 @@ function relayLiveFrame(
     v: ev.v ?? 1,
     type: ev.type ?? 'unknown',
     data: ev.data,
+    ...(ev._meta !== undefined ? { _meta: ev._meta } : {}),
   };
   wal.append(frame);
   // Persist per frame: a stale (boundary-only) lastOutId could miss a new
