@@ -1553,6 +1553,17 @@
         follow = true;
         schedule();
       },
+      // Called just before older rows are spliced in front of the list. Rows
+      // arriving above the viewport leave the scroll position pointing at
+      // different content, so the reader has to be put back where they were.
+      // Only this pass may write the scroll position: virtual-core sums its
+      // own corrections (see dropPendingCorrection), so a caller that set
+      // scrollTop itself would be corrected a second time on top.
+      anchorReader: function () {
+        var place = readerPlace();
+        if (place.end) pendingEnd = true;
+        else if (place.item) hold = place;
+      },
       isNearBottom: function () {
         return nearBottom;
       },

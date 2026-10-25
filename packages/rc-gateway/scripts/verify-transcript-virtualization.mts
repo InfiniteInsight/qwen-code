@@ -2081,6 +2081,25 @@ function replayFrames(turns: number, chunks: number): Frame[] {
   return f.list;
 }
 
+/**
+ * One event as the transcript ROUTE relays it (not as the live stream sends it):
+ * the same DaemonEvent envelope, with the send time on the envelope's `_meta`.
+ */
+function storedEvent(
+  id: number,
+  sessionUpdate: string,
+  update: Record<string, unknown>,
+  ts: number,
+): Record<string, unknown> {
+  return {
+    id,
+    v: 1,
+    type: 'session_update',
+    data: { update: { sessionUpdate, ...update } },
+    _meta: { serverTimestamp: ts },
+  };
+}
+
 // ---- Runner ------------------------------------------------------------------
 
 interface PageRun {
@@ -2093,8 +2112,12 @@ type PageScenario =
       name: string;
       /** Stub frames (default READY); the stream is held open. */
       frames?: () => Frame[];
-      /** Stub prompt behaviour: a slow turn, or one it refuses outright. */
-      stub?: { promptStatus?: number; promptDelayMs?: number };
+      /** Stub behaviour: a slow turn, one it refuses, or the page it stores. */
+      stub?: {
+        promptStatus?: number;
+        promptDelayMs?: number;
+        transcriptPage?: unknown;
+      };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
       /** Wait for transcriptView before run() (default true). */
@@ -6203,6 +6226,260 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// The route answers a curl, but a reader on the page could never reach it: the
+// transcript only ever held what this attach replayed. This drives the control
+// the way a person does. Three things go wrong in a naive wiring, and all three
+// are checked: the rows must land AHEAD of the live ones, not after them; the
+// page's live turn state must not move (a stored frame carries the same envelope
+// as a live one, so routing it through renderFrame would advance the turn
+// counter and the footer); and the reader, who is looking at the middle of a
+// long transcript, must not be shoved by content arriving above the viewport.
+PAGE_SCENARIOS.push({
+  name: 'P44 load earlier draws the stored page ahead of the live rows without moving the turn or the reader',
+  frames: () => replayFrames(20, 2),
+  stub: {
+    transcriptPage: {
+      v: 1,
+      events: [
+        storedEvent(
+          1,
+          'user_message_chunk',
+          { content: { text: 'paged question one' } },
+          1_700_000_000_000,
+        ),
+        storedEvent(
+          2,
+          'agent_thought_chunk',
+          { content: { text: 'paged thinking' } },
+          1_700_000_001_000,
+        ),
+        storedEvent(
+          3,
+          'agent_message_chunk',
+          { content: { text: 'paged answer one' } },
+          1_700_000_002_000,
+        ),
+        storedEvent(
+          4,
+          'tool_call',
+          { toolCallId: 'pt-1', title: 'read_file', status: 'in_progress' },
+          1_700_000_003_000,
+        ),
+      ],
+      nextCursor: 'eyJyZWNvcmRJZCI6IjEifQ',
+      hasMore: true,
+    },
+  },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.endsWith('/transcript')) asked.push(u.search);
+    });
+
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 20 * 7, 30_000);
+    await settlePage(page);
+
+    const state = () =>
+      page.evaluate(() => ({
+        items: transcriptModel.items.map((i) => ({
+          id: i.id,
+          kind: i.kind,
+          text: i.text ?? '',
+        })),
+        users: userTurnsSeen,
+        forks: forkTurnCount,
+        footer: document.getElementById('session-footer')?.textContent ?? '',
+        pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
+      }));
+    // The row the reader is aimed at, as readerPlace() picks it: the last one
+    // starting at or above the top edge, else the first one below it.
+    const edgeRow = () =>
+      page.evaluate(() => {
+        const s = document.getElementById('transcript')!;
+        const edge = s.getBoundingClientRect().top;
+        const rows = Array.from(
+          s.querySelectorAll<HTMLElement>('.vrow[data-id]'),
+        ).map((r) => ({
+          id: Number(r.dataset['id']),
+          top: Math.round(r.getBoundingClientRect().top - edge),
+        }));
+        const above = rows.filter((r) => r.top <= 0);
+        if (above.length)
+          return above.reduce((a, b) => (b.top > a.top ? b : a));
+        const below = rows.filter((r) => r.top > 0);
+        if (below.length)
+          return below.reduce((a, b) => (b.top < a.top ? b : a));
+        return { id: -1, top: 0 };
+      });
+
+    // Mid-transcript, not at the end: at the end the view follows, which is a
+    // different path and would make the anchor claim vacuous.
+    await page.evaluate(() => {
+      const s = document.getElementById('transcript')!;
+      s.scrollTop = Math.floor(s.scrollHeight / 2);
+    });
+    await settlePage(page);
+
+    const before = await state();
+    expect(before.items.length > 20, `setup: only ${before.items.length} rows`);
+    expect(before.users > 0, 'setup: no live user records counted');
+    const anchor = await edgeRow();
+    expect(anchor.id > 0, 'setup: nothing on screen to anchor the reader to');
+    expect(before.pill === false, 'setup: the reader was not mid-transcript');
+
+    await page.click('#load-earlier');
+    const drew = await page
+      .waitForFunction(
+        (n) => transcriptModel.items.length > n,
+        before.items.length,
+        { timeout: 10_000 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    expect(drew, 'the read added no rows to the model');
+    await settlePage(page);
+
+    const after = await state();
+    const added = after.items.length - before.items.length;
+    expect(added === 4, `${added} rows drawn, expected 4`);
+    expect(
+      after.items
+        .slice(0, 4)
+        .map((r) => r.kind)
+        .join(',') === 'user,thought,asst,tool',
+      `the page drew ${JSON.stringify(after.items.slice(0, 4).map((r) => r.kind))}`,
+    );
+    // Ahead of, not after: the stored half of the conversation belongs above the
+    // live one, and the reader's own prompt has to be drawn even though the live
+    // path leaves it to the local echo (which a stored page never carries).
+    expect(
+      after.items[0]?.text === 'paged question one',
+      `the first row reads ${JSON.stringify(after.items[0]?.text)}`,
+    );
+    // The live rows survive untouched, down to their ids: the read re-keys only
+    // what it splices in, so the virtualizer never sees two items on one key.
+    expect(
+      JSON.stringify(after.items.slice(4)) === JSON.stringify(before.items),
+      'the read did not leave the live rows exactly as they were',
+    );
+
+    // The live turn. A stored page carries user records and answers in the same
+    // envelope a live frame does, so this is where a wiring that reused
+    // renderFrame would show up: the turn counter arms, and the footer restates
+    // a token total this read never produced.
+    expect(
+      after.users === before.users && after.forks === before.forks,
+      `the read moved the turn: ${before.users}/${before.forks} -> ${after.users}/${after.forks}`,
+    );
+    expect(
+      after.footer === before.footer,
+      `the read moved the footer: ${JSON.stringify(before.footer)} -> ${JSON.stringify(after.footer)}`,
+    );
+
+    // The reader. Content arriving above the viewport moves everything below it,
+    // so unless the view puts them back the row they were reading is gone.
+    const moved = await page.evaluate((rid) => {
+      const s = document.getElementById('transcript')!;
+      const r = s.querySelector<HTMLElement>(`.vrow[data-id="${rid}"]`);
+      if (!r) return null;
+      const edge = s.getBoundingClientRect().top;
+      return Math.round(r.getBoundingClientRect().top - edge);
+    }, anchor.id);
+    expect(moved !== null, `the row the reader was on (${anchor.id}) vanished`);
+    expect(
+      Math.abs((moved ?? 0) - anchor.top) <= 2 && after.pill === false,
+      `the read moved the reader: row ${anchor.id} was at ${anchor.top}px, now ${moved}px (pill hidden ${after.pill})`,
+    );
+
+    expect(
+      asked.length === 1,
+      `${asked.length} reads after one tap, expected 1`,
+    );
+    expect(
+      asked[0]?.includes('direction=backward') &&
+        asked[0]?.includes('limit=80') &&
+        !asked[0]?.includes('cursor='),
+      `the first read asked for ${JSON.stringify(asked[0])}`,
+    );
+
+    // The cursor has to ride the next request. Without it a second tap re-reads
+    // the newest page and prepends the same records a second time.
+    await page.click('#load-earlier');
+    const again = Date.now();
+    while (asked.length < 2 && Date.now() - again < 10_000) {
+      await page.waitForTimeout(100);
+    }
+    expect(asked.length === 2, `the second tap sent ${asked.length} requests`);
+    expect(
+      asked[1]?.includes('cursor=eyJyZWNvcmRJZCI6IjEifQ'),
+      `the second read dropped the cursor: ${JSON.stringify(asked[1])}`,
+    );
+
+    return `${added} stored rows drawn ahead of ${before.items.length} live ones (${JSON.stringify(after.items[0]?.text)} first) with the live rows byte-identical behind them; the turn (${after.users} records) and the footer held still; the reader stayed on row ${anchor.id} at ${moved}px; the first read asked for a backward page of 80 with no cursor and the second carried the daemon's back`;
+  },
+});
+
+// The other half of the same guard. The daemon can say there is more while
+// handing back nothing to ask for it with, and a control that stays on the page
+// in that state invites a tap that re-reads the newest page and shows it twice.
+PAGE_SCENARIOS.push({
+  name: 'P45 a page that claims more but carries no cursor retires the control',
+  frames: () => replayFrames(6, 1),
+  stub: {
+    transcriptPage: {
+      v: 1,
+      events: [
+        storedEvent(
+          1,
+          'agent_message_chunk',
+          { content: { text: 'one stored answer' } },
+          1_700_000_000_000,
+        ),
+      ],
+      hasMore: true,
+    },
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6 * 6, 30_000);
+    await settlePage(page);
+
+    const btn = () =>
+      page.evaluate(() => {
+        const b = document.getElementById('load-earlier') as HTMLElement;
+        return { hidden: b.hidden, rows: transcriptModel.items.length };
+      });
+
+    const before = await btn();
+    expect(before.hidden === false, 'setup: no control to begin with');
+
+    await page.click('#load-earlier');
+    const gone = await page
+      .waitForFunction(
+        () => (document.getElementById('load-earlier') as HTMLElement).hidden,
+        null,
+        { timeout: 10_000 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    const after = await btn();
+    // The row it did draw still lands: retiring the control is not undoing the
+    // page that arrived with the retirement.
+    expect(
+      after.rows === before.rows + 1,
+      `the read drew ${after.rows - before.rows} rows, expected 1`,
+    );
+    expect(
+      gone && after.hidden,
+      `the control stayed on the page: ${JSON.stringify(after)}`,
+    );
+
+    return `the stored row landed (${after.rows - before.rows}) and the control retired itself (${JSON.stringify(after)}), so a tap that could only repeat the page is not offered`;
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
@@ -6211,6 +6488,7 @@ async function runPageScenario(
     holdOpenMs: 600_000,
     promptStatus: s.stub?.promptStatus,
     promptDelayMs: s.stub?.promptDelayMs,
+    transcriptPage: s.stub?.transcriptPage,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

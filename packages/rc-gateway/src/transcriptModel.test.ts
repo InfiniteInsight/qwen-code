@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 // The model is a classic browser script (no module syntax); loading it in
 // Node runs the IIFE, which assigns globalThis.TranscriptModel.
@@ -74,10 +75,12 @@ interface Model {
   cutAtUserTurn(keep: number): boolean;
   touch(item: Item): void;
   clear(): void;
+  prependItems(list: Item[]): number;
 }
 interface Api {
   clean(t: unknown): string;
   createTranscriptModel(opts?: { now?: () => number }): Model;
+  replayStoredPage(events: unknown[]): Item[];
 }
 
 let api: Api;
@@ -597,6 +600,212 @@ describe('TranscriptModel', () => {
     expect(m.items.length).toBe(1);
     m.finishThought(); // no stale thought pointer
     expect(m.items.length).toBe(1);
+  });
+
+  it('prependItems puts stored history ahead of live items, re-keys them, keeps the array and emits reset', () => {
+    const { m, events } = setup();
+    m.addUser('live question');
+    m.appendAssistant('live answer');
+    const live = m.items.slice();
+
+    // A stored page is built by a throwaway model, so its ids restart at 1.
+    const stored = api.createTranscriptModel();
+    stored.addUser('older question');
+    stored.appendAssistant('older answer');
+    expect(stored.items[0].id).toBe(1);
+
+    events.length = 0;
+    const arr = m.items;
+    expect(m.prependItems(stored.items)).toBe(2);
+
+    expect(events).toEqual(['reset']);
+    expect(m.items).toBe(arr); // the view holds this array by reference
+    expect(m.items.map((it) => it.text)).toEqual([
+      'older question',
+      'older answer',
+      'live question',
+      'live answer',
+    ]);
+    // Re-keyed off the live counter, so no id collides with a mounted row.
+    const ids = m.items.map((it) => it.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.slice(0, 2)).not.toEqual([1, 2]);
+    expect(m.items.slice(2).map((it) => it.id)).toEqual(
+      live.map((it) => it.id),
+    );
+    // Live turn pointers are untouched, so the next chunk still joins the live answer.
+    m.appendAssistant(' more');
+    expect(m.items[3].text).toBe('live answer more');
+    expect(m.items.length).toBe(4);
+  });
+
+  it('prependItems with nothing is a no-op that emits nothing', () => {
+    const { m, events } = setup();
+    m.addUser('q');
+    events.length = 0;
+    expect(m.prependItems([])).toBe(0);
+    expect(m.prependItems(undefined as unknown as Item[])).toBe(0);
+    expect(events).toEqual([]);
+    expect(m.items.length).toBe(1);
+  });
+
+  describe('replayStoredPage', () => {
+    // Frames in the shape the route relays: the DaemonEvent envelope with the
+    // ACP update under data.update and the send time on the envelope's _meta.
+    function frame(
+      sessionUpdate: string,
+      extra: Record<string, unknown> = {},
+      ts?: number,
+    ): Record<string, unknown> {
+      return {
+        v: 1,
+        type: 'session_update',
+        data: { update: { sessionUpdate, ...extra } },
+        ...(ts ? { _meta: { serverTimestamp: ts } } : {}),
+      };
+    }
+    const text = (t: string) => ({ content: { text: t } });
+
+    function kindsInPage(): string[] {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const html = readFileSync(
+        join(here, '..', 'public', 'index.html'),
+        'utf8',
+      );
+      const found = new Set<string>();
+      for (const m of html.matchAll(/su === '([a-z_]+)'/g)) found.add(m[1]);
+      return [...found].sort();
+    }
+
+    it('draws one row for every frame kind the live handler dispatches', () => {
+      // Drift guard: a kind added to renderSessionUpdate must be handled here
+      // too, or it silently never appears when the reader pages back.
+      const kinds = kindsInPage();
+      expect(kinds.length).toBeGreaterThan(0);
+      for (const kind of kinds) {
+        const extra =
+          kind === 'plan'
+            ? { entries: [{ content: 'step one', status: 'pending' }] }
+            : text('x');
+        const rows = api.replayStoredPage([frame(kind, extra)]);
+        if (rows.length !== 1) {
+          throw new Error(
+            `live handler dispatches ${kind}, but the reducer drew ${rows.length} rows from it`,
+          );
+        }
+      }
+    });
+
+    it('reduces a page to rows in the order the daemon stored them', () => {
+      const rows = api.replayStoredPage([
+        frame('user_message_chunk', text('first question'), 1000),
+        frame('agent_thought_chunk', text('hmm'), 1500),
+        frame('agent_message_chunk', text('first answer'), 2000),
+        frame(
+          'tool_call',
+          { toolCallId: 't1', title: 'read_file', status: 'in_progress' },
+          2500,
+        ),
+        frame(
+          'plan',
+          { entries: [{ content: 'step', status: 'pending' }] },
+          3000,
+        ),
+      ]);
+      expect(rows.map((r) => r.kind)).toEqual([
+        'user',
+        'thought',
+        'asst',
+        'tool',
+        'plan',
+      ]);
+      expect(rows[0].text).toBe('first question');
+      expect(rows[2].text).toBe('first answer');
+    });
+
+    it('draws the user row that the live path leaves to the local echo', () => {
+      // A stored page carries no echo, so without this the reader's own half of
+      // the conversation would be missing from paged history.
+      const rows = api.replayStoredPage([
+        frame('user_message_chunk', text('mine')),
+      ]);
+      expect(rows.map((r) => r.kind)).toEqual(['user']);
+    });
+
+    it('keeps the stamps the frames carry rather than the moment of the read', () => {
+      const rows = api.replayStoredPage([
+        frame('user_message_chunk', text('q'), 1_700_000_000_000),
+      ]);
+      expect(rows[0].time).toBe(1_700_000_000_000);
+    });
+
+    it('folds a thought the page ends inside, timed off the frames own stamps', () => {
+      // Date.now would date a historical thought at the read and fold it to
+      // <1s, which is a duration the run never had.
+      const rows = api.replayStoredPage([
+        frame('agent_thought_chunk', text('a '), 5_000),
+        frame('agent_thought_chunk', text('b'), 64_000),
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].kind).toBe('thought');
+      expect(rows[0].live).toBe(false);
+      expect(rows[0].durLabel).toBe('59s');
+    });
+
+    it('nests child frames under the parent tool instead of the transcript', () => {
+      // The parenting tag rides the INNER update's _meta (the envelope's own
+      // _meta carries the clock), which is where the live handler reads it.
+      const rows = api.replayStoredPage([
+        frame('tool_call', {
+          toolCallId: 'p1',
+          title: 'agent',
+          status: 'in_progress',
+        }),
+        frame('agent_message_chunk', {
+          content: { text: 'child says' },
+          _meta: { parentToolCallId: 'p1', subagentType: 'Explore' },
+        }),
+      ]);
+      expect(rows.map((r) => r.kind)).toEqual(['tool']);
+      expect(rows[0].sub?.text).toBe('child says');
+      expect(rows[0].sub?.type).toBe('Explore');
+    });
+
+    it('draws rows from the flat page shape as well as the nested one', () => {
+      // The stored page carries the update two ways and the SDK reads
+      // data.update first then falls back to data itself (hydrateEvent). The
+      // daemon's own transcript contract serves that flat form, so a reducer
+      // that reads only data.update draws nothing from a real page.
+      const flat = {
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello transcript' },
+        },
+      };
+      const rows = api.replayStoredPage([
+        flat,
+        frame('agent_message_chunk', text('and the answer')),
+      ]);
+      expect(rows.map((r) => r.kind)).toEqual(['user', 'asst']);
+      expect(rows[0].text).toBe('hello transcript');
+    });
+
+    it('ignores frames that are not session updates and junk it is handed', () => {
+      expect(
+        api.replayStoredPage([
+          { v: 1, type: 'client_joined', data: {} },
+          { v: 1, type: 'turn_complete', data: {} },
+          { v: 1, type: 'session_update', data: {} },
+          null,
+          'nope',
+        ]),
+      ).toEqual([]);
+      expect(api.replayStoredPage(undefined as unknown as unknown[])).toEqual(
+        [],
+      );
+    });
   });
 
   it('item ids are unique and strictly increasing across a cut', () => {
