@@ -32,6 +32,7 @@ import type {
   DaemonWorkspaceTrustStatus,
   DaemonWorkspaceTrustStatusResponse,
   DaemonWorkspaceTrustStatusV2,
+  DaemonSubagentSessionResolution,
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
@@ -274,6 +275,11 @@ export interface SessionDaemon {
     subagentRef: string,
     clientId?: string,
   ): Promise<{ cancelled: boolean }>;
+  resolveSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentSessionResolution>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
   // Daemon-global methods: no session id, but workspace-scoped — each takes
@@ -1315,6 +1321,25 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<{ cancelled: boolean }> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.cancelSubagentSession(sessionId, subagentRef, clientId),
+    );
+  }
+
+  /**
+   * Reads ONE running subagent's own state, keyed by the PARENT transcript's
+   * tool-call id. The pair this completes is `cancelSubagentSession`: without
+   * the read, a viewer can stop a child but cannot show what that child is
+   * doing, which is why the nested subagent block in the transcript is display
+   * only. Returns the daemon's resolution verbatim - it carries task id, title,
+   * status and token counts, and no workspace path, so there is nothing here to
+   * strip.
+   */
+  async resolveSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentSessionResolution> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.resolveSubagentSession(sessionId, subagentRef, clientId),
     );
   }
 

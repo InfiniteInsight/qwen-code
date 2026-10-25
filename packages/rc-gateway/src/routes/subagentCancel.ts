@@ -5,10 +5,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import {
-  isSessionLevelNotFound,
-  isSubagentSessionNotFound,
-} from '@qwen-code/sdk/daemon';
+import { classifySubagentFailure } from './subagentFailure.js';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
@@ -48,17 +45,11 @@ export function createSubagentCancelRoute(
       const done = await daemon.cancelSubagentSession(sessionId, subagentRef);
       cancelled = done.cancelled;
     } catch (err) {
-      // Three different failures, three different answers. The child being
-      // gone is a 404 the row can act on. The PARENT session answering the
-      // same shape is not proof it is deleted: the SDK documents that a
-      // multi-workspace daemon also returns it while the owning runtime is
-      // merely not active, which is reversible, so it is a 503 rather than a
-      // claim that the gateway is broken. Anything else really is 502.
-      const code = isSubagentSessionNotFound(err, subagentRef)
-        ? 'subagent_not_found'
-        : isSessionLevelNotFound(err)
-          ? 'session_unreachable'
-          : 'daemon_unavailable';
+      // Three different failures, three different answers, classified by the
+      // shared helper because the key that names the child on the wire is
+      // `subagentRef`, not the `toolCallId` the SDK guard reads. See
+      // `subagentFailure.ts`.
+      const code = classifySubagentFailure(err, subagentRef);
       void audit?.record({
         action: 'subagent_cancel_failed',
         actorTokenId,

@@ -81,6 +81,21 @@ function childGone(ref: string) {
   );
 }
 
+/**
+ * The daemon's child-gone 404 EXACTLY as it sends it: copied from
+ * `packages/cli/src/serve/routes/session.ts:5538-5544`, where the key naming
+ * the child is `subagentRef`. Nothing in `packages/cli/src/serve/` ever puts
+ * `toolCallId` in an error body, so this — not the invented shape below — is
+ * what the route really has to classify.
+ */
+function childGoneAsTheDaemonSendsIt(ref: string) {
+  return new DaemonHttpError(
+    404,
+    { code: 'session_not_found', sessionId: SESS, subagentRef: ref },
+    'Subagent session not found',
+  );
+}
+
 /** The daemon's session-level 404: same code, no identifying toolCallId. */
 function parentGone() {
   return new DaemonHttpError(
@@ -142,6 +157,23 @@ describe('POST /session/:id/subagents/:subagentRef/cancel (#110)', () => {
     expect(entries[0]).toMatchObject({
       action: 'subagent_cancel_failed',
       detail: { reason: 'session_unreachable' },
+    });
+  });
+
+  it('answers 404 for the 404 the daemon actually sends (key: subagentRef)', async () => {
+    // Regression: the SDK guard reads `body.toolCallId`, a key the daemon never
+    // emits, so classifying on that guard alone sent this real response down
+    // the 503 path. A settled row pressed by hand is the common case, and
+    // "not reachable right now" tells the operator to wait for something that
+    // will never come back.
+    const { daemon } = fakeDaemon({ thrown: childGoneAsTheDaemonSendsIt(REF) });
+    const { audit, entries } = recorder();
+    const out = await call(daemon, audit);
+    expect(out.status).toBe(404);
+    expect(out.body?.code).toBe('subagent_not_found');
+    expect(entries[0]).toMatchObject({
+      action: 'subagent_cancel_failed',
+      detail: { reason: 'subagent_not_found' },
     });
   });
 
