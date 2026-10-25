@@ -148,6 +148,7 @@ import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
+import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 /** #109: session attachments (uploads + the list that confirms them). */
 import {
   createAttachmentListRoute,
@@ -797,6 +798,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionCancelRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/subagents/:subagentRef — read-scope; one subagent's own
+  // run state. The read half of the pair whose write half is /cancel below, and
+  // the reason the viewer's nested subagent block can stop being display only.
+  // Same guard set as the other session reads.
+  app.get(
+    '/session/:id/subagents/:subagentRef',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSubagentInspectRoute(deps.daemon),
   );
   // POST /session/:id/subagents/:subagentRef/cancel — write-scope; stops ONE
   // running subagent while the parent turn survives. Same guard set as
