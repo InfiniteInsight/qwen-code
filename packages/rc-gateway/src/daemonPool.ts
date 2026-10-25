@@ -33,6 +33,7 @@ import type {
   DaemonWorkspaceTrustStatusResponse,
   DaemonWorkspaceTrustStatusV2,
   DaemonSubagentSessionResolution,
+  DaemonSessionTasksStatus,
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
@@ -261,6 +262,10 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionSummary>;
+  sessionTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTasksStatus>;
   loadSession(
     sessionId: string,
     req?: RestoreSessionRequest,
@@ -1133,6 +1138,29 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionSummary> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionStatus(sessionId, clientId),
+    );
+  }
+
+  /**
+   * Reads the session's task list: the runs this issue's title is about. Passed
+   * through verbatim, including each shell task's `cwd` and `outputFile`. That
+   * is not a new disclosure - `GET /session/:id/context` already relays the
+   * workspace cwd to the same read scope (routes/sessionContext.ts), so a
+   * reader able to reach this route can already reach the path. Stripping it
+   * here would only make the two reads disagree about the same workspace.
+   *
+   * No `includeWorkflows`: the SDK wrapper takes no options, so the gateway can
+   * only ask the daemon's default shape. That default is the redacted one - the
+   * daemon expands workflows only when the workspace is trusted AND the query
+   * opts in (cli/src/serve/routes/session.ts:7043), so the narrower view is what
+   * arrives here regardless.
+   */
+  async sessionTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTasksStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionTasks(sessionId, clientId),
     );
   }
 
