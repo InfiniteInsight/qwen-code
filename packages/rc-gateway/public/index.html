@@ -2177,6 +2177,33 @@
           </div>
           <div id="agents-out">(not listed)</div>
         </details>
+        <details id="archived-view" class="ops-collapse">
+          <summary>
+            <strong>Archived conversations</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What are Archived conversations?"
+              aria-expanded="false"
+              aria-controls="help-archived-view"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-archived-view" hidden>
+            Conversations the daemon has filed away. They are <b>not</b>
+            openable from here — the daemon refuses to read an archived
+            transcript — so this list offers <b>restore</b> only, which moves it
+            back where the rail reads. A restored conversation reappears under
+            <b>Past conversations</b> in the folder panel.
+          </div>
+          <div class="ops-note">(reads the folder you last browsed)</div>
+          <div><button id="list-archived">List archived</button></div>
+          <div id="archived-note" style="font-size: 0.8rem; color: #888"></div>
+          <div id="archived-list" style="margin-top: 0.4rem; font-size: 0.85rem">
+            (not listed)
+          </div>
+        </details>
       </div>
       <div class="tab-pane" id="pane-diag">
         <details id="watch-stream" class="ops-collapse">
@@ -7370,6 +7397,19 @@
           // is also the one row that is certainly in use on another device
           // right now, which is the worst subject for an irreversible action.
           if (!s.liveOnly) {
+            // issue #111: archive is offered on the rows delete is offered on,
+            // because both need a transcript to act on. It carries NO confirm,
+            // because it is reversible and delete is not -- the same asymmetry
+            // the route enforces (only delete requires `confirm: true`), so the
+            // page does not invent a dialog the server never asks for.
+            const arc = document.createElement('button');
+            arc.textContent = 'archive';
+            arc.style.cssText = 'flex:0 0 auto;font-size:0.7rem;opacity:0.6';
+            arc.onclick = (ev) => {
+              ev.stopPropagation();
+              void archivePastConversation(s.sessionId, cwd);
+            };
+            line.appendChild(arc);
             const del = document.createElement('button');
             del.textContent = 'delete';
             del.style.cssText = 'flex:0 0 auto;font-size:0.7rem;opacity:0.6';
@@ -7678,6 +7718,123 @@
         setStatus('deleted');
         void refreshPastConversations(cwd);
       }
+
+      // The filed-away half of the same data, kept off the main screen: an
+      // archived conversation cannot be opened (the daemon answers a read with
+      // SessionArchivedError), so it is not something to reach for while
+      // working, only to reach for when putting something back.
+      let archivedConvos = [];
+      let archivedCwd = null;
+
+      // issue #111: the at-rest actions the rail can press. Archive is the
+      // reversible one, so unlike delete it sends no `confirm` and asks no
+      // question -- a dialog on a reversible act trains the operator to tap
+      // through it, which is the opposite of what delete's dialog is for.
+      async function archivePastConversation(sessionId, cwd) {
+        if (!token()) return setStatus('pair first');
+        setStatus('archiving...');
+        const req = { sessionIds: [sessionId] };
+        if (cwd) req.cwd = cwd;
+        const r = await rcCall('/rc/sessions/archive', {
+          method: 'POST',
+          body: JSON.stringify(req),
+        });
+        if (!r.ok) {
+          // The daemon refuses exactly one subject here: a conversation a Live
+          // call is holding. Naming it beats a bare status number, because the
+          // fix is a specific act (end the call) rather than a retry.
+          if (r.code === 'live_session_active')
+            return setStatus('a live call holds this conversation - end it first');
+          return setStatus('archive failed: ' + r.code);
+        }
+        const done = (r.body && r.body.archived) || [];
+        const already = (r.body && r.body.alreadyArchived) || [];
+        if (!done.includes(sessionId))
+          return setStatus(already.includes(sessionId) ? 'already archived' : 'not archived');
+        // The transcript has moved out of the dir the watch re-attaches from, so
+        // a watch left up here could never be restored. Tear it down the way
+        // delete does rather than leave one that only looks alive.
+        if (sessionId === watchedSessionId) $('stop').onclick();
+        setStatus('archived');
+        void refreshPastConversations(cwd);
+        if (archivedCwd) void refreshArchivedConversations();
+      }
+
+      async function restoreArchivedConversation(sessionId, cwd) {
+        if (!token()) return setStatus('pair first');
+        setStatus('restoring...');
+        const req = { sessionIds: [sessionId] };
+        if (cwd) req.cwd = cwd;
+        const r = await rcCall('/rc/sessions/unarchive', {
+          method: 'POST',
+          body: JSON.stringify(req),
+        });
+        if (!r.ok) return setStatus('restore failed: ' + r.code);
+        const done = (r.body && r.body.unarchived) || [];
+        const already = (r.body && r.body.alreadyActive) || [];
+        if (!done.includes(sessionId))
+          return setStatus(already.includes(sessionId) ? 'already active' : 'not restored');
+        setStatus('restored');
+        void refreshArchivedConversations();
+        void refreshPastConversations(cwd);
+      }
+
+
+      async function refreshArchivedConversations() {
+        if (!token()) return setStatus('pair first');
+        const cwd = curDirPath || pastConvosCwd;
+        if (!cwd) return setStatus('pick a folder first');
+        const r = await rcCall(
+          '/rc/sessions?cwd=' +
+            encodeURIComponent(cwd) +
+            '&archiveState=archived',
+        );
+        archivedCwd = cwd;
+        if (!r.ok) {
+          archivedConvos = [];
+          $('archived-note').textContent = 'in ' + cwd;
+          $('archived-list').textContent = '(could not read: ' + r.code + ')';
+          return;
+        }
+        archivedConvos = (r.body && r.body.sessions) || [];
+        renderArchivedConversations();
+      }
+
+      // createElement + textContent only, never innerHTML: titles are model
+      // data. A row carries no click handler on purpose -- the rail's rows open
+      // a conversation and these cannot, so a row that looked pressable would
+      // promise a read the daemon refuses.
+      function renderArchivedConversations() {
+        const box = $('archived-list');
+        const note = $('archived-note');
+        box.textContent = '';
+        note.textContent = archivedCwd ? 'in ' + archivedCwd : '';
+        if (archivedConvos.length === 0) {
+          box.textContent = '(no archived conversations)';
+          return;
+        }
+        for (const s of archivedConvos) {
+          const row = document.createElement('div');
+          row.className = 'token-row';
+          row.style.cssText += 'display:flex;align-items:baseline;gap:6px';
+          const label = document.createElement('span');
+          const title =
+            strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
+          const when = relativeTime(s.updatedAt);
+          label.textContent = title + (when ? '  \u00b7  ' + when : '');
+          label.style.cssText = 'flex:1 1 auto;min-width:0';
+          row.appendChild(label);
+          const back = document.createElement('button');
+          back.textContent = 'restore';
+          back.style.cssText = 'flex:0 0 auto;font-size:0.7rem;opacity:0.6';
+          back.onclick = () =>
+            void restoreArchivedConversation(s.sessionId, archivedCwd);
+          row.appendChild(back);
+          box.appendChild(row);
+        }
+      }
+
+      $('list-archived').onclick = () => void refreshArchivedConversations();
 
       $('continue-last').onclick = () => {
         if (!pastConvos.length) return;

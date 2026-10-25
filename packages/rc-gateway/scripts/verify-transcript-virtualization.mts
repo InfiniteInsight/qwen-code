@@ -5251,6 +5251,256 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P39 a conversation can be filed away and put back, and the filed half is not pressable',
+  waitView: false,
+  run: async ({ page }) => {
+    const CWD = '/home/evan/scratch';
+    const DISK = '11111111-2222-3333-4444-555555555555';
+    const GONE = '88888888-9999-0000-1111-222222222222';
+    const LIVEONLY = '77777777-8888-9999-0000-111111111111';
+    const now = new Date().toISOString();
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+
+    // One route answers both listings, because they differ only by the query.
+    // Serving them from one place means a page that asked for the wrong one
+    // cannot be rescued into passing by a lucky pattern match.
+    //
+    // The transcript-less id is named ONLY by the snapshot below, never by this
+    // listing. If it appeared here too it would have a transcript on disk, so
+    // the merge would be right to offer it the at-rest buttons, and the
+    // assertion that the row carries none would be guarding nothing.
+    await page.route(/\/rc\/sessions\?cwd=/, (route) => {
+      const wantArchived = route.request().url().includes('archiveState=archived');
+      const sessions = wantArchived
+        ? [{ sessionId: GONE, title: 'filed away', updatedAt: now, archived: true }]
+        : [{ sessionId: DISK, title: 'on disk', updatedAt: now }];
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sessions, truncated: false }),
+      });
+    });
+    // The snapshot names the transcript-less row so it is listed at all, which
+    // is the #89 behaviour the rail row below depends on.
+    await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          v: 1,
+          catalogVersion: { generation: 'g-1', revision: 1 },
+          sessions: [
+            {
+              sessionId: LIVEONLY,
+              clientCount: 1,
+              hasActivePrompt: false,
+              isWaitingForPermission: false,
+              isWaitingForUserQuestion: false,
+            },
+          ],
+        }),
+      }),
+    );
+    const verb = (re: RegExp, action: string, key: string, id: string) =>
+      page.route(re, (route) => {
+        const raw = route.request().postData() ?? '{}';
+        posts.push({ path: action, body: JSON.parse(raw) as Record<string, unknown> });
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ action, requested: 1, [key]: [id] }),
+        });
+      });
+    await verb(/\/rc\/sessions\/archive$/, 'archive', 'archived', DISK);
+    await verb(/\/rc\/sessions\/unarchive$/, 'unarchive', 'unarchived', GONE);
+
+    const status = () =>
+      page.evaluate(() => (document.getElementById('status') as HTMLElement).textContent ?? '');
+    const railButtons = () =>
+      page.evaluate(() => {
+        const box = document.getElementById('past-list') as HTMLElement;
+        return Array.from(box.querySelectorAll('.token-row')).map((row) => ({
+          label: ((row.firstElementChild?.children[0] as HTMLElement) ?? row).textContent ?? '',
+          buttons: Array.from(row.querySelectorAll('button')).map((b) => b.textContent ?? ''),
+        }));
+      });
+
+    await page.evaluate(([cwd]) => {
+      curDirPath = cwd;
+      return refreshPastConversations(cwd);
+    }, [CWD]);
+    const rows = await railButtons();
+    const diskRow = rows.find((r) => r.label.startsWith('on disk'));
+    expect(!!diskRow, `the disk row is missing from the rail (${JSON.stringify(rows)})`);
+    expect(
+      diskRow!.buttons.includes('archive'),
+      `a conversation with a transcript offers no way to file it away (${JSON.stringify(diskRow!.buttons)})`,
+    );
+    const liveRow = rows.find((r) => r.label.startsWith('session 77777777'));
+    expect(!!liveRow, `the transcript-less row went missing (${JSON.stringify(rows)})`);
+    expect(
+      liveRow!.buttons.length === 0,
+      `the transcript-less row was offered an at-rest action it cannot perform (${JSON.stringify(liveRow!.buttons)})`,
+    );
+
+    // The placement ruling: the filed half is not something to reach for while
+    // working, so it lives under Settings and not on the main screen.
+    const placed = await page.evaluate(() => {
+      const det = document.getElementById('archived-view');
+      return {
+        exists: !!det,
+        inSettings: !!document.getElementById('pane-settings')?.contains(det ?? null),
+        inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
+      };
+    });
+    expect(placed.exists, 'there is no archived section in the page at all');
+    expect(placed.inSettings, 'the archived section is not under Settings');
+    expect(!placed.inChat, 'the archived section sits on the main screen');
+
+    // The ? is one delegated listener on document keyed on aria-controls (the
+    // rule P35 proves for the seven surfaces). A panel added after P35 was
+    // written is only covered by that rule if it follows it, so check this one
+    // rather than inherit the older scenario's conclusion.
+    const help = await page.evaluate(() => {
+      const det = document.getElementById('archived-view') as HTMLDetailsElement | null;
+      const btn = det?.querySelector('.help-btn') as HTMLButtonElement | null;
+      if (!btn) return 'no ? button';
+      const before = (document.getElementById('help-archived-view') as HTMLElement)?.hidden;
+      btn.click();
+      const el = document.getElementById('help-archived-view') as HTMLElement | null;
+      return `${before === true}/${el ? !el.hidden : 'no help element'}/${btn.getAttribute('aria-expanded')}`;
+    });
+    expect(
+      help === 'true/true/true',
+      `the archived section's ? did not behave like the other panels' (got ${help})`,
+    );
+
+    // Press archive. The body is the load-bearing part: archive is reversible,
+    // so it must NOT carry the confirm that only delete requires, and it must
+    // name the cwd or it would act on whichever workspace the gateway defaults
+    // to rather than the folder the row came from.
+    await page.evaluate(() => {
+      const box = document.getElementById('past-list') as HTMLElement;
+      for (const row of Array.from(box.querySelectorAll('.token-row'))) {
+        const btn = Array.from(row.querySelectorAll('button')).find(
+          (b) => b.textContent === 'archive',
+        );
+        if (btn) {
+          (btn as HTMLButtonElement).click();
+          return;
+        }
+      }
+    });
+    await page.waitForFunction(
+      () => !((document.getElementById('status') as HTMLElement).textContent ?? '').includes('archiving'),
+      null,
+      { timeout: 8000 },
+    );
+    const arc = posts.find((x) => x.path === 'archive');
+    expect(!!arc, `pressing archive sent nothing (${JSON.stringify(posts)})`);
+    expect(
+      JSON.stringify(arc!.body.sessionIds) === JSON.stringify([DISK]),
+      `archive did not name the conversation on the row that was pressed (${JSON.stringify(arc!.body)})`,
+    );
+    expect(
+      arc!.body.cwd === CWD,
+      `archive did not carry the cwd the row came from, so it could act on another workspace (${JSON.stringify(arc!.body)})`,
+    );
+    expect(
+      !('confirm' in arc!.body),
+      `archive sent a confirm, which only the irreversible verb requires (${JSON.stringify(arc!.body)})`,
+    );
+    expect(
+      (await status()) === 'archived',
+      `pressing archive did not report what it did (${JSON.stringify(await status())})`,
+    );
+
+    // The filed half, listed and put back.
+    await page.evaluate(() => refreshArchivedConversations());
+    const filed = await page.evaluate(() => {
+      const box = document.getElementById('archived-list') as HTMLElement;
+      return Array.from(box.querySelectorAll('.token-row')).map((row) => ({
+        label: ((row.children[0] as HTMLElement) ?? row).textContent ?? '',
+        buttons: Array.from(row.querySelectorAll('button')).map((b) => b.textContent ?? ''),
+        pressable: (row as (HTMLElement & { onclick: unknown })).onclick !== null,
+      }));
+    });
+    expect(
+      filed.length === 1 && filed[0]!.label.startsWith('filed away'),
+      `the archived listing did not show the filed conversation (${JSON.stringify(filed)})`,
+    );
+    expect(
+      filed[0]!.buttons.includes('restore'),
+      `an archived conversation offers no way back (${JSON.stringify(filed[0]!)})`,
+    );
+    // The honesty property. The rail's rows are pressable because they open a
+    // conversation; these must not be, because the daemon refuses to read an
+    // archived transcript. A row that looked pressable would promise a read
+    // that cannot happen.
+    expect(
+      !filed[0]!.pressable,
+      `an archived row is pressable, promising a read the daemon refuses (${JSON.stringify(filed[0]!)})`,
+    );
+
+    await page.evaluate(() => {
+      const box = document.getElementById('archived-list') as HTMLElement;
+      const btn = box.querySelector('button');
+      if (btn) (btn as HTMLButtonElement).click();
+    });
+    await page.waitForFunction(
+      () => !((document.getElementById('status') as HTMLElement).textContent ?? '').includes('restoring'),
+      null,
+      { timeout: 8000 },
+    );
+    const back = posts.find((x) => x.path === 'unarchive');
+    expect(!!back, `pressing restore sent nothing (${JSON.stringify(posts)})`);
+    expect(
+      JSON.stringify(back!.body.sessionIds) === JSON.stringify([GONE]),
+      `restore did not name the archived conversation on the row pressed (${JSON.stringify(back!.body)})`,
+    );
+    expect(
+      (await status()) === 'restored',
+      `pressing restore did not report what it did (${JSON.stringify(await status())})`,
+    );
+
+    // The one refusal the daemon makes here is about a Live call, and the fix
+    // is a specific act rather than a retry, so a bare status number would send
+    // the operator off looking in the wrong place.
+    await page.route(/\/rc\/sessions\/archive$/, (route) =>
+      route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'An active Live session cannot be archived', code: 'live_session_active' }),
+      }),
+    );
+    await page.evaluate(() => {
+      const box = document.getElementById('past-list') as HTMLElement;
+      for (const row of Array.from(box.querySelectorAll('.token-row'))) {
+        const btn = Array.from(row.querySelectorAll('button')).find(
+          (b) => b.textContent === 'archive',
+        );
+        if (btn) {
+          (btn as HTMLButtonElement).click();
+          return;
+        }
+      }
+    });
+    await page.waitForFunction(
+      () => !((document.getElementById('status') as HTMLElement).textContent ?? '').includes('archiving'),
+      null,
+      { timeout: 8000 },
+    );
+    const said = await status();
+    expect(
+      said.includes('live call'),
+      `a refused archive read "${said}" rather than naming the live call that blocks it`,
+    );
+
+    return `rail offers archive only where a transcript exists; the filed half sits under Settings, lists as restore-only and unpressable; archive sends no confirm and carries the cwd; a Live-call refusal is named`;
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
