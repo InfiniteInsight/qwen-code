@@ -141,6 +141,7 @@ import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js';
 import { createSessionExportRoute } from './routes/sessionExport.js';
 import { createSessionTranscriptRoute } from './routes/sessionTranscript.js';
+import { createSessionTurnIndexRoute } from './routes/sessionTurnIndex.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -780,6 +781,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionTranscriptRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/turn-index — read-scope, sitting beside /transcript. The
+  // transcript page hands back records; this hands back the list those records
+  // are indexed by, which is what a jump somewhere in a long conversation needs.
+  // Query parameters are relayed untouched because the daemon owns which paging
+  // combinations are legal (`start` is an offset into a snapshot). Bare
+  // namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/turn-index',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionTurnIndexRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
