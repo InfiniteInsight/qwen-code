@@ -28,12 +28,30 @@ function hhmmToMinutes(s: string): number {
 }
 
 /**
+ * True when `zone` is a name `Intl` can actually project a time into, probed by
+ * building a throwaway `Intl.DateTimeFormat` (an unknown zone throws
+ * `RangeError`). Shared by {@link parseTimeOfDay} and the viewer preference
+ * store: it is the same test the runtime formatter will itself pass, so a zone
+ * accepted here cannot later turn a row's time into a thrown format.
+ */
+export function isValidTimeZone(zone: string): boolean {
+  if (zone.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Parse a raw `match.timeOfDay` value into minutes-of-day + a validated IANA
  * timezone, or `null` when malformed. "Malformed" is a single concept (parse →
- * null): we validate the timezone HERE, by probing it with a throwaway
- * `Intl.DateTimeFormat` in try/catch (an invalid IANA zone throws `RangeError`).
- * As a consequence, {@link isWithinTimeOfDay} receives an already-validated zone
- * and its own try/catch around `Intl` is belt-and-suspenders.
+ * null): the timezone is validated by {@link isValidTimeZone}, so a zone the
+ * formatter would reject fails the whole condition rather than surviving into
+ * evaluation. As a consequence, {@link isWithinTimeOfDay} receives an
+ * already-validated zone and its own try/catch around `Intl` is
+ * belt-and-suspenders.
  */
 export function parseTimeOfDay(raw: unknown): ParsedTimeOfDay | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -45,13 +63,8 @@ export function parseTimeOfDay(raw: unknown): ParsedTimeOfDay | null {
   const timezone = obj['timezone'];
   if (typeof from !== 'string' || !HHMM.test(from)) return null;
   if (typeof to !== 'string' || !HHMM.test(to)) return null;
-  if (typeof timezone !== 'string' || timezone.length === 0) return null;
   // Probe the zone: an invalid IANA zone makes Intl throw → malformed.
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: timezone });
-  } catch {
-    return null;
-  }
+  if (typeof timezone !== 'string' || !isValidTimeZone(timezone)) return null;
   return {
     fromMin: hhmmToMinutes(from),
     toMin: hhmmToMinutes(to),

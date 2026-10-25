@@ -45,35 +45,42 @@
   var STAMPED = { user: true, asst: true };
   // Eastern by default, and the IANA name rather than 'EST': the abbreviation is
   // a fixed offset and would sit an hour out for the half the year EDT is in.
-  var STAMP_ZONE = 'America/New_York';
-  var stampFmt; // built on first use; false means the zone is unusable
-  function stampText(item) {
+  var DEFAULT_STAMP_ZONE = 'America/New_York';
+  // Formatters cached PER ZONE rather than in one shared slot. The zone is a
+  // per-view preference now, so a single slot would let one view's zone decide
+  // what another view renders. `false` means that zone is unusable.
+  var stampFmts = new Map();
+  function stampFormatter(zone) {
+    if (stampFmts.has(zone)) return stampFmts.get(zone);
+    var fmt;
+    try {
+      fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone,
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    } catch {
+      // An unusable zone yields no stamp rather than a wrong one: a silently
+      // mis-zoned time is the failure this whole feature exists to avoid.
+      fmt = false;
+    }
+    stampFmts.set(zone, fmt);
+    return fmt;
+  }
+  function stampText(item, zone) {
     var t = item && item.time;
     if (typeof t !== 'number' || !Number.isFinite(t)) return '';
-    if (stampFmt === undefined) {
-      try {
-        stampFmt = new Intl.DateTimeFormat('en-US', {
-          timeZone: STAMP_ZONE,
-          month: 'short',
-          day: 'numeric',
-          hour: 'numeric',
-          minute: '2-digit',
-        });
-      } catch {
-        // An unusable zone yields no stamp rather than a wrong one: a silently
-        // mis-zoned time is the failure this whole feature exists to avoid.
-        stampFmt = false;
-      }
-    }
-    if (!stampFmt) return '';
-    return stampFmt.format(new Date(t));
+    var fmt = stampFormatter(zone);
+    return fmt ? fmt.format(new Date(t)) : '';
   }
   // The stamp rides the role line instead of getting a line of its own: a second
   // line per row would move every height the virtualizer has already cached.
-  function roleLine(shape, item) {
+  function roleLine(shape, item, zone) {
     var r = el('div', 'role', TEXT_ROLES[shape]);
     if (item && STAMPED[item.kind]) {
-      var t = stampText(item);
+      var t = stampText(item, zone);
       if (t) r.appendChild(el('span', 'stamp', ' \u00b7 ' + t));
     }
     return r;
@@ -360,13 +367,21 @@
     // clicked header's offset in the viewport. The next pass keeps it there.
     var hold = null;
     var quiet = false; // the current model event is that toggle's own touch
+    // The zone THIS view renders message times in. Per-view rather than shared,
+    // because the preference is the reader's and two views on one page can read
+    // in different zones. Absent means the default, never no stamp.
+    var stampZone =
+      typeof opts.stampZone === 'string' && opts.stampZone
+        ? opts.stampZone
+        : DEFAULT_STAMP_ZONE;
+    var restamp = false; // a zone change: rebuild the stamped rows on screen
 
     // ---- Bubbles ----------------------------------------------------------
 
     function buildText(m) {
       var item = m.item;
       var b = el('div', 'bubble ' + item.kind);
-      b.appendChild(roleLine(m.shape, item));
+      b.appendChild(roleLine(m.shape, item, stampZone));
       var body = el('span');
       m.body = textRef(item.text);
       body.appendChild(m.body.node);
@@ -398,7 +413,7 @@
     // re-render is skipped entirely while the text is unchanged.
     function buildAsst(m) {
       var b = el('div', 'bubble asst');
-      b.appendChild(roleLine('asst', m.item));
+      b.appendChild(roleLine('asst', m.item, stampZone));
       m.mdBody = el('div', 'md');
       m.mdText = null;
       b.appendChild(m.mdBody);
@@ -1287,6 +1302,18 @@
         virtualizer.setOptions(vopts);
       }
       var written = [];
+      // A zone change rewrites the stamp text inside rows already on screen, and
+      // the patchers cannot do it: patchUser only syncs the text and the not-sent
+      // note, patchAsst only re-renders when the prose changed. So the bubble is
+      // rebuilt whole, which is also what re-measures it through `written`.
+      if (restamp) {
+        restamp = false;
+        mounted.forEach(function (m) {
+          if (m.shape !== 'user' && m.shape !== 'asst') return;
+          build(m, now);
+          written.push(m);
+        });
+      }
       dirty.forEach(function (id) {
         var m = mounted.get(id);
         if (!m) return;
@@ -1531,6 +1558,16 @@
       },
       mountedCount: function () {
         return mounted.size;
+      },
+      // Applying a saved zone. Only a change costs anything: the same zone is a
+      // no-op, so the page can call this on every boot without repainting a
+      // transcript that is already rendered correctly.
+      setStampZone: function (zone) {
+        var next = typeof zone === 'string' && zone ? zone : DEFAULT_STAMP_ZONE;
+        if (next === stampZone) return;
+        stampZone = next;
+        restamp = true;
+        schedule();
       },
       destroy: function () {
         if (destroyed) return;

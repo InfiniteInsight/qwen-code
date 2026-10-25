@@ -192,6 +192,8 @@ import {
 } from './routes/workflows.js';
 import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
+import { createUiPrefsRouter } from './routes/uiPrefs.js';
+import type { UiPrefsStore } from './uiPrefsStore.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute, type RankedSearch } from './routes/search.js';
 import { versionCheckMiddleware } from './middleware/versionCheck.js';
@@ -241,6 +243,12 @@ export interface GatewayDeps {
   vapid?: VapidStore;
   /** Token-bound push subscription store. Push routes mount only when both this and vapid are set. */
   pushStore?: PushStore;
+  /**
+   * Per-token display preferences (#80). The route mounts only when this is set.
+   * Keyed by token because a display zone describes the device reading, not the
+   * record being read.
+   */
+  uiPrefs?: UiPrefsStore;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
   /** Compiled routing matcher; notifier drop-gating wires only when set. */
@@ -1512,6 +1520,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/push',
       requireScope(SESSION_READ, audit),
       createPushRouter(deps.vapid, deps.pushStore, notifier, audit),
+    );
+  }
+
+  // GET/PUT /rc/ui-prefs (#80): the caller's OWN display preferences.
+  // SESSION_READ rather than WRITE, unlike the WRITE-forked idle toggle: the
+  // record is keyed by the caller's own token and cannot change what any other
+  // client sees, so a read-only share token is allowed to pick the zone it
+  // reads its timestamps in.
+  if (deps.uiPrefs) {
+    app.use(
+      '/rc/ui-prefs',
+      requireScope(SESSION_READ, audit),
+      createUiPrefsRouter(deps.uiPrefs, audit),
     );
   }
 

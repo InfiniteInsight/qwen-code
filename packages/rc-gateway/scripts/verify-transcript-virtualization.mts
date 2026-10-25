@@ -5886,9 +5886,9 @@ const ECHO_AT = 1_700_010_800_000;
  * happened to produce. Chromium's ICU puts a narrow no-break space before
  * AM/PM where Node's puts an ordinary one, so both sides fold to plain spaces.
  */
-function eastern(ms: number): string {
+function zoned(ms: number, zone: string): string {
   return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
+    timeZone: zone,
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
@@ -5898,10 +5898,15 @@ function eastern(ms: number): string {
     .replace(/[\u202f\u00a0]/g, ' ');
 }
 
+function eastern(ms: number): string {
+  return zoned(ms, 'America/New_York');
+}
+
 const fold = (t: string | null): string | null =>
   t === null ? null : t.replace(/[\u202f\u00a0]/g, ' ');
 
 const wantStamp = (ms: number) => ` \u00b7 ${eastern(ms)}`;
+const wantStampIn = (ms: number, zone: string) => ` \u00b7 ${zoned(ms, zone)}`;
 
 PAGE_SCENARIOS.push({
   name: 'P42 a message row says when it was sent, in the zone the viewer pins rather than the browser\u2019s',
@@ -6034,6 +6039,167 @@ PAGE_SCENARIOS.push({
     expect(user.inRole, 'the echo stamp sits outside the role line');
 
     return `the envelope send time reaches the row untouched (${eastern(SENT_AT)}); each row carries its own, so it is per-message; the stamp rides inside the role line so no row grows; the user echo is stamped; a frame with no send time draws no stamp; all of it under a browser pinned to Kolkata, so the zone is the viewer's, not the browser's`;
+  },
+});
+
+// The half P42 cannot see: P42 proves the view ignores the browser's zone, but
+// it never changes the zone, so it would pass just as well with the zone
+// welded to the default. This drives the real Settings control, checks that a
+// row ALREADY on screen repaints (the patchers cannot reach an existing stamp,
+// so this is the one path that proves the rebuild), and reloads to prove the
+// choice came from the gateway rather than from this tab.
+PAGE_SCENARIOS.push({
+  name: 'P43 the zone a reader picks is saved on the gateway, repaints the rows already on screen, and survives a reload',
+  // Pinned to a zone that is neither the default nor the saved choice, so a
+  // render that followed the browser fails at every step rather than at one.
+  before: async (page) => {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setTimezoneOverride', {
+      timezoneId: 'Asia/Kolkata',
+    });
+  },
+  frames: () => {
+    const f = new Frames();
+    for (const [i, stamp] of [
+      [1, SENT_AT],
+      [2, TURN2_AT],
+    ] as Array<[number, number]>) {
+      // The model closes the current bubble on a tool frame, so each turn needs
+      // one or both answers collapse into a single row.
+      f.toolCall(`tc-${i}`, 'read_file', 'in_progress').toolUpdate(
+        `tc-${i}`,
+        'completed',
+      );
+      f.asst(`answer ${i}. `, { serverTimestamp: stamp });
+      f.done();
+    }
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 8, 30_000);
+    await settlePage(page);
+
+    const asstIds = () =>
+      page.evaluate(() =>
+        transcriptModel.items
+          .filter((i) => i.kind === 'asst')
+          .map((i) => i.id),
+      );
+    const stampOf = (id: number) =>
+      page.evaluate((rid) => {
+        const row = __pg.row(rid);
+        const sp = row ? row.querySelector('.stamp') : null;
+        return sp ? (sp.textContent ?? '') : null;
+      }, id);
+    const heightOf = (id: number) =>
+      page.evaluate((rid) => {
+        const row = __pg.row(rid);
+        return row ? Math.round(row.getBoundingClientRect().height) : -1;
+      }, id);
+
+    const ids = await asstIds();
+    expect(ids.length === 2, `${ids.length} assistant rows, expected 2`);
+
+    // Step 1: nothing saved, so the rows draw in the default zone, which is not
+    // the browser's. This is the state the change is made FROM, so a view that
+    // ignored the change entirely would still be caught by step 3.
+    const start1 = fold(await stampOf(ids[0]!));
+    expect(
+      start1 === wantStamp(SENT_AT),
+      `with nothing saved the row reads ${JSON.stringify(start1)}, expected the default ${JSON.stringify(wantStamp(SENT_AT))}`,
+    );
+    const startH = await heightOf(ids[0]!);
+
+    // Step 2: drive the control the way a person does, not the setter.
+    const picked = await page.evaluate(() => {
+      const sel = document.getElementById('stamp-zone') as HTMLSelectElement;
+      if (!sel) return 'no control on the page';
+      sel.value = 'Asia/Tokyo';
+      // A select with no such option silently reads back empty, which would
+      // make the rest of this scenario vacuous.
+      if (sel.value !== 'Asia/Tokyo')
+        return `the picker has no Tokyo option (value reads ${JSON.stringify(sel.value)}, ${sel.options.length} options)`;
+      sel.dispatchEvent(new Event('change'));
+      return 'ok';
+    });
+    expect(picked === 'ok', `the Settings control could not be set (${picked})`);
+
+    // Step 3: the row that was already mounted repaints. Polled, not slept:
+    // this is a PUT round trip plus a restamp pass.
+    const wantTokyo = wantStampIn(SENT_AT, 'Asia/Tokyo');
+    const deadline = Date.now() + 10_000;
+    let after1 = fold(await stampOf(ids[0]!));
+    while (after1 !== wantTokyo && Date.now() < deadline) {
+      await page.waitForTimeout(100);
+      after1 = fold(await stampOf(ids[0]!));
+    }
+    expect(
+      after1 === wantTokyo,
+      `after the change the row already on screen reads ${JSON.stringify(after1)}, expected ${JSON.stringify(wantTokyo)}`,
+    );
+    // Both rows, not just the newest: the restamp walks the mounted set.
+    expect(
+      fold(await stampOf(ids[1]!)) === wantStampIn(TURN2_AT, 'Asia/Tokyo'),
+      'the second mounted row did not repaint',
+    );
+    // And the repaint cost no height, because the stamp still rides inside the
+    // role line. A row that grew here would desync the virtualizer's cache.
+    const afterH = await heightOf(ids[0]!);
+    expect(
+      afterH === startH,
+      `the repaint moved the row height (${startH} -> ${afterH})`,
+    );
+
+    // Step 4: a fresh page, no interaction. The only thing that can put Tokyo
+    // back on screen now is the gateway's answer to the boot read.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof startWatch === 'function');
+    await page.waitForFunction(() => watchedSessionId !== null);
+    const reloadedDeadline = Date.now() + 10_000;
+    let reloaded: number[] = [];
+    for (;;) {
+      reloaded = await asstIds();
+      if (reloaded.length >= 2 || Date.now() > reloadedDeadline) break;
+      await page.waitForTimeout(100);
+    }
+    expect(
+      reloaded.length === 2,
+      `the reload rebuilt ${reloaded.length} assistant rows, expected 2`,
+    );
+    await settlePage(page);
+    let afterReload = fold(await stampOf(reloaded[0]!));
+    const reloadDeadline = Date.now() + 10_000;
+    while (afterReload !== wantTokyo && Date.now() < reloadDeadline) {
+      await page.waitForTimeout(100);
+      afterReload = fold(await stampOf(reloaded[0]!));
+    }
+    expect(
+      afterReload === wantTokyo,
+      `after a reload the row reads ${JSON.stringify(afterReload)}, expected the saved zone ${JSON.stringify(wantTokyo)}`,
+    );
+    const shownZone = await page.evaluate(
+      () => (document.getElementById('stamp-zone') as HTMLSelectElement).value,
+    );
+    expect(
+      shownZone === 'Asia/Tokyo',
+      `the control came back showing ${JSON.stringify(shownZone)}, expected the saved zone`,
+    );
+
+    // Named separately from the render, so a row that painted Tokyo while the
+    // gateway held something else cannot pass on the render alone.
+    const stored = await page.evaluate(async () => {
+      const r = await fetch('/rc/ui-prefs', {
+        headers: { Authorization: 'Bearer ' + token() },
+      });
+      return (await r.json()) as { stampZone: string; saved: boolean };
+    });
+    expect(
+      stored.stampZone === 'Asia/Tokyo' && stored.saved === true,
+      `the gateway holds ${JSON.stringify(stored)}, expected the saved Tokyo choice`,
+    );
+
+    return `nothing saved draws the default (${start1}) while the browser sits in Kolkata; picking Tokyo in Settings repaints the rows already mounted (${after1}) and both rows together; the repaint costs no row height (${startH}px held); a reload with no interaction comes back in Tokyo from the gateway's own answer (${JSON.stringify(stored)})`;
   },
 });
 

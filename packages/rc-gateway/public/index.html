@@ -1956,14 +1956,24 @@
             </button>
           </summary>
           <div class="help-text" id="help-ui-prefs" hidden>
-            Local display preferences for this browser tab only.
-            <b>Sticky tab bar</b> keeps the tab row pinned to the top of the
-            page while you scroll; it resets on reload.
+            Display preferences. <b>Sticky tab bar</b> keeps the tab row pinned
+            to the top of the page while you scroll; it is tab-local and resets
+            on reload. <b>Stamp timezone</b> is the zone message times are
+            printed in, and unlike the tab bar it IS saved — on the gateway,
+            keyed to the paired token you are reading with, so a phone and a
+            laptop can each carry their own.
           </div>
           <div>
             <label
               ><input type="checkbox" id="sticky-tabs" /> Sticky tab bar</label
             >
+          </div>
+          <div>
+            <label for="stamp-zone">Stamp timezone</label>
+            <select
+              id="stamp-zone"
+              title="timezone message times are printed in"
+            ></select>
           </div>
         </details>
         <!-- #98. Seven gateway surfaces shipped their backend before anything
@@ -2635,6 +2645,94 @@
         $('tab-bar').classList.toggle('sticky', $('sticky-tabs').checked);
       };
 
+      // Stamp timezone (Settings > UI preferences). Issue #80: a viewer session
+      // is often read somewhere other than the machine it watches, so the zone
+      // its times print in is the reader's to choose. It is saved on the gateway
+      // keyed to THIS paired token rather than in this tab — the constraint that
+      // keeps UI state out of localStorage still holds, and a token is what a
+      // device already is to the gateway, which is how push quiet hours are
+      // keyed too.
+      const stampZoneSelect = $('stamp-zone');
+      // The zone the view is rendering in, or null while that is still unknown.
+      // Kept here because the boot read and the view's own attach resolve in
+      // either order: whichever lands second is the one that can apply it.
+      let stampZone = null;
+      function applyStampZone() {
+        if (transcriptView && stampZone) transcriptView.setStampZone(stampZone);
+      }
+      function stampZoneOption(zone) {
+        const opt = document.createElement('option');
+        opt.value = zone;
+        opt.textContent = zone;
+        return opt;
+      }
+      function fillStampZones() {
+        if (stampZoneSelect.options.length) return;
+        // Two names first, because the browser's own data omits both and they
+        // are the two a reader is most likely to want: 'UTC' (measured absent
+        // from all 418 entries, though the gateway accepts it, and log times are
+        // what a stamp gets compared against) and this device's zone, so the
+        // common case is at the top instead of buried in the list. Then the
+        // engine's full enumeration; an engine without supportedValuesOf simply
+        // gets these two, and ensureStampZoneOption still makes a saved zone
+        // selectable.
+        const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        ensureStampZoneOption('UTC');
+        ensureStampZoneOption(local);
+        if (typeof Intl.supportedValuesOf === 'function') {
+          for (const zone of Intl.supportedValuesOf('timeZone'))
+            ensureStampZoneOption(zone);
+        }
+      }
+      // A select that cannot display its own value reads as a broken control, so
+      // the effective zone is always an option even when the browser's list is
+      // empty or does not name it.
+      function ensureStampZoneOption(zone) {
+        if (!zone) return;
+        for (const opt of stampZoneSelect.options) if (opt.value === zone) return;
+        stampZoneSelect.appendChild(stampZoneOption(zone));
+      }
+      async function loadStampZone() {
+        try {
+          const res = await fetch('/rc/ui-prefs', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) return; // the view keeps its own default zone
+          const prefs = await res.json();
+          if (typeof prefs.stampZone !== 'string' || !prefs.stampZone) return;
+          fillStampZones();
+          ensureStampZoneOption(prefs.stampZone);
+          stampZoneSelect.value = prefs.stampZone;
+          stampZone = prefs.stampZone;
+          applyStampZone();
+        } catch {
+          // A failed read costs the saved zone only; times still render.
+        }
+      }
+      // Saving is optimistic in the wrong direction on purpose: the control
+      // reverts to what the gateway actually holds rather than showing a zone
+      // that was never saved, because a picker that lies about a save is worse
+      // than one that refuses.
+      stampZoneSelect.onchange = async () => {
+        const next = stampZoneSelect.value;
+        try {
+          const res = await fetch('/rc/ui-prefs', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ stampZone: next }),
+          });
+          if (!res.ok) throw new Error('http ' + res.status);
+          stampZone = next;
+          applyStampZone();
+        } catch {
+          stampZoneSelect.value = stampZone || '';
+          setStatus('could not save the stamp timezone');
+        }
+      };
+
       // Global 401 teardown: any 401 from THIS gateway (same-origin request)
       // means the stored token is no longer valid — drop it and fall back to
       // the pairing screen. Scoped to same-origin ONLY: the multi-workspace
@@ -2775,6 +2873,7 @@
         }
         // The view reports changes only: seed the pill from its state now.
         $('jump-bottom').hidden = transcriptView.isNearBottom();
+        applyStampZone();
       }
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
@@ -2791,6 +2890,9 @@
           onFork: (item) => void doForkHere(watchedSessionId, item),
           onCancelSubagent: (item) =>
             void doCancelSubagent(watchedSessionId, item),
+          // May still be null if the boot read has not landed; the view then
+          // starts in its own default and applyStampZone corrects it below.
+          stampZone,
         });
       }
       // Both vendored bundles are optional: each import's own catch turns a
@@ -5965,6 +6067,7 @@
             renderRecentWorkspaces();
             void browseTo();
             void loadDaemonManifest();
+            void loadStampZone(); // issue #80: the reader's stamp zone
             // A ?session= push deep link (#40) wins over the persisted
             // watch: handleSessionDeepLink() returns true only when the
             // param was present (and scrubbed), so a plain reload still
