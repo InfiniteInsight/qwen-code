@@ -5501,6 +5501,172 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P40 a session can list what it has running, and an empty list reads as empty',
+  waitView: false,
+  run: async ({ page }) => {
+    const SID = '11111111-2222-3333-4444-555555555555';
+    // Mutable so the same route can answer twice: once with runs, once with
+    // none. The empty case is the half that matters, because a reader who sees
+    // an error there cannot tell "nothing running" from "the gateway is broke",
+    // which is the exact confusion #110 is filed against.
+    let tasks: Array<Record<string, unknown>> = [
+      {
+        kind: 'agent',
+        id: 'a-1',
+        label: 'reading rc-gateway routes',
+        description: 'd',
+        status: 'running',
+        startTime: 0,
+        runtimeMs: 4000,
+        subagentType: 'Explore',
+        isBackgrounded: false,
+        stats: { totalTokens: 1200, toolUses: 3, durationMs: 4000 },
+        // Paths that exist on the record and must NOT reach the screen.
+        outputFile: '/home/evan/.qwen/secret-output.log',
+      },
+      {
+        kind: 'shell',
+        id: 's-1',
+        label: 'pnpm test',
+        description: 'd',
+        status: 'completed',
+        startTime: 0,
+        runtimeMs: 2000,
+        command: 'pnpm test',
+        cwd: '/home/evan/secret-workdir',
+        exitCode: 0,
+        outputFile: '/home/evan/.qwen/secret-shell.log',
+      },
+      {
+        kind: 'monitor',
+        id: 'm-1',
+        label: 'watch build',
+        description: 'd',
+        status: 'running',
+        startTime: 0,
+        runtimeMs: 1000,
+        command: 'tail -f build.log',
+        eventCount: 7,
+        lastEventTime: 1,
+      },
+    ];
+    await page.route(/\/session\/[0-9a-f-]+\/tasks/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ v: 1, sessionId: SID, now: Date.now(), tasks }),
+      }),
+    );
+
+    const body = () =>
+      page.evaluate(
+        () =>
+          (document.getElementById('runs-body') as HTMLElement).textContent ??
+          '',
+      );
+    const press = async () => {
+      await page.evaluate(() =>
+        (document.getElementById('runs-list') as HTMLButtonElement).click(),
+      );
+      await page.waitForFunction(
+        () =>
+          !(
+            (document.getElementById('runs-body') as HTMLElement).textContent ??
+            ''
+          ).includes('loading'),
+        null,
+        { timeout: 8000 },
+      );
+      return body();
+    };
+
+    // The placement ruling: a run log is not something to reach for mid-work,
+    // so it lives in Operations and not on the main screen.
+    const placed = await page.evaluate(() => {
+      const det = document.getElementById('runs');
+      return {
+        exists: !!det,
+        inOps: !!document.getElementById('pane-ops')?.contains(det ?? null),
+        inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
+      };
+    });
+    expect(placed.exists, 'there is no runs section in the page at all');
+    expect(placed.inOps, 'the runs section is not under Operations');
+    expect(!placed.inChat, 'the runs section sits on the main screen');
+
+    // A panel added after P35 is only covered by the one-delegated-listener
+    // rule if it follows it, so check this one rather than inherit it.
+    const help = await page.evaluate(() => {
+      const det = document.getElementById('runs') as HTMLDetailsElement | null;
+      const btn = det?.querySelector('.help-btn') as HTMLButtonElement | null;
+      if (!btn) return 'no ? button';
+      const before = (document.getElementById('help-runs') as HTMLElement)
+        ?.hidden;
+      btn.click();
+      const el = document.getElementById('help-runs') as HTMLElement | null;
+      return `${before === true}/${el ? !el.hidden : 'no help element'}/${btn.getAttribute('aria-expanded')}`;
+    });
+    expect(
+      help === 'true/true/true',
+      `the runs section's ? did not behave like the other panels' (got ${help})`,
+    );
+
+    await page.evaluate((id) => {
+      (document.getElementById('runs-id') as HTMLInputElement).value = id;
+    }, SID);
+
+    const listed = await press();
+    expect(
+      listed.includes('running') &&
+        listed.includes('reading rc-gateway routes'),
+      `the agent run is not drawn (${JSON.stringify(listed)})`,
+    );
+    expect(
+      listed.includes('Explore'),
+      `the agent kind is not shown (${JSON.stringify(listed)})`,
+    );
+    expect(
+      listed.includes('pnpm test'),
+      `the shell command is not shown (${JSON.stringify(listed)})`,
+    );
+    expect(
+      listed.includes('exit 0'),
+      `a finished shell lost its exit code (${JSON.stringify(listed)})`,
+    );
+    expect(
+      listed.includes('tail -f build.log') && listed.includes('7 events'),
+      `the monitor run is not drawn (${JSON.stringify(listed)})`,
+    );
+    // The load-bearing privacy half: these paths are on the daemon's records and
+    // are deliberately not drawn, so a row that grows one has widened what this
+    // read discloses without anyone deciding to.
+    expect(
+      !listed.includes('secret-output') && !listed.includes('secret-shell'),
+      `the run list drew task output paths (${JSON.stringify(listed)})`,
+    );
+    expect(
+      !listed.includes('secret-workdir'),
+      `the run list drew a shell task's cwd (${JSON.stringify(listed)})`,
+    );
+
+    // The empty half: nothing running is a normal state and must not read as a
+    // failure.
+    tasks = [];
+    const none = await press();
+    expect(
+      none.includes('no runs'),
+      `an idle session did not read as empty (${JSON.stringify(none)})`,
+    );
+    expect(
+      !/fail|error|500|502/i.test(none),
+      `an idle session read as a failure (${JSON.stringify(none)})`,
+    );
+
+    return `runs live under Operations with the shared ? behaviour; agent/shell/monitor rows carry their own fields and no filesystem path; an idle session says "(no runs)" instead of failing`;
+  },
+});
+
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {

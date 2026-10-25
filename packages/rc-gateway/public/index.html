@@ -1297,6 +1297,36 @@
           <div><button id="workflows-list">List runs</button></div>
           <div id="workflows-body">(not listed)</div>
         </details>
+        <details id="runs" class="ops-collapse">
+          <summary>
+            <strong>Runs</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Runs?"
+              aria-expanded="false"
+              aria-controls="help-runs"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-runs" hidden>
+            Everything one session has running or has finished: subagents,
+            background shell commands and monitors. Enter the session id (blank
+            means the session you're watching) and tap <b>List runs</b>. Read
+            only - stopping a single run is not wired up yet. Needs
+            session-read scope.
+          </div>
+          <div class="ops-note">
+            (agents, shells and monitors one session has going; requires
+            session-read scope)
+          </div>
+          <div>
+            <input id="runs-id" placeholder="session id (blank = watched)" />
+            <button id="runs-list">List runs</button>
+          </div>
+          <div id="runs-body">(not listed)</div>
+        </details>
         <details id="search" class="ops-collapse">
           <summary>
             <strong>Search</strong
@@ -10865,6 +10895,55 @@
             };
             row.appendChild(btn);
           }
+          out.appendChild(row);
+        }
+      };
+
+      $('runs-list').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('runs-body');
+        const id = verbSessionId('runs-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading…';
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/tasks');
+        if (!r.ok) {
+          out.textContent = 'list failed: ' + r.code;
+          return;
+        }
+        const tasks = r.body.tasks || [];
+        if (tasks.length === 0) {
+          out.textContent = '(no runs)';
+          return;
+        }
+        out.textContent = '';
+        for (const t of tasks) {
+          const row = document.createElement('div');
+          const label = document.createElement('span');
+          // Every field here is read off the daemon's own task shape
+          // (sdk-typescript types.ts:3304-3364): agent, shell and monitor all
+          // carry kind/id/label/status/runtimeMs, and each adds its own
+          // identifying field. Nothing is invented, and no path is shown:
+          // outputFile and cwd exist on these records but are not drawn, so
+          // this read discloses less than the sibling context read already
+          // does for the same scope.
+          const bits = [t.status, t.kind, t.label || t.id];
+          if (t.kind === 'agent') {
+            if (t.subagentType) bits.push(t.subagentType);
+            if (t.stats && t.stats.totalTokens) bits.push(t.stats.totalTokens + ' tok');
+            if (t.isBackgrounded) bits.push('backgrounded');
+          } else if (t.kind === 'shell') {
+            bits.push(t.command);
+            if (t.exitCode !== undefined) bits.push('exit ' + t.exitCode);
+          } else if (t.kind === 'monitor') {
+            bits.push(t.command);
+            bits.push(t.eventCount + ' events');
+          }
+          if (t.runtimeMs) bits.push(Math.round(t.runtimeMs / 1000) + 's');
+          label.textContent = bits.join('  ');
+          row.appendChild(label);
           out.appendChild(row);
         }
       };
