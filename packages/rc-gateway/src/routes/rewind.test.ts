@@ -65,12 +65,19 @@ function fakeDaemon(
   opts: {
     snapshots?: DaemonRewindSnapshotInfo[];
     /** Override the rewindSession body/throw; defaults to a clean success. */
-    rewind?: (id: string, promptId: string) => Promise<unknown> | unknown;
+    rewind?: (
+      id: string,
+      promptId: string,
+      opts?: { rewindFiles?: boolean },
+    ) => Promise<unknown> | unknown;
     /** Override the resumeSession body/throw; defaults to a clean success. */
     resume?: (id: string, workspaceCwd?: string) => Promise<unknown> | unknown;
   } = {},
 ) {
   const rewindCalls: Array<{ id: string; promptId: string }> = [];
+  // Recorded apart from rewindCalls on purpose: widening that array's objects
+  // would break the existing toEqual assertion on its exact shape.
+  const rewindOpts: Array<{ rewindFiles?: boolean } | undefined> = [];
   const resumeCalls: Array<{ id: string; workspaceCwd?: string }> = [];
   let snapshotCalls = 0;
   const snapshots = opts.snapshots ?? [];
@@ -79,9 +86,14 @@ function fakeDaemon(
       snapshotCalls += 1;
       return { snapshots };
     },
-    rewindSession: async (id: string, promptId: string) => {
+    rewindSession: async (
+      id: string,
+      promptId: string,
+      fwd?: { rewindFiles?: boolean },
+    ) => {
       rewindCalls.push({ id, promptId });
-      if (opts.rewind) return await opts.rewind(id, promptId);
+      rewindOpts.push(fwd);
+      if (opts.rewind) return await opts.rewind(id, promptId, fwd);
       return {
         rewound: true,
         targetTurnIndex: 0,
@@ -103,6 +115,7 @@ function fakeDaemon(
   };
   return {
     rewindCalls,
+    rewindOpts,
     resumeCalls,
     get snapshotCalls() {
       return snapshotCalls;
@@ -749,5 +762,144 @@ describe('POST /session/:id/rewind', () => {
     const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
     expect(wal.count()).toBe(0);
     wal.close();
+  });
+
+  // ---- #79: the diagnostics "restore files" checkbox is honoured -------------
+  //
+  // The daemon reads its own flag as `rewindFiles !== false`, so an ABSENT flag
+  // means TRUE. That makes the old drop non-neutral: an unchecked box did not
+  // leave the working tree alone, it rewound it. These cases pin all three
+  // input states separately, because "not sent" and "sent as false" mean
+  // opposite things here and only the second one is safe to conflate.
+
+  it('forwards rewindFiles: true to the daemon', async () => {
+    await writeTranscript(3);
+    const { daemon, rewindOpts } = fakeDaemon({ snapshots: makeSnapshots(3) });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 1, rewindFiles: true });
+    expect(res.status).toBe(202);
+    expect(rewindOpts).toEqual([{ rewindFiles: true }]);
+  });
+
+  it('forwards rewindFiles: false, the case the drop used to invert', async () => {
+    // The load-bearing half. With the flag dropped, the daemon saw no flag,
+    // applied its own default of true, and rewound the files the reader had
+    // just declined to rewind. A test that only covers `true` would have
+    // passed against the broken route.
+    await writeTranscript(3);
+    const { daemon, rewindOpts } = fakeDaemon({ snapshots: makeSnapshots(3) });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 1, rewindFiles: false });
+    expect(res.status).toBe(202);
+    expect(rewindOpts).toEqual([{ rewindFiles: false }]);
+  });
+
+  it('sends no opts at all when the caller omits rewindFiles', async () => {
+    // The Chat-tab rewind (#48) deliberately never names the flag. Absent must
+    // stay absent so that path keeps the daemon default it was built with,
+    // rather than being silently switched to false by this gateway.
+    await writeTranscript(3);
+    const { daemon, rewindOpts } = fakeDaemon({ snapshots: makeSnapshots(3) });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(202);
+    expect(rewindOpts).toHaveLength(1);
+    expect(rewindOpts[0]).toBeUndefined();
+  });
+
+  it('400 invalid_rewind_files_flag for a non-boolean, daemon never called', async () => {
+    // Refused at the boundary. Forwarded, the daemon's own 400 would arrive
+    // here as a throw and be reported as 502 daemon_unavailable, blaming the
+    // gateway for the caller's typo.
+    await writeTranscript(3);
+    for (const bad of ['true', 1, null, { on: true }]) {
+      const { daemon, rewindOpts, rewindCalls, snapshotCalls } = fakeDaemon({
+        snapshots: makeSnapshots(3),
+      });
+      const audit = fakeAudit();
+      const url = await mount({ daemon, audit });
+
+      const res = await postRewind(url, { toTurn: 1, rewindFiles: bad });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        code: 'invalid_rewind_files_flag',
+      });
+      expect(rewindCalls).toHaveLength(0);
+      expect(rewindOpts).toHaveLength(0);
+      expect(snapshotCalls).toBe(0);
+      expect(audit.calls).toHaveLength(0);
+    }
+  });
+
+  it('reports the file outcome as counts, never as the daemon paths', async () => {
+    await writeTranscript(3);
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const { daemon } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+      rewind: () => ({
+        rewound: true,
+        targetTurnIndex: 1,
+        filesChanged: [
+          '/home/evan/.qwen/workspaces/secret/a.ts',
+          '/home/evan/other.ts',
+        ],
+        filesFailed: ['/home/evan/secret/c.ts'],
+      }),
+    });
+    const url = await mount({ daemon, audit, walDir });
+
+    const res = await postRewind(url, { toTurn: 1, rewindFiles: true });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as {
+      toTurn: number;
+      files?: { changed: number; failed: number };
+    };
+    expect(body.files).toEqual({ changed: 2, failed: 1 });
+
+    // The privacy half: the daemon hands back real paths and this read must
+    // disclose only how many, the same call D24 makes for the run log.
+    const text = JSON.stringify(body);
+    expect(text).not.toContain('secret');
+    expect(text).not.toContain('workspaces');
+    expect(text).not.toContain('other.ts');
+
+    expect(audit.calls[0]).toMatchObject({
+      detail: { toTurn: 1, files: { changed: 2, failed: 1 } },
+    });
+    const frame = [
+      ...decodeSegment(join(walDir, 'wal', `${SESSION_ID}.log`)),
+    ][0];
+    expect(frame.data).toMatchObject({ files: { changed: 2, failed: 1 } });
+    expect(JSON.stringify(frame.data)).not.toContain('secret');
+  });
+
+  it('a clean rewind reports zero files rather than omitting the outcome', async () => {
+    // "Nothing to restore" and "did not look" must stay distinguishable, so a
+    // rewind that reached the daemon reports its counts even when both are 0.
+    await writeTranscript(3);
+    const { daemon } = fakeDaemon({ snapshots: makeSnapshots(3) });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 1, rewindFiles: false });
+    expect(res.status).toBe(202);
+    expect(((await res.json()) as { files?: unknown }).files).toEqual({
+      changed: 0,
+      failed: 0,
+    });
+  });
+
+  it('a rewind to the tip reports no file outcome, the daemon was not called', async () => {
+    await writeTranscript(2);
+    const { daemon, rewindCalls } = fakeDaemon({ snapshots: makeSnapshots(2) });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 2, rewindFiles: true });
+    expect(res.status).toBe(202);
+    expect(rewindCalls).toHaveLength(0);
+    expect(((await res.json()) as { files?: unknown }).files).toBeUndefined();
   });
 });

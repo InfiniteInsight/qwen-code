@@ -153,7 +153,37 @@ export function createRewindRoute(
       return;
     }
 
-    const body = (req.body ?? {}) as { toTurn?: unknown; cwd?: unknown };
+    const body = (req.body ?? {}) as {
+      toTurn?: unknown;
+      cwd?: unknown;
+      rewindFiles?: unknown;
+    };
+
+    // #79: this route used to have no field for `rewindFiles`, so the
+    // diagnostics pane's "restore files" checkbox was dropped on the floor.
+    // Dropping it was NOT neutral. The daemon reads its own flag as
+    // `rewindFiles !== false` (packages/cli/src/serve/routes/session.ts:10331),
+    // so an absent flag means TRUE: an UNCHECKED box still rewound the working
+    // tree. Absent therefore stays absent here rather than being defaulted, so
+    // the Chat-tab rewind (#48), which deliberately never names the flag,
+    // keeps the behaviour it was built with.
+    //
+    // A non-boolean is refused at this boundary rather than forwarded. The
+    // daemon answers that with a 400, the SDK turns a 400 into a throw, and
+    // the catch below would report it as 502 daemon_unavailable, blaming the
+    // gateway for the caller's typo. Same code as the daemon's own refusal, so
+    // a reader sees one meaning for it either side of the proxy.
+    if (
+      body.rewindFiles !== undefined &&
+      typeof body.rewindFiles !== 'boolean'
+    ) {
+      res.status(400).json({
+        error: '`rewindFiles` must be a boolean when provided',
+        code: 'invalid_rewind_files_flag',
+      });
+      return;
+    }
+    const rewindFiles = body.rewindFiles as boolean | undefined;
 
     // 1. Immediate, non-blocking prompt-in-flight guard. A free slot is HELD
     //    by this call for the rest of the saga (released in `finally`).
@@ -256,6 +286,9 @@ export function createRewindRoute(
       //    the marker below is recorded. Any failure aborts the saga cleanly
       //    BEFORE any WAL marker or audit is written. The daemon's own 409
       //    (session_busy) is surfaced as 409; everything else -> 502.
+      // Set only when the daemon is actually called. The tip case truncates
+      // nothing and never reaches the daemon, so it has no file outcome.
+      let fileOutcome: { changed: number; failed: number } | undefined;
       try {
         if (targetTurnIndex < addressableTurnCount) {
           // 3a. Ensure the session is owned by its workspace daemon before
@@ -303,7 +336,21 @@ export function createRewindRoute(
             });
             return;
           }
-          await daemon.rewindSession(sessionId, snapshot.promptId);
+          const result = await daemon.rewindSession(
+            sessionId,
+            snapshot.promptId,
+            // Only forward a NAMED flag; `undefined` leaves the daemon's own
+            // default in force.
+            rewindFiles === undefined ? undefined : { rewindFiles },
+          );
+          // Counts, never the path list. `filesChanged` and `filesFailed` are
+          // filesystem paths, and this read is deliberately narrower than the
+          // wire behind it (the same call D24 makes for the run log): a shared
+          // gateway should not walk workspace paths out to a reader.
+          fileOutcome = {
+            changed: result.filesChanged.length,
+            failed: result.filesFailed.length,
+          };
         }
       } catch (err) {
         const status = (err as { status?: unknown }).status;
@@ -328,6 +375,7 @@ export function createRewindRoute(
         truncatedEventId,
         rewoundByTokenId,
         rewoundAt,
+        ...(fileOutcome ? { files: fileOutcome } : {}),
       };
 
       // 4. WAL marker (persisted only when walDir is wired), with a single
@@ -386,7 +434,11 @@ export function createRewindRoute(
         action: 'session_rewound',
         actorTokenId: rewoundByTokenId,
         target: sessionId,
-        detail: { toTurn: targetTurnIndex, truncatedEventId },
+        detail: {
+          toTurn: targetTurnIndex,
+          truncatedEventId,
+          ...(fileOutcome ? { files: fileOutcome } : {}),
+        },
       });
       void notifier?.notify(
         { type: 'session_rewound', data: markerData },
@@ -394,7 +446,11 @@ export function createRewindRoute(
       );
 
       // 7. Success.
-      res.status(202).json({ toTurn: targetTurnIndex, truncatedEventId });
+      res.status(202).json({
+        toTurn: targetTurnIndex,
+        truncatedEventId,
+        ...(fileOutcome ? { files: fileOutcome } : {}),
+      });
     } finally {
       release();
     }
