@@ -13,6 +13,7 @@ import {
   resolveChatsDir,
   isValidSessionId,
   findSessionChatsDir,
+  isSessionArchived,
 } from '../sessions/chatsPath.js';
 import { resolveTurn } from '../sessions/turnResolver.js';
 import {
@@ -221,6 +222,27 @@ export function createForkRoute(
       }
     }
     if (!allRecords || !chatsDir) {
+      // Keyed on `parentId`, the transcript actually being read. An archived
+      // parent gets the daemon's 409 `session_archived` rather than a 404 that
+      // claims it never existed.
+      //
+      // Refusing here is also the thing that keeps the write safe: `chatsDir` is
+      // what `writeFork` below writes into, and the scan never returns an
+      // archive dir, so a fork can never be born filed away beside its parent.
+      if (
+        await isSessionArchived(
+          parentId,
+          candidateCwds.length > 0
+            ? resolveChatsDir(candidateCwds[0])
+            : undefined,
+        )
+      ) {
+        res.status(409).json({
+          error: 'Parent session is archived - restore it before forking',
+          code: 'session_archived',
+        });
+        return;
+      }
       res.status(404).json({
         error: 'Parent transcript not found',
         code: 'parent_transcript_not_found',

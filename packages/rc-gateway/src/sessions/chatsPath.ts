@@ -177,3 +177,61 @@ export async function findSessionChatsDir(
   }
   return null;
 }
+
+/**
+ * True when the transcript for `sessionId` exists under a project's
+ * `chats/archive/` dir, i.e. the conversation is filed away rather than absent.
+ *
+ * This exists so the routes that answer 404 "transcript not found" can tell the
+ * truth instead: an archived conversation is not a missing one, and the daemon
+ * already has a word for the difference (409 `session_archived`, raised by
+ * `assertSessionLoadable`, cli/src/serve/server/error-response.ts:780).
+ *
+ * Deliberately returns a boolean and never a directory. The sibling
+ * `findSessionChatsDir` hands back a path, and `routes/fork.ts:291` writes a NEW
+ * transcript into whichever dir it resolved (`writeFork(chatsDir, ...)`). If the
+ * scan learned to return an archive dir, forking an archived conversation would
+ * file the brand-new child into the archive alongside its parent. A yes/no
+ * answer cannot make that mistake, which is why this is a separate function
+ * rather than a flag on the existing one.
+ *
+ * `preferredChatsDir` is the active chats dir the caller already looked in: its
+ * `archive` sibling is the cheapest stat to try, covering the single-workspace
+ * case in one call. The bounded project scan is the fallback for a transcript
+ * run in another workspace, mirroring `findSessionChatsDir`.
+ *
+ * The id is validated first and never path-joined unvalidated.
+ */
+export async function isSessionArchived(
+  sessionId: string,
+  preferredChatsDir?: string,
+  env: Record<string, string | undefined> = process.env,
+): Promise<boolean> {
+  if (!isValidSessionId(sessionId)) return false;
+  const file = `${sessionId}.jsonl`;
+  if (preferredChatsDir) {
+    try {
+      await stat(join(archiveChatsDirOf(preferredChatsDir), file));
+      return true;
+    } catch {
+      // not filed in this workspace — the scan below may still find it
+    }
+  }
+  const projectsDir = join(runtimeBaseDir(env), 'projects');
+  let segments: string[];
+  try {
+    segments = await readdir(projectsDir);
+  } catch {
+    return false; // no projects dir -> nothing to scan
+  }
+  for (const segment of segments) {
+    const archiveDir = archiveChatsDirOf(join(projectsDir, segment, 'chats'));
+    try {
+      await stat(join(archiveDir, file));
+      return true;
+    } catch {
+      // not filed here — keep scanning
+    }
+  }
+  return false;
+}

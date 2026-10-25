@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
-import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { resolveChatsDir, archiveChatsDirOf } from '../sessions/chatsPath.js';
 import { createForkRoute } from './fork.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import { decodeSegment } from '../wal.js';
@@ -205,6 +205,24 @@ describe('fork route', () => {
     const res = await postFork(url, {});
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe('parent_transcript_not_found');
+  });
+
+  it('409s when the parent is archived, not missing', async () => {
+    // Discriminating pair with the 404 below: identical lookup, opposite
+    // answer, decided only by the parent file sitting in `chats/archive`. A 404
+    // here sent the operator hunting for a parent that exists.
+    await writeParent(archiveChatsDirOf(chatsDir));
+    const { daemon, loadCalls, resumeCalls } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'session_archived' });
+    // No fork was created, no daemon call made, nothing audited.
+    expect(loadCalls).toHaveLength(0);
+    expect(resumeCalls).toHaveLength(0);
+    expect(audit.calls).toHaveLength(0);
+    await expect(stat(join(chatsDir, `${NEW_ID}.jsonl`))).rejects.toThrow();
   });
 
   it('404s when the parent transcript does not exist', async () => {

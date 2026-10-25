@@ -12,6 +12,7 @@ import {
   resolveChatsDir,
   isValidSessionId,
   findSessionChatsDir,
+  isSessionArchived,
 } from '../sessions/chatsPath.js';
 import { readParentRecords } from '../sessions/forkStore.js';
 import type { ForkRecord } from '../sessions/forkTranscript.js';
@@ -206,6 +207,27 @@ export function createRewindRoute(
         }
       }
       if (!records) {
+        // A filed-away conversation is not a missing one, and the daemon
+        // already refuses to load it for exactly this reason
+        // (`assertSessionLoadable` throws `SessionArchivedError`). Answering 404
+        // here told the operator the conversation did not exist, so they would
+        // go looking for a transcript that is sitting in `chats/archive`. 409
+        // with the daemon's own code says what is true and what to do: restore
+        // it first.
+        if (
+          await isSessionArchived(
+            sessionId,
+            candidateCwds.length > 0
+              ? resolveChatsDir(candidateCwds[0])
+              : undefined,
+          )
+        ) {
+          res.status(409).json({
+            error: 'Session is archived - restore it before rewinding',
+            code: 'session_archived',
+          });
+          return;
+        }
         res.status(404).json({
           error: 'Session transcript not found',
           code: 'session_transcript_not_found',
