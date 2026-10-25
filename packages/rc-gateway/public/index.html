@@ -10944,6 +10944,48 @@
           if (t.runtimeMs) bits.push(Math.round(t.runtimeMs / 1000) + 's');
           label.textContent = bits.join('  ');
           row.appendChild(label);
+          // Only a running row gets the control. The other three statuses are
+          // settled, and a button that can only ever 404 is not a control, it
+          // is a way to generate a failure.
+          if (t.status === 'running') {
+            const btn = document.createElement('button');
+            btn.textContent = 'stop';
+            btn.style.marginLeft = '6px';
+            btn.onclick = async () => {
+              btn.disabled = true;
+              // t.id, not the label the row prints: the daemon matches this
+              // against the task's own id (routes/session.ts:7439 straight
+              // through to bridge.cancelSessionTask).
+              const c = await rcCall(
+                '/session/' +
+                  encodeURIComponent(id) +
+                  '/tasks/' +
+                  encodeURIComponent(t.id) +
+                  '/cancel',
+                { method: 'POST', body: JSON.stringify({ kind: t.kind }) },
+              );
+              // c.ok is NOT the verdict. The daemon answers 200 both for a
+              // policy refusal and for a run it did not stop, so a handler
+              // that reads only ok would print "stopped" over a run that is
+              // still running. That is the flattened failure this route was
+              // built to avoid, re-introduced by the page that calls it.
+              const stopped =
+                c.ok && !!c.body && c.body.cancelled === true;
+              if (stopped) {
+                label.textContent = 'stopped  ' + (t.label || t.id);
+              } else if (!c.ok) {
+                label.textContent =
+                  bits.join('  ') + '  [stop failed: ' + c.code + ']';
+              } else if (c.body && c.body.reason === 'disabled') {
+                label.textContent =
+                  bits.join('  ') + '  [workflow runs are not enabled here]';
+              } else {
+                label.textContent =
+                  bits.join('  ') + '  [the daemon did not stop it]';
+              }
+            };
+            row.appendChild(btn);
+          }
           out.appendChild(row);
         }
       };
