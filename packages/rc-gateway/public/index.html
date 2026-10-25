@@ -482,6 +482,26 @@
           #transcript-wrap {
             position: relative;
           }
+          /* Paging back lives at the top of the window, mirroring #jump-bottom
+             at the bottom. Absolutely positioned on purpose: an in-flow sibling
+             above #transcript would take height out of the bounded scroller,
+             which is what broke the render-all fallback's scroll pin. */
+          #load-earlier {
+            position: absolute;
+            top: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 2;
+            border-radius: 999px;
+            background: #fff;
+            color: #111;
+            border: 1px solid #ccc;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+            font-size: 0.85rem;
+          }
+          #load-earlier[disabled] {
+            color: #666;
+          }
           #jump-bottom {
             position: absolute;
             bottom: 8px;
@@ -975,6 +995,7 @@
         <div id="lineage" hidden></div>
         <div id="transcript-wrap">
           <div id="transcript"></div>
+          <button id="load-earlier" hidden>↑ load earlier messages</button>
           <button id="jump-bottom" hidden>↓ jump to bottom</button>
         </div>
         <!-- The run's to-do list, kept outside the transcript (#65). The
@@ -2918,6 +2939,79 @@
         if (force) transcriptView.scrollToEnd();
         else transcriptView.followIfPinned();
       }
+      // ---- Paging back through stored history --------------------------------
+      // The transcript holds only what the stream has carried since this watch
+      // opened, so a session that ran before the reader attached looks like it
+      // began wherever they joined it. GET /session/:id/transcript returns the
+      // stored records in the same frame envelope, and the model reduces them
+      // (TranscriptModel.replayStoredPage). It cannot go through renderFrame:
+      // that handler also drives the live turn, the token footer and the scroll
+      // pin, and a page of history has to leave all three alone.
+      const TRANSCRIPT_PAGE_SIZE = 80;
+      let transcriptCursor = null; // opaque; only ever sent back as received
+      let transcriptExhausted = false; // a read proved there is nothing older
+      let transcriptPaging = false; // one page in flight at a time
+
+      function renderLoadEarlier() {
+        const btn = $('load-earlier');
+        btn.hidden = !watchedSessionId || transcriptExhausted;
+        btn.disabled = transcriptPaging;
+        btn.textContent = transcriptPaging
+          ? '↑ loading…'
+          : '↑ load earlier messages';
+      }
+
+      async function loadEarlierMessages() {
+        const id = watchedSessionId;
+        if (!id || transcriptPaging) return;
+        transcriptPaging = true;
+        renderLoadEarlier();
+        try {
+          const q = new URLSearchParams({
+            direction: 'backward',
+            limit: String(TRANSCRIPT_PAGE_SIZE),
+          });
+          if (transcriptCursor) q.set('cursor', transcriptCursor);
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/transcript?' + q,
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(strOr(body.error, 'HTTP ' + res.status));
+          }
+          const page = await res.json();
+          const rows = TranscriptModel.replayStoredPage(page.events);
+          transcriptCursor = strOr(page.nextCursor, '') || null;
+          // Continuing needs the cursor as much as the daemon saying there is
+          // more: without one a second tap would re-read the same newest page
+          // and prepend it a second time.
+          transcriptExhausted = page.hasMore !== true || !transcriptCursor;
+          if (rows.length) {
+            // Rows arriving above the viewport leave the scroll position aimed
+            // at different content. Only the view puts the reader back; it owns
+            // every other scroll correction.
+            if (transcriptView) transcriptView.anchorReader();
+            transcriptModel.prependItems(rows);
+          }
+          if (!rows.length && !transcriptExhausted) {
+            setStatus('nothing older to show');
+          }
+        } catch (err) {
+          // A failed page costs nothing already on screen and leaves the cursor
+          // where it was, so the next tap retries the same page.
+          setStatus(
+            'earlier messages failed: ' +
+              (err && err.message ? err.message : String(err)),
+          );
+        } finally {
+          transcriptPaging = false;
+          renderLoadEarlier();
+        }
+      }
+      $('load-earlier').addEventListener('click', () => {
+        void loadEarlierMessages();
+      });
       // ---- Processing indicator (feedback while a turn is running) -------
       // After a send, the reply can take several seconds (gateway → daemon →
       // first model token). Show a quiet "thinking" row with a live elapsed
@@ -3075,6 +3169,12 @@
       function clearTranscript() {
         // Every item, the tool/subagent bookkeeping and the turn pointers.
         transcriptModel.clear();
+        // The cursor belongs to the conversation, not to the window: a page
+        // read from one session must never be sent as a position in another.
+        transcriptCursor = null;
+        transcriptExhausted = false;
+        transcriptPaging = false;
+        renderLoadEarlier();
         // #71: a new watch has not started any turn of ours, and replayed
         // history does not carry turn_complete, so the indicator has to be
         // closed out here rather than inherited from the session before.
@@ -6733,6 +6833,9 @@
         // the reader queued for it should still be waiting when they come back.
         outbox = [];
         renderQueued();
+        // Same ordering: the paging control names a conversation, so it comes
+        // down with it rather than staying to page a session no longer watched.
+        renderLoadEarlier();
         if (controller) controller.abort();
         setStatus(message);
       }
@@ -6759,6 +6862,9 @@
         // still waiting if the reader comes back to it.
         outbox = [];
         renderQueued();
+        // Same ordering: the paging control names a conversation, so it comes
+        // down with it rather than staying to page a session no longer watched.
+        renderLoadEarlier();
         if (controller) controller.abort();
       };
 
@@ -8218,6 +8324,10 @@
           watchRetryAttempt = 0; // healthy connect: reset the self-heal backoff
           $('composer').style.display = '';
           if (fromEventId == null) clearTranscript();
+          // Drawn on every watch, not only the ones that cleared: a watermark
+          // watch keeps the rows it already has (and so keeps the cursor that
+          // goes with them), but it still has to show whether more exists.
+          renderLoadEarlier();
           void fetchContext(id);
           void fetchContextUsage(id);
           void renderLineage(id);

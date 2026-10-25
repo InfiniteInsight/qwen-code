@@ -514,6 +514,21 @@
       emit({ type: 'reset' });
     }
 
+    // Stored history is built by a throwaway model, so its items carry that
+    // model's ids. Re-key from this model's counter before splicing: the view
+    // keys rows on item.id, and a duplicate key makes the virtualizer hand one
+    // mounted row to two different items.
+    function prependItems(list) {
+      if (!list || !list.length) return 0;
+      for (var i = 0; i < list.length; i++) list[i].id = nextId++;
+      // Mutate in place. The view binds `var items = model.items` once, so a
+      // reassigned array would leave it rendering a list the model no longer
+      // holds.
+      items.splice(0, 0, ...list);
+      emit({ type: 'reset' });
+      return list.length;
+    }
+
     function touch(item) {
       emitUpdate(item);
     }
@@ -560,11 +575,108 @@
       cutAtUserTurn: cutAtUserTurn,
       touch: touch,
       clear: clear,
+      prependItems: prependItems,
     };
+  }
+
+  // ---- Stored history (GET /session/:id/transcript) --------------------------
+  // A stored page carries the same DaemonEvent envelope as the live stream, so
+  // its frames already have the shape the viewer understands. They must not go
+  // through the page's frame handler: that handler also drives live-only state
+  // (the token footer, the processing indicator, the turn counters and the
+  // scroll pin), and replaying old frames moves every one of them out from
+  // under a reader who may be mid-turn. The load response can make that same
+  // call only because clearTranscript() zeroes that state first.
+  //
+  // So stored frames are reduced here against a throwaway model and the caller
+  // splices the result in front of the live items. Row shapes stay identical
+  // because both paths drive the same operations above.
+  //
+  // user_message_chunk is drawn here and skipped by the live path, where the
+  // prompt is echoed locally at send time: a stored page carries no echo, so
+  // the reader's own messages only appear if this reducer draws them.
+  function stampOf(ev) {
+    var t = ev && ev._meta && ev._meta.serverTimestamp;
+    return typeof t === 'number' && Number.isFinite(t) ? t : 0;
+  }
+
+  // The update rides two ways on a stored page: nested under data.update the way
+  // a live frame carries it, or spread onto data itself. The SDK reads
+  // data.update first and falls back to data (DaemonSessionClient.hydrateEvent),
+  // so mirror that order rather than picking one; reading only the nested form
+  // silently draws no rows from a flat page.
+  function storedUpdate(ev) {
+    var data = ev.data;
+    if (!data || typeof data !== 'object') return null;
+    var nested = data.update;
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      return nested;
+    }
+    return typeof data.sessionUpdate === 'string' ? data : null;
+  }
+
+  function applyStoredFrame(m, ev) {
+    if (!ev || typeof ev !== 'object' || ev.type !== 'session_update') return;
+    var u = storedUpdate(ev);
+    if (!u) return;
+    var su = u.sessionUpdate;
+    var text = u.content && u.content.text;
+    var sentAt = stampOf(ev) || undefined;
+    // Child frames belong to the parent Agent tool's row, not the transcript.
+    var parentId =
+      u._meta && typeof u._meta.parentToolCallId === 'string'
+        ? u._meta.parentToolCallId
+        : '';
+    if (parentId) {
+      m.setSubagentType(parentId, u._meta.subagentType);
+      if (su === 'agent_message_chunk' && text)
+        m.appendSubagentText(parentId, text);
+      else if (su === 'tool_call' || su === 'tool_call_update')
+        m.upsertSubagentTool(u, parentId);
+      return;
+    }
+    if (su === 'user_message_chunk') return m.addUser(text || '', sentAt);
+    if (su === 'agent_message_chunk') {
+      if (u.content && u.content.type === 'image')
+        return m.addImage(u.content.mimeType, u.content.data);
+      if (text) m.appendAssistant(text, sentAt);
+      return;
+    }
+    if (su === 'agent_thought_chunk' && text) return m.appendThought(text);
+    if (su === 'tool_call' || su === 'tool_call_update') return m.upsertTool(u);
+    if (su === 'plan') return m.setPlan(u.entries);
+  }
+
+  // Returns the rows one stored page renders, oldest first, built on a model
+  // nothing else holds. The caller hands these to prependItems, which re-keys
+  // them; the ids minted here are only ever this model's own.
+  function replayStoredPage(events) {
+    var list = Array.isArray(events) ? events : [];
+    // A thought folds to a "Thought for Ns" header from the clock, and a stored
+    // page brings no clock of its own: Date.now would date every historical
+    // thought at the moment of the read and fold it to <1s. Feed the reducer
+    // the frames' own timestamps instead, so the duration is the one the run
+    // actually took.
+    var stamp = 0;
+    var m = createTranscriptModel({
+      now: function () {
+        return stamp || Date.now();
+      },
+    });
+    for (var i = 0; i < list.length; i++) {
+      var t = stampOf(list[i]);
+      if (t > stamp) stamp = t;
+      applyStoredFrame(m, list[i]);
+    }
+    // The page can end inside a thought, which nothing then closes: on the live
+    // path the next non-thought frame folds it.
+    m.finishThought();
+    return m.items;
   }
 
   globalThis.TranscriptModel = {
     clean: clean,
     createTranscriptModel: createTranscriptModel,
+    replayStoredPage: replayStoredPage,
   };
 })();

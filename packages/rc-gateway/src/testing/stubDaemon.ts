@@ -1007,17 +1007,33 @@ export async function startStubDaemon(
       v: 1,
       sessionId: String(req.params.id),
       events: [
+        // Stored events are DaemonEvent envelopes, the same shape a live SSE
+        // frame carries. Serving a made-up type here would let a caller that
+        // only understands session_update reduce the page to nothing and still
+        // see a 200 with two events.
         {
           id: 1,
           v: 1,
-          type: 'user_message',
-          data: { text: 'first record' },
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'first record' },
+            },
+          },
+          _meta: { serverTimestamp: 1_767_225_600_000 },
         },
         {
           id: 2,
           v: 1,
-          type: 'assistant_message',
-          data: { text: 'second record' },
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'second record' },
+            },
+          },
+          _meta: { serverTimestamp: 1_767_225_601_000 },
         },
       ],
       nextCursor: 'eyJyZWNvcmRJZCI6IjIifQ',

@@ -48,6 +48,15 @@ export interface BootViewerOptions {
   promptStatus?: number;
   /** ms the stub holds a prompt open before answering (models a long turn). */
   promptDelayMs?: number;
+  /**
+   * Body the stub serves on GET /session/:id/transcript. Left unset it serves
+   * its own default page; a scenario that asserts a specific number of paged
+   * rows sets this, because otherwise it would be measuring whatever the stub
+   * happened to invent rather than what it asked for.
+   */
+  transcriptPage?: unknown;
+  /** Status the stub answers GET /session/:id/transcript with (default 200). */
+  transcriptStatusCode?: number;
 }
 
 export interface Viewer {
@@ -69,6 +78,8 @@ export async function bootViewer(
     holdOpenMs: opts.holdOpenMs,
     promptStatus: opts.promptStatus,
     promptDelayMs: opts.promptDelayMs,
+    transcriptPage: opts.transcriptPage,
+    transcriptStatusCode: opts.transcriptStatusCode,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
