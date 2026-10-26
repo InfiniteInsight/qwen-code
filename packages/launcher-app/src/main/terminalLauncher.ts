@@ -44,7 +44,12 @@ export interface DrainResult {
   cursor: number;
   opened: string[];
   failed: Array<{ id: string; error: string }>;
-  /** Requests skipped because a tab for that session is already open. */
+  /**
+   * Requests not opened because THIS RUN already opened a tab for that
+   * session. Worded as what happened rather than as current state: the
+   * launcher cannot observe the tab being closed, so it cannot say one is
+   * open now (issue #68).
+   */
   skipped: string[];
   /**
    * The queue could not be read at all (no `qwen-rc`, gateway down). Distinct
@@ -129,8 +134,11 @@ export function pendingCommand(cursor: number): string {
 /**
  * Fetch queued requests and open a tab for each.
  *
- * `openSessions` is the caller's long-lived set of session ids with a tab
- * already open. Skipping repeats matters: with the daemon's default
+ * `openSessions` is the caller's set, for this app run, of session ids this run
+ * has already opened a tab for. It is not a claim about what is on screen now:
+ * `wt.exe` hands the tab to the terminal process and returns, so closure is
+ * invisible from here, which is why a tab the user has closed still suppresses
+ * a new one (issue #68). Skipping repeats matters: with the daemon's default
  * `sessionScope:'single'`, every "New conversation" in a workspace resolves the
  * SAME session id, so without this a user clicking twice gets two identical
  * tabs.

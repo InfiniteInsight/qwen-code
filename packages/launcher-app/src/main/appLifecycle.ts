@@ -103,6 +103,50 @@ export function summarizeError(raw: string): string {
   return last.length > 90 ? `${last.slice(0, 89)}…` : last;
 }
 
+/**
+ * The tray's status line for one drain pass.
+ *
+ * A skipped request has to say so. The tray is the only thing a packaged app
+ * can show (there is no console), and a pass that skipped everything used to
+ * fall through to `TRAY_IDLE_NOTE`, which is the same line a host with nothing
+ * to do shows. So the one outcome the user most needs to see, "you asked for a
+ * tab and this app deliberately did not open one", was indistinguishable from
+ * an idle queue.
+ *
+ * The wording is scoped to what the entry actually proves. `openSessions`
+ * records that THIS RUN opened a tab, not that a tab is open now: the launcher
+ * cannot observe `wt.exe` handing the tab to the terminal process, so closure is
+ * invisible to it. Saying "a tab is already open" would claim a fact nothing on
+ * this host measures, which is the reason a closed tab reads as a dead control
+ * (issue #68).
+ */
+export function terminalDrainNote(out: {
+  opened: readonly unknown[];
+  failed: ReadonlyArray<{ id: string; error: string }>;
+  skipped: readonly unknown[];
+  fetchFailed: boolean;
+}): string {
+  // A refusal outranks everything else: it is the one state with a next step.
+  if (out.failed.length > 0) {
+    return `tab refused: ${summarizeError(out.failed[0].error)}`;
+  }
+  if (out.fetchFailed) return 'cannot read the request queue';
+  if (out.opened.length > 0 && out.skipped.length > 0) {
+    return (
+      `opened ${out.opened.length} tab(s), skipped ${out.skipped.length} ` +
+      'this run already opened'
+    );
+  }
+  if (out.opened.length > 0) return `opened ${out.opened.length} tab(s)`;
+  if (out.skipped.length > 0) {
+    return (
+      `skipped ${out.skipped.length}: this run already opened a tab for ` +
+      'that conversation'
+    );
+  }
+  return TRAY_IDLE_NOTE;
+}
+
 /** Decide the tray menu's contents for the current app state. */
 export function trayMenuSpec(opts: {
   packaged: boolean;
