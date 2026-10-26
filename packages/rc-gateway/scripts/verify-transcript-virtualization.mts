@@ -2148,6 +2148,15 @@ type PageScenario =
          * can drive the refusal note the page writes from the response body.
          */
         exportStatusCode?: number;
+        /**
+         * Status the stub answers POST /session/:id/attachments with, so a
+         * scenario can drive the attach note the page writes from the response
+         * body. Pair it with `attachmentUploadErrorBody`: the stub's own
+         * default says `stub error`, which no real daemon ever sends.
+         */
+        attachmentUploadStatus?: number;
+        /** Body the stub answers a refused upload with. */
+        attachmentUploadErrorBody?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -7206,6 +7215,237 @@ PAGE_SCENARIOS.push({
     return `the footer reads ${JSON.stringify(text)}, the daemon's 65536/262144 rather than a running sum`;
   },
 });
+PAGE_SCENARIOS.push({
+  name: 'P55 a picked file reaches the daemon and rides with the next prompt',
+  // #109: the attachment routes had no path to the UI, so a phone could not
+  // put a file into a conversation. The harness hides the stub, so what the
+  // page actually sent is read off the wire: the upload's request line and the
+  // prompt body it later produced. Two files, because one is enough to prove a
+  // POST and only two can prove the page carried EACH answer.
+  waitView: false,
+  noConsoleErrors: true,
+  run: async ({ page, viewer }) => {
+    const uploads: {
+      path: string;
+      search: string;
+      type: string;
+      status: number;
+      json: Promise<unknown>;
+    }[] = [];
+    page.on('response', (r) => {
+      const u = new URL(r.url());
+      if (r.request().method() !== 'POST' || !u.pathname.endsWith('/attachments'))
+        return;
+      uploads.push({
+        path: u.pathname,
+        search: u.search,
+        type: r.request().headers()['content-type'] ?? '',
+        status: r.status(),
+        json: r.json().catch(() => null),
+      });
+    });
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+
+    await page.setInputFiles('#attach-file', [
+      {
+        name: 'crash.log',
+        mimeType: 'text/plain',
+        buffer: Buffer.from('stack trace here'),
+      },
+      {
+        name: 'shot.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      },
+    ]);
+    const listed = await page.waitForFunction(
+      () => {
+        const l = document.getElementById('pending-list');
+        const t = l ? (l.textContent ?? '') : '';
+        return t.includes('crash.log') && t.includes('shot.png') ? t : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    // Named on screen, not just held in a variable: a file the reader cannot
+    // see is the #70 failure mode all over again.
+    const shown = (await listed.jsonValue()) as string;
+    expect(
+      uploads.length === 2,
+      `the page made ${uploads.length} upload requests, not one per file`,
+    );
+    expect(
+      uploads.every((x) => x.path === `/session/${viewer.sessionId}/attachments`),
+      `the uploads went to ${JSON.stringify(uploads.map((x) => x.path))}`,
+    );
+    // The name travels in the query and the bytes carry the file's own media
+    // type, which is the contract the gateway forwards to the daemon.
+    expect(
+      uploads[0].search === '?name=crash.log' &&
+        uploads[1].search === '?name=shot.png',
+      `the names arrived as ${JSON.stringify(uploads.map((x) => x.search))}`,
+    );
+    expect(
+      uploads[0].type === 'text/plain' && uploads[1].type === 'image/png',
+      `the files arrived as ${JSON.stringify(uploads.map((x) => x.type))}, not their own media types`,
+    );
+    expect(
+      uploads.every((x) => x.status === 201),
+      `the daemon answered ${JSON.stringify(uploads.map((x) => x.status))}`,
+    );
+    const answers = await Promise.all(uploads.map((x) => x.json));
+    const refs = answers.map((a) => (a as { attachment?: unknown })?.attachment);
+    expect(
+      shown.includes('crash.log') && shown.includes('shot.png'),
+      `the strip reads ${JSON.stringify(shown)}, which does not name both files`,
+    );
+
+    await page.fill('#prompt', 'look at these');
+    // Armed before the click, because the request can leave while the click is
+    // still in flight.
+    const sent = page.waitForRequest(
+      (r) =>
+        r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/prompt'),
+      { timeout: 15_000 },
+    );
+    await page.click('#send');
+    const req = await sent;
+    const body = JSON.parse(req.postData() ?? '{}') as Record<string, unknown>;
+    const blocks = body['blocks'] as Record<string, unknown>[] | undefined;
+    expect(
+      Array.isArray(blocks),
+      `the prompt went as ${req.postData()}, which is not content blocks`,
+    );
+    expect(
+      blocks![0]?.['type'] === 'text' && blocks![0]?.['text'] === 'look at these',
+      `the first block is ${JSON.stringify(blocks![0])}, not the typed text`,
+    );
+    // Each reference is the daemon's answer field for field. This is the whole
+    // point of the page holding what came back: a block rebuilt from the File
+    // would carry a name and a type the page invented instead.
+    expect(
+      blocks!.length === 3 &&
+        JSON.stringify(blocks[1]) === JSON.stringify(refs[0]) &&
+        JSON.stringify(blocks[2]) === JSON.stringify(refs[1]),
+      `the prompt carried ${JSON.stringify(blocks)}, not the text plus ${JSON.stringify(refs)}`,
+    );
+    // The kinds differ per file, and only the store decides that: a png is an
+    // image, a log is a resource. Seeing both in one prompt means the page
+    // relayed each answer rather than settling on one kind for everything.
+    const kinds = refs.map((r) => (r as { type?: unknown })?.type);
+    expect(
+      kinds[0] === 'resource' && kinds[1] === 'image',
+      `the daemon answered ${JSON.stringify(kinds)}, so this proves nothing about the relay`,
+    );
+    const stillStaged = await page.evaluate(
+      () => document.getElementById('pending')?.hidden === true,
+    );
+    expect(
+      stillStaged,
+      'the strip still shows both files after they were sent',
+    );
+    return `two picks reached the daemon as ${JSON.stringify(kinds)} and rode with the prompt unchanged, so a phone can put a file into a conversation`;
+  },
+});
+PAGE_SCENARIOS.push({
+  name: 'P56 a prompt with nothing attached keeps its plain shape',
+  // P55 only means something if the page did not start sending content blocks
+  // for everything. Same page, no file picked: the prompt has to go out in the
+  // {prompt} shape it has always had, or the attach path has quietly become the
+  // only path.
+  waitView: false,
+  noConsoleErrors: true,
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    await page.fill('#prompt', 'just a question');
+    const sent = page.waitForRequest(
+      (r) =>
+        r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/prompt'),
+      { timeout: 15_000 },
+    );
+    await page.click('#send');
+    const body = JSON.parse((await sent).postData() ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    expect(
+      body['blocks'] === undefined,
+      `the page sent ${JSON.stringify(body)}, which carries blocks it was never given`,
+    );
+    expect(
+      body['prompt'] === 'just a question',
+      `the page sent ${JSON.stringify(body)}, not the plain prompt`,
+    );
+    return `with nothing picked the prompt stays ${JSON.stringify(body)}, so blocks are the attach path rather than the default`;
+  },
+});
+PAGE_SCENARIOS.push({
+  name: 'P57 a refused upload says which reason it was, and stages nothing',
+  // The other half of the attach path. The route answers several different
+  // failures (the byte cap, a daemon without these routes, a dead daemon) and
+  // the note is the only place a reader learns which one they hit, so a verdict
+  // flattened into "failed" is invisible everywhere else. The stub's own default
+  // body says `stub error`, which no daemon ever sends, so the scenario supplies
+  // the envelope the real daemon uses.
+  waitView: false,
+  stub: {
+    attachmentUploadStatus: 413,
+    attachmentUploadErrorBody: {
+      error: 'attachment too large',
+      errorKind: 'attachment_too_large',
+    },
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    // Armed before the pick. The wait is keyed on the RESPONSE rather than on
+    // the first text to appear, because the page writes an "uploading…" line
+    // the instant the pick happens: waiting for any text at all matches that
+    // line and reads the verdict before the refusal exists.
+    const refused = page.waitForResponse(
+      (r) => new URL(r.url()).pathname.endsWith('/attachments'),
+      { timeout: 15_000 },
+    );
+    await page.setInputFiles('#attach-file', {
+      name: 'huge.log',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('x'),
+    });
+    const res = await refused;
+    expect(
+      res.status() === 413,
+      `the daemon answered ${res.status()}, not the 413 this scenario drives`,
+    );
+    // Settled on the note CHANGING, which says nothing about its content; what
+    // replaced it is asserted below.
+    const note = await page.waitForFunction(
+      () => {
+        const n = document.getElementById('pending-note');
+        const t = n ? (n.textContent ?? '') : '';
+        return t !== '' && !t.startsWith('uploading') ? t : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    const text = (await note.jsonValue()) as string;
+    expect(
+      text.includes('attachment_too_large'),
+      `the note said ${JSON.stringify(text)}, which does not name the reason`,
+    );
+    // Refused means refused: a file the daemon never accepted must not sit on
+    // the strip ready to ride with the next prompt.
+    const staged = await page.evaluate(
+      () => document.getElementById('pending-list')?.textContent ?? '',
+    );
+    expect(
+      staged === '',
+      `${JSON.stringify(staged)} was staged even though the daemon refused it`,
+    );
+    return `a refused upload reports ${JSON.stringify(text)} and stages nothing`;
+  },
+});
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
@@ -7221,6 +7461,8 @@ async function runPageScenario(
     sessionStatus: s.stub?.sessionStatus,
     capabilitiesFeatures: s.stub?.capabilitiesFeatures,
     exportStatusCode: s.stub?.exportStatusCode,
+    attachmentUploadStatus: s.stub?.attachmentUploadStatus,
+    attachmentUploadErrorBody: s.stub?.attachmentUploadErrorBody,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
