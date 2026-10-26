@@ -77,6 +77,13 @@ export interface BootViewerOptions {
    * that never becomes visible.
    */
   capabilitiesFeatures?: string[];
+  /**
+   * Status the stub answers GET /session/:id/export with (default 200). A
+   * scenario that drives the refusal note sets this, because the page reads
+   * the reason off the response body and there is no other way to make the
+   * daemon refuse.
+   */
+  exportStatusCode?: number;
 }
 
 export interface Viewer {
@@ -103,6 +110,7 @@ export async function bootViewer(
     transcriptPage: opts.transcriptPage,
     transcriptStatusCode: opts.transcriptStatusCode,
     capabilitiesFeatures: opts.capabilitiesFeatures,
+    exportStatusCode: opts.exportStatusCode,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
