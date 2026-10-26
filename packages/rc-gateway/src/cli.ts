@@ -108,7 +108,12 @@ import {
 import {
   resolveSuggestConfig,
   createChatTransport,
+  isSuggestEndpointPinned,
 } from './idle/chatTransport.js';
+import {
+  createSuggestChatSelector,
+  resolveSettingsSuggestConfig,
+} from './idle/settingsModel.js';
 import {
   resolveIdleEnabled,
   createIdleSuggestionHandler,
@@ -627,7 +632,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     (msg) => console.warn(`idle: ${msg}`),
   );
   if (resolveIdleEnabled()) idleConfig.enabled = true;
-  const suggestCfg = resolveSuggestConfig();
+  // The env chain first, since it is the operator's explicit override for THIS
+  // process; then the user's own settings.json. Env alone leaves the feature
+  // inert on a workstation whose gateway runs as a systemd unit exporting none
+  // of the provider keys — the keys are in settings.json's `env` map, which is
+  // where qwen itself reads them. Building a handler is NOT egress: `enabled` in
+  // idle.yaml stays the sole egress guard and is OFF by default.
+  const suggestCfg =
+    resolveSuggestConfig() ?? (await resolveSettingsSuggestConfig());
   const idleStatus: IdleStatusResolver = (sessionId) => {
     if (!suggestCfg) return undefined; // idle not wired → available:false
     return {
@@ -1364,6 +1376,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   if (suggestCfg) {
     const idleHandle = createIdleSuggestionHandler({
       chat: createChatTransport(suggestCfg),
+      // Per-session model: ask the model the watched conversation actually runs
+      // (read off its own transcript) instead of one fixed endpoint. Stays OFF
+      // when the operator pinned the destination with the dedicated
+      // QWEN_RC_SUGGEST_* pair: naming both a key and a host is an explicit
+      // instruction about where transcript content goes, which selection must
+      // not override. A model settings cannot map falls back to the transport
+      // above, so selection never turns egress on or off by itself.
+      getChat: isSuggestEndpointPinned()
+        ? undefined
+        : createSuggestChatSelector(suggestCfg),
       bus: ownerEvents,
       audit,
       getConfig: () => idleConfig,

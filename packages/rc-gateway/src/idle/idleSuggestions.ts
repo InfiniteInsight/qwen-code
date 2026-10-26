@@ -11,7 +11,7 @@ import { resolveChatsDir } from '../sessions/chatsPath.js';
 import type { ChatTransport } from './chatTransport.js';
 import type { IdleConfig } from './config.js';
 import { generateSuggestions, type TurnText } from './suggester.js';
-import { readRecentTurns } from './transcriptTail.js';
+import { readRecentTurns, readSessionModel } from './transcriptTail.js';
 
 /**
  * Explicit opt-in gate for idle suggestions (proposal `add-idle-suggestions`).
@@ -57,6 +57,21 @@ export interface IdleSuggestionDeps {
   resolveDir?: (cwd: string) => string;
   /** Read recent turns from a chats dir. Default: the bounded tail reader. */
   readTurns?: (chatsDir: string, sessionId: string) => Promise<TurnText[]>;
+  /**
+   * Read the model that produced the session's last assistant turn. Default: the
+   * bounded tail reader. The transcript is the source rather than a gateway-side
+   * copy because it records the model the conversation ACTUALLY ran, including
+   * after a mid-conversation `/model` switch.
+   */
+  readModel?: (chatsDir: string, sessionId: string) => Promise<string | null>;
+  /**
+   * Per-session transport selector (#92): resolve the endpoint for the model the
+   * watched conversation runs, so suggestions follow that conversation instead of
+   * one fixed model. Returning `undefined` (a model that cannot be mapped) falls
+   * back to `chat`, so an unmapped model still gets suggestions rather than
+   * silently none. Absent -> always `chat` (the single-model behaviour).
+   */
+  getChat?: (modelId: string) => Promise<ChatTransport | undefined>;
   /**
    * Per-session override accessor (the `/suggest on|off` toggle store). Returns
    * `false` to DISABLE idle suggestions for a session, `true`/`undefined` to
@@ -122,6 +137,7 @@ export function createIdleSuggestionHandler(
 ): IdleSuggestionHandle {
   const resolveDir = deps.resolveDir ?? ((cwd: string) => resolveChatsDir(cwd));
   const readTurns = deps.readTurns ?? readRecentTurns;
+  const readModel = deps.readModel ?? readSessionModel;
   const now = deps.now ?? Date.now;
   const ttlSec = deps.suggestionsTtlSec ?? DEFAULT_SUGGESTIONS_TTL_SEC;
 
@@ -196,9 +212,19 @@ export function createIdleSuggestionHandler(
           );
         }
         if (ctrl.signal.aborted) return;
+        // Per-session model (#92): ask the model the watched conversation
+        // actually runs. An unmappable model falls back to the env-resolved
+        // endpoint above, so selection can only change WHICH coherent endpoint is
+        // asked, never whether egress happens.
+        // A failed model read is NOT allowed to cost the session its
+        // suggestions: the fallback transport is still a coherent endpoint, so
+        // swallow and continue rather than letting this land in the outer catch.
+        const modelId = await readModel(chatsDir, sessionId).catch(() => null);
+        const chat =
+          (modelId ? await deps.getChat?.(modelId) : undefined) ?? deps.chat;
         const suggestions = await generateSuggestions({
           turns,
-          chat: deps.chat,
+          chat,
           max: cfg.maxSuggestions,
           signal: ctrl.signal,
           timeoutMs: deps.timeoutMs,
