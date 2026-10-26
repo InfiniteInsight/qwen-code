@@ -30,6 +30,7 @@
  *   ONLY=V9,V10 npx tsx scripts/verify-transcript-virtualization.mts view
  */
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page } from 'playwright';
@@ -2142,6 +2143,11 @@ type PageScenario =
          * against markup that never becomes visible.
          */
         capabilitiesFeatures?: string[];
+        /**
+         * Status the stub answers GET /session/:id/export with, so a scenario
+         * can drive the refusal note the page writes from the response body.
+         */
+        exportStatusCode?: number;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -7050,6 +7056,156 @@ PAGE_SCENARIOS.push({
     return 'with no feature tag the panel stays closed and lists nothing, so P50 seeing it open is the tag working';
   },
 });
+PAGE_SCENARIOS.push({
+  name: 'P52 the export button hands the remote a real file, bytes and all',
+  // Nothing here needs the transcript view: the footer is drawn by the watch
+  // path, so this boots the gateway and watches directly, the shape P50 uses
+  // for the other non-chat surfaces.
+  waitView: false,
+  noConsoleErrors: true,
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.endsWith('/export')) asked.push(u.pathname + u.search);
+    });
+    await watch(page, viewer.sessionId);
+    await page.waitForFunction(
+      () => !!document.getElementById('footer-export'),
+      null,
+      { timeout: 10_000 },
+    );
+
+    // Armed before the click: the save can land while the click is still in
+    // flight, and a listener attached afterwards would miss it entirely.
+    const armed = page.waitForEvent('download', { timeout: 15_000 });
+    await page.click('#footer-export');
+    const dl = await armed;
+
+    // The route is format-specific and the page asks for markdown, the form a
+    // person pastes somewhere else. A missing query means it took the daemon's
+    // default instead, which is a different file.
+    expect(
+      asked.length === 1 && asked[0].endsWith('/export?format=md'),
+      `the page asked ${JSON.stringify(asked)}, not one /export?format=md`,
+    );
+
+    // The filename is the DAEMON's, from its Content-Disposition, relayed in
+    // the gateway's JSON body. A name invented here would hide a gateway that
+    // dropped the field on the way through.
+    const short = viewer.sessionId.slice(0, 8);
+    expect(
+      dl.suggestedFilename() === `session-${short}.md`,
+      `saved as ${dl.suggestedFilename()}, not session-${short}.md`,
+    );
+    const why = await dl.failure();
+    expect(why === null, `the browser reported a failed save: ${why?.errorMessage}`);
+    const p = await dl.path();
+    const text = p ? readFileSync(p, 'utf8') : '';
+    expect(
+      text === `# session ${short}\n`,
+      `the saved file holds ${JSON.stringify(text)}, not the daemon's bytes`,
+    );
+
+    // Re-enabled on the way out, so a reader can export again without
+    // reloading. Left disabled it is a one-shot control.
+    const after = await page.evaluate(() => ({
+      disabled: document.getElementById('footer-export')?.disabled === true,
+      note: document.getElementById('footer-export-note')?.textContent ?? '',
+    }));
+    expect(!after.disabled, 'the export button stayed disabled after a success');
+    expect(
+      after.note === '',
+      `a successful export still left a note behind: ${JSON.stringify(after.note)}`,
+    );
+    return `one click saved ${JSON.stringify(dl.suggestedFilename())} holding ${JSON.stringify(text)}, so a token on a phone can get the conversation out`;
+  },
+});
+PAGE_SCENARIOS.push({
+  name: 'P53 a refused export says which reason it was, not just failed',
+  // The other half of the export path. The route answers three different
+  // failures (a format the daemon rejects, a session the pool dropped, a dead
+  // daemon) and the note is the only place a reader learns which one they hit,
+  // so a verdict flattened into "failed" is invisible everywhere else.
+  waitView: false,
+  stub: { exportStatusCode: 404 },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForFunction(
+      () => !!document.getElementById('footer-export'),
+      null,
+      { timeout: 10_000 },
+    );
+    // A refused export must produce no file at all. Short timeout, because the
+    // correct outcome here is the event never arriving.
+    let produced = false;
+    const armed = page
+      .waitForEvent('download', { timeout: 4_000 })
+      .then(() => {
+        produced = true;
+      })
+      .catch(() => undefined);
+    await page.click('#footer-export');
+    const note = await page.waitForFunction(
+      () => {
+        const n = document.getElementById('footer-export-note');
+        return n && n.textContent ? n.textContent : null;
+      },
+      null,
+      { timeout: 10_000 },
+    );
+    await armed;
+    const text = (await note.jsonValue()) as string;
+    expect(!produced, 'a refused export still produced a download');
+    // The daemon's 404 is a session it cannot load, and the gateway names it
+    // session_not_found. Anything vaguer sends the reader hunting for a cause
+    // the page already knew.
+    expect(
+      text.includes('session_not_found'),
+      `the note said ${JSON.stringify(text)}, which does not name the reason`,
+    );
+    return `a refused export reports ${JSON.stringify(text)} rather than a bare failure`;
+  },
+});
+PAGE_SCENARIOS.push({
+  name: 'P54 the footer fill is the daemon usage read, not the stream sum',
+  // The footer used to draw a running in/out sum off the live stream, which
+  // counts what the browser happened to see rather than how full the window
+  // is. The stub answers /context-usage with 65536 of a 262144 window, and
+  // those two numbers appear nowhere else in the app, so seeing them formatted
+  // here can only mean the read was made and parsed.
+  waitView: false,
+  noConsoleErrors: true,
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.endsWith('/context-usage')) asked.push(u.pathname);
+    });
+    await watch(page, viewer.sessionId);
+    const fill = await page.waitForFunction(
+      () => {
+        const f = document.getElementById('session-footer');
+        const t = f ? f.textContent ?? '' : '';
+        return t.includes('65.5k/262.1k') ? t : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    expect(
+      asked.length >= 1,
+      'the page never asked /context-usage, so the fill came from somewhere else',
+    );
+    const text = (await fill.jsonValue()) as string;
+    // The stream-sum shape is "N in / M out". Its absence next to the fill is
+    // what shows the read replaced the sum rather than sitting beside it.
+    expect(
+      !text.includes(' in / '),
+      `the footer still carries the stream sum alongside the fill: ${JSON.stringify(text)}`,
+    );
+    return `the footer reads ${JSON.stringify(text)}, the daemon's 65536/262144 rather than a running sum`;
+  },
+});
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
@@ -7064,6 +7220,7 @@ async function runPageScenario(
     permissionStatus: s.stub?.permissionStatus,
     sessionStatus: s.stub?.sessionStatus,
     capabilitiesFeatures: s.stub?.capabilitiesFeatures,
+    exportStatusCode: s.stub?.exportStatusCode,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
