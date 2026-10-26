@@ -2850,6 +2850,44 @@
       const clean = TranscriptModel.clean;
       const strOr = (v, d) => (typeof v === 'string' && v ? clean(v) : d);
 
+      // ---- Self-echo bookkeeping (issue #114) ------------------------------
+      // The send path echoes what you typed immediately, so the daemon's
+      // `user_message_chunk` for that same prompt used to be dropped on every
+      // path. That was only ever correct in the window that typed it: a second
+      // window, a reload, or a turn started on another device has no local
+      // echo, so it rendered an assistant-only transcript.
+      //
+      // So the frame is drawn unless it is this window's own echo. The daemon
+      // stamps no per-browser origin the viewer can read (the gateway is the
+      // daemon's single client, so an origin id names the gateway, not the
+      // person), which leaves the text itself as the only handle: a send
+      // queues its cleaned text here and the matching frame consumes it, FIFO,
+      // so two identical prompts in a row still pair up in order.
+      //
+      // Markers expire because a refused send never produces a frame to
+      // consume one, and a stale marker would silently swallow someone else's
+      // identical message later.
+      const SELF_ECHO_TTL_MS = 60_000;
+      const selfEchoes = [];
+      function noteSelfSend(text) {
+        selfEchoes.push({ text: clean(text || ''), at: Date.now() });
+        if (selfEchoes.length > 32) selfEchoes.shift();
+      }
+      function claimSelfEcho(text) {
+        const want = clean(text || '');
+        const now = Date.now();
+        while (selfEchoes.length && now - selfEchoes[0].at > SELF_ECHO_TTL_MS)
+          selfEchoes.shift();
+        const at = selfEchoes.findIndex((e) => e.text === want);
+        if (at < 0) return false;
+        selfEchoes.splice(at, 1);
+        return true;
+      }
+      function unmarkSelfSend(text) {
+        const at = selfEchoes.findIndex((e) => e.text === clean(text || ''));
+        if (at >= 0) selfEchoes.splice(at, 1);
+      }
+
       // The view needs the vendored virtual-core bundle, an ES module. Until
       // the import settles transcriptView is null: frames only update the
       // model, and the view renders everything buffered when it attaches. A
@@ -3188,6 +3226,9 @@
         userTurnsSeen = 0;
         forkTurnCount = 0;
         asstThisTurn = false;
+        // A pending echo belongs to the conversation it was sent in. Carrying
+        // it into the next one would let it eat that conversation's row.
+        selfEchoes.length = 0;
         clearCrashBanner(); // a new watch starts with no crash banner
         clearUnsent(); // and with no leftover refused-send draft
         // The strip's per-session count goes with the session it counted, so the
@@ -5663,11 +5704,15 @@
         // Token usage rides on agent_message_chunk _meta.usage (the frame may
         // carry empty text), so read it before the text guard below.
         updateLiveTokens(u._meta && u._meta.usage);
-        // Still NOT rendered (the prompt is echoed locally on send) — but
-        // counted: each user record arms the next turn boundary.
+        // Counted on every path: each user record arms the next turn
+        // boundary. Drawn unless it is this window's own echo (#114), which
+        // the send path already put on screen at the moment you typed it.
         if (su === 'user_message_chunk') {
           userTurnsSeen += 1;
           asstThisTurn = false;
+          // Drawn before the arm below, because addUser closes the turn it
+          // opens and the arm is what re-opens it.
+          if (!claimSelfEcho(text)) addUser(text || '', sentAt);
           // #73: the second arm point. A turn started on the laptop reaches this
           // transcript as one of these frames, and a live one means a prompt was
           // just accepted, so the work is real and this can say so at once
@@ -7217,7 +7262,11 @@
         // the duration of the turn and then discards whatever was typed in the
         // meantime.
         $('prompt').value = '';
-        // echo locally; the daemon's user_message_chunk is ignored
+        // Echo locally for the immediate feedback, and queue the text so the
+        // daemon's echo of THIS prompt is recognised and not drawn twice
+        // (#114). A frame that matches nothing here is someone else's turn -
+        // another window, another device - and now gets drawn.
+        noteSelfSend(prompt);
         const echoed = addUser(prompt, Date.now());
         showProcessing(); // visible feedback until the turn's first frame
         // Set only when the daemon refused before the turn began, so the echo
@@ -7302,6 +7351,10 @@
           }
         }
         if (refused) {
+          // The daemon never ran this prompt, so no frame is coming to consume
+          // the marker. Leaving it would let it swallow someone else's
+          // identical message later.
+          unmarkSelfSend(prompt);
           echoed.notSent = refused;
           transcriptModel.touch(echoed);
           offerUnsent(prompt, refused);
