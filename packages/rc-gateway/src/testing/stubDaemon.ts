@@ -1315,9 +1315,15 @@ export async function startStubDaemon(
           type: STUB_SUPPORTED_IMAGE_MIME_TYPES.has(declaredMimeType)
             ? 'image'
             : 'resource',
-          attachmentId: 'att-1',
-          name: String(req.query['name'] ?? ''),
-          mimeType: req.headers['content-type'] ?? 'application/octet-stream',
+          // The reference has no `name` field, and the id IS the stored name:
+          // the store answers `attachmentId: name` (:590) with the mime it
+          // inferred from that same name (:585). A page that read `name`, or
+          // that treated the id as an opaque token, would work here and show
+          // blanks on a device. `mimeType` stays the declared one, which is
+          // what the store's own check at :355-360 forces it to be whenever
+          // the kind is image; an unusual extension can still diverge.
+          attachmentId: String(req.query['name'] ?? 'attachment'),
+          mimeType: declaredMimeType,
           size: body.length,
         },
       );
@@ -1335,7 +1341,17 @@ export async function startStubDaemon(
     }
     res.status(200).json(
       opts.attachmentListResult ?? {
-        attachments: [{ attachmentId: 'att-1', name: 'log.txt', size: 12 }],
+        // The same four fields the store builds for every entry at :840-846,
+        // in the store's own order (upload order, mtime as the key). There is
+        // no `name` to read: the name is the `attachmentId`.
+        attachments: [
+          {
+            type: 'resource',
+            attachmentId: 'log.txt',
+            mimeType: 'text/plain',
+            size: 12,
+          },
+        ],
       },
     );
   });

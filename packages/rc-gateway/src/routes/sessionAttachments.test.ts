@@ -146,9 +146,12 @@ describe('POST /session/:id/attachments', () => {
     );
 
     expect(res.status).toBe(201);
-    // The reference is the daemon's, relayed rather than re-described.
+    // The reference is the daemon's, relayed rather than re-described. The id
+    // is the stored name itself (`attachmentId: name`,
+    // acp-bridge/src/sessionAttachments.ts:590), so a gateway that minted its
+    // own identifier would fail this rather than pass on it.
     const attachment = res.body['attachment'] as Record<string, unknown>;
-    expect(attachment['attachmentId']).toBe('att-1');
+    expect(attachment['attachmentId']).toBe('crash.log');
 
     expect(stub.lastAttachmentUpload).toEqual({
       name: 'crash.log',
@@ -345,8 +348,16 @@ describe('GET /session/:id/attachments', () => {
     const body = await jsonOf(res);
 
     expect(res.status).toBe(200);
+    // The four fields the store builds per entry (:840-846), in its own order:
+    // upload order keyed on mtime. There is no `name` field to read; the name
+    // IS the attachmentId.
     expect(body['attachments']).toEqual([
-      { attachmentId: 'att-1', name: 'log.txt', size: 12 },
+      {
+        type: 'resource',
+        attachmentId: 'log.txt',
+        mimeType: 'text/plain',
+        size: 12,
+      },
     ]);
     expect(stub.lastAttachmentListSessionId).toBe('s-9');
   });
