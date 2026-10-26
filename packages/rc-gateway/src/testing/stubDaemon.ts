@@ -109,6 +109,12 @@ export interface StubDaemon {
    * untouched, so a test can only prove that by reading what arrived here.
    */
   lastTurnIndexQuery: Record<string, unknown> | undefined;
+  /**
+   * Session id the most recent POST /session/:id/recap carried. The gateway
+   * is supposed to carry the watched id through to the daemon, and only what
+   * arrived here can prove that it did.
+   */
+  lastRecapSessionId: string | undefined;
   /** What the most recent POST /session/:id/attachments carried. */
   lastAttachmentUpload:
     | {
@@ -330,6 +336,14 @@ export interface StubDaemonOptions {
   turnIndexStatusCode?: number;
   /** Full body for GET /session/:id/turn-index (overrides the default page). */
   turnIndexPage?: unknown;
+  /**
+   * Status for POST /session/:id/recap (default 200). A 404 is how a daemon
+   * from before the recap route answers a request for it, which is the one
+   * failure the gateway must not report as a missing conversation.
+   */
+  recapStatusCode?: number;
+  /** Full body for POST /session/:id/recap (overrides the default pair). */
+  recapResult?: unknown;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -544,6 +558,7 @@ export async function startStubDaemon(
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
+    lastRecapSessionId: undefined as string | undefined,
     lastAttachmentUpload: undefined as
       | {
           name: unknown;
@@ -1127,6 +1142,29 @@ export async function startStubDaemon(
         },
       ],
       startTime: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  app.post('/session/:id/recap', (req, res) => {
+    state.lastRecapSessionId = String(req.params.id);
+    const status = opts.recapStatusCode ?? 200;
+    if (status !== 200) {
+      // A daemon from before the route existed 404s, with no code in the
+      // body to tell anyone. The stub refuses the same way so a test can
+      // prove the gateway reports an old daemon as old rather than as a
+      // conversation that has gone missing.
+      res.status(status).json({ error: 'Not Found' });
+      return;
+    }
+    if (opts.recapResult !== undefined) {
+      res.status(200).json(opts.recapResult);
+      return;
+    }
+    res.status(200).json({
+      sessionId: String(req.params.id),
+      // A real DaemonSessionRecapResult: one sentence, in the daemon's own
+      // voice, naming what the conversation was about.
+      recap: 'Asked why paging skipped a row, then fixed the offset math.',
     });
   });
 
@@ -1740,6 +1778,9 @@ export async function startStubDaemon(
     },
     get lastTurnIndexQuery() {
       return state.lastTurnIndexQuery;
+    },
+    get lastRecapSessionId() {
+      return state.lastRecapSessionId;
     },
     get lastAttachmentUpload() {
       return state.lastAttachmentUpload;

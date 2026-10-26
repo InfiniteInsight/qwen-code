@@ -142,6 +142,7 @@ import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js'
 import { createSessionExportRoute } from './routes/sessionExport.js';
 import { createSessionTranscriptRoute } from './routes/sessionTranscript.js';
 import { createSessionTurnIndexRoute } from './routes/sessionTurnIndex.js';
+import { createSessionRecapRoute } from './routes/sessionRecap.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -793,6 +794,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionTurnIndexRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/recap — asks the daemon for its one-sentence
+  // 'where did I leave off' summary of one conversation. It is a POST
+  // because it costs a model call, and it sits at SESSION_READ because it
+  // reveals nothing the transcript route above does not. The per-actor cap
+  // stays: being a read is about what it reveals, the cap is about what it
+  // spends. `enforceSessionLock` guards it like every other session route,
+  // so a share token cannot ask for a conversation it is not confined to.
+  // No gateway timeout: the SDK wrapper skips `fetchTimeoutMs` for this
+  // call and the bridge waits on a longer backstop, so a shorter cut here
+  // would only turn a slow recap into a failed one. Bare namespace, 1:1
+  // with the daemon route.
+  app.post(
+    '/session/:id/recap',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: a recap costs tokens like a prompt
+    createSessionRecapRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
