@@ -145,3 +145,24 @@ export function createChatTransport(
     return typeof content === 'string' ? content : '';
   };
 }
+
+/**
+ * True when the operator PINNED the suggestion destination with the dedicated
+ * `QWEN_RC_SUGGEST_API_KEY` + `QWEN_RC_SUGGEST_BASE_URL` pair.
+ *
+ * Why callers care: per-session model selection re-points suggestion calls at
+ * whatever host the watched conversation runs. A bare `OPENAI_API_KEY` or
+ * `DASHSCOPE_API_KEY` is ambient credential, not a chosen destination, so
+ * selection should apply to it. The dedicated pair is different — naming both a
+ * key and a host is an explicit instruction about where transcript content
+ * goes, and silently overriding that would be a security change, not a
+ * convenience one. Only this pair counts as a pin.
+ */
+export function isSuggestEndpointPinned(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return Boolean(
+    (env['QWEN_RC_SUGGEST_API_KEY'] ?? '').trim() &&
+      (env['QWEN_RC_SUGGEST_BASE_URL'] ?? '').trim(),
+  );
+}

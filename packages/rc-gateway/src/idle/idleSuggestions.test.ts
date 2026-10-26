@@ -329,3 +329,94 @@ describe('createIdleSuggestionHandler', () => {
     });
   });
 });
+
+describe('per-session model selection', () => {
+  it('asks the model the watched conversation runs, not the fixed endpoint', async () => {
+    const asked: string[] = [];
+    const readModel = vi.fn(async (chatsDir: string, sessionId: string) => {
+      asked.push(`${chatsDir}|${sessionId}`);
+      return 'session-model';
+    });
+    const { handler, events } = harness({
+      over: {
+        chat: async () => '["from the fixed endpoint"]',
+        readModel,
+        getChat: async (modelId: string) =>
+          modelId === 'session-model'
+            ? async () => '["from the session model"]'
+            : undefined,
+      },
+    });
+    handler('sess-9', 'proj-w');
+    await flush();
+    const ev = events[0];
+    if (ev.type !== 'idle_suggestions') throw new Error('no frame');
+    expect(ev.suggestions).toEqual(['from the session model']);
+    // The reader is scoped to THIS session's own transcript.
+    expect(readModel).toHaveBeenCalledTimes(1);
+    expect(asked).toEqual(['/chats/proj-w|sess-9']);
+  });
+
+  it('keeps the fixed endpoint when the selector cannot map the model', async () => {
+    const { handler, events } = harness({
+      over: {
+        chat: async () => '["from the fixed endpoint"]',
+        readModel: async () => 'unmapped-model',
+        getChat: async () => undefined,
+      },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    const ev = events[0];
+    if (ev.type !== 'idle_suggestions') throw new Error('no frame');
+    expect(ev.suggestions).toEqual(['from the fixed endpoint']);
+  });
+
+  it('does not consult the selector when the transcript names no model', async () => {
+    const getChat = vi.fn(async () => async () => '["should not be used"]');
+    const { handler, events } = harness({
+      over: {
+        chat: async () => '["from the fixed endpoint"]',
+        readModel: async () => null,
+        getChat,
+      },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    expect(getChat).not.toHaveBeenCalled();
+    const ev = events[0];
+    if (ev.type !== 'idle_suggestions') throw new Error('no frame');
+    expect(ev.suggestions).toEqual(['from the fixed endpoint']);
+  });
+
+  it('a failed model read costs the session nothing', async () => {
+    const { handler, events } = harness({
+      over: {
+        chat: async () => '["from the fixed endpoint"]',
+        readModel: async () => {
+          throw new Error('transcript unreadable');
+        },
+        getChat: async () => async () => '["should not be used"]',
+      },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    // Selection is enrichment: a read failure must not land in the outer catch
+    // and silently drop suggestions the fallback endpoint could still make.
+    const ev = events[0];
+    if (ev.type !== 'idle_suggestions') throw new Error('no frame');
+    expect(ev.suggestions).toEqual(['from the fixed endpoint']);
+  });
+
+  it('selection cannot turn egress on: a DISABLED config never reads the model', async () => {
+    const readModel = vi.fn(async () => 'session-model');
+    const { handler, events } = harness({
+      config: { enabled: false },
+      over: { readModel, getChat: async () => async () => '["a"]' },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    expect(readModel).not.toHaveBeenCalled();
+    expect(events).toHaveLength(0);
+  });
+});

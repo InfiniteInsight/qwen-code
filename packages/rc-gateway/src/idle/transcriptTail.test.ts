@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readRecentTurns } from './transcriptTail.js';
+import { readRecentTurns, readSessionModel } from './transcriptTail.js';
 
 const SID = '00000000-0000-0000-0000-000000000001';
 
@@ -125,5 +125,58 @@ describe('readRecentTurns', () => {
       { role: 'user', text: 'good' },
       { role: 'assistant', text: 'also good' },
     ]);
+  });
+});
+
+describe('readSessionModel', () => {
+  it('returns the model of the LAST assistant record (newest-biased)', async () => {
+    await writeTranscript([
+      rec('user', 'first', { model: 'stale-model' }),
+      rec('assistant', 'a1', { model: 'first-model' }),
+      rec('system', 'switched', { model: 'not-a-turn' }),
+      rec('assistant', 'a2', { model: 'current-model' }),
+      rec('tool_result', 'dump', { model: 'also-ignored' }),
+    ]);
+    expect(await readSessionModel(dir, SID)).toBe('current-model');
+  });
+
+  it('trims the stored model name', async () => {
+    await writeTranscript([
+      rec('assistant', 'a', { model: '  spaced-model  ' }),
+    ]);
+    expect(await readSessionModel(dir, SID)).toBe('spaced-model');
+  });
+
+  it('returns null when no assistant record carries a model', async () => {
+    await writeTranscript([
+      rec('user', 'u', { model: 'user-record-has-no-model-field' }),
+      rec('assistant', 'a'),
+    ]);
+    expect(await readSessionModel(dir, SID)).toBeNull();
+  });
+
+  it('returns null for a missing file, an empty file, and an invalid id', async () => {
+    expect(await readSessionModel(dir, SID)).toBeNull();
+    await writeFile(join(dir, `${SID}.jsonl`), '', 'utf8');
+    expect(await readSessionModel(dir, SID)).toBeNull();
+    expect(await readSessionModel(dir, '../etc/passwd')).toBeNull();
+  });
+
+  it('skips corrupt lines and blank model values rather than throwing', async () => {
+    await writeTranscript([
+      '{ not json',
+      rec('assistant', 'a', { model: 'good-model' }),
+      rec('assistant', 'b', { model: '   ' }),
+    ]);
+    expect(await readSessionModel(dir, SID)).toBe('good-model');
+  });
+
+  it('a model pushed out of the byte window yields null, no crash', async () => {
+    const pad = 'x'.repeat(4000);
+    await writeTranscript([
+      rec('assistant', 'early', { model: 'out-of-window' }),
+      rec('user', pad),
+    ]);
+    expect(await readSessionModel(dir, SID, { maxBytes: 200 })).toBeNull();
   });
 });
