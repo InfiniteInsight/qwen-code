@@ -2816,6 +2816,38 @@
         appendCapped(el, m + '\n');
       };
       const cards = new Map();
+      // An answered card is history, and history belongs in the transcript, not
+      // in a strip that stays occupied for the rest of the page's life (#116).
+      // The note is kept briefly so the vote is visibly confirmed, then the node
+      // and its map entry go together, which also bounds the list
+      // `refreshPendingCards` has to walk. The timer rides on the entry so a
+      // conversation switch can cancel one that has not fired yet.
+      const CARD_RETIRE_MS = 6000;
+      function retireCard(requestId, message) {
+        const entry = cards.get(requestId);
+        if (!entry) return;
+        // First word wins: the pending poll also retires cards it no longer
+        // reports, and it must not overwrite "voted: accepted" with "resolved".
+        if (entry.retireTimer !== undefined) return;
+        entry.disable();
+        entry.note(message);
+        entry.retireTimer = setTimeout(() => {
+          entry.retireTimer = undefined;
+          // Only if this exact entry is still what the map holds: a re-issued
+          // requestId must not be removed by the older card's timer.
+          if (cards.get(requestId) === entry) cards.delete(requestId);
+          entry.el.remove();
+        }, CARD_RETIRE_MS);
+      }
+      // Every card belongs to the conversation that raised it, so a switch drops
+      // them at once rather than waiting on each retire timer.
+      function dropAllCards() {
+        for (const entry of cards.values()) {
+          if (entry.retireTimer !== undefined) clearTimeout(entry.retireTimer);
+          entry.el.remove();
+        }
+        cards.clear();
+      }
 
       // ---- Readable transcript ----------------------------------------------
       // The gateway relays the daemon's raw SSE frames. Rather than dump JSON,
@@ -3229,6 +3261,10 @@
         // A pending echo belongs to the conversation it was sent in. Carrying
         // it into the next one would let it eat that conversation's row.
         selfEchoes.length = 0;
+        // Same for the question cards: a prompt raised in the previous
+        // conversation cannot be answered from this one, and leaving it up
+        // would keep the strip occupied by something now unanswerable. (#116)
+        dropAllCards();
         clearCrashBanner(); // a new watch starts with no crash banner
         clearUnsent(); // and with no leftover refused-send draft
         // The strip's per-session count goes with the session it counted, so the
@@ -6390,11 +6426,14 @@
             },
           );
           if (entry) {
-            entry.disable();
-            if (res.status === 200) entry.note('voted: ' + outcome);
-            else if (res.status === 404) entry.note('already resolved');
+            if (res.status === 200) retireCard(requestId, 'voted: ' + outcome);
+            else if (res.status === 404) retireCard(requestId, 'already resolved');
             else if (res.status === 401 || res.status === 403)
-              entry.note('not authorized');
+              retireCard(requestId, 'not authorized');
+            // Anything else leaves the request pending on the daemon, so the
+            // card stays pressable: a dead card the user cannot retry is the
+            // pile this function is meant to clear. A retry whose first POST
+            // did land comes back 404 and retires then.
             else entry.note('vote failed (' + res.status + ')');
           }
         } catch (e) {
@@ -6604,11 +6643,9 @@
       }
 
       function resolveCard(requestId) {
-        const entry = cards.get(requestId);
-        if (entry) {
-          entry.disable();
-          entry.note('resolved');
-        }
+        // Answered somewhere else (another window, the terminal). Same exit as
+        // a local vote: confirm it, then leave the strip.
+        retireCard(requestId, 'resolved');
       }
 
       // issue #46: recovery for question/permission cards the event
@@ -6679,15 +6716,14 @@
             );
           }
         }
-        for (const [requestId, entry] of cards) {
-          if (entry.sessionId !== sessionId) continue;
+        // Anything held for this session that the daemon no longer reports is
+        // over, answered here or elsewhere. Retiring is idempotent, so a card
+        // already on its way out is not re-noted or re-timed.
+        for (const requestId of cards.keys()) {
+          const entry = cards.get(requestId);
+          if (!entry || entry.sessionId !== sessionId) continue;
           if (pending.has(requestId)) continue;
-          // Already handled locally (voted or resolved): disable() has
-          // left every button disabled.
-          const firstBtn = entry.el.querySelector('button');
-          if (firstBtn && firstBtn.disabled) continue;
-          entry.disable();
-          entry.note('resolved');
+          retireCard(requestId, 'resolved');
         }
       }
 

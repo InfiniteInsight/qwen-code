@@ -2124,6 +2124,17 @@ type PageScenario =
         promptStatus?: number;
         promptDelayMs?: number;
         transcriptPage?: unknown;
+        /**
+         * Status the stub answers a permission vote with, so a scenario can
+         * drive a vote the daemon refuses.
+         */
+        permissionStatus?: number;
+        /**
+         * Body for GET /session/:id/status. A card scenario lists its request
+         * here, because the stub's default reports nothing pending and the
+         * page's 5s sweep would retire the card before the scenario votes.
+         */
+        sessionStatus?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -6587,6 +6598,146 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #116: an answered card is history. The strip above the composer is the live
+// queue, so a card that stays there after the vote turns a few turns into a
+// pile the reader has to scroll past. The note is what makes this prove the
+// VOTE retired it: the pending poll retires the same shape with a different
+// word, so watching only for a removal would pass even if vote() never called
+// retireCard at all.
+PAGE_SCENARIOS.push({
+  name: 'P47 an answered permission card leaves the strip',
+  frames: () =>
+    new Frames().ev('permission_request', {
+      requestId: 'p47-req',
+      toolCall: { kind: 'exec', title: 'run the tests' },
+      options: [{ optionId: 'allow_once', name: 'Allow once' }],
+    }).list,
+  // The request stays listed as pending. The stub's default status reports
+  // none, and the page's 5s sweep would otherwise retire the card before the
+  // scenario ever presses a button, which would test the sweep instead of the
+  // vote.
+  stub: {
+    sessionStatus: {
+      workspaceCwd: '/proj',
+      clientCount: 0,
+      hasActivePrompt: false,
+      pendingInteractions: [
+        {
+          requestId: 'p47-req',
+          kind: 'permission',
+          action: { type: 'exec', title: 'run the tests' },
+          options: [{ optionId: 'allow_once', label: 'Allow once' }],
+        },
+      ],
+    },
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForFunction(
+      () => document.querySelectorAll('#cards .card').length === 1,
+      null,
+      { timeout: 15_000 },
+    );
+    // Tag the node rather than counting the strip. The poll still lists this
+    // request, so a later poll could draw a fresh card, and "the strip is
+    // empty" would race that redraw. "This card left" is the actual claim.
+    await page.evaluate(() => {
+      document.querySelector('#cards .card')?.setAttribute('data-probe', '1');
+    });
+
+    await page.click('#cards .card button');
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('#cards .card[data-probe]')
+          ?.textContent?.includes('voted: selected'),
+      null,
+      { timeout: 10_000 },
+    );
+
+    const gone = await page
+      .waitForFunction(
+        () => document.querySelector('#cards .card[data-probe]') === null,
+        null,
+        { timeout: 15_000 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    expect(gone, 'the answered card never left the strip');
+    return 'the card confirmed the vote, then left the strip on its own, so an answered prompt does not pile up';
+  },
+});
+
+// The other half of #116. A vote the daemon refused leaves the request live on
+// the daemon, so a card greyed out over it is the worst case of the issue: a
+// dead card in the pile with the retry taken away as well.
+PAGE_SCENARIOS.push({
+  name: 'P48 a refused vote leaves the card pressable so it can be retried',
+  frames: () =>
+    new Frames().ev('permission_request', {
+      requestId: 'p48-req',
+      toolCall: { kind: 'exec', title: 'run the tests' },
+      options: [{ optionId: 'allow_once', name: 'Allow once' }],
+    }).list,
+  stub: {
+    permissionStatus: 502,
+    sessionStatus: {
+      workspaceCwd: '/proj',
+      clientCount: 0,
+      hasActivePrompt: false,
+      pendingInteractions: [
+        {
+          requestId: 'p48-req',
+          kind: 'permission',
+          action: { type: 'exec', title: 'run the tests' },
+          options: [{ optionId: 'allow_once', label: 'Allow once' }],
+        },
+      ],
+    },
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForFunction(
+      () => document.querySelectorAll('#cards .card').length === 1,
+      null,
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      document.querySelector('#cards .card')?.setAttribute('data-probe', '1');
+    });
+
+    await page.click('#cards .card button');
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('#cards .card[data-probe]')
+          ?.textContent?.includes('vote failed'),
+      null,
+      { timeout: 10_000 },
+    );
+
+    const state = await page.evaluate(() => {
+      const el = document.querySelector('#cards .card[data-probe]');
+      const btns = Array.from(
+        el?.querySelectorAll('button') ?? [],
+      ) as HTMLButtonElement[];
+      return {
+        attached: el !== null,
+        pressable: btns.some((b) => !b.disabled),
+        note: el?.textContent ?? '',
+      };
+    });
+    expect(
+      state.attached,
+      'the refused card was dropped, so the reader cannot retry it',
+    );
+    expect(
+      state.pressable,
+      `every button on the refused card is disabled: ${state.note}`,
+    );
+    return `the refused vote was reported (${JSON.stringify(state.note)}) and the card stayed pressable, so the retry is still there`;
+  },
+});
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
@@ -6596,6 +6747,10 @@ async function runPageScenario(
     promptStatus: s.stub?.promptStatus,
     promptDelayMs: s.stub?.promptDelayMs,
     transcriptPage: s.stub?.transcriptPage,
+    // A card scenario needs both: the status body that keeps its request
+    // listed as pending, and the status the vote is answered with.
+    permissionStatus: s.stub?.permissionStatus,
+    sessionStatus: s.stub?.sessionStatus,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
