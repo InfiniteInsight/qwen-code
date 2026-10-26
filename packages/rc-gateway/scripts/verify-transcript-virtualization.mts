@@ -7768,6 +7768,205 @@ PAGE_SCENARIOS.push({
       return `a list released after the switch is dropped, the panel still reads ${JSON.stringify(after)} against ${JSON.stringify(onScreen)}`;
     },
   });
+
+  // The recap sentence is the daemon's own summary of the conversation, so the
+  // scenarios below intercept the route and answer with a sentence this file
+  // chose. Asserting a substring the stub invented would pass even if the page
+  // had asked about a different conversation entirely.
+  const RECAP_SENTENCE =
+    'moved the anodising line to Tuesdays after the vendor reply';
+
+  PAGE_SCENARIOS.push({
+    name: 'P62 the recap control shows the daemon sentence for the conversation on screen',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_recap'] },
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      let asked = null;
+      await page.route(/\/session\/[^/]+\/recap$/, async (route) => {
+        asked = new URL(route.request().url()).pathname.split('/')[2];
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: asked, recap: RECAP_SENTENCE }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // The control is markup from boot and stays hidden until the daemon's own
+      // feature list says it can answer, so becoming visible is the gate firing.
+      await page.waitForSelector('#recap-toggle', { state: 'visible' });
+
+      // Before the press the box must cost nothing. A control that carries
+      // layout height when nobody asked for it is what pushed the composer
+      // under the fold on a phone (#65), so this is the claim being guarded.
+      const before = await page.evaluate(() => {
+        const el = document.getElementById('recap');
+        return el ? { hidden: el.hidden, height: el.offsetHeight } : null;
+      });
+      expect(before !== null, 'the recap box is missing from the page');
+      expect(
+        before?.hidden === true && before?.height === 0,
+        `the recap box already costs layout height before anyone asked (${JSON.stringify(before)})`,
+      );
+
+      await page.click('#recap-toggle');
+      const shown = await page.waitForFunction(
+        (needle) => {
+          const el = document.getElementById('recap');
+          const t = el ? (el.textContent ?? '') : '';
+          return t.includes(needle) ? t : null;
+        },
+        RECAP_SENTENCE,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await shown.jsonValue()) as string;
+
+      expect(
+        asked === A,
+        `the page asked for a recap of ${JSON.stringify(asked)} while watching ${JSON.stringify(A)}`,
+      );
+      // Bounded on purpose: the box scrolls rather than growing, because a
+      // summary that grows is the failure this page has already been filed for.
+      const height = await page.evaluate(
+        () => document.getElementById('recap')?.offsetHeight ?? -1,
+      );
+      expect(
+        height > 0 && height <= 160,
+        `the open recap box is not bounded (${height} px)`,
+      );
+      return `the summary is asked for the watched conversation and reads ${JSON.stringify(onScreen)} in a ${height}px box`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P63 a daemon that cannot summarise is offered no button that could only fail',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      let asked = 0;
+      await page.route(/\/session\/[^/]+\/recap$/, async (route) => {
+        asked += 1;
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Not Found' }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // The harness advertises no daemon features here, which is the state of a
+      // daemon from before this route existed.
+      const offered = await page.evaluate(() => {
+        const b = document.getElementById('recap-toggle');
+        return b ? { present: true, hidden: b.hidden } : { present: false };
+      });
+      expect(
+        offered.present === true && offered.hidden === true,
+        `the page showed a recap control to a daemon that has no recap route (${JSON.stringify(offered)})`,
+      );
+      expect(
+        asked === 0,
+        'a control that is not on screen still asked the daemon for a summary',
+      );
+      return `with no session_recap tag the control stays hidden (${JSON.stringify(offered)}) and nothing was asked`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P64 a daemon with nothing to say is reported as having nothing to say',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_recap'] },
+    run: async ({ page, viewer }) => {
+      await page.route(/\/session\/[^/]+\/recap$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: viewer.sessionId, recap: null }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForSelector('#recap-toggle', { state: 'visible' });
+      await page.click('#recap-toggle');
+      const filled = await page.waitForFunction(
+        () => {
+          const el = document.getElementById('recap');
+          const t = el ? (el.textContent ?? '') : '';
+          // "asking..." is the loader's own placeholder and is non-empty, so
+          // waiting on length alone would settle on it before the answer.
+          return t.length > 0 && !t.includes('asking') ? t : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await filled.jsonValue()) as string;
+      // `recap: null` is a 200 that means "not yet", so the page must not dress
+      // it as a refusal. A reader told it failed goes looking for a bug that
+      // does not exist, on a conversation that simply has not done anything.
+      expect(
+        !/refused|failed|error/i.test(onScreen),
+        `a null recap was reported as a failure (${JSON.stringify(onScreen)})`,
+      );
+      expect(
+        /nothing/i.test(onScreen),
+        `a null recap said nothing about there being nothing to say (${JSON.stringify(onScreen)})`,
+      );
+      return `a null recap reads ${JSON.stringify(onScreen)} rather than a refusal`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P65 a daemon that 404s the recap is named as too old, not as a missing conversation',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_recap'] },
+    run: async ({ page, viewer }) => {
+      // The capability tag says the route exists and the daemon still 404s: the
+      // state a gateway reaches when the capabilities it advertises are ahead of
+      // the daemon it is now talking to.
+      await page.route(/\/session\/[^/]+\/recap$/, async (route) => {
+        await route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: 'Daemon does not support session recaps',
+            code: 'recap_unsupported',
+          }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForSelector('#recap-toggle', { state: 'visible' });
+      await page.click('#recap-toggle');
+      const filled = await page.waitForFunction(
+        () => {
+          const el = document.getElementById('recap');
+          const t = el ? (el.textContent ?? '') : '';
+          // "asking..." is the loader's own placeholder and is non-empty, so
+          // waiting on length alone would settle on it before the answer.
+          return t.length > 0 && !t.includes('asking') ? t : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await filled.jsonValue()) as string;
+      // The gateway maps a bare 404 to recap_unsupported precisely so nobody is
+      // sent looking for a conversation that is still there. The page has to
+      // keep that distinction rather than flattening it back into "not found".
+      expect(
+        !/not_found|not found|no such/i.test(onScreen),
+        `an old daemon was reported as a missing conversation (${JSON.stringify(onScreen)})`,
+      );
+      expect(
+        /cannot|support|yet/i.test(onScreen),
+        `an old daemon was not named as the cause (${JSON.stringify(onScreen)})`,
+      );
+      return `a 404 on the recap route reads ${JSON.stringify(onScreen)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,

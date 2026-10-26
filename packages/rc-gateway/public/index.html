@@ -1176,6 +1176,38 @@
             <span id="stored-note"></span>
             <span id="stored-list"></span>
           </div>
+          <!-- #124. "Where did I leave off", asked of the daemon that was
+               watching. Its own button rather than a line in the transcript:
+               the summary is a sentence ABOUT the conversation, not a turn IN
+               it, and text nobody sent has no business inside the history the
+               operator reads. Same bounded shape as the panel above it, because
+               an open strip that grows is what pushed the composer under the
+               fold on a phone. Hidden until the daemon says it can answer, so
+               an old daemon shows no button that could only fail. -->
+          <button
+            id="recap-toggle"
+            type="button"
+            aria-expanded="false"
+            hidden
+          >
+            Where did I leave off?
+          </button>
+          <div
+            id="recap"
+            aria-live="polite"
+            hidden
+            style="
+              margin-top: 6px;
+              padding: 6px 8px;
+              background: #1f2630;
+              border-left: 2px solid #88c0d0;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #c8d2e0;
+              max-height: 140px;
+              overflow-y: auto;
+            "
+          ></div>
           <button id="dictate">Dictate</button>
           <!-- #97. The engine is named where the control is drawn. A mic icon
                alone reads as the product's voice stack; what runs here is the
@@ -6259,6 +6291,11 @@
             renderWsSectionPlaceholder(bodyId, label, loader);
           }
         }
+        // #124: this is the one function that runs after capabilities land on
+        // either auth path, which is why a composer control's gate lives here
+        // despite the name of the function.
+        renderRecapGate();
+
         // rc-workspace-scoping (#28): the target selector appears when at
         // least one workspace-control surface is available on this daemon.
         const anyControl = !!(
@@ -7611,6 +7648,110 @@
         if (opening) await loadStored();
       };
 
+      // -- Session recap (#124) ------------------------------------------
+      // The daemon's one-sentence 'where did I leave off', asked on press.
+      // Kept out of the transcript on purpose: the rows are what was said,
+      // and this is a model's opinion about them, so drawing it among them
+      // would put text nobody sent inside the history.
+      let recapText = '';
+      let recapNote = '';
+
+      function renderRecap() {
+        const box = $('recap');
+        if (!box) return;
+        box.textContent = recapText || recapNote;
+        // A sentence and a refusal are different facts. The reader tells them
+        // apart from the rule down the left without reading the box out.
+        box.style.borderLeftColor = recapText ? '#88c0d0' : '#b48b87';
+      }
+
+      async function loadRecap() {
+        // Snapshot the conversation: every write below happens after an
+        // await, and a switch cannot cancel this request. Without the guard
+        // two asks race and the later arrival wins, painting A's summary
+        // under B. Same guard the stored loader applies.
+        const id = watchedSessionId;
+        if (!id) {
+          recapText = '';
+          recapNote = 'watch a session first';
+          renderRecap();
+          return;
+        }
+        recapText = '';
+        recapNote = 'asking…'; // a model call takes seconds; say so
+        renderRecap();
+        let res;
+        try {
+          res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/recap',
+            {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + token() },
+              body: '{}',
+            },
+          );
+        } catch {
+          if (watchedSessionId !== id) return;
+          recapNote = 'could not reach the gateway';
+          renderRecap();
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (watchedSessionId !== id) return;
+        if (!res.ok) {
+          const code = (body && body.code) || String(res.status);
+          // The gateway reports an old daemon as recap_unsupported rather
+          // than as a missing conversation; the page passes that honesty on
+          // instead of implying the reader has a conversation to go find.
+          recapNote =
+            code === 'recap_unsupported'
+              ? 'this daemon cannot summarise yet'
+              : 'refused (' + code + ')';
+          renderRecap();
+          return;
+        }
+        const said =
+          body && typeof body.recap === 'string' ? body.recap.trim() : '';
+        // `recap: null` is the daemon answering that it has nothing to say,
+        // which is not a failure. A conversation of one turn has not done
+        // anything worth summarising yet.
+        recapText = said;
+        recapNote = said ? '' : 'nothing to say about this one yet';
+        renderRecap();
+      }
+
+      function syncRecapForSession() {
+        // The summary names a conversation, so it goes with it: a switch
+        // either re-asks (the reader is looking at an open box) or clears,
+        // never leaves the previous session's sentence standing here.
+        const box = $('recap');
+        if (box && !box.hidden) {
+          void loadRecap();
+        } else {
+          recapText = '';
+          recapNote = '';
+          renderRecap();
+        }
+      }
+
+      function renderRecapGate() {
+        // The route is the daemon's, so only the daemon's own feature list
+        // can say whether asking would work. A button that can only fail is
+        // worse than no button at all.
+        const btn = $('recap-toggle');
+        if (btn) btn.hidden = !daemonHasFeature('session_recap');
+      }
+
+      $('recap-toggle').onclick = async () => {
+        const box = $('recap');
+        if (!box) return;
+        const opening = box.hidden;
+        box.hidden = !opening;
+        $('recap-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
+        if (opening) await loadRecap();
+        else renderRecap();
+      };
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
@@ -8706,6 +8847,9 @@
         // The stored list names a conversation, so a switch refetches it rather
         // than leaving the previous session's files under this heading.
         syncStoredForSession();
+        // Same rule for the summary: it describes the conversation it was
+        // asked about, so it cannot stay on screen through a switch.
+        syncRecapForSession();
         // #70: the queue belongs to the conversation, not to the window, so it is
         // loaded by session id here. Moving to another conversation takes the
         // strip off screen rather than discarding it, and coming back finds it
