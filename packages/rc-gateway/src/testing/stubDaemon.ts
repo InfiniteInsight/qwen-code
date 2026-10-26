@@ -11,6 +11,22 @@ import type { DaemonSessionSummary } from '@qwen-code/sdk';
 import type { DaemonRewindSnapshotInfo } from '@qwen-code/sdk/daemon';
 import { gateJsonBody } from '../routes/sessionAttachments.js';
 
+/**
+ * The five media types the daemon's attachment store treats as images
+ * (`packages/acp-bridge/src/sessionAttachments.ts:26-32`, membership tested by
+ * `isSupportedImageMimeType` at :263). The store uses this set rather than an
+ * `image/` prefix to choose a reference's `type`, so an `image/tiff` upload
+ * comes back as a `resource`. Restated here because that predicate is not
+ * exported and rc-gateway has no acp-bridge dependency.
+ */
+const STUB_SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/bmp',
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+
 export interface StubDaemon {
   baseUrl: string;
   /** Last-Event-ID header value seen on the most recent /events request. */
@@ -1284,8 +1300,21 @@ export async function startStubDaemon(
           .json(opts.attachmentUploadErrorBody ?? { error: 'stub error' });
         return;
       }
+      const declaredMimeType = String(
+        req.headers['content-type'] ?? 'application/octet-stream',
+      )
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase();
       res.status(201).json(
         opts.attachmentUploadResult ?? {
+          // The store answers with the finished reference and chooses the kind
+          // itself (`:586-594`), so an answer missing `type` would let a page
+          // scenario pass on a block a real daemon refuses with 400:
+          // `isSessionAttachmentReference` requires it (`:175-193`).
+          type: STUB_SUPPORTED_IMAGE_MIME_TYPES.has(declaredMimeType)
+            ? 'image'
+            : 'resource',
           attachmentId: 'att-1',
           name: String(req.query['name'] ?? ''),
           mimeType: req.headers['content-type'] ?? 'application/octet-stream',

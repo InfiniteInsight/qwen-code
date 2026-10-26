@@ -1097,6 +1097,31 @@
             ></span>
             <button id="queued-discard" type="button">Discard</button>
           </div>
+          <!-- #109. What is riding along with the next prompt. The file is
+               uploaded when it is picked rather than when Send is pressed,
+               because the daemon's answer IS the thing the prompt has to carry,
+               so a refusal has to surface while the typed text is still on
+               screen to keep. It is named here instead of only in the status
+               line, because a strip that hides which file is attached leaves
+               the reader guessing what is about to be sent, which is the
+               failure #70 records for a queued message. -->
+          <div
+            id="pending"
+            aria-live="polite"
+            hidden
+            style="
+              margin-bottom: 6px;
+              padding: 6px 8px;
+              background: #1f2630;
+              border-left: 2px solid #a3be8c;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #c8d2e0;
+            "
+          >
+            <span id="pending-note"></span>
+            <span id="pending-list"></span>
+          </div>
           <textarea
             id="prompt"
             rows="3"
@@ -1113,6 +1138,14 @@
                It is shown only while a send is in flight, because a queue button
                outside a turn is a Send button that does not send. -->
           <button id="queue" type="button" hidden>Queue</button>
+          <!-- #109. Its own control rather than a drop zone over the composer:
+               a phone's browser opens a file picker reliably, and a drop target
+               that is not obviously one goes unused on the device that most
+               wants it. The input itself is hidden because a bare file input
+               renders as a platform-styled button that matches nothing else
+               here; it is still what opens the picker. -->
+          <button id="attach" type="button">Attach</button>
+          <input id="attach-file" type="file" multiple hidden />
           <button id="dictate">Dictate</button>
           <!-- #97. The engine is named where the control is drawn. A mic icon
                alone reads as the product's voice stack; what runs here is the
@@ -7280,6 +7313,119 @@
       // only place that returns the button.
       const SEND_HOLD_LIMIT_MS = 3 * 60 * 1000;
 
+      // #109: the files picked for the next prompt. They are uploaded when they
+      // are chosen, not when Send is pressed, because the daemon's answer IS
+      // the thing the prompt has to carry: the route returns
+      // `{ attachment: reference }` (routes/sessionAttachments.ts:230) and the
+      // store chooses `type` itself from the name it actually stored
+      // (packages/acp-bridge/src/sessionAttachments.ts:586-594). So each entry
+      // keeps that answer verbatim. Rebuilding the block here would put a
+      // second copy of the store's rule between the phone and the daemon, and
+      // the daemon's own validator reads `attachmentId`, `size` and `mimeType`
+      // off exactly what was returned
+      // (packages/cli/src/serve/routes/session.ts:357-408).
+      let pendingAttachments = [];
+      let pendingNote = '';
+
+      const formatBytes = (n) =>
+        n >= 1024 * 1024
+          ? (n / (1024 * 1024)).toFixed(1) + ' MB'
+          : n >= 1024
+            ? (n / 1024).toFixed(1) + ' KB'
+            : n + ' B';
+
+      function renderPendingAttachments() {
+        const box = $('pending');
+        const list = $('pending-list');
+        if (!box || !list) return;
+        list.textContent = '';
+        for (const entry of pendingAttachments) {
+          const row = document.createElement('span');
+          row.style.display = 'block';
+          row.style.marginTop = '4px';
+          const label = document.createElement('span');
+          label.textContent =
+            entry.name + ' (' + formatBytes(Number(entry.reference.size) || 0) + ')';
+          const drop = document.createElement('button');
+          drop.type = 'button';
+          drop.textContent = 'Drop';
+          drop.style.marginLeft = '6px';
+          // Drops the pending entry only. The file stays in the session's
+          // store, because removing it there is DELETE
+          // /session/:id/attachments/:attachmentId, a different action on a
+          // different thing than "do not send this one".
+          drop.onclick = () => {
+            pendingAttachments = pendingAttachments.filter((e) => e !== entry);
+            renderPendingAttachments();
+          };
+          row.appendChild(label);
+          row.appendChild(drop);
+          list.appendChild(row);
+        }
+        $('pending-note').textContent = pendingNote;
+        box.hidden = pendingAttachments.length === 0 && pendingNote === '';
+      }
+
+      const setPendingNote = (m) => {
+        pendingNote = m;
+        renderPendingAttachments();
+      };
+
+      async function uploadAttachment(file) {
+        if (!watchedSessionId) {
+          setPendingNote('watch a session first');
+          return;
+        }
+        setPendingNote('uploading ' + file.name + '…');
+        let res;
+        try {
+          res = await fetch(
+            '/session/' +
+              encodeURIComponent(watchedSessionId) +
+              '/attachments?name=' +
+              encodeURIComponent(file.name),
+            {
+              method: 'POST',
+              headers: {
+                Authorization: 'Bearer ' + token(),
+                'Content-Type': file.type || 'application/octet-stream',
+              },
+              body: file,
+            },
+          );
+        } catch {
+          setPendingNote(file.name + ': upload failed (network)');
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (!res.ok || !body || !body.attachment) {
+          // The reason is the daemon's code, not a bare "failed": 413 is the
+          // byte cap, 404 with no envelope is a daemon without these routes,
+          // and those need different answers from the reader.
+          const code = (body && body.code) || String(res.status);
+          setPendingNote(file.name + ': refused (' + code + ')');
+          return;
+        }
+        pendingAttachments.push({ name: file.name, reference: body.attachment });
+        // The reason this upload started is now spent. Left in place it reads
+        // as still-running forever beside a file that is plainly listed.
+        pendingNote = '';
+        renderPendingAttachments();
+      }
+
+      $('attach').onclick = () => {
+        if (!watchedSessionId) return setStatus('watch a session first');
+        $('attach-file').click();
+      };
+
+      $('attach-file').onchange = async () => {
+        const picked = Array.from($('attach-file').files || []);
+        // Emptied before uploading so the same file can be picked again after a
+        // Drop, and so a refused upload does not stay selected and re-fire.
+        $('attach-file').value = '';
+        for (const file of picked) await uploadAttachment(file);
+      };
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
@@ -7310,6 +7456,13 @@
         // the duration of the turn and then discards whatever was typed in the
         // meantime.
         $('prompt').value = '';
+        // #109: taken here rather than at the fetch, because the strip is
+        // cleared on dispatch for the same reason the text is: a send whose
+        // socket dies must not leave a file staged that the reader already
+        // counts as sent.
+        const sentAttachments = pendingAttachments.map((entry) => entry.reference);
+        pendingAttachments = [];
+        renderPendingAttachments();
         // Echo locally for the immediate feedback, and queue the text so the
         // daemon's echo of THIS prompt is recognised and not drawn twice
         // (#114). A frame that matches nothing here is someone else's turn -
@@ -7332,7 +7485,20 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
-              body: JSON.stringify({ prompt }),
+              body: JSON.stringify(
+                // With a file picked the prompt goes as content blocks, so the
+                // references the daemon handed back travel unchanged; the
+                // gateway forwards this array as-is (routes/prompt.ts:92-93).
+                // Without one it keeps the {prompt} shape it has always sent.
+                sentAttachments.length
+                  ? {
+                      blocks: [
+                        { type: 'text', text: prompt },
+                        ...sentAttachments,
+                      ],
+                    }
+                  : { prompt },
+              ),
             },
           );
           if (res.status === 200) {

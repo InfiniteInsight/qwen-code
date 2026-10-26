@@ -84,6 +84,19 @@ export interface BootViewerOptions {
    * daemon refuse.
    */
   exportStatusCode?: number;
+  /**
+   * Status the stub answers POST /session/:id/attachments with (default 201).
+   * A scenario that drives the attach failure note sets this, because the page
+   * reads the reason off the response body and there is no other way to make
+   * the daemon refuse a file.
+   */
+  attachmentUploadStatus?: number;
+  /**
+   * Body the stub answers a refused upload with. Left unset the stub says
+   * `stub error`, which is not a code the real daemon ever sends, so a
+   * scenario asserting the page names a reason has to supply one.
+   */
+  attachmentUploadErrorBody?: unknown;
 }
 
 export interface Viewer {
@@ -111,6 +124,8 @@ export async function bootViewer(
     transcriptStatusCode: opts.transcriptStatusCode,
     capabilitiesFeatures: opts.capabilitiesFeatures,
     exportStatusCode: opts.exportStatusCode,
+    attachmentUploadStatus: opts.attachmentUploadStatus,
+    attachmentUploadErrorBody: opts.attachmentUploadErrorBody,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
