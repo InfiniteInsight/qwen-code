@@ -97,6 +97,20 @@ export interface BootViewerOptions {
    * scenario asserting the page names a reason has to supply one.
    */
   attachmentUploadErrorBody?: unknown;
+  /**
+   * Body the stub answers GET /session/:id/attachments with. A scenario that
+   * drives the stored list sets this, because the list a reader sees has to be
+   * what the daemon holds, and the stub's own default is one file the test
+   * never chose.
+   */
+  attachmentListResult?: unknown;
+  /**
+   * Status the stub answers the attachment list with (default 200). Set it to
+   * drive the refusal note. Leave the body unset to see the gateway's own
+   * mapping of that status, which is what a reader actually gets, rather than
+   * a body this file composed.
+   */
+  attachmentListStatus?: number;
 }
 
 export interface Viewer {
@@ -126,6 +140,8 @@ export async function bootViewer(
     exportStatusCode: opts.exportStatusCode,
     attachmentUploadStatus: opts.attachmentUploadStatus,
     attachmentUploadErrorBody: opts.attachmentUploadErrorBody,
+    attachmentListResult: opts.attachmentListResult,
+    attachmentListStatus: opts.attachmentListStatus,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));

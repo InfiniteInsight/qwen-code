@@ -2157,6 +2157,10 @@ type PageScenario =
         attachmentUploadStatus?: number;
         /** Body the stub answers a refused upload with. */
         attachmentUploadErrorBody?: unknown;
+        /** Body the stub answers the stored-attachment list with. */
+        attachmentListResult?: unknown;
+        /** Status the stub answers the stored-attachment list with. */
+        attachmentListStatus?: number;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -7446,6 +7450,243 @@ PAGE_SCENARIOS.push({
     return `a refused upload reports ${JSON.stringify(text)} and stages nothing`;
   },
 });
+PAGE_SCENARIOS.push({
+  name: 'P58 the stored list names what the daemon holds, and only when asked',
+  // #125. The pending strip is this page's own memory, so a reload lost the
+  // names of files the store still had. Each row here is the store's reference
+  // (packages/acp-bridge/src/sessionAttachments.ts:840-846), where the name IS
+  // `attachmentId` and there is no `name` field to read: a page written against
+  // `name` shows blanks on a device and passes on this machine. Two entries,
+  // because one proves a row exists and only two can prove the page read EACH
+  // answer rather than the first.
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    attachmentListResult: {
+      attachments: [
+        {
+          type: 'resource',
+          attachmentId: 'crash.log',
+          mimeType: 'text/plain',
+          size: 2048,
+        },
+        {
+          type: 'image',
+          attachmentId: 'shot.png',
+          mimeType: 'image/png',
+          size: 3 * 1024 * 1024,
+        },
+      ],
+    },
+  },
+  run: async ({ page, viewer }) => {
+    const lists: string[] = [];
+    page.on('request', (r) => {
+      if (
+        new URL(r.url()).pathname === `/session/${viewer.sessionId}/attachments`
+      )
+        lists.push(r.method());
+    });
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    // Nothing fetched just for watching. The names are the daemon's answer, and
+    // polling it on every session would pay a round trip nobody asked for.
+    expect(
+      lists.length === 0,
+      `watching alone fetched the list ${lists.length} times before anyone asked`,
+    );
+    const closed = await page.evaluate(
+      () => document.getElementById('stored')?.hidden === true,
+    );
+    expect(closed, 'the stored panel was open before it was asked for');
+
+    const answered = page.waitForResponse(
+      (r) =>
+        new URL(r.url()).pathname === `/session/${viewer.sessionId}/attachments`,
+      { timeout: 15_000 },
+    );
+    await page.click('#stored-toggle');
+    const res = await answered;
+    expect(
+      res.status() === 200,
+      `the gateway answered the list with ${res.status()}`,
+    );
+    const shown = await page.waitForFunction(
+      () => {
+        const l = document.getElementById('stored-list');
+        const t = l ? (l.textContent ?? '') : '';
+        return t.includes('crash.log') && t.includes('shot.png') ? t : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    const text = (await shown.jsonValue()) as string;
+    // The row is the reference's own fields, formatted: 2048 bytes reads 2.0 KB
+    // and 3 MiB reads 3.0 MB, and the kind is the store's, which differs per
+    // file. Reading `name` instead would render `undefined (undefined B,
+    // undefined)` and still satisfy a looser assertion.
+    expect(
+      text.includes('crash.log (2.0 KB, resource)') &&
+        text.includes('shot.png (3.0 MB, image)'),
+      `the list reads ${JSON.stringify(text)}, which is not each reference's own fields`,
+    );
+    const note = await page.evaluate(
+      () => document.getElementById('stored-note')?.textContent ?? '',
+    );
+    expect(
+      note === '',
+      `the note said ${JSON.stringify(note)} for a list that succeeded`,
+    );
+    const expanded = await page.evaluate(() =>
+      document.getElementById('stored-toggle')?.getAttribute('aria-expanded'),
+    );
+    expect(
+      expanded === 'true',
+      `the toggle reports aria-expanded=${JSON.stringify(expanded)} while open`,
+    );
+    expect(
+      lists.length === 1,
+      `one open fetched the list ${lists.length} times, not once`,
+    );
+    return `the panel reads ${JSON.stringify(text)} off the store's own fields, fetched once on open`;
+  },
+});
+PAGE_SCENARIOS.push({
+  name: 'P59 removing a stored file asks once, then sends exactly one delete',
+  // #125. The house pattern for a destructive control is window.confirm
+  // (public/index.html:11284 and :11405), but this verifier dismisses every
+  // dialog unconditionally, so a confirm gate could never be driven here, and a
+  // control nobody can drive is a control nobody can show works. The row arms on
+  // the first press instead, which is provable: nothing leaves on press one and
+  // exactly one DELETE leaves on press two.
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    attachmentListResult: {
+      attachments: [
+        {
+          type: 'resource',
+          attachmentId: 'crash.log',
+          mimeType: 'text/plain',
+          size: 2048,
+        },
+      ],
+    },
+  },
+  run: async ({ page, viewer }) => {
+    const deletes: string[] = [];
+    page.on('request', (r) => {
+      if (r.method() === 'DELETE') deletes.push(new URL(r.url()).pathname);
+    });
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    await page.click('#stored-toggle');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('stored-list')?.textContent ?? '').includes(
+          'crash.log',
+        ),
+      null,
+      { timeout: 15_000 },
+    );
+    const row = '#stored-list > span:first-child > button';
+    await page.click(row);
+    // Waited on the LABEL rather than a request, because press one must produce
+    // no request at all, so the only thing to wait for is the re-render.
+    const armed = await page.waitForFunction(
+      () => {
+        const b = document.querySelector(
+          '#stored-list > span:first-child > button',
+        );
+        return b && b.textContent === 'Confirm remove' ? b.textContent : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    const armedText = (await armed.jsonValue()) as string;
+    expect(
+      armedText === 'Confirm remove',
+      `the first press left the button reading ${JSON.stringify(armedText)}`,
+    );
+    expect(
+      deletes.length === 0,
+      `the first press sent ${JSON.stringify(deletes)}; an armed button sends nothing`,
+    );
+    await page.click(row);
+    const gone = await page.waitForFunction(
+      () => {
+        const l = document.getElementById('stored-list');
+        return l && !(l.textContent ?? '').includes('crash.log') ? 'gone' : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    expect(
+      (await gone.jsonValue()) === 'gone',
+      'the row was still listed after the delete was answered',
+    );
+    expect(
+      deletes.length === 1 &&
+        deletes[0] === `/session/${viewer.sessionId}/attachments/crash.log`,
+      `the page sent ${JSON.stringify(deletes)}, not one delete naming the attachmentId`,
+    );
+    const note = await page.evaluate(
+      () => document.getElementById('stored-note')?.textContent ?? '',
+    );
+    expect(
+      note === '',
+      `the note said ${JSON.stringify(note)} after a delete the daemon confirmed`,
+    );
+    return `press one armed the row and sent nothing, press two sent ${JSON.stringify(deletes)} and dropped it`;
+  },
+});
+PAGE_SCENARIOS.push({
+  name: 'P60 a refused stored list says which reason it was, and shows nothing',
+  // The other half of the read path. A daemon that predates these routes
+  // answers the list with a bare 404, which the route maps to 502
+  // attachments_unsupported (src/routes/sessionAttachments.ts:106-113). This
+  // scenario drives only the daemon's status and no body, so the code that
+  // reaches the screen is the gateway's own verdict, not one composed here.
+  waitView: false,
+  stub: { attachmentListStatus: 404 },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    const answered = page.waitForResponse(
+      (r) =>
+        new URL(r.url()).pathname === `/session/${viewer.sessionId}/attachments`,
+      { timeout: 15_000 },
+    );
+    await page.click('#stored-toggle');
+    const res = await answered;
+    expect(
+      res.status() === 502,
+      `the gateway answered ${res.status()}, not the 502 a daemon without these routes earns`,
+    );
+    const note = await page.waitForFunction(
+      () => {
+        const n = document.getElementById('stored-note');
+        const t = n ? (n.textContent ?? '') : '';
+        return t !== '' ? t : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    const text = (await note.jsonValue()) as string;
+    expect(
+      text.includes('attachments_unsupported'),
+      `the note said ${JSON.stringify(text)}, which does not name the reason`,
+    );
+    const listed = await page.evaluate(
+      () => document.getElementById('stored-list')?.textContent ?? '',
+    );
+    expect(
+      listed === '',
+      `${JSON.stringify(listed)} was listed even though the daemon refused`,
+    );
+    return `a refused list reports ${JSON.stringify(text)} and lists nothing`;
+  },
+});
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
@@ -7463,6 +7704,8 @@ async function runPageScenario(
     exportStatusCode: s.stub?.exportStatusCode,
     attachmentUploadStatus: s.stub?.attachmentUploadStatus,
     attachmentUploadErrorBody: s.stub?.attachmentUploadErrorBody,
+    attachmentListResult: s.stub?.attachmentListResult,
+    attachmentListStatus: s.stub?.attachmentListStatus,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

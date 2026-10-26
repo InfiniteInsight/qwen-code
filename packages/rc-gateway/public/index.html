@@ -1146,6 +1146,36 @@
                here; it is still what opens the picker. -->
           <button id="attach" type="button">Attach</button>
           <input id="attach-file" type="file" multiple hidden />
+          <!-- #125. What the store already holds, which is a different fact
+               from what is staged above. The pending strip is this page's
+               memory and a reload empties it; these files stayed. Fetched on
+               the first open rather than on watch, because the names are the
+               daemon's answer and polling it on every session would pay a
+               round trip nobody asked for. Bounded and scrollable on purpose:
+               an open list that grows is how the to-do strip pushed the
+               composer under the fold on a phone. -->
+          <button id="stored-toggle" type="button" aria-expanded="false">
+            Files in this session
+          </button>
+          <div
+            id="stored"
+            aria-live="polite"
+            hidden
+            style="
+              margin-top: 6px;
+              padding: 6px 8px;
+              background: #1f2630;
+              border-left: 2px solid #88c0d0;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #c8d2e0;
+              max-height: 140px;
+              overflow-y: auto;
+            "
+          >
+            <span id="stored-note"></span>
+            <span id="stored-list"></span>
+          </div>
           <button id="dictate">Dictate</button>
           <!-- #97. The engine is named where the control is drawn. A mic icon
                alone reads as the product's voice stack; what runs here is the
@@ -6948,6 +6978,7 @@
         showSessionTitle(null);
         watchedSessionTitle = null;
         watchedSessionId = null;
+        syncStoredForSession();
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
         // the switcher was drawn against the conversation being left. Redrawn here,
         // after the clear, or the control stays on screen offering a folder this
@@ -6978,6 +7009,7 @@
         // The pending-cards poll is gated only on watchedSessionId, so an
         // Unwatch that left it set kept polling the daemon every 5s (#59).
         watchedSessionId = null;
+        syncStoredForSession();
         // #50: redrawn after the clear for the same reason as in
         // forgetGoneSession. Unwatch is the path a reader takes on purpose to
         // leave a conversation, so a switcher still naming that folder here would
@@ -7424,6 +7456,145 @@
         // Drop, and so a refused upload does not stay selected and re-fire.
         $('attach-file').value = '';
         for (const file of picked) await uploadAttachment(file);
+      };
+
+      // #125: what the session's store holds. Read from the daemon rather than
+      // from anything on screen, because the pending strip above is only what
+      // this page staged. Each entry is the store's own reference, so the name
+      // to show is `attachmentId`: the reference has no `name` field
+      // (packages/acp-bridge/src/sessionAttachments.ts:840-846).
+      let storedFiles = [];
+      let storedNote = '';
+      let storedArmed = null;
+
+      function renderStored() {
+        const box = $('stored');
+        const list = $('stored-list');
+        if (!box || !list) return;
+        list.textContent = '';
+        for (const entry of storedFiles) {
+          const row = document.createElement('span');
+          row.style.display = 'block';
+          row.style.marginTop = '4px';
+          const label = document.createElement('span');
+          label.textContent =
+            entry.attachmentId +
+            ' (' +
+            formatBytes(Number(entry.size) || 0) +
+            ', ' +
+            entry.type +
+            ')';
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.style.marginLeft = '6px';
+          // Two presses rather than a dialog. The verifier dismisses every
+          // dialog unconditionally (its page.on('dialog') handler in
+          // scripts/verify-transcript-virtualization.mts), so a confirm() gate
+          // could never be driven here, and a control nobody can drive is a
+          // control nobody can show works.
+          if (storedArmed === entry.attachmentId) {
+            remove.textContent = 'Confirm remove';
+            remove.onclick = () => removeStored(entry);
+          } else {
+            remove.textContent = 'Remove';
+            remove.onclick = () => {
+              storedArmed = entry.attachmentId;
+              renderStored();
+            };
+          }
+          row.appendChild(label);
+          row.appendChild(remove);
+          list.appendChild(row);
+        }
+        $('stored-note').textContent = storedNote;
+      }
+
+      async function loadStored() {
+        if (!watchedSessionId) {
+          storedNote = 'watch a session first';
+          storedFiles = [];
+          renderStored();
+          return;
+        }
+        let res;
+        try {
+          res = await fetch(
+            '/session/' + encodeURIComponent(watchedSessionId) + '/attachments',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+        } catch {
+          storedNote = 'could not reach the gateway';
+          storedFiles = [];
+          renderStored();
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (!res.ok || !body || !Array.isArray(body.attachments)) {
+          const code = (body && body.code) || String(res.status);
+          storedNote = 'refused (' + code + ')';
+          storedFiles = [];
+          renderStored();
+          return;
+        }
+        storedNote =
+          body.attachments.length === 0 ? 'nothing stored yet' : '';
+        storedFiles = body.attachments;
+        storedArmed = null;
+        renderStored();
+      }
+
+      // The panel names a conversation, so it goes with it, on the same ordering
+      // the queue strip and the paging control use: touched after watchedSessionId
+      // changes, or the rows get drawn against the session being left. Refetched
+      // only when the reader is already looking at it, because the list is the
+      // daemon's answer and nobody else asked for it.
+      function syncStoredForSession() {
+        storedFiles = [];
+        storedNote = '';
+        storedArmed = null;
+        const box = $('stored');
+        if (box && !box.hidden) void loadStored();
+        else renderStored();
+      }
+
+      async function removeStored(entry) {
+        storedArmed = null;
+        let res;
+        try {
+          res = await fetch(
+            '/session/' +
+              encodeURIComponent(watchedSessionId) +
+              '/attachments/' +
+              encodeURIComponent(entry.attachmentId),
+            { method: 'DELETE', headers: { Authorization: 'Bearer ' + token() } },
+          );
+        } catch {
+          storedNote = 'could not reach the gateway';
+          renderStored();
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (!res.ok || !body) {
+          const code = (body && body.code) || String(res.status);
+          storedNote = 'remove refused (' + code + ')';
+          renderStored();
+          return;
+        }
+        // `removed: false` is the daemon answering that the id matched nothing,
+        // not a refusal, so the row goes either way and the note says which.
+        storedFiles = storedFiles.filter((e) => e !== entry);
+        storedNote =
+          body.removed === false ? entry.attachmentId + ' was already gone' : '';
+        renderStored();
+      }
+
+      $('stored-toggle').onclick = async () => {
+        const box = $('stored');
+        if (!box) return;
+        const opening = box.hidden;
+        box.hidden = !opening;
+        $('stored-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
+        if (opening) await loadStored();
       };
 
       $('send').onclick = async () => {
@@ -8518,6 +8689,9 @@
         $('reconnect').style.display = 'none';
         if (id !== watchedSessionId) clearIdleChips();
         watchedSessionId = id;
+        // The stored list names a conversation, so a switch refetches it rather
+        // than leaving the previous session's files under this heading.
+        syncStoredForSession();
         // #70: the queue belongs to the conversation, not to the window, so it is
         // loaded by session id here. Moving to another conversation takes the
         // strip off screen rather than discarding it, and coming back finds it
