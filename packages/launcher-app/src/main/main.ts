@@ -17,6 +17,7 @@ import {
   shouldHideInsteadOfClose,
   shouldQuitOnWindowClosed,
   summarizeError,
+  terminalDrainNote,
   TRAY_IDLE_NOTE,
 } from './appLifecycle.js';
 
@@ -85,15 +86,7 @@ function startTerminalPolling(): void {
         // eslint-disable-next-line no-console
         console.warn(`terminal ${f.id}: ${f.error}`);
       }
-      if (out.failed.length > 0) {
-        setTerminalNote(`tab refused: ${summarizeError(out.failed[0].error)}`);
-      } else if (out.fetchFailed) {
-        setTerminalNote('cannot read the request queue');
-      } else if (out.opened.length > 0) {
-        setTerminalNote(`opened ${out.opened.length} tab(s)`);
-      } else {
-        setTerminalNote(TRAY_IDLE_NOTE);
-      }
+      setTerminalNote(terminalDrainNote(out));
     } catch (err) {
       const message = (err as Error)?.message ?? String(err);
       // eslint-disable-next-line no-console
