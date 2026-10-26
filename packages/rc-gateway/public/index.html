@@ -6760,6 +6760,18 @@
       let watchRetryAttempt = 0;
       const watchRetryDelays = [1000, 2000, 4000, 8000, 15000, 30000];
       const watchRetryMax = 10;
+      // issue #85: the second line of defence. The gateway's heartbeat makes a
+      // dead socket detectable, but that detection still depends on the write
+      // failing and surfacing as a close. A path that black-holes writes without
+      // ever failing them leaves the reader parked on reader.read() forever,
+      // which is the reported freeze. So the page also keeps its own clock: no
+      // byte inside this window cancels the reader, and the existing teardown
+      // routes the reconnect through scheduleWatchRetry rather than a second
+      // retry path. Three of the server's 25s pings, so two consecutive missed
+      // heartbeats are tolerated before anything is concluded, and it stays
+      // above the 60s a recovery attach may hold the stream without a frame.
+      // Not a const: a page scenario lowers it to watch a stall inside a run.
+      let watchStallMs = 75_000;
 
       function clearWatchRetry() {
         if (watchRetryTimer) {
@@ -8362,6 +8374,17 @@
         watchStreamAlive = false;
         setStatus('connecting…');
         persistWatch();
+        // issue #85: the stall watchdog's state lives out here, not inside the
+        // try, so the finally can see it. The reader it watches only exists
+        // once the connect succeeds, which is why it is armed further down.
+        let stalled = false;
+        let stallTimer = null;
+        const stopStallWatch = () => {
+          if (stallTimer !== null) {
+            clearTimeout(stallTimer);
+            stallTimer = null;
+          }
+        };
         try {
           const headers = { Authorization: 'Bearer ' + token() };
           // Asking for a cursor is what asks for a replay, so this is the one
@@ -8434,9 +8457,28 @@
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
+          // issue #85: arm the stall watchdog. Every byte counts, the gateway's
+          // `: ping` comment lines included — a ping is exactly the proof that
+          // the socket still carries writes, which is the one thing a
+          // dead-but-open connection stops producing. Cancelling the reader is
+          // the whole action: the parked read() below resolves done, the loop
+          // exits, and its existing teardown runs scheduleWatchRetry, so
+          // recovery keeps the Last-Event-ID contract and the 412/resync
+          // self-heal instead of gaining a second reconnect path.
+          const armStall = () => {
+            if (stallTimer !== null) clearTimeout(stallTimer);
+            stallTimer = setTimeout(() => {
+              stallTimer = null;
+              if (controller !== myController) return;
+              stalled = true;
+              void reader.cancel().catch(() => {});
+            }, watchStallMs);
+          };
+          armStall();
           for (;;) {
             const { value, done } = await reader.read();
             if (done) break;
+            if (value.length > 0) armStall();
             buf += decoder.decode(value, { stream: true });
             const blocks = buf.split('\n\n');
             buf = blocks.pop() || '';
@@ -8493,7 +8535,9 @@
               renderFrame(ev);
             }
           }
-          setStatus('stream ended');
+          // issue #85: name which of the two it was. A silent socket is not the
+          // session finishing, and the retry after it is the recovery.
+          setStatus(stalled ? 'stream stalled' : 'stream ended');
           // issue #35: the session just finished — refresh so it lands in
           // the list with its final mtime/title instead of waiting for the
           // next interval tick.
@@ -8513,6 +8557,10 @@
           // retries from where we last saw.
           if (!aborted) scheduleWatchRetry(0);
         } finally {
+          // issue #85: first thing, above the superseded-watch return below —
+          // a watch that got replaced still owns a pending stall timer, and
+          // only this frame can clear it.
+          stopStallWatch();
           // issue #46: a newer startWatch already replaced this one (its
           // abort fired) — that watch's teardown owns the shared state now,
           // so do not clobber it.
