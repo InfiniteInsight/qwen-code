@@ -1884,7 +1884,14 @@ const PAGE_HELPERS_JS = String.raw`
   }
   // One live turn as the page sees it: the local echo of the sent prompt,
   // the daemon's user record, an optional tool call, the answer, the end.
+  //
+  // The echo is queued through noteSelfSend for the same reason the real send
+  // path does it (issue #114): that marker is what tells the frame handler this
+  // window typed the prompt, so the daemon's echo is recognised instead of
+  // drawn as a second row. Omitting it here would model a send the page never
+  // performs, and the turn would double up.
   function liveTurn(prompt, answer, toolId) {
+    noteSelfSend(prompt);
     addUser(prompt);
     update({ sessionUpdate: 'user_message_chunk', content: { text: prompt } });
     if (toolId) {
@@ -2306,9 +2313,11 @@ const PAGE_SCENARIOS: PageScenario[] = [
           tailVisible: !!tail && __pg.visibleIds().includes(tail.id),
         };
       });
+      // A replayed turn is four rows: the prompt, its thought, its answer,
+      // and the fork that closes it. The prompt row was missing until #114.
       expect(
-        r.items === 3 * P1_TURNS + 1,
-        `model has ${r.items} items, expected ${3 * P1_TURNS + 1}`,
+        r.items === 4 * P1_TURNS + 1,
+        `model has ${r.items} items, expected ${4 * P1_TURNS + 1}`,
       );
       expect(
         r.mounted > 0 && r.mounted < 60,
@@ -2709,7 +2718,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
           pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
         };
       });
-      expect(r.items === 751, `${r.items} items, expected 751`);
+      expect(r.items === 1001, `${r.items} items, expected 1001`);
       expect(r.sizer, 'no .vsizer: the view did not use the bundle');
       expect(
         r.mounted > 0 && r.mounted < 60,
@@ -2749,16 +2758,20 @@ const PAGE_SCENARIOS: PageScenario[] = [
           lastModel: items[items.length - 2]!.text ?? null,
         };
       });
-      expect(r.items === 301, `${r.items} items, expected 301`);
+      expect(r.items === 401, `${r.items} items, expected 401`);
       expect(!r.sizer, '.vsizer present without the bundle');
       expect(
         r.rows.length === r.items && r.rows.join() === r.ids.join(),
         `${r.rows.length} rows for ${r.items} items (or out of order)`,
       );
       expect(r.mounted === r.items, `mountedCount() = ${r.mounted}`);
+      // The rendered row drops the trailing space the model keeps on the
+      // last chunk, so compare with it off. A missing text must still fail.
+      const tail = (r.lastText ?? '').replace(/\s+$/, '');
+      const want = r.lastModel === null ? null : r.lastModel.replace(/\s+$/, '');
       expect(
-        (r.lastText ?? '').endsWith(r.lastModel ?? '\u0000'),
-        `last answer ${JSON.stringify(r.lastText)}`,
+        want !== null && tail.endsWith(want),
+        `last answer ${JSON.stringify(r.lastText)} vs model ${JSON.stringify(r.lastModel)}`,
       );
       expect(r.gap <= 2, `fallback not pinned: gap=${r.gap}`);
       return `fallback rendered all ${r.rows.length} items`;
@@ -2789,7 +2802,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         rows: document.querySelectorAll('#transcript .vrow').length,
         pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
       }));
-      expect(before.items === 63, `setup: ${before.items} items`);
+      expect(before.items === 83, `setup: ${before.items} items`);
       expect(!before.pill, 'pill hidden while scrolled to the top');
       await page.evaluate(() => clearTranscript());
       await settlePage(page);
@@ -2843,7 +2856,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         gap: __pg.gap(),
       }));
       expect(
-        switched.items === 61 && switched.seen === 20,
+        switched.items === 81 && switched.seen === 20,
         `after the switch: ${JSON.stringify(switched)}`,
       );
       expect(switched.gap <= 2, `not pinned after the switch: ${switched.gap}`);
@@ -2985,7 +2998,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
           gap: __pg.gap(),
         };
       });
-      expect(r.items === 301, `${r.items} items, expected 301`);
+      expect(r.items === 401, `${r.items} items, expected 401`);
       expect(r.sizers === 0, `${r.sizers} .vsizer left by the failed view`);
       expect(
         r.rows.length === r.items && r.rows.join() === r.ids.join(),
@@ -3017,7 +3030,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
     run: async ({ page, viewer }) => {
       const detail = await checkTranscriptMissing(page, viewer);
       const items = await page.evaluate(() => transcriptModel.items.length);
-      expect(items === 16, `model holds ${items} items, expected 16`);
+      expect(items === 21, `model holds ${items} items, expected 21`);
       return `${detail}; model holds ${items} items`;
     },
   },
@@ -6477,6 +6490,100 @@ PAGE_SCENARIOS.push({
     );
 
     return `the stored row landed (${after.rows - before.rows}) and the control retired itself (${JSON.stringify(after)}), so a tap that could only repeat the page is not offered`;
+  },
+});
+
+// issue #114. The send path echoes what you typed at the moment you sent it,
+// and the viewer used to drop every `user_message_chunk` on that account. That
+// was only ever true of the window that typed it: a second window, a reload, or
+// a turn started on another device has no local echo, so it rendered an
+// assistant-only transcript, which is what #114 reads as and what #113 reads as
+// the phone's messages never reaching the laptop.
+//
+// The assertion is on the model rather than the DOM (rows far from the viewport
+// are unmounted) and it counts user rows specifically, because an assistant
+// count would pass with the defect still in place.
+PAGE_SCENARIOS.push({
+  name: 'P46 a transcript draws the user rows it never typed, and still draws your own once',
+  frames: () =>
+    new Frames()
+      .user('started on the laptop')
+      .asst('the answer to it')
+      .done()
+      .user('a second question')
+      .asst('the second answer')
+      .done().list,
+  run: async ({ page, viewer }) => {
+    // No cursor, which is what a fresh attach sends: this is the window that
+    // did not type anything, reading a conversation that already has turns.
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 15_000);
+    await settlePage(page);
+
+    const userRows = () =>
+      page.evaluate(
+        () =>
+          transcriptModel.items
+            .filter((i) => i.kind === 'user')
+            .map((i) => i.text),
+      );
+
+    const replayed = await userRows();
+    expect(
+      replayed.length === 2,
+      `${replayed.length} user rows after replaying two prompts (${JSON.stringify(replayed)}) - ` +
+        'the replay path is dropping them again, which is #114',
+    );
+    expect(
+      replayed[0] === 'started on the laptop',
+      `the first user row reads ${JSON.stringify(replayed[0])}`,
+    );
+
+    // The other half: the echo of a prompt this window DID send must not draw
+    // a second row under it. Driven through the page's own bookkeeping rather
+    // than a real send, because the send path needs a live turn to settle.
+    const echoed = await page.evaluate(() => {
+      noteSelfSend('typed right here');
+      renderFrame({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { text: 'typed right here' },
+          },
+        },
+      });
+      return transcriptModel.items
+        .filter((i) => i.kind === 'user')
+        .map((i) => i.text);
+    });
+    expect(
+      echoed.length === 2,
+      `the daemon's echo of your own prompt drew a second row (${JSON.stringify(echoed)})`,
+    );
+
+    // And a frame that is NOT yours still draws, so the dedup above has not
+    // simply restored the old drop-everything behaviour.
+    const other = await page.evaluate(() => {
+      renderFrame({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { text: 'typed on the phone' },
+          },
+        },
+      });
+      return transcriptModel.items
+        .filter((i) => i.kind === 'user')
+        .map((i) => i.text);
+    });
+    expect(
+      other.length === 3 && other[2] === 'typed on the phone',
+      `another device's prompt drew ${other.length - 2} rows (${JSON.stringify(other)})`,
+    );
+
+    return `two replayed prompts drew two user rows, your own echo stayed at one row, and another device's prompt drew its own`;
   },
 });
 
