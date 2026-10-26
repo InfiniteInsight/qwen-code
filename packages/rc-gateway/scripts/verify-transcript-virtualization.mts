@@ -6738,6 +6738,91 @@ PAGE_SCENARIOS.push({
     return `the refused vote was reported (${JSON.stringify(state.note)}) and the card stayed pressable, so the retry is still there`;
   },
 });
+
+// #85: the page's own clock. The gateway pings every 25s, so a live socket
+// always produces bytes. A path that black-holes writes without ever failing
+// them produces neither a byte nor a close, and reader.read() parks on it
+// forever — the reported freeze. Nothing else here can see it: the retry
+// ladder only runs once a connect has failed or ended, and this one has done
+// neither. The stub already holds the stream open after its frames
+// (holdOpenMs), which is that silence, so the scenario lowers the window and
+// watches the wire. The assertion is the header the reconnect actually puts
+// on the wire, recorded from the request rather than from the page's own idea
+// of what it asked for.
+PAGE_SCENARIOS.push({
+  name: 'P49 a watched stream that goes silent reconnects from its cursor',
+  frames: () =>
+    new Frames()
+      .asst('the first answer')
+      .asst('the second answer')
+      .done()
+      .list,
+  run: async ({ page, viewer }) => {
+    const sent: Array<{ id: string | null; at: number }> = [];
+    const t0 = Date.now();
+    await page.route(/\/session\/[^/]+\/events$/, async (route) => {
+      sent.push({
+        id: route.request().headers()['last-event-id'] ?? null,
+        at: Date.now() - t0,
+      });
+      await route.continue();
+    });
+
+    // Lowered before the connect, because armStall reads the window when it
+    // arms and a later assignment would leave this watch on the 75s default.
+    // 1.5s sits far under the gateway's 25s ping, so no heartbeat can be what
+    // ends this stream — only the page's own clock can.
+    await page.evaluate((id) => {
+      lastSeenEventId = null;
+      watchStallMs = 1500;
+      void startWatch(id);
+    }, viewer.sessionId);
+
+    // The three frames land first, so the cursor the reconnect has to carry is
+    // observed rather than assumed.
+    await waitForFrame(page, 3, 8_000);
+
+    // Stall fires at ~1.5s, then the first retry is scheduled 1s out.
+    const deadline = Date.now() + 12_000;
+    while (sent.length < 2 && Date.now() < deadline) {
+      await page.waitForTimeout(100);
+    }
+    expect(
+      sent.length >= 2,
+      `the silent stream never produced a reconnect (attempts: ${JSON.stringify(sent)}) — ` +
+        'self-heal state at the deadline: ' +
+        (await page.evaluate(
+          () =>
+            `hidden=${document.hidden} watch.disabled=${$('watch').disabled} ` +
+            `streamAlive=${watchStreamAlive} watchedId=${watchedSessionId != null} ` +
+            `retryAttempt=${watchRetryAttempt} timerPending=${watchRetryTimer != null} ` +
+            `lastSeen=${lastSeenEventId} status=${$('status').textContent}`,
+        )),
+    );
+    // The first connect asked for nothing (a fresh tap), which is what makes
+    // the second one the recovery rather than the original subscribe.
+    expect(
+      sent[0].id === null,
+      `the first connect already asked for Last-Event-ID ${JSON.stringify(sent[0].id)}`,
+    );
+    // replayFrom is exclusive of the cursor, so 3 re-sends frame 4 and nothing
+    // more: no gap, no duplicate of what was already drawn.
+    expect(
+      sent[1].id === '3',
+      `the stall reconnect asked for Last-Event-ID ${JSON.stringify(sent[1].id)}, wanted "3" ` +
+        `(the last frame drawn; attempts: ${JSON.stringify(sent)})`,
+    );
+    // Well under the 25s heartbeat, so the page's clock is what recovered it.
+    // Were the watchdog absent, the earliest this could happen is a ping
+    // arriving and the socket dying behind it.
+    expect(
+      sent[1].at < 10_000,
+      `the reconnect took ${sent[1].at} ms, which is not the page's 1500 ms window plus ` +
+        'its 1s first retry — something slower than the watchdog recovered it',
+    );
+    return `a stream silent for 1.5s reconnected at Last-Event-ID 3 after ${sent[1].at} ms, so a black-holed socket recovers without waiting for the server's 25s ping`;
+  },
+});
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
