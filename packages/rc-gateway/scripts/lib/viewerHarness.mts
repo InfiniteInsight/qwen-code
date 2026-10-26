@@ -46,6 +46,19 @@ export interface BootViewerOptions {
   holdOpenMs?: number;
   /** Status the stub answers POST /session/:id/prompt with (default 200). */
   promptStatus?: number;
+  /**
+   * Status the stub daemon answers a permission vote with. The gateway turns a
+   * throw from the SDK into 502, so any non-2xx here reaches the page as a
+   * failed vote, which is how a scenario drives the retry path.
+   */
+  permissionStatus?: number;
+  /**
+   * Body the stub serves on GET /session/:id/status. A card scenario sets this
+   * to keep its request listed as pending, because the default body reports no
+   * pending interactions and the page's 5s sweep would retire the card on its
+   * own, leaving the vote path untested.
+   */
+  sessionStatus?: unknown;
   /** ms the stub holds a prompt open before answering (models a long turn). */
   promptDelayMs?: number;
   /**
@@ -77,6 +90,8 @@ export async function bootViewer(
     frames: opts.frames,
     holdOpenMs: opts.holdOpenMs,
     promptStatus: opts.promptStatus,
+    permissionStatus: opts.permissionStatus,
+    sessionStatus: opts.sessionStatus,
     promptDelayMs: opts.promptDelayMs,
     transcriptPage: opts.transcriptPage,
     transcriptStatusCode: opts.transcriptStatusCode,
