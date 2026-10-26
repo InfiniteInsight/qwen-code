@@ -184,6 +184,14 @@ export interface StubDaemonOptions {
   /** Status for GET /capabilities (default 200). Non-200 → { error }. */
   capabilitiesStatus?: number;
   /**
+   * The `features` list GET /capabilities advertises (default: none). The page
+   * gates whole panels on these tags — index.html reads `workspace_file_read`
+   * before it will even show the file browser — so a scenario that drives such
+   * a panel has to advertise the tag. Left empty, the panel stays hidden and
+   * the scenario would assert against markup no user can reach.
+   */
+  capabilitiesFeatures?: string[];
+  /**
    * Status for DELETE /session/:id (default 204). The "success" statuses
    * (200/204) respond 204 (the SDK's closeSession accepts 204/404); any other
    * value is returned verbatim as an error.
@@ -769,7 +777,7 @@ export async function startStubDaemon(
     res.json({
       v: 1,
       mode: 'http-bridge',
-      features: [],
+      features: opts.capabilitiesFeatures ?? [],
       modelServices: [],
       workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
     });

@@ -2135,6 +2135,13 @@ type PageScenario =
          * page's 5s sweep would retire the card before the scenario votes.
          */
         sessionStatus?: unknown;
+        /**
+         * Daemon feature tags the stub advertises. The page hides a whole
+         * panel behind some of these tags, so a scenario that drives such a
+         * panel has to advertise the tag it depends on, or it is asserting
+         * against markup that never becomes visible.
+         */
+        capabilitiesFeatures?: string[];
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -6823,6 +6830,226 @@ PAGE_SCENARIOS.push({
     return `a stream silent for 1.5s reconnected at Last-Event-ID 3 after ${sent[1].at} ms, so a black-holed socket recovers without waiting for the server's 25s ping`;
   },
 });
+PAGE_SCENARIOS.push({
+  name: 'P50 the workspace file browser reaches the daemon and reads through it',
+  // The panel sits in the ops pane, so nothing here needs the transcript view.
+  waitView: false,
+  stub: { capabilitiesFeatures: ['workspace_file_read'] },
+  noConsoleErrors: true,
+  run: async ({ page }) => {
+    // The panel lives under Settings, not Operations: its ancestor chain is
+    // details#ws-files inside #pane-settings, which is where P35 finds the
+    // other unseen surfaces too.
+    await page.click('.tab[data-tab="settings"]');
+    const gate = await page.evaluate(() => {
+      const sec = document.getElementById('ws-files');
+      return {
+        hasBody: !!document.getElementById('ws-files-body'),
+        hidden: !!sec && sec.hidden,
+      };
+    });
+    expect(gate.hasBody, 'no #ws-files-body in the page at all');
+    expect(
+      !gate.hidden,
+      '#ws-files stayed hidden although the daemon advertised workspace_file_read',
+    );
+
+    // The section is a <details> and nothing in the page expands it for the
+    // reader (the only .open assignment is the ? handler, which opens a panel
+    // to show its help), so its body is unrendered until tapped. Expand it the
+    // way a tap on the heading does, and check the body actually has geometry
+    // before clicking into it.
+    await page.click('#ws-files > summary');
+    const opened = await page.evaluate(() => {
+      const det = document.getElementById('ws-files');
+      const body = document.getElementById('ws-files-body');
+      return `${det?.open}/${!!body && body.getBoundingClientRect().height > 0}`;
+    });
+    expect(
+      opened === 'true/true',
+      `expanding the heading did not render the body, open/has-height ${JSON.stringify(opened)}`,
+    );
+
+    // Open it the way a user does: the section's own Load control.
+    await page.click('#ws-files-body button');
+    await page.waitForFunction(
+      () => {
+        const b = document.getElementById('ws-files-body');
+        return !!b && /README\.md/.test(b.textContent || '');
+      },
+      null,
+      { timeout: 15_000 },
+    );
+
+    const listing = await page.evaluate(() => {
+      const b = document.getElementById('ws-files-body');
+      const strong = b ? b.querySelector('strong') : null;
+      return {
+        head: strong ? strong.textContent || '' : '',
+        rows: Array.from(b ? b.querySelectorAll('button') : []).map(
+          (x) => x.textContent || '',
+        ),
+        notes: Array.from(b ? b.querySelectorAll('span') : [])
+          .map((x) => (x.textContent || '').trim())
+          .filter((t) => t !== ''),
+      };
+    });
+    expect(
+      listing.head === '.',
+      `the listing opened at ${JSON.stringify(listing.head)}, expected the root`,
+    );
+    expect(
+      listing.rows.includes('src/'),
+      `a directory is not offered as enterable: ${JSON.stringify(listing.rows)}`,
+    );
+    expect(
+      listing.rows.includes('README.md'),
+      `a file row is missing: ${JSON.stringify(listing.rows)}`,
+    );
+    expect(
+      listing.notes.includes('ignored'),
+      `the daemon's ignored flag is not surfaced: ${JSON.stringify(listing.notes)}`,
+    );
+    // At the root there is nowhere to go up, so the control must be absent
+    // rather than present and inert.
+    expect(
+      !listing.rows.includes('up'),
+      'an up control appeared at the root of the tree',
+    );
+
+    // Descend. The stub answers with the path IT was asked for, so the head
+    // reading 'src' can only happen if the request carried path=src: this is
+    // the round trip, not a re-read of page state.
+    const clickRow = (label: string) =>
+      page.evaluate((text) => {
+        const hit = Array.from(
+          document.querySelectorAll('#ws-files-body button'),
+        ).find((x) => (x.textContent || '') === text) as
+          | HTMLButtonElement
+          | undefined;
+        if (!hit) return 'no such control';
+        hit.click();
+        return 'clicked';
+      }, label);
+    const headText = () =>
+      page.evaluate(
+        () =>
+          document.querySelector('#ws-files-body strong')?.textContent || '',
+      );
+
+    expect((await clickRow('src/')) === 'clicked', 'the src row vanished');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('#ws-files-body strong')?.textContent === 'src',
+      null,
+      { timeout: 15_000 },
+    );
+
+    // One level down, up appears and takes the reader back.
+    expect(
+      (await page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll('#ws-files-body button'),
+        ).some((x) => (x.textContent || '') === 'up'),
+      )) === true,
+      'no up control one directory down',
+    );
+    expect((await clickRow('up')) === 'clicked', 'the up control vanished');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('#ws-files-body strong')?.textContent === '.',
+      null,
+      { timeout: 15_000 },
+    );
+    expect((await headText()) === '.', 'up did not return the reader to root');
+
+    // A file row reads the file rather than entering it.
+    expect((await clickRow('README.md')) === 'clicked', 'the file row vanished');
+    await page.waitForFunction(
+      () => {
+        const v = document.getElementById('ws-files-view');
+        return !!v && /# hello/.test(v.textContent || '');
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    const fileView = await page.evaluate(() => {
+      const v = document.getElementById('ws-files-view');
+      return {
+        title: v ? v.querySelector('strong')?.textContent || '' : '',
+        size: v ? v.querySelector('span')?.textContent || '' : '',
+      };
+    });
+    expect(
+      fileView.title === 'README.md',
+      `the file view is titled ${JSON.stringify(fileView.title)}`,
+    );
+    expect(
+      fileView.size.includes('8 bytes'),
+      `the file view reports ${JSON.stringify(fileView.size)}`,
+    );
+
+    // Find goes through GET /glob, the fourth route of the slice.
+    await page.fill('#ws-files-body input', 'src/**/*.ts');
+    await page.press('#ws-files-body input', 'Enter');
+    await page.waitForFunction(
+      () => {
+        const v = document.getElementById('ws-files-view');
+        return !!v && /src\/index\.ts/.test(v.textContent || '');
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    const globView = await page.evaluate(() => {
+      const v = document.getElementById('ws-files-view');
+      return {
+        title: v ? v.querySelector('strong')?.textContent || '' : '',
+        text: v ? v.textContent || '' : '',
+      };
+    });
+    expect(
+      globView.title === 'find: src/**/*.ts',
+      `the find view is titled ${JSON.stringify(globView.title)}`,
+    );
+    expect(
+      globView.text.includes('1 matches'),
+      `the find view reports ${JSON.stringify(globView.text)}`,
+    );
+
+    return 'the file browser opened on the advertised tag, listed the root, descended into src and back, read README.md, and found through /glob';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P51 the file browser stays shut when the daemon does not advertise it',
+  // The counterfactual to P50. Re-running the page's own gating inside that
+  // scenario was the obvious way to prove this and is not a safe one: gating
+  // also renders the permission-rules panel, which throws on a body whose
+  // scope entry carries no rules. Booting a second gateway without the tag
+  // proves the same thing without reaching into another panel.
+  waitView: false,
+  run: async ({ page }) => {
+    await page.click('.tab[data-tab="settings"]');
+    const state = await page.evaluate(() => {
+      const sec = document.getElementById('ws-files');
+      return {
+        exists: !!sec,
+        hidden: !!sec && sec.hidden,
+        daemonDaemon: typeof caps === 'undefined' ? 'caps undeclared' : JSON.stringify(caps?.remoteControl?.daemon?.features ?? null),
+      };
+    });
+    expect(state.exists, 'no #ws-files section in the page at all');
+    expect(
+      state.daemonDaemon === '[]',
+      `the stub advertised ${state.daemonDaemon}, so this is not the no-tag case`,
+    );
+    expect(
+      state.hidden,
+      '#ws-files was revealed although the daemon advertised no features',
+    );
+    return 'with no feature tag the panel stays closed and lists nothing, so P50 seeing it open is the tag working';
+  },
+});
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {
@@ -6836,6 +7063,7 @@ async function runPageScenario(
     // listed as pending, and the status the vote is answered with.
     permissionStatus: s.stub?.permissionStatus,
     sessionStatus: s.stub?.sessionStatus,
+    capabilitiesFeatures: s.stub?.capabilitiesFeatures,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

@@ -70,6 +70,13 @@ export interface BootViewerOptions {
   transcriptPage?: unknown;
   /** Status the stub answers GET /session/:id/transcript with (default 200). */
   transcriptStatusCode?: number;
+  /**
+   * Daemon feature tags the stub advertises on GET /capabilities (default:
+   * none). The page hides whole panels behind these tags, so a scenario that
+   * drives one of them has to advertise it or it is asserting against markup
+   * that never becomes visible.
+   */
+  capabilitiesFeatures?: string[];
 }
 
 export interface Viewer {
@@ -95,6 +102,7 @@ export async function bootViewer(
     promptDelayMs: opts.promptDelayMs,
     transcriptPage: opts.transcriptPage,
     transcriptStatusCode: opts.transcriptStatusCode,
+    capabilitiesFeatures: opts.capabilitiesFeatures,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
