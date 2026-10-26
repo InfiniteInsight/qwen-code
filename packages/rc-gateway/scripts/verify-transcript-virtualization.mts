@@ -7687,6 +7687,88 @@ PAGE_SCENARIOS.push({
     return `a refused list reports ${JSON.stringify(text)} and lists nothing`;
   },
 });
+{
+  // P61. The list is fetched when the panel opens, and a switch made while that
+  // request is in flight painted the conversation the reader had just left:
+  // loadStored reads watchedSessionId to build the URL, then wrote storedFiles
+  // after the await, and syncStoredForSession cannot cancel a request already
+  // sent. Two sessions answering differently, because one answer cannot show
+  // WHICH conversation painted. This is the test the guard exists for; remove
+  // the watchedSessionId checks in loadStored and it goes red on the release.
+  let releaseHeldList = () => {};
+  const heldList = new Promise<void>((resolve) => {
+    releaseHeldList = () => resolve();
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P61 a stored list that lands after a switch names the conversation on screen',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      const B = '22222222-3333-4444-5555-666666666666';
+      let askedA = false;
+      await page.route(/\/session\/[^/]+\/attachments$/, async (route) => {
+        const sid = new URL(route.request().url()).pathname.split('/')[2];
+        const name = sid === A ? 'from-a.log' : 'from-b.log';
+        if (sid === A) {
+          askedA = true;
+          await heldList;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            attachments: [
+              {
+                type: 'resource',
+                attachmentId: name,
+                mimeType: 'text/plain',
+                size: 12,
+              },
+            ],
+          }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.click('#stored-toggle');
+      // The window the guard has to survive: A's request is on the wire and
+      // unanswered. Polling the flag rather than sleeping, so a slow machine
+      // cannot fall through before the request exists.
+      const deadline = Date.now() + 10_000;
+      while (!askedA && Date.now() < deadline) await page.waitForTimeout(50);
+      expect(askedA, 'opening the panel never asked the daemon for the list');
+
+      await watch(page, B);
+      const shown = await page.waitForFunction(
+        () => {
+          const l = document.getElementById('stored-list');
+          const t = l ? (l.textContent ?? '') : '';
+          return t.includes('from-b.log') ? t : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await shown.jsonValue()) as string;
+
+      releaseHeldList();
+      // A's answer is on the wire now; give it the turn it needs to arrive.
+      await page.waitForTimeout(500);
+      const after = await page.evaluate(
+        () => document.getElementById('stored-list')?.textContent ?? '',
+      );
+      expect(
+        !after.includes('from-a.log'),
+        `the list for the conversation just left painted it under the one on screen (${JSON.stringify(after)})`,
+      );
+      expect(
+        after.includes('from-b.log'),
+        `the conversation on screen lost its own rows (${JSON.stringify(after)})`,
+      );
+      return `a list released after the switch is dropped, the panel still reads ${JSON.stringify(after)} against ${JSON.stringify(onScreen)}`;
+    },
+  });
+}
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
 ): Promise<string> {

@@ -7510,7 +7510,13 @@
       }
 
       async function loadStored() {
-        if (!watchedSessionId) {
+        // Snapshot the conversation, because every write below happens after an
+        // await. syncStoredForSession clears and refetches on a switch but cannot
+        // cancel this request, so without the guard two loads race and the later
+        // arrival wins: A's names painted under B. Same guard the frame handler
+        // applies to a late frame.
+        const id = watchedSessionId;
+        if (!id) {
           storedNote = 'watch a session first';
           storedFiles = [];
           renderStored();
@@ -7519,16 +7525,18 @@
         let res;
         try {
           res = await fetch(
-            '/session/' + encodeURIComponent(watchedSessionId) + '/attachments',
+            '/session/' + encodeURIComponent(id) + '/attachments',
             { headers: { Authorization: 'Bearer ' + token() } },
           );
         } catch {
+          if (watchedSessionId !== id) return;
           storedNote = 'could not reach the gateway';
           storedFiles = [];
           renderStored();
           return;
         }
         const body = await res.json().catch(() => null);
+        if (watchedSessionId !== id) return;
         if (!res.ok || !body || !Array.isArray(body.attachments)) {
           const code = (body && body.code) || String(res.status);
           storedNote = 'refused (' + code + ')';
@@ -7559,21 +7567,27 @@
 
       async function removeStored(entry) {
         storedArmed = null;
+        // The delete is aimed at the conversation the row was drawn against, and
+        // the note below is about that row, so both are guarded by the same
+        // snapshot rather than read live after the await.
+        const id = watchedSessionId;
         let res;
         try {
           res = await fetch(
             '/session/' +
-              encodeURIComponent(watchedSessionId) +
+              encodeURIComponent(id) +
               '/attachments/' +
               encodeURIComponent(entry.attachmentId),
             { method: 'DELETE', headers: { Authorization: 'Bearer ' + token() } },
           );
         } catch {
+          if (watchedSessionId !== id) return;
           storedNote = 'could not reach the gateway';
           renderStored();
           return;
         }
         const body = await res.json().catch(() => null);
+        if (watchedSessionId !== id) return;
         if (!res.ok || !body) {
           const code = (body && body.code) || String(res.status);
           storedNote = 'remove refused (' + code + ')';
