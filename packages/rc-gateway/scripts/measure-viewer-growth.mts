@@ -123,8 +123,38 @@ async function main(): Promise<void> {
     const { metrics } = await cdp.send('Performance.getMetrics');
     return (metrics.find((x) => x.name === 'TaskDuration')?.value ?? 0) * 1000;
   };
+
+  // Drain the replay before timing anything. `lastSeenEventId` says the last
+  // frame was RECEIVED, not that the page stopped working, so the rounds below
+  // would otherwise bill the replay's leftover main-thread work to the chunks
+  // measured here. The leftover is a fixed amount of catch-up, not a function
+  // of transcript size (measured: ~180 chunks of it at 60 per round, ~240 at
+  // 240 per round), but it is large enough to outlast the 3 rounds this
+  // harness runs once the replay is big, which is why the per-chunk-with-frame
+  // figure rose only at the largest size and not gradually. Waiting for the
+  // task clock to go quiet is how that is told apart from a real cost: a
+  // genuine per-chunk regression would still be there after the wait, so this
+  // sharpens the assertion rather than softening it. The stream is held open
+  // and the gateway pings it, so the clock never reaches zero; the bound is
+  // "quiet for two samples in a row", not "idle".
+  const DRAIN_POLL_MS = 150;
+  const DRAIN_QUIET_MS = 2;
+  const DRAIN_LIMIT_MS = 30_000;
+  const drainStart = Date.now();
+  let quiet = 0;
+  for (;;) {
+    const t = await taskMs();
+    await page.waitForTimeout(DRAIN_POLL_MS);
+    if ((await taskMs()) - t <= DRAIN_QUIET_MS) quiet++;
+    else quiet = 0;
+    if (quiet >= 2) break;
+    if (Date.now() - drainStart > DRAIN_LIMIT_MS) break;
+  }
+  const drainMs = Date.now() - drainStart;
+
   const FRAME_ROUNDS = 3;
   const FRAME_CHUNKS = 60;
+  const frameRounds: number[] = [];
   let perChunkFrameMs = Infinity;
   for (let round = 0; round < FRAME_ROUNDS; round++) {
     const before = await taskMs();
@@ -142,10 +172,9 @@ async function main(): Promise<void> {
         await new Promise((resolve) => requestAnimationFrame(resolve));
       }
     }, FRAME_CHUNKS);
-    perChunkFrameMs = Math.min(
-      perChunkFrameMs,
-      ((await taskMs()) - before) / FRAME_CHUNKS,
-    );
+    const per = ((await taskMs()) - before) / FRAME_CHUNKS;
+    frameRounds.push(Number(per.toFixed(4)));
+    perChunkFrameMs = Math.min(perChunkFrameMs, per);
   }
 
   // Then the synchronous frame handling alone, in batches of 200 until a
@@ -191,6 +220,8 @@ async function main(): Promise<void> {
             i === samples.length - 1,
         ),
         ...stats,
+        drainMs,
+        frameRounds,
         perChunkMs: Number(perChunkMs.toFixed(6)),
         perChunkFrameMs: Number(perChunkFrameMs.toFixed(4)),
         jsHeapMb: Number(heapAll.toFixed(1)),
