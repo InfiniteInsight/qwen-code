@@ -12669,6 +12669,36 @@ PAGE_SCENARIOS.push({
             }),
           strip: document.getElementById('status-strip') !== null,
           drawer: document.getElementById('inspector') !== null,
+          // The stack order the sheet draws: status, transcript, to-do strip,
+          // inspector drawer, composer. #session-footer starts display:none and
+          // renderFooter bails without a model, so it is shown here to read
+          // where it actually lands. The pane sets no flex and no order, so this is
+          // paint order.
+          stack: (() => {
+            // Two of the five are hidden on this host: the drawer until a model
+            // is configured, the strip because no to-do tool is registered
+            // (#81). A hidden element reports a zero rect, which would sort it
+            // to the top of the column and read as a position it does not have,
+            // so both are shown for the reading and put back after.
+            const hidden = ['plan', 'session-footer'].map((k) => ({
+              e: document.getElementById(k) as HTMLElement,
+              was: (document.getElementById(k) as HTMLElement).style.display,
+            }));
+            for (const h of hidden) {
+              h.e.hidden = false;
+              h.e.style.display = 'block';
+            }
+            const ids = ['status', 'transcript', 'plan', 'session-footer', 'composer'];
+            const tops = ids.map((k) => ({
+              k,
+              top: Math.round((document.getElementById(k) as HTMLElement).getBoundingClientRect().top),
+            }));
+            for (const h of hidden) {
+              h.e.style.display = h.was;
+              if (h.e.id === 'plan') h.e.hidden = true;
+            }
+            return tops;
+          })(),
         };
       });
 
@@ -12683,6 +12713,15 @@ PAGE_SCENARIOS.push({
       expect(
         !seen.strip && !seen.drawer,
         `the retired slots returned (status-strip ${seen.strip}, inspector ${seen.drawer})`,
+      );
+
+      // Sorted on the measured top, not on the order the ids were asked for.
+      // Mapping over that list would echo the literal back and could never
+      // fail, which is the exact shape of a guard that proves nothing.
+      const order = [...seen.stack].sort((a, b) => a.top - b.top).map((t) => t.k);
+      expect(
+        order.join(' ') === 'status transcript plan session-footer composer',
+        `the column stack is ${seen.stack.map((t) => t.k + '@' + t.top).join(' ')}, but the sheet draws status -> transcript -> to-do strip -> drawer -> composer`,
       );
 
       const worst = { kind: '', ratio: 99 };
@@ -12705,13 +12744,98 @@ PAGE_SCENARIOS.push({
         );
       }
 
+      // The composer has to clear the fold at both widths, which #121 asks for
+      // by name and nothing in the tree did. It is the exact failure the sheet
+      // records: a band added above the composer once pushed it out of reach.
+      // Three drawer states are read because the band's cost is what this task
+      // adds. They have to be forced, because the page does not offer a hidden
+      // rest state once a turn has run: renderFooter at index.html:4814 sets
+      // display:none only in its no-ctxInfo branch and never sets it back, so
+      // with a live turn the band is already painted and reading it untouched
+      // twice, which an earlier draft of this leg did, measures one quantity
+      // under two names. So each state is set explicitly here: hidden, as-is,
+      // and filled with model, tokens, cwd and mode. The strip stays out of it:
+      // no to-do tool is registered (#81), so a filled strip is a state this
+      // host cannot produce and drawing one here would be a fiction.
+      //
+      // Only the hidden band is asserted at both widths. With the band removed
+      // the composer sits at 813 in a 844px viewport at 390 and 606 in a 720px
+      // one at 1280, so there is 31px of headroom on a phone and 114px at
+      // desktop. The band itself spends 97px of that 31px at 390, putting the
+      // composer at 910, which is 66px under the fold. It is not asserted
+      // because the cause is the column budget rather than this band: the column
+      // is unbounded, so a band above the composer lengthens the document
+      // instead of shortening the scroller, which is the 2026-10-21 sizing
+      // decision. It is held in #151 with its measurements rather than shipped
+      // red, because a failing baseline hides every other scenario in the run.
+      // Note the page's own band costs more than a typed sentence: at 390 the
+      // as-is reading is 910 against 872 for the synthetic fill, because
+      // renderFooter lays out model, tokens, cwd, a mode select and a checkbox,
+      // which wrap to more lines than one string does. Measuring only a typed
+      // string would have understated the overflow by 38px.
+      const fold: {
+        w: number;
+        hidden: number;
+        asis: number;
+        filled: number;
+        viewH: number;
+      }[] = [];
+      for (const [w, h] of [
+        [1280, 720],
+        [390, 844],
+      ]) {
+        await page.setViewportSize({ width: w, height: h });
+        fold.push({
+          w,
+          ...(await page.evaluate(() => {
+            const foot = document.getElementById('session-footer') as HTMLElement;
+            const comp = document.getElementById('composer') as HTMLElement;
+            // The band's own state is saved and put back rather than cleared. An
+            // earlier draft ended with textContent = '', which erased what
+            // renderFooter had written, so the second width measured a band the
+            // run itself had emptied.
+            const wasDisplay = foot.style.display;
+            const wasHtml = foot.innerHTML;
+            // No named arrow anywhere in here. The transform rewrites one into a
+            // __name(...) call the page does not define, so it throws at run
+            // time. The rect is read inline at each step instead.
+            foot.style.display = 'none';
+            const hidden = Math.round(comp.getBoundingClientRect().bottom);
+            foot.style.display = wasDisplay;
+            const asis = Math.round(comp.getBoundingClientRect().bottom);
+            foot.textContent =
+              'gpt-4o 12.3k/128k /home/evan/projects/qwen-code-remote mode: default';
+            const filled = Math.round(comp.getBoundingClientRect().bottom);
+            foot.innerHTML = wasHtml;
+            foot.style.display = wasDisplay;
+            return { hidden, asis, filled, viewH: window.innerHeight };
+          })),
+        });
+      }
+      for (const f of fold) {
+        expect(
+          f.hidden <= f.viewH + 1,
+          `at ${f.w}px the composer bottom is ${f.hidden} with the drawer hidden, in a ${f.viewH}px viewport`,
+        );
+      }
+      const desk = fold.find((f) => f.w === 1280)!;
+      for (const k of ['asis', 'filled'] as const) {
+        expect(
+          desk[k] <= desk.viewH + 1,
+          `with the drawer ${k} the composer bottom is ${desk[k]} at 1280px, in a ${desk.viewH}px viewport`,
+        );
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+
       return (
         seen.painted.length +
         ' text-bearing elements all at 3:1 or better, worst ' +
         worst.kind +
         ' at ' +
         worst.ratio.toFixed(2) +
-        ':1; the retired status strip and inspector stayed retired'
+        ':1; the retired status strip and inspector stayed retired; composer clears the fold at both widths with the drawer hidden, and at 1280 as the page draws it and with it filled (' +
+        fold.map((f) => f.w + ': ' + f.hidden + '/' + f.asis + '/' + f.filled + ' of ' + f.viewH).join(', ') +
+        ')'
       );
     },
   });
