@@ -125,6 +125,23 @@ export interface BootViewerOptions {
    * invention rather than its own.
    */
   statsResult?: unknown;
+  /**
+   * Body the stub answers GET /session/:id/artifacts with. Left unset the stub
+   * serves its own default envelope, so a scenario that asserts a drawn row is
+   * checking the stub's invention rather than its own unless it sets this.
+   */
+  artifactListResult?: unknown;
+  /**
+   * Status the stub answers GET /session/:id/artifacts with (default 200). Set
+   * it to drive the failure row, since there is no other way to make a daemon
+   * refuse a list, and the page prints the reason code it was given.
+   */
+  artifactListStatus?: number;
+  /**
+   * Status the stub answers the artifact content read with (default 200). Set
+   * it to 404 to drive the refusal the page reports when a snapshot is gone.
+   */
+  artifactContentStatus?: number;
 }
 
 export interface Viewer {
@@ -158,6 +175,9 @@ export async function bootViewer(
     attachmentListStatus: opts.attachmentListStatus,
     statsStatusCode: opts.statsStatusCode,
     statsResult: opts.statsResult,
+    artifactListResult: opts.artifactListResult,
+    artifactListStatus: opts.artifactListStatus,
+    artifactContentStatus: opts.artifactContentStatus,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));

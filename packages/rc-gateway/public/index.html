@@ -1181,6 +1181,41 @@
                  pushed the composer under the fold on a phone. -->
             <span id="stored-preview" hidden></span>
           </div>
+          <!-- #127. What the session PRODUCED, which is a different fact from
+               the box above it (what someone sent in). Its own control rather
+               than rows added to that panel: that panel's Open rule is one
+               line, "only an image is drawn, anything else is offered as a
+               file", and a saved webpage is the one content type that must
+               never be drawn here. The body is HTML fetched off the open web,
+               served from an origin that holds the operator's token, and this
+               page sets no Content-Security-Policy at all, so a row here only
+               ever offers a download. The web-shell, which already answered
+               this same question, keeps artifacts in their own panel too.
+               Same bounded shape as the box above, because an open list that
+               grows is how the to-do strip pushed the composer under the fold
+               on a phone. Fetched on the first open rather than polled. -->
+          <button id="artifacts-toggle" type="button" aria-expanded="false">
+            Artifacts in this session
+          </button>
+          <div
+            id="artifacts"
+            aria-live="polite"
+            hidden
+            style="
+              margin-top: 6px;
+              padding: 6px 8px;
+              background: #1f2630;
+              border-left: 2px solid #88c0d0;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #c8d2e0;
+              max-height: 140px;
+              overflow-y: auto;
+            "
+          >
+            <span id="artifacts-note"></span>
+            <span id="artifacts-list"></span>
+          </div>
           <!-- #124. "Where did I leave off", asked of the daemon that was
                watching. Its own button rather than a line in the transcript:
                the summary is a sentence ABOUT the conversation, not a turn IN
@@ -7955,6 +7990,156 @@
         box.hidden = !opening;
         $('stored-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
         if (opening) await loadStored();
+      };
+
+      // -- Session artifacts (#127) ----------------------------------------
+      // What the session produced, in its own box rather than rows added to
+      // the Files panel above it. See the markup note for the rule this keeps:
+      // a row offers a file and never draws one, because the only body this
+      // family serves is HTML that came off the open web.
+      let artifactFiles = [];
+      let artifactNote = '';
+      // One object URL at a time, revoked before the next save. These are
+      // saved webpages, up to the daemon's own size, and a URL per press is a
+      // leak the page cannot see.
+      let artifactSaveUrl = '';
+
+      function artifactFileName(entry) {
+        // The title is the producer's text and is not trusted as a path. Every
+        // separator is folded out so a row cannot offer a name that escapes
+        // the download directory, and an empty title falls back to the id.
+        const raw = typeof entry.title === 'string' ? entry.title.trim() : '';
+        const base = raw.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80);
+        return base || String(entry.id || 'artifact');
+      }
+
+      function renderArtifacts() {
+        const list = $('artifacts-list');
+        if (!list) return;
+        list.textContent = '';
+        for (const entry of artifactFiles) {
+          const row = document.createElement('span');
+          row.style.display = 'block';
+          row.style.marginTop = '4px';
+          const label = document.createElement('span');
+          // The kind is drawn from the daemon's field and never guessed at.
+          // Its union is open (KnownDaemonSessionArtifactKind plus
+          // OpenStringUnion), so a kind this file has never heard of still
+          // gets a row with the daemon's own word on it rather than being
+          // dropped or relabeled as something known.
+          label.textContent =
+            (typeof entry.title === 'string' && entry.title
+              ? entry.title
+              : String(entry.id || '(untitled)')) +
+            ' (' +
+            String(entry.kind || 'unknown') +
+            ', ' +
+            formatBytes(Number(entry.sizeBytes) || 0) +
+            (entry.status && entry.status !== 'available'
+              ? ', ' + String(entry.status)
+              : '') +
+            ')';
+          row.appendChild(label);
+          // A missing or changed snapshot has nothing to save, and the content
+          // read would only answer with the daemon's refusal.
+          if (entry.status === 'available') {
+            const save = document.createElement('button');
+            save.type = 'button';
+            save.style.marginLeft = '6px';
+            save.textContent = 'Save';
+            save.onclick = () => void saveArtifact(entry);
+            row.appendChild(save);
+          }
+          list.appendChild(row);
+        }
+        $('artifacts-note').textContent = artifactNote;
+      }
+
+      async function loadArtifacts() {
+        // Snapshot the conversation: every write below happens after an await,
+        // and a switch cannot cancel this request. Without the guard two loads
+        // race and the later arrival wins, painting A's artifacts under B.
+        const id = watchedSessionId;
+        artifactFiles = [];
+        artifactNote = '';
+        if (!id) {
+          artifactNote = 'watch a session first';
+          renderArtifacts();
+          return;
+        }
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/artifacts',
+        );
+        if (id !== watchedSessionId) return;
+        if (!r.ok) {
+          artifactNote = 'artifacts failed: ' + r.code;
+          renderArtifacts();
+          return;
+        }
+        const rows =
+          r.body && Array.isArray(r.body.artifacts) ? r.body.artifacts : [];
+        artifactFiles = rows;
+        artifactNote = rows.length ? '' : 'nothing produced yet';
+        renderArtifacts();
+      }
+
+      async function saveArtifact(entry) {
+        const id = watchedSessionId;
+        if (!id) {
+          artifactNote = 'watch a session first';
+          renderArtifacts();
+          return;
+        }
+        try {
+          // Not rcCall: that helper JSON.parses every 2xx body, and this one is
+          // a saved webpage. The four headers the gateway restates are what
+          // keep this text from ever rendering where the token lives, and the
+          // blob below is typed as a byte stream for the same reason: even a
+          // stray navigation to the object URL downloads rather than renders.
+          const res = await fetch(
+            '/session/' +
+              encodeURIComponent(id) +
+              '/artifacts/' +
+              encodeURIComponent(String(entry.id)) +
+              '/content',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            artifactNote =
+              'save failed: ' + String((e && e.error) || res.status);
+            renderArtifacts();
+            return;
+          }
+          const text = await res.text();
+          if (id !== watchedSessionId) return;
+          if (artifactSaveUrl) URL.revokeObjectURL(artifactSaveUrl);
+          artifactSaveUrl = URL.createObjectURL(
+            new Blob([text], { type: 'application/octet-stream' }),
+          );
+          const a = document.createElement('a');
+          a.href = artifactSaveUrl;
+          a.download = artifactFileName(entry);
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          artifactNote = 'saved ' + artifactFileName(entry);
+        } catch (err) {
+          artifactNote = 'save failed: ' + err.message;
+        }
+        renderArtifacts();
+      }
+
+      $('artifacts-toggle').onclick = async () => {
+        const box = $('artifacts');
+        if (!box) return;
+        const opening = box.hidden;
+        box.hidden = !opening;
+        $('artifacts-toggle').setAttribute(
+          'aria-expanded',
+          opening ? 'true' : 'false',
+        );
+        if (opening) await loadArtifacts();
       };
 
       // -- Session recap (#124) ------------------------------------------
