@@ -430,6 +430,18 @@ export interface StubDaemonOptions {
   workspacePreflightStatus?: number;
   /** Full body for GET /workspace/preflight (overrides the default v:1). */
   workspacePreflightResult?: unknown;
+  /** Status for GET /workspace/skills (default 200). Non-200 → { error }. */
+  workspaceSkillsStatus?: number;
+  /** Full body for GET /workspace/skills (overrides the default v:1 shape). */
+  workspaceSkillsResult?: unknown;
+  /** Status for GET /workspace/providers (default 200). Non-200 → { error }. */
+  workspaceProvidersStatus?: number;
+  /** Full body for GET /workspace/providers (overrides the default v:1). */
+  workspaceProvidersResult?: unknown;
+  /** Status for GET /workspace/hooks (default 200). Non-200 → { error }. */
+  workspaceHooksStatus?: number;
+  /** Full body for GET /workspace/hooks (overrides the default v:1 shape). */
+  workspaceHooksResult?: unknown;
   /** Status for GET /workspace/settings (default 200). Non-200 → { error }. */
   workspaceSettingsStatus?: number;
   /** Full body for GET /workspace/settings (overrides the default v:1 shape). */
@@ -875,6 +887,152 @@ export async function startStubDaemon(
           },
         ],
         errors: [{ kind: 'egress', status: 'error', error: 'probe timed out' }],
+      },
+    );
+  });
+
+  app.get('/workspace/skills', (_req, res) => {
+    const status = opts.workspaceSkillsStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspaceSkillsStatus
+    // (packages/sdk-typescript/src/daemon/types.ts:2511) and
+    // DaemonWorkspaceSkillStatus (:2493), which extends DaemonStatusCell and
+    // adds name/description/level/modelInvocable plus optionals.
+    // installedPath is deliberately present on one entry: it is a host path,
+    // which is the fact that puts this read on the write side of the #107 line.
+    // The second entry carries `disabledReason`, the field that says a skill is
+    // there but off, which a page that filters non-ok rows would drop.
+    res.json(
+      opts.workspaceSkillsResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            name: 'review',
+            description: 'review the current diff',
+            level: 'workspace',
+            modelInvocable: true,
+            status: 'ok',
+            installedPath: '/proj/.qwen/skills/review/SKILL.md',
+          },
+          {
+            kind: 'skill',
+            name: 'pdf',
+            description: 'work with pdf files',
+            level: 'user',
+            modelInvocable: false,
+            status: 'disabled',
+            disabledReason: 'default',
+          },
+        ],
+      },
+    );
+  });
+
+  app.get('/workspace/providers', (_req, res) => {
+    const status = opts.workspaceProvidersStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspaceProvidersStatus (:2606),
+    // DaemonWorkspaceProviderStatus (:2594) and DaemonWorkspaceProviderModel
+    // (:2578). One model carries `baseUrl` and `envKey` on purpose: those two
+    // are why this read is the most identifying of the three, and a page that
+    // prints them is printing where the host's model traffic goes and which
+    // variable pays for it.
+    res.json(
+      opts.workspaceProvidersResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        current: { authType: 'anthropic', modelId: 'claude-sonnet-4' },
+        approvalMode: 'default',
+        providers: [
+          {
+            kind: 'model_provider',
+            authType: 'anthropic',
+            current: true,
+            status: 'ok',
+            models: [
+              {
+                modelId: 'claude-sonnet-4',
+                baseModelId: 'claude-sonnet-4',
+                name: 'Claude Sonnet 4',
+                isCurrent: true,
+                isRuntime: false,
+                baseUrl: 'https://api.anthropic.com',
+                envKey: 'ANTHROPIC_API_KEY',
+              },
+            ],
+          },
+          {
+            kind: 'model_provider',
+            authType: 'qwen-oauth',
+            current: false,
+            status: 'warning',
+            hint: 'token expires soon',
+            models: [],
+          },
+        ],
+      },
+    );
+  });
+
+  app.get('/workspace/hooks', (_req, res) => {
+    const status = opts.workspaceHooksStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspaceHooksStatus (:5483) and DaemonHookEntry
+    // (:5471). The config mirrors what the real daemon sends: `command` is NOT
+    // masked by redactHookSecrets
+    // (packages/cli/src/acp-integration/acpAgent.ts:2549) because a hook's
+    // shell command is configuration, while every `env` VALUE is replaced with
+    // a constant and only the key names survive. So the secret here is a mask,
+    // not a value, and a page that printed config.env would print key names
+    // beside a string that looks like content.
+    res.json(
+      opts.workspaceHooksResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        initialized: true,
+        disabled: false,
+        hooks: [
+          {
+            kind: 'hook',
+            eventName: 'PreToolUse',
+            source: 'workspace',
+            enabled: true,
+            matcher: 'Bash',
+            config: {
+              type: 'command',
+              command: 'python3 tools/guard.py',
+              env: { GUARD_TOKEN: '[redacted]' },
+            },
+          },
+          {
+            kind: 'hook',
+            eventName: 'Stop',
+            source: 'user',
+            enabled: false,
+            config: { type: 'command', command: 'echo done' },
+          },
+        ],
+        events: {
+          PreToolUse: {
+            description: 'before a tool runs',
+            matcherKind: 'string',
+          },
+          Stop: { description: 'when the turn stops' },
+        },
       },
     );
   });

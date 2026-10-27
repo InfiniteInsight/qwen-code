@@ -100,6 +100,11 @@ import {
   createWorkspacePreflightRoute,
 } from './routes/workspaceDiagnostics.js';
 import {
+  createWorkspaceHooksRoute,
+  createWorkspaceProvidersRoute,
+  createWorkspaceSkillsRoute,
+} from './routes/workspaceInventory.js';
+import {
   createWorkspaceToolToggleRoute,
   createWorkspaceToolsCatalogRoute,
 } from './routes/workspaceTools.js';
@@ -1897,6 +1902,40 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspacePreflightRoute(deps.daemon),
+  );
+  // #123. The three inventory reads: what is installed and configured on this
+  // machine. Same WRITE floor as the diagnostics pair, for the same reason and
+  // by the same rule (#107: names at the read side, host facts at the write
+  // side). Each of these payloads carries host facts rather than names: a skill
+  // record carries `installedPath`, a provider model carries `baseUrl` and
+  // `envKey` (so this read enumerates the host's model endpoints and which
+  // variable feeds each), and a hook entry carries its real shell command,
+  // which the daemon masks only for `config.env`/`config.headers` VALUES
+  // (packages/cli/src/acp-integration/acpAgent.ts:2549). A device that can read
+  // a conversation should not be able to enumerate any of it.
+  app.get(
+    '/rc/workspace/skills',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceSkillsRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/providers',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceProvidersRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/hooks',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceHooksRoute(deps.daemon),
   );
   app.get(
     '/rc/workspace/tools',
