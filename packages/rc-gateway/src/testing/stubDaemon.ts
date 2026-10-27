@@ -93,6 +93,12 @@ export interface StubDaemon {
   lastListQuery: Record<string, unknown> | undefined;
   /** Query the most recent GET /glob request carried. */
   lastGlobQuery: Record<string, unknown> | undefined;
+  /**
+   * Query the most recent GET /workspace/memory request carried. Recorded so
+   * a test can prove the gateway never forwards a content flag, whatever the
+   * caller sent it: see routes/workspaceContext.ts.
+   */
+  lastMemoryQuery: Record<string, unknown> | undefined;
   /** Query the most recent GET /file request carried. */
   lastFileQuery: Record<string, unknown> | undefined;
   /** Query the most recent GET /file/bytes request carried. */
@@ -442,6 +448,14 @@ export interface StubDaemonOptions {
   workspaceHooksStatus?: number;
   /** Full body for GET /workspace/hooks (overrides the default v:1 shape). */
   workspaceHooksResult?: unknown;
+  /** Status for GET /workspace/memory (default 200). Non-200 -> { error }. */
+  workspaceMemoryStatus?: number;
+  /** Full body for GET /workspace/memory (overrides the default v:1 shape). */
+  workspaceMemoryResult?: unknown;
+  /** Status for GET /workspace/agents (default 200). Non-200 -> { error }. */
+  workspaceAgentsStatus?: number;
+  /** Full body for GET /workspace/agents (overrides the default v:1 shape). */
+  workspaceAgentsResult?: unknown;
   /** Status for GET /workspace/settings (default 200). Non-200 → { error }. */
   workspaceSettingsStatus?: number;
   /** Full body for GET /workspace/settings (overrides the default v:1 shape). */
@@ -608,6 +622,7 @@ export async function startStubDaemon(
     lastMcpReloadBody: undefined as unknown,
     lastListQuery: undefined as Record<string, unknown> | undefined,
     lastGlobQuery: undefined as Record<string, unknown> | undefined,
+    lastMemoryQuery: undefined as Record<string, unknown> | undefined,
     lastFileQuery: undefined as Record<string, unknown> | undefined,
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
@@ -1033,6 +1048,93 @@ export async function startStubDaemon(
           },
           Stop: { description: 'when the turn stops' },
         },
+      },
+    );
+  });
+
+  app.get('/workspace/memory', (req, res) => {
+    // Recorded so a test can assert the flag never arrives. The gateway has
+    // no path that sets it, and a caller's own query param must not become one.
+    state.lastMemoryQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.workspaceMemoryStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspaceMemoryStatus
+    // (packages/sdk-typescript/src/daemon/types.ts:2646) and
+    // DaemonWorkspaceMemoryFile (:2625). No `content` field on either entry,
+    // because the gateway never sends includeContent: that flag is the only way
+    // to read the global file, which sits outside the bound workspace and is
+    // refused by the file routes. The second entry is the `global` scope, whose
+    // `path` is a home-directory path and is the reason this read is WRITE.
+    res.json(
+      opts.workspaceMemoryResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file',
+            path: '/proj/QWEN.md',
+            scope: 'workspace',
+            bytes: 4210,
+          },
+          {
+            kind: 'memory_file',
+            path: '/home/dev/.qwen/QWEN.md',
+            scope: 'global',
+            bytes: 980,
+          },
+        ],
+        totalBytes: 5190,
+        fileCount: 2,
+        ruleCount: 14,
+      },
+    );
+  });
+
+  app.get('/workspace/agents', (_req, res) => {
+    const status = opts.workspaceAgentsStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspaceAgentsStatus (:2977) and
+    // DaemonWorkspaceAgentSummary (:2948). Levels are the real union
+    // (project|user|builtin|extension|session). The first entry carries
+    // `filePath`, a host path, plus the tool and MCP names it may reach; the
+    // second is a builtin with no file at all, so a page that assumed every
+    // agent has a definition file would break on it.
+    res.json(
+      opts.workspaceAgentsResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        agents: [
+          {
+            kind: 'agent',
+            name: 'reviewer',
+            description: 'reviews the current diff',
+            level: 'project',
+            isBuiltin: false,
+            hasTools: true,
+            tools: ['read_file', 'grep_search'],
+            model: 'qwen3.6-plus',
+            mcpServerNames: ['memory'],
+            hookEvents: ['PreToolUse'],
+            filePath: '/proj/.qwen/agents/reviewer.md',
+          },
+          {
+            kind: 'agent',
+            name: 'Explore',
+            description: 'fast codebase exploration',
+            level: 'builtin',
+            isBuiltin: true,
+            hasTools: false,
+          },
+        ],
       },
     );
   });
@@ -2367,6 +2469,9 @@ export async function startStubDaemon(
     },
     get lastGlobQuery() {
       return state.lastGlobQuery;
+    },
+    get lastMemoryQuery() {
+      return state.lastMemoryQuery;
     },
     get lastFileQuery() {
       return state.lastFileQuery;

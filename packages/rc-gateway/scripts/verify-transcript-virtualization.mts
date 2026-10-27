@@ -2222,6 +2222,14 @@ type PageScenario =
         workspaceHooksResult?: unknown;
         /** Status the stub answers GET /workspace/hooks with. */
         workspaceHooksStatus?: number;
+        /** Body the stub answers GET /workspace/memory with. */
+        workspaceMemoryResult?: unknown;
+        /** Status the stub answers GET /workspace/memory with. */
+        workspaceMemoryStatus?: number;
+        /** Body the stub answers GET /workspace/agents with. */
+        workspaceAgentsResult?: unknown;
+        /** Status the stub answers GET /workspace/agents with. */
+        workspaceAgentsStatus?: number;
         /**
          * Body the stub answers GET /session/:id/artifacts with. A scenario
          * that asserts a drawn row, or that an unknown kind still reaches the
@@ -9992,6 +10000,39 @@ PAGE_SCENARIOS.push({
     return invRows(page);
   };
 
+  // #123. The context panel. Two reads, one handler, one bounded body.
+  const ctxRows = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ctx-body > div')).map((el) =>
+        (el.textContent ?? '').trim(),
+      ),
+    );
+
+  const openCtxPanel = async (page: Page): Promise<void> => {
+    // The settings tab, not ops: like every other ws-* surface, this panel lives
+    // in the settings pane, and clicking the wrong tab leaves the summary
+    // hidden, which reads as a broken selector rather than a pane boundary (D59).
+    await page.click('.tab[data-tab="settings"]');
+    await page.click('#ws-context > summary');
+  };
+
+  const readCtx = async (page: Page): Promise<string[]> => {
+    await page.click('#ctx-load');
+    await page.waitForFunction(() => {
+      const b = document.getElementById('ctx-body');
+      return !!b && !b.textContent.includes('loading');
+    });
+    return ctxRows(page);
+  };
+
+  const pickCtxKind = async (page: Page, kind: string): Promise<void> => {
+    // Every scenario picks its kind. The default radio is memory, so a scenario
+    // that forgot to click would read the memory payload while believing it
+    // tested agents, and its absence assertions would pass by never seeing an
+    // agent (D60's P103/P104 miss).
+    await page.click(`input[name="ctx-kind"][value="${kind}"]`);
+  };
+
   PAGE_SCENARIOS.push({
     name: 'P98 the diagnostics panel draws the daemon words it has never seen',
     waitView: false,
@@ -10569,6 +10610,250 @@ PAGE_SCENARIOS.push({
       return `hooks refused by name, skills drew ${JSON.stringify(rows)}`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P106 the context file list draws names and sizes and never the text',
+    waitView: false,
+    noConsoleErrors: true,
+    // The payload here carries `content` even though this gateway never asks for
+    // it, which is the point: the guard is that the page has no path that draws
+    // it, so a daemon that started returning text unasked would still not put it
+    // on screen. The global entry's directory is a home path, also undrawn.
+    stub: {
+      workspaceMemoryResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file',
+            path: '/proj/only-a-workspace-file.md',
+            scope: 'workspace',
+            bytes: 4210,
+          },
+          {
+            kind: 'memory_file',
+            path: '/home/onlyasecrethomedir/.qwen/only-a-global-file.md',
+            scope: 'global',
+            bytes: 980,
+            content: 'ONLY_A_SECRET_MEMORY_BODY',
+            truncated: true,
+          },
+        ],
+        totalBytes: 5190,
+        fileCount: 2,
+        ruleCount: 14,
+      },
+    },
+    run: async ({ page }) => {
+      await openCtxPanel(page);
+      await pickCtxKind(page, 'memory');
+      const rows = await readCtx(page);
+      expect(
+        rows[0] === '2 context files',
+        `the context header miscounted (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-a-workspace-file.md') &&
+            r.includes('[workspace]') &&
+            r.includes('4210 B'),
+        ),
+        `the workspace file or its size never reached the page (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-a-global-file.md') &&
+            r.includes('[global]') &&
+            r.includes('truncated'),
+        ),
+        `the global file or its truncation never reached the page (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('ONLY_A_SECRET_MEMORY_BODY')) === false,
+        `the context panel drew file text it never asked for (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('onlyasecrethomedir')) === false,
+        `the context panel drew a home directory (${JSON.stringify(rows)})`,
+      );
+      return `context files draw ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P107 the agents list draws identity and keeps a builtin with no file',
+    waitView: false,
+    noConsoleErrors: true,
+    // The builtin has no filePath at all, so a page that assumed one would drop
+    // it and the reader would conclude the agent does not exist. The project
+    // entry's filePath stays undrawn, same rule as the skills panel in D60.
+    stub: {
+      workspaceAgentsResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        agents: [
+          {
+            kind: 'agent',
+            name: 'only-a-project-agent',
+            description: 'd',
+            level: 'project',
+            isBuiltin: false,
+            hasTools: true,
+            tools: ['read_file', 'grep_search'],
+            model: 'only-a-model-name',
+            filePath: '/proj/.qwen/agents/only-a-secret-agent-path.md',
+          },
+          {
+            kind: 'agent',
+            name: 'only-a-builtin-agent',
+            description: 'd',
+            level: 'builtin',
+            isBuiltin: true,
+            hasTools: false,
+          },
+        ],
+      },
+    },
+    run: async ({ page }) => {
+      await openCtxPanel(page);
+      await pickCtxKind(page, 'agents');
+      const rows = await readCtx(page);
+      expect(
+        rows[0] === '2 agents',
+        `the agents header miscounted (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-a-project-agent') &&
+            r.includes('[project]') &&
+            r.includes('2 tools') &&
+            r.includes('via only-a-model-name'),
+        ),
+        `the project agent's identity never reached the page (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) => r.includes('only-a-builtin-agent') && r.includes('builtin'),
+        ),
+        `the builtin agent was dropped for having no file (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('only-a-secret-agent-path')) === false,
+        `the agents panel drew a definition path (${JSON.stringify(rows)})`,
+      );
+      return `agents draw ${JSON.stringify(rows)}`;
+    },
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P108 switching context kind re-reads the other route',
+    waitView: false,
+    noConsoleErrors: true,
+    // Two payloads with disjoint marker words, so a panel that cached its first
+    // read, or that read the same route twice, cannot pass.
+    stub: {
+      workspaceMemoryResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file',
+            path: '/proj/only-in-memory.md',
+            scope: 'workspace',
+            bytes: 100,
+          },
+        ],
+        totalBytes: 100,
+        fileCount: 1,
+        ruleCount: 3,
+      },
+      workspaceAgentsResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        agents: [
+          {
+            kind: 'agent',
+            name: 'only-in-agents',
+            description: 'd',
+            level: 'user',
+            isBuiltin: false,
+            hasTools: false,
+          },
+        ],
+      },
+    },
+    run: async ({ page }) => {
+      await openCtxPanel(page);
+      await pickCtxKind(page, 'memory');
+      const first = await readCtx(page);
+      expect(
+        first[0] === '1 context files',
+        `the memory header miscounted on the first read (${JSON.stringify(first)})`,
+      );
+      expect(
+        first.some((r) => r.includes('only-in-memory')),
+        `the memory read drew nothing (${JSON.stringify(first)})`,
+      );
+      expect(
+        first.some((r) => r.includes('only-in-agents')) === false,
+        `the memory read drew an agent (${JSON.stringify(first)})`,
+      );
+
+      await pickCtxKind(page, 'agents');
+      const second = await readCtx(page);
+      expect(
+        second[0] === '1 agents',
+        `the agents header miscounted after switching (${JSON.stringify(second)})`,
+      );
+      expect(
+        second.some((r) => r.includes('only-in-agents')),
+        `switching did not re-read the other route (${JSON.stringify(second)})`,
+      );
+      expect(
+        second.some((r) => r.includes('only-in-memory')) === false,
+        `the agents read still showed the cached memory rows (${JSON.stringify(second)})`,
+      );
+      return `switched ${JSON.stringify(first)} -> ${JSON.stringify(second)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P109 a refused context read names which route refused',
+    waitView: false,
+    // Memory 404 while agents answer. The two unsupported codes are distinct on
+    // purpose, so a page that collapsed them would hide which half an older
+    // daemon serves. noConsoleErrors is deliberately not set: the browser logs
+    // the 502.
+    stub: { workspaceMemoryStatus: 404 },
+    run: async ({ page }) => {
+      await openCtxPanel(page);
+      await pickCtxKind(page, 'memory');
+      await page.click('#ctx-load');
+      await page.waitForFunction(() => {
+        const b = document.getElementById('ctx-body');
+        return !!b && b.textContent.includes('memory_unsupported');
+      });
+      const refused = await page.evaluate(
+        () => document.getElementById('ctx-body')?.textContent ?? '',
+      );
+      expect(
+        refused.includes('context failed: memory_unsupported'),
+        `the memory refusal did not name itself (${JSON.stringify(refused)})`,
+      );
+
+      await pickCtxKind(page, 'agents');
+      const rows = await readCtx(page);
+      expect(
+        rows.length > 0 && rows[0].includes('agents'),
+        `agents still would not draw beside a memory refusal (${JSON.stringify(rows)})`,
+      );
+      return `memory refused by name, agents drew ${JSON.stringify(rows)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -10605,6 +10890,10 @@ async function runPageScenario(
     workspaceProvidersStatus: s.stub?.workspaceProvidersStatus,
     workspaceHooksResult: s.stub?.workspaceHooksResult,
     workspaceHooksStatus: s.stub?.workspaceHooksStatus,
+    workspaceMemoryResult: s.stub?.workspaceMemoryResult,
+    workspaceMemoryStatus: s.stub?.workspaceMemoryStatus,
+    workspaceAgentsResult: s.stub?.workspaceAgentsResult,
+    workspaceAgentsStatus: s.stub?.workspaceAgentsStatus,
     artifactListResult: s.stub?.artifactListResult,
     artifactListStatus: s.stub?.artifactListStatus,
     artifactContentStatus: s.stub?.artifactContentStatus,

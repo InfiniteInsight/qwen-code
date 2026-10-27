@@ -2429,6 +2429,47 @@
             (not loaded)
           </div>
         </details>
+        <details id="ws-context" class="ops-collapse">
+          <summary>
+            <strong>Workspace context</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Workspace context?"
+              aria-expanded="false"
+              aria-controls="help-ws-context"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-context" hidden>
+            What this machine loads to tell the model who it is. Pick
+            <b>context files</b> for the memory files that exist and how big
+            they are, or <b>agents</b> for the subagents defined here and which
+            level each sits at, then tap <b>Read context</b>. This lists the
+            files and their sizes, it does not open them: the text of the global
+            file stays where the file browser already refuses it. Needs write
+            scope, because which files exist on this host is a fact about the
+            host.
+          </div>
+          <div class="ops-note">
+            (this machine's own state; requires write scope)
+          </div>
+          <div>
+            <label
+              ><input type="radio" name="ctx-kind" value="memory" checked />
+              context files</label
+            >
+            <label
+              ><input type="radio" name="ctx-kind" value="agents" />
+              agents</label
+            >
+            <button id="ctx-load">Read context</button>
+          </div>
+          <div id="ctx-body" style="max-height: 140px; overflow-y: auto">
+            (not loaded)
+          </div>
+        </details>
         <!-- #124. What ONE live conversation has loaded: its skills and the MCP
              servers its own manager holds. Deliberately not the workspace view.
              The SDK builds this payload from one session's own Config
@@ -13176,6 +13217,98 @@
             if (typeof (c && c.matcher) === 'string')
               line += ' match ' + c.matcher;
             rows.push(line + tail(c));
+          }
+        }
+        for (const e of errs) {
+          rows.push(
+            '  ! ' +
+              String((e && e.kind) || '(unknown)') +
+              '  ' +
+              statusWord(e) +
+              (typeof (e && e.error) === 'string' ? ' - ' + e.error : ''),
+          );
+        }
+        renderRows(out, rows);
+      };
+
+      $('ctx-load').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('ctx-body');
+        const kindEl = document.querySelector(
+          'input[name="ctx-kind"]:checked',
+        );
+        const kind = kindEl && kindEl.value === 'agents' ? 'agents' : 'memory';
+        out.textContent = 'loading\u2026';
+        const r = await rcCall('/rc/workspace/' + kind);
+        if (!r.ok) {
+          // Two routes, two verdicts, each passed through as the route named it
+          // (src/routes/workspaceContext.ts), because a daemon can serve one and
+          // not the other.
+          out.textContent = 'context failed: ' + r.code;
+          return;
+        }
+        const st = r.body || {};
+        const items = Array.isArray(kind === 'memory' ? st.files : st.agents)
+          ? kind === 'memory'
+            ? st.files
+            : st.agents
+          : [];
+        const errs = Array.isArray(st.errors) ? st.errors : [];
+        const rows = [];
+        const statusWord = (c) => String((c && c.status) || 'unknown');
+        const tail = (c) => {
+          // The daemon's own words for what is wrong, in preference to anything
+          // this page could say about it.
+          let line = '';
+          if (typeof (c && c.error) === 'string')
+            line +=
+              ' - ' +
+              c.error +
+              (typeof (c && c.errorKind) === 'string'
+                ? ' (' + c.errorKind + ')'
+                : '');
+          if (typeof (c && c.hint) === 'string') line += ' - ' + c.hint;
+          return line;
+        };
+        if (kind === 'memory') {
+          rows.push(
+            items.length +
+              ' context files' +
+              (st.initialized === false ? ', not initialized' : ''),
+          );
+          for (const f of items) {
+            // The last path segment plus the scope, not the directory. The
+            // directory is a host fact the caller could already read off the
+            // route at this scope, so omitting it is readability on a phone
+            // screen and not a secret filter - but the global entry's directory
+            // is a home path, which is the one that would fill the row twice
+            // over. Nothing here reads `content`: this gateway never asks the
+            // daemon for file text, and the flag is not reachable from the wire
+            // (src/routes/workspaceContext.ts).
+            const path = typeof (f && f.path) === 'string' ? f.path : '';
+            const seg = path.split('/').filter(Boolean).pop() || '(unnamed)';
+            let line = '  ' + seg;
+            if (typeof (f && f.scope) === 'string')
+              line += '  [' + f.scope + ']';
+            if (typeof (f && f.bytes) === 'number')
+              line += '  ' + f.bytes + ' B';
+            if (f && f.truncated === true) line += ' truncated';
+            rows.push(line + tail(f));
+          }
+        } else {
+          rows.push(items.length + ' agents');
+          for (const a of items) {
+            // Identity and level only. No `filePath`: same reasoning as the
+            // skills panel in D60, where the name is what the reader came for
+            // and the definition path is a host fact beside it.
+            let line = '  ' + String((a && a.name) || '(unnamed)');
+            if (typeof (a && a.level) === 'string')
+              line += '  [' + a.level + ']';
+            if (a && a.isBuiltin === true) line += ' builtin';
+            if (Array.isArray(a && a.tools))
+              line += '  ' + a.tools.length + ' tools';
+            if (typeof (a && a.model) === 'string') line += ' via ' + a.model;
+            rows.push(line + tail(a));
           }
         }
         for (const e of errs) {

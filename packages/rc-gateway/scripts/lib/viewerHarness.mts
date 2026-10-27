@@ -193,6 +193,14 @@ export interface BootViewerOptions {
   workspaceHooksResult?: unknown;
   /** Status the stub answers GET /workspace/hooks with. */
   workspaceHooksStatus?: number;
+  /** Body the stub answers GET /workspace/memory with. */
+  workspaceMemoryResult?: unknown;
+  /** Status the stub answers GET /workspace/memory with. */
+  workspaceMemoryStatus?: number;
+  /** Body the stub answers GET /workspace/agents with. */
+  workspaceAgentsResult?: unknown;
+  /** Status the stub answers GET /workspace/agents with. */
+  workspaceAgentsStatus?: number;
   /**
    * Body the stub answers GET /session/:id/artifacts with. Left unset the stub
    * serves its own default envelope, so a scenario that asserts a drawn row is
@@ -259,6 +267,10 @@ export async function bootViewer(
     workspaceProvidersStatus: opts.workspaceProvidersStatus,
     workspaceHooksResult: opts.workspaceHooksResult,
     workspaceHooksStatus: opts.workspaceHooksStatus,
+    workspaceMemoryResult: opts.workspaceMemoryResult,
+    workspaceMemoryStatus: opts.workspaceMemoryStatus,
+    workspaceAgentsResult: opts.workspaceAgentsResult,
+    workspaceAgentsStatus: opts.workspaceAgentsStatus,
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,
