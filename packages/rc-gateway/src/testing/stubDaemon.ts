@@ -51,6 +51,8 @@ export interface StubDaemon {
   lastRewindBody: unknown;
   /** Body of the most recent POST /session/:id/approval-mode request. */
   lastApprovalModeBody: unknown;
+  /** Body of the most recent PATCH /session/:id/metadata request. */
+  lastMetadataBody: unknown;
   /**
    * `{ requestId, response }` captured from the most recent
    * POST /session/:id/permission/:requestId request. Lets a test assert
@@ -300,6 +302,17 @@ export interface StubDaemonOptions {
   };
   /** JSON body to return on a non-200 approval-mode response. */
   approvalModeBody?: unknown;
+  /** Status for PATCH /session/:id/metadata (default 200). */
+  metadataStatus?: number;
+  /**
+   * Response body for PATCH /session/:id/metadata on success. Defaults to
+   * `{ displayName: req.body.displayName }`, which is the daemon echoing what
+   * it was sent. Set this to a DIFFERENT name to prove a gateway route reports
+   * the daemon's verdict rather than its own request.
+   */
+  metadataResult?: { displayName?: string; prs?: unknown[] };
+  /** JSON body to return on a non-200 PATCH /session/:id/metadata response. */
+  metadataBody?: unknown;
   /** Status for POST /session/:id/model (default 200). */
   setModelStatus?: number;
   /**
@@ -681,6 +694,7 @@ export async function startStubDaemon(
     lastPromptBody: undefined as unknown,
     lastRewindBody: undefined as unknown,
     lastApprovalModeBody: undefined as unknown,
+    lastMetadataBody: undefined as unknown,
     lastRespondedPermission: undefined as
       | { requestId: string; response: unknown }
       | undefined,
@@ -2491,6 +2505,22 @@ export async function startStubDaemon(
     });
   });
 
+  app.patch('/session/:id/metadata', express.json(), (req, res) => {
+    state.lastMetadataBody = req.body;
+    const status = opts.metadataStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.metadataBody ?? { error: 'stub' });
+      return;
+    }
+    // The default answers with the name it was sent, because that is what the
+    // real route does for an ordinary name. A test that has to tell the
+    // gateway's own input apart from the daemon's verdict sets metadataResult
+    // to something else, and the route has to report THAT one.
+    res
+      .status(200)
+      .json(opts.metadataResult ?? { displayName: req.body?.displayName });
+  });
+
   app.post('/session/:id/model', express.json(), (req, res) => {
     const status = opts.setModelStatus ?? 200;
     if (status !== 200) {
@@ -2640,6 +2670,9 @@ export async function startStubDaemon(
     },
     get lastApprovalModeBody() {
       return state.lastApprovalModeBody;
+    },
+    get lastMetadataBody() {
+      return state.lastMetadataBody;
     },
     get lastRespondedPermission() {
       return state.lastRespondedPermission;

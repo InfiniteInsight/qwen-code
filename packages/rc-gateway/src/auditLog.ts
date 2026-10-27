@@ -157,6 +157,8 @@ export type AuditAction =
   | 'mid_turn_messages_sent_now'
   | 'task_cancelled'
   | 'task_cancel_failed'
+  | 'session_renamed'
+  | 'session_rename_failed'
   | 'ui_prefs_set'
   | 'session_transcript_read'
   | 'session_turn_index_read'
@@ -270,6 +272,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'mid_turn_messages_sent_now',
   'task_cancelled',
   'task_cancel_failed',
+  'session_renamed',
+  'session_rename_failed',
   'ui_prefs_set',
   'session_transcript_read',
   'session_turn_index_read',
