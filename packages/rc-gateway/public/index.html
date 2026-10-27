@@ -992,6 +992,30 @@
             ></select></label
           ><span id="convo-switch-note" style="margin-left: 8px"></span>
         </div>
+        <!-- #77. Said by a window that came up on a conversation a live sibling
+             is already on. The restore is not withheld in this case, because a
+             wrong guess would strand the window on the unwatched page, whose only
+             route onto a conversation is inside the collapsed #dir-picker. So the
+             window goes onto the conversation AND says that it joined it, which is
+             the one thing the mirroring was actually missing: it was not the
+             landing that was wrong for the second-window case, it was the landing
+             arriving with no indication that another window was already there. -->
+        <div
+          id="joined-note"
+          hidden
+          style="
+            margin-top: 4px;
+            padding: 4px 8px;
+            font-size: 0.85rem;
+            color: #b0b8c1;
+            border-bottom: 1px solid #333;
+          "
+        >
+          <span id="joined-note-text"></span>
+          <button id="joined-note-new" style="margin-left: 8px">
+            Start a new conversation here
+          </button>
+        </div>
         <div id="lineage" hidden></div>
         <div id="transcript-wrap">
           <div id="transcript"></div>
@@ -3045,12 +3069,129 @@
       const WATCHED_KEY = 'qwen-rc:watched-session';
       // #50. Which conversation THIS window is on, per-window, so a second window
       // can hold a second conversation. WATCHED_KEY stays what it was, the last
-      // conversation used anywhere on this origin, because that is what carries a
-      // conversation from the phone to the laptop and what rebuilds the page after
-      // a mobile screen-off discard. The two are read in that order: this window's
-      // own pointer wins when it has one, and a window that has never picked
-      // adopts the shared one, which is exactly what happened before it existed.
+      // conversation used anywhere in this browser profile.
+      //
+      // #77. What that shared record is for was written twice as if it were
+      // something it cannot be: it was said to carry a conversation from a phone
+      // to a laptop. It cannot. localStorage is scoped to one browser profile on
+      // one device and nothing in the gateway keeps a copy of it server-side, so
+      // the phone's record is not reachable from the laptop at any distance. The
+      // route that does move a conversation between devices is the turn-end push
+      // deep link (/ui/?session=<id>, #40), which names the session in the URL
+      // and is handled by handleSessionDeepLink() before any of this storage is
+      // read. Keeping the wrong reason attached to this key is what made the
+      // second-window complaint (#77) look like it had a shipped behaviour
+      // standing against it, when the only thing standing was the same-tab
+      // rebuild below.
       const WINDOW_KEY = 'qwen-rc:window-session';
+
+      // #77. Is some other window on this origin already on this same conversation
+      // right now? Storage cannot answer that, and the question matters because
+      // the shared record is read in two situations that look identical to the
+      // page: a tab rebuilt after the browser dropped its sessionStorage, which
+      // wants the adopt, and a second window opened beside a live one, which does
+      // not. A live sibling is not identical and it is directly observable, so ask
+      // it. This does not gate the adopt. The page cannot know which of the two
+      // situations the user meant, and a wrong guess that withheld the restore
+      // would strand the window on the unwatched page, whose only route onto a
+      // conversation is inside the collapsed #dir-picker. So the restore always
+      // runs at full speed and the answer only decides whether the window says
+      // out loud that it joined another window's conversation.
+      const WINDOW_BUS = 'qwen-rc:window-bus';
+      const ASK_WAIT_MS = 250;
+      const busListeners = [];
+      let windowBus = null;
+
+      function ensureWindowBus() {
+        if (windowBus || typeof BroadcastChannel !== 'function') return;
+        try {
+          windowBus = new BroadcastChannel(WINDOW_BUS);
+        } catch {
+          return;
+        }
+        windowBus.onmessage = (e) => {
+          const d = e && e.data;
+          if (!d) return;
+          // The answer side is live for the whole life of a window that holds a
+          // conversation, independent of whoever is asking. A window with no
+          // conversation stays quiet, so an idle second tab never makes a fresh
+          // window think it joined something.
+          if (d.kind === 'who-is-watching' && watchedSessionId) {
+            try {
+              windowBus.postMessage({
+                kind: 'watching',
+                sessionId: watchedSessionId,
+              });
+            } catch {
+              /* a bus that cannot answer is a bus that says nothing, which is
+                 the same as nobody answering: the note stays off */
+            }
+          }
+          for (const fn of busListeners.slice()) fn(d);
+        };
+      }
+
+      // Resolves with the session id a live sibling is on, or null when nobody
+      // answered within the budget. Called only after a restore that came off the
+      // shared record, so the wait is never on the path that puts the transcript
+      // on screen.
+      function askWhoIsWatching() {
+        return new Promise((resolve) => {
+          ensureWindowBus();
+          if (!windowBus) {
+            resolve(null);
+            return;
+          }
+          let settled = false;
+          const finish = (v) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            const i = busListeners.indexOf(listen);
+            if (i >= 0) busListeners.splice(i, 1);
+            resolve(v);
+          };
+          const listen = (d) => {
+            if (d.kind === 'watching' && d.sessionId) finish(String(d.sessionId));
+          };
+          const timer = setTimeout(() => finish(null), ASK_WAIT_MS);
+          busListeners.push(listen);
+          try {
+            windowBus.postMessage({ kind: 'who-is-watching' });
+          } catch {
+            finish(null);
+          }
+        });
+      }
+
+      // #77. The one-tap way out of a conversation this window joined on its own.
+      // It runs the shipped create path rather than a second one: the folder this
+      // window joined is typed into the same input New conversation reads, so the
+      // button cannot drift from it and cannot start a session in a folder the
+      // page never resolved.
+      let joinedNoteCwd = null;
+      let joinedNoteShown = false;
+      function showJoinedNote(title, cwd) {
+        if (joinedNoteShown) return;
+        joinedNoteShown = true;
+        joinedNoteCwd = strOr(cwd, '');
+        $('joined-note-text').textContent =
+          'this window joined ' +
+          (strOr(title, '') || 'the last conversation') +
+          ' from another window on this browser';
+        $('joined-note').hidden = false;
+      }
+      function hideJoinedNote() {
+        const box = $('joined-note');
+        if (box) box.hidden = true;
+      }
+      $('joined-note-new').onclick = () => {
+        hideJoinedNote();
+        $('new-session-cwd').value = joinedNoteCwd;
+        $('new-session').click();
+      };
+
+      ensureWindowBus();
 
       // Auth gate (add-rc-viewer-ui-reorg task 1): #auth-gate (pairing only)
       // and #app-body (everything else) are mutually exclusive. Later tasks
@@ -11105,8 +11246,13 @@
       // which is the mirroring that is wanted. Both records hold the same shape,
       // so one parse serves either.
       function restoreWatchedSession() {
-        const raw =
-          sessionStorage.getItem(WINDOW_KEY) || localStorage.getItem(WATCHED_KEY);
+        // #77: which record this came off is the whole question, so it is kept
+        // rather than folded away. A per-window record means this window is
+        // coming back to a conversation it chose, which is never a join. Only a
+        // restore off the shared record can be one, and only then does it ask
+        // whether a live window is already on that conversation.
+        const own = sessionStorage.getItem(WINDOW_KEY);
+        const raw = own || localStorage.getItem(WATCHED_KEY);
         if (!raw) return;
         try {
           const { sessionId, lastEventId, title, cwd } = JSON.parse(raw);
@@ -11116,6 +11262,19 @@
             // hits a resync the self-heal can re-resume without a re-tap.
             watchedSessionCwd = typeof cwd === 'string' && cwd ? cwd : null;
             startWatch(sessionId, 0, title || null);
+            // #77: asked after startWatch, never before it, so the wait for an
+            // answer is never between the reader and their transcript. The
+            // answer is compared against the session this window actually came
+            // up on rather than against "any answer", because a sibling on a
+            // DIFFERENT conversation is the multi-window case working as
+            // designed, and saying "you joined" there would be a lie.
+            if (!own) {
+              void askWhoIsWatching().then((busyId) => {
+                if (busyId && busyId === String(sessionId)) {
+                  showJoinedNote(title, watchedSessionCwd);
+                }
+              });
+            }
           }
         } catch {
           /* corrupt entry — ignore */
