@@ -5,7 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError as RootDaemonHttpError } from '@qwen-code/sdk';
+import { DaemonHttpError as SubpathDaemonHttpError } from '@qwen-code/sdk/daemon';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,9 +23,16 @@ import {
 } from './orchestrator.js';
 
 /** The 404 contract the daemon answers when a session's transcript is gone
- * (`code: 'session_not_found'`, no `toolCallId`). */
+ * (`code: 'session_not_found'`, no `toolCallId`).
+ *
+ * Built through the SDK package ROOT, because that is where the gateway gets
+ * its clients (`daemonPool.ts:43`) and therefore which copy of
+ * `DaemonHttpError` a real resume failure carries. Building it through the
+ * `/daemon` subpath instead, as this file used to, hands the fixture the same
+ * class the guard under test imports, so the guard matches inside the test and
+ * misses in production. See the tripwire below. */
 const sessionNotFound = () =>
-  new DaemonHttpError(
+  new RootDaemonHttpError(
     404,
     { code: 'session_not_found', sessionId: 's1' },
     'resume session: 404 session not found',
@@ -55,6 +63,20 @@ function makeOrchestrator(
 }
 
 describe('RecoveryOrchestrator', () => {
+  it('the gone-transcript fixture is not the class the /daemon subpath exports', () => {
+    // A tripwire on the SDK's packaging, not a behaviour test. The gateway
+    // builds its clients through the package root, so a real resume failure
+    // carries that copy of the class, while the `/daemon` subpath bundles its
+    // own. This is why the saga reads the 404 structurally instead of calling
+    // `isSessionLevelNotFound`. If the SDK ever ships a single class, this
+    // assertion fails and the structural read becomes redundant rather than
+    // silently wrong.
+    const cause = sessionNotFound();
+    expect(cause).not.toBeInstanceOf(SubpathDaemonHttpError);
+    expect(cause.name).toBe('DaemonHttpError');
+    expect(cause.status).toBe(404);
+  });
+
   it('recovers every session in place, sequentially, and reports recovered outcomes', async () => {
     const getOrSpawn = vi.fn(async () => ({}));
     const order: string[] = [];

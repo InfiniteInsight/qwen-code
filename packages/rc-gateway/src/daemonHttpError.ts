@@ -48,3 +48,27 @@ export function daemonErrorBody(
     ? (body as Record<string, unknown>)
     : undefined;
 }
+
+/**
+ * The session-level 404: the daemon could not find the parent session itself,
+ * so the body carries `code: 'session_not_found'` with no identifying
+ * `toolCallId` (an explicit `null` counts as absent).
+ *
+ * This is the contract the SDK's `isSessionLevelNotFound` tests, read without
+ * that guard. The guard opens with `error instanceof DaemonHttpError` against
+ * its own bundle's copy of the class, so it answers false for an error thrown
+ * through the package root, which is the only way the gateway can receive one.
+ *
+ * A missing parent session is not the only producer. A multi-workspace daemon
+ * answers this same shape while the owning entry is merely not active, which
+ * the daemon treats as reversible, so read this as "this session is not
+ * resumable right now", not as proof the transcript is permanently gone.
+ */
+export function isSessionLevelGone(err: unknown): boolean {
+  const http = asDaemonHttpError(err);
+  if (http === undefined || http.status !== 404) return false;
+  const body = daemonErrorBody(err);
+  if (body?.['code'] !== 'session_not_found') return false;
+  const toolCallId = body['toolCallId'];
+  return toolCallId === undefined || toolCallId === null;
+}
