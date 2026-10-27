@@ -117,6 +117,8 @@ export interface StubDaemon {
   lastRecapSessionId: string | undefined;
   /** Session id the most recent GET /session/:id/stats carried. */
   lastStatsSessionId: string | undefined;
+  /** Session id the most recent GET /session/:id/resources carried. */
+  lastResourcesSessionId: string | undefined;
   /** What the most recent POST /session/:id/attachments carried. */
   lastAttachmentUpload:
     | {
@@ -354,6 +356,14 @@ export interface StubDaemonOptions {
    * this, because the default body has every optional block present.
    */
   statsResult?: unknown;
+  /** Status for GET /session/:id/resources (default 200). */
+  resourcesStatusCode?: number;
+  /**
+   * Full body for GET /session/:id/resources (overrides the default). A
+   * scenario that asserts what a reader is shown has to supply its own
+   * payload, or it is checking the two names this file invented.
+   */
+  resourcesResult?: unknown;
   /** Status for GET /session/:id/artifacts (default 200). */
   artifactListStatus?: number;
   /**
@@ -584,6 +594,7 @@ export async function startStubDaemon(
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
     lastRecapSessionId: undefined as string | undefined,
     lastStatsSessionId: undefined as string | undefined,
+    lastResourcesSessionId: undefined as string | undefined,
     lastArtifactListSessionId: undefined as string | undefined,
     lastArtifactContent: undefined as
       | { sessionId: string; artifactId: string }
@@ -1281,6 +1292,79 @@ export async function startStubDaemon(
         'Cache-Control': 'private, no-store',
       })
       .send(opts.artifactContentBody ?? '<!doctype html><p>saved snapshot</p>');
+  });
+
+  app.get('/session/:id/resources', (req, res) => {
+    state.lastResourcesSessionId = String(req.params.id);
+    const status = opts.resourcesStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    if (opts.resourcesResult !== undefined) {
+      res.status(200).json(opts.resourcesResult);
+      return;
+    }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    // A real DaemonSessionResourcesStatus, and note what is NOT here: the
+    // name-keyed hasOAuthTokens, requiresAuth, authenticationState and
+    // authenticationError fields are absent on this route by design
+    // (packages/sdk-typescript/src/daemon/types.ts:2526-2533), so leaving them
+    // out is what the daemon actually sends. A stub that filled them in would
+    // let a page that draws an auth verdict pass while the real route could
+    // only ever feed it absence.
+    res.status(200).json({
+      v: 1,
+      sessionId: String(req.params.id),
+      workspaceCwd: cwd,
+      skills: {
+        v: 1,
+        workspaceCwd: cwd,
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            name: 'pdf',
+            description: 'Read a PDF',
+            level: 'user',
+            modelInvocable: true,
+          },
+          {
+            kind: 'skill',
+            name: 'quiet-skill',
+            description: 'Turned off',
+            level: 'bundled',
+            modelInvocable: false,
+            disabledReason: 'default',
+          },
+        ],
+      },
+      mcp: {
+        v: 1,
+        workspaceCwd: cwd,
+        initialized: true,
+        source: 'live',
+        servers: [
+          {
+            kind: 'mcp_server',
+            name: 'playwright',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            name: 'sleepy',
+            mcpStatus: 'disconnected',
+            transport: 'sse',
+            disabled: true,
+          },
+        ],
+        clientCount: 2,
+        clientBudget: 4,
+        budgetMode: 'enforce',
+      },
+    });
   });
 
   app.get('/session/:id/stats', (req, res) => {
@@ -1989,6 +2073,9 @@ export async function startStubDaemon(
     },
     get lastStatsSessionId() {
       return state.lastStatsSessionId;
+    },
+    get lastResourcesSessionId() {
+      return state.lastResourcesSessionId;
     },
     get lastArtifactListSessionId() {
       return state.lastArtifactListSessionId;

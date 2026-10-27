@@ -141,6 +141,20 @@ export interface BootViewerOptions {
    */
   statsResult?: unknown;
   /**
+   * Body the stub answers GET /session/:id/resources with. Left unset the stub
+   * serves its own default skills-and-servers payload, so a scenario that
+   * asserts a drawn row, or that an unknown level or status still reaches the
+   * page, has to supply its own payload or it is checking the two names the
+   * stub invented.
+   */
+  resourcesResult?: unknown;
+  /**
+   * Status the stub answers GET /session/:id/resources with (default 200). Set
+   * it to drive the failure row, since there is no other way to make a daemon
+   * refuse a resources read, and the page prints the reason code it was given.
+   */
+  resourcesStatusCode?: number;
+  /**
    * Body the stub answers GET /session/:id/artifacts with. Left unset the stub
    * serves its own default envelope, so a scenario that asserts a drawn row is
    * checking the stub's invention rather than its own unless it sets this.
@@ -192,6 +206,8 @@ export async function bootViewer(
     attachmentListStatus: opts.attachmentListStatus,
     statsStatusCode: opts.statsStatusCode,
     statsResult: opts.statsResult,
+    resourcesResult: opts.resourcesResult,
+    resourcesStatusCode: opts.resourcesStatusCode,
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,

@@ -155,6 +155,7 @@ import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
 import { createSessionStatsRoute } from './routes/sessionStats.js';
+import { createSessionResourcesRoute } from './routes/sessionResources.js';
 /** #127: session artifacts (the read pair; the mutation pair needs a client id). */
 import {
   createSessionArtifactContentRoute,
@@ -860,6 +861,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionStatsRoute(deps.daemon),
+  );
+  // GET /session/:id/resources — read-scope; what one live conversation has
+  // loaded, its skills and its MCP servers, as the daemon sanitises them for a
+  // reader. 1:1 with the daemon's own route. Not audited: it carries
+  // configuration names, which is what the un-audited /supported-commands and
+  // /stats reads beside it already relay. This is the SESSION's own set rather
+  // than the workspace pool, and the page says so, because the daemon builds it
+  // from that session's Config and the name-keyed authentication fields are
+  // absent on this route by design, so a reader must draw no auth verdict from
+  // their absence.
+  app.get(
+    '/session/:id/resources',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionResourcesRoute(deps.daemon),
   );
   // POST /session/:id/end — write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.
