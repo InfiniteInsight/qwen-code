@@ -1263,34 +1263,76 @@
     // Touch events stay aimed at the node the finger came down on. If that
     // node leaves the DOM mid-touch (a live bubble folded, a row unmounted),
     // its touchend no longer bubbles to the scroller, so it is listened to
-    // on the node itself as well.
-    var touchNode = null;
+    // on the node itself as well. A second finger comes down on a second node
+    // and must not retire the first one's listener: the touchend that only the
+    // detached first node can deliver would then be lost, the gesture would
+    // never end, and the view would stop following for the rest of the run.
+    var touchNodes = new Set();
     function gestureActive() {
       return touching || tailTimer !== null;
     }
-    function untrackTouchNode() {
-      if (!touchNode) return;
-      touchNode.removeEventListener('touchend', onTouchEnd);
-      touchNode.removeEventListener('touchcancel', onTouchEnd);
-      touchNode = null;
+    function trackedList() {
+      var list = [];
+      touchNodes.forEach(function (node) {
+        list.push(node);
+      });
+      return list;
+    }
+    function dropTouchNode(node) {
+      if (!touchNodes.has(node)) return;
+      touchNodes.delete(node);
+      node.removeEventListener('touchend', onTouchEnd);
+      node.removeEventListener('touchcancel', onTouchEnd);
+    }
+    function dropAllTouchNodes() {
+      var list = trackedList();
+      for (var i = 0; i < list.length; i++) dropTouchNode(list[i]);
+    }
+    // e.touches is the set of fingers still down, each still aimed at the node
+    // it came down on, so a tracked node missing from it has lifted. A
+    // synthetic event carries no touches at all, which reads as no fingers.
+    function releaseLiftedNodes(e) {
+      var down = (e && e.touches) || [];
+      if (!down.length) {
+        dropAllTouchNodes();
+        return;
+      }
+      var list = trackedList();
+      for (var i = 0; i < list.length; i++) {
+        var stillDown = false;
+        for (var t = 0; t < down.length; t++) {
+          if (down[t].target === list[i]) {
+            stillDown = true;
+            break;
+          }
+        }
+        if (!stillDown) dropTouchNode(list[i]);
+      }
     }
     function onTouchStart(e) {
+      // A second finger is the same gesture, so whether this gesture has
+      // scrolled the transcript yet is already decided and stays.
+      if (!touching) touchScrolled = false;
       touching = true;
-      touchScrolled = false;
       if (tailTimer !== null) clearTimeout(tailTimer);
       tailTimer = null;
-      untrackTouchNode();
       var node = e.target;
-      if (node && node !== scroller && node.addEventListener) {
-        touchNode = node;
+      if (
+        node &&
+        node !== scroller &&
+        node.addEventListener &&
+        !touchNodes.has(node)
+      ) {
+        touchNodes.add(node);
         node.addEventListener('touchend', onTouchEnd, { passive: true });
         node.addEventListener('touchcancel', onTouchEnd, { passive: true });
       }
     }
     function onTouchEnd(e) {
-      if (!touching || (e.touches && e.touches.length)) return;
+      if (!touching) return;
+      releaseLiftedNodes(e);
+      if (e.touches && e.touches.length) return;
       touching = false;
-      untrackTouchNode();
       // virtual-core follows the finger with its own touchstart/touchend
       // listeners on the scroller and ignores touchcancel. An end it does
       // not get as a touchend (a cancel, or one from a node no longer in
@@ -1313,6 +1355,10 @@
     scroller.addEventListener('touchcancel', onTouchEnd, { passive: true });
 
     var structural = true;
+    // The part of the last edge correction that a whole-pixel write could not
+    // carry, and the element it was measured on.
+    var edgeCarry = 0;
+    var edgeAnchorNode = null;
 
     function pass() {
       rafId = 0;
@@ -1325,6 +1371,32 @@
         virtualizer.setOptions(vopts);
       }
       var written = [];
+      // A row whose box straddles the scroller's top edge can grow in its own
+      // MIDDLE. The running Agent row puts its subagent text above the tool
+      // rows the child collected, so every one of those slides down as the
+      // text streams, and virtual-core cannot see it: its rule is per row and
+      // this row is not wholly above the viewport. Record the first element
+      // below the edge before the patch and undo whatever this pass moved it,
+      // the way keepHeld() does for a toggled header. Not while a finger is
+      // down: on iOS each write grows virtual-core's deferred correction (see
+      // dropPendingCorrection), and the pass after the gesture re-anchors from
+      // wherever the reader ended up. Not when the end or an explicit hold
+      // already owns the position either; those run after this and win.
+      var edgeKeep = null;
+      if (virtualizer && !follow && !hold && !pendingEnd && !gestureActive()) {
+        mounted.forEach(function (m, id) {
+          if (edgeKeep || !m.row) return;
+          if (!dirty.has(id) && !restamp) return;
+          var box = m.row.getBoundingClientRect();
+          var edge = scroller.getBoundingClientRect().top;
+          if (!(box.top < edge && box.bottom > edge)) return;
+          var node = firstBelowEdge(m.row, edge);
+          if (!node) return;
+          edgeKeep = { node: node, top: viewportTop(node) };
+          if (node !== edgeAnchorNode) edgeCarry = 0;
+          edgeAnchorNode = node;
+        });
+      }
       // A zone change rewrites the stamp text inside rows already on screen, and
       // the patchers cannot do it: patchUser only syncs the text and the not-sent
       // note, patchAsst only re-renders when the prose changed. So the bubble is
@@ -1359,6 +1431,28 @@
         }
         // Applies followOnAppend / end anchoring for this update.
         virtualizer._willUpdate();
+        // Read after the placement: whatever else this pass corrected (a row
+        // above the viewport, a follow to the end) has already moved the
+        // element, so what is left here is the shift inside the row.
+        if (
+          edgeKeep &&
+          !hold &&
+          !pendingEnd &&
+          !follow &&
+          edgeKeep.node.isConnected
+        ) {
+          // Ask for whole pixels only. A scroll offset is written to the
+          // nearest whole pixel (measured: 43.4 reads back 43, and ten
+          // separate += 0.4 writes land on 0), so a fractional correction is
+          // silently refused. Refusing it here and carrying it to the next
+          // pass keeps the reader exactly where they were instead of leaking
+          // a fraction of a pixel per streamed chunk.
+          var want = viewportTop(edgeKeep.node) - edgeKeep.top + edgeCarry;
+          var whole = Math.round(want);
+          if (whole !== 0)
+            virtualizer.scrollToOffset(scroller.scrollTop + whole);
+          edgeCarry = want - whole;
+        }
       } else if (structural) {
         syncAllRows(now);
       }
@@ -1390,6 +1484,27 @@
       return (
         node.getBoundingClientRect().top - scroller.getBoundingClientRect().top
       );
+    }
+
+    // The first element inside `row` that lies wholly below the scroller's top
+    // edge; document order is visual order within a row. An element that
+    // straddles the edge is no use as an anchor: its own top is above the
+    // edge, so a shift of the content above it leaves it where it is.
+    function firstBelowEdge(row, edge) {
+      var walker = document.createTreeWalker(
+        row,
+        NodeFilter.SHOW_ELEMENT,
+        null,
+      );
+      var node = walker.nextNode(); // the row itself
+      while (node) {
+        if (node !== row) {
+          var b = node.getBoundingClientRect();
+          if (b.height > 0 && b.top >= edge) return node;
+        }
+        node = walker.nextNode();
+      }
+      return null;
     }
 
     // The scroller's width changed. virtual-core keeps every measured height
@@ -1621,7 +1736,7 @@
         scroller.removeEventListener('touchstart', onTouchStart);
         scroller.removeEventListener('touchend', onTouchEnd);
         scroller.removeEventListener('touchcancel', onTouchEnd);
-        untrackTouchNode();
+        dropAllTouchNodes();
         if (unmountVirtualizer) unmountVirtualizer();
         host.remove();
         if (virtualizer) scroller.style.overflowAnchor = savedOverflowAnchor;

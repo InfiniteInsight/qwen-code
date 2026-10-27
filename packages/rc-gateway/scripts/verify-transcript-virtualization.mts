@@ -478,6 +478,11 @@ async function onPhone<T>(
 
 // ---- Section `view`: TranscriptView against a test-owned container -------
 
+// A synthetic touch event carrying the fingers still down. The view reads
+// `touches` off the event and nothing else, so a plain Event with the field
+// added is all the harness needs; the type exists only to say so.
+type AimedEvent = Event & { touches: { target: Element }[] };
+
 const VIEW_SCENARIOS: Scenario[] = [
   {
     name: 'V1 bounded mount',
@@ -1747,6 +1752,207 @@ const VIEW_SCENARIOS: Scenario[] = [
         await check(p, 'ios', false);
         await check(p, 'ios+finger', true);
       });
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
+  },
+  {
+    // Two fingers down on two different rows. The second finger must not
+    // retire the listener the view put on the first finger's node: once that
+    // node leaves the DOM its touchend reaches the view nowhere else, so
+    // losing the listener loses the end of the gesture, `touching` stays true,
+    // and the view stops following new content for the rest of the run.
+    // The lifted-finger bookkeeping runs on the scroller, so the second node
+    // has to stay connected for its own touchend to bubble there.
+    name: 'V13 second finger keeps the first node',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      for (const [os, ua] of Object.entries(MOBILE_UA)) {
+        await onPhone(page, ua, async (p) => {
+          const r = await p.evaluate(async () => {
+            __vt.setup(true);
+            const m = __vt.model;
+            const s = __vt.scroller;
+            __vt.addTurns(60, 330, 0);
+            m.addUser('stream please');
+            m.appendAssistant('start ' + __vt.text(1000, 9));
+            await __vt.settle(400);
+            __vt.view.scrollToEnd();
+            await __vt.settle(400);
+            // Each event carries its own touches list (the fingers still down,
+            // each aimed at the node it came down on). Built inline: a nested
+            // function here would reach the browser as esbuild's __name helper.
+            const items = m.items;
+            const rowA = __vt.row(items[items.length - 1]!.id);
+            const nodeA = rowA && rowA.querySelector('.bubble');
+            if (!nodeA) return { setup: 'no row at the end to touch' };
+            const e1 = new Event('touchstart', { bubbles: true }) as AimedEvent;
+            e1.touches = [{ target: nodeA }];
+            nodeA.dispatchEvent(e1);
+            // Finger 1 is down on a row that then leaves the DOM.
+            s.scrollTop = 0;
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const detached = !nodeA.isConnected;
+            const top = __vt.topRow();
+            const rowB = top && __vt.row(top.id);
+            const nodeB = rowB && rowB.querySelector('.bubble');
+            if (!nodeB) return { setup: 'no row at the top for the second finger' };
+            const bConnected = nodeB.isConnected;
+            // Finger 2 comes down on a row that stays mounted.
+            const e2 = new Event('touchstart', { bubbles: true }) as AimedEvent;
+            e2.touches = [{ target: nodeA }, { target: nodeB }];
+            nodeB.dispatchEvent(e2);
+            await __vt.sleep(100);
+            // Finger 2 lifts; finger 1 is still down, aimed at the detached node.
+            const e3 = new Event('touchend', { bubbles: true }) as AimedEvent;
+            e3.touches = [{ target: nodeA }];
+            nodeB.dispatchEvent(e3);
+            await __vt.sleep(200);
+            // Finger 1 lifts last, from the detached node.
+            const e4 = new Event('touchend', { bubbles: true }) as AimedEvent;
+            e4.touches = [];
+            nodeA.dispatchEvent(e4);
+            await __vt.sleep(300);
+            __vt.view.scrollToEnd();
+            await __vt.sleep(300);
+            await __vt.settle(200);
+            const gapPinned = Math.round(__vt.gap());
+            const gaps: number[] = [];
+            for (let k = 0; k < 10; k++) {
+              m.appendAssistant(' ' + __vt.text(300, 60 + k));
+              await __vt.frame();
+              await __vt.frame();
+              gaps.push(Math.round(__vt.gap()));
+            }
+            await __vt.sleep(700);
+            await __vt.settle(200);
+            return {
+              detached,
+              bConnected,
+              gapPinned,
+              gaps,
+              gap: Math.round(__vt.gap()),
+              near: __vt.view.isNearBottom(),
+            };
+          });
+          if ('setup' in r) {
+            problems.push(`${os}: setup failed (${r.setup})`);
+            return;
+          }
+          const worst = Math.max(...r.gaps, r.gap);
+          if (!r.detached)
+            problems.push(`${os}: the first finger's node never detached`);
+          if (!r.bConnected)
+            problems.push(`${os}: the second finger's node detached too`);
+          if (r.gapPinned > 2)
+            problems.push(`${os}: the jump pill did not reach the end (${r.gapPinned}px)`);
+          if (worst > 2)
+            problems.push(
+              `${os}: the view never resumed following after both fingers lifted ` +
+                `(gaps [${r.gaps.join(',')}]px)`,
+            );
+          if (!r.near) problems.push(`${os}: jump pill still shown`);
+          details.push(`${os} max gap ${worst}px, detached ${r.detached}`);
+        });
+      }
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
+  },
+  {
+    // A running Agent tool row grows in the MIDDLE. Its subagent text block
+    // sits above the tool rows the child collected, so every one of those rows
+    // slides down as the text streams. virtual-core corrects a growing row only
+    // when it lies wholly above the viewport, and this row straddles the top
+    // edge, so nothing corrects the shift and the reader inside the tool list
+    // is carried away from what they were reading. The mirror case (a reader in
+    // the text while rows append below) is V12's, and no per-row rule serves
+    // both, so the correction has to be inside the row.
+    name: 'V14 reader inside a running subagent tool list',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      const run = async (p: Page, what: string) => {
+        const r = await p.evaluate(async () => {
+          __vt.setup(true);
+          const m = __vt.model;
+          const s = __vt.scroller;
+          __vt.addTurns(20, 330, 0);
+          m.addUser('delegate this');
+          m.upsertTool({
+            toolCallId: 'p1',
+            title: 'agent',
+            status: 'in_progress',
+          });
+          m.appendSubagentText('p1', 'start ' + __vt.text(1500, 3));
+          for (let k = 0; k < 80; k++) {
+            m.upsertSubagentTool(
+              { toolCallId: 'c' + k, title: 'grep ' + k, status: 'in_progress' },
+              'p1',
+            );
+          }
+          await __vt.settle(400);
+          const items = m.items;
+          const id = items[items.length - 1]!.id;
+          const row = __vt.row(id);
+          if (!row) return { setup: 'the agent row is not mounted' };
+          const subs = row.querySelectorAll('.subagent > .subtool');
+          const target = subs[Math.floor(subs.length / 2)] as HTMLElement | null;
+          if (!target) return { setup: 'no subagent tool rows rendered' };
+          const edge = s.getBoundingClientRect().top;
+          // Put the row of tools the reader is on right at the top edge.
+          s.scrollTop += target.getBoundingClientRect().top - edge;
+          await __vt.sleep(300);
+          await __vt.settle(200);
+          const box = __vt.rowBox(id);
+          const straddling = !!box && box.top < 0 && box.bottom > 0;
+          const y0 = target.getBoundingClientRect().top - edge;
+          const top0 = s.scrollTop;
+          const moves: number[] = [];
+          const scrolls: number[] = [];
+          for (let k = 0; k < 10; k++) {
+            m.appendSubagentText('p1', ' ' + __vt.text(300, 200 + k));
+            await __vt.frame();
+            await __vt.frame();
+            moves.push(Math.round(target.getBoundingClientRect().top - edge - y0));
+            scrolls.push(Math.round(s.scrollTop - top0));
+          }
+          await __vt.settle(200);
+          return {
+            straddling,
+            connected: target.isConnected,
+            subs: subs.length,
+            moves,
+            scrolls,
+            moved: Math.round(target.getBoundingClientRect().top - edge - y0),
+            scrolled: Math.round(s.scrollTop - top0),
+          };
+        });
+        if ('setup' in r) {
+          problems.push(`${what}: setup failed (${r.setup})`);
+          return;
+        }
+        // Only the element's own position is the reader's place. scrollTop is
+        // expected to move by exactly as much as the text grew: that is the
+        // correction working, so it is reported, never bounded.
+        const worst = Math.max(...r.moves.map(Math.abs), Math.abs(r.moved));
+        if (!r.straddling)
+          problems.push(`${what}: setup: the row does not straddle the top edge`);
+        if (!r.connected)
+          problems.push(`${what}: the row the reader was on was replaced`);
+        if (worst > 2)
+          problems.push(
+            `${what}: text appended above the reader moved them ${r.moved}px ` +
+              `(per chunk [${r.moves.join(',')}]px, scrollTop [${r.scrolls.join(',')}])`,
+          );
+        details.push(`${what}: moved ${r.moved}px, scrollTop ${r.scrolled}px`);
+      };
+      await run(page, 'desktop');
+      for (const [os, ua] of Object.entries(MOBILE_UA)) {
+        await onPhone(page, ua, async (p) => run(p, os));
+      }
       expect(problems.length === 0, problems.join('; '));
       return details.join('; ');
     },
