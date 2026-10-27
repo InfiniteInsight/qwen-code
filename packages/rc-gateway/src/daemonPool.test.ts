@@ -1405,3 +1405,190 @@ describe('DaemonPool.daemonEndpointForSession', () => {
     );
   });
 });
+
+// #134: a worktree handover returns a DIFFERENT session id from the one that
+// was posted, and the pool routes by id. Every test below exists because of one
+// consequence: `daemonForSession` raises `UnknownSessionError` for an id it has
+// never recorded, so a pool that hands back a replacement without binding it
+// leaves a conversation the gateway cannot address at all - and the first call
+// to fail would be the very release that stops the replacement leaking.
+describe('DaemonPool worktree handover rebind (#134)', () => {
+  function makeResetPool(
+    opts: { replacementId?: string; echoSameId?: boolean } = {},
+  ) {
+    const calls: Array<{
+      method: string;
+      on: string;
+      sessionId: string;
+      clientId?: string;
+    }> = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => {
+        const record = (method: string, sessionId: string, clientId?: string) =>
+          calls.push({ method, on: cwd, sessionId, clientId });
+        const client = {
+          tag: cwd,
+          async createOrAttachSession() {
+            return {
+              sessionId: `${cwd}-s`,
+              workspaceCwd: cwd,
+              attached: false,
+            };
+          },
+          async sessionContext(id: string) {
+            record('sessionContext', id);
+            return { calledOn: cwd, id };
+          },
+          async resetWorktreeSession(id: string) {
+            record('resetWorktreeSession', id);
+            return {
+              // The replacement's create-shape response: a different id, and
+              // an owner-style client id registered on it.
+              sessionId: opts.echoSameId
+                ? id
+                : (opts.replacementId ?? 's-after-reset'),
+              clientId: 'client-minted',
+            };
+          },
+          async detachSession(id: string, clientId?: string) {
+            record('detachSession', id, clientId);
+          },
+          subscribeEvents: noEvents,
+        } as unknown as DaemonClient;
+        const out: PooledDaemonSpawn = {
+          client,
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+        return out;
+      },
+    });
+    return { pool, calls };
+  }
+
+  it('makes the replacement addressable on the daemon that owns the checkout', async () => {
+    const { pool, calls } = makeResetPool();
+    const created = await pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    const after = await pool.resetWorktreeSession(created.sessionId, {});
+
+    expect(after.sessionId).toBe('s-after-reset');
+    // Addressable AND on the same daemon. The transfer moved the checkout
+    // within one workspace, so a successor routed anywhere else would be
+    // talking to a daemon that does not own the files.
+    await expect(pool.sessionContext('s-after-reset')).resolves.toEqual({
+      calledOn: '/proj/a',
+      id: 's-after-reset',
+    });
+    expect(calls.filter((c) => c.method === 'sessionContext')).toEqual([
+      { method: 'sessionContext', on: '/proj/a', sessionId: 's-after-reset' },
+    ]);
+  });
+
+  it('lets the release that prevents the leak actually reach the daemon', async () => {
+    // The specific trap this issue is about. The relay releases the owner-style
+    // client id the transfer mints, and that release is a pool call aimed at
+    // the REPLACEMENT id. Without the rebind it throws before the daemon is
+    // contacted, so the leak survives through the code written to close it -
+    // and survives quietly, because the route reports the transfer as done.
+    const { pool, calls } = makeResetPool();
+    const created = await pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    const after = await pool.resetWorktreeSession(created.sessionId, {});
+
+    await expect(
+      pool.detachSession(after.sessionId, 'client-minted'),
+    ).resolves.toBeUndefined();
+    expect(calls).toContainEqual({
+      method: 'detachSession',
+      on: '/proj/a',
+      sessionId: 's-after-reset',
+      clientId: 'client-minted',
+    });
+  });
+
+  it('names the replacement among the sessions its daemon death takes with it', async () => {
+    // The workspace's session set is what a death report is built from, so a
+    // replacement missing from it would be left out of the list of
+    // conversations the crash took with it. That is a reader still looking for
+    // a session that is already gone, and a recovery that never tries to bring
+    // it back. Fired through the real exit handle rather than read off a
+    // private map, because the collection is the thing under test.
+    const h = makeDeathHarness({
+      client: (cwd) => ({
+        tag: cwd,
+        async createOrAttachSession() {
+          return {
+            sessionId: `${cwd}-s`,
+            workspaceCwd: cwd,
+            attached: false,
+          };
+        },
+        async resetWorktreeSession(_id: string) {
+          // The replacement is what the transfer answers with, and it is the
+          // same here whichever id was posted.
+          return { sessionId: 's-after-reset', clientId: 'client-minted' };
+        },
+        subscribeEvents: noEvents,
+      }),
+    });
+    const created = await h.pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    await h.pool.resetWorktreeSession(created.sessionId, {});
+    h.fireExit('/proj/a', { code: null, signal: 'SIGKILL' });
+
+    expect(h.deaths).toHaveLength(1);
+    expect(h.deaths[0].sessions.sort()).toEqual([
+      '/proj/a-s', // the superseded conversation, still bound
+      's-after-reset',
+    ]);
+  });
+
+  it('leaves the superseded conversation addressable', async () => {
+    // The original is not deleted by a handover; it records that it was
+    // superseded and stays readable. Dropping its binding would turn a
+    // historical conversation into a 404.
+    const { pool } = makeResetPool();
+    const created = await pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    await pool.resetWorktreeSession(created.sessionId, {});
+
+    await expect(pool.sessionContext(created.sessionId)).resolves.toMatchObject(
+      {
+        calledOn: '/proj/a',
+      },
+    );
+  });
+
+  it('binds nothing new for an idempotent resume that returns the same id', async () => {
+    // The second half of the protocol: resuming an already committed transfer
+    // answers with the id you posted. Rebinding that would be a no-op at best,
+    // and a route that assumed a fresh id every time would be wrong here.
+    const { pool } = makeResetPool({ echoSameId: true });
+    const created = await pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    const ownerOf = (pool as unknown as { ownerOf: Map<string, string> })
+      .ownerOf;
+    const before = ownerOf.size;
+
+    const after = await pool.resetWorktreeSession(created.sessionId, {});
+    expect(after.sessionId).toBe(created.sessionId);
+    expect(ownerOf.size).toBe(before);
+  });
+
+  it('refuses a handover for a session the pool does not own', async () => {
+    // Nothing was bound, so nothing may be claimed. A pool that answered here
+    // would be reporting a transfer against a conversation it has never seen.
+    const { pool } = makeResetPool();
+    await expect(
+      pool.resetWorktreeSession('never-seen', {}),
+    ).rejects.toBeInstanceOf(UnknownSessionError);
+  });
+});

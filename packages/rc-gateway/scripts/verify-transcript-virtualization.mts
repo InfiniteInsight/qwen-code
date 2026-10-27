@@ -11750,6 +11750,179 @@ PAGE_SCENARIOS.push({
       return `with no session_btw tag the control stays hidden (${JSON.stringify(offered)}) and nothing was asked`;
     },
   });
+
+  // #134. A checkout handover is the one conversation control that changes
+  // WHICH conversation owns the work, so the two things that would be wrong
+  // are specific: a control that fires on a single tap (the move cannot be
+  // undone from a phone), and a screen that keeps showing a conversation which
+  // no longer has the checkout. P117/P118 established the layout-height and
+  // capability-gate assertions for the side-question control; these drive the
+  // same shapes through this one, plus the two-press gate that #125 established
+  // as the house pattern for a destructive control, because this verifier
+  // dismisses every dialog unconditionally and a confirm() gate could never be
+  // driven here.
+  const WT_REPLACEMENT = 'aaaaaaaa-1111-2222-3333-444444444444';
+
+  PAGE_SCENARIOS.push({
+    name: 'P119 a checkout handover warns on the first press and moves the screen on the second',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_worktree_reset_v1'] },
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      const sent: string[] = [];
+      await page.route(/\/session\/[^/]+\/worktree-reset$/, async (route) => {
+        sent.push(new URL(route.request().url()).pathname);
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            sessionId: WT_REPLACEMENT,
+            supersededSessionId: A,
+            changedIdentity: true,
+            registrationReleased: true,
+          }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // Markup from boot, hidden until the daemon's own feature list says the
+      // route exists, so becoming visible is the gate firing.
+      await page.waitForSelector('#wt-reset', { state: 'visible' });
+
+      // No inner helper in these evaluates: a function declared inside the
+      // callback gets an esbuild keepNames wrapper that does not exist in the
+      // browser, and the whole evaluate dies with "__name is not defined".
+      const before = await page.evaluate(() => {
+        const box = document.getElementById('wt-reset-note');
+        return {
+          label: (document.getElementById('wt-reset') || { textContent: '' })
+            .textContent,
+          armed: typeof wtResetArmed === 'undefined' ? null : wtResetArmed,
+          box: box ? { hidden: box.hidden, height: box.offsetHeight } : null,
+        };
+      });
+      expect(before.box !== null, 'the handover note is missing from the page');
+      expect(
+        before.box?.hidden === true && before.box?.height === 0,
+        `the handover note already costs layout height before anyone pressed it (${JSON.stringify(before.box)})`,
+      );
+      expect(
+        before.armed === false,
+        `the handover starts armed (${JSON.stringify(before.armed)})`,
+      );
+
+      // Press one. It must say what the move costs and send NOTHING.
+      await page.click('#wt-reset');
+      const armed = await page.evaluate(() => {
+        const box = document.getElementById('wt-reset-note');
+        return {
+          label: (document.getElementById('wt-reset') || { textContent: '' })
+            .textContent,
+          note: box && !box.hidden ? (box.textContent ?? '') : '',
+          height: box ? box.offsetHeight : -1,
+        };
+      });
+      // Counted here, in Node, because the array is this file's. Reading it
+      // from inside the evaluate would ask the browser for a binding it has
+      // never heard of.
+      expect(
+        sent.length === 0,
+        `the first press sent ${sent.length} handovers; the warning press must send nothing`,
+      );
+      expect(
+        armed.label !== 'Hand over the checkout',
+        'arming the handover left the label unchanged, so the second press looks like the first',
+      );
+      expect(
+        armed.note.includes('cannot be undone'),
+        `the warning does not say the move is irreversible (${JSON.stringify(armed.note)})`,
+      );
+      expect(
+        armed.note.includes('new conversation'),
+        `the warning does not say a new conversation takes the checkout (${JSON.stringify(armed.note)})`,
+      );
+      expect(
+        armed.height > 0 && armed.height <= 160,
+        `the open warning is not bounded (${armed.height} px)`,
+      );
+
+      // Press two. Exactly one request, aimed at the conversation on screen.
+      await page.click('#wt-reset');
+      const moved = await page.waitForFunction(
+        (replacement) =>
+          typeof watchedSessionId !== 'undefined' &&
+          watchedSessionId === replacement
+            ? (
+                document.getElementById('wt-reset-note') || {
+                  textContent: '',
+                }
+              ).textContent
+            : null,
+        WT_REPLACEMENT,
+        { timeout: 15_000 },
+      );
+      const note = (await moved.jsonValue()) as string;
+      expect(
+        sent.length === 1,
+        `two presses sent ${sent.length} handovers; a double-send moves the checkout twice`,
+      );
+      expect(
+        sent[0] === `/session/${A}/worktree-reset`,
+        `the page handed over ${JSON.stringify(sent[0])} while watching ${JSON.stringify(A)}`,
+      );
+      // The screen followed the checkout rather than staying on the conversation
+      // that lost it. An operator left looking at the superseded session keeps
+      // typing into a conversation with no checkout.
+      expect(
+        note.includes('moved to a new conversation'),
+        `after the move the page says ${JSON.stringify(note)} instead of naming the replacement`,
+      );
+      expect(
+        note.includes(A.slice(0, 8)),
+        `the note does not name the conversation this one used to be (${JSON.stringify(note)})`,
+      );
+      expect(
+        !note.includes('could not be released'),
+        `a clean handover was reported as leaking (${JSON.stringify(note)})`,
+      );
+      return `press one warned without sending (${JSON.stringify(armed.label)}), press two moved the screen to ${WT_REPLACEMENT.slice(0, 8)} and reads ${JSON.stringify(note.slice(0, 60))}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P120 a daemon that cannot hand over a checkout is offered no control that could only fail',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      let sent = 0;
+      await page.route(/\/session\/[^/]+\/worktree-reset$/, async (route) => {
+        sent += 1;
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Not Found' }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // The harness advertises no daemon features here, which is the state of a
+      // daemon from before this route existed.
+      const offered = await page.evaluate(() => {
+        const b = document.getElementById('wt-reset');
+        return b ? { present: true, hidden: b.hidden } : { present: false };
+      });
+      expect(
+        offered.present === true && offered.hidden === true,
+        `the page showed a handover control to a daemon with no worktree-reset route (${JSON.stringify(offered)})`,
+      );
+      expect(
+        sent === 0,
+        'a control that is not on screen still asked the daemon for a handover',
+      );
+      return `with no session_worktree_reset_v1 tag the control stays hidden (${JSON.stringify(offered)}) and nothing was sent`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,

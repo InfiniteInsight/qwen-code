@@ -1323,6 +1323,37 @@
               "
             ></div>
           </div>
+          <!-- #134. A checkout handover is the one conversation control that
+               changes WHICH conversation owns the work: the daemon moves the
+               git checkout's ownership to a fresh session and links the pair,
+               so the conversation on screen stops being the thing that owns
+               it. That is why this is a named button that has to be pressed
+               twice rather than a chip that fires on one tap, and why the answer
+               says out loud
+               that the conversation now on screen is the replacement: an
+               operator who is not told keeps typing into a conversation that
+               no longer has a checkout. Gated on the daemon's own capability,
+               because an older daemon answers this route with a 404 that would
+               read as a broken button rather than an unsupported one. -->
+          <button id="wt-reset" type="button" hidden>
+            Hand over the checkout
+          </button>
+          <div
+            id="wt-reset-note"
+            aria-live="polite"
+            hidden
+            style="
+              margin-top: 6px;
+              padding: 6px 8px;
+              background: #1f2630;
+              border-left: 2px solid #a3be8c;
+              border-radius: 6px;
+              font-size: 0.82rem;
+              color: #c8d2e0;
+              max-height: 140px;
+              overflow-y: auto;
+            "
+          ></div>
           <button id="dictate">Dictate</button>
           <!-- #97. The engine is named where the control is drawn. A mic icon
                alone reads as the product's voice stack; what runs here is the
@@ -6996,6 +7027,7 @@
         // despite the name of the function.
         renderRecapGate();
         renderBtwGate(); // #133, same reason
+        renderWtResetGate(); // #134, same reason
 
         // rc-workspace-scoping (#28): the target selector appears when at
         // least one workspace-control surface is available on this daemon.
@@ -8859,6 +8891,176 @@
         }
       });
 
+      // -- Worktree checkout handover (#134) -----------------------------
+      // The daemon moves this conversation's git checkout onto a FRESH session
+      // and records the pair as superseded, so the conversation on screen stops
+      // being the one that owns the work. Two presses rather than a dialog, for
+      // the reason #125 gives for the stored-file row: the verifier dismisses
+      // every dialog unconditionally (its page.on('dialog') handler in
+      // scripts/verify-transcript-virtualization.mts), so a confirm() gate could
+      // never be driven here, and a control nobody can drive is a control nobody
+      // can show works. Press one says what the move costs and sends nothing;
+      // press two sends it.
+      let wtResetArmed = false;
+      let wtResetNote = '';
+      let wtResetNoteFor = null;
+
+      function renderWtResetButton() {
+        const btn = $('wt-reset');
+        if (!btn) return;
+        // The label carries the state, because a button that means "are you
+        // really sure" while still reading "Hand over the checkout" is the same
+        // size and the same colour, and the difference is the whole point.
+        btn.textContent = wtResetArmed
+          ? 'Confirm the handover'
+          : 'Hand over the checkout';
+      }
+
+      function renderWtResetNote() {
+        const box = $('wt-reset-note');
+        if (!box) return;
+        // The note is a fact about ONE conversation, so it is on screen only
+        // while that conversation is the one being watched. Left over a switch it
+        // would tell someone their checkout moved here when it moved to somewhere
+        // they have already walked away from.
+        const show = !!wtResetNote && watchedSessionId === wtResetNoteFor;
+        box.textContent = show ? wtResetNote : '';
+        box.hidden = !show;
+      }
+
+      function armWtReset() {
+        if (!watchedSessionId) {
+          setStatus('watch a session first');
+          return;
+        }
+        wtResetArmed = true;
+        wtResetNoteFor = watchedSessionId;
+        wtResetNote =
+          'A new conversation takes the git checkout and becomes the one that ' +
+          'owns the work. This conversation stays where it is and records that ' +
+          'it was superseded, and the screen follows the new one. This cannot be ' +
+          'undone from here. Press again to go ahead, or leave it and nothing ' +
+          'has happened.';
+        renderWtResetButton();
+        renderWtResetNote();
+      }
+
+      function disarmWtReset() {
+        wtResetArmed = false;
+        renderWtResetButton();
+      }
+
+      async function handOverCheckout() {
+        const id = watchedSessionId;
+        if (!id) {
+          disarmWtReset();
+          return setStatus('watch a session first');
+        }
+        const btn = $('wt-reset');
+        if (btn) btn.disabled = true; // the page's own busy signal
+        setStatus('handing the checkout over\u2026');
+        let res;
+        try {
+          res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/worktree-reset',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({}),
+            },
+          );
+        } catch {
+          // The press that got here was a real decision, so a failed trip to the
+          // gateway disarms: making them read the warning again is cheaper than
+          // a second accidental send.
+          disarmWtReset();
+          if (btn) btn.disabled = false;
+          return setStatus('could not reach the gateway');
+        }
+        const body = await res.json().catch(() => null);
+        if (btn) btn.disabled = false;
+        disarmWtReset();
+        // The reader may have walked away during the await, and this request
+        // cannot be recalled. The handover still happened, so say that; what must
+        // NOT happen is redrawing a screen they are no longer looking at, or
+        // moving a watch they have since re-pointed somewhere else.
+        if (watchedSessionId !== id) {
+          wtResetNote = '';
+          wtResetNoteFor = null;
+          renderWtResetNote();
+          return setStatus(
+            'checkout handed over while you were looking elsewhere',
+          );
+        }
+        if (!res.ok) {
+          // Each 409 means something different and only one of them clears by
+          // trying again, so the daemon's own sentence is relayed rather than a
+          // generic refusal, which would invite a retry loop on the kind that
+          // returns the same answer forever.
+          const code = (body && body.code) || String(res.status);
+          wtResetNote = '';
+          wtResetNoteFor = null;
+          renderWtResetNote();
+          return setStatus((body && body.error) || 'refused (' + code + ')');
+        }
+        const next =
+          body && typeof body.sessionId === 'string' ? body.sessionId : '';
+        if (!next || next === id) {
+          // An idempotent resume of a transfer that had already committed: the
+          // checkout is already where it was going and this conversation still
+          // owns it, so there is nothing to switch and nothing to pretend
+          // changed.
+          wtResetNote = '';
+          wtResetNoteFor = null;
+          renderWtResetNote();
+          return setStatus('the checkout was already handed over');
+        }
+        // The move happened, so the conversation on screen is now the
+        // replacement. It is a NEW session with no history of its own, which is
+        // the same shape as a fresh create: no cursor, so the daemon replays
+        // nothing and startWatch clears the transcript itself.
+        lastSeenEventId = null;
+        wtResetNote =
+          'The checkout moved to a new conversation, and this is it. Before the ' +
+          'handover this was conversation ' +
+          id.slice(0, 8) +
+          ', which now only records that it was superseded.';
+        if (body && body.registrationReleased === false) {
+          // Named rather than hidden. The move really happened, so the success
+          // stands; what it will not do is pretend a leftover registration is not
+          // sitting on the replacement, because that leftover is exactly what
+          // keeps the daemon from ever reaping it.
+          wtResetNote +=
+            ' One registration could not be released, so run the handover again ' +
+            'once this conversation is idle and it will be cleaned up.';
+        }
+        wtResetNoteFor = next;
+        // Set before the switch, and startWatch's own sync pass only re-decides
+        // visibility from watchedSessionId, which is about to equal this id.
+        renderWtResetNote();
+        void startWatch(next);
+        setStatus('checkout handed over to ' + next.slice(0, 8));
+      }
+
+      function renderWtResetGate() {
+        const btn = $('wt-reset');
+        if (!btn) return;
+        const supported = daemonHasFeature('session_worktree_reset_v1');
+        btn.hidden = !supported;
+        // A gate that closes mid-session (a daemon restart that dropped the
+        // capability) must not leave an armed button behind, because its next
+        // press would still fire.
+        if (!supported) disarmWtReset();
+      }
+
+      $('wt-reset').onclick = () => {
+        if (wtResetArmed) void handOverCheckout();
+        else armWtReset();
+      };
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
@@ -9984,6 +10186,14 @@
         // -- the question was typed and costs a model call, so a swipe must not
         // spend another one behind the reader's back.
         syncBtwForSession();
+        // #134: an armed handover belongs to the conversation that was on
+        // screen when it was armed, so a switch disarms it -- otherwise the next
+        // press hands over whatever conversation the reader swiped to, which is
+        // not the one they were warned about. The note itself is not cleared: it
+        // names a conversation, so coming back to that conversation finds it
+        // still true, and any other conversation leaves it off screen.
+        disarmWtReset();
+        renderWtResetNote();
         // #70: the queue belongs to the conversation, not to the window, so it is
         // loaded by session id here. Moving to another conversation takes the
         // strip off screen rather than discarding it, and coming back finds it

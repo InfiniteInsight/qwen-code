@@ -129,6 +129,22 @@ export interface StubDaemon {
    */
   lastBtwSessionId: string | undefined;
   lastBtwQuestion: string | undefined;
+  /**
+   * Session id and body the most recent POST /session/:id/worktree-reset
+   * carried. A transfer is the one relay whose request id and response id
+   * legitimately differ, so a test can only prove the gateway relayed the
+   * replacement rather than echoed the request by reading both here and in
+   * the route's response.
+   */
+  lastWorktreeReset: { sessionId: string; body: unknown } | undefined;
+  /**
+   * Every POST /session/:id/detach that arrived here, in order, with the
+   * client id it named. The gateway is meant to release the registration the
+   * transfer mints inside the same request that made it, so the count and the
+   * id are the whole proof: one call, naming the minted id, not the
+   * superseded one.
+   */
+  detachCalls: Array<{ sessionId: string; clientId: string | undefined }>;
   /** Session id the most recent GET /session/:id/stats carried. */
   lastStatsSessionId: string | undefined;
   /** Session id the most recent GET /session/:id/resources carried. */
@@ -381,6 +397,25 @@ export interface StubDaemonOptions {
   btwStatusCode?: number;
   /** Full body for POST /session/:id/btw (overrides the default pair). */
   btwResult?: unknown;
+  /**
+   * Status for POST /session/:id/worktree-reset (default 200). The 409 family
+   * matters most and the stub cannot guess which one a scenario wants, because
+   * the gateway gives each of { worktree_reset_unsupported,
+   * worktree_reset_active, worktree_reset_invalid_state } different copy: a
+   * retry helps one and never helps another. Supply the code through
+   * worktreeResetResult.
+   */
+  worktreeResetStatusCode?: number;
+  /**
+   * Full body for POST /session/:id/worktree-reset. The default mints a new
+   * session id AND an owner-style client id, which is what a fresh transfer
+   * returns and the case the gateway must release. A scenario wanting the
+   * idempotent resume of a committed transfer - same id back, no client id,
+   * nothing to release - supplies it here.
+   */
+  worktreeResetResult?: unknown;
+  /** Status for POST /session/:id/detach (default 204). */
+  detachStatusCode?: number;
   /** Status for GET /session/:id/stats (default 200). Non-200 -> { error }. */
   statsStatusCode?: number;
   /**
@@ -670,6 +705,14 @@ export async function startStubDaemon(
     lastRecapSessionId: undefined as string | undefined,
     lastBtwSessionId: undefined as string | undefined,
     lastBtwQuestion: undefined as string | undefined,
+    lastWorktreeReset: undefined as
+      | { sessionId: string; body: unknown }
+      | undefined,
+    detachCalls: [] as Array<{
+      sessionId: string;
+      clientId: string | undefined;
+    }>,
+    worktreeResetCount: 0,
     lastStatsSessionId: undefined as string | undefined,
     lastResourcesSessionId: undefined as string | undefined,
     lastArtifactListSessionId: undefined as string | undefined,
@@ -1695,6 +1738,47 @@ export async function startStubDaemon(
     });
   });
 
+  app.post('/session/:id/worktree-reset', (req, res) => {
+    state.lastWorktreeReset = {
+      sessionId: String(req.params.id),
+      body: req.body,
+    };
+    const status = opts.worktreeResetStatusCode ?? 200;
+    if (status !== 200) {
+      // Default refusal is the active-transfer 409, the one a caller can act
+      // on. The gateway must tell the three 409 codes apart, so a scenario
+      // wanting a specific one names its code through worktreeResetResult.
+      res.status(status).json(
+        opts.worktreeResetResult ?? {
+          error: 'Conflict',
+          code: 'worktree_reset_active',
+        },
+      );
+      return;
+    }
+    if (opts.worktreeResetResult !== undefined) {
+      res.status(200).json(opts.worktreeResetResult);
+      return;
+    }
+    state.worktreeResetCount += 1;
+    // A real fresh transfer: a DIFFERENT session id, and an owner-style client
+    // id registered on the replacement. Both are the point of this stub - a
+    // relay that echoed the request id, or that kept the client id for the
+    // caller instead of releasing it, would look fine and be wrong.
+    res.status(200).json({
+      sessionId: `s-after-reset-${state.worktreeResetCount}`,
+      clientId: `client-owner-style-${state.worktreeResetCount}`,
+    });
+  });
+
+  app.post('/session/:id/detach', (req, res) => {
+    state.detachCalls.push({
+      sessionId: String(req.params.id),
+      clientId: req.get('X-Qwen-Client-Id') ?? undefined,
+    });
+    res.status(opts.detachStatusCode ?? 204).end();
+  });
+
   // What the session produced. The envelope shape is the daemon's own
   // (v, sessionId, artifacts, generatedAt, limits) and each entry carries the
   // fields the store builds, so a gateway that reshaped it would be tested
@@ -2610,6 +2694,12 @@ export async function startStubDaemon(
     },
     get lastBtwQuestion() {
       return state.lastBtwQuestion;
+    },
+    get lastWorktreeReset() {
+      return state.lastWorktreeReset;
+    },
+    get detachCalls() {
+      return state.detachCalls;
     },
     get lastStatsSessionId() {
       return state.lastStatsSessionId;
