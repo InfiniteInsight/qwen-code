@@ -2251,6 +2251,59 @@
           </div>
           <div id="stats-body">(not loaded)</div>
         </details>
+        <!-- #126. The turn index shipped as a relay with a test and no caller
+             anywhere. This is the caller. It is a list rather than a jump, and
+             the reason is on the wire rather than in here: a jump has to say
+             which drawn row is turn N, and nothing on the page can. The daemon
+             stamps a record id onto a stored frame only in three goal-control
+             call sites (packages/acp-bridge/src/transcript-replay.ts:1881,
+             :1894, :2342); the emitter that builds every ordinary frame
+             (createTranscriptMessageUpdate, :521) attaches none, so the
+             recordId field DaemonSessionClient.hydrateEvent reads at :1569 is
+             undefined for every row this panel could draw. The only ids a
+             reader is ever handed are a page's targetRecordId and the opaque
+             cursor, and neither maps a turn to a row. So the panel answers
+             "how long is this conversation, and what did the daemon call each
+             turn" -- including turns never loaded -- and asks for nothing.
+             Bounded like the panels around it: an open list that grows is how
+             the to-do strip pushed the composer under the fold on a phone, and
+             a conversation can hold hundreds of these rows. -->
+        <details id="session-turns" class="ops-collapse">
+          <summary>
+            <strong>Turns</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Turns?"
+              aria-expanded="false"
+              aria-controls="help-session-turns"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-session-turns" hidden>
+            The conversation as the daemon counts it: every turn it recorded, in
+            order, under the label the daemon gave each one. It includes turns
+            this page has never loaded, so it answers how long a conversation is
+            without paging back through it. Enter the session id (blank means
+            the session you're watching) and tap <b>Read turns</b>. It is a
+            list, not a jump: nothing here can land you on a turn in the
+            transcript. Needs session-read scope.
+          </div>
+          <div class="ops-note">
+            (the daemon's own turn list; requires session-read scope)
+          </div>
+          <div>
+            <input
+              id="turns-id"
+              placeholder="session id (blank = watched)"
+            />
+            <button id="turns-load">Read turns</button>
+          </div>
+          <div id="turns-body" style="max-height: 140px; overflow-y: auto">
+            (not loaded)
+          </div>
+        </details>
         <details id="usage-view" class="ops-collapse">
           <summary>
             <strong>Usage</strong
@@ -12626,6 +12679,65 @@
               ' skill calls, ' +
               (st.skills.totalFail || 0) +
               ' failed',
+          );
+        }
+        renderRows(out, rows);
+      };
+
+      // #126. The turn index's first consumer. Drawn in the daemon's own words
+      // rather than summarised: an entry's kind is an open union
+      // (prompt/realtime/scheduled plus whatever the daemon adds later), so a
+      // kind this file has never heard of still gets a row carrying the
+      // daemon's word instead of being dropped or relabelled as something
+      // known. Same rule for the label, which is the daemon's string and not a
+      // prompt the viewer necessarily has.
+      $('turns-load').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('turns-body');
+        const id = verbSessionId('turns-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading\u2026';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/turn-index',
+        );
+        if (!r.ok) {
+          // The gateway distinguishes these and the page passes every one on:
+          // session_not_loaded means the pool holds no binding for it, which is
+          // an instruction to open the conversation rather than a claim that it
+          // is missing (src/routes/sessionTurnIndex.ts).
+          out.textContent = 'turns failed: ' + r.code;
+          return;
+        }
+        const page = r.body || {};
+        const turns = Array.isArray(page.turns) ? page.turns : [];
+        const total = Number(page.totalTurns) || 0;
+        const rows = [];
+        // The index is a slice of a count, and naming only one of them implies
+        // the other. A short page says how much of the conversation it is.
+        const turnWord = (n) => (n === 1 ? 'turn' : 'turns');
+        rows.push(
+          turns.length === total
+            ? total + ' ' + turnWord(total)
+            : turns.length + ' of ' + total + ' ' + turnWord(total),
+        );
+        if (!turns.length && total) {
+          rows.push('the daemon listed none for this start');
+        }
+        for (const t of turns) {
+          const n = Number(t && t.ordinal);
+          rows.push(
+            (Number.isFinite(n) ? n + 1 : '?') +
+              '. ' +
+              String((t && t.label) || '(untitled)') +
+              ' [' +
+              String((t && t.kind) || 'unknown') +
+              ']' +
+              (typeof (t && t.timestamp) === 'string'
+                ? ' ' + new Date(t.timestamp).toLocaleTimeString()
+                : ''),
           );
         }
         renderRows(out, rows);
