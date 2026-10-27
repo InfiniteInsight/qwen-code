@@ -55,6 +55,7 @@ import {
   type DaemonSessionTurnIndexPageOptions,
   type DaemonSessionRecapResult,
   type DaemonSessionBtwResult,
+  type WorktreeResetSessionRequest,
   type DaemonSessionStatsStatus,
   type DaemonSessionResourcesStatus,
   type DaemonPermissionRuleType,
@@ -347,6 +348,35 @@ export interface SessionDaemon {
     question: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionBtwResult>;
+  /**
+   * Move a worktree session's checkout ownership to a fresh replacement
+   * session. Named `resetWorktreeSession` exactly as
+   * `DaemonClient.resetWorktreeSession` is
+   * (packages/sdk-typescript/src/daemon/DaemonClient.ts:3719), for the reason
+   * recorded in D61.
+   *
+   * The response is the REPLACEMENT's create-shape body, so it carries a
+   * different `sessionId` from the one passed in, and the pool has to learn
+   * that new id or nothing downstream can address it: `daemonForSession`
+   * raises `UnknownSessionError` for any id it has never recorded, which would
+   * make the very call that releases the minted client id fail before it
+   * reached the daemon. The implementation therefore rebinds the replacement to
+   * the same workspace key the original was owned by.
+   */
+  resetWorktreeSession(
+    sessionId: string,
+    req?: WorktreeResetSessionRequest,
+  ): Promise<DaemonSession>;
+  /**
+   * Release one client registration on a session. Named `detachSession` exactly
+   * as `DaemonClient.detachSession` is
+   * (packages/sdk-typescript/src/daemon/DaemonClient.ts:6686), and it forwards
+   * the id unchanged rather than substituting the pool's own, because the whole
+   * point is to release a SPECIFIC registration. The SDK's method no-ops on an
+   * absent id and treats both 204 and 404 as success, so it is safe to call for
+   * an id that turned out not to exist.
+   */
+  detachSession(sessionId: string, clientId?: string): Promise<void>;
   sessionStatus(
     sessionId: string,
     clientId?: string,
@@ -1307,6 +1337,42 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionBtwResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.btwSession(sessionId, question, opts),
+    );
+  }
+
+  async resetWorktreeSession(
+    sessionId: string,
+    req: WorktreeResetSessionRequest = {},
+  ): Promise<DaemonSession> {
+    // Read the owner BEFORE the call: the original id is what this pool knows,
+    // and the replacement id it hands back is not in `ownerOf` yet.
+    const ownerKey = this.ownerOf.get(sessionId);
+    const result = await this.withSessionDeathTrigger(sessionId, (client) =>
+      client.resetWorktreeSession(sessionId, req),
+    );
+    // The transfer moved the checkout to a session with a new id on the SAME
+    // daemon, so the replacement inherits the original's workspace key. Without
+    // this the replacement is unaddressable through the pool: `daemonForSession`
+    // throws `UnknownSessionError` for an id it never recorded, and the release
+    // that keeps the replacement from leaking would fail before reaching the
+    // daemon. Recorded after the call, because a failed transfer produced no
+    // replacement to record.
+    const replacementId = (result as { sessionId?: unknown } | null)?.sessionId;
+    if (
+      ownerKey !== undefined &&
+      typeof replacementId === 'string' &&
+      replacementId.length > 0 &&
+      replacementId !== sessionId
+    ) {
+      this.ownerOf.set(replacementId, ownerKey);
+      this.byWorkspace.get(ownerKey)?.sessions.add(replacementId);
+    }
+    return result;
+  }
+
+  async detachSession(sessionId: string, clientId?: string): Promise<void> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.detachSession(sessionId, clientId),
     );
   }
 

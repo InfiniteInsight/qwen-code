@@ -200,6 +200,7 @@ import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
 import { RECENT_WORKSPACES_CAP } from './terminals.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
+import { createSessionWorktreeResetRoute } from './routes/sessionWorktreeReset.js';
 import {
   createListTokensRoute,
   createMintTokenRoute,
@@ -1184,6 +1185,30 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before touching the daemon)
     createSessionResumeRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/worktree-reset - hand a conversation that was working in
+  // a temporary checkout over to the replacement checkout it now belongs on
+  // (add-worktree-handover). WRITE: the daemon may run cleanup commands, and
+  // the conversation comes back under a different id. Bare namespace, 1:1 with
+  // the daemon route. Unlike the resume above, no cwd is accepted from the
+  // caller - the replacement inherits the workspace its owning daemon started
+  // with, and a caller-named one could aim a transfer at a daemon that does not
+  // own the checkout. See routes/sessionWorktreeReset.ts.
+  // Two things here are load-bearing and neither is visible in the response:
+  // the route RELEASES the owner-style registration the daemon mints for the
+  // replacement instead of adopting it (the channels SessionRouter adopts
+  // because it is a long-lived owner; this gateway's next contact is the page's
+  // own watch registering its own id, so adopting would leave a second
+  // registration that nothing ever releases), and the pool rebinds the
+  // replacement id to the original's workspace key - without that the
+  // successor is unaddressable through the pool and the release call fails
+  // before it ever reaches the daemon, which is the leak this exists to close.
+  app.post(
+    '/session/:id/worktree-reset',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before touching the daemon)
+    createSessionWorktreeResetRoute(deps.daemon, audit),
   );
   // GET /rc/fs — folder browser so the phone can pick which directory a new
   // conversation (POST /session above) runs in. Write-scoped, owner/control-
