@@ -101,4 +101,30 @@ describe('classifySubagentFailure (#139)', () => {
     const impostor = { name: 'DaemonHttpError', message: 'not really' };
     expect(classifySubagentFailure(impostor, REF)).toBe('daemon_unavailable');
   });
+
+  it('follows the SDK guards down the toolCallId spelling', () => {
+    // The one shape this file cannot decide on its own: the body names the
+    // child under `toolCallId` rather than the daemon's `subagentRef`, so the
+    // structural read falls through to the SDK guards. Those guards used to
+    // open with `instanceof` against their own bundle's copy of the class, so
+    // they could never answer an error built through the package root, which
+    // is the only way this process receives one. This verdict is theirs now.
+    const namedUnderSdk = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', sessionId: SESS, toolCallId: REF },
+      'Subagent session not found',
+    );
+    expect(classifySubagentFailure(namedUnderSdk, REF)).toBe(
+      'subagent_not_found',
+    );
+  });
+
+  it('will not let a toolCallId-named absence on another row settle this one', () => {
+    const otherRow = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', sessionId: SESS, toolCallId: 'toolu_other' },
+      'Subagent session not found',
+    );
+    expect(classifySubagentFailure(otherRow, REF)).toBe('daemon_unavailable');
+  });
 });

@@ -24,6 +24,39 @@ export class DaemonHttpError extends Error {
   }
 }
 
+/**
+ * Read a daemon HTTP failure without asking which copy of the class threw it.
+ *
+ * This class is bundled once per entry point: `scripts/build.js` runs one
+ * independent esbuild bundle for `.` and another for `./daemon`, so the copy
+ * a client throws is not the copy a caller imported. `instanceof` across that
+ * line answers false for a perfectly ordinary production 404, which is why
+ * these guards used to answer `false` for every real error reaching a caller
+ * that imported the other entry. The two entries cannot share a chunk instead:
+ * `.` is built for node and `./daemon` for the browser, gated by
+ * `assertNoNodeBuiltins`, so unifying them would force one platform and break
+ * that assertion.
+ *
+ * `name` and `status` are assigned on the instance by the constructor above,
+ * so they survive bundling and the duplicate class alike; `status` is required
+ * alongside the name so an unrelated `Error` that happens to carry the name
+ * cannot be read as a daemon answer. A genuine `DaemonHttpError` always
+ * satisfies this test, so there is no `instanceof` path left to keep.
+ */
+function asDaemonFailure(
+  error: unknown,
+): { readonly status: number; readonly body: unknown } | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const shaped = error as {
+    name?: unknown;
+    status?: unknown;
+    body?: unknown;
+  };
+  if (shaped.name !== 'DaemonHttpError') return undefined;
+  if (typeof shaped.status !== 'number') return undefined;
+  return { status: shaped.status, body: shaped.body };
+}
+
 // Kept local (instead of reusing `isRecord` from `acpTransportUtils.ts` or
 // `ui/utils.ts`) so this leaf module stays dependency-free: those modules
 // pull the ACP route table / UI helpers into the budgeted browser bundles.
@@ -36,29 +69,55 @@ function getErrorBodyRecord(
 }
 
 /**
- * Type guard for the daemon's `GET /session/:id/subagents/:toolCallId` 404
- * contract: `{ code: 'session_not_found', sessionId, toolCallId? }`. Pass
- * `toolCallId` to require the body to identify that specific missing agent
- * (a session-level 404 carries no identifying `toolCallId`); omit it to
- * accept both.
+ * The keys a 404 can name the missing child under, in the order the daemon
+ * writes them.
+ *
+ * `subagentRef` is the one the daemon actually sends: the route names the child
+ * after its own path parameter
+ * (`packages/cli/src/serve/routes/session.ts:5481` for the read and `:5538`
+ * for the cancel), and `toolCallId` appears nowhere in that file. `toolCallId`
+ * is the spelling these guards were originally written against and is still
+ * accepted, because a caller that was given that shape must keep getting the
+ * same answer.
+ */
+const CHILD_REFERENCE_KEYS = ['subagentRef', 'toolCallId'] as const;
+
+/**
+ * The child a `session_not_found` body names, or undefined when it names none,
+ * which is what distinguishes a gone child from a gone parent. An explicitly
+ * `null` reference counts as naming none.
+ */
+function childReference(body: Record<string, unknown>): string | undefined {
+  for (const key of CHILD_REFERENCE_KEYS) {
+    const value = body[key];
+    if (typeof value === 'string') return value;
+  }
+  return undefined;
+}
+
+/**
+ * Type guard for the daemon's `GET /session/:id/subagents/:subagentRef` 404
+ * contract: `{ code: 'session_not_found', sessionId, subagentRef? }`. Pass the
+ * reference THIS request sent to require the body to identify that specific
+ * missing agent; a 404 naming a different child is not this caller's answer,
+ * and a session-level 404 names none. Omit it to accept both shapes.
  */
 export function isSubagentSessionNotFound(
   error: unknown,
-  toolCallId?: string,
+  subagentRef?: string,
 ): boolean {
-  if (!(error instanceof DaemonHttpError) || error.status !== 404) {
-    return false;
-  }
-  const body = getErrorBodyRecord(error.body);
+  const failure = asDaemonFailure(error);
+  if (failure === undefined || failure.status !== 404) return false;
+  const body = getErrorBodyRecord(failure.body);
   if (body?.['code'] !== 'session_not_found') return false;
-  return toolCallId === undefined || body['toolCallId'] === toolCallId;
+  if (subagentRef === undefined) return true;
+  return childReference(body) === subagentRef;
 }
 
 /**
  * Type guard for the session-level variant of that same 404 contract: the
  * daemon could not find the parent session itself, so the body carries
- * `code: 'session_not_found'` with no identifying `toolCallId` (an
- * explicitly `null` id is treated the same as an absent one).
+ * `code: 'session_not_found'` and names no child under either spelling.
  *
  * A missing parent session is not the only producer: a multi-workspace
  * daemon answers this same shape while the owning workspace entry is
@@ -67,11 +126,9 @@ export function isSubagentSessionNotFound(
  * this error as recoverable, not as proof the session is permanently gone.
  */
 export function isSessionLevelNotFound(error: unknown): boolean {
-  if (!(error instanceof DaemonHttpError) || error.status !== 404) {
-    return false;
-  }
-  const body = getErrorBodyRecord(error.body);
+  const failure = asDaemonFailure(error);
+  if (failure === undefined || failure.status !== 404) return false;
+  const body = getErrorBodyRecord(failure.body);
   if (body?.['code'] !== 'session_not_found') return false;
-  const toolCallId = body['toolCallId'];
-  return toolCallId === undefined || toolCallId === null;
+  return childReference(body) === undefined;
 }

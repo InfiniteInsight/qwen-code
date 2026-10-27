@@ -13,8 +13,10 @@
  * (`daemonPool.ts:43`), while a route may import the class from the subpath, so
  * `err instanceof DaemonHttpError` answers false for a perfectly ordinary
  * production error and the caller falls through to its fallback silently. The
- * SDK's own guards (`isSubagentSessionNotFound`, `isSessionLevelNotFound`) run
- * that same identity test internally and are therefore unusable here too.
+ * SDK's own guards used to carry that same defect and were changed to read
+ * `name` plus a numeric `status` (`asDaemonFailure` in
+ * `sdk-typescript/src/daemon/DaemonHttpError.ts`); this module predates that
+ * fix and is the reason it was found.
  *
  * `name` and `status` are assigned on the instance by the constructor
  * (`sdk-typescript/src/daemon/DaemonHttpError.ts:19-24`), so they survive both

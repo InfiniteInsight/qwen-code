@@ -37,11 +37,17 @@ export type SubagentFailure =
  * The read is structural on purpose. `DaemonClient` is built through the SDK
  * package root (`daemonPool.ts:43`) while this module's imports come from the
  * `/daemon` subpath, and the two entries each bundle their own `DaemonHttpError`
- * class. A real production error therefore fails `instanceof DaemonHttpError`
- * here and in the SDK's own guards, which run that same test internally
- * (`sdk-typescript/src/daemon/DaemonHttpError.ts:46`, `:70`); an earlier revision
- * of this file relied on both and silently answered every gone child as
+ * class, so a real production error still fails `instanceof DaemonHttpError`
+ * here and the read has to stay structural. An earlier revision of this file
+ * relied on that identity test and silently answered every gone child as
  * `daemon_unavailable`. See `daemonHttpError.ts`.
+ *
+ * The SDK's own guards used to fail the same way and no longer do: they read
+ * `name` plus a numeric `status` rather than asking which copy of the class
+ * threw (`asDaemonFailure` in `sdk-typescript/src/daemon/DaemonHttpError.ts`),
+ * so the two calls below are live again rather than decorative. That does not
+ * make this read redundant. It runs first, and it is the one that separates a
+ * child named under `subagentRef` from a parent that is merely inactive.
  *
  * The daemon names the child under the route parameter's own name, `subagentRef`
  * (`packages/cli/src/serve/routes/session.ts:5484` for the read and `:5538` for
@@ -73,8 +79,10 @@ export function classifySubagentFailure(
       // it is left to the guards written against that key below.
     }
   }
-  // Kept for shapes these guards were written against. Neither can match an
-  // error thrown through the other SDK entry, for the identity reason above.
+  // Reached only when the body names the child under the SDK's `toolCallId`
+  // spelling instead of the daemon's. Both guards read the failure
+  // structurally now, so they answer for an error thrown through the package
+  // root, which is the only way this process can receive one.
   if (isSubagentSessionNotFound(err, subagentRef)) return 'subagent_not_found';
   if (isSessionLevelNotFound(err)) return 'session_unreachable';
   return 'daemon_unavailable';
