@@ -5,11 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>qwen-rc viewer</title>
     <style>
+      /* The g1 shell (#117): a dark, full-bleed application frame instead of the
+         centred light column this page shipped as. The shell owns the page grid
+         (bar over a body row of rail + middle column), the dark ground, and the
+         three named containers the region tasks fill. No region's content lives
+         here. */
+      /* The sheet draws the shell as a fixed viewport frame
+         (html,body{height:100%} with body{overflow:hidden}). The shell does not
+         copy that: #pane-ops, #pane-settings and #pane-diag have no scroller of
+         their own and scroll with the document today, so clipping the document
+         would make everything below their fold unreachable. The shell fills the
+         viewport and grows with the page instead. A definite height here would
+         also let the flex items shrink below their content, which is the same
+         class of failure that made the bounded conversation column be reverted. */
       body {
         font-family: system-ui, sans-serif;
+        min-height: 100vh;
+        margin: 0;
+        background: #0d1117;
+        color: #cbd5e1;
+        display: flex;
+        flex-direction: column;
+      }
+      /* The pairing form is not a region and has nothing to fill it, so it keeps
+         the measure the page had before the shell went full-bleed. */
+      #auth-gate {
         max-width: 760px;
-        margin: 2rem auto;
-        padding: 0 1rem;
+        padding: 2rem 1rem;
+        /* body's old margin: 2rem auto centred this; as a flex item it would
+           otherwise sit flush left at its max-width. */
+        margin: 0 auto;
       }
       h1 {
         font-size: 1.2rem;
@@ -175,8 +200,9 @@
         display: flex;
         align-items: center;
         gap: 0;
-        border-bottom: 2px solid #ccc;
-        background: #f8f8f8;
+        border-bottom: 2px solid #21262d;
+        background: #161b22;
+        color: #7d8590;
         margin-bottom: 1rem;
         flex-wrap: wrap;
       }
@@ -262,6 +288,89 @@
         z-index: 100;
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
       }
+      /* The shell grid: the bar sits over a row of the rail and the middle
+         column, and the column stacks the status strip, the panes and the
+         inspector. The three named containers are empty until their region task
+         fills them, so each is hidden while empty -- an empty 190px rail would
+         otherwise read as a broken column rather than an unbuilt one. */
+      #app-body {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+      }
+      /* The author display above would beat the UA rule for [hidden], so the app
+         would show before pairing. This is the same guard the sheet carries for
+         its hidden marker. */
+      #app-body[hidden] {
+        display: none;
+      }
+      #app-body > .tab-bar {
+        flex: none;
+      }
+      .shell-body {
+        display: flex;
+        align-items: flex-start;
+        flex: 1 1 auto;
+      }
+      #rail {
+        flex: 0 0 190px;
+        align-self: stretch;
+        position: sticky;
+        top: 0;
+        max-height: 100vh;
+        overflow-y: auto;
+        background: #10151c;
+        border-right: 1px solid #21262d;
+      }
+      .mid {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-width: 0;
+        /* The gutter the page had as body { padding: 0 1rem }. It moved here
+           because the shell is full-bleed, and content flush to the window edge
+           reads as a layout failure rather than as a wide column. */
+        padding: 0 1rem;
+      }
+      #status-strip,
+      #inspector {
+        flex: none;
+      }
+      #rail:empty,
+      #status-strip:empty,
+      #inspector:empty {
+        display: none;
+      }
+      /* The panes keep the light surface they have today. The shell's dark ground
+         stops at the pane edge because every region still styles itself for a
+         light page: .card sets #fffbe6, #status sets #444, and a light page
+         element on a dark ground is an unreadable combination, not an unfinished
+         one. Each region task flips its own surface (#119 the rail, #121 the
+         transcript, strip and drawer); the shell does not pre-decide them.
+         The colour is the UA default rather than a chosen dark because most of the
+         transcript's rows (#transcript .system, .tool, .thought, the .subagent
+         block) set no colour of their own and take it by inheritance. Naming any
+         other value here would silently restyle every row that never opted in;
+         #000 on #fff is what they compute today. */
+      .tab-pane {
+        background: #fff;
+        color: #000;
+      }
+      @media (max-width: 860px) {
+        /* The rail is the sheet's own column at 190px; below the break the sheet
+           turns it into a horizontal strip. Measured the same way the bar's break
+           was: the column is what does not fit a 390 viewport. */
+        .shell-body {
+          flex-direction: column;
+        }
+        #rail {
+          flex: none;
+          width: 100%;
+          max-height: none;
+          border-right: 0;
+          border-bottom: 1px solid #21262d;
+        }
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -305,7 +414,11 @@
             title="Pin to Chat"
         /></span>
       </div>
-      <div class="tab-pane active" id="pane-chat">
+      <div class="shell-body">
+        <div id="rail"></div>
+        <div class="mid">
+          <div id="status-strip"></div>
+          <div class="tab-pane active" id="pane-chat">
         <details id="session-controls" class="ops-collapse" open>
           <summary>
             <strong>Session controls</strong
@@ -3159,6 +3272,13 @@
           </div>
           <pre id="log" style="display: none"></pre>
         </details>
+      </div>
+      <!-- The inspector slot. It sits at the foot of the middle column, after the
+           panes, because the panes are the sheet's whole column stack and this is
+           the one container with no live counterpart to attach to. #121 places its
+           content and moves it into the chat stack if the sheet's order wants that. -->
+      <div id="inspector"></div>
+        </div>
       </div>
     </div>
     <script src="transcript-model.js"></script>
