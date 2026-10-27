@@ -552,6 +552,161 @@
         background: #fff;
         color: #000;
       }
+      /* #120. The composer takes the sheet's three rows: the field, the control
+         row under it, the idle row under that. Scoped under #composer because the
+         sheet's names (.field, .crow, .idle, .ic) are short and the page has rows
+         of its own elsewhere.
+         The caret bar is drawn on .field, not on the textarea. A native textarea
+         is a replaced element, and a ::before on one computes without ever
+         painting: measured on a 300x60 field with a 1x14 red bar, 0 pixels of it
+         reached the screen. The sheet draws it on the wrapper for the same
+         reason. */
+      #composer .field {
+        position: relative;
+        min-height: 52px;
+        background: #0d1117;
+        border: 1px solid #30363d;
+      }
+      /* Only while the field is unfocused. A focused field already has the
+         browser's own caret, and a drawn bar beside it reads as two carets. The
+         sheet can only ever draw the unfocused state, so this is that drawing
+         standing in for the real caret rather than sitting beside it. */
+      #composer .field:not(:focus-within)::before {
+        content: "";
+        position: absolute;
+        left: 8px;
+        top: 6px;
+        width: 1px;
+        height: 14px;
+        background: #e6edf3;
+      }
+      #composer textarea {
+        position: relative;
+        display: block;
+        width: 100%;
+        min-height: 52px;
+        background: transparent;
+        border: 0;
+        padding: 5px 8px 5px 10px;
+        font: inherit;
+        color: #e6edf3;
+        resize: none;
+      }
+      #composer textarea:focus {
+        outline: none;
+      }
+      /* The suggestion, painted inside the field rather than as a pill below it.
+         A textarea takes no child elements, so this is a layer behind a
+         transparent field, not text in the field. Sized to its own text rather
+         than to the box on purpose: the accept tap is hit-tested against this
+         rect, and a ghost that filled the box would turn every tap meant to
+         start typing into an accept. */
+      #composer .ghost {
+        position: absolute;
+        left: 10px;
+        top: 5px;
+        z-index: 0;
+        max-width: calc(100% - 20px);
+        color: #5b6470;
+        font-style: italic;
+        pointer-events: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #composer .ghost .use {
+        font-style: normal;
+        color: #4d5560;
+      }
+      #composer .crow {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      /* The engine tag keeps its own class (the page uses .cmd-kind everywhere)
+         and takes the sheet's palette here, because #ccc on the composer's dark
+         ground is a light-page colour left behind. */
+      #composer .crow .cmd-kind {
+        border-color: #30363d;
+        color: #7d8590;
+        margin-right: 0;
+      }
+      #composer .crow select {
+        font: inherit;
+        font-size: 11px;
+        color: #cbd5e1;
+        background: #161b22;
+        border: 1px solid #30363d;
+        padding: 1px 3px;
+      }
+      #composer .crow .lab {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #7d8590;
+        font-size: 11px;
+      }
+      /* Empty at rest: it carries text only while a recognition session is open. */
+      #composer .interim:empty {
+        display: none;
+      }
+      #composer .interim {
+        color: #8a8f98;
+        font-style: italic;
+        font-size: 11px;
+      }
+      /* The verbs go right: they are the row's far end in the sheet, and pushed
+         by margin-left auto because everything before them packs left. */
+      #composer .sgroup {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      #composer .ic {
+        font: inherit;
+        font-size: 13px;
+        line-height: 1;
+        color: #cbd5e1;
+        background: #161b22;
+        border: 1px solid #30363d;
+        padding: 2px 6px;
+        min-width: 24px;
+      }
+      #composer .ic.end {
+        color: #f38ba8;
+      }
+      #composer #send {
+        font: inherit;
+        font-size: 12px;
+        color: #0d1117;
+        background: #238636;
+        border: 1px solid #2ea043;
+        padding: 2px 14px;
+      }
+      #composer .idle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
+        color: #7d8590;
+        font-size: 11px;
+      }
+      #composer .idle .st {
+        color: #6e7681;
+      }
+      /* The composer's help panel sits under the row it explains rather than
+         inside a collapsible, so it has no summary to hide behind and starts
+         hidden on its own. */
+      #composer .help-text {
+        margin-top: 6px;
+        font-size: 11px;
+      }
+      #composer .help-text[hidden] {
+        display: none;
+      }
       @media (max-width: 860px) {
         /* The rail is the sheet's own column at 190px; below the break the sheet
            turns it into a horizontal strip. Measured the same way the bar's break
@@ -665,6 +820,34 @@
           border-left: 1px solid #161b22;
           min-width: 40px;
         }
+        /* The 44px floor, by hand. measure.mjs counts only button,a,[tabindex],
+           so the language select is invisible to its under44px metric and the
+           sheet applies the floor to the row's controls itself. */
+        #composer .mic,
+        #composer #send,
+        #composer .ic,
+        #composer .help-btn,
+        #composer .crow select {
+          min-height: 44px;
+        }
+        /* The word is what does not fit a 390 strip; the glyph is the control.
+           The button's text lives in these two spans so this can drop one of
+           them, which is also why the running label is written into .w rather
+           than into the button's textContent. */
+        #composer .mic .w {
+          display: none;
+        }
+        #composer #send {
+          padding: 0 16px;
+        }
+        /* #dictate-interim carries text only while a recognition session is
+           open, so at rest it costs the transcript nothing here. */
+        #composer .interim {
+          display: none;
+        }
+        #composer .idle {
+          flex-wrap: wrap;
+        }
       }
       /* Last on purpose: #rail, #rail.collapsed and the media overrides all set
          display, and an id or class selector outranks the bare [hidden]
@@ -728,73 +911,12 @@
         <div class="mid">
           <div id="status-strip"></div>
           <div class="tab-pane active" id="pane-chat">
-        <details id="session-controls" class="ops-collapse" open>
-          <summary>
-            <strong>Session controls</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Session controls?"
-              aria-expanded="false"
-              aria-controls="help-session-controls"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-session-controls" hidden>
-            Controls for the session shown above. <b>Cancel turn</b> aborts
-            whatever the agent is doing right now without ending the session.
-            <b>End session</b> terminates it entirely. <b>Rewind</b> rolls it
-            back to an earlier turn (a turn picker appears once you choose one).
-            <b>Reconnect</b> only appears after the automatic self-heal gives up
-            after repeated retries — tap it to re-attach the event stream by
-            hand. Tap the model name in the status bar below the transcript
-            to switch models.
-          </div>
-          <button
-            id="cancel-turn"
-            title="Abort the turn running on the host (POST /session/:id/cancel)"
-          >
-            Cancel turn
-          </button>
-          <button
-            id="end-session"
-            title="Terminate the session on the host (POST /session/:id/end)"
-          >
-            End session
-          </button>
-          <button
-            id="rewind-chat"
-            title="Roll this session back to an earlier turn (POST /session/:id/rewind)"
-          >
-            Rewind
-          </button>
-          <!-- issue #48: hidden by default; self-heal shows it when the retry
-           budget is exhausted, and any fresh watch / Unwatch hides it -->
-          <button
-            id="reconnect"
-            style="display: none"
-            title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now."
-          >
-            Reconnect
-          </button>
-          <span
-            id="session-verb-result"
-            style="color: #888; font-size: 0.85rem"
-          ></span>
-          <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
-            <label
-              >Rewind to
-              <select id="rewind-turn-pick" style="max-width: 28rem"></select>
-            </label>
-            <button id="rewind-pick-btn">Rewind</button>
-            <button id="rewind-pick-close" type="button">Cancel</button>
-            <span
-              id="rewind-pick-result"
-              style="color: #888; font-size: 0.85rem"
-            ></span>
-          </div>
-        </details>
+        <!-- #120. This block is gone. Its four verbs and its help sentence now
+             live in the composer's control row, under the field, where the
+             sheet draws them; keeping them up here too would put two doors on
+             the same four actions. Every id survived the move, including
+             #rewind-chat, which a verifier scenario presses, and #reconnect,
+             which the self-heal path shows and hides. -->
         <!-- Collapsed by default, like every other ops-collapse on this page.
            Its body is a directory form that is only wanted before a
            conversation exists, and open it measured 947px tall, which pushed
@@ -1537,13 +1659,14 @@
             <span id="pending-note"></span>
             <span id="pending-list"></span>
           </div>
-          <textarea
-            id="prompt"
-            rows="3"
-            style="width: 100%"
-            placeholder="type a prompt to send to the watched session"
-          ></textarea>
-          <button id="send">Send</button>
+          <div class="field">
+            <span class="ghost" id="idle-ghost" hidden></span>
+            <textarea
+              id="prompt"
+              rows="3"
+              placeholder="type a prompt to send to the watched session"
+            ></textarea>
+          </div>
           <!-- #70. A separate control rather than making Send queue. Send is
                held for the whole turn on purpose: it is the fix for the report
                that Send looked pressable while doing nothing, and two verifier
@@ -1745,54 +1868,129 @@
               overflow-y: auto;
             "
           ></div>
-          <button id="dictate">Dictate</button>
-          <!-- #97. The engine is named where the control is drawn. A mic icon
-               alone reads as the product's voice stack; what runs here is the
-               browser's Web Speech API, a different engine with different
-               accuracy and language coverage that is simply absent in some
-               browsers. The gateway has no transcribe route to offer instead,
-               so the honest fix is the label. It is a sibling of the button,
-               not part of its text, because the button's textContent is
-               rewritten to "Stop" while a session is open. -->
+          <div class="crow">
+            <button
+              id="dictate"
+              class="mic"
+              title="dictate the prompt with this browser's speech engine"
+            >
+              <span class="m">🎙</span><span class="w">Dictate</span>
+            </button>
+            <!-- #97. The engine is named where the control is drawn. A mic icon
+                 alone reads as the product's voice stack; what runs here is the
+                 browser's Web Speech API, a different engine with different
+                 accuracy and language coverage that is simply absent in some
+                 browsers. The gateway has no transcribe route to offer instead,
+                 so the honest fix is the label. It is a sibling of the button,
+                 not part of its text, because the running label is rewritten to
+                 "Stop" while a session is open (into the .w span, so the glyph
+                 beside it survives). -->
+            <span
+              class="cmd-kind"
+              id="dictate-engine"
+              title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
+              >browser</span
+            >
+            <select id="dictate-lang" title="dictation language">
+              <option value="">auto</option>
+              <option value="en-US">English (US)</option>
+              <option value="en-GB">English (UK)</option>
+              <option value="es-ES">Spanish</option>
+              <option value="fr-FR">French</option>
+              <option value="de-DE">German</option>
+              <option value="pt-BR">Portuguese (BR)</option>
+              <option value="hi-IN">Hindi</option>
+              <option value="zh-CN">Chinese</option>
+              <option value="ja-JP">Japanese</option>
+            </select>
+            <label
+              class="lab"
+              title="when dictation ends on a pause, send the prompt automatically"
+              ><input id="dictate-autosend" type="checkbox" /> auto-send</label
+            >
+            <span class="interim" id="dictate-interim" aria-live="polite"></span>
+            <!-- #120. The session verbs moved here from their own block above
+                 the transcript, which is why that block is gone: the row under
+                 the field is where the sheet draws them, and a second copy up
+                 top is the same second-door problem #119 retired the switcher
+                 for. Symbols because the row has to stay short; the full phrase
+                 is in each title. -->
+            <span class="sgroup">
+              <button
+                class="ic"
+                id="cancel-turn"
+                title="Abort the turn running on the host (POST /session/:id/cancel)"
+              >
+                ⊘
+              </button>
+              <button
+                class="ic end"
+                id="end-session"
+                title="Terminate the session on the host (POST /session/:id/end)"
+              >
+                ✕
+              </button>
+              <button
+                class="ic"
+                id="rewind-chat"
+                title="Roll this session back to an earlier turn (POST /session/:id/rewind)"
+              >
+                ⏪︎
+              </button>
+              <!-- issue #48: hidden by default; self-heal shows it when the retry
+                   budget is exhausted, and any fresh watch / Unwatch hides it -->
+              <button
+                class="ic"
+                id="reconnect"
+                style="display: none"
+                title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now."
+              >
+                ↻
+              </button>
+              <button
+                type="button"
+                class="help-btn"
+                aria-label="What are these controls?"
+                aria-expanded="false"
+                aria-controls="help-session-controls"
+              >
+                ?
+              </button>
+            </span>
+            <button id="send">Send</button>
+          </div>
+          <div class="help-text" id="help-session-controls" hidden>
+            The symbols at the right of this row act on the session you are
+            watching. <b>⊘</b> aborts the turn running right now without ending
+            the session. <b>✕</b> ends the session entirely. <b>⏪︎</b> rolls it
+            back to an earlier turn (a turn picker appears once you choose one).
+            <b>↻</b> only appears after the automatic self-heal gives up after
+            repeated retries, to re-attach the event stream by hand. Each one
+            carries its full phrase in its tooltip.
+          </div>
           <span
-            class="cmd-kind"
-            id="dictate-engine"
-            title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
-            >browser</span
-          >
-          <select id="dictate-lang" title="dictation language">
-            <option value="">auto</option>
-            <option value="en-US">English (US)</option>
-            <option value="en-GB">English (UK)</option>
-            <option value="es-ES">Spanish</option>
-            <option value="fr-FR">French</option>
-            <option value="de-DE">German</option>
-            <option value="pt-BR">Portuguese (BR)</option>
-            <option value="hi-IN">Hindi</option>
-            <option value="zh-CN">Chinese</option>
-            <option value="ja-JP">Japanese</option>
-          </select>
-          <label
-            title="when dictation ends on a pause, send the prompt automatically"
-            ><input id="dictate-autosend" type="checkbox" /> auto-send</label
-          >
-          <span
-            id="dictate-interim"
-            aria-live="polite"
+            id="session-verb-result"
             style="color: #888; font-size: 0.85rem"
           ></span>
-          <div id="idle-suggest" style="margin-top: 6px; font-size: 0.85rem">
+          <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
+            <label
+              >Rewind to
+              <select id="rewind-turn-pick" style="max-width: 28rem"></select>
+            </label>
+            <button id="rewind-pick-btn">Rewind</button>
+            <button id="rewind-pick-close" type="button">Cancel</button>
+            <span
+              id="rewind-pick-result"
+              style="color: #888; font-size: 0.85rem"
+            ></span>
+          </div>
+          <div class="idle" id="idle-suggest">
             <label title="next-step suggestions when this session goes idle"
               ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
               suggestions</label
             >
-            <span id="idle-suggest-status" style="color: #888"></span>
+            <span class="st" id="idle-suggest-status"></span>
           </div>
-          <div
-            id="idle-chips"
-            aria-live="polite"
-            style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
-          ></div>
         </section>
       </div>
       <div class="tab-pane" id="pane-ops">
@@ -8245,51 +8443,88 @@
         startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
       };
 
-      // Idle suggestions (add-idle-suggestions): render an idle_suggestions owner
-      // frame as next-step chips for the session currently in the composer. Chips
-      // FILL the prompt on click (never auto-send — a terse later "yes" must never
-      // bind to a suggestion the user didn't choose) and auto-expire. textContent
-      // only (server-supplied strings, never innerHTML).
-      let idleChipTimer = null;
-      function clearIdleChips() {
-        const box = $('idle-chips');
-        if (box) box.textContent = '';
-        if (idleChipTimer) {
-          clearTimeout(idleChipTimer);
-          idleChipTimer = null;
+      // Idle suggestions (add-idle-suggestions), #120. One suggestion, painted
+      // inside the field as ghost text rather than as a chip below it: the sheet
+      // says one at a time and forbids the pill stack outright. So a frame
+      // carrying three suggestions (the daemon's default cap) draws the first
+      // and drops the rest. That is a real loss of reach, recorded rather than
+      // quietly accepted.
+      // The ghost cannot be a node inside the field, because a native textarea
+      // takes no children, so it is a layer behind a transparent field. A tap
+      // therefore lands on the TEXTAREA, not on the ghost, and the ghost itself
+      // is pointer-events:none. Accepting is the field's decision, hit-tested
+      // against the ghost's own rect: a tap further right, in the empty part of
+      // the box, is someone starting to type and is not an accept. Accepting
+      // FILLS the prompt and never sends it (never auto-send: a terse later
+      // "yes" must never bind to a suggestion the user did not choose).
+      // textContent only (server strings, never innerHTML).
+      let idleGhostTimer = null;
+      function clearIdleGhost() {
+        const g = $('idle-ghost');
+        if (g) {
+          g.textContent = '';
+          delete g.dataset.suggestion;
+          g.hidden = true;
+        }
+        if (idleGhostTimer) {
+          clearTimeout(idleGhostTimer);
+          idleGhostTimer = null;
         }
       }
-      function renderIdleChips(frame) {
-        const box = $('idle-chips');
-        if (!box) return;
-        // Send targets watchedSessionId, so only show chips for that session.
+      // Visible only while the box is empty, which is also why any typed
+      // character removes it without this being a second source of truth.
+      function syncIdleGhost() {
+        const g = $('idle-ghost');
+        if (!g) return;
+        g.hidden = !g.dataset.suggestion || $('prompt').value !== '';
+      }
+      function acceptIdleGhost() {
+        const g = $('idle-ghost');
+        if (!g || g.hidden || !g.dataset.suggestion) return false;
+        const ta = $('prompt');
+        ta.value = g.dataset.suggestion;
+        clearIdleGhost();
+        ta.focus();
+        return true;
+      }
+      function renderIdleGhost(frame) {
+        const g = $('idle-ghost');
+        if (!g) return;
+        // Send targets watchedSessionId, so only paint for that session.
         if (!frame || frame.sessionId !== watchedSessionId) return;
         const list = Array.isArray(frame.suggestions) ? frame.suggestions : [];
-        clearIdleChips();
-        if (list.length === 0) return;
-        const label = document.createElement('span');
-        label.textContent = 'next:';
-        label.style.cssText = 'color:#888;font-size:0.85rem;align-self:center';
-        box.appendChild(label);
-        for (const s of list) {
-          if (typeof s !== 'string' || !s) continue;
-          const chip = document.createElement('button');
-          chip.type = 'button';
-          chip.textContent = s;
-          chip.title = 'fill the prompt (does not send)';
-          chip.style.cssText =
-            'font-size:0.85rem;padding:2px 8px;border-radius:12px;cursor:pointer';
-          chip.onclick = () => {
-            const ta = $('prompt');
-            ta.value = s;
-            ta.focus();
-            clearIdleChips();
-          };
-          box.appendChild(chip);
-        }
-        // Auto-expire so stale suggestions don't linger after you move on.
-        idleChipTimer = setTimeout(clearIdleChips, 60000);
+        clearIdleGhost();
+        const first = list.find((s) => typeof s === 'string' && s);
+        if (!first) return;
+        g.dataset.suggestion = first;
+        g.textContent = first;
+        const use = document.createElement('span');
+        use.className = 'use';
+        use.textContent = ' \u21a9 use';
+        g.appendChild(use);
+        syncIdleGhost();
+        // Auto-expire so a stale suggestion does not linger after you move on.
+        idleGhostTimer = setTimeout(clearIdleGhost, 60000);
       }
+      // The prompt's own listeners carry both accept paths, because the box is
+      // the only thing under the pointer or the keyboard here. Separate
+      // addEventListener calls so they do not disturb the Enter-to-send path.
+      $('prompt').addEventListener('input', syncIdleGhost);
+      $('prompt').addEventListener('click', (e) => {
+        const g = $('idle-ghost');
+        if (!g || g.hidden) return;
+        const r = g.getBoundingClientRect();
+        if (e.clientX < r.left || e.clientX > r.right) return;
+        if (e.clientY < r.top || e.clientY > r.bottom) return;
+        acceptIdleGhost();
+      });
+      $('prompt').addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab') return;
+        const g = $('idle-ghost');
+        if (!g || g.hidden) return;
+        e.preventDefault();
+        acceptIdleGhost();
+      });
 
       // Per-session idle-suggestion toggle (`/suggest on|off|status`). Reads the
       // EFFECTIVE state from GET so it never shows a lie (the POST narrows-only:
@@ -10744,7 +10979,7 @@
         // Reconnect) dismisses the give-up button; self-heal re-shows it
         // only if the budget exhausts again.
         $('reconnect').style.display = 'none';
-        if (id !== watchedSessionId) clearIdleChips();
+        if (id !== watchedSessionId) clearIdleGhost();
         watchedSessionId = id;
         // The stored list names a conversation, so a switch refetches it rather
         // than leaving the previous session's files under this heading.
@@ -11299,7 +11534,7 @@
               // next-step chips for the session you're watching (fill-on-click,
               // never auto-send); everything else non-audit is ignored here.
               if (frame.type === 'idle_suggestions') {
-                renderIdleChips(frame);
+                renderIdleGhost(frame);
                 continue;
               }
               if (frame.type && frame.type !== 'audit') continue;
@@ -15197,6 +15432,10 @@
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         const dictate = $('dictate');
         const interimEl = $('dictate-interim');
+        // #120: the button is a glyph and a word now, so the running label goes
+        // into the word. Writing textContent on the button would replace both
+        // spans and the mic would never come back.
+        const dictateWord = dictate.querySelector('.w');
         const engineEl = $('dictate-engine');
         if (!SR) {
           // The tag changes with the state it describes. Leaving "browser" on a
@@ -15230,7 +15469,7 @@
           // appended to the prompt.
           rec.interimResults = true;
           rec.continuous = false;
-          dictate.textContent = 'Stop';
+          dictateWord.textContent = 'Stop';
           // Per-session flags for the opt-in auto-send (cycle 99): only send when
           // this dictation actually captured FINAL speech and did not error.
           let gotFinal = false;
@@ -15256,7 +15495,7 @@
           };
           const reset = () => {
             rec = null;
-            dictate.textContent = 'Dictate';
+            dictateWord.textContent = 'Dictate';
             interimEl.textContent = '';
           };
           rec.onerror = (e) => {

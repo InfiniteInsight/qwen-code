@@ -12367,6 +12367,258 @@ PAGE_SCENARIOS.push({
       );
     },
   });
+  PAGE_SCENARIOS.push({
+    name: 'P125 the composer row carries the verbs and the ghost paints in the field',
+    // #120, g1 "The field", "The idle suggestion, drawn as ghost text" and
+    // "The control row". Measured, because the failures this layout invites are
+    // invisible in the source: the ghost is a layer BEHIND a transparent field
+    // (a textarea takes no children, and a ::before on one computes without
+    // ever painting, which is why the caret bar lives on the wrapper), the
+    // verbs moved out of their own block above the transcript, and the pill
+    // stack is gone by design, which strands suggestions 2 and 3 of the
+    // daemon's default three.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+
+      const look = () =>
+        page.evaluate(() => {
+          const composer = document.getElementById('composer') as HTMLElement;
+          const field = composer.querySelector('.field') as HTMLElement;
+          const ta = document.getElementById('prompt') as HTMLElement;
+          const ghost = document.getElementById('idle-ghost') as HTMLElement;
+          const crow = composer.querySelector('.crow') as HTMLElement;
+          const sgroup = crow.querySelector('.sgroup') as HTMLElement;
+          const mic = crow.querySelector('.mic') as HTMLElement;
+          const interim = document.getElementById('dictate-interim') as HTMLElement;
+          const send = document.getElementById('send') as HTMLElement;
+          const use = ghost.querySelector('.use') as HTMLElement | null;
+          // Order along the row as PAINTED, which is the sheet's claim. The
+          // empty interim slot is display:none, so it is not in the line; the
+          // auto-send label is. Reading the DOM order instead would pass even
+          // if the CSS rearranged the row.
+          const kids = Array.from(crow.children) as HTMLElement[];
+          const line = kids
+            .filter((k) => k.getClientRects().length > 0)
+            .map((k) =>
+              k === sgroup ? 'sgroup' : k === mic ? 'mic' : k === send ? 'send' : k.id || k.className,
+            );
+          const fr = field.getBoundingClientRect();
+          const gr = ghost.getBoundingClientRect();
+          // measure.mjs's rule (button,a,[tabindex]) plus the select, which the
+          // sheet floors but the metric cannot see. The auto-send checkbox is
+          // deliberately NOT counted: the sheet gives it no floor, and a bare
+          // checkbox is 13px in every browser.
+          const taps = Array.from(crow.querySelectorAll('button,select,a,[tabindex]'))
+            .map((e) => Math.round(e.getBoundingClientRect().height))
+            .filter((h) => h > 0);
+          return {
+            focused: document.activeElement === ta,
+            fieldH: Math.round(fr.height),
+            caret: getComputedStyle(field, '::before').content,
+            caretW: getComputedStyle(field, '::before').width,
+            taBg: getComputedStyle(ta).backgroundColor,
+            ghostShown: ghost.getClientRects().length > 0,
+            ghostText: ghost.textContent || '',
+            ghostBehind:
+              Number(getComputedStyle(ghost).zIndex || 0) <= 0 &&
+              getComputedStyle(ghost).position === 'absolute',
+            ghostInside:
+              gr.left >= fr.left - 1 &&
+              gr.top >= fr.top - 1 &&
+              gr.right <= fr.right + 1,
+            ghostItalic: getComputedStyle(ghost).fontStyle,
+            ghostColor: getComputedStyle(ghost).color,
+            // null at rest: the affordance is only built when a suggestion is
+            // painted, and getComputedStyle on null throws inside evaluate.
+            useStyle: use ? getComputedStyle(use).fontStyle : 'absent',
+            rowOrder: line.join(','),
+            verbsRight:
+              sgroup.getBoundingClientRect().left > mic.getBoundingClientRect().right,
+            sendLast: kids[kids.length - 1] === send,
+            interimShown: interim.getClientRects().length > 0,
+            // The three verbs, not the help button beside them and not the
+            // reconnect, which is authored hidden until self-heal gives up.
+            verbs: Array.from(sgroup.querySelectorAll('button'))
+              .filter((b) => b.id !== 'reconnect' && !b.classList.contains('help-btn'))
+              .map((b) => ({
+                id: b.id,
+                text: (b.textContent || '').trim(),
+                title: b.getAttribute('title') || '',
+              })),
+            endTint: getComputedStyle(sgroup.querySelector('.ic.end') as HTMLElement).color,
+            helpTarget:
+              sgroup.querySelector('.help-btn')?.getAttribute('aria-controls') || '',
+            oldBlock: !!document.getElementById('session-controls'),
+            oldChips: !!document.getElementById('idle-chips'),
+            lost: ['cancel-turn', 'end-session', 'rewind-chat', 'reconnect']
+              .filter((id) => !document.getElementById(id))
+              .join(','),
+            outside: ['cancel-turn', 'end-session', 'rewind-chat']
+              .filter((id) => !sgroup.contains(document.getElementById(id) as Node))
+              .join(','),
+            under44: taps.filter((h) => h < 44).length,
+            taps: taps.length,
+            composerBottom: Math.round(composer.getBoundingClientRect().bottom),
+            viewH: window.innerHeight,
+          };
+        });
+
+      const blur = () =>
+        page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur?.());
+
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await blur();
+
+      // Resting: nothing suggested, the caret bar drawn, the row in order.
+      const rest = await look();
+      expect(!rest.focused, 'the field is focused at rest, so the caret check below proves nothing');
+      expect(!rest.ghostShown, 'a ghost is painted with nothing to suggest');
+      expect(
+        rest.fieldH >= 52,
+        `the field is ${rest.fieldH}px tall, under the 52px g1 draws`,
+      );
+      expect(
+        rest.caret !== 'none' && rest.caretW === '1px',
+        `the unfocused field draws no caret bar (content ${rest.caret}, width ${rest.caretW})`,
+      );
+      expect(
+        rest.taBg === 'rgba(0, 0, 0, 0)',
+        `the textarea is ${rest.taBg}, so a ghost behind it could never show through`,
+      );
+      expect(
+        rest.rowOrder === 'mic,dictate-engine,dictate-lang,lab,sgroup,send',
+        `the row reads ${rest.rowOrder}, not the order g1 draws`,
+      );
+      expect(
+        !rest.interimShown,
+        'the interim slot is drawn while empty, so it holds a row of its own',
+      );
+      expect(rest.verbsRight, 'the session verbs are not pushed to the row end');
+      expect(rest.sendLast, 'Send is not the last control in the row');
+      expect(
+        !rest.oldBlock,
+        'the session-controls block is still on the page beside the row that now carries its verbs',
+      );
+      expect(!rest.oldChips, 'idle-chips is still on the page beside the ghost');
+      expect(rest.lost === '', `verbs lost from the move: ${rest.lost}`);
+      expect(rest.outside === '', `verbs not inside the row: ${rest.outside}`);
+      expect(
+        rest.verbs.length === 3,
+        `the row carries ${rest.verbs.length} verbs, not the three g1 draws`,
+      );
+      for (const v of rest.verbs) {
+        expect(
+          v.text.length <= 2 && v.title.length > 10,
+          `#${v.id} reads "${v.text}" with title "${v.title}", so it is not a symbol carrying its phrase`,
+        );
+      }
+      expect(
+        rest.endTint === 'rgb(243, 139, 168)',
+        `the end-session verb is ${rest.endTint}, not the tint g1 gives it`,
+      );
+      expect(
+        rest.helpTarget === 'help-session-controls',
+        `the row help button targets "${rest.helpTarget}"`,
+      );
+
+      // The drawn caret stands in for the real one only while unfocused. A
+      // focused field already has the browser caret, so a bar beside it reads
+      // as two. This is the deliberate deviation from the sheet, pinned.
+      await page.focus('#prompt');
+      const lit = await look();
+      expect(
+        lit.caret === 'none',
+        `the focused field still draws its own caret bar (${lit.caret}), so two carets paint`,
+      );
+      await blur();
+
+      // A suggestion arrives: painted inside the field, behind the box, grey
+      // italic, and only the first of the frame's three.
+      await page.evaluate((sid) => {
+        renderIdleGhost({ sessionId: sid, suggestions: ['first suggestion', 'second', 'third'] });
+      }, viewer.sessionId);
+      const withGhost = await look();
+      expect(withGhost.ghostShown, 'the suggestion is not painted in the field');
+      expect(
+        withGhost.ghostText.startsWith('first suggestion'),
+        `the ghost reads "${withGhost.ghostText}", so it is not the first suggestion`,
+      );
+      expect(
+        !withGhost.ghostText.includes('second'),
+        'the ghost carries more than one suggestion, which g1 forbids',
+      );
+      expect(
+        withGhost.ghostBehind,
+        'the ghost is not a layer behind the field, so it would sit on top of what is typed',
+      );
+      expect(
+        withGhost.ghostInside,
+        'the ghost is painted outside the field box rather than inside it',
+      );
+      expect(
+        withGhost.ghostItalic === 'italic' && withGhost.ghostColor === 'rgb(91, 100, 112)',
+        `the ghost is ${withGhost.ghostColor} ${withGhost.ghostItalic}, not the grey italic g1 measures`,
+      );
+      expect(
+        withGhost.useStyle === 'normal',
+        `the use affordance is ${withGhost.useStyle}, so it does not read as an action`,
+      );
+
+      // Any typed character removes it.
+      await page.focus('#prompt');
+      await page.keyboard.type('x');
+      const typed = await look();
+      expect(!typed.ghostShown, 'typing left the ghost painted under the text');
+
+      // Emptying the box brings it back, and Tab accepts without sending.
+      await page.evaluate(() => {
+        const ta = document.getElementById('prompt') as HTMLTextAreaElement;
+        ta.value = '';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const back = await look();
+      expect(back.ghostShown, 'the suggestion did not return once the box was empty');
+      const before = await page.evaluate(() => transcriptModel.items.length);
+      await page.focus('#prompt');
+      await page.keyboard.press('Tab');
+      const accepted = await look();
+      expect(!accepted.ghostShown, 'Tab did not take the suggestion, so the keyboard path is missing');
+      const filled = await page.$eval('#prompt', (el) => (el as HTMLTextAreaElement).value);
+      expect(
+        filled === 'first suggestion',
+        `Tab left "${filled}" in the box, so it did not fill the suggestion`,
+      );
+      // Filling is not sending: the transcript gained nothing.
+      const after = await page.evaluate(() => transcriptModel.items.length);
+      expect(
+        after === before,
+        `accepting a suggestion sent it: the model went from ${before} rows to ${after}`,
+      );
+
+      // Phone: the row stays on the 44px floor and the composer clears the fold.
+      await page.setViewportSize({ width: 390, height: 844 });
+      const narrow = await look();
+      expect(
+        narrow.under44 === 0,
+        `${narrow.under44} of ${narrow.taps} row controls are under 44px tall at 390`,
+      );
+      expect(
+        narrow.composerBottom <= narrow.viewH + 1,
+        `the composer bottom is ${narrow.composerBottom} in a ${narrow.viewH}px viewport at 390`,
+      );
+
+      return (
+        'row ' +
+        rest.rowOrder +
+        '; 3 verbs as symbols with titles; field ' +
+        rest.fieldH +
+        'px, caret drawn only unfocused; ghost paints behind the field, one of three; ' +
+        'Tab fills without sending; 390 row all at 44px or over'
+      );
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
