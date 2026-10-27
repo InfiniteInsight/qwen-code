@@ -334,15 +334,189 @@
         align-items: flex-start;
         flex: 1 1 auto;
       }
+      /* #119. The rail is the folder's conversation list. The scroller moved off
+         #rail and onto its own .list, because the header and the folder line have
+         to stay put while the rows scroll, and a column that scrolls as a whole
+         scrolls them away with it.
+         Every rule below is scoped under #rail on purpose: the sheet's names are
+         short (.s, .list, .plus) and the ops panel already uses rows of its own. */
       #rail {
         flex: 0 0 190px;
         align-self: stretch;
         position: sticky;
         top: 0;
         max-height: 100vh;
-        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
         background: #10151c;
         border-right: 1px solid #21262d;
+        /* border-box so 190px and the collapsed 40px are the painted widths g1
+           measures, not those numbers plus the 1px border. */
+        box-sizing: border-box;
+      }
+      #rail .list {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        min-height: 0;
+      }
+      #rail .rh {
+        display: flex;
+        align-items: center;
+        padding: 6px 10px;
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #6e7681;
+        border-bottom: 1px solid #21262d;
+      }
+      #rail .rh button {
+        margin-left: auto;
+        font: inherit;
+        font-size: 10px;
+        letter-spacing: 0;
+        text-transform: none;
+        color: #7d8590;
+        background: none;
+        border: 1px solid #21262d;
+        padding: 1px 5px;
+      }
+      #rail .rh .help-btn {
+        margin-left: auto;
+        width: 18px;
+        height: 18px;
+        padding: 0;
+      }
+      #rail .rh .help-btn + button {
+        margin-left: 4px;
+      }
+      /* The glyph belongs to the collapsed column only. Expanded, the header says
+         the word instead. */
+      #rail .gl {
+        display: none;
+      }
+      #rail .ws {
+        padding: 5px 10px;
+        font-size: 11px;
+        color: #6e7681;
+        overflow-wrap: anywhere;
+        border-bottom: 1px solid #161b22;
+      }
+      #rail .flt {
+        padding: 6px 8px;
+        border-bottom: 1px solid #161b22;
+      }
+      #rail .flt input {
+        font: inherit;
+        font-size: 11px;
+        width: 100%;
+        color: #e6edf3;
+        background: #0b1016;
+        border: 1px solid #21262d;
+        border-radius: 4px;
+        padding: 4px 6px;
+      }
+      #rail .s {
+        font: inherit;
+        width: 100%;
+        text-align: left;
+        background: none;
+        border: 0;
+        border-bottom: 1px solid #161b22;
+        padding: 7px 10px;
+        color: #7d8590;
+        cursor: pointer;
+      }
+      #rail .s.on {
+        background: #1f2937;
+        color: #e6edf3;
+        border-left: 2px solid #1f6feb;
+        padding-left: 8px;
+      }
+      #rail .s b {
+        display: block;
+        color: inherit;
+        font-weight: 400;
+        overflow-wrap: anywhere;
+      }
+      #rail .s span {
+        font-size: 11px;
+        color: #6e7681;
+      }
+      #rail .plus {
+        font: inherit;
+        font-size: 12px;
+        color: #7d8590;
+        background: none;
+        border: 0;
+        border-bottom: 1px solid #161b22;
+        padding: 7px 10px;
+        text-align: left;
+        width: 100%;
+        cursor: pointer;
+      }
+      /* Collapsed, g1b. The column is 40px, so the header stacks and keeps only
+         the glyph. Both halves matter: the word "conversations" sets a
+         min-content width well past the flex basis, which is what let the column
+         grow to 108px, and #rail .gl hides the glyph for the expanded state, so
+         without the display override below the collapsed header would have no
+         label and no glyph either.
+         The counter is CSS, not JS, so a re-render cannot desync it from the row
+         order. */
+      #rail.collapsed {
+        flex: 0 0 40px;
+        counter-reset: n;
+      }
+      #rail.collapsed .rh {
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px 4px;
+      }
+      #rail.collapsed .rh .lbl {
+        display: none;
+      }
+      #rail.collapsed .rh .gl {
+        display: inline;
+        font-size: 11px;
+      }
+      #rail.collapsed .ws {
+        display: none;
+      }
+      /* No room for a text field in a 40px column. Expanding brings it back, the
+         same rule the rest of the collapsed column follows. */
+      #rail.collapsed .flt {
+        display: none;
+      }
+      #rail.collapsed .s {
+        padding: 7px 0;
+        text-align: center;
+      }
+      #rail.collapsed .s::before {
+        content: counter(n);
+        counter-increment: n;
+        color: #6e7681;
+      }
+      #rail.collapsed .s.on::before {
+        content: '\25CF';
+        color: #1f6feb;
+      }
+      #rail.collapsed .plus {
+        font-size: 13px;
+        line-height: 1;
+        border-bottom: 0;
+        border-top: 1px solid #161b22;
+        padding: 7px 0;
+        text-align: center;
+      }
+      #rail.collapsed .plus .word {
+        display: none;
+      }
+      /* Kept last of the row rules, as it is in the sheet. Under this scoping it
+         would win on specificity anyway, but the order is what the drawn set
+         proves, so it stays. */
+      #rail.collapsed .s b,
+      #rail.collapsed .s span {
+        display: none;
       }
       .mid {
         display: flex;
@@ -391,7 +565,112 @@
           max-height: none;
           border-right: 0;
           border-bottom: 1px solid #21262d;
+          /* The strip: the column's parts sit side by side and the rows scroll
+             sideways. No height here -- the 57px the sheet measures falls out of
+             the 44px floor below plus the header's own padding. */
+          flex-direction: row;
+          align-items: stretch;
         }
+        /* Named separately because #rail.collapsed outranks #rail: without this a
+           collapsed rail would stay a 40px column on a phone, which is the one
+           state the sheet says must go full width. */
+        #rail.collapsed {
+          flex: none;
+          width: 100%;
+        }
+        #rail .rh {
+          border-bottom: 0;
+          border-right: 1px solid #161b22;
+          align-items: center;
+        }
+        /* The word and the folder path are what does not fit a 390 viewport; the
+           rows carry the titles, so nothing is lost by hiding them. */
+        #rail .rh .lbl {
+          display: none;
+        }
+        #rail .ws {
+          display: none;
+        }
+        /* The filter leads the strip rather than dropping. It is the one control
+           that cannot be a 44px cell beside the rows, and dropping it leaves a
+           phone unable to reach a conversation past the first page, which is the
+           exact failure the control exists to prevent. */
+        #rail .flt {
+          flex: none;
+          display: flex;
+          align-items: center;
+          padding: 0 8px;
+          border-bottom: 0;
+          border-right: 1px solid #161b22;
+        }
+        #rail .flt input {
+          width: 120px;
+          min-height: 44px;
+        }
+        #rail .list {
+          flex: 1 1 auto;
+          display: flex;
+          flex-direction: row;
+          overflow-x: auto;
+          overflow-y: hidden;
+        }
+        #rail .s {
+          flex: none;
+          border-bottom: 0;
+          border-right: 1px solid #161b22;
+          padding: 11px 12px;
+          min-height: 44px;
+          max-width: 42vw;
+        }
+        #rail .s b {
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        #rail .s.on {
+          border-left: 0;
+          border-bottom: 2px solid #1f6feb;
+          padding-left: 12px;
+        }
+        #rail .s span {
+          display: none;
+        }
+        #rail .plus {
+          flex: none;
+          border-bottom: 0;
+          border-right: 1px solid #161b22;
+          padding: 0 12px;
+          min-height: 44px;
+          white-space: nowrap;
+        }
+        /* The 44px floor, applied by hand. measure.mjs counts only
+           button,a,[tabindex], so an input is invisible to its under44px metric:
+           the sheet reports 0 under 44px at 390 with or without this rule. */
+        #rail .rh button,
+        #rail .plus {
+          min-height: 44px;
+        }
+        /* Collapsed on a phone the header goes back to a row and the glyph hides,
+           and the + takes a left border instead of a top one. */
+        #rail.collapsed .rh {
+          flex-direction: row;
+          justify-content: center;
+          padding: 6px 8px;
+        }
+        #rail.collapsed .rh .gl {
+          display: none;
+        }
+        #rail.collapsed .plus {
+          border-top: 0;
+          border-left: 1px solid #161b22;
+          min-width: 40px;
+        }
+      }
+      /* Last on purpose: #rail, #rail.collapsed and the media overrides all set
+         display, and an id or class selector outranks the bare [hidden]
+         attribute, so a hidden rail would still be painted. */
+      #rail[hidden] {
+        display: none;
       }
     </style>
   </head>
@@ -538,8 +817,8 @@
             absolute path) and tap <b>New conversation</b> to start fresh there.
             <b>Recent workspaces</b> and the <b>Past conversations</b> list
             below let you jump back into an existing session in that folder —
-            filter by name, and <b>Continue last</b> reopens the most recent
-            one.
+            filter by name. The conversation list in the left rail is the
+            always-visible way to another conversation in this folder.
           </div>
           — pick a directory
           <div
@@ -578,9 +857,6 @@
           </div>
           <div style="margin-top: 0.6rem">
             <strong>Past conversations</strong> — for the current folder
-            <div>
-              <button id="continue-last" disabled>Continue last</button>
-            </div>
             <!-- issue #44: client-side filter over the already-fetched set;
              matching + pager rules live in renderPastConversations -->
             <input
@@ -1107,34 +1383,6 @@
             border-bottom: 1px solid #333;
           "
         ></div>
-        <!-- #50. The way to another conversation, kept OUTSIDE #dir-picker on
-             purpose. That panel is collapsed by default since #50, and the only
-             other route to a conversation, the Past conversations list, is inside
-             it, so leaving it there meant the switcher cost a click to find and
-             read as absent. A native select rather than a dialog: it needs no
-             open or close state of its own, it is keyboard and touch correct
-             without any help, and it cannot be left stranded open by a watch
-             change. Label text is set in JS so a folder with one conversation
-             does not read as a broken control. -->
-        <div
-          id="convo-switch"
-          hidden
-          style="
-            margin-top: 4px;
-            padding: 4px 8px;
-            font-size: 0.85rem;
-            color: #b0b8c1;
-            border-bottom: 1px solid #333;
-          "
-        >
-          <label
-            >conversation
-            <select
-              id="convo-switch-list"
-              style="max-width: 60%; margin-left: 6px"
-            ></select></label
-          ><span id="convo-switch-note" style="margin-left: 8px"></span>
-        </div>
         <!-- #77. Said by a window that came up on a conversation a live sibling
              is already on. The restore is not withheld in this case, because a
              wrong guess would strand the window on the unwatched page, whose only
@@ -3606,8 +3854,11 @@
         e.stopPropagation();
         const panel = $(btn.getAttribute('aria-controls'));
         const det = btn.closest('details');
-        const wasClosed = !det.open;
-        det.open = true;
+        // A help button outside a collapsible section (the rail's) has no
+        // section to open, so it only toggles its own panel. Counting it as
+        // already-open is what makes the first tap show rather than hide.
+        const wasClosed = det ? !det.open : false;
+        if (det) det.open = true;
         panel.hidden = wasClosed ? false : !panel.hidden;
         btn.setAttribute('aria-expanded', String(!panel.hidden));
       });
@@ -7888,7 +8139,7 @@
         // here rather than at each call site because every route that names a
         // conversation comes through this function, manual watch, resume, deep
         // link, restore, and the unwatch and gone-session paths that name none.
-        renderConvoSwitch();
+        renderRail();
         // #70: the queue strip and the way to queue ride this same route, since
         // both are about the conversation on screen rather than about the folder.
         renderQueueControl();
@@ -7942,7 +8193,7 @@
         // the switcher was drawn against the conversation being left. Redrawn here,
         // after the clear, or the control stays on screen offering a folder this
         // window is no longer on. The clear order is #59's and is left alone.
-        renderConvoSwitch();
+        renderRail();
         // #70: same ordering, same reason. The strip holds the leaving
         // conversation's queue, so it comes down after the clear. The stored
         // record is left on purpose: the conversation still exists, and a message
@@ -7973,7 +8224,7 @@
         // forgetGoneSession. Unwatch is the path a reader takes on purpose to
         // leave a conversation, so a switcher still naming that folder here would
         // be the control lying about where they are.
-        renderConvoSwitch();
+        renderRail();
         // #70: the strip goes with the conversation for the same reason. The
         // stored queue is kept, so a message queued for this conversation is
         // still waiting if the reader comes back to it.
@@ -9609,58 +9860,196 @@
       let pastFilter = ''; // issue #44: trimmed, lowercased filter text
       let pastTruncated = false;
 
-      // #50. The always-visible way to another conversation. Deliberately independent
-      // of #past-filter and the pager: those are view state for the panel, and a
-      // switcher that inherited them would offer only the filtered page and
-      // silently drop the rest of the folder. So it reads pastConvos whole.
-      // It shows only when there is a second conversation to go to. A select with
-      // one option in it is a control that does nothing, which reads as broken
-      // rather than as quiet, and the rule the to-do strip follows is the same one
-      // here: a control appears when it has something to do.
+// #119. The rail is the always-visible way to another conversation, drawn
+      // as a list. It replaces the dropdown #50 shipped for that job: with the
+      // rail present, a select beside it offering the same conversations was the
+      // second door to the room you are standing in, which is the argument that
+      // retired Continue last.
+      // Deliberately independent of #past-filter and the pager: those are the
+      // panel's view state, and a rail that inherited them would offer only the
+      // filtered page and silently drop the rest of the folder. So it reads
+      // pastConvos whole and keeps its own filter, per-folder like the panel's.
+      // The skeleton is built once and only the rows are redrawn, because the
+      // rail is re-drawn on every poll tick and a filter input rebuilt under the
+      // caret loses what you were typing.
+      // Collapse state is not persisted, per the no-localStorage-for-UI-state
+      // constraint the sticky tabs follow.
       // createElement + textContent only, never innerHTML: titles are model data.
-      function renderConvoSwitch() {
-        const box = $('convo-switch');
-        const list = $('convo-switch-list');
-        const note = $('convo-switch-note');
-        const cwd = pastConvosCwd;
-        const others = pastConvos.filter(
-          (s) => s && s.sessionId !== watchedSessionId,
+      let railFilter = '';
+      let railCollapsed = false;
+      let railEls = null;
+
+      function railTitle(s) {
+        return (
+          strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8)
         );
-        if (!watchedSessionId || !cwd || others.length === 0) {
-          box.hidden = true;
-          return;
-        }
+      }
+
+      function buildRail() {
+        const rail = $('rail');
+        const head = document.createElement('div');
+        head.className = 'rh';
+        const lbl = document.createElement('span');
+        lbl.className = 'lbl';
+        lbl.textContent = 'conversations';
+        const gl = document.createElement('span');
+        gl.className = 'gl';
+        gl.textContent = '\u{1F4AC}';
+        gl.title = 'Conversations';
+        const help = document.createElement('button');
+        help.type = 'button';
+        help.className = 'help-btn';
+        help.textContent = '?';
+        help.setAttribute('aria-label', 'What is this list?');
+        help.setAttribute('aria-expanded', 'false');
+        help.setAttribute('aria-controls', 'help-rail');
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.textContent = '\u00ab';
+        toggle.setAttribute('aria-label', 'Collapse the conversation list');
+        toggle.onclick = () => {
+          railCollapsed = !railCollapsed;
+          rail.classList.toggle('collapsed', railCollapsed);
+          toggle.textContent = railCollapsed ? '\u00bb' : '\u00ab';
+          toggle.setAttribute(
+            'aria-label',
+            railCollapsed
+              ? 'Expand the conversation list'
+              : 'Collapse the conversation list',
+          );
+        };
+        head.append(lbl, gl, help, toggle);
+
+        const helpText = document.createElement('div');
+        helpText.className = 'help-text';
+        helpText.id = 'help-rail';
+        helpText.hidden = true;
+        // Rewritten from the dropdown's help, which described a select. Says
+        // which folder the rows belong to, since switching stays inside one
+        // folder and a reader who wants another needs to know that is the browse
+        // control rather than this list failing to show it.
+        const h1 = document.createTextNode('The conversations in ');
+        const h1b = document.createElement('b');
+        h1b.textContent = 'the folder you are watching';
+        const h2 = document.createTextNode(
+          '. Tap one to read it and send to it. To work in another folder, use ',
+        );
+        const h2b = document.createElement('b');
+        h2b.textContent = 'New conversation';
+        helpText.append(h1, h1b, h2, h2b, document.createTextNode('.'));
+
+        const ws = document.createElement('div');
+        ws.className = 'ws';
+
+        const flt = document.createElement('div');
+        flt.className = 'flt';
+        const input = document.createElement('input');
+        input.type = 'search';
+        input.placeholder = 'filter by name';
+        input.setAttribute('aria-label', 'Filter conversations by name');
+        input.oninput = () => {
+          railFilter = input.value.trim().toLowerCase();
+          renderRailRows();
+        };
+        flt.appendChild(input);
+
+        const list = document.createElement('div');
+        list.className = 'list';
+
+        const plus = document.createElement('button');
+        plus.type = 'button';
+        plus.className = 'plus';
+        // Sign and word are separate nodes because g1b draws the collapsed + as
+        // a bare sign, and a single text run cannot be hidden in part. The word
+        // is what held the collapsed column at 85px.
+        const plusSign = document.createElement('span');
+        plusSign.className = 'sign';
+        plusSign.textContent = '+';
+        const plusWord = document.createElement('span');
+        plusWord.className = 'word';
+        plusWord.textContent = ' new conversation';
+        plus.append(plusSign, plusWord);
+        // Opens the existing picker rather than starting a conversation itself:
+        // browse-to-a-folder then New conversation already is that path, and a
+        // rail that POSTed on its own would be a second one onto the same thing.
+        plus.onclick = () => {
+          const picker = $('dir-picker');
+          picker.open = true;
+          picker.scrollIntoView({ block: 'start' });
+        };
+        // The sheet keeps the + inside the list when expanded so it scrolls with
+        // the rows, and puts it below the list when collapsed. One live node
+        // cannot sit in both places, so it stays inside in both and the collapsed
+        // rule gives it a top border for the separation the sibling had.
+        list.appendChild(plus);
+
+        rail.append(head, helpText, ws, flt, list);
+        railEls = {
+          ws: ws,
+          input: input,
+          list: list,
+          plus: plus,
+          toggle: toggle,
+        };
+      }
+
+      function renderRail() {
+        if (!railEls) buildRail();
+        const cwd = pastConvosCwd;
+        // No folder chosen yet: chrome around nothing to list reads as a broken
+        // panel, so the region stays out until there is a folder to name.
+        $('rail').hidden = !cwd;
+        if (!cwd) return;
+        railEls.ws.textContent = cwd;
+        renderRailRows();
+      }
+
+      function renderRailRows() {
+        const list = railEls.list;
+        const plus = railEls.plus;
         list.textContent = '';
         for (const s of pastConvos) {
           if (!s || !s.sessionId) continue;
-          const opt = document.createElement('option');
-          opt.value = String(s.sessionId);
-          const title =
-            strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
+          const title = railTitle(s);
+          if (railFilter && !title.toLowerCase().includes(railFilter)) continue;
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 's';
+          // The dropdown carried the id in option.value; a row of buttons needs
+          // the same affordance, or nothing can name which conversation a row is.
+          row.dataset.session = String(s.sessionId);
+          const b = document.createElement('b');
+          b.textContent = title;
+          row.appendChild(b);
           const when = relativeTime(s.updatedAt);
-          opt.textContent = title + (when ? '  ·  ' + when : '');
-          opt.selected = s.sessionId === watchedSessionId;
-          list.appendChild(opt);
+          if (when) {
+            const span = document.createElement('span');
+            span.textContent = when;
+            row.appendChild(span);
+          }
+          // Marked, not offered: the row for the conversation already on screen
+          // is where you are. The collapsed rail shows it as a dot instead of a
+          // number, so the position still reads.
+          if (s.sessionId === watchedSessionId) {
+            row.classList.add('on');
+            row.setAttribute('aria-current', 'true');
+          }
+          row.onclick = () => {
+            if (s.sessionId === watchedSessionId) return;
+            // The same hand-off the Past conversations rows use, so the rail adds
+            // no second path onto a conversation. issue #67: the tab follows the
+            // conversation you picked, so the host mirrors what is on screen.
+            void resumeConversation(
+              s.sessionId,
+              pastConvosCwd,
+              strOr(s.title, ''),
+              { hostTerminal: true },
+            );
+          };
+          list.appendChild(row);
         }
-        // Says which folder the list belongs to, since switching stays within
-        // one folder and a reader who wants another one needs to know that is the
-        // other control rather than this one failing to list it.
-        note.textContent = 'in ' + cwd;
-        box.hidden = false;
+        list.appendChild(plus);
       }
-
-      $('convo-switch-list').onchange = (e) => {
-        const id = e.target.value;
-        if (!id || id === watchedSessionId) return;
-        const s = pastConvos.find((x) => x && x.sessionId === id);
-        // Resume is the same hand-off the Past conversations rows use, so the
-        // switcher adds no second path onto a conversation.
-        // issue #67: the tab follows the conversation you picked, so the host
-        // mirrors what is on screen rather than only what was created here.
-        void resumeConversation(id, pastConvosCwd, s ? strOr(s.title, '') : '', {
-          hostTerminal: true,
-        });
-      };
 
       function renderPastConversations(sessions, cwd, truncated) {
         pastConvos = Array.isArray(sessions) ? sessions : [];
@@ -9668,26 +10057,25 @@
           pastPage = 1; // workspace switch → page 1
           pastFilter = ''; // issue #44: filter is per-workspace view state
           $('past-filter').value = '';
+          railFilter = ''; // #119: the rail's filter is per-folder too
+          if (railEls) railEls.input.value = '';
         }
         pastConvosCwd = cwd;
         pastTruncated = Boolean(truncated);
-        // #50: fed from this same poll rather than its own, so the switcher cannot
+        // #119: fed from this same poll rather than its own, so the rail cannot
         // drift from the list. Called above the early returns below, because those
-        // are the list's view state (empty folder, a filter that matches nothing)
-        // and a switcher that sat past them would keep stale options up.
-        renderConvoSwitch();
+        // are the panel's view state (empty folder, a filter that matches nothing)
+        // and a rail that sat past them would keep stale rows up.
+        renderRail();
         const box = $('past-list');
         const pager = $('past-pager');
         const scroll = box.scrollTop; // kept across same-page re-renders
         box.textContent = '';
         pager.textContent = '';
-        const btn = $('continue-last');
         if (pastConvos.length === 0) {
           box.textContent = '(no past conversations)';
-          btn.disabled = true;
           return;
         }
-        btn.disabled = false;
         // issue #44: filter the already-fetched set client-side, matching
         // the displayed title (title text, or the session-id fallback the
         // rows show) case-insensitively. The truncated note below still
@@ -10205,13 +10593,6 @@
 
       $('list-archived').onclick = () => void refreshArchivedConversations();
 
-      $('continue-last').onclick = () => {
-        if (!pastConvos.length) return;
-        const s = pastConvos[0];
-        resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''), {
-          hostTerminal: true,
-        });
-      };
       // issue #44: filter on input; applying a filter resets the pager to
       // page 1 (page size unchanged), clearing it restores the full list
       $('past-filter').oninput = (e) => {
