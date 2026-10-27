@@ -2176,6 +2176,16 @@ type PageScenario =
          */
         statsResult?: unknown;
         /**
+         * Body the stub answers GET /session/:id/resources with. A scenario
+         * that asserts a drawn row, or that an unknown skill level or MCP
+         * status still reaches the page under the daemon's own word, has to
+         * supply its own payload, or it is checking the two names the stub
+         * invented.
+         */
+        resourcesResult?: unknown;
+        /** Status the stub answers GET /session/:id/resources with. */
+        resourcesStatusCode?: number;
+        /**
          * Body the stub answers GET /session/:id/artifacts with. A scenario
          * that asserts a drawn row, or that an unknown kind still reaches the
          * page, has to supply its own envelope, or it is checking a list the
@@ -9385,6 +9395,13 @@ PAGE_SCENARIOS.push({
       ),
     );
 
+  const resourceRows = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(
+        document.getElementById('resources-body')?.children ?? [],
+      ).map((d) => d.textContent ?? ''),
+    );
+
   PAGE_SCENARIOS.push({
     name: 'P88 the turns panel prints the slice against the daemon total',
     waitView: false,
@@ -9486,6 +9503,179 @@ PAGE_SCENARIOS.push({
       return `a refused index reports ${JSON.stringify(text)}`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P91 the resources panel draws the skills and servers the daemon named',
+    waitView: false,
+    // Its own payload, so the names below are this scenario's and not the two
+    // the stub invented. The header counts both halves because a reader shown
+    // one list cannot tell whether the other came back empty or was never
+    // asked for.
+    stub: {
+      resourcesResult: {
+        v: 1,
+        sessionId: 'irrelevant',
+        workspaceCwd: '/proj',
+        skills: {
+          v: 1,
+          workspaceCwd: '/proj',
+          initialized: true,
+          skills: [
+            {
+              kind: 'skill',
+              name: 'alpha-skill',
+              level: 'user',
+              modelInvocable: true,
+            },
+            {
+              kind: 'skill',
+              name: 'beta-skill',
+              level: 'bundled',
+              modelInvocable: false,
+              disabledReason: 'default',
+            },
+          ],
+        },
+        mcp: {
+          v: 1,
+          workspaceCwd: '/proj',
+          initialized: true,
+          source: 'live',
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'gamma-server',
+              mcpStatus: 'connected',
+              transport: 'stdio',
+              disabled: false,
+            },
+          ],
+          clientCount: 1,
+          clientBudget: 3,
+          budgetMode: 'enforce',
+        },
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-resources', 'resources-load');
+      await drawn(page, 'resources-body');
+      const rows = await resourceRows(page);
+      // One server is not "1 servers", and the count is the pair, not either
+      // half on its own.
+      expect(
+        rows[0] === '2 skills, 1 server',
+        `the header is not both halves counted (${JSON.stringify(rows)})`,
+      );
+      for (const name of ['alpha-skill', 'beta-skill', 'gamma-server']) {
+        expect(
+          rows.some((r) => r.includes(name)),
+          `a daemon name never reached the page (${JSON.stringify(name)} in ${JSON.stringify(rows)})`,
+        );
+      }
+      // The disabled skill says so with the daemon's own reason, because a list
+      // that shows it as merely present tells an operator it is usable.
+      expect(
+        rows.some(
+          (r) => r.includes('beta-skill') && r.includes('off (default)'),
+        ),
+        `a disabled skill was drawn as available (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('1 clients of 3')),
+        `the session's own budget did not reach the page (${JSON.stringify(rows)})`,
+      );
+      return `draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name:
+      'P92 resources draws unknown states in the daemon word, no auth verdict',
+    waitView: false,
+    // Skill level, MCP status and transport are all open unions, so a value
+    // this file has never heard of has to arrive under the daemon's word.
+    // And the payload carries none of the name-keyed authentication fields,
+    // which the type says are always absent on this route and must never be
+    // read as a negative authentication state
+    // (sdk-typescript/src/daemon/types.ts:2526-2533). Printing one here would
+    // invent a verdict in the one direction that sends someone to re-authorise
+    // a working server.
+    stub: {
+      resourcesResult: {
+        v: 1,
+        sessionId: 'irrelevant',
+        workspaceCwd: '/proj',
+        skills: {
+          v: 1,
+          workspaceCwd: '/proj',
+          initialized: true,
+          skills: [
+            {
+              kind: 'skill',
+              name: 'odd-skill',
+              level: 'galactic',
+              modelInvocable: true,
+            },
+          ],
+        },
+        mcp: {
+          v: 1,
+          workspaceCwd: '/proj',
+          initialized: true,
+          source: 'live',
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'odd-server',
+              mcpStatus: 'wobbling',
+              transport: 'carrier-pigeon',
+              disabled: false,
+            },
+          ],
+        },
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-resources', 'resources-load');
+      await drawn(page, 'resources-body');
+      const rows = await resourceRows(page);
+      for (const word of ['[galactic]', '[wobbling]', 'carrier-pigeon']) {
+        expect(
+          rows.some((r) => r.includes(word)),
+          `an unknown state was not drawn as the daemon named it (${JSON.stringify(word)} in ${JSON.stringify(rows)})`,
+        );
+      }
+      // Absence draws nothing. Checked case-folded across every row, because
+      // the invented verdict could be worded any of several ways.
+      expect(
+        !rows.join('\n').toLowerCase().includes('authentic'),
+        `an authentication verdict was invented from absent fields (${JSON.stringify(rows)})`,
+      );
+      return `draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P93 a refused resources read names its reason, not an empty box',
+    waitView: false,
+    // session_resources is advertised since v1, so the gateway re-codes a
+    // daemon 404 as a gone conversation rather than laundering it into a
+    // capability verdict. The page passes that verdict on. An empty box and a
+    // refusal are different facts to an operator.
+    stub: { resourcesStatusCode: 404 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-resources', 'resources-load');
+      const text = await drawn(page, 'resources-body');
+      expect(
+        text.includes('resources failed: session_not_found'),
+        `a refused read did not name the gateway verdict (${JSON.stringify(text)})`,
+      );
+      return `a refused read reports ${JSON.stringify(text)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -9508,6 +9698,8 @@ async function runPageScenario(
     attachmentListStatus: s.stub?.attachmentListStatus,
     statsStatusCode: s.stub?.statsStatusCode,
     statsResult: s.stub?.statsResult,
+    resourcesResult: s.stub?.resourcesResult,
+    resourcesStatusCode: s.stub?.resourcesStatusCode,
     artifactListResult: s.stub?.artifactListResult,
     artifactListStatus: s.stub?.artifactListStatus,
     artifactContentStatus: s.stub?.artifactContentStatus,

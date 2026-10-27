@@ -50,6 +50,7 @@ import {
   type DaemonSessionTurnIndexPageOptions,
   type DaemonSessionRecapResult,
   type DaemonSessionStatsStatus,
+  type DaemonSessionResourcesStatus,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -324,6 +325,18 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionStatsStatus>;
+  /**
+   * What one live conversation has loaded: its skills and its MCP servers.
+   * Built by the daemon from that session's own Config, so the MCP half
+   * reports the session's manager rather than the workspace-owned pool, and
+   * the name-keyed authentication fields are always absent on this route. A
+   * caller that reads that absence as "not authenticated" would be inventing a
+   * verdict the daemon never gave, so relay it and let the reader draw nothing.
+   */
+  sessionResources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionResourcesStatus>;
   loadSession(
     sessionId: string,
     req?: RestoreSessionRequest,
@@ -1271,6 +1284,25 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionStatsStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionStats(sessionId, clientId),
+    );
+  }
+
+  /**
+   * `GET /session/:id/resources` relay, passed through untouched. What it
+   * discloses is which skills and MCP servers a conversation loaded, and a
+   * reader who can read the transcript can already see both of those being
+   * used, so nothing new is handed over by naming them.
+   *
+   * No gateway-side cache, for the reason `sessionStats` gives: a session
+   * installs a skill or an MCP server finishes discovering mid-conversation,
+   * and a stale list would read as the set the turn ran with.
+   */
+  async sessionResources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionResourcesStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionResources(sessionId, clientId),
     );
   }
 

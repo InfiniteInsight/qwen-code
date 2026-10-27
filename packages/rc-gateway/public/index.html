@@ -2304,6 +2304,63 @@
             (not loaded)
           </div>
         </details>
+        <!-- #124. What ONE live conversation has loaded: its skills and the MCP
+             servers its own manager holds. Deliberately not the workspace view.
+             The SDK builds this payload from one session's own Config
+             (DaemonSessionResourcesStatus,
+             packages/sdk-typescript/src/daemon/types.ts:2520), so the MCP half
+             reports that session's manager and its budget rather than the
+             workspace-owned pool. A reader who wants the pool has to ask the
+             workspace, and labelling this as a workspace fact would misstate
+             which budget the numbers describe.
+             This panel also draws no authentication verdict at all. The
+             name-keyed hasOAuthTokens, requiresAuth, authenticationState and
+             authenticationError fields are always absent on this route, and the
+             type says a consumer must not read their absence as a negative
+             authentication state (types.ts:2526-2533). A page printing "not
+             authenticated" for a server that carries no such field would
+             invent a verdict the daemon never gave, in the one direction that
+             sends someone to re-authorise a working server. Absence draws
+             nothing. Bounded like the panels around it: an open list that grows
+             is what pushed the composer under the fold on a phone. -->
+        <details id="session-resources" class="ops-collapse">
+          <summary>
+            <strong>Session resources</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Session resources?"
+              aria-expanded="false"
+              aria-controls="help-session-resources"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-session-resources" hidden>
+            What this one conversation loaded: the skills it can use and the MCP
+            servers its own manager holds, each in the daemon's own words. Enter
+            the session id (blank means the session you're watching) and tap
+            <b>Read resources</b>. This is the conversation's view, not the
+            workspace's, so the server count and budget here describe this
+            session's manager. It says nothing about whether any server is
+            signed in, because this read never reports that. Needs session-read
+            scope.
+          </div>
+          <div class="ops-note">
+            (one conversation's own skills and MCP servers; requires
+            session-read scope)
+          </div>
+          <div>
+            <input
+              id="resources-id"
+              placeholder="session id (blank = watched)"
+            />
+            <button id="resources-load">Read resources</button>
+          </div>
+          <div id="resources-body" style="max-height: 140px; overflow-y: auto">
+            (not loaded)
+          </div>
+        </details>
         <details id="usage-view" class="ops-collapse">
           <summary>
             <strong>Usage</strong
@@ -12737,6 +12794,90 @@
               ']' +
               (typeof (t && t.timestamp) === 'string'
                 ? ' ' + new Date(t.timestamp).toLocaleTimeString()
+                : ''),
+          );
+        }
+        renderRows(out, rows);
+      };
+
+      // #124. The session resources read. Every state is drawn in the daemon's
+      // own words: skill level, MCP status and transport are all open unions, so
+      // a value this file has never heard of gets a row carrying the daemon's
+      // word rather than being dropped or relabelled as something known.
+      // And nothing here draws an authentication verdict, because this route
+      // never reports those fields and printing one from their absence would be
+      // an invented verdict (src/routes/sessionResources.ts).
+      $('resources-load').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('resources-body');
+        const id = verbSessionId('resources-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading\u2026';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/resources',
+        );
+        if (!r.ok) {
+          // The gateway distinguishes these and the page passes every one on:
+          // session_not_loaded means the pool holds no binding for it, which is
+          // an instruction to open the conversation rather than a claim that it
+          // is missing (src/routes/sessionResources.ts).
+          out.textContent = 'resources failed: ' + r.code;
+          return;
+        }
+        const st = r.body || {};
+        const skills =
+          Array.isArray(st.skills && st.skills.skills) ? st.skills.skills : [];
+        const mcp = st.mcp || {};
+        const servers = Array.isArray(mcp.servers) ? mcp.servers : [];
+        const rows = [];
+        const countWord = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+        rows.push(
+          countWord(skills.length, 'skill') +
+            ', ' +
+            countWord(servers.length, 'server'),
+        );
+        for (const s of skills) {
+          const reason =
+            typeof (s && s.disabledReason) === 'string' ? s.disabledReason : '';
+          rows.push(
+            '  ' +
+              String((s && s.name) || '(unnamed)') +
+              ' [' +
+              String((s && s.level) || 'unknown') +
+              ']' +
+              (reason
+                ? ' off (' + reason + ')'
+                : (s && s.modelInvocable === false
+                  ? ' not model-invocable'
+                  : '')),
+          );
+        }
+        for (const s of servers) {
+          rows.push(
+            '  ' +
+              String((s && s.name) || '(unnamed)') +
+              ' ' +
+              String((s && s.transport) || 'unknown') +
+              ' [' +
+              String((s && s.mcpStatus) || 'unknown') +
+              ']' +
+              (s && s.disabled ? ' disabled' : ''),
+          );
+        }
+        // The budget belongs to this session's manager, which is why the row
+        // says so rather than reading as a workspace total.
+        if (Number.isFinite(Number(mcp.clientCount))) {
+          rows.push(
+            Number(mcp.clientCount) +
+              ' clients' +
+              (Number.isFinite(Number(mcp.clientBudget))
+                ? ' of ' + Number(mcp.clientBudget)
+                : '') +
+              (typeof mcp.budgetMode === 'string'
+                ? ', budget ' + mcp.budgetMode
                 : ''),
           );
         }
