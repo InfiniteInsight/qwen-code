@@ -228,6 +228,22 @@ export interface SessionDaemon {
     messageId: string,
     opts?: { clientId?: string },
   ): Promise<unknown>;
+  /**
+   * Named after `DaemonClient.enqueueMidTurnMessage`, on purpose. `SessionDaemon`
+   * is implemented by BOTH this pool and a bare `DaemonClient` (the route tests
+   * inject one), so a gateway-invented name here is `undefined` at runtime on the
+   * client side and `tsc --noEmit` cannot see it (D61). Same for
+   * `sendMidTurnMessagesNow` below.
+   */
+  enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    opts?: { clientId?: string; messageId?: string },
+  ): Promise<unknown>;
+  sendMidTurnMessagesNow(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown>;
   subscribeEvents(
     sessionId: string,
     opts?: SubscribeOptions,
@@ -1466,6 +1482,25 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<unknown> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.removeMidTurnMessage(sessionId, messageId, opts),
+    );
+  }
+
+  async enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    opts?: { clientId?: string; messageId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.enqueueMidTurnMessage(sessionId, message, opts),
+    );
+  }
+
+  async sendMidTurnMessagesNow(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sendMidTurnMessagesNow(sessionId, opts),
     );
   }
 

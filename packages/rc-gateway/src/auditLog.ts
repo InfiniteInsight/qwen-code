@@ -153,6 +153,8 @@ export type AuditAction =
   | 'attachment_removed'
   | 'pending_prompt_removed'
   | 'mid_turn_message_withdrawn'
+  | 'mid_turn_message_queued'
+  | 'mid_turn_messages_sent_now'
   | 'task_cancelled'
   | 'task_cancel_failed'
   | 'ui_prefs_set'
@@ -262,6 +264,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'attachment_removed',
   'pending_prompt_removed',
   'mid_turn_message_withdrawn',
+  'mid_turn_message_queued',
+  'mid_turn_messages_sent_now',
   'task_cancelled',
   'task_cancel_failed',
   'ui_prefs_set',

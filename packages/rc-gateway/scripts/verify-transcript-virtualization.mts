@@ -10854,6 +10854,286 @@ PAGE_SCENARIOS.push({
       return `memory refused by name, agents drew ${JSON.stringify(rows)}`;
     },
   });
+  // #110: the write half of the mid-turn queue. Everything above this block can
+  // only show what the daemon is holding; these drive the two controls that put
+  // something into it.
+  //
+  // Intercepted with page.route rather than the stub knobs because the sibling
+  // scenarios in this block already intercept these very paths, and because the
+  // verdicts under test (accepted:false carrying a reason, requested:false) are
+  // ones a live daemon answers only in a race no harness can schedule.
+  const enqueueRoute = (
+    page: Page,
+    status: number,
+    body: unknown,
+    asked: { session: string | null; message: string | null },
+  ) =>
+    page.route(/\/session\/[^/]+\/mid-turn-message$/, async (route) => {
+      const parts = new URL(route.request().url()).pathname.split('/');
+      asked.session = parts[2];
+      const raw = route.request().postData();
+      asked.message = raw
+        ? ((JSON.parse(raw) as { message?: string }).message ?? null)
+        : null;
+      await route.fulfill({
+        status,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+
+  const sendNowRoute = (
+    page: Page,
+    status: number,
+    body: unknown,
+    asked: { session: string | null; hits: number },
+  ) =>
+    page.route(
+      /\/session\/[^/]+\/mid-turn-messages\/send-now$/,
+      async (route) => {
+        const parts = new URL(route.request().url()).pathname.split('/');
+        asked.session = parts[2];
+        asked.hits += 1;
+        await route.fulfill({
+          status,
+          contentType: 'application/json',
+          body: JSON.stringify(body),
+        });
+      },
+    );
+
+  const writeBody = (page: Page) =>
+    page.evaluate(
+      () =>
+        (document.getElementById('mid-turn-write') as HTMLElement).textContent ??
+        '',
+    );
+
+  const writeField = (page: Page) =>
+    page.evaluate(
+      () =>
+        (document.getElementById('mid-turn-text') as HTMLInputElement).value,
+    );
+
+  const pressIntoTurn = async (page: Page, text: string): Promise<string> => {
+    await page.evaluate((t) => {
+      (document.getElementById('mid-turn-text') as HTMLInputElement).value = t;
+      (document.getElementById('mid-turn-send') as HTMLButtonElement).click();
+    }, text);
+    await page.waitForFunction(
+      () =>
+        !(
+          (
+            document.getElementById('mid-turn-write') as HTMLElement
+          ).textContent ?? ''
+        ).includes('loading'),
+      null,
+      { timeout: 8000 },
+    );
+    return writeBody(page);
+  };
+
+  const pressDeliverNow = async (page: Page): Promise<string> => {
+    await page.evaluate(() =>
+      (document.getElementById('mid-turn-now') as HTMLButtonElement).click(),
+    );
+    await page.waitForFunction(
+      () =>
+        !(
+          (
+            document.getElementById('mid-turn-write') as HTMLElement
+          ).textContent ?? ''
+        ).includes('loading'),
+      null,
+      { timeout: 8000 },
+    );
+    return writeBody(page);
+  };
+
+    PAGE_SCENARIOS.push({
+    name: 'P110 the panel hands a typed message to the turn already running',
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null, message: null as string | null };
+      await enqueueRoute(page, 200, { accepted: true, messageId: 'm-7' }, asked);
+      await watch(page, viewer.sessionId);
+      const body = await pressIntoTurn(page, 'also use the short name');
+      expect(
+        asked.session === viewer.sessionId,
+        `the write asked ${JSON.stringify(asked.session)} while watching ${JSON.stringify(viewer.sessionId)}`,
+      );
+      expect(
+        asked.message === 'also use the short name',
+        `the page sent ${JSON.stringify(asked.message)} rather than the typed text`,
+      );
+      expect(
+        body.includes('held for the running turn'),
+        `a message the daemon took did not read as held (${JSON.stringify(body)})`,
+      );
+      // The daemon's own id is printed because it is the handle the withdraw
+      // button needs; without it the row is a claim with no way back.
+      expect(
+        body.includes('m-7'),
+        `the daemon's message id was not drawn (${JSON.stringify(body)})`,
+      );
+      expect(
+        (await writeField(page)) === '',
+        `the field kept text the daemon already took (${JSON.stringify(await writeField(page))})`,
+      );
+      return `a held write reads ${JSON.stringify(body)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P111 a write that arrives after the turn ended gives the next move',
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null, message: null as string | null };
+      // The gateway answers 200 for this verdict on purpose
+      // (src/routes/sessionQueue.ts): the session went idle between looking and
+      // writing, which is an answer about timing and not a refusal. So the page
+      // must not print it as a failure, and it must print the one move it
+      // implies.
+      await enqueueRoute(
+        page,
+        200,
+        { accepted: false, reason: 'session_idle' },
+        asked,
+      );
+      await watch(page, viewer.sessionId);
+      const body = await pressIntoTurn(page, 'sent a moment too late');
+      expect(
+        body.includes('the turn already ended'),
+        `an idle verdict did not say the turn was over (${JSON.stringify(body)})`,
+      );
+      expect(
+        body.includes('session_idle'),
+        `the daemon's own reason was dropped (${JSON.stringify(body)})`,
+      );
+      expect(
+        body.includes('send it as a prompt'),
+        `an idle verdict gave no next move (${JSON.stringify(body)})`,
+      );
+      expect(
+        !/fail|error/i.test(body),
+        `an idle verdict read as a failure (${JSON.stringify(body)})`,
+      );
+      // The text stays in the field. Nothing was taken, so clearing it would
+      // lose the message the operator still has to send.
+      expect(
+        (await writeField(page)) === 'sent a moment too late',
+        `the field was cleared although the daemon took nothing (${JSON.stringify(await writeField(page))})`,
+      );
+      return `an idle verdict reads ${JSON.stringify(body)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P112 deliver-now prints the verdict and claims no cut it cannot see',
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null, hits: 0 };
+      await sendNowRoute(page, 200, { requested: true }, asked);
+      await watch(page, viewer.sessionId);
+      const body = await pressDeliverNow(page);
+      expect(
+        asked.hits === 1,
+        `the deliver control pressed the daemon ${asked.hits} times for one tap`,
+      );
+      expect(
+        asked.session === viewer.sessionId,
+        `deliver asked ${JSON.stringify(asked.session)} while watching ${JSON.stringify(viewer.sessionId)}`,
+      );
+      expect(
+        body.includes('asked the agent to deliver the held messages now'),
+        `a requested:true verdict was not drawn (${JSON.stringify(body)})`,
+      );
+      // requested:true means messages were waiting and the agent was asked, not
+      // that a response was cut short (the SDK documents the difference). A page
+      // that said otherwise would report an effect it has no signal for.
+      expect(
+        !/cut|interrupt|stopped/i.test(body),
+        `the page claimed a cut the field cannot show (${JSON.stringify(body)})`,
+      );
+      return `deliver-now reads ${JSON.stringify(body)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P113 delivering when nothing waits reads as an answer and not a failure',
+    run: async ({ page, viewer }) => {
+      await sendNowRoute(page, 200, { requested: false }, { session: null, hits: 0 });
+      await watch(page, viewer.sessionId);
+      const body = await pressDeliverNow(page);
+      expect(
+        body.includes('nothing was waiting'),
+        `an empty deliver did not read as empty (${JSON.stringify(body)})`,
+      );
+      expect(
+        !/fail|error/i.test(body),
+        `an empty deliver read as a failure (${JSON.stringify(body)})`,
+      );
+      return `an empty deliver reads ${JSON.stringify(body)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P114 the mid-turn write stays in the panel and the composer means what it meant',
+    waitView: false,
+    run: async ({ page }) => {
+      const placed = await page.evaluate(() => {
+        const send = document.getElementById('mid-turn-send');
+        const text = document.getElementById('mid-turn-text');
+        const composer = document.getElementById('composer');
+        const chatSend = document.getElementById('send') as HTMLButtonElement | null;
+        const outbox = document.getElementById('queue') as HTMLButtonElement | null;
+        return {
+          hasSend: !!send,
+          hasText: !!text,
+          inOps: !!document.getElementById('pane-ops')?.contains(send ?? null),
+          inComposer: !!composer?.contains(send ?? null),
+          chatSendLabel: chatSend ? (chatSend.textContent ?? '').trim() : null,
+          chatSendDisabled: chatSend ? chatSend.disabled : null,
+          outboxExists: !!outbox,
+          outboxHidden: outbox ? outbox.hidden : null,
+        };
+      });
+      expect(
+        placed.hasSend && placed.hasText,
+        'the mid-turn write control is missing from the page',
+      );
+      expect(
+        placed.inOps,
+        'the mid-turn write control is not under Operations',
+      );
+      expect(
+        !placed.inComposer,
+        'the mid-turn write control sits on the composer',
+      );
+      // What this slice could have broken, stated as it actually is. Issue #70
+      // settled that chat-side queueing is its own control and not an inverted
+      // Send, so the composer legitimately carries a Queue button beside its
+      // Send (it is hidden outside a turn, because a queue button in idle view
+      // is a Send that does not send). The ruling this guards is narrower than
+      // "no queue control in the composer" and it is about Send: adding a
+      // mid-turn writer must not have turned Send into something else, since
+      // two other scenarios press Send during a turn and assert it is disabled.
+      expect(
+        placed.chatSendLabel === 'Send',
+        `the composer's Send button no longer reads Send (${JSON.stringify(placed.chatSendLabel)})`,
+      );
+      expect(
+        placed.chatSendDisabled === false,
+        `the composer's Send is disabled between turns (${JSON.stringify(placed.chatSendDisabled)})`,
+      );
+      expect(
+        placed.outboxExists && placed.outboxHidden === true,
+        `the #70 outbox control is no longer a separate button hidden outside a turn (${JSON.stringify(
+          { exists: placed.outboxExists, hidden: placed.outboxHidden },
+        )})`,
+      );
+      return `the write control sits under Operations; Send reads ${JSON.stringify(
+        placed.chatSendLabel,
+      )} enabled and the outbox is hidden=${placed.outboxHidden}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,

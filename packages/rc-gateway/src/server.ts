@@ -185,8 +185,10 @@ import {
 } from './routes/sessionAttachments.js';
 /** #110: the visible queue (pending prompts and mid-turn messages). */
 import {
+  createMidTurnMessageEnqueueRoute,
   createMidTurnMessageRemoveRoute,
   createMidTurnMessagesRoute,
+  createMidTurnMessagesSendNowRoute,
   createPendingPromptRemoveRoute,
   createPendingPromptsRoute,
 } from './routes/sessionQueue.js';
@@ -1099,6 +1101,34 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user -> 403 (a stop request is never rate-limited)
     createMidTurnMessageRemoveRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/mid-turn-message — write-scope, and the same guard set as
+  // `POST /session/:id/prompt` above, because this is the same kind of act: chat
+  // content with a body, arriving from a device. It carries `subActorRateLimit`
+  // for the same reason the prompt route does (bridge fan-in). #110: this is the
+  // write half of a queue that has been readable since the four routes above, and
+  // without it the panel's own promise that a held message can only be withdrawn
+  // is a description of a gateway limitation, not of the daemon.
+  app.post(
+    '/session/:id/mid-turn-message',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap mid-turn pushes per chat user
+    createMidTurnMessageEnqueueRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/mid-turn-messages/send-now — write-scope, deliberately NOT
+  // rate-limited: it adds no content and cannot grow the queue, so throttling it
+  // would punish the operator for reacting to a problem they are closing. Same
+  // posture as the withdraw and cancel routes.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403 (a control act is never rate-limited)
+    createMidTurnMessagesSendNowRoute(deps.daemon, audit),
   );
   // POST /session — create (or attach to) a session so a freshly-paired client
   // (the web UI's "New conversation" button) has one to watch and prompt.
