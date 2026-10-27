@@ -11134,6 +11134,132 @@ PAGE_SCENARIOS.push({
       )} enabled and the outbox is hidden=${placed.outboxHidden}`;
     },
   });
+
+PAGE_SCENARIOS.push({
+    name: 'P115 a window that joined another window says so, and a window on its own pointer does not',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      // Window A takes the harness conversation and holds it. The frame is the
+      // gate rather than watchedSessionId, for the reason P26 records: the id is
+      // assigned before the replay clears the transcript, so only a frame proves
+      // the hand-off finished and the watch was persisted.
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 30_000);
+
+      const note = (p: Page) =>
+        p.evaluate(() => {
+          const box = document.getElementById('joined-note') as HTMLDivElement;
+          const btn = document.getElementById(
+            'joined-note-new',
+          ) as HTMLButtonElement;
+          return {
+            id: watchedSessionId,
+            hidden: box.hidden,
+            shown: box.getClientRects().length > 0,
+            text: document.getElementById('joined-note-text')!.textContent ?? '',
+            hasBtn: !!btn,
+          };
+        });
+
+      // Window B, same browser context: it shares A's localStorage and token and
+      // gets no sessionStorage. That is the second-window case exactly, and B is
+      // NOT told which conversation to open, because being told would be the
+      // thing under test.
+      const b = await page.context().newPage();
+      try {
+        await b.addInitScript({ content: PAGE_HELPERS_JS });
+        await b.goto(`${viewer.url}/ui/`, { waitUntil: 'domcontentloaded' });
+        await b.waitForFunction(() => typeof startWatch === 'function');
+        await b.waitForFunction(() => watchedSessionId !== null, null, {
+          timeout: 20_000,
+        });
+        // The join note is asked for after the restore, so give the probe its
+        // budget before reading. It is 250 ms and this waits for it to have
+        // resolved, not for a fixed sleep.
+        await b.waitForFunction(
+          () => !document.getElementById('joined-note')!.hidden,
+          null,
+          { timeout: 5_000 },
+        );
+        const joined = await note(b);
+        expect(
+          joined.id === viewer.sessionId,
+          `the second window did not come up on the shared conversation (got ${JSON.stringify(
+            joined.id,
+          )}, wanted ${viewer.sessionId})`,
+        );
+        expect(
+          joined.shown,
+          'the join note is not on screen for a window that joined a live sibling',
+        );
+        expect(
+          /joined/i.test(joined.text),
+          `the join note does not say the window joined (${JSON.stringify(
+            joined.text,
+          )})`,
+        );
+        expect(joined.hasBtn, 'the join note carries no way out');
+
+        // The way out has to hand the folder to the SHIPPED create path, not a
+        // second one. The create handler is intercepted so nothing is actually
+        // created; what is asserted is that the note typed the folder the page
+        // restored into the input New conversation reads.
+        const handed = await b.evaluate(() => {
+          const btn = document.getElementById('new-session') as HTMLButtonElement;
+          const input = document.getElementById(
+            'new-session-cwd',
+          ) as HTMLInputElement;
+          const prior = input.value;
+          let clicked = false;
+          const prev = btn.onclick;
+          btn.onclick = () => {
+            clicked = true;
+          };
+          (document.getElementById('joined-note-new') as HTMLButtonElement).click();
+          const seen = input.value;
+          btn.onclick = prev;
+          input.value = prior;
+          return { clicked, seen, want: watchedSessionCwd ?? '' };
+        });
+        expect(
+          handed.clicked,
+          'the join note does not run the shipped New conversation path',
+        );
+        expect(
+          handed.seen === handed.want,
+          `the join note handed the wrong folder to New conversation (${JSON.stringify(
+            handed.seen,
+          )}, wanted ${JSON.stringify(handed.want)})`,
+        );
+
+        // The control. B now holds its OWN per-window pointer, so a reload of B
+        // is a window coming back to a conversation it chose, never a join. An
+        // implementation that said "you joined" on every restore would pass
+        // every assertion above and fail this one.
+        await b.reload({ waitUntil: 'domcontentloaded' });
+        await b.waitForFunction(() => typeof startWatch === 'function');
+        await b.waitForFunction(() => watchedSessionId !== null, null, {
+          timeout: 20_000,
+        });
+        await b.waitForTimeout(600);
+        const back = await note(b);
+        expect(
+          back.hidden,
+          `a window restored onto its own pointer was told it joined another window (${JSON.stringify(
+            back.text,
+          )})`,
+        );
+        expect(
+          back.id === viewer.sessionId,
+          `the reload lost B's conversation (${JSON.stringify(back.id)})`,
+        );
+
+        return `a fresh window on the shared record says it joined and hands the folder to New conversation; the same window on its own pointer says nothing`;
+      } finally {
+        await b.close();
+      }
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
