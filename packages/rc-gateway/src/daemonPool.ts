@@ -168,6 +168,34 @@ export interface SessionDaemon {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<unknown>;
 
+  // Session artifacts (add-capability-parity #127, the read pair). The two
+  // signatures differ and both mirror `DaemonClient` exactly: the list takes a
+  // bare `clientId` (its :7108) while the content read takes a trailing `opts`
+  // object (its :4816), so they are NOT the attachment block's uniform shape.
+  // The `add`/`remove` pair is deliberately NOT modelled: the daemon's POST and
+  // DELETE routes both call `requireSessionArtifactClientId`
+  // (packages/cli/src/serve/routes/session.ts:466) and answer 403
+  // `client_id_required` without a session-bound client id, which no gateway
+  // route forwards today.
+  listSessionArtifacts(sessionId: string, clientId?: string): Promise<unknown>;
+  /**
+   * One artifact's saved snapshot, as the SDK hands it over: a decoded string.
+   *
+   * The headers the daemon chose for that body are NOT reachable through this
+   * method. `DaemonClient.readSessionArtifactContent`
+   * (packages/sdk-typescript/src/daemon/DaemonClient.ts:4816) reads the
+   * response with `res.text()` and returns the string, so `Content-Type`,
+   * `Content-Disposition`, `X-Content-Type-Options` and `Cache-Control` are
+   * gone by the time the gateway sees the value. The route that uses this
+   * therefore re-states them rather than forwarding them; see
+   * routes/sessionArtifacts.ts for why that restatement is load-bearing.
+   */
+  readSessionArtifactContent(
+    sessionId: string,
+    artifactId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown>;
+
   // The visible queue (add-capability-parity #110, second slice). Signatures
   // mirror `DaemonClient`'s exactly, including its trailing `opts` object, so
   // a plain `DaemonClient` still satisfies this interface. Returns stay
@@ -1318,6 +1346,25 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<unknown> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.removeSessionAttachment(sessionId, attachmentId, opts),
+    );
+  }
+
+  async listSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.listSessionArtifacts(sessionId, clientId),
+    );
+  }
+
+  async readSessionArtifactContent(
+    sessionId: string,
+    artifactId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<unknown> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.readSessionArtifactContent(sessionId, artifactId, opts),
     );
   }
 

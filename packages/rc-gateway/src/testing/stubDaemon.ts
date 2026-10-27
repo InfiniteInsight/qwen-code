@@ -354,6 +354,20 @@ export interface StubDaemonOptions {
    * this, because the default body has every optional block present.
    */
   statsResult?: unknown;
+  /** Status for GET /session/:id/artifacts (default 200). */
+  artifactListStatus?: number;
+  /**
+   * Full body for GET /session/:id/artifacts (overrides the default envelope).
+   * A scenario that asserts an unknown kind still reaches the page sets this,
+   * because the default envelope holds only kinds this repo has named.
+   */
+  artifactListResult?: unknown;
+  /** Status for GET /session/:id/artifacts/:artifactId/content (default 200). */
+  artifactContentStatus?: number;
+  /** JSON body for a non-200 content read (default the daemon's own pair). */
+  artifactContentErrorBody?: unknown;
+  /** Body the content read serves on success. Defaults to a saved snapshot. */
+  artifactContentBody?: string;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -570,6 +584,10 @@ export async function startStubDaemon(
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
     lastRecapSessionId: undefined as string | undefined,
     lastStatsSessionId: undefined as string | undefined,
+    lastArtifactListSessionId: undefined as string | undefined,
+    lastArtifactContent: undefined as
+      | { sessionId: string; artifactId: string }
+      | undefined,
     lastAttachmentUpload: undefined as
       | {
           name: unknown;
@@ -1177,6 +1195,92 @@ export async function startStubDaemon(
       // voice, naming what the conversation was about.
       recap: 'Asked why paging skipped a row, then fixed the offset math.',
     });
+  });
+
+  // What the session produced. The envelope shape is the daemon's own
+  // (v, sessionId, artifacts, generatedAt, limits) and each entry carries the
+  // fields the store builds, so a gateway that reshaped it would be tested
+  // against a fiction.
+  app.get('/session/:id/artifacts', (req, res) => {
+    state.lastArtifactListSessionId = String(req.params.id);
+    const status = opts.artifactListStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    if (opts.artifactListResult !== undefined) {
+      res.status(200).json(opts.artifactListResult);
+      return;
+    }
+    res.status(200).json({
+      v: 1,
+      sessionId: String(req.params.id),
+      generatedAt: '2026-10-26T09:00:00.000Z',
+      limits: { maxArtifacts: 64 },
+      artifacts: [
+        {
+          id: 'art-web-1',
+          kind: 'html',
+          storage: 'snapshot',
+          source: 'tool',
+          status: 'available',
+          title: 'Saved webpage: paging notes',
+          url: 'https://example.com/paging',
+          mimeType: 'text/html',
+          sizeBytes: 2048,
+          retention: 'session',
+          clientRetained: false,
+          createdAt: '2026-10-26T08:00:00.000Z',
+          updatedAt: '2026-10-26T08:00:00.000Z',
+        },
+        {
+          id: 'art-file-1',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'decisions.md',
+          workspacePath: 'decisions.md',
+          mimeType: 'text/markdown',
+          sizeBytes: 512,
+          retention: 'session',
+          clientRetained: true,
+          createdAt: '2026-10-26T08:30:00.000Z',
+          updatedAt: '2026-10-26T08:30:00.000Z',
+        },
+      ],
+    });
+  });
+
+  // The snapshot read answers with the body AND the headers the daemon chose
+  // (session.ts:7331-7336), not just the bytes. The SDK discards those headers
+  // before the gateway ever sees a value, so the route restates them; serving
+  // anything else here would let that restatement be tested against itself
+  // rather than against the source of truth.
+  app.get('/session/:id/artifacts/:artifactId/content', (req, res) => {
+    state.lastArtifactContent = {
+      sessionId: String(req.params.id),
+      artifactId: String(req.params.artifactId),
+    };
+    const status = opts.artifactContentStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(
+        opts.artifactContentErrorBody ?? {
+          error: 'artifact_snapshot_unavailable',
+          message: 'Saved webpage version is missing or has changed.',
+        },
+      );
+      return;
+    }
+    res
+      .status(200)
+      .set({
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="saved-webpage.html"',
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, no-store',
+      })
+      .send(opts.artifactContentBody ?? '<!doctype html><p>saved snapshot</p>');
   });
 
   app.get('/session/:id/stats', (req, res) => {
@@ -1885,6 +1989,12 @@ export async function startStubDaemon(
     },
     get lastStatsSessionId() {
       return state.lastStatsSessionId;
+    },
+    get lastArtifactListSessionId() {
+      return state.lastArtifactListSessionId;
+    },
+    get lastArtifactContent() {
+      return state.lastArtifactContent;
     },
     get lastAttachmentUpload() {
       return state.lastAttachmentUpload;

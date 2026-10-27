@@ -155,6 +155,11 @@ import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
 import { createSessionStatsRoute } from './routes/sessionStats.js';
+/** #127: session artifacts (the read pair; the mutation pair needs a client id). */
+import {
+  createSessionArtifactContentRoute,
+  createSessionArtifactListRoute,
+} from './routes/sessionArtifacts.js';
 /** #109: session attachments (uploads + the list that confirms them). */
 import {
   createAttachmentListRoute,
@@ -1000,6 +1005,30 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user -> 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap deletions per chat user
     createAttachmentRemoveRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/artifacts - what the session PRODUCED, which is a
+  // different fact from the uploads above (what someone sent in). Session-read
+  // like the attachment list: the names are ones the transcript already
+  // implies. Not audited, matching that sibling. The mutation pair the issue
+  // counts is NOT mounted here - see routes/sessionArtifacts.ts for the 403
+  // client_id_required that makes it a different slice.
+  app.get(
+    '/session/:id/artifacts',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionArtifactListRoute(deps.daemon),
+  );
+  // GET /session/:id/artifacts/:artifactId/content - one saved snapshot back
+  // out. WRITE, not session-read, for the same reason the attachment content
+  // read above is: this returns the file's contents, and #107 settled that
+  // host file contents sit at WRITE. The response carries the daemon's four
+  // headers restated, because they are what stop a saved webpage rendering as
+  // a document on an origin that holds the operator's token.
+  app.get(
+    '/session/:id/artifacts/:artifactId/content',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    createSessionArtifactContentRoute(deps.daemon),
   );
   // GET /session/:id/pending-prompts — session-read-scope, mirroring /export.
   // The queue is part of the conversation's own state, and seeing it is the

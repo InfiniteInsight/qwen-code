@@ -2175,6 +2175,17 @@ type PageScenario =
          * checking a roll-up the stub invented.
          */
         statsResult?: unknown;
+        /**
+         * Body the stub answers GET /session/:id/artifacts with. A scenario
+         * that asserts a drawn row, or that an unknown kind still reaches the
+         * page, has to supply its own envelope, or it is checking a list the
+         * stub invented.
+         */
+        artifactListResult?: unknown;
+        /** Status the stub answers the artifact list with. */
+        artifactListStatus?: number;
+        /** Status the stub answers the artifact content read with. */
+        artifactContentStatus?: number;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -9186,6 +9197,175 @@ PAGE_SCENARIOS.push({
       return `a refused read reports ${JSON.stringify(body)}`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P85 the artifact rows name the kind the daemon used, even an unknown one',
+    waitView: false,
+    // The kind union is open (KnownDaemonSessionArtifactKind plus
+    // OpenStringUnion), so a kind this page has never heard of has to arrive
+    // with the daemon's own word on it. Dropping the row or relabeling it as
+    // 'other' would hide a produced file from the only screen that lists them.
+    // The third entry is `missing`, which has nothing to save.
+    stub: {
+      artifactListResult: {
+        v: 1,
+        sessionId: 'unused',
+        generatedAt: '2026-10-26T09:00:00.000Z',
+        limits: { maxArtifacts: 64 },
+        artifacts: [
+          {
+            id: 'a1',
+            kind: 'html',
+            status: 'available',
+            title: 'paging notes',
+            sizeBytes: 2048,
+          },
+          {
+            id: 'a2',
+            kind: 'diagram',
+            status: 'available',
+            title: 'loop map',
+            sizeBytes: 1024,
+          },
+          {
+            id: 'a3',
+            kind: 'file',
+            status: 'missing',
+            title: 'gone.txt',
+            sizeBytes: 8,
+          },
+        ],
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'artifacts', 'artifacts-toggle');
+      await drawn(page, 'artifacts-list');
+      const rows = await page.evaluate(() =>
+        Array.from(document.getElementById('artifacts-list')?.children || []).map(
+          (c) => (c.textContent || '').trim(),
+        ),
+      );
+      const buttons = await page.evaluate(
+        () =>
+          document.querySelectorAll('#artifacts-list button').length,
+      );
+      expect(
+        rows.length === 3,
+        `rows did not draw (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('diagram')),
+        `an unknown kind was dropped or relabeled (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('paging notes') && r.includes('2.0 KB')),
+        `size did not render (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('gone.txt') && r.includes('missing')),
+        `a missing artifact did not say so (${JSON.stringify(rows)})`,
+      );
+      // Two available rows get a Save; the missing one must not, since the
+      // content read could only answer with the daemon's refusal.
+      expect(
+        buttons === 2,
+        `Save buttons did not track availability (${buttons} for ${JSON.stringify(rows)})`,
+      );
+      return `3 rows drawn, unknown kind kept, ${buttons} Save buttons`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P86 saving an artifact downloads it and never draws the HTML',
+    waitView: false,
+    // The load-bearing page rule from #127. The body is a saved webpage, this
+    // origin holds the operator's token, and the page sets no CSP, so the one
+    // thing that must never happen is the text landing in the DOM. A row that
+    // rendered it would pass every other scenario in this file. It carries its
+    // own one-row envelope so the asserted file name is this scenario's title
+    // rather than whatever the stub happens to default to.
+    stub: {
+      artifactListResult: {
+        v: 1,
+        sessionId: 'unused',
+        generatedAt: '2026-10-26T09:00:00.000Z',
+        limits: { maxArtifacts: 64 },
+        artifacts: [
+          {
+            id: 'a1',
+            kind: 'html',
+            status: 'available',
+            title: 'paging notes',
+            sizeBytes: 2048,
+          },
+        ],
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'artifacts', 'artifacts-toggle');
+      await drawn(page, 'artifacts-list');
+      const dl = page
+        .waitForEvent('download', { timeout: 15_000 })
+        .catch(() => null);
+      await page.evaluate(() => {
+        const b = document.querySelector(
+          '#artifacts-list button',
+        ) as HTMLButtonElement | null;
+        b?.click();
+      });
+      const note = await drawn(page, 'artifacts-note');
+      const download = await dl;
+      const body = await page.evaluate(
+        () => document.getElementById('artifacts')?.innerHTML ?? '',
+      );
+      expect(
+        note.startsWith('saved '),
+        `a save did not report the file (${JSON.stringify(note)})`,
+      );
+      expect(
+        download,
+        'the save offered no download',
+      );
+      expect(
+        !body.includes('saved snapshot'),
+        'the snapshot body was written into the page',
+      );
+      expect(
+        !/<iframe|<object|<embed/i.test(body),
+        'an artifact was given a frame to render in',
+      );
+      const name = download ? download.suggestedFilename() : '';
+      expect(
+        name === 'paging notes',
+        `download name was not the title (${JSON.stringify(name)})`,
+      );
+      return `saved as ${JSON.stringify(name)}, body never entered the DOM`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P87 a refused artifact list names its reason instead of an empty box',
+    waitView: false,
+    // The gateway answers this route with several different failures and the
+    // box has nowhere to show the difference except this note. An empty box
+    // and a refusal are different facts to an operator.
+    stub: { artifactListStatus: 404 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'artifacts', 'artifacts-toggle');
+      await drawn(page, 'artifacts-note');
+      const note = await page.evaluate(
+        () => (document.getElementById('artifacts-note')?.textContent ?? '').trim(),
+      );
+      expect(
+        note.includes('artifacts failed'),
+        `a refused list did not say so (${JSON.stringify(note)})`,
+      );
+      return `a refused list reports ${JSON.stringify(note)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -9208,6 +9388,9 @@ async function runPageScenario(
     attachmentListStatus: s.stub?.attachmentListStatus,
     statsStatusCode: s.stub?.statsStatusCode,
     statsResult: s.stub?.statsResult,
+    artifactListResult: s.stub?.artifactListResult,
+    artifactListStatus: s.stub?.artifactListStatus,
+    artifactContentStatus: s.stub?.artifactContentStatus,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
