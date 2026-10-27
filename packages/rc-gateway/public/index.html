@@ -9083,7 +9083,11 @@
         const s = pastConvos.find((x) => x && x.sessionId === id);
         // Resume is the same hand-off the Past conversations rows use, so the
         // switcher adds no second path onto a conversation.
-        void resumeConversation(id, pastConvosCwd, s ? strOr(s.title, '') : '');
+        // issue #67: the tab follows the conversation you picked, so the host
+        // mirrors what is on screen rather than only what was created here.
+        void resumeConversation(id, pastConvosCwd, s ? strOr(s.title, '') : '', {
+          hostTerminal: true,
+        });
       };
 
       function renderPastConversations(sessions, cwd, truncated) {
@@ -9205,7 +9209,9 @@
             row.appendChild(prev);
           }
           row.onclick = () =>
-            resumeConversation(s.sessionId, cwd, strOr(s.title, ''));
+            resumeConversation(s.sessionId, cwd, strOr(s.title, ''), {
+              hostTerminal: true,
+            });
           box.appendChild(row);
         }
         if (pastTruncated) {
@@ -9385,7 +9391,16 @@
 
       // POST /session/<id>/resume { cwd } (Bearer). On 200, hand off to the
       // SAME watch flow the New-conversation button uses.
-      async function resumeConversation(sessionId, cwd, title) {
+      //
+      // issue #67: opts.hostTerminal asks the host for a terminal mirroring the
+      // conversation this call brings on screen, which the create button has
+      // always done and no switch path ever did. It is a caller flag rather than
+      // an unconditional call because this function is also the #39 resync
+      // self-heal, reached from startWatch's finally with nobody behind it: a
+      // request there would open a tab on every recovery, and a resync storm
+      // would open one per resync. The ask belongs to the tap, not to the
+      // hand-off. Default off, so a new caller cannot inherit it by accident.
+      async function resumeConversation(sessionId, cwd, title, opts) {
         if (!token()) return setStatus('pair first');
         const label = title || 'session ' + sessionId.slice(0, 8);
         setStatus('resuming ' + label + '…');
@@ -9456,6 +9471,12 @@
             lastSeenEventId = from || null;
             watchedSessionCwd = cwd || null;
             startWatch(j.sessionId, lastSeenEventId, title);
+            // Asked only once the resume has actually succeeded: the route
+            // answers 404 for a session the daemon does not know, so a request
+            // fired from the call site would queue a tab for a conversation this
+            // tap failed to open. Still best-effort in the #49 sense, which is
+            // non-blocking rather than silent: requestHostTerminal reports why.
+            if (opts && opts.hostTerminal) void requestHostTerminal(j.sessionId);
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');
           } else if (res.status === 404) {
@@ -9615,7 +9636,9 @@
       $('continue-last').onclick = () => {
         if (!pastConvos.length) return;
         const s = pastConvos[0];
-        resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''));
+        resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''), {
+          hostTerminal: true,
+        });
       };
       // issue #44: filter on input; applying a filter resets the pager to
       // page 1 (page size unchanged), clearing it restores the full list
@@ -11220,7 +11243,9 @@
                 (x) => x && x.sessionId === id,
               );
               if (s) {
-                void resumeConversation(id, cwd, strOr(s.title, ''));
+                void resumeConversation(id, cwd, strOr(s.title, ''), {
+                  hostTerminal: true,
+                });
                 return;
               }
             } catch {
