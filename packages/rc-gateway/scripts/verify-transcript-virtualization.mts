@@ -1955,6 +1955,15 @@ declare let lastSeenEventId: number | null;
 // release without waiting out the watchdog's 3-minute timer.
 declare let abandonPendingSend: ((why: string) => void) | null;
 declare const requestHostTerminal: (id: string) => Promise<void>;
+// issue #67: the hand-off carries an options bag now, because the switch paths
+// ask the host for a terminal and the #39 resync self-heal, which reaches this
+// same function with nobody behind it, must not. P116 drives both shapes.
+declare const resumeConversation: (
+  id: string,
+  cwd: string,
+  title: string,
+  opts?: { hostTerminal?: boolean },
+) => Promise<void>;
 declare const setStatus: (m: string) => void;
 declare const renderFrame: (ev: unknown) => void;
 declare const addUser: (text: string, time?: number) => PgItem;
@@ -11258,6 +11267,137 @@ PAGE_SCENARIOS.push({
       } finally {
         await b.close();
       }
+    },
+  });
+
+PAGE_SCENARIOS.push({
+    // #67. A host terminal was requested on create and on nothing else, so the
+    // laptop kept mirroring the conversation you happened to create while the
+    // phone had moved on. This asserts the switch now asks, and it asserts the
+    // half that is easy to get wrong: the same function is also the #39 resync
+    // self-heal, reached from startWatch's finally with no user behind it, so a
+    // request wired in unconditionally would open a tab on every recovery.
+    name: 'P116 a conversation switch asks for a host terminal, and a resync recovery does not',
+    run: async ({ page, viewer }) => {
+      const OTHER = '33333333-4444-5555-6666-777777777777';
+      const HELD = '44444444-5555-6666-7777-888888888888';
+      const DIR = '/srv/work/proj';
+
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 30_000);
+
+      // Recorded rather than merely fulfilled: the claim is that this tap put a
+      // request on the wire carrying the conversation the tap selected, and only
+      // the body can tell the two conversations apart.
+      const asked: string[] = [];
+      await page.route('**/rc/terminals', (route) => {
+        const body = route.request().postData() ?? '{}';
+        asked.push(String(JSON.parse(body).sessionId ?? ''));
+        route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            requestId: 'r1',
+            launcherState: 'live',
+            launcherSeenMsAgo: 400,
+          }),
+        });
+      });
+      const answers = (id: string) =>
+        JSON.stringify({ sessionId: id, lastEventId: 0 });
+      for (const id of [OTHER, HELD]) {
+        await page.route(`**/session/${id}/resume`, (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: answers(id),
+          }),
+        );
+      }
+
+      // The list is drawn through the same entry point a real load uses, so the
+      // switcher is populated the way it is on the page rather than by hand.
+      await page.evaluate(
+        ([here, other, dir]) => {
+          renderPastConversations(
+            [
+              { sessionId: here, title: 'here' },
+              { sessionId: other, title: 'there' },
+            ],
+            dir,
+            false,
+          );
+        },
+        [viewer.sessionId, OTHER, DIR],
+      );
+      const listed = await page.evaluate(
+        (id) =>
+          Array.from(
+            (
+              document.getElementById('convo-switch-list') as HTMLSelectElement
+            ).options,
+          ).some((o) => o.value === id),
+        OTHER,
+      );
+      expect(listed, `the switcher offers no option for ${OTHER}, so the tap below could not have switched to it`);
+
+      const responded = page.waitForResponse(
+        (r) => r.url().includes('/rc/terminals'),
+        { timeout: 15_000 },
+      );
+      // Driven through the control, not by calling the hand-off: the bug was a
+      // missing call on a path, so the assertion has to travel that path.
+      await page.evaluate((id) => {
+        const sel = document.getElementById('convo-switch-list') as HTMLSelectElement;
+        sel.value = id;
+        sel.dispatchEvent(new Event('change'));
+      }, OTHER);
+      await responded;
+      expect(
+        asked.length === 1 && asked[0] === OTHER,
+        `switching to ${OTHER} asked the host for ${JSON.stringify(asked)}`,
+      );
+
+      // The other half, and the one that makes the flag load-bearing. This is
+      // the exact call the resync self-heal makes, positional and unflagged,
+      // reached when a watch tears down with a resync pending. An
+      // implementation that asked on every hand-off would satisfy the
+      // assertion above and fail here.
+      asked.length = 0;
+      await page.evaluate(
+        ([id, dir]) => {
+          void resumeConversation(id, dir, 'held');
+        },
+        [HELD, DIR],
+      );
+      await page.waitForTimeout(1_500);
+      expect(
+        asked.length === 0,
+        `the unflagged hand-off asked the host for a terminal (${JSON.stringify(
+          asked,
+        )}), which is a tab opening on every resync recovery`,
+      );
+
+      // And the flag still works when the hand-off is reached directly, so the
+      // guard is the option rather than the switcher's own wiring.
+      asked.length = 0;
+      const again = page.waitForResponse(
+        (r) => r.url().includes('/rc/terminals'),
+        { timeout: 15_000 },
+      );
+      await page.evaluate(
+        ([id, dir]) => {
+          void resumeConversation(id, dir, 'held', { hostTerminal: true });
+        },
+        [HELD, DIR],
+      );
+      await again;
+      expect(
+        asked.length === 1 && asked[0] === HELD,
+        `the flagged hand-off asked the host for ${JSON.stringify(asked)}`,
+      );
+
+      return `the switcher's change asks for the conversation it selected; the unflagged hand-off the resync self-heal uses asks for nothing; the flagged one asks`;
     },
   });
 }
