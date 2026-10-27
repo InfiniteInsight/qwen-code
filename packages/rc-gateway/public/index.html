@@ -2363,6 +2363,72 @@
             (not loaded)
           </div>
         </details>
+        <!-- #123. What is installed and configured on this machine: skills,
+             model providers, hooks. Host facts, so the routes behind this sit at
+             write scope and the note below says so.
+             What this panel deliberately does not print, and why that is a
+             readability choice rather than a protection: a skill's
+             `installedPath`, a provider model's `baseUrl` and `envKey`, and a
+             hook's whole `config` block. The gate on these routes is the scope,
+             not this page, so a device that can read the route can read those
+             fields already. What the page adds is not a secret filter, it is
+             rows a person can read on a phone: which skills exist and whether
+             each is on, which provider is current, which events have a hook.
+             On hooks the omission has one more reason worth stating. The daemon
+             masks every `config.env` and `config.headers` VALUE to a constant
+             and leaves the key names, and it never masks `config.command`
+             (packages/cli/src/acp-integration/acpAgent.ts:2549). So a printed
+             env row would show a variable name beside a string that looks like
+             content, which reads as a value to anyone skimming. Printing
+             nothing from that block is the honest rendering.
+             A disabled skill and a disabled hook both stay on the list. They are
+             installed, and the reason one is off is the fact someone came to
+             check. -->
+        <details id="ws-inventory" class="ops-collapse">
+          <summary>
+            <strong>Workspace inventory</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Workspace inventory?"
+              aria-expanded="false"
+              aria-controls="help-ws-inventory"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-inventory" hidden>
+            What this machine has installed and configured. Pick
+            <b>skills</b> for the invocable skills and whether each is on,
+            <b>providers</b> for the model providers and which one is current,
+            or <b>hooks</b> for the events that have a hook attached, then tap
+            <b>Read inventory</b>. Off items are listed with the rest because an
+            installed-but-disabled item is still an item. Needs write scope,
+            because these are facts about the host rather than about a
+            conversation.
+          </div>
+          <div class="ops-note">
+            (this machine's own state; requires write scope)
+          </div>
+          <div>
+            <label
+              ><input type="radio" name="inv-kind" value="skills" checked />
+              skills</label
+            >
+            <label
+              ><input type="radio" name="inv-kind" value="providers" />
+              providers</label
+            >
+            <label
+              ><input type="radio" name="inv-kind" value="hooks" />
+              hooks</label
+            >
+            <button id="inv-load">Read inventory</button>
+          </div>
+          <div id="inv-body" style="max-height: 140px; overflow-y: auto">
+            (not loaded)
+          </div>
+        </details>
         <!-- #124. What ONE live conversation has loaded: its skills and the MCP
              servers its own manager holds. Deliberately not the workspace view.
              The SDK builds this payload from one session's own Config
@@ -13008,6 +13074,110 @@
         // `errors` is its own field on the envelope, so it gets its own rows
         // rather than being folded into the cells, which would invent a kind
         // the daemon never named.
+        for (const e of errs) {
+          rows.push(
+            '  ! ' +
+              String((e && e.kind) || '(unknown)') +
+              '  ' +
+              statusWord(e) +
+              (typeof (e && e.error) === 'string' ? ' - ' + e.error : ''),
+          );
+        }
+        renderRows(out, rows);
+      };
+
+      $('inv-load').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('inv-body');
+        const kindEl = document.querySelector(
+          'input[name="inv-kind"]:checked',
+        );
+        const kind =
+          kindEl && (kindEl.value === 'providers' || kindEl.value === 'hooks')
+            ? kindEl.value
+            : 'skills';
+        out.textContent = 'loading\u2026';
+        const r = await rcCall('/rc/workspace/' + kind);
+        if (!r.ok) {
+          // Three routes, three verdicts. The page passes each through as the
+          // route named it, so a daemon that serves skills but not hooks says
+          // which one it will not answer
+          // (src/routes/workspaceInventory.ts).
+          out.textContent = 'inventory failed: ' + r.code;
+          return;
+        }
+        const st = r.body || {};
+        const items = Array.isArray(st[kind]) ? st[kind] : [];
+        const errs = Array.isArray(st.errors) ? st.errors : [];
+        const rows = [];
+        const n = items.length;
+        rows.push(
+          n +
+            ' ' +
+            kind +
+            (st.disabled === true ? ', all disabled' : '') +
+            (st.acpChannelLive === false ? ', channel not live' : ''),
+        );
+        const statusWord = (c) => String((c && c.status) || 'unknown');
+        const tail = (c) => {
+          // The daemon's own words for what is wrong, in preference to anything
+          // this page could say about it.
+          let line = '';
+          if (typeof (c && c.error) === 'string')
+            line +=
+              ' - ' +
+              c.error +
+              (typeof (c && c.errorKind) === 'string'
+                ? ' (' + c.errorKind + ')'
+                : '');
+          if (typeof (c && c.hint) === 'string') line += ' - ' + c.hint;
+          return line;
+        };
+        for (const c of items) {
+          if (kind === 'skills') {
+            // A disabled skill stays on the row list: it is installed, and
+            // `disabledReason` is the fact the reader came for.
+            let line =
+              '  ' +
+              String((c && c.name) || '(unnamed)') +
+              '  ' +
+              statusWord(c);
+            if (typeof (c && c.level) === 'string')
+              line += ' [' + c.level + ']';
+            if (typeof (c && c.disabledReason) === 'string')
+              line += ' off (' + c.disabledReason + ')';
+            rows.push(line + tail(c));
+          } else if (kind === 'providers') {
+            // `authType` is the provider's identity. No baseUrl and no envKey:
+            // see the note on the panel, which says plainly that this is
+            // readability and not a secret filter.
+            let line =
+              '  ' +
+              String((c && c.authType) || '(unnamed)') +
+              '  ' +
+              statusWord(c);
+            if (c && c.current === true) line += ' (current)';
+            if (Array.isArray(c && c.models))
+              line += '  ' + c.models.length + ' models';
+            rows.push(line + tail(c));
+          } else {
+            // Hook identity only. The whole `config` block stays undrawn: the
+            // daemon masks env VALUES to a constant while leaving the key names
+            // and leaves `command` unmasked
+            // (packages/cli/src/acp-integration/acpAgent.ts:2549), so a printed
+            // env row would put a variable name beside a string that reads like
+            // content.
+            let line =
+              '  ' +
+              String((c && c.eventName) || '(unknown event)') +
+              (c && c.enabled === true ? '  on' : '  off');
+            if (typeof (c && c.source) === 'string')
+              line += ' [' + c.source + ']';
+            if (typeof (c && c.matcher) === 'string')
+              line += ' match ' + c.matcher;
+            rows.push(line + tail(c));
+          }
+        }
         for (const e of errs) {
           rows.push(
             '  ! ' +

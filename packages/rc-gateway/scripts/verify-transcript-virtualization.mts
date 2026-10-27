@@ -2210,6 +2210,18 @@ type PageScenario =
         workspacePreflightResult?: unknown;
         /** Status the stub answers GET /workspace/preflight with. */
         workspacePreflightStatus?: number;
+        /** Body the stub answers GET /workspace/skills with. */
+        workspaceSkillsResult?: unknown;
+        /** Status the stub answers GET /workspace/skills with. */
+        workspaceSkillsStatus?: number;
+        /** Body the stub answers GET /workspace/providers with. */
+        workspaceProvidersResult?: unknown;
+        /** Status the stub answers GET /workspace/providers with. */
+        workspaceProvidersStatus?: number;
+        /** Body the stub answers GET /workspace/hooks with. */
+        workspaceHooksResult?: unknown;
+        /** Status the stub answers GET /workspace/hooks with. */
+        workspaceHooksStatus?: number;
         /**
          * Body the stub answers GET /session/:id/artifacts with. A scenario
          * that asserts a drawn row, or that an unknown kind still reaches the
@@ -9956,6 +9968,30 @@ PAGE_SCENARIOS.push({
     return diagRows(page);
   };
 
+  // #123. The inventory panel. Three reads, one handler, one bounded body, so
+  // the scenarios name their own payloads: the point is what the page does with
+  // a record it was handed, not whether the stub can echo a fixture.
+  const invRows = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('#inv-body > div')).map(
+        (el) => (el.textContent ?? '').trim(),
+      ),
+    );
+
+  const openInvPanel = async (page: Page): Promise<void> => {
+    await page.click('.tab[data-tab="settings"]');
+    await page.click('#ws-inventory > summary');
+  };
+
+  const readInv = async (page: Page): Promise<string[]> => {
+    await page.click('#inv-load');
+    await page.waitForFunction(() => {
+      const b = document.getElementById('inv-body');
+      return !!b && !b.textContent.includes('loading');
+    });
+    return invRows(page);
+  };
+
   PAGE_SCENARIOS.push({
     name: 'P98 the diagnostics panel draws the daemon words it has never seen',
     waitView: false,
@@ -10171,6 +10207,368 @@ PAGE_SCENARIOS.push({
       return `refusals: preflight then env, each named`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P102 the skills list keeps a disabled skill and its reason',
+    waitView: false,
+    noConsoleErrors: true,
+    // One skill on, one off. The off one is the row that matters: a relay or a
+    // page that dropped non-ok entries would make the machine look like it had
+    // one skill rather than two, one of them switched off on purpose, which is
+    // the direction that hides a skill someone disabled and forgot.
+    stub: {
+      workspaceSkillsResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            name: 'only-an-on-skill',
+            description: 'd',
+            level: 'workspace',
+            modelInvocable: true,
+            status: 'ok',
+          },
+          {
+            kind: 'skill',
+            name: 'only-an-off-skill',
+            description: 'd',
+            level: 'user',
+            modelInvocable: false,
+            status: 'disabled',
+            disabledReason: 'hard',
+          },
+        ],
+      },
+    },
+    run: async ({ page }) => {
+      await openInvPanel(page);
+      // Explicit even though skills is the checked default, so this scenario
+      // does not silently change meaning if the default radio moves.
+      await page.click('input[name="inv-kind"][value="skills"]');
+      const rows = await readInv(page);
+      expect(
+        rows[0] === '2 skills',
+        `the skills header miscounted (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('only-an-on-skill') && r.includes('ok')),
+        `the enabled skill never reached the page (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-an-off-skill') &&
+            r.includes('disabled') &&
+            r.includes('hard'),
+        ),
+        `the disabled skill or its reason never reached the page (${JSON.stringify(rows)})`,
+      );
+      return `skills draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P103 the hooks list draws identity and never the config block',
+    waitView: false,
+    noConsoleErrors: true,
+    // The payload carries a real shell command and an env entry whose value is
+    // the daemon's mask. Neither may appear. The mask is the sharper half of
+    // this: a printed env row would put a variable name beside a string that
+    // looks exactly like content, which reads as "here is the token" to anyone
+    // skimming a phone screen, when in fact the daemon replaced the value
+    // (packages/cli/src/acp-integration/acpAgent.ts:2549).
+    stub: {
+      workspaceHooksResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        disabled: false,
+        hooks: [
+          {
+            kind: 'hook',
+            eventName: 'only-a-hook-event',
+            source: 'workspace',
+            enabled: true,
+            matcher: 'Bash',
+            config: {
+              type: 'command',
+              command: 'only-a-secret-command-invocation',
+              env: { ONLY_A_SECRET_ENV_KEY: '[redacted]' },
+            },
+          },
+          {
+            kind: 'hook',
+            eventName: 'only-an-off-hook',
+            source: 'user',
+            enabled: false,
+            config: { type: 'command', command: 'only-another-command' },
+          },
+        ],
+        events: {},
+      },
+    },
+    run: async ({ page }) => {
+      await openInvPanel(page);
+      // The panel opens on skills, so a scenario that wants another kind has to
+      // say so. Without this click the body below would be the stub's default
+      // skills payload, and the config assertions would pass by never having
+      // seen a hook at all.
+      await page.click('input[name="inv-kind"][value="hooks"]');
+      const rows = await readInv(page);
+      const joined = rows.join('\n');
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-a-hook-event') &&
+            r.includes('on') &&
+            r.includes('[workspace]') &&
+            r.includes('match Bash'),
+        ),
+        `the hook identity never reached the page (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('only-an-off-hook') && r.includes('off')),
+        `the disabled hook was dropped from the list (${JSON.stringify(rows)})`,
+      );
+      for (const forbidden of [
+        'only-a-secret-command-invocation',
+        'only-another-command',
+        'ONLY_A_SECRET_ENV_KEY',
+        '[redacted]',
+      ]) {
+        expect(
+          !joined.includes(forbidden),
+          `the hooks panel drew config it should leave undrawn (${JSON.stringify(forbidden)} in ${JSON.stringify(rows)})`,
+        );
+      }
+      return `hooks draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P104 the providers list draws identity and not the endpoint or key',
+    waitView: false,
+    noConsoleErrors: true,
+    // `baseUrl` says where this machine's model traffic goes and `envKey` says
+    // which variable pays for it. Both are in the payload and neither is drawn.
+    // The route is write-gated, so this is a readability choice and not a
+    // secret filter, and the panel's own note says that rather than claiming a
+    // protection it does not provide.
+    stub: {
+      workspaceProvidersResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        acpChannelLive: false,
+        providers: [
+          {
+            kind: 'model_provider',
+            authType: 'only-a-current-provider',
+            current: true,
+            status: 'ok',
+            models: [
+              {
+                modelId: 'm1',
+                baseModelId: 'm1',
+                name: 'M1',
+                isCurrent: true,
+                isRuntime: false,
+                baseUrl: 'https://only-a-secret-endpoint.example',
+                envKey: 'ONLY_A_SECRET_PROVIDER_KEY',
+              },
+              {
+                modelId: 'm2',
+                baseModelId: 'm2',
+                name: 'M2',
+                isCurrent: false,
+                isRuntime: false,
+              },
+            ],
+          },
+          {
+            kind: 'model_provider',
+            authType: 'only-a-quiet-provider',
+            current: false,
+            status: 'warning',
+            hint: 'only-a-provider-hint',
+            models: [],
+          },
+        ],
+      },
+    },
+    run: async ({ page }) => {
+      await openInvPanel(page);
+      await page.click('input[name="inv-kind"][value="providers"]');
+      const rows = await readInv(page);
+      const joined = rows.join('\n');
+      expect(
+        rows[0] === '2 providers, channel not live',
+        `the providers header miscounted or dropped the channel clause (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-a-current-provider') &&
+            r.includes('(current)') &&
+            r.includes('2 models'),
+        ),
+        `the current provider or its model count never reached the page (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some(
+          (r) =>
+            r.includes('only-a-quiet-provider') &&
+            r.includes('only-a-provider-hint') &&
+            r.includes('0 models'),
+        ),
+        `the other provider or its hint never reached the page (${JSON.stringify(rows)})`,
+      );
+      for (const forbidden of [
+        'https://only-a-secret-endpoint.example',
+        'ONLY_A_SECRET_PROVIDER_KEY',
+      ]) {
+        expect(
+          !joined.includes(forbidden),
+          `the providers panel drew a field it should leave undrawn (${JSON.stringify(forbidden)} in ${JSON.stringify(rows)})`,
+        );
+      }
+      return `providers draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P105 switching inventory kind re-reads the other route',
+    waitView: false,
+    noConsoleErrors: true,
+    // Three payloads, each with a word the others do not have. A switch that
+    // redrew a cached answer would leave the first word on screen, and the
+    // reader would be looking at skills while believing they were looking at
+    // hooks.
+    stub: {
+      workspaceSkillsResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            name: 'only-in-skills',
+            description: 'd',
+            level: 'workspace',
+            modelInvocable: true,
+            status: 'ok',
+          },
+        ],
+      },
+      workspaceProvidersResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        providers: [
+          {
+            kind: 'model_provider',
+            authType: 'only-in-providers',
+            current: false,
+            status: 'ok',
+            models: [],
+          },
+        ],
+      },
+      workspaceHooksResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        disabled: true,
+        hooks: [
+          {
+            kind: 'hook',
+            eventName: 'only-in-hooks',
+            source: 'user',
+            enabled: true,
+            config: { type: 'command', command: 'x' },
+          },
+        ],
+        events: {},
+      },
+    },
+    run: async ({ page }) => {
+      await openInvPanel(page);
+      const skills = await readInv(page);
+      expect(
+        skills.join('\n').includes('only-in-skills'),
+        `the skills read never drew its own item (${JSON.stringify(skills)})`,
+      );
+
+      await page.click('input[name="inv-kind"][value="providers"]');
+      const providers = await readInv(page);
+      expect(
+        providers.join('\n').includes('only-in-providers'),
+        `the providers read never drew its own item (${JSON.stringify(providers)})`,
+      );
+      expect(
+        !providers.join('\n').includes('only-in-skills'),
+        `skills stayed on screen after switching to providers (${JSON.stringify(providers)})`,
+      );
+
+      await page.click('input[name="inv-kind"][value="hooks"]');
+      const hooks = await readInv(page);
+      expect(
+        hooks.join('\n').includes('only-in-hooks'),
+        `the hooks read never drew its own item (${JSON.stringify(hooks)})`,
+      );
+      expect(
+        hooks[0] === '1 hooks, all disabled',
+        `the envelope disabled flag never reached the header (${JSON.stringify(hooks)})`,
+      );
+      return `switched ${JSON.stringify(skills)} -> ${JSON.stringify(providers)} -> ${JSON.stringify(hooks)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P105b a refused inventory read names which route refused',
+    waitView: false,
+    // Hooks 404 while skills answer. The three unsupported codes are distinct on
+    // purpose, so a page that collapsed them would hide which half of the
+    // inventory an older daemon serves. noConsoleErrors is deliberately not set:
+    // the browser logs the 502.
+    stub: { workspaceHooksStatus: 404 },
+    run: async ({ page }) => {
+      await openInvPanel(page);
+      await page.click('input[name="inv-kind"][value="hooks"]');
+      await page.click('#inv-load');
+      await page.waitForFunction(() => {
+        const b = document.getElementById('inv-body');
+        return !!b && b.textContent.includes('hooks_unsupported');
+      });
+      const refused = await page.evaluate(
+        () => document.getElementById('inv-body')?.textContent ?? '',
+      );
+      expect(
+        refused.includes('inventory failed: hooks_unsupported'),
+        `the hooks refusal did not name itself (${JSON.stringify(refused)})`,
+      );
+
+      await page.click('input[name="inv-kind"][value="skills"]');
+      await page.click('#inv-load');
+      await page.waitForFunction(() => {
+        const b = document.getElementById('inv-body');
+        return !!b && !b.textContent.includes('loading');
+      });
+      const rows = await invRows(page);
+      expect(
+        rows.some((r) => r.includes('ANTHROPIC_API_KEY')) === false,
+        `the skills read drew a provider field (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.length > 0 && rows[0].includes('skills'),
+        `skills still would not draw beside a hooks refusal (${JSON.stringify(rows)})`,
+      );
+      return `hooks refused by name, skills drew ${JSON.stringify(rows)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -10201,6 +10599,12 @@ async function runPageScenario(
     workspaceEnvStatus: s.stub?.workspaceEnvStatus,
     workspacePreflightResult: s.stub?.workspacePreflightResult,
     workspacePreflightStatus: s.stub?.workspacePreflightStatus,
+    workspaceSkillsResult: s.stub?.workspaceSkillsResult,
+    workspaceSkillsStatus: s.stub?.workspaceSkillsStatus,
+    workspaceProvidersResult: s.stub?.workspaceProvidersResult,
+    workspaceProvidersStatus: s.stub?.workspaceProvidersStatus,
+    workspaceHooksResult: s.stub?.workspaceHooksResult,
+    workspaceHooksStatus: s.stub?.workspaceHooksStatus,
     artifactListResult: s.stub?.artifactListResult,
     artifactListStatus: s.stub?.artifactListStatus,
     artifactContentStatus: s.stub?.artifactContentStatus,

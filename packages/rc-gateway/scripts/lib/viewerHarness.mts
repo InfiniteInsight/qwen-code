@@ -181,6 +181,18 @@ export interface BootViewerOptions {
   workspacePreflightResult?: unknown;
   /** Status the stub answers GET /workspace/preflight with (default 200). */
   workspacePreflightStatus?: number;
+  /** Body the stub answers GET /workspace/skills with. */
+  workspaceSkillsResult?: unknown;
+  /** Status the stub answers GET /workspace/skills with. */
+  workspaceSkillsStatus?: number;
+  /** Body the stub answers GET /workspace/providers with. */
+  workspaceProvidersResult?: unknown;
+  /** Status the stub answers GET /workspace/providers with. */
+  workspaceProvidersStatus?: number;
+  /** Body the stub answers GET /workspace/hooks with. */
+  workspaceHooksResult?: unknown;
+  /** Status the stub answers GET /workspace/hooks with. */
+  workspaceHooksStatus?: number;
   /**
    * Body the stub answers GET /session/:id/artifacts with. Left unset the stub
    * serves its own default envelope, so a scenario that asserts a drawn row is
@@ -241,6 +253,12 @@ export async function bootViewer(
     workspaceEnvStatus: opts.workspaceEnvStatus,
     workspacePreflightResult: opts.workspacePreflightResult,
     workspacePreflightStatus: opts.workspacePreflightStatus,
+    workspaceSkillsResult: opts.workspaceSkillsResult,
+    workspaceSkillsStatus: opts.workspaceSkillsStatus,
+    workspaceProvidersResult: opts.workspaceProvidersResult,
+    workspaceProvidersStatus: opts.workspaceProvidersStatus,
+    workspaceHooksResult: opts.workspaceHooksResult,
+    workspaceHooksStatus: opts.workspaceHooksStatus,
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,

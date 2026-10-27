@@ -37,6 +37,9 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspacePreflightStatus,
+  DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceHooksStatus,
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
@@ -423,6 +426,14 @@ export interface SessionDaemon {
   workspacePreflight(
     workspaceCwd?: string,
   ): Promise<DaemonWorkspacePreflightStatus>;
+  // Workspace inventory (rc-workspace-inventory, #123). Same no-argument
+  // wrappers as the diagnostics pair: the trailing cwd picks the pooled
+  // client, and that client's base URL is the target workspace.
+  workspaceSkills(workspaceCwd?: string): Promise<DaemonWorkspaceSkillsStatus>;
+  workspaceProviders(
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceProvidersStatus>;
+  workspaceHooks(workspaceCwd?: string): Promise<DaemonWorkspaceHooksStatus>;
   setWorkspaceSetting(
     scope: 'workspace' | 'user',
     key: string,
@@ -1691,6 +1702,26 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonWorkspacePreflightStatus> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.workspacePreflight(),
+    );
+  }
+
+  workspaceSkills(workspaceCwd?: string): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceSkills(),
+    );
+  }
+
+  workspaceProviders(
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceProvidersStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceProviders(),
+    );
+  }
+
+  workspaceHooks(workspaceCwd?: string): Promise<DaemonWorkspaceHooksStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceHooks(),
     );
   }
 
