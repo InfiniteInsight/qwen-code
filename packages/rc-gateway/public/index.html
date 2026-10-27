@@ -2304,6 +2304,65 @@
             (not loaded)
           </div>
         </details>
+        <!-- #123. What this machine can actually run: the daemon's startup
+             checks and its environment cells. Both are host facts, which is
+             why the routes sit at write scope and why the note below says so
+             rather than leaving it to the reader to discover a 403.
+             Nothing here is relabelled. Every row is the daemon's own word for
+             its own state, because DaemonPreflightCell.kind and DaemonStatus
+             are the daemon's vocabulary and it can add members without this
+             page changing (src/routes/workspaceDiagnostics.ts). A switch over
+             the members this page happens to know would draw a check it has
+             never heard of as nothing at all, which is the failure that hides
+             a broken machine.
+             An env_var cell prints presence and never a value. The daemon
+             guarantees a value is always omitted for that kind
+             (packages/sdk-typescript/src/daemon/types.ts:3067), so there is no
+             secret on the wire to print, and the page does not reach for one
+             that is absent: absence draws nothing here too. -->
+        <details id="ws-diagnostics" class="ops-collapse">
+          <summary>
+            <strong>Workspace diagnostics</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Workspace diagnostics?"
+              aria-expanded="false"
+              aria-controls="help-ws-diagnostics"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-ws-diagnostics" hidden>
+            What the daemon says about the machine it runs on. Pick
+            <b>startup checks</b> for the preflight cells (Node, ripgrep, git,
+            credentials, egress) or <b>environment</b> for the runtime cells
+            (versions, platform, proxy, which variables are set), then tap
+            <b>Read diagnostics</b>. Each row is the daemon's own status word,
+            and a failing check stays on the page because it is the row you
+            came for. An environment row for a secret variable says only that
+            it is set; the value never leaves the daemon. Needs write scope,
+            because these are facts about the host rather than about a
+            conversation.
+          </div>
+          <div class="ops-note">
+            (this machine's own state; requires write scope)
+          </div>
+          <div>
+            <label
+              ><input type="radio" name="diag-kind" value="preflight" checked />
+              startup checks</label
+            >
+            <label
+              ><input type="radio" name="diag-kind" value="env" />
+              environment</label
+            >
+            <button id="diag-load">Read diagnostics</button>
+          </div>
+          <div id="diag-body" style="max-height: 140px; overflow-y: auto">
+            (not loaded)
+          </div>
+        </details>
         <!-- #124. What ONE live conversation has loaded: its skills and the MCP
              servers its own manager holds. Deliberately not the workspace view.
              The SDK builds this payload from one session's own Config
@@ -12879,6 +12938,83 @@
               (typeof mcp.budgetMode === 'string'
                 ? ', budget ' + mcp.budgetMode
                 : ''),
+          );
+        }
+        renderRows(out, rows);
+      };
+
+      // #123. The two diagnostics reads share one handler because the payloads
+      // share one envelope, and a reader switching between startup checks and
+      // environment cells should see the same layout. Two things it does on
+      // purpose. It draws the daemon's own status word with no switch over the
+      // members it knows, so a check or a status added by a newer daemon still
+      // appears rather than being drawn as nothing. And it prints a value only
+      // when the daemon sent one, which is what keeps an env_var row saying
+      // merely "set": the type guarantees a value is always omitted for that
+      // kind (types.ts:3067), so reaching for an absent field here would be the
+      // page inventing a secret's contents.
+      $('diag-load').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('diag-body');
+        const kindEl = document.querySelector(
+          'input[name="diag-kind"]:checked',
+        );
+        const kind = kindEl && kindEl.value === 'env' ? 'env' : 'preflight';
+        out.textContent = 'loading\u2026';
+        const r = await rcCall('/rc/workspace/' + kind);
+        if (!r.ok) {
+          // env_unsupported and preflight_unsupported are two different
+          // verdicts from two routes, and the page passes both through rather
+          // than collapsing them, so a daemon that answers one and not the
+          // other says so (src/routes/workspaceDiagnostics.ts).
+          out.textContent = 'diagnostics failed: ' + r.code;
+          return;
+        }
+        const st = r.body || {};
+        const cells = Array.isArray(st.cells) ? st.cells : [];
+        const errs = Array.isArray(st.errors) ? st.errors : [];
+        const rows = [];
+        const n = cells.length;
+        rows.push(
+          n +
+            (kind === 'env' ? ' environment cell' : ' check') +
+            (n === 1 ? '' : 's') +
+            (st.acpChannelLive === false ? ', channel not live' : ''),
+        );
+        const statusWord = (c) => String((c && c.status) || 'unknown');
+        for (const c of cells) {
+          const label =
+            kind === 'env'
+              ? String((c && c.name) || '(unnamed)')
+              : String((c && c.kind) || '(unknown)');
+          let line = '  ' + label + '  ' + statusWord(c);
+          if (typeof (c && c.value) === 'string') line += ' = ' + c.value;
+          if (typeof (c && c.present) === 'boolean')
+            line += c.present ? ' set' : ' not set';
+          if (typeof (c && c.locality) === 'string')
+            line += ' [' + c.locality + ']';
+          // The daemon's own words for what is wrong, in preference to anything
+          // this page could say about it.
+          if (typeof (c && c.error) === 'string')
+            line +=
+              ' - ' +
+              c.error +
+              (typeof (c && c.errorKind) === 'string'
+                ? ' (' + c.errorKind + ')'
+                : '');
+          if (typeof (c && c.hint) === 'string') line += ' - ' + c.hint;
+          rows.push(line);
+        }
+        // `errors` is its own field on the envelope, so it gets its own rows
+        // rather than being folded into the cells, which would invent a kind
+        // the daemon never named.
+        for (const e of errs) {
+          rows.push(
+            '  ! ' +
+              String((e && e.kind) || '(unknown)') +
+              '  ' +
+              statusWord(e) +
+              (typeof (e && e.error) === 'string' ? ' - ' + e.error : ''),
           );
         }
         renderRows(out, rows);
