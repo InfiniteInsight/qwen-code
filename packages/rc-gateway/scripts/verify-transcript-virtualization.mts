@@ -3588,9 +3588,17 @@ const PAGE_SCENARIOS: PageScenario[] = [
         ['ship it', 'pending'],
       ]);
       // Long enough that the row near the top is genuinely off screen when the
-      // view sits at the end.
+      // view sits at the end. The text, not the row count, is the lever: these
+      // chunks merge into ONE assistant item, so the height is the sum of their
+      // wrapped lines at whatever measure the page has. Measured on the g1 shell
+      // (#117), 40 short rows read scrollHeight 584 against a 540px box at the
+      // shell's 1248px measure, so the to-do row was still on screen at the end
+      // and this scenario proved nothing. Kept long enough to overflow the box at
+      // the full-bleed measure, not just the 760px column this predates.
       for (let k = 0; k < 40; k++) {
-        f.asst(`turn ${k}: lorem ipsum dolor sit amet consectetur elit. `);
+        f.asst(
+          (`turn ${k}: lorem ipsum dolor sit amet consectetur elit. `).repeat(8),
+        );
       }
       return f.done().list;
     },
