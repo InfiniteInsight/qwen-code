@@ -12035,6 +12035,93 @@ PAGE_SCENARIOS.push({
       return `a nameless 200 reads ${JSON.stringify(out)}`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P123 the bar names search and the word is what the break drops',
+    // g1 "Top bar", gap 10 option B (#118). The affordance lived only behind a
+    // key you already knew, and the verifier had no bar assertion of any kind,
+    // so nothing could have noticed the label going missing again.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // The harness opens a default-viewport context (lib/viewerHarness.mts:
+      // 305, newContext with no viewport), so the narrow reading has to be
+      // made here rather than assumed from the phone scenarios.
+      await page.setViewportSize({ width: 390, height: 844 });
+      const read = () =>
+        page.evaluate(() => {
+          const bar = document.getElementById('tab-bar') as HTMLElement;
+          const keys = document.getElementById(
+            'bar-search',
+          ) as HTMLButtonElement;
+          const word = keys.querySelector('.kl') as HTMLElement;
+          return {
+            inBar: !!keys.closest('#tab-bar'),
+            shown: keys.getClientRects().length > 0,
+            label: (keys.textContent || '').trim(),
+            wordShown: word.getClientRects().length > 0,
+            barScroll: bar.scrollWidth,
+            barClient: bar.clientWidth,
+          };
+        });
+      // 390 is the width the break exists for, and the one the sheet measured.
+      const narrow = await read();
+      expect(narrow.inBar, 'the search control is not inside the bar');
+      expect(narrow.shown, 'the search control is not on screen at 390');
+      expect(
+        narrow.label.includes('\u2318K'),
+        'the label lost the glyph at 390, got ' + JSON.stringify(narrow.label),
+      );
+      expect(
+        !narrow.wordShown,
+        'the word is still shown at 390, the one width it does not fit',
+      );
+      expect(
+        narrow.barScroll <= narrow.barClient,
+        'the bar overflows horizontally at 390, scrollWidth ' +
+          narrow.barScroll +
+          ' against ' +
+          narrow.barClient,
+      );
+      await page.setViewportSize({ width: 1280, height: 720 });
+      const wide = await read();
+      expect(
+        wide.wordShown,
+        'the word did not come back at 1280, where the bar has the room',
+      );
+      expect(
+        wide.label === '\u2318K search',
+        'the bar label is ' + JSON.stringify(wide.label) + ', not the phrase',
+      );
+      // Naming it is half of it: the control has to do the thing it names.
+      await page.click('#bar-search');
+      const opened = await page.evaluate(() => ({
+        open: (document.getElementById('search') as HTMLDetailsElement).open,
+        focused:
+          document.activeElement === document.getElementById('search-q'),
+        ops: (
+          document.querySelector('.tab[data-tab="ops"]') as HTMLElement
+        ).classList.contains('active'),
+      }));
+      expect(opened.ops, 'the bar control did not move to the Operations tab');
+      expect(opened.open, 'the bar control did not open the search panel');
+      expect(
+        opened.focused,
+        'the bar control did not focus the search box, so it names a way in it ' +
+          'does not open',
+      );
+      return (
+        '390: glyph alone, word dropped, bar ' +
+        narrow.barScroll +
+        '/' +
+        narrow.barClient +
+        '; 1280: ' +
+        wide.label +
+        '; click lands on ops with the box focused'
+      );
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
