@@ -12,7 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { loadSettings } from '../../config/settings.js';
 import { normalizeDisabledToolList } from '../../config/normalizeDisabledTools.js';
-import { getNestedProperty } from '../../utils/settingsUtils.js';
+import { getNestedProperty } from '../../config/settingsUtils.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
