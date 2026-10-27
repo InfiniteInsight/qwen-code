@@ -2198,6 +2198,19 @@ type PageScenario =
         /** Status the stub answers GET /workspace/permissions with. */
         workspacePermissionsStatus?: number;
         /**
+         * Body the stub answers GET /workspace/env with. A scenario that
+         * asserts a drawn environment cell has to name that cell itself: left
+         * unset the stub serves its own default fixture, and the assertion would
+         * be checking this file's invention rather than the page's reading.
+         */
+        workspaceEnvResult?: unknown;
+        /** Status the stub answers GET /workspace/env with. */
+        workspaceEnvStatus?: number;
+        /** Body the stub answers GET /workspace/preflight with. */
+        workspacePreflightResult?: unknown;
+        /** Status the stub answers GET /workspace/preflight with. */
+        workspacePreflightStatus?: number;
+        /**
          * Body the stub answers GET /session/:id/artifacts with. A scenario
          * that asserts a drawn row, or that an unknown kind still reaches the
          * page, has to supply its own envelope, or it is checking a list the
@@ -9915,6 +9928,249 @@ PAGE_SCENARIOS.push({
       return `default payload draws ${JSON.stringify(chips)}`;
     },
   });
+
+  // #123. The diagnostics panel. Both reads share one envelope and one handler,
+  // so the scenarios below name their own cells: left to the stub's default the
+  // assertions would be checking this file's fixture rather than the page's
+  // reading of a payload it was handed.
+  const diagRows = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('#diag-body > div')).map(
+        (el) => (el.textContent ?? '').trim(),
+      ),
+    );
+
+  // The panel sits under Settings, beside the other workspace surfaces
+  // (ws-target, ws-trust, ws-mcp, ws-tools, ws-files), not under Ops.
+  const openDiagPanel = async (page: Page): Promise<void> => {
+    await page.click('.tab[data-tab="settings"]');
+    await page.click('#ws-diagnostics > summary');
+  };
+
+  const readDiag = async (page: Page): Promise<string[]> => {
+    await page.click('#diag-load');
+    await page.waitForFunction(() => {
+      const b = document.getElementById('diag-body');
+      return !!b && !b.textContent.includes('loading');
+    });
+    return diagRows(page);
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P98 the diagnostics panel draws the daemon words it has never seen',
+    waitView: false,
+    noConsoleErrors: true,
+    // A kind and a status from a newer daemon, a hint, an errorKind, and the
+    // separate `errors` array, all in one payload. The panel switches over
+    // nothing, so every one of those has to survive; a page that knew only the
+    // 12 kinds in the SDK type would draw `tape_drive` as no row at all, which
+    // is how a broken machine gets hidden from the person looking at it.
+    stub: {
+      workspacePreflightResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          { kind: 'node_version', status: 'ok', locality: 'daemon' },
+          {
+            kind: 'tape_drive',
+            status: 'recalibrating',
+            locality: 'acp',
+            hint: 'belt slipping',
+          },
+          {
+            kind: 'auth',
+            status: 'error',
+            locality: 'daemon',
+            error: 'no credentials',
+            errorKind: 'auth_missing',
+          },
+        ],
+        errors: [{ kind: 'egress', status: 'error', error: 'probe timed out' }],
+      },
+    },
+    run: async ({ page }) => {
+      await openDiagPanel(page);
+      const rows = await readDiag(page);
+      expect(
+        rows[0] === '3 checks, channel not live',
+        `the header did not count the cells or lost the channel state (${JSON.stringify(rows)})`,
+      );
+      const joined = rows.join('\n');
+      for (const word of [
+        'tape_drive',
+        'recalibrating',
+        'belt slipping',
+        'auth_missing',
+        'no credentials',
+      ]) {
+        expect(
+          joined.includes(word),
+          `a daemon word never reached the page (${JSON.stringify(word)} in ${JSON.stringify(rows)})`,
+        );
+      }
+      // `errors` is its own field, so it gets its own row and does not get
+      // folded into the cells, which would invent a check the daemon never ran.
+      expect(
+        rows.some(
+          (r) => r.startsWith('!') && r.includes('egress') && r.includes('probe timed out'),
+        ),
+        `the errors array was not relayed as its own row (${JSON.stringify(rows)})`,
+      );
+      expect(
+        !rows
+          .filter((r) => !r.startsWith('!'))
+          .some((r) => r.includes('egress')),
+        `an error entry was folded into the checks (${JSON.stringify(rows)})`,
+      );
+      return `draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P99 an environment secret draws presence and never a value',
+    waitView: false,
+    noConsoleErrors: true,
+    // The daemon guarantees a value is always omitted for kind='env_var'
+    // (packages/sdk-typescript/src/daemon/types.ts:3067), so the only fact on
+    // the wire is whether it is set. The fixture leaves the value off on
+    // purpose: if the page reached for the absent field it would print
+    // "undefined", and a reader would take that for a token whose value is
+    // literally the string undefined.
+    stub: {
+      workspaceEnvResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        cells: [
+          { kind: 'runtime', name: 'node', status: 'ok', value: 'v9.9.9' },
+          { kind: 'env_var', name: 'MYSTERY_TOKEN', status: 'ok', present: true },
+          { kind: 'proxy', name: 'HTTPS_PROXY', status: 'warning', present: false },
+        ],
+      },
+    },
+    run: async ({ page }) => {
+      await openDiagPanel(page);
+      await page.click('input[name="diag-kind"][value="env"]');
+      const rows = await readDiag(page);
+      const joined = rows.join('\n');
+      expect(
+        rows.some((r) => r.includes('node') && r.includes('v9.9.9')),
+        `a value the daemon did send was dropped (${JSON.stringify(rows)})`,
+      );
+      const secret = rows.find((r) => r.includes('MYSTERY_TOKEN'));
+      expect(
+        !!secret && secret.includes('set') && !secret.includes('='),
+        `a secret's row invented a value (${JSON.stringify(secret)})`,
+      );
+      expect(
+        joined.includes('not set'),
+        `an absent variable did not say so (${JSON.stringify(rows)})`,
+      );
+      for (const signature of ['undefined', 'null']) {
+        expect(
+          !joined.includes(signature),
+          `the page printed an absent field as ${signature} (${JSON.stringify(rows)})`,
+        );
+      }
+      return `environment draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P100 switching from checks to environment re-reads the other route',
+    waitView: false,
+    noConsoleErrors: true,
+    // Two payloads, each carrying a word the other does not have. A switch that
+    // redrew the cached answer would leave the check word on screen, and the
+    // reader would be looking at startup checks while believing they were
+    // reading the environment.
+    stub: {
+      workspacePreflightResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        cells: [{ kind: 'only-a-check', status: 'ok', locality: 'daemon' }],
+      },
+      workspaceEnvResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        cells: [
+          { kind: 'runtime', name: 'only-a-cell', status: 'ok', value: 'x' },
+        ],
+      },
+    },
+    run: async ({ page }) => {
+      await openDiagPanel(page);
+      const checks = await readDiag(page);
+      expect(
+        checks.join('\n').includes('only-a-check'),
+        `the checks read never drew its own cell (${JSON.stringify(checks)})`,
+      );
+      expect(
+        !checks.join('\n').includes('only-a-cell'),
+        `the environment leaked into the checks view (${JSON.stringify(checks)})`,
+      );
+
+      await page.click('input[name="diag-kind"][value="env"]');
+      const cells = await readDiag(page);
+      expect(
+        cells.join('\n').includes('only-a-cell'),
+        `the environment read never drew its own cell (${JSON.stringify(cells)})`,
+      );
+      expect(
+        !cells.join('\n').includes('only-a-check'),
+        `the checks stayed on screen after switching to environment (${JSON.stringify(cells)})`,
+      );
+      return `switched ${JSON.stringify(checks)} -> ${JSON.stringify(cells)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P101 a refused diagnostics read names which route refused',
+    waitView: false,
+    // Both routes are told to 404, which the gateway re-codes as its own
+    // verdicts (src/routes/workspaceDiagnostics.ts). The two codes are
+    // different on purpose, so a page that collapsed them into one message
+    // would hide which half of the panel a daemon can actually serve.
+    // noConsoleErrors is deliberately not set: a 502 is logged by the browser.
+    stub: { workspacePreflightStatus: 404, workspaceEnvStatus: 404 },
+    run: async ({ page }) => {
+      await openDiagPanel(page);
+      await page.click('#diag-load');
+      await page.waitForFunction(() => {
+        const b = document.getElementById('diag-body');
+        return !!b && b.textContent.includes('preflight_unsupported');
+      });
+      const checks = await page.evaluate(
+        () => document.getElementById('diag-body')?.textContent ?? '',
+      );
+      expect(
+        checks.includes('diagnostics failed: preflight_unsupported'),
+        `the checks refusal did not name itself (${JSON.stringify(checks)})`,
+      );
+
+      await page.click('input[name="diag-kind"][value="env"]');
+      await page.click('#diag-load');
+      await page.waitForFunction(() => {
+        const b = document.getElementById('diag-body');
+        return !!b && b.textContent.includes('env_unsupported');
+      });
+      const cells = await page.evaluate(
+        () => document.getElementById('diag-body')?.textContent ?? '',
+      );
+      expect(
+        cells.includes('diagnostics failed: env_unsupported'),
+        `the environment refusal did not name itself (${JSON.stringify(cells)})`,
+      );
+      return `refusals: preflight then env, each named`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -9941,6 +10197,10 @@ async function runPageScenario(
     resourcesStatusCode: s.stub?.resourcesStatusCode,
     workspacePermissionsResult: s.stub?.workspacePermissionsResult,
     workspacePermissionsStatus: s.stub?.workspacePermissionsStatus,
+    workspaceEnvResult: s.stub?.workspaceEnvResult,
+    workspaceEnvStatus: s.stub?.workspaceEnvStatus,
+    workspacePreflightResult: s.stub?.workspacePreflightResult,
+    workspacePreflightStatus: s.stub?.workspacePreflightStatus,
     artifactListResult: s.stub?.artifactListResult,
     artifactListStatus: s.stub?.artifactListStatus,
     artifactContentStatus: s.stub?.artifactContentStatus,

@@ -169,6 +169,19 @@ export interface BootViewerOptions {
    */
   workspacePermissionsStatus?: number;
   /**
+   * Body the stub answers GET /workspace/env and /workspace/preflight with.
+   * The two diagnostics reads share one envelope, so a scenario that asserts a
+   * drawn cell has to name the cell itself: left unset, the stub serves its own
+   * default fixture and the assertion would be checking this file's invention.
+   */
+  workspaceEnvResult?: unknown;
+  /** Status the stub answers GET /workspace/env with (default 200). */
+  workspaceEnvStatus?: number;
+  /** Body the stub answers GET /workspace/preflight with. */
+  workspacePreflightResult?: unknown;
+  /** Status the stub answers GET /workspace/preflight with (default 200). */
+  workspacePreflightStatus?: number;
+  /**
    * Body the stub answers GET /session/:id/artifacts with. Left unset the stub
    * serves its own default envelope, so a scenario that asserts a drawn row is
    * checking the stub's invention rather than its own unless it sets this.
@@ -224,6 +237,10 @@ export async function bootViewer(
     resourcesStatusCode: opts.resourcesStatusCode,
     workspacePermissionsResult: opts.workspacePermissionsResult,
     workspacePermissionsStatus: opts.workspacePermissionsStatus,
+    workspaceEnvResult: opts.workspaceEnvResult,
+    workspaceEnvStatus: opts.workspaceEnvStatus,
+    workspacePreflightResult: opts.workspacePreflightResult,
+    workspacePreflightStatus: opts.workspacePreflightStatus,
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,

@@ -422,6 +422,14 @@ export interface StubDaemonOptions {
   trustRequestResult?: unknown;
   /** JSON body to return on a non-202 POST /workspace/trust/request response. */
   trustRequestErrorBody?: unknown;
+  /** Status for GET /workspace/env (default 200). Non-200 → { error }. */
+  workspaceEnvStatus?: number;
+  /** Full body for GET /workspace/env (overrides the default v:1 shape). */
+  workspaceEnvResult?: unknown;
+  /** Status for GET /workspace/preflight (default 200). Non-200 → { error }. */
+  workspacePreflightStatus?: number;
+  /** Full body for GET /workspace/preflight (overrides the default v:1). */
+  workspacePreflightResult?: unknown;
   /** Status for GET /workspace/settings (default 200). Non-200 → { error }. */
   workspaceSettingsStatus?: number;
   /** Full body for GET /workspace/settings (overrides the default v:1 shape). */
@@ -776,6 +784,97 @@ export async function startStubDaemon(
         accepted: true,
         desiredState: b.desiredState ?? 'trusted',
         requiresOperatorAction: true,
+      },
+    );
+  });
+
+  app.get('/workspace/env', (_req, res) => {
+    const status = opts.workspaceEnvStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspaceEnvStatus
+    // (packages/sdk-typescript/src/daemon/types.ts:3071) and DaemonEnvCell
+    // (:3063): every cell is a DaemonStatusCell ({ kind, status, error?,
+    // errorKind?, hint? }) plus kind/name/present?/value?.
+    // The env_var cell deliberately carries NO value, because the type says a
+    // value is ALWAYS omitted for that kind (:3067) — a stub that sent one
+    // would let a page pass by printing a secret the real daemon never puts on
+    // the wire. Presence is the whole fact about an env var.
+    res.json(
+      opts.workspaceEnvResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        cells: [
+          {
+            kind: 'runtime',
+            name: 'node',
+            status: 'ok',
+            value: 'v22.17.1',
+          },
+          { kind: 'platform', name: 'os', status: 'ok', value: 'linux' },
+          {
+            kind: 'proxy',
+            name: 'HTTPS_PROXY',
+            status: 'warning',
+            present: false,
+            hint: 'no proxy configured for this workspace',
+          },
+          {
+            kind: 'env_var',
+            name: 'ANTHROPIC_API_KEY',
+            status: 'ok',
+            present: true,
+          },
+        ],
+      },
+    );
+  });
+
+  app.get('/workspace/preflight', (_req, res) => {
+    const status = opts.workspacePreflightStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    // Shaped off DaemonWorkspacePreflightStatus (types.ts:3100) and
+    // DaemonPreflightCell (:3094): a DaemonStatusCell plus kind/locality/
+    // detail?. The three states below are on purpose — a passing check, a
+    // degraded one carrying the daemon's own hint, and a hard failure with an
+    // errorKind from the closed taxonomy — because the panel's job is to draw
+    // all three in the daemon's words, and a fixture where everything is ok
+    // proves only the happy path.
+    res.json(
+      opts.workspacePreflightResult ?? {
+        v: 1,
+        workspaceCwd: opts.workspaceCwd ?? '/proj',
+        initialized: true,
+        acpChannelLive: true,
+        cells: [
+          {
+            kind: 'node_version',
+            status: 'ok',
+            locality: 'daemon',
+            detail: { version: 'v22.17.1' },
+          },
+          {
+            kind: 'ripgrep',
+            status: 'warning',
+            locality: 'daemon',
+            hint: 'falling back to the bundled search binary',
+          },
+          {
+            kind: 'auth',
+            status: 'error',
+            locality: 'acp',
+            error: 'no credentials for the configured provider',
+            errorKind: 'auth_missing',
+          },
+        ],
+        errors: [{ kind: 'egress', status: 'error', error: 'probe timed out' }],
       },
     );
   });

@@ -96,6 +96,10 @@ import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.
 import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
 import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
 import {
+  createWorkspaceEnvRoute,
+  createWorkspacePreflightRoute,
+} from './routes/workspaceDiagnostics.js';
+import {
   createWorkspaceToolToggleRoute,
   createWorkspaceToolsCatalogRoute,
 } from './routes/workspaceTools.js';
@@ -1868,6 +1872,31 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceSettingsRoute(deps.daemon),
+  );
+  // GET /rc/workspace/env and /rc/workspace/preflight — the two diagnostics
+  // reads (rc-workspace-diagnostics, #123). WRITE floor, like every other
+  // workspace read here, and for the same reason the daemon gives: these cells
+  // are host facts, not names. Its own route comment says so
+  // (packages/cli/src/serve/routes/workspace-status.ts:381), naming env's
+  // secret-var presence and preflight's workspace path, CLI entry and Node
+  // version as reconnaissance. #107 puts host facts on the write side of the
+  // line, so a chat-scoped share token that can read a conversation cannot
+  // enumerate this machine.
+  app.get(
+    '/rc/workspace/env',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceEnvRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/preflight',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspacePreflightRoute(deps.daemon),
   );
   app.get(
     '/rc/workspace/tools',
