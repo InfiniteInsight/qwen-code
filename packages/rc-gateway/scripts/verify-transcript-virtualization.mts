@@ -8550,6 +8550,248 @@ PAGE_SCENARIOS.push({
       return `a settled subagent still reads ${JSON.stringify(note)} with its stop withdrawn`;
     },
   });
+
+  // #110: the visible queue. The page is the first consumer these routes ever
+  // had, so these scenarios are what proves a caller exists, not the route
+  // being mounted.
+  const queueListRoute = (
+    page: Page,
+    body: unknown,
+    asked: { session: string | null },
+  ) =>
+    page.route(/\/session\/[^/]+\/pending-prompts$/, async (route) => {
+      const parts = new URL(route.request().url()).pathname.split('/');
+      asked.session = parts[2];
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+
+  // Anchored on the trailing segment so it cannot swallow the list request.
+  const queueDropRoute = (
+    page: Page,
+    status: number,
+    body: unknown,
+    asked: { session: string | null; promptId: string | null },
+  ) =>
+    page.route(/\/session\/[^/]+\/pending-prompts\/[^/]+$/, async (route) => {
+      const parts = new URL(route.request().url()).pathname.split('/');
+      asked.session = parts[2];
+      asked.promptId = decodeURIComponent(parts[4]);
+      await route.fulfill({
+        status,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+
+  const queuedBody = (page: Page) =>
+    page.evaluate(
+      () =>
+        (document.getElementById('prompt-queue-body') as HTMLElement)
+          .textContent ?? '',
+    );
+
+  const queueRows = (page: Page) =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('#prompt-queue-body > div')).map(
+        (d) => d.textContent ?? '',
+      ),
+    );
+
+  const pressQueueList = async (page: Page): Promise<string> => {
+    await page.evaluate(() =>
+      (
+        document.getElementById('prompt-queue-list') as HTMLButtonElement
+      ).click(),
+    );
+    await page.waitForFunction(
+      () =>
+        !(
+          (document.getElementById('prompt-queue-body') as HTMLElement)
+            .textContent ?? ''
+        ).includes('loading'),
+      null,
+      { timeout: 8000 },
+    );
+    return queuedBody(page);
+  };
+
+  const pressQueueDrop = async (page: Page, n: number): Promise<string> => {
+    await page.evaluate((i) => {
+      const row = document.querySelectorAll('#prompt-queue-body > div')[i];
+      (row?.querySelector('button') as HTMLButtonElement | undefined)?.click();
+    }, n);
+    await page.waitForFunction(
+      (i) => {
+        const row = document.querySelectorAll('#prompt-queue-body > div')[i];
+        const t = row ? (row.textContent ?? '') : '';
+        return t.includes('dropped') || t.includes('[');
+      },
+      n,
+      { timeout: 8000 },
+    );
+    return page.evaluate((i) => {
+      const row = document.querySelectorAll('#prompt-queue-body > div')[i];
+      return row ? (row.textContent ?? '') : '';
+    }, n);
+  };
+
+  const twoQueued = {
+    pendingPrompts: [
+      {
+        promptId: 'p-run',
+        text: 'the one in flight',
+        queuedAt: 1700000000000,
+        state: 'running',
+      },
+      {
+        promptId: 'p-queue',
+        text: 'waiting its turn',
+        queuedAt: 1700000000500,
+        state: 'queued',
+      },
+    ],
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P74 the prompt queue lists what the daemon holds for the watched session',
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null };
+      await queueListRoute(page, twoQueued, asked);
+      await watch(page, viewer.sessionId);
+      await pressQueueList(page);
+      expect(
+        asked.session === viewer.sessionId,
+        `the queue of ${JSON.stringify(asked.session)} was listed while watching ${JSON.stringify(viewer.sessionId)}`,
+      );
+      const rows = await queueRows(page);
+      expect(
+        rows.length === 2,
+        `the daemon listed two prompts and the page drew ${rows.length} (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows[0].includes('running') && rows[0].includes('the one in flight'),
+        `the running prompt did not reach the panel (${JSON.stringify(rows[0])})`,
+      );
+      expect(
+        rows[1].includes('queued') && rows[1].includes('waiting its turn'),
+        `the waiting prompt did not reach the panel (${JSON.stringify(rows[1])})`,
+      );
+      // Both states are droppable, so both rows carry the control: the SDK
+      // gives each a defined effect, and hiding it on the running row would
+      // hide the only control that reaches a turn already in flight.
+      const drops = await page.evaluate(
+        () =>
+          document.querySelectorAll('#prompt-queue-body > div button').length,
+      );
+      expect(
+        drops === 2,
+        `${rows.length} prompts were listed and ${drops} drop controls were drawn`,
+      );
+      // The placement ruling, copied from the runs panel: this is an operator
+      // read, so it lives under Operations and not on the main screen.
+      const placed = await page.evaluate(() => {
+        const det = document.getElementById('prompt-queue');
+        return {
+          exists: !!det,
+          inOps: !!document.getElementById('pane-ops')?.contains(det ?? null),
+          inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
+        };
+      });
+      expect(placed.exists, 'there is no prompt queue section in the page');
+      expect(placed.inOps, 'the prompt queue section is not under Operations');
+      expect(!placed.inChat, 'the prompt queue section sits on the main screen');
+      return `the queue drew ${JSON.stringify(rows)} for ${JSON.stringify(asked.session)} with ${drops} controls`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P75 a session with nothing queued reads as a result and not a failure',
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null };
+      await queueListRoute(page, { pendingPrompts: [] }, asked);
+      await watch(page, viewer.sessionId);
+      const body = await pressQueueList(page);
+      expect(
+        body.includes('(nothing queued)'),
+        `an empty queue did not read as empty (${JSON.stringify(body)})`,
+      );
+      expect(
+        !/fail|error/i.test(body),
+        `an empty queue read as a failure (${JSON.stringify(body)})`,
+      );
+      return `an empty queue reads ${JSON.stringify(body)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P76 a drop the daemon did not honour does not read as dropped',
+    run: async ({ page, viewer }) => {
+      const listAsked = { session: null as string | null };
+      await queueListRoute(page, twoQueued, listAsked);
+      const dropped = {
+        session: null as string | null,
+        promptId: null as string | null,
+      };
+      // The daemon's own answer for a promptId it does not know: 200, with
+      // removed false. Reading c.ok here would print "dropped" over a prompt
+      // still sitting in the queue.
+      await queueDropRoute(page, 200, { removed: false }, dropped);
+      await watch(page, viewer.sessionId);
+      await pressQueueList(page);
+      const row = await pressQueueDrop(page, 1);
+      expect(
+        dropped.promptId === 'p-queue',
+        `the drop asked for ${JSON.stringify(dropped.promptId)} rather than the row's own prompt id`,
+      );
+      expect(
+        !row.includes('dropped'),
+        `a prompt the daemon did not remove read as dropped (${JSON.stringify(row)})`,
+      );
+      expect(
+        row.includes('the daemon did not drop it'),
+        `a no-op drop did not say so (${JSON.stringify(row)})`,
+      );
+      return `a 200 with removed:false reads ${JSON.stringify(row)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P77 a refused drop names the reason instead of a bare status',
+    run: async ({ page, viewer }) => {
+      await queueListRoute(page, twoQueued, { session: null });
+      const dropped = {
+        session: null as string | null,
+        promptId: null as string | null,
+      };
+      // The gateway's own wording for a daemon too old to serve the queue
+      // (src/routes/sessionQueue.ts:73), so the page has a real code to name.
+      await queueDropRoute(
+        page,
+        502,
+        {
+          error: 'Daemon does not support the session queue routes',
+          code: 'queue_unsupported',
+        },
+        dropped,
+      );
+      await watch(page, viewer.sessionId);
+      await pressQueueList(page);
+      const row = await pressQueueDrop(page, 0);
+      expect(
+        row.includes('queue_unsupported'),
+        `a refusal did not name its code (${JSON.stringify(row)})`,
+      );
+      expect(
+        !row.includes('dropped'),
+        `a refused drop read as dropped (${JSON.stringify(row)})`,
+      );
+      return `a refused drop reads ${JSON.stringify(row)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
