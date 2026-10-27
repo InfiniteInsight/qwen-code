@@ -2186,6 +2186,14 @@ type PageScenario =
         artifactListStatus?: number;
         /** Status the stub answers the artifact content read with. */
         artifactContentStatus?: number;
+        /**
+         * Body the stub answers GET /session/:id/turn-index with. A scenario
+         * that asserts which turns a reader is shown has to supply its own
+         * index, or it is checking the two turns the stub invented.
+         */
+        turnIndexPage?: unknown;
+        /** Status the stub answers the turn index read with. */
+        turnIndexStatusCode?: number;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -9366,6 +9374,118 @@ PAGE_SCENARIOS.push({
       return `a refused list reports ${JSON.stringify(note)}`;
     },
   });
+
+  // #126. The turn index's first consumer. renderRows writes one div per row,
+  // so the container's text jams them together with no separator and an
+  // assertion could match across a row boundary. Read the rows.
+  const turnRows = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(document.getElementById('turns-body')?.children ?? []).map(
+        (d) => d.textContent ?? '',
+      ),
+    );
+
+  PAGE_SCENARIOS.push({
+    name: 'P88 the turns panel prints the slice against the daemon total',
+    waitView: false,
+    // totalTurns is the whole conversation and turns is the page handed back.
+    // Printing only one of the two implies the other, so a short page has to
+    // name both. Five turns claimed, three delivered: the only reading that
+    // fits is three of five.
+    stub: {
+      turnIndexPage: {
+        v: 1,
+        sessionId: 'irrelevant',
+        snapshot: 'sn-9',
+        totalTurns: 5,
+        start: 2,
+        turns: [
+          { ordinal: 2, turnId: 't-c', kind: 'prompt', label: 'alpha turn' },
+          { ordinal: 3, turnId: 't-d', kind: 'realtime', label: 'beta turn' },
+          { ordinal: 4, turnId: 't-e', kind: 'scheduled', label: 'gamma turn' },
+        ],
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-turns', 'turns-load');
+      await drawn(page, 'turns-body');
+      const rows = await turnRows(page);
+      expect(
+        rows[0] === '3 of 5 turns',
+        `the header is not the slice against the total (${JSON.stringify(rows)})`,
+      );
+      // The label is the daemon's string, not a prompt the viewer necessarily
+      // holds, so all three have to reach the page verbatim.
+      for (const label of ['alpha turn', 'beta turn', 'gamma turn']) {
+        expect(
+          rows.some((r) => r.includes(label)),
+          `a daemon label never reached the page (${JSON.stringify(label)} in ${JSON.stringify(rows)})`,
+        );
+      }
+      return `draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P89 a turn kind this page has never heard of keeps the daemon word',
+    waitView: false,
+    // kind is an open union. A relabelling or a dropped row here would turn an
+    // index the daemon wrote into an index this file guessed at.
+    stub: {
+      turnIndexPage: {
+        v: 1,
+        sessionId: 'irrelevant',
+        snapshot: 'sn-9',
+        totalTurns: 1,
+        start: 0,
+        turns: [
+          { ordinal: 0, turnId: 't-x', kind: 'heartbeat', label: 'quiet beat' },
+        ],
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-turns', 'turns-load');
+      await drawn(page, 'turns-body');
+      const rows = await turnRows(page);
+      // One turn is not "1 turns". Pinned here because this is the scenario
+      // that carries a single-turn index, and a header that reads wrong is
+      // still a header the operator has to re-read.
+      expect(
+        rows[0] === '1 turn',
+        `a single turn was not counted in the singular (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('[heartbeat]')),
+        `an unknown kind was not drawn as the daemon named it (${JSON.stringify(rows)})`,
+      );
+      expect(
+        !rows.some((r) => r.includes('[prompt]')),
+        `an invented kind was substituted (${JSON.stringify(rows)})`,
+      );
+      return `draws ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P90 a refused turn index names its reason instead of an empty box',
+    waitView: false,
+    // The stub refuses the way the daemon does, and the gateway re-codes that
+    // verdict rather than laundering it. An empty box and a refusal are
+    // different facts to an operator.
+    stub: { turnIndexStatusCode: 400 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-turns', 'turns-load');
+      const text = await drawn(page, 'turns-body');
+      expect(
+        text.includes('turns failed: invalid_turn_index_query'),
+        `a refused index did not name the gateway verdict (${JSON.stringify(text)})`,
+      );
+      return `a refused index reports ${JSON.stringify(text)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -9391,6 +9511,8 @@ async function runPageScenario(
     artifactListResult: s.stub?.artifactListResult,
     artifactListStatus: s.stub?.artifactListStatus,
     artifactContentStatus: s.stub?.artifactContentStatus,
+    turnIndexPage: s.stub?.turnIndexPage,
+    turnIndexStatusCode: s.stub?.turnIndexStatusCode,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

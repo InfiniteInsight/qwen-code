@@ -71,6 +71,21 @@ export interface BootViewerOptions {
   /** Status the stub answers GET /session/:id/transcript with (default 200). */
   transcriptStatusCode?: number;
   /**
+   * Body the stub serves on GET /session/:id/turn-index. Left unset it serves
+   * its own two-turn default, so a scenario that asserts which turns a reader
+   * is shown has to name them, or it is checking the stub's invention rather
+   * than its own. The `snapshot` in this body is the value a consumer has to
+   * echo back on the anchored transcript read, so a scenario that drives a jump
+   * asserts the pair it asked for rather than a guess.
+   */
+  turnIndexPage?: unknown;
+  /**
+   * Status the stub answers GET /session/:id/turn-index with (default 200). Set
+   * it to drive the refusal note, because there is no other way to make a daemon
+   * refuse an index read, and the page prints the reason code it was given.
+   */
+  turnIndexStatusCode?: number;
+  /**
    * Daemon feature tags the stub advertises on GET /capabilities (default:
    * none). The page hides whole panels behind these tags, so a scenario that
    * drives one of them has to advertise it or it is asserting against markup
@@ -167,6 +182,8 @@ export async function bootViewer(
     promptDelayMs: opts.promptDelayMs,
     transcriptPage: opts.transcriptPage,
     transcriptStatusCode: opts.transcriptStatusCode,
+    turnIndexPage: opts.turnIndexPage,
+    turnIndexStatusCode: opts.turnIndexStatusCode,
     capabilitiesFeatures: opts.capabilitiesFeatures,
     exportStatusCode: opts.exportStatusCode,
     attachmentUploadStatus: opts.attachmentUploadStatus,
