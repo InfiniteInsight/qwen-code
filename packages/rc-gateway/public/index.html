@@ -1457,6 +1457,41 @@
           </div>
           <div id="runs-body">(not listed)</div>
         </details>
+        <details id="prompt-queue" class="ops-collapse">
+          <summary>
+            <strong>Prompt queue</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Prompt queue?"
+              aria-expanded="false"
+              aria-controls="help-prompt-queue"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-prompt-queue" hidden>
+            What this session has accepted and not finished running: the one
+            prompt in flight plus anything waiting behind it. This is not the
+            strip above the composer, which is text this browser has not sent
+            at all. Enter the session id (blank means the session you're
+            watching) and tap <b>List queue</b>. Dropping a waiting prompt
+            takes it out of the queue; dropping the one in flight cancels that
+            turn. Needs session-read scope.
+          </div>
+          <div class="ops-note">
+            (prompts the daemon accepted and has not run; requires
+            session-read scope)
+          </div>
+          <div>
+            <input
+              id="prompt-queue-id"
+              placeholder="session id (blank = watched)"
+            />
+            <button id="prompt-queue-list">List queue</button>
+          </div>
+          <div id="prompt-queue-body">(not listed)</div>
+        </details>
         <details id="search" class="ops-collapse">
           <summary>
             <strong>Search</strong
@@ -12047,6 +12082,89 @@
             };
             row.appendChild(btn);
           }
+          out.appendChild(row);
+        }
+      };
+
+      // The daemon's own queue for one session. This is not the outbox strip
+      // above the composer: that is text this browser never sent, and this is
+      // text the daemon took and has not run.
+      $('prompt-queue-list').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('prompt-queue-body');
+        const id = verbSessionId('prompt-queue-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading\u2026';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/pending-prompts',
+        );
+        if (!r.ok) {
+          // An old daemon is already named by the gateway, which turns a 404
+          // with no errorKind into queue_unsupported
+          // (src/routes/sessionQueue.ts:73), so there is nothing for this page
+          // to pre-flight. The code is the reason and it is printed as-is.
+          out.textContent = 'list failed: ' + r.code;
+          return;
+        }
+        const prompts = r.body.pendingPrompts || [];
+        if (prompts.length === 0) {
+          // An empty queue is the ordinary state of a session, so it reads as
+          // a result, not as a failure.
+          out.textContent = '(nothing queued)';
+          return;
+        }
+        out.textContent = '';
+        for (const p of prompts) {
+          const row = document.createElement('div');
+          const label = document.createElement('span');
+          // state first, because which state a row is in decides what dropping
+          // it does. queuedAt is not drawn: it is the daemon's clock and this
+          // page may be a different machine, so an age computed here would be
+          // wrong by whatever the skew between those two clocks happens to be.
+          const bits = [p.state, p.text];
+          // Not clamped, unlike the command list. A truncated prompt can make
+          // two rows look alike, and these rows differ by what they cost to
+          // drop.
+          label.textContent = bits.join('  ');
+          row.appendChild(label);
+          // Every row the daemon listed gets the control, the running one
+          // included. The SDK gives both states a defined effect (a queued
+          // prompt is taken out of the FIFO, the running one is cancelled), so
+          // hiding it on the running row would hide the only control that
+          // reaches a turn already in flight.
+          const btn = document.createElement('button');
+          btn.textContent = 'drop';
+          btn.style.marginLeft = '6px';
+          btn.onclick = async () => {
+            btn.disabled = true;
+            const c = await rcCall(
+              '/session/' +
+                encodeURIComponent(id) +
+                '/pending-prompts/' +
+                encodeURIComponent(p.promptId),
+              { method: 'DELETE' },
+            );
+            // c.ok is NOT the verdict. The daemon answers 200 whatever it
+            // removed (packages/cli/src/serve/routes/session.ts:10151 replies
+            // res.status(200).json(result) unconditionally) and its contract
+            // says a promptId it does not know comes back {removed:false}. A
+            // handler reading only ok would print "dropped" over a prompt that
+            // is still sitting in the queue waiting to run.
+            const gone = c.ok && !!c.body && c.body.removed === true;
+            if (gone) {
+              label.textContent = 'dropped  ' + p.text;
+            } else if (!c.ok) {
+              label.textContent =
+                bits.join('  ') + '  [drop failed: ' + c.code + ']';
+            } else {
+              label.textContent =
+                bits.join('  ') + '  [the daemon did not drop it]';
+            }
+          };
+          row.appendChild(btn);
           out.appendChild(row);
         }
       };
