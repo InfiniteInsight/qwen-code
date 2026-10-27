@@ -7589,16 +7589,31 @@ PAGE_SCENARIOS.push({
       null,
       { timeout: 15_000 },
     );
-    const row = '#stored-list > span:first-child > button';
-    await page.click(row);
+    // Located by label, not by position. The row gained an Open control when
+    // stored files became readable, so "> button" named whichever control
+    // happened to be first rather than the destructive one.
+    const press = (want: string) =>
+      page.evaluate((label) => {
+        const line = document.getElementById('stored-list')?.firstElementChild;
+        if (!line) return false;
+        const btn = Array.from(line.querySelectorAll('button')).find(
+          (b) => (b.textContent ?? '') === label,
+        );
+        if (!btn) return false;
+        (btn as HTMLButtonElement).click();
+        return true;
+      }, want);
+    expect(await press('Remove'), 'the stored row has no Remove control');
     // Waited on the LABEL rather than a request, because press one must produce
     // no request at all, so the only thing to wait for is the re-render.
     const armed = await page.waitForFunction(
       () => {
-        const b = document.querySelector(
-          '#stored-list > span:first-child > button',
+        const line = document.getElementById('stored-list')?.firstElementChild;
+        if (!line) return null;
+        const b = Array.from(line.querySelectorAll('button')).find(
+          (x) => (x.textContent ?? '') === 'Confirm remove',
         );
-        return b && b.textContent === 'Confirm remove' ? b.textContent : null;
+        return b ? b.textContent : null;
       },
       null,
       { timeout: 15_000 },
@@ -7612,7 +7627,10 @@ PAGE_SCENARIOS.push({
       deletes.length === 0,
       `the first press sent ${JSON.stringify(deletes)}; an armed button sends nothing`,
     );
-    await page.click(row);
+    expect(
+      await press('Confirm remove'),
+      'the armed row lost its confirm control before press two',
+    );
     const gone = await page.waitForFunction(
       () => {
         const l = document.getElementById('stored-list');
@@ -7965,6 +7983,331 @@ PAGE_SCENARIOS.push({
         `an old daemon was not named as the cause (${JSON.stringify(onScreen)})`,
       );
       return `a 404 on the recap route reads ${JSON.stringify(onScreen)}`;
+    },
+  });
+
+  // #125's content read. The gateway mount exists at server.ts:973 and had no
+  // caller, so these scenarios are what make it a feature rather than a route.
+  // Intercepted rather than driven through the stub options because the read
+  // answers per FILE, and a stub option would have to grow a second knob to
+  // name one. P61 and P62 established the technique.
+  // A real 1x1 PNG, so the browser can actually decode it: an <img> that fails
+  // to load would still satisfy a src assertion.
+  const PNG_B64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const FILE_BODY = 'EXECUTE-MARKER-42 the file body';
+
+  const storedListRoute = (
+    page: Page,
+    entries: Array<{ id: string; mime: string }>,
+  ) =>
+    page.route(/\/session\/[^/]+\/attachments$/, async (route) => {
+      const sid = new URL(route.request().url()).pathname.split('/')[2];
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          attachments: entries.map((e) => ({
+            type: 'resource',
+            attachmentId: e.id,
+            mimeType: e.mime,
+            size: 64,
+            sessionId: sid,
+          })),
+        }),
+      });
+    });
+
+  async function openStoredRow(page: Page, name: string): Promise<void> {
+    const clicked = await page.evaluate((needle) => {
+      const list = document.getElementById('stored-list');
+      if (!list) return false;
+      for (const row of Array.from(list.children)) {
+        if (!(row.textContent ?? '').includes(needle)) continue;
+        const btn = Array.from(row.querySelectorAll('button')).find(
+          (b) => (b.textContent ?? '') === 'Open',
+        );
+        if (!btn) return false;
+        (btn as HTMLButtonElement).click();
+        return true;
+      }
+      return false;
+    }, name);
+    expect(clicked, `the stored row for ${JSON.stringify(name)} has no Open control`);
+  }
+
+  PAGE_SCENARIOS.push({
+    name: 'P66 opening a stored image draws it inside the bounded panel',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      let askedSession: string | null = null;
+      let askedFile: string | null = null;
+      await storedListRoute(page, [{ id: 'plate.png', mime: 'image/png' }]);
+      await page.route(/\/session\/[^/]+\/attachments\/[^/]+$/, async (route) => {
+        const parts = new URL(route.request().url()).pathname.split('/');
+        askedSession = parts[2];
+        askedFile = decodeURIComponent(parts[4]);
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ data: PNG_B64, mimeType: 'image/png' }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.click('#stored-toggle');
+      await page.waitForFunction(
+        () => (document.getElementById('stored-list')?.textContent ?? '').includes('plate.png'),
+        null,
+        { timeout: 15_000 },
+      );
+      // Before the press the panel must not already be showing a file: an
+      // eager content read is a round trip nobody asked for.
+      const before = await page.evaluate(() => {
+        const el = document.getElementById('stored-preview');
+        return el ? { hidden: el.hidden, height: el.offsetHeight } : null;
+      });
+      expect(before !== null, 'the stored preview box is missing from the page');
+      expect(
+        before?.hidden === true && before?.height === 0,
+        `a file is already drawn before anyone opened it (${JSON.stringify(before)})`,
+      );
+
+      await openStoredRow(page, 'plate.png');
+      const shown = await page.waitForFunction(
+        () => {
+          const box = document.getElementById('stored-preview');
+          const img = box ? box.querySelector('img') : null;
+          return img ? { src: img.getAttribute('src') ?? '', alt: img.alt } : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await shown.jsonValue()) as { src: string; alt: string };
+
+      expect(
+        askedSession === A,
+        `the page read an attachment of ${JSON.stringify(askedSession)} while watching ${JSON.stringify(A)}`,
+      );
+      expect(
+        askedFile === 'plate.png',
+        `the page read ${JSON.stringify(askedFile)} after Open was pressed on ${JSON.stringify('plate.png')}`,
+      );
+      // A blob URL rather than a data URI: the route answers base64 and the
+      // page decodes it once, which is what keeps an 8 MiB file out of the DOM.
+      expect(
+        onScreen.src.startsWith('blob:'),
+        `the preview is not a decoded object URL (${JSON.stringify(onScreen)})`,
+      );
+      // The claim this page was filed for: an open panel that grows pushed the
+      // composer under the fold on a phone. The preview lives INSIDE the box
+      // that is already capped, so the cap has to hold with a file drawn.
+      // A measured height on its own is a weak claim, and was: one row plus a
+      // 1x1 image sits at 53px and clears any ceiling, so the panel passed with
+      // its cap deleted. What makes an open file unable to grow the composer
+      // row is the computed pair below, so assert that and not a number small
+      // content always beats.
+      const shape = await page.evaluate(() => {
+        const el = document.getElementById('stored');
+        if (!el) return null;
+        const css = window.getComputedStyle(el);
+        return {
+          height: el.offsetHeight,
+          maxHeight: css.maxHeight,
+          overflowY: css.overflowY,
+        };
+      });
+      expect(shape !== null, 'the stored panel is missing from the page');
+      expect(
+        shape !== null && shape.maxHeight !== 'none',
+        `the panel carries no height cap, so an open file grows it (${JSON.stringify(shape)})`,
+      );
+      expect(
+        shape !== null && (shape.overflowY === 'auto' || shape.overflowY === 'scroll'),
+        `the panel cannot scroll its own overflow (${JSON.stringify(shape)})`,
+      );
+      expect(
+        shape !== null && shape.height > 0 && shape.height <= 160,
+        `the panel with a file open is not bounded (${JSON.stringify(shape)})`,
+      );
+      return `an image opens as ${JSON.stringify(onScreen.src.slice(0, 12))}... inside a ${shape?.height}px capped panel (${shape?.maxHeight}, ${shape?.overflowY})`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P67 a stored non-image is offered as a file, never injected',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      await storedListRoute(page, [{ id: 'notes.txt', mime: 'text/plain' }]);
+      await page.route(/\/session\/[^/]+\/attachments\/[^/]+$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            data: Buffer.from(FILE_BODY, 'utf8').toString('base64'),
+            mimeType: 'text/plain',
+          }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.click('#stored-toggle');
+      await page.waitForFunction(
+        () => (document.getElementById('stored-list')?.textContent ?? '').includes('notes.txt'),
+        null,
+        { timeout: 15_000 },
+      );
+      await openStoredRow(page, 'notes.txt');
+      const shown = await page.waitForFunction(
+        () => {
+          const box = document.getElementById('stored-preview');
+          const a = box ? box.querySelector('a') : null;
+          return a
+            ? { download: a.getAttribute('download') ?? '', href: a.getAttribute('href') ?? '' }
+            : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const link = (await shown.jsonValue()) as { download: string; href: string };
+
+      expect(
+        link.download === 'notes.txt',
+        `the download is not named for the file it came from (${JSON.stringify(link)})`,
+      );
+      expect(
+        link.href.startsWith('blob:'),
+        `the download is not a decoded object URL (${JSON.stringify(link)})`,
+      );
+      // The bytes stay out of the document. Only an image is drawn, and this is
+      // the assertion that would catch a page that rendered text or HTML
+      // straight from the store.
+      const body = await page.evaluate(() => ({
+        imgs: document.querySelectorAll('#stored-preview img').length,
+        text: document.body.innerText,
+      }));
+      expect(
+        body.imgs === 0,
+        `a text file was drawn as an image (${JSON.stringify(body)})`,
+      );
+      expect(
+        !body.text.includes(FILE_BODY),
+        'the stored bytes were injected into the document rather than offered as a file',
+      );
+      return `a text file is offered as ${JSON.stringify(link.download)} with its bytes kept out of the document`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P68 a stored file that lands after a switch is not drawn',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      const B = '22222222-3333-4444-5555-666666666666';
+      let releaseHeldRead = () => {};
+      const heldRead = new Promise<void>((resolve) => {
+        releaseHeldRead = () => resolve();
+      });
+      let heldForA = false;
+      await storedListRoute(page, [{ id: 'plate.png', mime: 'image/png' }]);
+      await page.route(/\/session\/[^/]+\/attachments\/[^/]+$/, async (route) => {
+        const parts = new URL(route.request().url()).pathname.split('/');
+        if (parts[2] === A) {
+          heldForA = true;
+          await heldRead;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ data: PNG_B64, mimeType: 'image/png' }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.click('#stored-toggle');
+      await page.waitForFunction(
+        () => (document.getElementById('stored-list')?.textContent ?? '').includes('plate.png'),
+        null,
+        { timeout: 15_000 },
+      );
+      await openStoredRow(page, 'plate.png');
+      const deadline = Date.now() + 10_000;
+      while (!heldForA && Date.now() < deadline) await page.waitForTimeout(50);
+      expect(heldForA, 'pressing Open never asked the daemon for the file');
+
+      await watch(page, B);
+      releaseHeldRead();
+      // The answer is on the wire now; give it the turn it needs to arrive.
+      await page.waitForTimeout(750);
+      const after = await page.evaluate(() => {
+        const box = document.getElementById('stored-preview');
+        return box
+          ? { hidden: box.hidden, imgs: box.querySelectorAll('img').length }
+          : null;
+      });
+      expect(after !== null, 'the stored preview box is missing from the page');
+      expect(
+        after?.hidden === true && after?.imgs === 0,
+        `a file read against the conversation just left was drawn under the one on screen (${JSON.stringify(after)})`,
+      );
+      return `a read released after the switch is dropped (${JSON.stringify(after)})`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P69 a stored file the gateway refuses is named, not drawn broken',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      await storedListRoute(page, [{ id: 'secret.dat', mime: 'application/octet-stream' }]);
+      await page.route(/\/session\/[^/]+\/attachments\/[^/]+$/, async (route) => {
+        await route.fulfill({
+          status: 403,
+          contentType: 'application/json',
+          body: JSON.stringify({ code: 'insufficient_scope' }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.click('#stored-toggle');
+      await page.waitForFunction(
+        () => (document.getElementById('stored-list')?.textContent ?? '').includes('secret.dat'),
+        null,
+        { timeout: 15_000 },
+      );
+      await openStoredRow(page, 'secret.dat');
+      const shown = await page.waitForFunction(
+        () => {
+          const box = document.getElementById('stored-preview');
+          const t = box && !box.hidden ? (box.textContent ?? '') : '';
+          return t.includes('insufficient_scope') ? t : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await shown.jsonValue()) as string;
+      const shape = await page.evaluate(() => {
+        const box = document.getElementById('stored-preview');
+        return {
+          imgs: box ? box.querySelectorAll('img').length : -1,
+          links: box ? box.querySelectorAll('a').length : -1,
+        };
+      });
+      expect(
+        shape.imgs === 0 && shape.links === 0,
+        `a refused read still drew a preview (${JSON.stringify(shape)})`,
+      );
+      expect(
+        !/cannot reach the gateway/i.test(onScreen),
+        `a refusal was reported as the gateway being unreachable (${JSON.stringify(onScreen)})`,
+      );
+      return `a refused read reads ${JSON.stringify(onScreen)} with no preview drawn`;
     },
   });
 }
