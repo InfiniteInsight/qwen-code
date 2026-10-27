@@ -528,26 +528,23 @@
            reads as a layout failure rather than as a wide column. */
         padding: 0 1rem;
       }
-      #status-strip,
-      #inspector {
-        flex: none;
-      }
-      #rail:empty,
-      #status-strip:empty,
-      #inspector:empty {
+      #rail:empty {
         display: none;
       }
-      /* The panes keep the light surface they have today. The shell's dark ground
-         stops at the pane edge because every region still styles itself for a
-         light page: .card sets #fffbe6, #status sets #444, and a light page
-         element on a dark ground is an unreadable combination, not an unfinished
-         one. Each region task flips its own surface (#119 the rail, #121 the
-         transcript, strip and drawer); the shell does not pre-decide them.
-         The colour is the UA default rather than a chosen dark because most of the
-         transcript's rows (#transcript .system, .tool, .thought, the .subagent
-         block) set no colour of their own and take it by inheritance. Naming any
-         other value here would silently restyle every row that never opted in;
-         #000 on #fff is what they compute today. */
+      /* The panes keep the light surface they have today. This one rule is shared
+         by all four panes (chat, ops, settings, diag), so flipping it is the shell
+         task's call across the whole page, not #121's call for the chat regions.
+         .card sets #fffbe6 and #status sets #444, and a light page element on a
+         dark ground is unreadable rather than unfinished.
+
+         #transcript's colour is left unnamed, and the reason is not what an
+         earlier version of this comment claimed. It said the rows compute "#000 on
+         #fff"; measured, they do not. #transcript sets background #111 below, so an
+         unnamed row computes #000 on #111, which is 1.11:1 and unreadable. What
+         actually makes the unnamed value safe is that every row kind names its own
+         colour, and the only elements left inheriting are the virtualizer's own
+         wrappers, which hold no text of their own. P126 measures that per row
+         rather than leaving it as a claim in a comment. */
       .tab-pane {
         background: #fff;
         color: #000;
@@ -909,7 +906,6 @@
       <div class="shell-body">
         <div id="rail"></div>
         <div class="mid">
-          <div id="status-strip"></div>
           <div class="tab-pane active" id="pane-chat">
         <!-- #120. This block is gone. Its four verbs and its help sentence now
              live in the composer's control row, under the field, where the
@@ -3749,11 +3745,13 @@
           <pre id="log" style="display: none"></pre>
         </details>
       </div>
-      <!-- The inspector slot. It sits at the foot of the middle column, after the
-           panes, because the panes are the sheet's whole column stack and this is
-           the one container with no live counterpart to attach to. #121 places its
-           content and moves it into the chat stack if the sheet's order wants that. -->
-      <div id="inspector"></div>
+      <!-- #121. This slot is gone. The sheet's inspector drawer already has a
+           home: #session-footer carries the model, the token counts, the cwd, the
+           mode picker and its persist checkbox, and it is already on a dark ground
+           (#14171c). A second empty container at the foot of the column was a
+           reservation for a region that already exists, and nothing in src/,
+           scripts/ or public/ ever wrote it. The sheet's status strip is the same
+           case: #status above the transcript is the live status line. -->
         </div>
       </div>
     </div>

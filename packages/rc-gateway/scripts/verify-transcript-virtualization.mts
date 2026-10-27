@@ -12619,6 +12619,126 @@ PAGE_SCENARIOS.push({
       );
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P126 every row that paints its own text is legible on the ground it sits on',
+    // #121, g1 "Session and status regions". The shell leaves #transcript's
+    // colour unnamed, which is only safe while every row kind names its own.
+    // Measured per row instead of asserted in a comment, because the failure is
+    // invisible in the source: #transcript sets background #111, so a row that
+    // forgets to name a colour inherits the UA default black and computes
+    // 1.11:1, which reads as an empty box rather than as a broken style.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        __pg.liveTurn('what is the plan', 'here is the plan', 'tc-1');
+      });
+      await settlePage(page);
+
+      // The browser collects raw values and nothing else. Every arithmetic
+      // happens here in Node, because a named helper declared inside evaluate
+      // is rewritten into a __name(...) call that the page does not define.
+      const seen = await page.evaluate(() => {
+        const box = document.getElementById('transcript') as HTMLElement;
+        return {
+          rows: transcriptModel.items.length,
+          painted: Array.from(box.querySelectorAll('*'))
+            .filter(
+              (e) =>
+                Array.from(e.childNodes).some(
+                  (n) => n.nodeType === 3 && (n.textContent || '').trim() !== '',
+                ) && e.getClientRects().length > 0,
+            )
+            .map((e) => {
+              const chain: string[] = [];
+              let up: Element | null = e;
+              for (let i = 0; i < 12 && up !== null; i++) {
+                chain.push(getComputedStyle(up).backgroundColor);
+                if (up === box) break;
+                up = up.parentElement;
+              }
+              return {
+                kind:
+                  e.tagName.toLowerCase() +
+                  (e.className ? '.' + String(e.className).split(' ')[0] : ''),
+                color: getComputedStyle(e).color,
+                chain,
+              };
+            }),
+          strip: document.getElementById('status-strip') !== null,
+          drawer: document.getElementById('inspector') !== null,
+        };
+      });
+
+      expect(
+        seen.rows > 0,
+        `the driven turn left ${seen.rows} rows in the model, so there is nothing to measure`,
+      );
+      expect(
+        seen.painted.length > 0,
+        'no element in the transcript paints text of its own, so the guard measures nothing',
+      );
+      expect(
+        !seen.strip && !seen.drawer,
+        `the retired slots returned (status-strip ${seen.strip}, inspector ${seen.drawer})`,
+      );
+
+      const worst = { kind: '', ratio: 99 };
+      for (const row of seen.painted) {
+        const ground = row.chain.map(pgParseRgb).find((c) => c !== null && c.a > 0);
+        expect(
+          ground !== undefined,
+          `${row.kind} has no painted ground anywhere up to #transcript`,
+        );
+        const ink = pgParseRgb(row.color);
+        expect(ink !== null, `${row.kind} reports an unparsable colour ${row.color}`);
+        const ratio = pgContrast(ink!, ground!);
+        if (ratio < worst.ratio) {
+          worst.kind = row.kind;
+          worst.ratio = ratio;
+        }
+        expect(
+          ratio >= 3,
+          `${row.kind} is ${row.color} on ${JSON.stringify(ground)} = ${ratio.toFixed(2)}:1, under the 3:1 floor g1 holds for text`,
+        );
+      }
+
+      return (
+        seen.painted.length +
+        ' text-bearing elements all at 3:1 or better, worst ' +
+        worst.kind +
+        ' at ' +
+        worst.ratio.toFixed(2) +
+        ':1; the retired status strip and inspector stayed retired'
+      );
+    },
+  });
+}
+
+/** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
+function pgParseRgb(css: string): { r: number; g: number; b: number; a: number } | null {
+  const m = /^rgba?\(([^)]+)\)$/.exec(css.trim());
+  if (m === null) return null;
+  const parts = m[1]!.split(/[,/\s]+/).filter((x) => x !== '').map(Number);
+  if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return null;
+  return { r: parts[0]!, g: parts[1]!, b: parts[2]!, a: parts.length > 3 ? parts[3]! : 1 };
+}
+
+/** WCAG contrast ratio between two opaque colours. */
+function pgContrast(
+  ink: { r: number; g: number; b: number; a: number },
+  back: { r: number; g: number; b: number; a: number },
+): number {
+  const lum = (c: { r: number; g: number; b: number }): number => {
+    const ch = (v: number): number =>
+      v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4;
+    return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+  };
+  const a = lum(ink);
+  const b = lum(back);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
