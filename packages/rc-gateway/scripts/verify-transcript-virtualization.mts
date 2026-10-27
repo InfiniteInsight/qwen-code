@@ -2161,6 +2161,20 @@ type PageScenario =
         attachmentListResult?: unknown;
         /** Status the stub answers the stored-attachment list with. */
         attachmentListStatus?: number;
+        /**
+         * Status the stub answers GET /session/:id/stats with, so a scenario
+         * can drive the failure row. Pair it with `statsResult` when the point
+         * is the reason code, since the stub's own default body says
+         * `stub error`, which no real daemon ever sends.
+         */
+        statsStatusCode?: number;
+        /**
+         * Body the stub answers GET /session/:id/stats with. A scenario that
+         * asserts a printed number, or asserts that an absent optional block
+         * draws nothing, has to supply the payload it expects, or it is
+         * checking a roll-up the stub invented.
+         */
+        statsResult?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -9015,6 +9029,163 @@ PAGE_SCENARIOS.push({
       return `a refused withdraw reads ${JSON.stringify(row)}`;
     },
   });
+
+  // #124: the Session report panel. The stub's default roll-up is built so
+  // that no number in it appears anywhere else in the harness (the
+  // context-usage read answers 65536/262144), so a row carrying one of these
+  // values can only have come from GET /session/:id/stats.
+  //
+  // Rows are read off the child divs rather than the container's textContent.
+  // renderRows writes one div per row, so the container's text jams them
+  // together with no separator and an assertion could match across a row
+  // boundary.
+  const statsRows = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(
+        document.getElementById('stats-body')?.children ?? [],
+      ).map((d) => d.textContent ?? ''),
+    );
+
+  PAGE_SCENARIOS.push({
+    name: 'P82 the session report prints the models total and not the subagent sum',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-stats', 'stats-load');
+      await drawn(page, 'stats-body');
+      const rows = await statsRows(page);
+      expect(
+        rows.some((r) => r === 'ran 1h 30m, 7 prompts'),
+        `the roll-up header is missing (${JSON.stringify(rows)})`,
+      );
+      // 128000 is models['qwen3-coder:30b'].tokens.total, the whole
+      // conversation. 9500 is the one subagent's spend, which by the
+      // payload's own definition excludes the main conversation, so a total
+      // printed as 9500 would be a number labelled like a session total while
+      // being a partial one.
+      expect(
+        rows.some((r) => r === 'total 128000 tokens'),
+        `the printed total is not the models sum (${JSON.stringify(rows)})`,
+      );
+      expect(
+        !rows.some((r) => r.includes('total 9500')),
+        `the total was taken from the sources list (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.startsWith('subagent audit the paging path')),
+        `the per-subagent row is missing (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.startsWith('lines +140 / -22')),
+        `the lines-written row is missing (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r.includes('12 tool calls') && r.includes('2 failed')),
+        `the tool roll-up is missing (${JSON.stringify(rows)})`,
+      );
+      // A refused tool call is the one number on this panel that says something
+      // about what the human actually did, so it has to survive to the screen.
+      expect(
+        rows.some((r) => r.startsWith('  run_shell_command') && r.includes('1 refused')),
+        `the refused-call count is missing (${JSON.stringify(rows)})`,
+      );
+      return `the report drew ${rows.length} rows headed ${JSON.stringify(rows[0])}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P83 a stats payload with no skills block draws no skills row',
+    waitView: false,
+    // `skills` and `sources` are optional on the wire. A daemon that never
+    // measured skills must not be drawn saying zero skill calls, because that
+    // states a fact about a thing it did not measure. The default stub body
+    // carries every optional block, so this scenario has to hand it one
+    // without them.
+    stub: {
+      statsResult: {
+        v: 1,
+        sessionId: '11111111-2222-3333-4444-555555555555',
+        workspaceCwd: '/proj',
+        sessionStartTimeMs: 1_767_225_600_000,
+        durationMs: 60_000,
+        promptCount: 1,
+        models: {
+          'qwen3-coder:30b': {
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 900 },
+            tokens: {
+              prompt: 10,
+              candidates: 5,
+              total: 15,
+              cached: 0,
+              thoughts: 0,
+            },
+          },
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-stats', 'stats-load');
+      await drawn(page, 'stats-body');
+      const rows = await statsRows(page);
+      expect(
+        !rows.some((r) => /skill/i.test(r)),
+        `an unmeasured skills block drew a row (${JSON.stringify(rows)})`,
+      );
+      expect(
+        !rows.some((r) => /subagent/i.test(r)),
+        `an absent sources list drew a row (${JSON.stringify(rows)})`,
+      );
+      // The tool roll-up is present but empty. Drawing "0 tool calls" for a
+      // conversation that made none is the same invention, so the guard here
+      // is the same one.
+      expect(
+        !rows.some((r) => /tool calls/.test(r)),
+        `an empty tool roll-up drew a zero row (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows.some((r) => r === 'total 15 tokens'),
+        `the models total is wrong (${JSON.stringify(rows)})`,
+      );
+      return `a bare roll-up drew only ${JSON.stringify(rows)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P84 a refused stats read names its reason instead of a bare failure',
+    waitView: false,
+    // The gateway answers this route with three different failures and the
+    // page has no place to show the difference except this row. A daemon 404
+    // is a conversation it cannot load, which the gateway passes on as
+    // session_not_found rather than flattening into a capability verdict the
+    // way the recap route does.
+    stub: { statsStatusCode: 404 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await press(page, 'session-stats', 'stats-load');
+      await drawn(page, 'stats-body');
+      const body = await page.evaluate(
+        () => (document.getElementById('stats-body')?.textContent ?? '').trim(),
+      );
+      expect(
+        body.includes('session_not_found'),
+        `a refused read did not name its code (${JSON.stringify(body)})`,
+      );
+      expect(
+        !/^\(not loaded\)$/.test(body),
+        `a refused read left the placeholder in place (${JSON.stringify(body)})`,
+      );
+      return `a refused read reports ${JSON.stringify(body)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -9035,6 +9206,8 @@ async function runPageScenario(
     attachmentUploadErrorBody: s.stub?.attachmentUploadErrorBody,
     attachmentListResult: s.stub?.attachmentListResult,
     attachmentListStatus: s.stub?.attachmentListStatus,
+    statsStatusCode: s.stub?.statsStatusCode,
+    statsResult: s.stub?.statsResult,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

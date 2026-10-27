@@ -115,6 +115,8 @@ export interface StubDaemon {
    * arrived here can prove that it did.
    */
   lastRecapSessionId: string | undefined;
+  /** Session id the most recent GET /session/:id/stats carried. */
+  lastStatsSessionId: string | undefined;
   /** What the most recent POST /session/:id/attachments carried. */
   lastAttachmentUpload:
     | {
@@ -344,6 +346,14 @@ export interface StubDaemonOptions {
   recapStatusCode?: number;
   /** Full body for POST /session/:id/recap (overrides the default pair). */
   recapResult?: unknown;
+  /** Status for GET /session/:id/stats (default 200). Non-200 -> { error }. */
+  statsStatusCode?: number;
+  /**
+   * Full body for GET /session/:id/stats (overrides the default roll-up). A
+   * scenario that asserts the page draws nothing for an absent field sets
+   * this, because the default body has every optional block present.
+   */
+  statsResult?: unknown;
   /** Status for GET /session/:id/status (default 200). Non-200 → { error }. */
   sessionStatusCode?: number;
   /**
@@ -559,6 +569,7 @@ export async function startStubDaemon(
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
     lastRecapSessionId: undefined as string | undefined,
+    lastStatsSessionId: undefined as string | undefined,
     lastAttachmentUpload: undefined as
       | {
           name: unknown;
@@ -1165,6 +1176,96 @@ export async function startStubDaemon(
       // A real DaemonSessionRecapResult: one sentence, in the daemon's own
       // voice, naming what the conversation was about.
       recap: 'Asked why paging skipped a row, then fixed the offset math.',
+    });
+  });
+
+  app.get('/session/:id/stats', (req, res) => {
+    state.lastStatsSessionId = String(req.params.id);
+    const status = opts.statsStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    if (opts.statsResult !== undefined) {
+      res.status(200).json(opts.statsResult);
+      return;
+    }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    // A real DaemonSessionStatsStatus. Every number here is deliberately
+    // unlike the context-usage stub's 65536/262144, so a test that reads a
+    // token count cannot accidentally be reading the other route's payload.
+    res.status(200).json({
+      v: 1,
+      sessionId: String(req.params.id),
+      workspaceCwd: cwd,
+      sessionStartTimeMs: 1_767_225_600_000,
+      durationMs: 5_400_000,
+      promptCount: 7,
+      models: {
+        'qwen3-coder:30b': {
+          api: { totalRequests: 42, totalErrors: 1, totalLatencyMs: 91_000 },
+          tokens: {
+            prompt: 120_000,
+            candidates: 8_000,
+            total: 128_000,
+            cached: 30_000,
+            thoughts: 2_000,
+          },
+        },
+      },
+      sources: [
+        {
+          id: 'inv-1',
+          type: 'general-purpose',
+          name: 'audit the paging path',
+          tokens: {
+            prompt: 9_000,
+            candidates: 500,
+            total: 9_500,
+            cached: 0,
+            thoughts: 0,
+          },
+        },
+      ],
+      tools: {
+        totalCalls: 12,
+        totalSuccess: 10,
+        totalFail: 2,
+        totalDurationMs: 4_200,
+        byName: {
+          read_file: {
+            count: 8,
+            success: 7,
+            fail: 1,
+            durationMs: 900,
+            decisions: {
+              accept: 7,
+              reject: 0,
+              modify: 0,
+              auto_accept: 1,
+            },
+          },
+          run_shell_command: {
+            count: 4,
+            success: 3,
+            fail: 1,
+            durationMs: 3_300,
+            decisions: {
+              accept: 2,
+              reject: 1,
+              modify: 0,
+              auto_accept: 1,
+            },
+          },
+        },
+      },
+      files: { totalLinesAdded: 140, totalLinesRemoved: 22 },
+      skills: {
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: { review: { count: 1, success: 1, fail: 0 } },
+      },
     });
   });
 
@@ -1781,6 +1882,9 @@ export async function startStubDaemon(
     },
     get lastRecapSessionId() {
       return state.lastRecapSessionId;
+    },
+    get lastStatsSessionId() {
+      return state.lastStatsSessionId;
     },
     get lastAttachmentUpload() {
       return state.lastAttachmentUpload;

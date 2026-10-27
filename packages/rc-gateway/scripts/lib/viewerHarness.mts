@@ -111,6 +111,20 @@ export interface BootViewerOptions {
    * a body this file composed.
    */
   attachmentListStatus?: number;
+  /**
+   * Status the stub answers GET /session/:id/stats with (default 200). Set it
+   * to drive the failure row, because there is no other way to make a daemon
+   * refuse a stats read, and the page prints the reason code it was given.
+   */
+  statsStatusCode?: number;
+  /**
+   * Body the stub answers GET /session/:id/stats with. Left unset the stub
+   * serves its own default roll-up, which is fine for a scenario that only
+   * needs a panel to fill, but a scenario that asserts a printed number has to
+   * supply the payload it expects to see, or it is checking the stub's
+   * invention rather than its own.
+   */
+  statsResult?: unknown;
 }
 
 export interface Viewer {
@@ -142,6 +156,8 @@ export async function bootViewer(
     attachmentUploadErrorBody: opts.attachmentUploadErrorBody,
     attachmentListResult: opts.attachmentListResult,
     attachmentListStatus: opts.attachmentListStatus,
+    statsStatusCode: opts.statsStatusCode,
+    statsResult: opts.statsResult,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));

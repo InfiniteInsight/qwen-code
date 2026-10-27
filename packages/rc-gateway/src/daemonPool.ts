@@ -49,6 +49,7 @@ import {
   type DaemonSessionTurnIndexPage,
   type DaemonSessionTurnIndexPageOptions,
   type DaemonSessionRecapResult,
+  type DaemonSessionStatsStatus,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -284,6 +285,17 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionTasksStatus>;
+  /**
+   * The daemon's per-conversation roll-up: how long it ran, how many prompts
+   * it took, what each model spent, and which tools were called. Read
+   * verbatim, with one exception worth naming - `sources` excludes the main
+   * conversation's own calls by design (the SDK documents them as the
+   * aggregate remainder), so summing that list is not a session total.
+   */
+  sessionStats(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionStatsStatus>;
   loadSession(
     sessionId: string,
     req?: RestoreSessionRequest,
@@ -1212,6 +1224,25 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionTasksStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionTasks(sessionId, clientId),
+    );
+  }
+
+  /**
+   * `GET /session/:id/stats` relay. Passed through untouched for the same
+   * reason `sessionTasks` is: the numbers are the daemon's accounting of a
+   * conversation this reader can already read in full through
+   * `GET /session/:id/transcript`, so nothing new is disclosed by handing the
+   * roll-up over.
+   *
+   * No gateway-side cache. The roll-up moves while a turn is running, and a
+   * stale number would read as a fact about a turn that has since finished.
+   */
+  async sessionStats(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionStatsStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionStats(sessionId, clientId),
     );
   }
 
