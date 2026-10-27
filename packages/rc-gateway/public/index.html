@@ -1175,6 +1175,11 @@
           >
             <span id="stored-note"></span>
             <span id="stored-list"></span>
+            <!-- #125: the content read's answer. Deliberately inside the box
+                 above rather than beside it: that box is bounded and scrolls,
+                 and an open file that grew its own box is how the to-do strip
+                 pushed the composer under the fold on a phone. -->
+            <span id="stored-preview" hidden></span>
           </div>
           <!-- #124. "Where did I leave off", asked of the daemon that was
                watching. Its own button rather than a line in the transcript:
@@ -7503,6 +7508,13 @@
       let storedFiles = [];
       let storedNote = '';
       let storedArmed = null;
+      // The opened file's object URL. Held so it can be revoked: a blob URL
+      // the page drops without revoking keeps the whole file alive for the
+      // document's lifetime, and these are up to 8 MiB each.
+      let storedPreviewUrl = '';
+      let storedPreviewMime = '';
+      let storedPreviewNote = '';
+      let storedPreviewName = '';
 
       function renderStored() {
         const box = $('stored');
@@ -7539,11 +7551,125 @@
               renderStored();
             };
           }
+          const open = document.createElement('button');
+          open.type = 'button';
+          open.style.marginLeft = '6px';
+          open.textContent = 'Open';
+          open.onclick = () => void openStored(entry);
           row.appendChild(label);
+          row.appendChild(open);
           row.appendChild(remove);
           list.appendChild(row);
         }
         $('stored-note').textContent = storedNote;
+      }
+
+      function dropStoredPreview() {
+        if (storedPreviewUrl) {
+          URL.revokeObjectURL(storedPreviewUrl);
+          storedPreviewUrl = '';
+        }
+        storedPreviewMime = '';
+        storedPreviewNote = '';
+        storedPreviewName = '';
+      }
+
+      function renderStoredPreview() {
+        const box = $('stored-preview');
+        if (!box) return;
+        box.textContent = '';
+        if (!storedPreviewUrl && !storedPreviewNote) {
+          box.hidden = true;
+          return;
+        }
+        box.hidden = false;
+        if (storedPreviewNote) {
+          const waiting = document.createElement('span');
+          waiting.textContent = storedPreviewNote;
+          box.appendChild(waiting);
+          return;
+        }
+        // Only an image is drawn. Anything else gets a link rather than being
+        // put in the document: the bytes are a file someone uploaded, and
+        // injecting them would run whatever they turn out to be. The mime the
+        // READ answers with decides, not the list's, because the route note
+        // says that field is the daemon's own account of what it stored.
+        if (storedPreviewMime.indexOf('image/') === 0) {
+          const img = document.createElement('img');
+          img.src = storedPreviewUrl;
+          img.alt = storedPreviewName;
+          // Bounded against the box, not the viewport: the box already scrolls,
+          // and an image sized to its own pixels is how a bounded panel stops
+          // being one.
+          img.style.maxWidth = '100%';
+          img.style.maxHeight = '110px';
+          img.style.display = 'block';
+          img.style.marginTop = '4px';
+          box.appendChild(img);
+          return;
+        }
+        const link = document.createElement('a');
+        link.href = storedPreviewUrl;
+        link.download = storedPreviewName;
+        link.textContent = 'Save ' + storedPreviewName;
+        link.style.display = 'inline-block';
+        link.style.marginTop = '4px';
+        box.appendChild(link);
+      }
+
+      async function openStored(entry) {
+        // Snapshot before the first await, for the reason the list above
+        // gives: a switch during the fetch must not paint a file from the
+        // conversation that was left.
+        const id = watchedSessionId;
+        if (!id) return;
+        dropStoredPreview();
+        storedPreviewNote = 'opening…';
+        renderStoredPreview();
+        let res;
+        try {
+          res = await fetch(
+            '/session/' +
+              encodeURIComponent(id) +
+              '/attachments/' +
+              encodeURIComponent(entry.attachmentId),
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+        } catch {
+          if (watchedSessionId !== id) return;
+          storedPreviewNote = 'could not reach the gateway';
+          renderStoredPreview();
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (watchedSessionId !== id) return;
+        if (!res.ok || !body || typeof body.data !== 'string') {
+          const code = (body && body.code) || String(res.status);
+          storedPreviewNote = 'could not open (' + code + ')';
+          renderStoredPreview();
+          return;
+        }
+        let bytes;
+        try {
+          bytes = Uint8Array.from(atob(body.data), (c) => c.charCodeAt(0));
+        } catch {
+          // The daemon answers base64, so this is the store's data being
+          // unreadable rather than anything the caller can fix.
+          storedPreviewNote = 'the stored bytes did not decode';
+          renderStoredPreview();
+          return;
+        }
+        const mime =
+          typeof body.mimeType === 'string' && body.mimeType.length > 0
+            ? body.mimeType
+            : 'application/octet-stream';
+        const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        if (storedPreviewUrl) URL.revokeObjectURL(storedPreviewUrl);
+        storedPreviewUrl = url;
+        storedPreviewMime = mime;
+        storedPreviewName = entry.attachmentId;
+        storedPreviewNote = '';
+        renderStoredPreview();
       }
 
       async function loadStored() {
@@ -7585,6 +7711,8 @@
           body.attachments.length === 0 ? 'nothing stored yet' : '';
         storedFiles = body.attachments;
         storedArmed = null;
+        dropStoredPreview();
+        renderStoredPreview();
         renderStored();
       }
 
@@ -7597,6 +7725,10 @@
         storedFiles = [];
         storedNote = '';
         storedArmed = null;
+        // Revoked rather than cleared, and before the switch is drawn: the
+        // open file belongs to the conversation being left.
+        dropStoredPreview();
+        renderStoredPreview();
         const box = $('stored');
         if (box && !box.hidden) void loadStored();
         else renderStored();
