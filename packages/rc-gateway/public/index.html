@@ -232,6 +232,28 @@
         margin: 0 8px;
         background: #888;
       }
+      /* g1 "Top bar", gap 10 option B: the bar names the search affordance, so
+         it is findable without pressing a key you already know. The sheet's
+         `.bar .keys`; the live bar is `.tab-bar` and the tabs are its direct
+         children, so margin-left auto is what pushes this to the right end of a
+         row that otherwise packs left. A button, not the sheet's bare span: the
+         word is exactly what the break below 860px drops, and a phone has no
+         ⌘K to press, so a label there would name a way in nobody can take. */
+      .tab-bar .keys {
+        margin-left: auto;
+        padding: 0.5rem 1rem;
+        border: none;
+        background: none;
+        color: #6e7681;
+        font: inherit;
+        font-size: 0.85rem;
+        cursor: pointer;
+      }
+      @media (max-width: 860px) {
+        .tab-bar .keys .kl {
+          display: none;
+        }
+      }
       .tab-pane {
         display: none;
       }
@@ -413,6 +435,14 @@
             data-pin="diag"
             title="Pin to Chat"
         /></span>
+        <button
+          class="keys"
+          id="bar-search"
+          type="button"
+          title="Search across sessions (⌘K)"
+        >
+          ⌘K<span class="kl"> search</span></button
+        >
       </div>
       <div class="shell-body">
         <div id="rail"></div>
@@ -12325,14 +12355,21 @@
       document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
-          switchTab('ops');
-          $('search').open = true;
-          const box = $('search-q');
-          box.scrollIntoView({ block: 'center' });
-          box.focus();
-          box.select();
+          openSearch();
         }
       });
+      // g1 gap 10 option B: the bar names this affordance, so the name and the
+      // key have to do one thing. One function, two callers, so they cannot
+      // drift apart and leave the label pointing somewhere the key does not go.
+      function openSearch() {
+        switchTab('ops');
+        $('search').open = true;
+        const box = $('search-q');
+        box.scrollIntoView({ block: 'center' });
+        box.focus();
+        box.select();
+      }
+      $('bar-search').onclick = openSearch;
       $('search-q').addEventListener('keydown', (e) => {
         if (e.key === 'Escape') $('search-q').blur();
       });
