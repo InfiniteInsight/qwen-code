@@ -656,6 +656,8 @@
         ref: (m.item && m.item.toolCallId) || '',
         cancel: null,
         cancelNote: null,
+        cost: null,
+        costNote: null,
       };
       head.appendChild(r.spin);
       head.appendChild(r.msg);
@@ -669,6 +671,19 @@
       r.cancelNote = el('span', 'subagent-cancel-note');
       head.appendChild(r.cancel);
       head.appendChild(r.cancelNote);
+      // issue #110: what the child used. The stream carries no per-subagent
+      // usage, so this read is the only way the number can reach the row.
+      // Unlike cancel it stays offered once the child settles, because a
+      // finished run's cost is the thing a reader most often wants.
+      r.cost = el('button', 'subagent-cost', 'cost');
+      r.cost.type = 'button';
+      r.cost.title = 'what this subagent used, per the daemon';
+      r.cost.addEventListener('click', function () {
+        if (opts.onCostSubagent) opts.onCostSubagent(m.item);
+      });
+      r.costNote = el('span', 'subagent-cost-note');
+      head.appendChild(r.cost);
+      head.appendChild(r.costNote);
       host.appendChild(head);
       bubble.appendChild(host);
       return r;
@@ -706,6 +721,14 @@
       var busy = !!s.cancelBusy;
       if (r.cancel.disabled !== busy) r.cancel.disabled = busy;
       setText(r.cancelNote, s.cancelNote || '');
+      // Cost is offered whenever the row has a reference, running or settled,
+      // and busy/note come from item.sub like cancel's, so a row scrolled
+      // away and rebuilt still shows the number it already read.
+      var priced = !!r.ref;
+      if (r.cost.hidden !== !priced) r.cost.hidden = !priced;
+      var costBusy = !!s.costBusy;
+      if (r.cost.disabled !== costBusy) r.cost.disabled = costBusy;
+      setText(r.costNote, s.costNote || '');
       if (s.text && !r.text) {
         r.text = el('div', 'subagent-text');
         r.textBody = textRef('');

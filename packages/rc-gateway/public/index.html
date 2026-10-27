@@ -3081,6 +3081,8 @@
           onFork: (item) => void doForkHere(watchedSessionId, item),
           onCancelSubagent: (item) =>
             void doCancelSubagent(watchedSessionId, item),
+          onCostSubagent: (item) =>
+            void doCostSubagent(watchedSessionId, item),
           // May still be null if the boot read has not landed; the view then
           // starts in its own default and applyStampZone corrects it below.
           stampZone,
@@ -6200,6 +6202,67 @@
         );
         if (!r.ok) return show(false, 'stop failed: ' + r.code);
         show(false, 'stopped');
+      }
+
+      // ---- Read ONE subagent's cost (issue #110) --------------------------
+      // The nested row's cost button. The stream carries the child's text and
+      // tool calls but never its usage: renderSessionUpdate skips
+      // updateLiveTokens for child frames on purpose, because the child's
+      // tokens are not this session's.
+      //
+      // The runs panel under Operations already prints a token count, so this
+      // is not the page's only cost read and does not pretend to be. The
+      // difference is which question each answers: that panel lists whatever
+      // the daemon's task registry still holds at the moment you press it, in
+      // a separate manual panel, while this prices the row you are already
+      // looking at, by its own tool-use reference.
+      //
+      // No session guard, unlike the stored-file preview. The answer is
+      // written onto item.sub, and a switch calls transcriptModel.clear(),
+      // which drops every item, so an abandoned row cannot repaint; the view
+      // only marks rows it still holds. doCancelSubagent leans on the same
+      // fact, and the preview needed a guard only because it writes into one
+      // global box that survives the switch.
+      async function doCostSubagent(sessionId, item) {
+        const sub = item && item.sub;
+        // The daemon matches this against task.toolUseId, the PARENT Agent
+        // tool's call id, which is the same value cancel uses.
+        const ref = item && item.toolCallId;
+        const show = (busy, note) => {
+          if (sub) {
+            sub.costBusy = busy;
+            sub.costNote = note;
+          }
+          transcriptModel.touch(item);
+        };
+        if (!sessionId) return show(false, 'watch a session first');
+        if (!token()) return show(false, 'pair first');
+        if (!ref) return show(false, 'no reference for this subagent');
+        show(true, 'reading...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sessionId) +
+            '/subagents/' +
+            encodeURIComponent(ref),
+        );
+        if (!r.ok) return show(false, 'cost failed: ' + r.code);
+        const b = (r && r.body) || {};
+        // Only what the daemon actually sent. A resolution with no usage
+        // fields says so rather than drawing 0, because 0 is a number nobody
+        // reported and a reader cannot tell it apart from a free run.
+        if (typeof b.totalTokens !== 'number') {
+          return show(false, 'the daemon named no usage');
+        }
+        const split =
+          typeof b.inputTokens === 'number' &&
+          typeof b.outputTokens === 'number'
+            ? ' (' +
+              fmtK(b.inputTokens) +
+              ' in / ' +
+              fmtK(b.outputTokens) +
+              ' out)'
+            : '';
+        return show(false, fmtK(b.totalTokens) + ' tok' + split);
       }
 
       const token = () => localStorage.getItem(TOKEN_KEY);
