@@ -2171,6 +2171,51 @@
              rather than in the chat pane because none of them is something you
              look at every session: this is the part of the page you open to
              check on something. -->
+        <!-- #124. The daemon's roll-up of ONE conversation. It sits beside
+             Usage rather than inside the chat pane because it is something you
+             open to check on a conversation, not something you watch. The two
+             reads are neighbours on purpose and are still different things:
+             Usage is the gateway's own cost store, absent entirely when no
+             store is wired, and it answers across every session. This is the
+             daemon's accounting of the one conversation you name, and it
+             carries prompt counts, tool calls and lines written, which the
+             gateway store has no field for. Bounded like the panels around it,
+             because an open strip that grows is what pushed the composer under
+             the fold on a phone. -->
+        <details id="session-stats" class="ops-collapse">
+          <summary>
+            <strong>Session report</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Session report?"
+              aria-expanded="false"
+              aria-controls="help-session-stats"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-session-stats" hidden>
+            What the daemon recorded about one conversation: how long it ran,
+            how many prompts it took, what each model spent, which tools were
+            called and how many lines were written. Enter the session id (blank
+            means the session you're watching) and tap <b>Read stats</b>. This
+            is not the Usage panel above it, which reports money across every
+            session from the gateway's own store and says <b>not enabled</b>
+            when that store was never wired. Needs session-read scope.
+          </div>
+          <div class="ops-note">
+            (one conversation's own roll-up; requires session-read scope)
+          </div>
+          <div>
+            <input
+              id="stats-id"
+              placeholder="session id (blank = watched)"
+            />
+            <button id="stats-load">Read stats</button>
+          </div>
+          <div id="stats-body">(not loaded)</div>
+        </details>
         <details id="usage-view" class="ops-collapse">
           <summary>
             <strong>Usage</strong
@@ -12272,6 +12317,133 @@
           row.appendChild(btn);
           out.appendChild(row);
         }
+      };
+
+      // #124. The daemon's roll-up of one conversation, asked on press.
+      // Two rules in this renderer come straight from the payload's shape
+      // rather than from taste.
+      //
+      // `sources` is per-subagent spend with the MAIN conversation's own calls
+      // excluded by design (the SDK documents them as the aggregate remainder),
+      // so summing that list would print a number labelled like a session
+      // total while being nothing of the kind. It is drawn per row and never
+      // added up. The total the page does print is `models[*].tokens.total`,
+      // which is the whole conversation.
+      //
+      // `skills` and `sources` are optional on the wire. Absent is not zero:
+      // printing "0 skill calls" for a daemon that reported nothing would
+      // state a fact about a thing it never measured, so an absent block draws
+      // no row at all.
+      function statsDuration(ms) {
+        const mins = Math.round(ms / 60000);
+        if (mins < 60) return mins + 'm';
+        return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+      }
+
+      $('stats-load').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('stats-body');
+        const id = verbSessionId('stats-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading\u2026';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/stats',
+        );
+        if (!r.ok) {
+          // The gateway distinguishes three failures here and the page passes
+          // all three on: a conversation the pool has no binding for is
+          // session_not_loaded (src/routes/sessionStats.ts), which is an
+          // instruction to open it, not a missing conversation.
+          out.textContent = 'stats failed: ' + r.code;
+          return;
+        }
+        const st = r.body || {};
+        const rows = [];
+        rows.push(
+          'ran ' +
+            statsDuration(st.durationMs || 0) +
+            ', ' +
+            (st.promptCount || 0) +
+            ' prompts',
+        );
+        let grandTokens = 0;
+        for (const model of Object.keys(st.models || {})) {
+          const m = st.models[model];
+          const t = (m && m.tokens) || {};
+          grandTokens += t.total || 0;
+          const api = (m && m.api) || {};
+          rows.push(
+            model +
+              '  ' +
+              (t.total || 0) +
+              ' tok (' +
+              (t.prompt || 0) +
+              ' in, ' +
+              (t.candidates || 0) +
+              ' out)' +
+              ', ' +
+              (api.totalRequests || 0) +
+              ' calls' +
+              (api.totalErrors ? ', ' + api.totalErrors + ' errors' : ''),
+          );
+        }
+        rows.push('total ' + grandTokens + ' tokens');
+        const tools = st.tools || {};
+        if (tools.totalCalls) {
+          rows.push(
+            tools.totalCalls +
+              ' tool calls, ' +
+              (tools.totalSuccess || 0) +
+              ' ok, ' +
+              (tools.totalFail || 0) +
+              ' failed',
+          );
+          for (const name of Object.keys(tools.byName || {})) {
+            const t = tools.byName[name];
+            const d = (t && t.decisions) || {};
+            rows.push(
+              '  ' +
+                name +
+                '  ' +
+                (t.count || 0) +
+                (t.fail ? ', ' + t.fail + ' failed' : '') +
+                (d.reject ? ', ' + d.reject + ' refused' : ''),
+            );
+          }
+        }
+        const files = st.files || {};
+        rows.push(
+          'lines +' +
+            (files.totalLinesAdded || 0) +
+            ' / -' +
+            (files.totalLinesRemoved || 0),
+        );
+        if (Array.isArray(st.sources)) {
+          for (const src of st.sources) {
+            const t = (src && src.tokens) || {};
+            rows.push(
+              'subagent ' +
+                (src.name || src.id || '?') +
+                '  ' +
+                (t.total || 0) +
+                ' tok',
+            );
+          }
+        }
+        // No row at all when the daemon reported no skills, rather than a row
+        // claiming zero. See the note above.
+        if (st.skills && st.skills.totalCalls) {
+          rows.push(
+            st.skills.totalCalls +
+              ' skill calls, ' +
+              (st.skills.totalFail || 0) +
+              ' failed',
+          );
+        }
+        renderRows(out, rows);
       };
 
       $('fork-btn').onclick = async () => {

@@ -154,6 +154,7 @@ import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
+import { createSessionStatsRoute } from './routes/sessionStats.js';
 /** #109: session attachments (uploads + the list that confirms them). */
 import {
   createAttachmentListRoute,
@@ -842,6 +843,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionTasksRoute(deps.daemon),
+  );
+  // GET /session/:id/stats — read-scope; the daemon's roll-up of one
+  // conversation (duration, prompt count, per-model tokens, tool calls, lines
+  // written). 1:1 with the daemon's own route. Not audited: the payload is
+  // counts, and the un-audited /tasks read beside it relays shell paths, which
+  // is strictly more disclosing. This is NOT /rc/usage, which reads the
+  // gateway's own cost store and is absent entirely when no store is wired.
+  app.get(
+    '/session/:id/stats',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionStatsRoute(deps.daemon),
   );
   // POST /session/:id/end — write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.
