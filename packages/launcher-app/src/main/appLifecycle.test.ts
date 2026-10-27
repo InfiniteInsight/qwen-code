@@ -135,12 +135,12 @@ describe('terminalDrainNote', () => {
     expect(note).toContain('skipped 1');
   });
 
-  it('claims only that this run opened a tab, never that one is open now', () => {
-    // `openSessions` cannot observe `wt.exe` handing the tab to the terminal
+  it('names a coalesced duplicate without claiming a tab is open now', () => {
+    // `openedTabs` cannot observe `wt.exe` handing the tab to the terminal
     // process, so closure is invisible here. A present-tense claim would be a
-    // fact nothing on this host measures.
+    // fact nothing on this host measures (issue #68).
     const note = terminalDrainNote({ ...empty, skipped: ['r1'] });
-    expect(note).toContain('this run');
+    expect(note).toContain('duplicate');
     expect(note).not.toMatch(/\bis (?:already )?open/i);
     expect(note).not.toMatch(/\bcurrently\b/i);
   });

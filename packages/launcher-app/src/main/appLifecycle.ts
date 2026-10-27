@@ -113,12 +113,13 @@ export function summarizeError(raw: string): string {
  * tab and this app deliberately did not open one", was indistinguishable from
  * an idle queue.
  *
- * The wording is scoped to what the entry actually proves. `openSessions`
- * records that THIS RUN opened a tab, not that a tab is open now: the launcher
- * cannot observe `wt.exe` handing the tab to the terminal process, so closure is
- * invisible to it. Saying "a tab is already open" would claim a fact nothing on
- * this host measures, which is the reason a closed tab reads as a dead control
- * (issue #68).
+ * The wording is scoped to what the entry actually proves. `openedTabs`
+ * records that THIS RUN opened a tab for a request stamped at a given time, not
+ * that a tab is open now: the launcher cannot observe `wt.exe` handing the tab
+ * to the terminal process, so closure is invisible to it. Saying "a tab is
+ * already open" would claim a fact nothing on this host measures, which is the
+ * reason a closed tab read as a dead control (issue #68). The window is what
+ * makes the skip mean something: a later ask opens its own tab.
  */
 export function terminalDrainNote(out: {
   opened: readonly unknown[];
@@ -134,14 +135,14 @@ export function terminalDrainNote(out: {
   if (out.opened.length > 0 && out.skipped.length > 0) {
     return (
       `opened ${out.opened.length} tab(s), skipped ${out.skipped.length} ` +
-      'this run already opened'
+      'duplicate(s)'
     );
   }
   if (out.opened.length > 0) return `opened ${out.opened.length} tab(s)`;
   if (out.skipped.length > 0) {
     return (
-      `skipped ${out.skipped.length}: this run already opened a tab for ` +
-      'that conversation'
+      `skipped ${out.skipped.length}: duplicate of a tab ` +
+      'opened moments ago'
     );
   }
   return TRAY_IDLE_NOTE;
