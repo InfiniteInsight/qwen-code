@@ -4,7 +4,7 @@
 # retag a mutable base tag with a poisoned image, but a digest cannot be
 # moved by `docker tag`. Bump the digest together with the tag.
 # ratchet:docker.io/library/node:22-slim
-FROM docker.io/library/node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS builder
+FROM docker.io/library/node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,7 +36,7 @@ RUN QWEN_SKIP_PREPARE=1 corepack pnpm install --frozen-lockfile --reporter=appen
 # Runtime stage
 # Digest-pinned for the same reason as the builder stage above.
 # ratchet:docker.io/library/node:22-slim
-FROM docker.io/library/node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM docker.io/library/node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
 
 ARG SANDBOX_NAME="qwen-code-sandbox"
 ARG CLI_VERSION_ARG
