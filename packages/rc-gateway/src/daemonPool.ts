@@ -65,6 +65,8 @@ import {
   type DaemonWorkspaceMcpReloadOptions,
   type DaemonWorkspacePermissionsStatus,
   type DaemonWorkspaceSettingsStatus,
+  type DaemonWorkspaceMemoryStatus,
+  type DaemonWorkspaceAgentsStatus,
 } from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
 
@@ -434,6 +436,14 @@ export interface SessionDaemon {
     workspaceCwd?: string,
   ): Promise<DaemonWorkspaceProvidersStatus>;
   workspaceHooks(workspaceCwd?: string): Promise<DaemonWorkspaceHooksStatus>;
+  // Workspace context (rc-workspace-context, #123). Same no-argument wrappers
+  // as the two batches above; the memory wrapper deliberately takes no
+  // options, because the SDK's includeContent flag is the only way to read the
+  // global context file, which the file routes refuse. See routes/workspaceContext.
+  workspaceMemory(workspaceCwd?: string): Promise<DaemonWorkspaceMemoryStatus>;
+  listWorkspaceAgents(
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceAgentsStatus>;
   setWorkspaceSetting(
     scope: 'workspace' | 'user',
     key: string,
@@ -1722,6 +1732,25 @@ export class DaemonPool implements SessionDaemon {
   workspaceHooks(workspaceCwd?: string): Promise<DaemonWorkspaceHooksStatus> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.workspaceHooks(),
+    );
+  }
+
+  workspaceMemory(workspaceCwd?: string): Promise<DaemonWorkspaceMemoryStatus> {
+    // No options argument, on purpose: see routes/workspaceContext.ts.
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceMemory(),
+    );
+  }
+
+  listWorkspaceAgents(
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceAgentsStatus> {
+    // Named after the SDK method, not after its siblings. SessionDaemon is
+    // implemented by BOTH this pool and a bare DaemonClient (the tests inject
+    // one as deps.daemon), so a gateway-invented name here is undefined at
+    // runtime on the client side. workspaceSkills above follows that rule.
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.listWorkspaceAgents(),
     );
   }
 

@@ -105,6 +105,10 @@ import {
   createWorkspaceSkillsRoute,
 } from './routes/workspaceInventory.js';
 import {
+  createWorkspaceAgentsRoute,
+  createWorkspaceMemoryRoute,
+} from './routes/workspaceContext.js';
+import {
   createWorkspaceToolToggleRoute,
   createWorkspaceToolsCatalogRoute,
 } from './routes/workspaceTools.js';
@@ -1936,6 +1940,29 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceHooksRoute(deps.daemon),
+  );
+  // Workspace context reads (rc-workspace-context, #123). WRITE floor, same
+  // #107 line as the batches above: a memory entry is a host `path` plus a
+  // `scope` that can be `global`, and an agent summary carries `filePath`
+  // beside the tools and MCP servers each agent may reach. Neither is a name.
+  // The memory route also never asks the daemon for file content, because the
+  // SDK's includeContent flag is the designed way to read the global context
+  // file that the file routes refuse; see routes/workspaceContext.ts.
+  app.get(
+    '/rc/workspace/memory',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceMemoryRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/agents',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceAgentsRoute(deps.daemon),
   );
   app.get(
     '/rc/workspace/tools',
