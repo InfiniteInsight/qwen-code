@@ -35,6 +35,7 @@ import type {
   DaemonSubagentSessionResolution,
   DaemonSessionTasksStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  SessionMetadataResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceSkillsStatus,
@@ -428,6 +429,17 @@ export interface SessionDaemon {
     kind: DaemonSessionTaskWithWorkflowStatus['kind'],
     clientId?: string,
   ): Promise<{ cancelled: boolean; reason?: string }>;
+  /**
+   * Renames ONE loaded session. Returns the daemon's EFFECTIVE metadata: the
+   * name the daemon says is now stored, not the name that was sent. A caller
+   * that echoes back its own input would report a title the daemon never
+   * agreed to.
+   */
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult>;
   resolveSubagentSession(
     sessionId: string,
     subagentRef: string,
@@ -1692,6 +1704,32 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<{ cancelled: boolean; reason?: string }> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionTaskCancel(sessionId, taskId, kind, clientId),
+    );
+  }
+
+  /**
+   * Sets ONE session's human title. Two properties of the daemon's route are
+   * worth carrying here, because both decide what a caller may conclude.
+   *
+   * This reaches a LOADED session only. The route's disk fallback, the branch
+   * that renames an inactive or archived transcript, lives on the
+   * workspace-qualified spelling and behind `runtime.trusted`
+   * (cli/src/serve/routes/session.ts:1565, :8887). Through this door a session
+   * the daemon has not loaded is a 404, never a rename.
+   *
+   * The returned name is the daemon's effective one. The route slices the name
+   * to 256 and the bridge caps at 256, while the child's own persist refuses
+   * above 200 and is not awaited, so a name can be accepted, published as a
+   * live change, and never written to disk. The verdict to trust is the name
+   * that comes back, not the name that was sent.
+   */
+  async updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.updateSessionMetadata(sessionId, metadata, clientId),
     );
   }
 

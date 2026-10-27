@@ -166,6 +166,7 @@ import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
+import { createSessionRenameRoute } from './routes/sessionRename.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
 import { createSessionStatsRoute } from './routes/sessionStats.js';
@@ -970,6 +971,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionTaskCancelRoute(deps.daemon, audit),
+  );
+  // PATCH /session/:id/metadata: write-scope, gives ONE loaded session a human
+  // title. Same guard set as the run cancel above it: naming a session is a
+  // mutation, and a token scoped to another session has no business titling it.
+  // No sub-actor rate limiter, because a title is typed by a person once, not
+  // repeated by a loop, and the route's own 200-character ceiling bounds what
+  // one call can carry.
+  app.patch(
+    '/session/:id/metadata',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403
+    createSessionRenameRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',

@@ -26,8 +26,19 @@ import type { CorsOriginRecord } from './types.js';
 /** Marker string the caller writes into a structured `cors_denied` audit event. */
 export type CorsAuditSignal = 'cors_denied';
 
-/** Default methods advertised on a preflight when the gateway does not narrow them. */
-const DEFAULT_ALLOW_METHODS = ['GET', 'POST', 'DELETE', 'OPTIONS'] as const;
+/** Default methods advertised on a preflight when the gateway does not narrow them.
+ * `PATCH` is here because the session rename is one
+ * (`PATCH /session/:id/metadata`). This list reaches only the preflight
+ * response header, not a method gate, so omitting it did not block the route:
+ * it let the browser ask and then refused the answer, which reads to a
+ * cross-origin caller as a dead route. */
+const DEFAULT_ALLOW_METHODS = [
+  'GET',
+  'POST',
+  'PATCH',
+  'DELETE',
+  'OPTIONS',
+] as const;
 
 /**
  * Default request headers echoed when the browser does not send

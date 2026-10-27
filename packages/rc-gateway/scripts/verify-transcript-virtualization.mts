@@ -11923,6 +11923,110 @@ PAGE_SCENARIOS.push({
       return `with no session_worktree_reset_v1 tag the control stays hidden (${JSON.stringify(offered)}) and nothing was sent`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P121 the rename prints the title the daemon returns, not the one that was typed',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const sent: unknown[] = [];
+      await page.route(/\/session\/[^/]+\/metadata$/, async (route) => {
+        sent.push(JSON.parse(route.request().postData() ?? '{}'));
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            sessionId: viewer.sessionId,
+            displayName: 'Stored by the daemon',
+          }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('rename-title') as HTMLInputElement).value =
+          'Typed by the reader';
+        (document.getElementById('rename-set') as HTMLButtonElement).click();
+      });
+      await page.waitForFunction(
+        () =>
+          !(((document.getElementById('rename-result') as HTMLElement) || {
+            textContent: '',
+          }).textContent ?? '').includes('saving'),
+        null,
+        { timeout: 8000 },
+      );
+      const out = await page.evaluate(
+        () =>
+          ((document.getElementById('rename-result') as HTMLElement) || {
+            textContent: '',
+          }).textContent ?? '',
+      );
+      expect(
+        sent.length === 1,
+        `the rename sent ${sent.length} requests to the gateway`,
+      );
+      expect(
+        (sent[0] as { displayName?: string }).displayName ===
+          'Typed by the reader',
+        `the typed title never reached the gateway (${JSON.stringify(sent[0])})`,
+      );
+      expect(
+        out.includes('Stored by the daemon'),
+        `the page did not print the title the daemon returned (${JSON.stringify(out)})`,
+      );
+      expect(
+        !out.includes('Typed by the reader'),
+        `the page echoed what was typed instead of the daemon's name (${JSON.stringify(out)})`,
+      );
+      return `typed title went up, daemon name came back (${JSON.stringify(out)})`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P122 a rename the daemon answered with no name does not read as titled',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await page.route(/\/session\/[^/]+\/metadata$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: viewer.sessionId }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('rename-title') as HTMLInputElement).value =
+          'Any title at all';
+        (document.getElementById('rename-set') as HTMLButtonElement).click();
+      });
+      await page.waitForFunction(
+        () =>
+          !(((document.getElementById('rename-result') as HTMLElement) || {
+            textContent: '',
+          }).textContent ?? '').includes('saving'),
+        null,
+        { timeout: 8000 },
+      );
+      const out = await page.evaluate(
+        () =>
+          ((document.getElementById('rename-result') as HTMLElement) || {
+            textContent: '',
+          }).textContent ?? '',
+      );
+      expect(
+        !/^title set/i.test(out),
+        `a reply carrying no name was printed as a set title (${JSON.stringify(out)})`,
+      );
+      expect(
+        out.includes('no name'),
+        `a rename with no name back did not say so (${JSON.stringify(out)})`,
+      );
+      return `a nameless 200 reads ${JSON.stringify(out)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,

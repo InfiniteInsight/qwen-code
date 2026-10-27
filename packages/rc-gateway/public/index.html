@@ -1598,6 +1598,45 @@
           </div>
           <div id="runs-body">(not listed)</div>
         </details>
+        <details id="rename" class="ops-collapse">
+          <summary>
+            <strong>Rename session</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Rename session?"
+              aria-expanded="false"
+              aria-controls="help-rename"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-rename" hidden>
+            Gives a session a title of your own, replacing the one in the list
+            beside it. Enter the session id (blank means the session you're
+            watching), type a title and tap <b>Set title</b>. Two limits are
+            worth knowing before you do. This reaches a session the daemon has
+            <b>open</b>: a transcript it is not currently running answers that
+            there is nothing to rename, and the title on disk is left alone. And
+            the durable record is written after the reply, so the list can still
+            show the old title for a moment; the name printed here is the one
+            the daemon says it holds. 200 characters is the limit, and a title
+            over it is refused rather than cut short. Needs session-write scope.
+          </div>
+          <div class="ops-note">
+            (titles a session the daemon has open; requires session-write scope)
+          </div>
+          <div>
+            <input id="rename-id" placeholder="session id (blank = watched)" />
+            <input
+              id="rename-title"
+              maxlength="200"
+              placeholder="new title for the session"
+            />
+            <button id="rename-set">Set title</button>
+          </div>
+          <div id="rename-result">(no title set)</div>
+        </details>
         <details id="prompt-queue" class="ops-collapse">
           <summary>
             <strong>Prompt queue</strong
@@ -13218,6 +13257,43 @@
           }
           out.appendChild(row);
         }
+      };
+
+      // #110. Names one session. The reply is judged on the name the daemon
+      // sends BACK, not on the status code: the daemon's route answers
+      // { sessionId, ...effective }, so the body carries the title it says it
+      // now holds. A handler that read only r.ok would print the typed name
+      // over a daemon that stored something else.
+      $('rename-set').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('rename-result');
+        const id = verbSessionId('rename-id');
+        const title = ($('rename-title').value || '').trim();
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        if (title === '') {
+          out.textContent = 'type a title first';
+          return;
+        }
+        out.textContent = 'saving\u2026';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/metadata',
+          { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
+        );
+        if (!r.ok) {
+          // display_name_too_long and invalid_metadata are both about the name
+          // and both come back as 400, so the code is what tells the reader
+          // which one they hit.
+          out.textContent = 'rename failed: ' + r.code;
+          return;
+        }
+        const stored = r.body && r.body.displayName;
+        out.textContent =
+          typeof stored === 'string' && stored !== ''
+            ? 'title set: ' + stored
+            : 'the daemon accepted the rename but returned no name';
       };
 
       // The daemon's own queue for one session. This is not the outbox strip
