@@ -36,9 +36,8 @@
  * hold or short-circuit recovery-pending attaches (§3).
  */
 
-import { isSessionLevelNotFound } from '@qwen-code/sdk/daemon';
-
 import type { AuditRecorder } from '../auditLog.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { DaemonExitInfo, RecoveryState } from '../daemonPool.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import type { PromptQueue } from '../routes/promptQueue.js';
@@ -260,7 +259,7 @@ export class RecoveryOrchestrator {
         await this.pool.resumeSession(id, { workspaceCwd: workspaceKey });
         report(id, true, startedAt);
       } catch (err) {
-        if (isSessionLevelNotFound(err)) {
+        if (isSessionLevelGone(err)) {
           // The transcript is gone — unrecoverable, no retry; the other
           // sessions are still tried.
           report(id, false, startedAt);
