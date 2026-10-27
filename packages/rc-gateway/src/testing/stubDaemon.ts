@@ -643,12 +643,43 @@ export async function startStubDaemon(
         .json(opts.workspacePermissionsErrorBody ?? { error: 'stub error' });
       return;
     }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    // The shape the daemon actually sends. buildPermissionSettings
+    // (packages/cli/src/config/permission-settings.ts:145) builds user and
+    // workspace as { path, rules } OBJECTS and merged as one
+    // { allow, ask, deny } set (readPermissionRuleSet, :55). This used to be
+    // three flat arrays, and that was not a cosmetic difference: the page reads
+    // `permRules[permScope] || { rules: {} }` then `src.rules[rt]`
+    // (public/index.html:4254), and a truthy empty array survives that `||`, so
+    // src.rules was undefined and renderPermRulesSection threw. loadPermRules
+    // swallows it when notify is false (:4344), so the panel sat on "loading…"
+    // in every page scenario and no scenario noticed, because none asserted it.
+    // It also made the gateway's version hash useless: permissionsVersion hashes
+    // data.user?.rules (src/routes/workspacePermissions.ts:45), which on an array
+    // is undefined, so every default payload hashed to the same constant and the
+    // baseVersion conflict path could not be reached either.
+    // A fixture a page cannot render is not a stub of the daemon; it is a fixture
+    // that hides the panel it stands for.
     res.json(
       opts.workspacePermissionsResult ?? {
         v: 1,
-        user: [],
-        workspace: [],
-        merged: [],
+        user: {
+          path: '/home/tester/.qwen/settings.json',
+          rules: { allow: ['Read(~/.qwen/**)'], ask: [], deny: [] },
+        },
+        workspace: {
+          path: cwd,
+          rules: {
+            allow: ['Bash(git status:*)'],
+            ask: ['Bash(npm publish:*)'],
+            deny: ['Edit(./secrets/**)'],
+          },
+        },
+        merged: {
+          allow: ['Read(~/.qwen/**)', 'Bash(git status:*)'],
+          ask: ['Bash(npm publish:*)'],
+          deny: ['Edit(./secrets/**)'],
+        },
         isTrusted: true,
       },
     );
@@ -668,12 +699,36 @@ export async function startStubDaemon(
       ruleType?: unknown;
       rules?: unknown;
     };
+    // A write is answered with the whole rebuilt settings object, not the list
+    // it was handed, for the same reason the GET carries that shape: the page
+    // assigns this body straight to permRules and re-renders
+    // (public/index.html:4396), so an array here would break the panel on the way
+    // back from a save. The written list lands in the slot its own scope and
+    // ruleType name, which is what a scenario needs to see the write take hold.
+    const cwd = opts.workspaceCwd ?? '/proj';
+    const ruleType =
+      typeof b.ruleType === 'string' &&
+      ['allow', 'ask', 'deny'].includes(b.ruleType)
+        ? b.ruleType
+        : 'allow';
+    const written = Array.isArray(b.rules) ? b.rules : [];
+    const emptySet = () => ({ allow: [], ask: [], deny: [] });
+    const userRules = emptySet();
+    const workspaceRules = emptySet();
+    if (b.scope === 'user') {
+      userRules[ruleType] = written;
+    } else {
+      workspaceRules[ruleType] = written;
+    }
     res.json(
       opts.setPermissionRulesResult ?? {
         v: 1,
-        user: [],
-        workspace: [],
-        merged: Array.isArray(b.rules) ? b.rules : [],
+        user: {
+          path: '/home/tester/.qwen/settings.json',
+          rules: userRules,
+        },
+        workspace: { path: cwd, rules: workspaceRules },
+        merged: { ...emptySet(), [ruleType]: written },
         isTrusted: true,
       },
     );

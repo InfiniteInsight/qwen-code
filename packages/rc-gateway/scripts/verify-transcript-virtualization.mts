@@ -2186,6 +2186,18 @@ type PageScenario =
         /** Status the stub answers GET /session/:id/resources with. */
         resourcesStatusCode?: number;
         /**
+         * Body the stub answers GET /workspace/permissions with. A scenario that
+         * asserts a drawn rule chip has to supply its own settings object, or it
+         * is checking the rules this file invented. The shape matters as much as
+         * the contents: the page reads `permRules[scope].rules[type]`, so a
+         * payload that carries flat arrays instead of the daemon's
+         * { path, rules } objects makes the panel throw and the scenario then
+         * asserts against a box no reader can see.
+         */
+        workspacePermissionsResult?: unknown;
+        /** Status the stub answers GET /workspace/permissions with. */
+        workspacePermissionsStatus?: number;
+        /**
          * Body the stub answers GET /session/:id/artifacts with. A scenario
          * that asserts a drawn row, or that an unknown kind still reaches the
          * page, has to supply its own envelope, or it is checking a list the
@@ -9676,6 +9688,233 @@ PAGE_SCENARIOS.push({
       return `a refused read reports ${JSON.stringify(text)}`;
     },
   });
+
+  // The permission-rules panel is opened last here, not first. It sits in the
+  // Operations pane behind a gate the gateway answers statically
+  // (src/routes/capabilities.ts:95), and it loads during boot
+  // (public/index.html:6646), so the only thing that ever kept a reader from
+  // seeing it was the stub's own payload: it sent three flat arrays where
+  // buildPermissionSettings sends { path, rules } objects
+  // (packages/cli/src/config/permission-settings.ts:145), and the page reads
+  // permRules[scope].rules[type], so it threw inside loadPermRules, whose catch
+  // swallowed it when notify was false. The panel sat on "loading..." for every
+  // scenario and nothing noticed, because no scenario looked. These three look.
+
+  const permChips = async (page: Page): Promise<string[]> =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('#perm-rules-body span')).map(
+        (el) => (el.textContent ?? '').trim(),
+      ),
+    );
+
+  const openPermPanel = async (page: Page): Promise<void> => {
+    await page.click('.tab[data-tab="ops"]');
+    await page.click('#perm-rules > summary');
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P94 the permission rules panel draws the daemon rules per bucket',
+    waitView: false,
+    noConsoleErrors: true,
+    // Its own payload, so the rule strings below are this scenario's and not the
+    // stub's. The ask bucket is left empty on purpose: an empty bucket has to
+    // draw its own "(none)" so a reader can tell "no ask rules" apart from a
+    // panel that never loaded, which is the exact confusion this fixture caused.
+    stub: {
+      workspacePermissionsResult: {
+        v: 1,
+        user: {
+          path: '/home/tester/.qwen/settings.json',
+          rules: { allow: ['user-only-allow'], ask: [], deny: [] },
+        },
+        workspace: {
+          path: '/proj',
+          rules: {
+            allow: ['Bash(git status:*)', 'Read(./docs/**)'],
+            ask: [],
+            deny: ['Edit(./secrets/**)'],
+          },
+        },
+        merged: { allow: [], ask: [], deny: [] },
+        isTrusted: true,
+      },
+    },
+    run: async ({ page }) => {
+      const gate = await page.evaluate(() => {
+        const sec = document.getElementById('perm-rules');
+        return {
+          hasBody: !!document.getElementById('perm-rules-body'),
+          hidden: !!sec && sec.hidden,
+        };
+      });
+      expect(gate.hasBody, 'no #perm-rules-body in the page at all');
+      expect(
+        !gate.hidden,
+        `#perm-rules stayed hidden although the gateway advertises workspaceControl.permissions (${JSON.stringify(gate)})`,
+      );
+      await openPermPanel(page);
+      await page.waitForFunction(() => {
+        const b = document.getElementById('perm-rules-body');
+        return !!b && !b.textContent.includes('loading');
+      });
+      const chips = await permChips(page);
+      for (const rule of [
+        'Bash(git status:*)',
+        'Read(./docs/**)',
+        'Edit(./secrets/**)',
+      ]) {
+        expect(
+          chips.some((c) => c.includes(rule)),
+          `a workspace rule never reached a chip (${JSON.stringify(rule)} in ${JSON.stringify(chips)})`,
+        );
+      }
+      // The empty bucket says so, and the other scope's rule does not appear
+      // while the workspace scope is selected.
+      expect(
+        chips.some((c) => c.includes('(none)')),
+        `an empty bucket drew nothing instead of saying so (${JSON.stringify(chips)})`,
+      );
+      expect(
+        !chips.join('\n').includes('user-only-allow'),
+        `the other scope's rules leaked into this one (${JSON.stringify(chips)})`,
+      );
+      return `draws ${JSON.stringify(chips)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P95 switching scope draws the other half of the same payload',
+    waitView: false,
+    noConsoleErrors: true,
+    // Both scopes carry a rule the other does not, so a switch that does not
+    // actually re-read proves itself: the selected scope's rule arrives and the
+    // unselected one leaves. A panel that showed both would tell an operator
+    // their user rules apply to the workspace, which is the direction that
+    // grants access by accident.
+    stub: {
+      workspacePermissionsResult: {
+        v: 1,
+        user: {
+          path: '/home/tester/.qwen/settings.json',
+          rules: { allow: ['user-side-rule'], ask: [], deny: [] },
+        },
+        workspace: {
+          path: '/proj',
+          rules: { allow: ['workspace-side-rule'], ask: [], deny: [] },
+        },
+        merged: { allow: [], ask: [], deny: [] },
+        isTrusted: true,
+      },
+    },
+    run: async ({ page }) => {
+      await openPermPanel(page);
+      await page.waitForFunction(() => {
+        const b = document.getElementById('perm-rules-body');
+        return !!b && b.textContent.includes('workspace-side-rule');
+      });
+      const before = await permChips(page);
+      expect(
+        !before.join('\n').includes('user-side-rule'),
+        `the user scope was drawn before it was selected (${JSON.stringify(before)})`,
+      );
+
+      await page.click('#perm-rules-body input[name="perm-scope"][value="user"]');
+      await page.waitForFunction(() => {
+        const b = document.getElementById('perm-rules-body');
+        return !!b && b.textContent.includes('user-side-rule');
+      });
+      const after = await permChips(page);
+      expect(
+        after.join('\n').includes('user-side-rule'),
+        `the user scope never drew its own rules (${JSON.stringify(after)})`,
+      );
+      expect(
+        !after.join('\n').includes('workspace-side-rule'),
+        `the workspace rules stayed on screen after switching to user (${JSON.stringify(after)})`,
+      );
+      return `switched ${JSON.stringify(before)} -> ${JSON.stringify(after)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P96 a refused rules read names the verdict instead of hanging',
+    waitView: false,
+    // A daemon 404 is re-coded by the gateway as permissions_unsupported on a
+    // 502 (src/routes/workspacePermissions.ts:115), because a missing
+    // permissions route is a daemon that cannot do this at all, not a workspace
+    // that is absent. The page prints the reason it was handed. Pinned because
+    // this is the one failure the fixture used to disguise: with the array
+    // payload every read threw before the verdict could be shown, so the
+    // distinction between "refused" and "still loading" never existed.
+    // noConsoleErrors is deliberately not set: a 502 is logged by the browser.
+    stub: { workspacePermissionsStatus: 404 },
+    run: async ({ page }) => {
+      await openPermPanel(page);
+      await page.waitForFunction(() => {
+        const b = document.getElementById('perm-rules-body');
+        return !!b && b.textContent.includes('(502)');
+      });
+      const text = await page.evaluate(
+        () => document.getElementById('perm-rules-body')?.textContent ?? '',
+      );
+      expect(
+        text.includes('Daemon does not support workspace permission control'),
+        `the refusal did not carry the gateway verdict (${JSON.stringify(text)})`,
+      );
+      return `a refused read reports ${JSON.stringify(text.slice(0, 160))}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P97 the rules panel renders the stub default payload, not only a bespoke one',
+    waitView: false,
+    noConsoleErrors: true,
+    // P94 and P95 bring their own payloads and P96 forces an error status, so
+    // none of them ever reads the stub's default. That default is what every
+    // other page scenario gets at boot, because loadPermRules(false) runs
+    // unconditionally (public/index.html:6646), and it is exactly the payload
+    // whose array shape made the renderer throw. This is the scenario that
+    // proves the fixture fix: with the array default it drew zero rule chips,
+    // only the empty label span the panel always renders, and it still left
+    // "loading..." because the boot read's catch swallows the throw when
+    // notify is false. A fixture fix that no scenario can notice is not a fix,
+    // so this one asks the stub for nothing and still has to be handed the
+    // workspace rules.
+    run: async ({ page }) => {
+      await openPermPanel(page);
+      await page.waitForFunction(
+        () => {
+          const b = document.getElementById('perm-rules-body');
+          return !!b && !b.textContent.includes('loading');
+        },
+        undefined,
+        { timeout: 8000 },
+      );
+      const text = await page.evaluate(
+        () => document.getElementById('perm-rules-body')?.textContent ?? '',
+      );
+      expect(
+        !text.includes('loading'),
+        `the panel never left "loading..." on the stub's own payload (${JSON.stringify(text.slice(0, 120))})`,
+      );
+      const chips = await permChips(page);
+      for (const rule of [
+        'Bash(git status:*)',
+        'Bash(npm publish:*)',
+        'Edit(./secrets/**)',
+      ]) {
+        expect(
+          chips.some((c) => c.includes(rule)),
+          `a default workspace rule never reached a chip (${JSON.stringify(rule)} in ${JSON.stringify(chips)})`,
+        );
+      }
+      expect(
+        !chips.join('\n').includes('Read(~/.qwen/**)'),
+        `the user scope's rule leaked into the workspace view (${JSON.stringify(chips)})`,
+      );
+      return `default payload draws ${JSON.stringify(chips)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
@@ -9700,6 +9939,8 @@ async function runPageScenario(
     statsResult: s.stub?.statsResult,
     resourcesResult: s.stub?.resourcesResult,
     resourcesStatusCode: s.stub?.resourcesStatusCode,
+    workspacePermissionsResult: s.stub?.workspacePermissionsResult,
+    workspacePermissionsStatus: s.stub?.workspacePermissionsStatus,
     artifactListResult: s.stub?.artifactListResult,
     artifactListStatus: s.stub?.artifactListStatus,
     artifactContentStatus: s.stub?.artifactContentStatus,

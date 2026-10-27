@@ -155,6 +155,20 @@ export interface BootViewerOptions {
    */
   resourcesStatusCode?: number;
   /**
+   * Body the stub answers GET /workspace/permissions with. Left unset the stub
+   * serves its own settings object, which now carries the shape the daemon
+   * really sends ({ path, rules } per scope, one { allow, ask, deny } merged
+   * set). A scenario that asserts a drawn rule chip has to supply its own
+   * payload, or it is checking the rules this file invented.
+   */
+  workspacePermissionsResult?: unknown;
+  /**
+   * Status the stub answers GET /workspace/permissions with (default 200). Set
+   * it to drive the refusal the page reports, since there is no other way to
+   * make a daemon refuse a rules read.
+   */
+  workspacePermissionsStatus?: number;
+  /**
    * Body the stub answers GET /session/:id/artifacts with. Left unset the stub
    * serves its own default envelope, so a scenario that asserts a drawn row is
    * checking the stub's invention rather than its own unless it sets this.
@@ -208,6 +222,8 @@ export async function bootViewer(
     statsResult: opts.statsResult,
     resourcesResult: opts.resourcesResult,
     resourcesStatusCode: opts.resourcesStatusCode,
+    workspacePermissionsResult: opts.workspacePermissionsResult,
+    workspacePermissionsStatus: opts.workspacePermissionsStatus,
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,
