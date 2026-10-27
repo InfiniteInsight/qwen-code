@@ -40,6 +40,16 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // pinning: tests that want the variable set it in-body.
 delete process.env['QWEN_RUNTIME_DIR'];
 
+// The relaunch env-provenance marker is the PARENT's state, not the test's.
+// config/environment.ts:85 reads it at module load into the inherited key sets,
+// and getRelaunchEnvProvenance() unions those with the keys sourced in-process,
+// so a test that asserts the provenance is empty is asserting what the parent
+// happened to carry. Run the suite from inside a qwen session and 3 llm.test.tsx
+// relaunch tests go red on a tree that did nothing wrong. Deleting rather than
+// pinning: an absent marker is the state under test, and a test that wants
+// inheritance exercises it in-body (config/environment.test.ts:519).
+delete process.env['QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE'];
+
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
