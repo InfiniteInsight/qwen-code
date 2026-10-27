@@ -45,10 +45,10 @@ export interface DrainResult {
   opened: string[];
   failed: Array<{ id: string; error: string }>;
   /**
-   * Requests not opened because THIS RUN already opened a tab for that
-   * session. Worded as what happened rather than as current state: the
-   * launcher cannot observe the tab being closed, so it cannot say one is
-   * open now (issue #68).
+   * Requests not opened because a tab was already opened for the same
+   * session by a request stamped within `TERMINAL_COALESCE_MS`. Worded as what
+   * happened rather than as current state: the launcher cannot observe the tab
+   * being closed, so it cannot say one is open now (issue #68).
    */
   skipped: string[];
   /**
@@ -65,6 +65,36 @@ export interface LauncherDeps {
   runWsl: (command: string) => Promise<{ code: number; stdout: string }>;
   /** Launch Windows Terminal with `args`; resolves when it is accepted. */
   execWt: (args: string[]) => Promise<void>;
+}
+
+/**
+ * How long a second request for the same session is still treated as the same
+ * ask rather than a new one. Three polls, which is the tolerance the gateway
+ * already uses for a launcher that has gone quiet (`rc-gateway/src/routes/
+ * terminals.ts`, `LAUNCHER_STALE_MS`), so the two ends do not disagree about
+ * what a missed poll means.
+ *
+ * This is a bound on how far apart two duplicates can be, not a guess about how
+ * long a tab lives. Nothing here measures the latter: `wt.exe` hands the tab to
+ * the terminal process and returns. What is measurable is that this run opened a
+ * tab for a request at a moment the gateway stamped, and the requests carry that
+ * moment, so the window is read off data rather than off a timer this app sets.
+ */
+export const TERMINAL_COALESCE_MS = 3 * 4_000;
+
+/**
+ * The gateway's stamp on a request, or null when it has none.
+ *
+ * A missing stamp arrives as 0 on the way through the log, and 0 against a real
+ * epoch stamp is a difference of half a century: taken as a time it would either
+ * suppress forever or never, depending on which side was missing. So an
+ * unstamped request is never coalesced with anything, which is the direction
+ * that cannot leave a user staring at a control that appears to do nothing.
+ */
+function stampOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : null;
 }
 
 /**
@@ -134,21 +164,27 @@ export function pendingCommand(cursor: number): string {
 /**
  * Fetch queued requests and open a tab for each.
  *
- * `openSessions` is the caller's set, for this app run, of session ids this run
- * has already opened a tab for. It is not a claim about what is on screen now:
- * `wt.exe` hands the tab to the terminal process and returns, so closure is
- * invisible from here, which is why a tab the user has closed still suppresses
- * a new one (issue #68). Skipping repeats matters: with the daemon's default
+ * `openedTabs` is the caller's map, for this app run, of session id to the
+ * gateway stamp on the request this run opened a tab for. It is not a claim
+ * about what is on screen now: `wt.exe` hands the tab to the terminal process
+ * and returns, so closure is invisible from here.
+ *
+ * A repeat request is therefore coalesced with the one it duplicates only while
+ * it is close enough in time to be the same ask (`TERMINAL_COALESCE_MS`), and a
+ * later request opens a tab even though an earlier one was opened for the same
+ * session. Coalescing forever was the bug: it meant a tab the user closed
+ * suppressed every future tab for that conversation for the life of the process,
+ * which is days, so the control went dead with nothing on screen to explain it
+ * (issue #68). The dedup itself still matters: with the daemon's default
  * `sessionScope:'single'`, every "New conversation" in a workspace resolves the
- * SAME session id, so without this a user clicking twice gets two identical
- * tabs.
+ * SAME session id, so without it a user clicking twice gets two identical tabs.
  *
  * A request whose tab fails to open is reported and left un-recorded, so the
  * next pass retries it (the cursor only advances past what was handled).
  */
 export async function drainTerminalRequests(
   cursor: number,
-  openSessions: Set<string>,
+  openedTabs: Map<string, number>,
   deps: LauncherDeps,
   opts: { distro?: string } = {},
 ): Promise<DrainResult> {
@@ -170,8 +206,19 @@ export async function drainTerminalRequests(
   // The page is a contiguous slice starting at `cursor`, so the cursor is just
   // how many of them were handled in order.
   let advanced = cursor;
+  // The newest stamp on this page. The launcher has no reason to read a clock
+  // when the requests it is asked about already carry the time the gateway
+  // wrote them, so this is its only hold on "now".
+  let newest = 0;
   for (const req of page.requests) {
-    if (openSessions.has(req.sessionId)) {
+    const arrived = stampOf(req.createdAt);
+    if (arrived !== null && arrived > newest) newest = arrived;
+    const since = openedTabs.get(req.sessionId);
+    if (
+      arrived !== null &&
+      since !== undefined &&
+      arrived - since <= TERMINAL_COALESCE_MS
+    ) {
       result.skipped.push(req.id);
       advanced++;
       continue;
@@ -190,9 +237,17 @@ export async function drainTerminalRequests(
       // one tab cannot open any.
       break;
     }
-    openSessions.add(req.sessionId);
+    if (arrived !== null) openedTabs.set(req.sessionId, arrived);
     result.opened.push(req.id);
     advanced++;
+  }
+  // Past the window an entry can coalesce nothing, and the log only moves
+  // forward, so it is dropped rather than kept for the life of the process.
+  // Unbounded growth is the other half of issue #68.
+  if (newest > 0) {
+    for (const [sessionId, since] of openedTabs) {
+      if (newest - since > TERMINAL_COALESCE_MS) openedTabs.delete(sessionId);
+    }
   }
   result.cursor = Math.min(advanced, page.cursor);
   return result;

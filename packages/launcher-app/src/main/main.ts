@@ -63,9 +63,10 @@ function setTerminalNote(note: string): void {
  * conversation started from a phone whether or not this window is up.
  */
 function startTerminalPolling(): void {
-  // Sessions with a tab already open, for this app run only. Restarting the
-  // launcher forgets them, which is correct — the old tabs are gone too.
-  const openSessions = new Set<string>();
+  // Session id to the gateway stamp on the request this run opened a tab for,
+  // for this app run only. Restarting the launcher forgets them, which is
+  // correct - the old tabs are gone too.
+  const openedTabs = new Map<string, number>();
   let running = false;
   const tick = async (): Promise<void> => {
     if (running) return; // a slow `wt` launch must not let passes pile up
@@ -75,7 +76,7 @@ function startTerminalPolling(): void {
       const cursor = before.terminalCursor ?? 0;
       const out = await drainTerminalRequests(
         cursor,
-        openSessions,
+        openedTabs,
         { runWsl: realRunWsl(before.distro), execWt: realExecWt() },
         { distro: before.distro },
       );
