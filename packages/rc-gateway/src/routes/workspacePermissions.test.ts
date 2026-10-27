@@ -152,7 +152,15 @@ describe('/rc/workspace/permissions', () => {
       body: JSON.stringify({ scope: 'workspace', ruleType: 'allow', rules }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ merged: rules, isTrusted: true });
+    // merged is one { allow, ask, deny } set, not the flat list this asserted
+    // until the stub was fixed to the shape the daemon sends
+    // (buildPermissionSettings, packages/cli/src/config/permission-settings.ts:145).
+    // The passthrough is the point, so it is still checked: the list the owner
+    // posted comes back in the slot its own ruleType names.
+    expect(await res.json()).toMatchObject({
+      merged: { allow: rules, ask: [], deny: [] },
+      isTrusted: true,
+    });
     // The daemon received the full replacement list.
     expect(ctx.stub.lastPermissionRulesBody).toEqual({
       scope: 'workspace',
