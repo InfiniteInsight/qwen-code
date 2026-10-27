@@ -1272,6 +1272,57 @@
               overflow-y: auto;
             "
           ></div>
+          <!-- #133. A side question about this conversation, answered without
+               joining its turn order. Its own control rather than a line in the
+               composer: the composer's Send is guarded so a held prompt cannot
+               be doubled (#70), and a question that must NOT take a turn has no
+                 business sharing the button that does. It needs a field, which
+               is why the recap slot above cannot answer this one -- recap asks
+               a fixed question, this one is the operator's words.
+               Collapsed until pressed, for the same reason as recap: an open
+               strip that grows is what pushed the composer under the fold on a
+               phone, and a field plus an answer is taller than either alone. -->
+          <button id="btw-toggle" type="button" aria-expanded="false" hidden>
+            Ask a side question
+          </button>
+          <div id="btw-panel" hidden style="margin-top: 6px">
+            <input
+              id="btw-question"
+              type="text"
+              maxlength="4096"
+              placeholder="a question about this conversation"
+              style="
+                width: 100%;
+                box-sizing: border-box;
+                padding: 6px 8px;
+                font: inherit;
+                font-size: 0.82rem;
+                border-radius: 6px;
+                border: 1px solid #3a4452;
+                background: #1f2630;
+                color: #c8d2e0;
+              "
+            />
+            <button id="btw-ask" type="button" style="margin-top: 6px">
+              Ask
+            </button>
+            <div
+              id="btw"
+              aria-live="polite"
+              hidden
+              style="
+                margin-top: 6px;
+                padding: 6px 8px;
+                background: #1f2630;
+                border-left: 2px solid #88c0d0;
+                border-radius: 6px;
+                font-size: 0.82rem;
+                color: #c8d2e0;
+                max-height: 140px;
+                overflow-y: auto;
+              "
+            ></div>
+          </div>
           <button id="dictate">Dictate</button>
           <!-- #97. The engine is named where the control is drawn. A mic icon
                alone reads as the product's voice stack; what runs here is the
@@ -6944,6 +6995,7 @@
         // either auth path, which is why a composer control's gate lives here
         // despite the name of the function.
         renderRecapGate();
+        renderBtwGate(); // #133, same reason
 
         // rc-workspace-scoping (#28): the target selector appears when at
         // least one workspace-control surface is available on this daemon.
@@ -8678,6 +8730,135 @@
         else renderRecap();
       };
 
+      // -- Session side question (#133) ----------------------------------
+      // The daemon answers a question about the conversation WITHOUT taking a
+      // turn in it, so this control is deliberately not the composer: a reader
+      // who wants an answer about a session must not have to inject a prompt
+      // into it and change what happened.
+      let btwText = '';
+      let btwNote = '';
+
+      function renderBtw() {
+        const box = $('btw');
+        if (!box) return;
+        box.textContent = btwText || btwNote;
+        // The box is on screen exactly while it has something to say. Recap's
+        // toggle owns its box's visibility; here the panel is the toggle and
+        // this box carries the answer, so it follows the content -- which is
+        // also what lets a conversation switch take the height back.
+        box.hidden = !(btwText || btwNote);
+        // An answer and a refusal are different facts, told apart by the rule
+        // down the left without reading the box out.
+        box.style.borderLeftColor = btwText ? '#88c0d0' : '#b48b87';
+      }
+
+      async function askBtw() {
+        const field = $('btw-question');
+        const question = field ? field.value.trim() : '';
+        if (!question) {
+          btwText = '';
+          btwNote = 'type a question first';
+          renderBtw();
+          return;
+        }
+        // Snapshot the conversation: every write below happens after an await,
+        // and a switch cannot cancel this request. Without the guard two asks
+        // race and the later arrival wins, painting A's answer under B.
+        const id = watchedSessionId;
+        if (!id) {
+          btwText = '';
+          btwNote = 'watch a session first';
+          renderBtw();
+          return;
+        }
+        btwText = '';
+        btwNote = 'asking…'; // a model call takes seconds; say so
+        renderBtw();
+        const ask = $('btw-ask');
+        if (ask) ask.disabled = true; // the page's own busy signal
+        let res;
+        try {
+          res = await fetch('/session/' + encodeURIComponent(id) + '/btw', {
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer ' + token(),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ question }),
+          });
+        } catch {
+          if (watchedSessionId === id) {
+            btwNote = 'could not reach the gateway';
+            renderBtw();
+          }
+          if (ask) ask.disabled = false;
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        if (ask) ask.disabled = false;
+        if (watchedSessionId !== id) return;
+        if (!res.ok) {
+          const code = (body && body.code) || String(res.status);
+          btwNote =
+            code === 'btw_unsupported'
+              ? 'this daemon cannot answer side questions yet'
+              : code === 'session_not_loaded'
+                ? 'open this conversation before asking it'
+                : code === 'rate_limited'
+                  ? 'too many questions just now'
+                  : 'refused (' + code + ')';
+          renderBtw();
+          return;
+        }
+        const said =
+          body && typeof body.answer === 'string' ? body.answer.trim() : '';
+        // `answer: null` is the daemon answering that it has nothing to say,
+        // which is not a failure and gets its own sentence rather than an
+        // empty bubble.
+        btwText = said;
+        btwNote = said ? '' : 'no answer for this one right now';
+        renderBtw();
+      }
+
+      function syncBtwForSession() {
+        // The answer names a conversation, so it goes with it. Unlike recap
+        // this one never re-asks on a switch: the question was the operator's
+        // own words and costs a model call, so silently spending another one
+        // on a swipe would be wrong. It clears, and they ask again if they
+        // want it.
+        btwText = '';
+        btwNote = '';
+        renderBtw();
+      }
+
+      function renderBtwGate() {
+        const btn = $('btw-toggle');
+        if (btn) btn.hidden = !daemonHasFeature('session_btw');
+      }
+
+      $('btw-toggle').onclick = () => {
+        const panel = $('btw-panel');
+        if (!panel) return;
+        const opening = panel.hidden;
+        panel.hidden = !opening;
+        $('btw-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
+        if (opening) {
+          const field = $('btw-question');
+          if (field) field.focus(); // on a phone the keyboard is half the task
+        }
+      };
+
+      $('btw-ask').onclick = () => void askBtw();
+      $('btw-question').addEventListener('keydown', (e) => {
+        // On a phone the field is where the typing happens, and the return key
+        // there means "ask this", not "make a newline" -- the field is a
+        // single-line input, so there is nothing else for it to do.
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          void askBtw();
+        }
+      });
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
@@ -9799,6 +9980,10 @@
         // Same rule for the summary: it describes the conversation it was
         // asked about, so it cannot stay on screen through a switch.
         syncRecapForSession();
+        // #133: same rule for the side answer, but it clears without re-asking
+        // -- the question was typed and costs a model call, so a swipe must not
+        // spend another one behind the reader's back.
+        syncBtwForSession();
         // #70: the queue belongs to the conversation, not to the window, so it is
         // loaded by session id here. Moving to another conversation takes the
         // strip off screen rather than discarding it, and coming back finds it

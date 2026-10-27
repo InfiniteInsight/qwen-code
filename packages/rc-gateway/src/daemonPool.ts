@@ -54,6 +54,7 @@ import {
   type DaemonSessionTurnIndexPage,
   type DaemonSessionTurnIndexPageOptions,
   type DaemonSessionRecapResult,
+  type DaemonSessionBtwResult,
   type DaemonSessionStatsStatus,
   type DaemonSessionResourcesStatus,
   type DaemonPermissionRuleType,
@@ -329,6 +330,23 @@ export interface SessionDaemon {
     sessionId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionRecapResult>;
+  /**
+   * A side question about one conversation, answered without touching the turn
+   * in flight. Named `btwSession` exactly as `DaemonClient.btwSession` is
+   * (packages/sdk-typescript/src/daemon/DaemonClient.ts:4437), for the reason
+   * recorded in D61: `SessionDaemon` is implemented by a bare `DaemonClient` as
+   * well as by this pool, so a gateway-invented name is `undefined` at runtime
+   * on the client side and `tsc --noEmit` cannot see it.
+   *
+   * Unlike the recap read, `signal` is honoured end to end: the daemon aborts
+   * the generation when its own caller hangs up, so a caller that stops waiting
+   * should get what it asked for. See the module note in routes/sessionBtw.ts.
+   */
+  btwSession(
+    sessionId: string,
+    question: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionBtwResult>;
   sessionStatus(
     sessionId: string,
     clientId?: string,
@@ -1280,6 +1298,15 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionRecapResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.recapSession(sessionId, opts),
+    );
+  }
+  async btwSession(
+    sessionId: string,
+    question: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionBtwResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.btwSession(sessionId, question, opts),
     );
   }
 

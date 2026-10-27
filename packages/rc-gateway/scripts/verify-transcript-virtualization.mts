@@ -11606,6 +11606,150 @@ PAGE_SCENARIOS.push({
       return `the switcher's change asks for the conversation it selected; the unflagged hand-off the resync self-heal uses asks for nothing; the flagged one asks`;
     },
   });
+
+  // #133. The side question is a new composer control, and the two ways it can
+  // be wrong are the two ways this page has already been filed for: a strip
+  // that carries layout height nobody asked for (it pushed the composer under
+  // the fold on a phone, #65), and an answer painted for the wrong
+  // conversation. P62 and P63 established both assertions for the recap
+  // control; this drives the same shapes through the new one.
+  const BTW_ANSWER =
+    'it skipped a row because the offset was computed before the filter';
+  const BTW_QUESTION = 'why did the last run skip a row';
+
+  PAGE_SCENARIOS.push({
+    name: 'P117 the side question asks the watched conversation and bounds its answer',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_btw'] },
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      const asked: { path: string; question: string }[] = [];
+      await page.route(/\/session\/[^/]+\/btw$/, async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        let question = '';
+        try {
+          const parsed = JSON.parse(route.request().postData() ?? '{}') as {
+            question?: unknown;
+          };
+          question = String(parsed.question ?? '');
+        } catch {
+          question = '';
+        }
+        asked.push({ path, question });
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: A, answer: BTW_ANSWER }),
+        });
+      });
+
+      await watch(page, A);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // Markup from boot, hidden until the daemon's own feature list says
+      // asking would work, so becoming visible is the gate firing.
+      await page.waitForSelector('#btw-toggle', { state: 'visible' });
+
+      // No inner helper here on purpose: a function declared inside the
+      // callback gets an esbuild keepNames wrapper that does not exist in the
+      // browser, and the whole evaluate dies with "__name is not defined".
+      const before = await page.evaluate(() => {
+        const panel = document.getElementById('btw-panel');
+        const box = document.getElementById('btw');
+        return {
+          panel: panel
+            ? { hidden: panel.hidden, height: panel.offsetHeight }
+            : null,
+          box: box ? { hidden: box.hidden, height: box.offsetHeight } : null,
+        };
+      });
+      expect(
+        before.panel !== null && before.box !== null,
+        'the side-question control is missing from the page',
+      );
+      expect(
+        before.panel?.hidden === true && before.panel?.height === 0,
+        `the side-question panel already costs layout height before anyone asked (${JSON.stringify(before.panel)})`,
+      );
+      expect(
+        before.box?.hidden === true && before.box?.height === 0,
+        `the answer box already costs layout height before anyone asked (${JSON.stringify(before.box)})`,
+      );
+
+      await page.click('#btw-toggle');
+      await page.waitForSelector('#btw-question', { state: 'visible' });
+      await page.fill('#btw-question', BTW_QUESTION);
+      await page.click('#btw-ask');
+
+      const shown = await page.waitForFunction(
+        (needle) => {
+          const el = document.getElementById('btw');
+          const t = el ? (el.textContent ?? '') : '';
+          return t.includes(needle) ? t : null;
+        },
+        BTW_ANSWER,
+        { timeout: 15_000 },
+      );
+      const onScreen = (await shown.jsonValue()) as string;
+
+      expect(
+        asked.length === 1,
+        `one press sent ${asked.length} questions; a side question costs a model call, so a double-send is a double spend`,
+      );
+      expect(
+        asked[0]?.path === `/session/${A}/btw`,
+        `the page asked ${JSON.stringify(asked[0]?.path)} while watching ${JSON.stringify(A)}`,
+      );
+      // The operator's own words, unchanged. A control that rewrote the
+      // question would make the answer impossible to re-ask.
+      expect(
+        asked[0]?.question === BTW_QUESTION,
+        `the daemon received ${JSON.stringify(asked[0]?.question)} rather than the typed question`,
+      );
+
+      const height = await page.evaluate(
+        () => document.getElementById('btw')?.offsetHeight ?? -1,
+      );
+      expect(
+        height > 0 && height <= 160,
+        `the open answer box is not bounded (${height} px)`,
+      );
+      return `the question is asked of the watched conversation and reads ${JSON.stringify(onScreen)} in a ${height}px box`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P118 a daemon that cannot answer side questions is offered no control that could only fail',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      let asked = 0;
+      await page.route(/\/session\/[^/]+\/btw$/, async (route) => {
+        asked += 1;
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Not Found' }),
+        });
+      });
+
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // The harness advertises no daemon features here, which is the state of a
+      // daemon from before this route existed.
+      const offered = await page.evaluate(() => {
+        const b = document.getElementById('btw-toggle');
+        return b ? { present: true, hidden: b.hidden } : { present: false };
+      });
+      expect(
+        offered.present === true && offered.hidden === true,
+        `the page showed a side-question control to a daemon that has no btw route (${JSON.stringify(offered)})`,
+      );
+      expect(
+        asked === 0,
+        'a control that is not on screen still asked the daemon a side question',
+      );
+      return `with no session_btw tag the control stays hidden (${JSON.stringify(offered)}) and nothing was asked`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,

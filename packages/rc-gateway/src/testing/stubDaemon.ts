@@ -121,6 +121,14 @@ export interface StubDaemon {
    * arrived here can prove that it did.
    */
   lastRecapSessionId: string | undefined;
+  /**
+   * Session id and question the most recent POST /session/:id/btw carried.
+   * The gateway is meant to forward the watched id and the caller's own
+   * words, and only what arrived here can prove it did rather than sent
+   * something else.
+   */
+  lastBtwSessionId: string | undefined;
+  lastBtwQuestion: string | undefined;
   /** Session id the most recent GET /session/:id/stats carried. */
   lastStatsSessionId: string | undefined;
   /** Session id the most recent GET /session/:id/resources carried. */
@@ -362,6 +370,17 @@ export interface StubDaemonOptions {
   recapStatusCode?: number;
   /** Full body for POST /session/:id/recap (overrides the default pair). */
   recapResult?: unknown;
+  /**
+   * Status for POST /session/:id/btw (default 200). Two different 404s matter
+   * here and they mean opposite things, so the stub can produce both: a bare
+   * 404 is how a daemon from before the btw route answers, and a 404 carrying
+   * { code: 'session_not_found' } is how the daemon's own session guard
+   * answers for an id it cannot resolve or an owning workspace that is mid
+   * drain. Pair with btwResult to choose which.
+   */
+  btwStatusCode?: number;
+  /** Full body for POST /session/:id/btw (overrides the default pair). */
+  btwResult?: unknown;
   /** Status for GET /session/:id/stats (default 200). Non-200 -> { error }. */
   statsStatusCode?: number;
   /**
@@ -649,6 +668,8 @@ export async function startStubDaemon(
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
     lastRecapSessionId: undefined as string | undefined,
+    lastBtwSessionId: undefined as string | undefined,
+    lastBtwQuestion: undefined as string | undefined,
     lastStatsSessionId: undefined as string | undefined,
     lastResourcesSessionId: undefined as string | undefined,
     lastArtifactListSessionId: undefined as string | undefined,
@@ -1647,6 +1668,33 @@ export async function startStubDaemon(
     });
   });
 
+  app.post('/session/:id/btw', (req, res) => {
+    state.lastBtwSessionId = String(req.params.id);
+    const question = (req.body as { question?: unknown } | undefined)?.question;
+    state.lastBtwQuestion = typeof question === 'string' ? question : undefined;
+    const status = opts.btwStatusCode ?? 200;
+    if (status !== 200) {
+      // Default refusal is the shapeless 404 of a daemon that has no such
+      // route, which is what the gateway must report as the daemon being old
+      // rather than as a conversation that has gone missing. A test wanting
+      // the other 404, the guard's session_not_found, supplies it through
+      // btwResult.
+      res.status(status).json(opts.btwResult ?? { error: 'Not Found' });
+      return;
+    }
+    if (opts.btwResult !== undefined) {
+      res.status(200).json(opts.btwResult);
+      return;
+    }
+    res.status(200).json({
+      sessionId: String(req.params.id),
+      // A real DaemonSessionBtwResult: an answer to the question that was
+      // asked, and null is a legal value the gateway has to carry.
+      answer:
+        'It skipped a row because the offset was computed before the filter.',
+    });
+  });
+
   // What the session produced. The envelope shape is the daemon's own
   // (v, sessionId, artifacts, generatedAt, limits) and each entry carries the
   // fields the store builds, so a gateway that reshaped it would be tested
@@ -2556,6 +2604,12 @@ export async function startStubDaemon(
     },
     get lastRecapSessionId() {
       return state.lastRecapSessionId;
+    },
+    get lastBtwSessionId() {
+      return state.lastBtwSessionId;
+    },
+    get lastBtwQuestion() {
+      return state.lastBtwQuestion;
     },
     get lastStatsSessionId() {
       return state.lastStatsSessionId;
