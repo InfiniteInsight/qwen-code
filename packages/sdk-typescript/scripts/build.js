@@ -13,6 +13,7 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
@@ -36,13 +37,72 @@ const MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES = 48 * 1024;
 // Baseline for the initial projection implementation is ~66 KiB.
 const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 
-rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
-mkdirSync(join(rootDir, 'dist'), { recursive: true });
+const distDir = join(rootDir, 'dist');
+// A failed build must not leave this package without dist. `@qwen-code/sdk/daemon`
+// is consumed by package specifier and resolves into this directory's built
+// output (rc-gateway does this), so a typecheck failure here silently breaks that
+// package's build and its tests too, and `dist` is gitignored, so git cannot put
+// it back. Park the previous build under node_modules/.cache, which is ignored
+// as well, and put it back if this run does not reach its end.
+const distStashDir = join(
+  rootDir,
+  'node_modules',
+  '.cache',
+  'sdk-dist-previous',
+);
+let stashedPreviousDist = false;
+let buildReachedEnd = false;
 
-execSync('tsc --build tsconfig.reference.json', {
-  stdio: 'inherit',
-  cwd: rootDir,
+function stashPreviousDist() {
+  rmSync(distStashDir, { recursive: true, force: true });
+  if (!existsSync(distDir)) return;
+  mkdirSync(dirname(distStashDir), { recursive: true });
+  cpSync(distDir, distStashDir, { recursive: true });
+  rmSync(distDir, { recursive: true, force: true });
+  stashedPreviousDist = true;
+}
+
+// Keyed on an explicit flag rather than on the exit code: an uncaught throw
+// reaches here with the code already settled, and a success that never got to
+// the end of this script is not a success.
+process.on('exit', () => {
+  if (buildReachedEnd || !stashedPreviousDist) return;
+  try {
+    rmSync(distDir, { recursive: true, force: true });
+    cpSync(distStashDir, distDir, { recursive: true });
+    console.warn(
+      'Build failed before it finished: restored the previous dist so that ' +
+        'anything resolving @qwen-code/sdk from source keeps building.',
+    );
+  } catch (error) {
+    console.warn(
+      'Build failed and the previous dist could not be restored:',
+      error.message,
+    );
+  }
 });
+
+stashPreviousDist();
+mkdirSync(distDir, { recursive: true });
+
+// Resolved from this package instead of from PATH. A bare `tsc` is whatever the
+// ambient PATH holds, and on a WSL host with the Windows npm directory on PATH
+// that is a global TypeScript newer than the pin here, whose stricter
+// Uint8Array<ArrayBufferLike> checks fail about twenty diagnostics in
+// packages/core, in files no one edited. argv form for the same reason as
+// assertExecutableBin below: execSync would run this through a shell.
+execFileSync(
+  process.execPath,
+  [
+    createRequire(import.meta.url).resolve('typescript/bin/tsc'),
+    '--build',
+    'tsconfig.reference.json',
+  ],
+  {
+    stdio: 'inherit',
+    cwd: rootDir,
+  },
+);
 
 try {
   execSync(
@@ -275,6 +335,9 @@ if (existsSync(licenseSource)) {
     console.warn('Could not copy LICENSE:', error.message);
   }
 }
+
+buildReachedEnd = true;
+rmSync(distStashDir, { recursive: true, force: true });
 
 /**
  * A published `bin` must be startable. Assert the built entry begins with a
