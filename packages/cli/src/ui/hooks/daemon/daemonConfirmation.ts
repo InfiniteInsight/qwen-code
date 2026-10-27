@@ -26,7 +26,7 @@
 import {
   ToolConfirmationOutcome,
   type ToolCallConfirmationDetails,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { PendingPermission } from './projectDaemonEvent.js';
 
 type OptionKind =

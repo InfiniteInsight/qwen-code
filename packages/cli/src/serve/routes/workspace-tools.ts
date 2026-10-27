@@ -9,7 +9,7 @@ import {
   ToolNames,
   ToolDisplayNames,
   ToolNamesMigration,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { loadSettings } from '../../config/settings.js';
 import { normalizeDisabledToolList } from '../../config/normalizeDisabledTools.js';
 import { getNestedProperty } from '../../utils/settingsUtils.js';
