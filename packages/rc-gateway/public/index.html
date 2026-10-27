@@ -1492,6 +1492,40 @@
           </div>
           <div id="prompt-queue-body">(not listed)</div>
         </details>
+        <details id="mid-turn" class="ops-collapse">
+          <summary>
+            <strong>Mid-turn messages</strong
+            ><button
+              type="button"
+              class="help-btn"
+              aria-label="What is Mid-turn messages?"
+              aria-expanded="false"
+              aria-controls="help-mid-turn"
+            >
+              ?
+            </button>
+          </summary>
+          <div class="help-text" id="help-mid-turn" hidden>
+            Messages the daemon took while a turn was already running, which it
+            holds to deliver into that turn instead of starting a new one. This
+            is what the daemon is holding right now, not what this browser has
+            not sent. Enter the session id (blank means the session you're
+            watching) and tap <b>List messages</b>. None of these can be sent a
+            second time, so withdrawing one is the only way to take it back.
+            Needs session-read scope.
+          </div>
+          <div class="ops-note">
+            (messages held during a running turn; requires session-read scope)
+          </div>
+          <div>
+            <input
+              id="mid-turn-id"
+              placeholder="session id (blank = watched)"
+            />
+            <button id="mid-turn-list">List messages</button>
+          </div>
+          <div id="mid-turn-body">(not listed)</div>
+        </details>
         <details id="search" class="ops-collapse">
           <summary>
             <strong>Search</strong
@@ -12162,6 +12196,77 @@
             } else {
               label.textContent =
                 bits.join('  ') + '  [the daemon did not drop it]';
+            }
+          };
+          row.appendChild(btn);
+          out.appendChild(row);
+        }
+      };
+
+      // What the daemon holds to inject into the turn already running. Not the
+      // prompt queue above it: those are prompts waiting to start a turn, these
+      // are messages waiting to join one in flight.
+      $('mid-turn-list').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('mid-turn-body');
+        const id = verbSessionId('mid-turn-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading\u2026';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/mid-turn-messages',
+        );
+        if (!r.ok) {
+          // A daemon too old for these routes is already named by the gateway,
+          // which maps a bare 404 to queue_unsupported
+          // (src/routes/sessionQueue.ts:73), so the code is the reason and it
+          // is printed as it arrived.
+          out.textContent = 'list failed: ' + r.code;
+          return;
+        }
+        const held = r.body.messages || [];
+        if (held.length === 0) {
+          // Nothing held is the ordinary state of a session between turns.
+          out.textContent = '(nothing held)';
+          return;
+        }
+        out.textContent = '';
+        for (const m of held) {
+          const row = document.createElement('div');
+          const label = document.createElement('span');
+          // The text alone. This summary carries no state field, so there is
+          // nothing to print beside it, and the result's settled and promoted
+          // rings are deliberately not drawn: they are bounded rings of ids the
+          // daemon keeps so a client can reconcile rows it stored, and this
+          // page stores none, so a count of them would read as a total that
+          // the ring cannot actually hold.
+          label.textContent = m.text;
+          row.appendChild(label);
+          const btn = document.createElement('button');
+          btn.textContent = 'withdraw';
+          btn.style.marginLeft = '6px';
+          btn.onclick = async () => {
+            btn.disabled = true;
+            const c = await rcCall(
+              '/session/' +
+                encodeURIComponent(id) +
+                '/mid-turn-messages/' +
+                encodeURIComponent(m.messageId),
+              { method: 'DELETE' },
+            );
+            // Same ruling as the prompt queue: the daemon answers 200 for a
+            // messageId it does not know and the contract says a miss is
+            // {removed:false}, so c.ok is not the verdict.
+            const gone = c.ok && !!c.body && c.body.removed === true;
+            if (gone) {
+              label.textContent = 'withdrawn  ' + m.text;
+            } else if (!c.ok) {
+              label.textContent =
+                m.text + '  [withdraw failed: ' + c.code + ']';
+            } else {
+              label.textContent = m.text + '  [the daemon did not withdraw it]';
             }
           };
           row.appendChild(btn);

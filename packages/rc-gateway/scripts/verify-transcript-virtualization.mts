@@ -8792,6 +8792,229 @@ PAGE_SCENARIOS.push({
       return `a refused drop reads ${JSON.stringify(row)}`;
     },
   });
+
+  // The mid-turn half of the same route pair. Separate helpers because the
+  // paths differ and the list request must not be swallowed by the drop rule.
+  const heldRoute = (
+    page: Page,
+    body: unknown,
+    asked: { session: string | null },
+  ) =>
+    page.route(/\/session\/[^/]+\/mid-turn-messages$/, async (route) => {
+      const parts = new URL(route.request().url()).pathname.split('/');
+      asked.session = parts[2];
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+
+  const withdrawRoute = (
+    page: Page,
+    status: number,
+    body: unknown,
+    asked: { session: string | null; messageId: string | null },
+  ) =>
+    page.route(
+      /\/session\/[^/]+\/mid-turn-messages\/[^/]+$/,
+      async (route) => {
+        const parts = new URL(route.request().url()).pathname.split('/');
+        asked.session = parts[2];
+        asked.messageId = decodeURIComponent(parts[4]);
+        await route.fulfill({
+          status,
+          contentType: 'application/json',
+          body: JSON.stringify(body),
+        });
+      },
+    );
+
+  const heldBody = (page: Page) =>
+    page.evaluate(
+      () =>
+        (document.getElementById('mid-turn-body') as HTMLElement).textContent ??
+        '',
+    );
+
+  const heldRows = (page: Page) =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('#mid-turn-body > div')).map(
+        (d) => d.textContent ?? '',
+      ),
+    );
+
+  const pressHeldList = async (page: Page): Promise<string> => {
+    await page.evaluate(() =>
+      (document.getElementById('mid-turn-list') as HTMLButtonElement).click(),
+    );
+    await page.waitForFunction(
+      () =>
+        !(
+          (document.getElementById('mid-turn-body') as HTMLElement).textContent ??
+          ''
+        ).includes('loading'),
+      null,
+      { timeout: 8000 },
+    );
+    return heldBody(page);
+  };
+
+  const pressWithdraw = async (page: Page, n: number): Promise<string> => {
+    await page.evaluate((i) => {
+      const row = document.querySelectorAll('#mid-turn-body > div')[i];
+      (row?.querySelector('button') as HTMLButtonElement | undefined)?.click();
+    }, n);
+    await page.waitForFunction(
+      (i) => {
+        const row = document.querySelectorAll('#mid-turn-body > div')[i];
+        const t = row ? (row.textContent ?? '') : '';
+        return t.includes('withdrawn') || t.includes('[');
+      },
+      n,
+      { timeout: 8000 },
+    );
+    return page.evaluate((i) => {
+      const row = document.querySelectorAll('#mid-turn-body > div')[i];
+      return row ? (row.textContent ?? '') : '';
+    }, n);
+  };
+
+  const twoHeld = {
+    messages: [
+      { messageId: 'm-1', text: 'also use the short name' },
+      { messageId: 'm-2', text: 'and skip the migration' },
+    ],
+    settledMessageIds: ['m-old'],
+    promotedMessageIds: [],
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P78 the page lists what the daemon holds mid-turn for the watched session',
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null };
+      await heldRoute(page, twoHeld, asked);
+      await watch(page, viewer.sessionId);
+      await pressHeldList(page);
+      expect(
+        asked.session === viewer.sessionId,
+        `the held messages of ${JSON.stringify(asked.session)} were listed while watching ${JSON.stringify(viewer.sessionId)}`,
+      );
+      const rows = await heldRows(page);
+      expect(
+        rows.length === 2,
+        `the daemon held two messages and the page drew ${rows.length} (${JSON.stringify(rows)})`,
+      );
+      expect(
+        rows[0].includes('also use the short name'),
+        `the first held message did not reach the panel (${JSON.stringify(rows[0])})`,
+      );
+      expect(
+        rows[1].includes('and skip the migration'),
+        `the second held message did not reach the panel (${JSON.stringify(rows[1])})`,
+      );
+      // The two rings are not drawn. They are bounded rings of ids kept so a
+      // client can reconcile rows it stored, and this page stores none, so a
+      // count of them would read as a total the ring cannot hold.
+      expect(
+        !/m-old|settled|promoted/i.test(rows.join(' ')),
+        `a reconciliation ring leaked into the rows (${JSON.stringify(rows)})`,
+      );
+      const placed = await page.evaluate(() => {
+        const det = document.getElementById('mid-turn');
+        return {
+          exists: !!det,
+          inOps: !!document.getElementById('pane-ops')?.contains(det ?? null),
+          inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
+        };
+      });
+      expect(placed.exists, 'there is no mid-turn section in the page');
+      expect(placed.inOps, 'the mid-turn section is not under Operations');
+      expect(!placed.inChat, 'the mid-turn section sits on the main screen');
+      return `the held messages drew ${JSON.stringify(rows)} for ${JSON.stringify(asked.session)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P79 a session holding nothing mid-turn reads as a result and not a failure',
+    run: async ({ page, viewer }) => {
+      await heldRoute(page, { messages: [], settledMessageIds: [], promotedMessageIds: [] }, { session: null });
+      await watch(page, viewer.sessionId);
+      const body = await pressHeldList(page);
+      expect(
+        body.includes('(nothing held)'),
+        `an empty hold did not read as empty (${JSON.stringify(body)})`,
+      );
+      expect(
+        !/fail|error/i.test(body),
+        `an empty hold read as a failure (${JSON.stringify(body)})`,
+      );
+      return `an empty hold reads ${JSON.stringify(body)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P80 a withdraw the daemon did not honour does not read as withdrawn',
+    run: async ({ page, viewer }) => {
+      await heldRoute(page, twoHeld, { session: null });
+      const gone = {
+        session: null as string | null,
+        messageId: null as string | null,
+      };
+      // The daemon's own answer for a messageId it does not know: 200 with
+      // removed false, so reading c.ok here would print "withdrawn" over a
+      // message the daemon still holds.
+      await withdrawRoute(page, 200, { removed: false }, gone);
+      await watch(page, viewer.sessionId);
+      await pressHeldList(page);
+      const row = await pressWithdraw(page, 1);
+      expect(
+        gone.messageId === 'm-2',
+        `the withdraw asked for ${JSON.stringify(gone.messageId)} rather than the row's own message id`,
+      );
+      expect(
+        !row.includes('withdrawn'),
+        `a message the daemon did not withdraw read as withdrawn (${JSON.stringify(row)})`,
+      );
+      expect(
+        row.includes('the daemon did not withdraw it'),
+        `a no-op withdraw did not say so (${JSON.stringify(row)})`,
+      );
+      return `a 200 with removed:false reads ${JSON.stringify(row)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P81 a refused withdraw names the reason instead of a bare status',
+    run: async ({ page, viewer }) => {
+      await heldRoute(page, twoHeld, { session: null });
+      const gone = {
+        session: null as string | null,
+        messageId: null as string | null,
+      };
+      await withdrawRoute(
+        page,
+        502,
+        {
+          error: 'Daemon does not support the session queue routes',
+          code: 'queue_unsupported',
+        },
+        gone,
+      );
+      await watch(page, viewer.sessionId);
+      await pressHeldList(page);
+      const row = await pressWithdraw(page, 0);
+      expect(
+        row.includes('queue_unsupported'),
+        `a refusal did not name its code (${JSON.stringify(row)})`,
+      );
+      expect(
+        !row.includes('withdrawn'),
+        `a refused withdraw read as withdrawn (${JSON.stringify(row)})`,
+      );
+      return `a refused withdraw reads ${JSON.stringify(row)}`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
