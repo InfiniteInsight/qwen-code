@@ -1545,12 +1545,18 @@
             holds to deliver into that turn instead of starting a new one. This
             is what the daemon is holding right now, not what this browser has
             not sent. Enter the session id (blank means the session you're
-            watching) and tap <b>List messages</b>. None of these can be sent a
-            second time, so withdrawing one is the only way to take it back.
-            Needs session-read scope.
+            watching) and tap <b>List messages</b>. Type a message and tap
+            <b>Send into turn</b> to hand it to the turn already running; the
+            daemon holds it until its next tool boundary. Once held, a message
+            is never sent twice, so <b>withdraw</b> is the only way to take one
+            back. <b>Deliver now</b> asks the daemon to stop holding what it has
+            and push it in before that boundary, which cuts a streaming response
+            short; it does nothing when nothing is waiting. Listing needs
+            session-read scope, sending needs session-write.
           </div>
           <div class="ops-note">
-            (messages held during a running turn; requires session-read scope)
+            (messages held during a running turn; list with session-read, send
+            with session-write)
           </div>
           <div>
             <input
@@ -1559,6 +1565,15 @@
             />
             <button id="mid-turn-list">List messages</button>
           </div>
+          <div>
+            <input
+              id="mid-turn-text"
+              placeholder="message for the turn in flight"
+            />
+            <button id="mid-turn-send">Send into turn</button>
+            <button id="mid-turn-now">Deliver now</button>
+          </div>
+          <div id="mid-turn-write">(nothing sent)</div>
           <div id="mid-turn-body">(not listed)</div>
         </details>
         <details id="search" class="ops-collapse">
@@ -12778,6 +12793,77 @@
           row.appendChild(btn);
           out.appendChild(row);
         }
+      };
+
+      // #110: the write half of this queue. It lives here, in the panel that
+      // already shows what is held, and not in the composer: issue #70 settled
+      // that chat-side queueing is its own client control rather than an
+      // inverted Send, and that ruling stands. Nothing here presses Send,
+      // disables Send, or waits for a turn to end.
+      $('mid-turn-send').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('mid-turn-write');
+        const id = verbSessionId('mid-turn-id');
+        const text = ($('mid-turn-text').value || '').trim();
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        if (text === '') {
+          out.textContent = 'type a message first';
+          return;
+        }
+        out.textContent = 'loading…';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/mid-turn-message',
+          { method: 'POST', body: JSON.stringify({ message: text }) },
+        );
+        if (!r.ok) {
+          out.textContent = 'send failed: ' + r.code;
+          return;
+        }
+        if (r.body.accepted === false) {
+          // The turn ended between listing and writing, so the daemon declined
+          // to hold the text and said why. The gateway passes that answer
+          // through at 200 on purpose (src/routes/sessionQueue.ts), and the one
+          // action it implies is to send the thing the ordinary way, so it is
+          // drawn as an instruction rather than a failure.
+          out.textContent =
+            'the turn already ended' +
+            (r.body.reason ? ' (' + r.body.reason + ')' : '') +
+            ' — send it as a prompt instead';
+          return;
+        }
+        out.textContent =
+          'held for the running turn' +
+          (r.body.messageId ? ' (' + r.body.messageId + ')' : '');
+        $('mid-turn-text').value = '';
+      };
+
+      $('mid-turn-now').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('mid-turn-write');
+        const id = verbSessionId('mid-turn-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading…';
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/mid-turn-messages/send-now',
+          { method: 'POST' },
+        );
+        if (!r.ok) {
+          out.textContent = 'deliver failed: ' + r.code;
+          return;
+        }
+        // requested:true means messages were waiting and the agent was asked,
+        // not that a response was cut short. The SDK documents that
+        // distinction, so the page claims no more than the field says.
+        out.textContent =
+          r.body.requested === true
+            ? 'asked the agent to deliver the held messages now'
+            : 'nothing was waiting to deliver';
       };
 
       // #124. The daemon's roll-up of one conversation, asked on press.

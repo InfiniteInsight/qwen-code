@@ -149,6 +149,14 @@ export interface StubDaemon {
   lastMidTurnMessageRemove:
     | { sessionId: string; messageId: string }
     | undefined;
+  /** What the most recent POST /session/:id/mid-turn-message carried. The
+   * `message` is recorded so a test can assert what reached the daemon; it is
+   * stub state, never an audit row. */
+  lastEnqueueMidTurnMessage:
+    | { sessionId: string; message: string; messageId?: string }
+    | undefined;
+  /** Session id of the most recent POST .../mid-turn-messages/send-now. */
+  lastSendMidTurnMessagesNowSessionId: string | undefined;
   /** Workspace the most recent GET .../sessions/live-state named, decoded. */
   lastLiveStateWorkspace: string | undefined;
   close: () => Promise<void>;
@@ -578,6 +586,19 @@ export interface StubDaemonOptions {
   removeMidTurnMessageStatus?: number;
   removeMidTurnMessageErrorBody?: unknown;
   removeMidTurnMessageResult?: unknown;
+  /** Status for POST /session/:id/mid-turn-message (default 200). Set 404 with no
+   * `enqueueMidTurnMessageErrorBody` to stand for a daemon predating the route. */
+  enqueueMidTurnMessageStatus?: number;
+  enqueueMidTurnMessageErrorBody?: unknown;
+  /** Body for POST /session/:id/mid-turn-message. The default answers
+   * `accepted: true`; set `{ accepted: false, reason: 'session_idle' }` to stand
+   * for a session whose turn already ended, which is an answer and not a
+   * failure. */
+  enqueueMidTurnMessageResult?: unknown;
+  /** Status for POST /session/:id/mid-turn-messages/send-now (default 200). */
+  sendMidTurnMessagesNowStatus?: number;
+  sendMidTurnMessagesNowErrorBody?: unknown;
+  sendMidTurnMessagesNowResult?: unknown;
   /** Status for GET /workspaces/:workspace/sessions/live-state (default 200).
    * Set 404 with no `liveStateErrorBody` to stand for a daemon that
    * advertises the capability tag without serving the route. */
@@ -656,6 +677,10 @@ export async function startStubDaemon(
     lastMidTurnMessageRemove: undefined as
       | { sessionId: string; messageId: string }
       | undefined,
+    lastEnqueueMidTurnMessage: undefined as
+      | { sessionId: string; message: string; messageId?: string }
+      | undefined,
+    lastSendMidTurnMessagesNowSessionId: undefined as string | undefined,
     lastLiveStateWorkspace: undefined as string | undefined,
   };
   const app = express();
@@ -2217,6 +2242,50 @@ export async function startStubDaemon(
     res.status(200).json(opts.removeMidTurnMessageResult ?? { removed: true });
   });
 
+  // #110: the write half of the mid-turn queue. The body is recorded before the
+  // status check, so a test can see what the daemon was asked to hold even when
+  // the stub is configured to refuse it.
+  app.post('/session/:id/mid-turn-message', (req, res) => {
+    const body = (req.body ?? {}) as {
+      message?: unknown;
+      messageId?: unknown;
+    };
+    state.lastEnqueueMidTurnMessage = {
+      sessionId: req.params.id,
+      message: typeof body.message === 'string' ? body.message : '',
+      ...(typeof body.messageId === 'string'
+        ? { messageId: body.messageId }
+        : {}),
+    };
+    const status = opts.enqueueMidTurnMessageStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.enqueueMidTurnMessageErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.enqueueMidTurnMessageResult ?? {
+        accepted: true,
+        messageId: 'm-2',
+      },
+    );
+  });
+
+  app.post('/session/:id/mid-turn-messages/send-now', (req, res) => {
+    state.lastSendMidTurnMessagesNowSessionId = req.params.id;
+    const status = opts.sendMidTurnMessagesNowStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.sendMidTurnMessagesNowErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res
+      .status(200)
+      .json(opts.sendMidTurnMessagesNowResult ?? { requested: true });
+  });
+
   // #111: the workspace live-state snapshot. The body carries the daemon's own
   // shape, `v` and `catalogVersion` included, because those are equality tokens
   // a caller compares against the snapshot it already holds.
@@ -2523,6 +2592,12 @@ export async function startStubDaemon(
     },
     get lastMidTurnMessageRemove() {
       return state.lastMidTurnMessageRemove;
+    },
+    get lastEnqueueMidTurnMessage() {
+      return state.lastEnqueueMidTurnMessage;
+    },
+    get lastSendMidTurnMessagesNowSessionId() {
+      return state.lastSendMidTurnMessagesNowSessionId;
     },
     get lastLiveStateWorkspace() {
       return state.lastLiveStateWorkspace;
