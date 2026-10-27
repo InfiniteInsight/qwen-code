@@ -8310,6 +8310,246 @@ PAGE_SCENARIOS.push({
       return `a refused read reads ${JSON.stringify(onScreen)} with no preview drawn`;
     },
   });
+
+  // ---- issue #110: pricing the nested subagent row ------------------------
+  // No scenario on either side had ever drawn a nested subagent block, so the
+  // stop control shipped earlier in this line arrived unproven too. Two frame
+  // rules decide whether these scenarios exercise the real path: the child
+  // marker rides on the UPDATE's own _meta (index.html:5829), not the frame
+  // ENVELOPE that Frames.upd's second argument stamps, and the parent
+  // tool_call has to precede its children or the model drops them outright
+  // (transcript-model.js:278).
+  const subagentFrames = (settle: boolean): Frame[] => {
+    const f = new Frames();
+    f.user('go');
+    f.toolCall('tc-1', 'Agent', 'in_progress');
+    f.upd({
+      sessionUpdate: 'agent_message_chunk',
+      content: { text: 'reading rc-gateway routes' },
+      _meta: { parentToolCallId: 'tc-1', subagentType: 'Explore' },
+    });
+    if (settle) f.done();
+    return f.list;
+  };
+
+  const subagentInspectRoute = (
+    page: Page,
+    status: number,
+    body: unknown,
+    asked: { session: string | null; ref: string | null },
+  ) =>
+    page.route(/\/session\/[^/]+\/subagents\/[^/]+$/, async (route) => {
+      const parts = new URL(route.request().url()).pathname.split('/');
+      asked.session = parts[2];
+      asked.ref = decodeURIComponent(parts[4]);
+      await route.fulfill({
+        status,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+
+  const subagentRow = (page: Page) =>
+    page.evaluate(() => {
+      const note = document.querySelector('.subagent-cost-note');
+      const cost = document.querySelector('.subagent-cost') as
+        | HTMLButtonElement
+        | null;
+      const cancel = document.querySelector('.subagent-cancel') as
+        | HTMLButtonElement
+        | null;
+      return {
+        note: note ? (note.textContent ?? '') : null,
+        costHidden: cost ? cost.hidden : null,
+        cancelHidden: cancel ? cancel.hidden : null,
+      };
+    });
+
+  const pressCost = (page: Page) =>
+    page.evaluate(() => {
+      const btn = document.querySelector('.subagent-cost') as
+        | HTMLButtonElement
+        | null;
+      if (!btn || btn.hidden) return false;
+      btn.click();
+      return true;
+    });
+
+  // Waits for the read to leave its in-flight text.
+  const settledCostNote = async (page: Page): Promise<string> => {
+    const h = await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.subagent-cost-note');
+        const t = el ? (el.textContent ?? '') : '';
+        return t && !t.includes('reading') ? t : null;
+      },
+      null,
+      { timeout: 15_000 },
+    );
+    return (await h.jsonValue()) as string;
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P70 a subagent row is priced by the parent tool reference, not its own id',
+    frames: () => subagentFrames(false),
+    run: async ({ page, viewer }) => {
+      const asked = { session: null as string | null, ref: null as string | null };
+      await subagentInspectRoute(
+        page,
+        200,
+        {
+          sessionId: 'sub-1',
+          taskId: 'task-1',
+          title: 'Explore the reconnect path',
+          status: 'running',
+          durationMs: 6000,
+          totalTokens: 1234,
+          inputTokens: 1000,
+          outputTokens: 234,
+        },
+        asked,
+      );
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('.subagent-cost', { state: 'visible' });
+      // Nothing is asked before the press: a row that polled would fire one
+      // request per subagent on every transcript.
+      const before = await subagentRow(page);
+      expect(
+        before.note === '' && asked.session === null,
+        `a cost was drawn before anyone asked (${JSON.stringify({ before, asked })})`,
+      );
+      expect(
+        (await pressCost(page)) === true,
+        'the cost control is not pressable on a running subagent',
+      );
+      const note = await settledCostNote(page);
+      expect(
+        asked.session === viewer.sessionId,
+        `the cost of ${JSON.stringify(asked.session)} was read while watching ${JSON.stringify(viewer.sessionId)}`,
+      );
+      // The load-bearing half: the daemon resolves a subagent by its PARENT
+      // Agent tool's toolUseId, so sending the row's own id 404s in production.
+      expect(
+        asked.ref === 'tc-1',
+        `the read sent ${JSON.stringify(asked.ref)} rather than the parent Agent tool's reference`,
+      );
+      expect(
+        note.includes('1.2k tok'),
+        `the daemon's 1234 tokens did not reach the row (${JSON.stringify(note)})`,
+      );
+      return `a running subagent reads ${JSON.stringify(note)} from ${JSON.stringify(asked.ref)} of ${JSON.stringify(asked.session)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P71 a subagent the daemon gives no usage for is not drawn as costing nothing',
+    frames: () => subagentFrames(false),
+    run: async ({ page, viewer }) => {
+      await subagentInspectRoute(
+        page,
+        200,
+        {
+          sessionId: 'sub-1',
+          taskId: 'task-1',
+          title: 'Explore the reconnect path',
+          status: 'running',
+          durationMs: 6000,
+        },
+        { session: null, ref: null },
+      );
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('.subagent-cost', { state: 'visible' });
+      await pressCost(page);
+      const note = await settledCostNote(page);
+      expect(
+        /named no usage/i.test(note),
+        `a resolution with no usage read ${JSON.stringify(note)}`,
+      );
+      // 0 is a number nobody reported, and a reader cannot tell it apart from
+      // a run that genuinely cost nothing.
+      expect(
+        !/\d/.test(note),
+        `an unreported cost was drawn as a number (${JSON.stringify(note)})`,
+      );
+      return `a subagent with no reported usage reads ${JSON.stringify(note)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P72 a refused subagent cost read names the reason, not the gateway being down',
+    frames: () => subagentFrames(false),
+    run: async ({ page, viewer }) => {
+      await subagentInspectRoute(
+        page,
+        404,
+        // Verbatim from the route (src/routes/subagentInspect.ts:48): the code
+        // rides at the TOP level, which is the one field rcCall lifts off an
+        // error body. A nested fixture here would test a shape the gateway
+        // never sends.
+        { error: 'Subagent not found in this session', code: 'subagent_not_found' },
+        { session: null, ref: null },
+      );
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('.subagent-cost', { state: 'visible' });
+      await pressCost(page);
+      const note = await settledCostNote(page);
+      expect(
+        note.includes('subagent_not_found'),
+        `a refusal read ${JSON.stringify(note)} instead of naming its code`,
+      );
+      expect(
+        !/cannot reach|unreachable|offline/i.test(note),
+        `a refusal was reported as the gateway being unreachable (${JSON.stringify(note)})`,
+      );
+      return `a refused cost read says ${JSON.stringify(note)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P73 a settled subagent keeps its price and loses its stop',
+    frames: () => subagentFrames(true),
+    run: async ({ page, viewer }) => {
+      await subagentInspectRoute(
+        page,
+        200,
+        {
+          sessionId: 'sub-1',
+          taskId: 'task-1',
+          title: 'Explore the reconnect path',
+          status: 'completed',
+          durationMs: 6000,
+          totalTokens: 1234,
+        },
+        { session: null, ref: null },
+      );
+      await watch(page, viewer.sessionId);
+      await page.waitForFunction(
+        () => {
+          const c = document.querySelector('.subagent-cancel') as
+            | HTMLButtonElement
+            | null;
+          return c ? c.hidden : null;
+        },
+        null,
+        { timeout: 15_000 },
+      );
+      const row = await subagentRow(page);
+      // The asymmetry, on purpose: stopping a finished run is meaningless, so
+      // its control goes away, while a finished run's COST is the number a
+      // reader actually wants and never changes.
+      expect(
+        row.costHidden === false,
+        `a settled subagent lost its cost control (${JSON.stringify(row)})`,
+      );
+      await pressCost(page);
+      const note = await settledCostNote(page);
+      expect(
+        note.includes('1.2k tok'),
+        `a settled subagent could not be priced (${JSON.stringify(note)})`,
+      );
+      return `a settled subagent still reads ${JSON.stringify(note)} with its stop withdrawn`;
+    },
+  });
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
