@@ -156,6 +156,7 @@ import { createSessionExportRoute } from './routes/sessionExport.js';
 import { createSessionTranscriptRoute } from './routes/sessionTranscript.js';
 import { createSessionTurnIndexRoute } from './routes/sessionTurnIndex.js';
 import { createSessionRecapRoute } from './routes/sessionRecap.js';
+import { createSessionBtwRoute } from './routes/sessionBtw.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -835,6 +836,24 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: a recap costs tokens like a prompt
     createSessionRecapRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/btw - ask one conversation a side question without
+  // putting the question or the answer into it. WRITE, unlike the recap above
+  // it sits beside: a recap only reduces what the transcript read already
+  // reveals, while a side answer is content no read of this conversation
+  // returns, so under the #107 rule it is the same kind of act as a prompt.
+  // The cap stays because the daemon bounds the question's length and nothing
+  // bounds how many may be asked. The route propagates this client's
+  // disconnect to the daemon, which is the one place the gateway deliberately
+  // does the opposite of the prompt route; see routes/sessionBtw.ts. Bare
+  // namespace, 1:1 with the daemon route.
+  app.post(
+    '/session/:id/btw',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user, refused before any budget is spent
+    subActorRateLimit, // a side question costs a model call like a prompt
+    createSessionBtwRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
