@@ -161,15 +161,12 @@ function persistSetting(
 function resolvePersistedBaseUrl(
   config: Config,
   settings: LoadedSettings,
-  scopeOverride: SettingScope | undefined,
   authType: AuthType,
   modelId: string,
 ): string {
-  const existingBaseUrl =
-    (settings.getValue(
-      resolveScope(settings, scopeOverride),
-      'model.baseUrl',
-    ) as string | undefined) ?? '';
+  // The effective value, not the persist scope's own: the result is written at the
+  // persist scope, and a workspace '' shadows a disambiguator set in user settings.
+  const existingBaseUrl = settings.merged.model?.baseUrl ?? '';
   try {
     const available = config.getAvailableModelsForAuthType(authType);
     const matches = available.filter((m) => m.id === modelId);
@@ -222,7 +219,6 @@ async function switchMainModel(
         resolvePersistedBaseUrl(
           config,
           settings,
-          scopeOverride,
           parsed.authType,
           parsed.modelId,
         ),
@@ -238,13 +234,7 @@ async function switchMainModel(
     persistSetting(
       settings,
       'model.baseUrl',
-      resolvePersistedBaseUrl(
-        config,
-        settings,
-        scopeOverride,
-        currentAuthType,
-        modelArg,
-      ),
+      resolvePersistedBaseUrl(config, settings, currentAuthType, modelArg),
       scopeOverride,
     );
   }

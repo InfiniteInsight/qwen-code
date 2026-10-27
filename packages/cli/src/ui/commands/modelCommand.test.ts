@@ -26,9 +26,12 @@ function createMockConfig(
   };
 }
 
-function createMockSettings(setValue = vi.fn()): Partial<LoadedSettings> {
+function createMockSettings(
+  setValue = vi.fn(),
+  merged: Record<string, unknown> = {},
+): Partial<LoadedSettings> {
   return {
-    merged: {},
+    merged,
     user: { settings: {} },
     workspace: { settings: {} },
     isTrusted: false,
@@ -310,6 +313,143 @@ describe('modelCommand', () => {
       content: 'Model: qwen-max',
     });
     expect(recordSessionModel).not.toHaveBeenCalled();
+  });
+
+  // The three cases resolvePersistedBaseUrl actually branches on. Before these the
+  // keep-the-disambiguator path had no assertion anywhere, so the feature could be
+  // and stay broken without any test noticing.
+  function sharedIdRegistry(
+    baseUrlA: string,
+    baseUrlB: string,
+  ): Array<Record<string, unknown>> {
+    return [
+      {
+        id: 'qwen-max',
+        label: 'Qwen Max (a)',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: baseUrlA,
+      },
+      {
+        id: 'qwen-max',
+        label: 'Qwen Max (b)',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: baseUrlB,
+      },
+    ];
+  }
+
+  it('keeps the baseUrl that disambiguates an id two providers share', async () => {
+    const setValue = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          // Two providers publish the same id, so the id alone cannot say which
+          // endpoint this session is on.
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue(
+              sharedIdRegistry('https://a.example/v1', 'https://b.example/v1'),
+            ),
+          switchModel: vi.fn().mockResolvedValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel: vi.fn().mockResolvedValue(true),
+          }),
+        },
+        settings: createMockSettings(setValue, {
+          model: { baseUrl: 'https://b.example/v1' },
+        }),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.baseUrl',
+      'https://b.example/v1',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Model: qwen-max',
+    });
+  });
+
+  it('clears the baseUrl when a shared id matches no candidate', async () => {
+    const setValue = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue(
+              sharedIdRegistry('https://a.example/v1', 'https://b.example/v1'),
+            ),
+          switchModel: vi.fn().mockResolvedValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel: vi.fn().mockResolvedValue(true),
+          }),
+        },
+        // A leftover value for a provider that is no longer a candidate.
+        settings: createMockSettings(setValue, {
+          model: { baseUrl: 'https://retired.example/v1' },
+        }),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.baseUrl',
+      '',
+    );
+  });
+
+  it('takes the sole candidate baseUrl when the id is unambiguous', async () => {
+    const setValue = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-max',
+              label: 'Qwen Max',
+              authType: AuthType.QWEN_OAUTH,
+              baseUrl: 'https://only.example/v1',
+            },
+          ]),
+          switchModel: vi.fn().mockResolvedValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel: vi.fn().mockResolvedValue(true),
+          }),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.baseUrl',
+      'https://only.example/v1',
+    );
   });
 
   it('records the session model in ACP mode after switching', async () => {
