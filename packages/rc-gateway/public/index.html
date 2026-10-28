@@ -989,6 +989,12 @@
       #h1-mode {
         flex: none;
       }
+      /* #190: no model named. Muted so it reads as an absence, and never cut,
+         since `no …` would say nothing at all. */
+      #h1-model.none {
+        flex: none;
+        color: var(--g1-ink-dim);
+      }
       #h1-status .sp {
         flex: 1 1 0;
       }
@@ -1056,6 +1062,10 @@
       }
       #session-footer .sh-lbl {
         font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      /* #190: the Model row's `no model`, muted as the status line's is. */
+      #session-footer .none {
         color: var(--g1-ink-mid);
       }
       #footer-model-name {
@@ -6516,18 +6526,21 @@
         // The model name is a button (opens the picker dialog) only when
         // there's more than one model to switch to -- same guard the mode
         // control below uses for its buttons vs. plain text.
+        // #190: the status line's words for a model the daemon has not named.
+        const modelText = ctxInfo.modelName || 'no model';
         let model;
         if (hasModels) {
           model = document.createElement('button');
           model.type = 'button';
           model.id = 'footer-model-name';
           model.title = 'Tap to switch model';
-          model.textContent = ctxInfo.modelName + ' ▾';
+          model.textContent = modelText + ' ▾';
           model.addEventListener('click', openModelPicker);
         } else {
           model = document.createElement('span');
-          model.textContent = ctxInfo.modelName;
+          model.textContent = modelText;
         }
+        if (!ctxInfo.modelName) model.classList.add('none');
         f.append(row('Model', model));
         if (hasModes) {
           // #182. The daemon's mode is what the control shows: it is the mode
@@ -6706,7 +6719,12 @@
         }
         if (btn.dataset.state !== state) btn.dataset.state = state;
         h1Text($('h1-state'), word);
-        h1Text($('h1-model'), ctxInfo ? shortModel(ctxInfo.modelName) : '');
+        // #190: a context with no model named prints `no model`, muted, so
+        // the line still has a model field and it reads as an absence.
+        const modelEl = $('h1-model');
+        const modelShort = ctxInfo ? shortModel(ctxInfo.modelName) : '';
+        h1Text(modelEl, ctxInfo ? modelShort || 'no model' : '');
+        modelEl.classList.toggle('none', !!ctxInfo && !modelShort);
         h1Text($('h1-tokens'), fillText());
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
@@ -8840,7 +8858,11 @@
         const currentModelId =
           typeof models.currentModelId === 'string' ? models.currentModelId : '';
         const current = availableModels.find((m) => m.modelId === currentModelId);
-        const modelName = current ? current.name : currentModelId || '(model unknown until switched)';
+        // #190: empty when the daemon names no model. The places that print it
+        // say `no model` themselves, muted, because the old parenthetical
+        // (`model unknown until switched`) cut to `(model …` on a 390px status
+        // line and read as a broken name rather than an absent one.
+        const modelName = current ? current.name : currentModelId;
         const modes = st.modes || {};
         const found = (modes.availableModes || []).find(
           (x) => x && x.id === modes.currentModeId,

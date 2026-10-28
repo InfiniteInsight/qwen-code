@@ -14811,7 +14811,7 @@ PAGE_SCENARIOS.push({
   // the page does not define.
 
   PAGE_SCENARIOS.push({
-    name: 'P138 the status line names the state, model, fill and mode, and opens the sheet in place, where the mode buttons drive the mode handler',
+    name: 'P138 the status line names the state, model (or no model), fill and mode, and opens the sheet in place, where the mode buttons drive the mode handler',
     // #184. The drawer band and the status strip became one 44px line and a
     // sheet under it. The line is only worth its row if it says what the
     // conversation is doing, and the sheet only if it pushes the transcript
@@ -14887,7 +14887,12 @@ PAGE_SCENARIOS.push({
         rest.state === 'idle' && rest.word === 'idle' && rest.dot === 'rgb(63, 185, 80)',
         `an idle conversation reads ${rest.state} ${JSON.stringify(rest.word)} with a ${rest.dot} dot, not idle in green`,
       );
-      expect(rest.model !== '' && rest.mode !== '', `the line does not name the model (${JSON.stringify(rest.model)}) and the mode (${JSON.stringify(rest.mode)})`);
+      // #190: the model field is a name or the words `no model`, never the old
+      // parenthetical that cut to `(model …` at 390 (P188 holds both states).
+      expect(
+        rest.model !== '' && !rest.model.startsWith('(') && rest.mode !== '',
+        `the line does not name the model (${JSON.stringify(rest.model)}) and the mode (${JSON.stringify(rest.mode)})`,
+      );
       expect(rest.tokens === '65.5k/262.1k', `the line's fill reads ${JSON.stringify(rest.tokens)}, not the daemon's 65.5k/262.1k`);
       expect(!rest.sheet.shown && rest.expanded === 'false', 'the sheet is open at rest');
 
@@ -14936,6 +14941,73 @@ PAGE_SCENARIOS.push({
       const shut = await read();
       expect(!shut.sheet.shown && shut.trTop === rest.trTop, 'the second tap did not shut the sheet and give the transcript its room back');
       return `idle in green, ${rest.model} · ${rest.tokens} · ${rest.mode}; the sheet opens in place (${open.sheet.h}px, transcript pushed down), ${open.modes.length} mode buttons, ${target} posted once and followed; Escape and the line shut it`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P188 a conversation whose daemon names no model reads no model, muted and whole, on the status line at 390 and 360 and in the sheet’s Model row, and a named model reads its name in both',
+    // #190, from slice 1: the line read `(model unknown until switched)`,
+    // which cut to `(model …` at 390 and read as a broken name. The harness
+    // daemon's context carries its model in a shape the page does not read
+    // as a current model id, so the line starts with none named, which is
+    // the state the phone was in; a model_switched frame then names one.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize(PHONE);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.waitForFunction(`document.getElementById('h1-tokens').textContent !== ''`);
+      type Model = { text: string; muted: boolean; color: string; tokColor: string; cut: boolean; right: number; vw: number; row: string | null; rowMuted: boolean; rowColor: string; old: boolean };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const m = document.getElementById('h1-model');
+          const t = document.getElementById('h1-tokens');
+          const row = Array.from(document.querySelectorAll('#session-footer .sh-row')).find((r) => {
+            const l = r.querySelector('.sh-lbl');
+            return !!l && l.textContent === 'Model';
+          });
+          const v = row ? row.querySelector('.sh-lbl + *') : null;
+          const all = document.getElementById('h1-status').textContent + ' ' + document.getElementById('session-footer').textContent;
+          return {
+            text: m.textContent,
+            muted: m.classList.contains('none'),
+            color: getComputedStyle(m).color,
+            tokColor: getComputedStyle(t).color,
+            cut: m.scrollWidth > m.clientWidth,
+            right: Math.round(m.getBoundingClientRect().right),
+            vw: innerWidth,
+            row: v ? v.textContent : null,
+            rowMuted: !!v && v.classList.contains('none'),
+            rowColor: v ? getComputedStyle(v).color : '',
+            old: /until switched|\(model/.test(all),
+          };
+        })()`) as Promise<Model>;
+      const lines: string[] = [];
+      let none: Model | null = null;
+      for (const size of [PHONE, { width: 360, height: 780 }]) {
+        await page.setViewportSize(size);
+        const r = await read();
+        expect(!r.old, `the parenthetical is still on the line or in the sheet at ${size.width}`);
+        expect(r.text === 'no model' && r.muted, `with no model named the line reads ${JSON.stringify(r.text)} (muted ${r.muted}) at ${size.width}, not no model, muted`);
+        expect(!r.cut && r.right <= r.vw, `no model is cut at ${size.width} (cut ${r.cut}, right ${r.right} of ${r.vw})`);
+        expect(r.color !== r.tokColor, `no model is drawn in the fill's ${r.color}, so it does not read as muted`);
+        expect(r.row === 'no model' && r.rowMuted, `the sheet's Model row reads ${JSON.stringify(r.row)} (muted ${r.rowMuted}), not no model, muted`);
+        lines.push(`${size.width}: "${r.text}" in ${r.color} (the fill ${r.tokColor}), whole, ending at ${r.right}px`);
+        none = r;
+      }
+      await page.setViewportSize(PHONE);
+      await page.evaluate(`renderFrame({ type: 'model_switched', data: { modelId: 'openai/qwen3-coder:30b' } })`);
+      const named = await read();
+      expect(
+        named.text === 'qwen3-coder:30b' && !named.muted && named.color === named.tokColor,
+        `a named model reads ${JSON.stringify(named.text)} (muted ${named.muted}, ${named.color}) on the line, not its name in the line's ink`,
+      );
+      expect(
+        named.row === 'openai/qwen3-coder:30b' && !named.rowMuted && named.rowColor !== none!.rowColor,
+        `the sheet's Model row reads ${JSON.stringify(named.row)} (muted ${named.rowMuted}) once a model is named`,
+      );
+      return `${lines.join('; ')}; the sheet's Model row no model in ${none!.rowColor}; after model_switched the line reads ${named.text} and the row ${named.row} in ${named.rowColor}`;
     },
   });
 
