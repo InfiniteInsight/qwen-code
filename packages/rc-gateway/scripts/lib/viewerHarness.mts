@@ -26,6 +26,10 @@ import { TokenStore } from '../../src/tokenStore.js';
 import { PairingService } from '../../src/pairing.js';
 import { createGatewayApp } from '../../src/server.js';
 import { UiPrefsStore } from '../../src/uiPrefsStore.js';
+import {
+  HostActions,
+  type HostActionRunner,
+} from '../../src/hostActions.js';
 
 /**
  * `_meta` is the envelope the real EventBus stamps when it publishes
@@ -218,6 +222,47 @@ export interface BootViewerOptions {
    * it to 404 to drive the refusal the page reports when a snapshot is gone.
    */
   artifactContentStatus?: number;
+  /**
+   * Mount a host-actions store (#192) holding one action, `launcher`, behind
+   * a fake runner: its status reads not running until one start has run, then
+   * running. The start takes {@link HOST_ACTION_START_MS} so the page's
+   * "starting…" is on screen long enough to be read. Left unset the routes are
+   * not mounted and answer 404, which is how a scenario checks that the page
+   * draws no row. Nothing on the host is ever run.
+   */
+  hostActions?: boolean;
+}
+
+/** The label the harness's one host action carries. */
+export const HOST_ACTION_LABEL = 'Qwen Remote Launcher';
+/** How long the harness's fake start takes before it answers. */
+export const HOST_ACTION_START_MS = 400;
+
+/**
+ * The fake behind the `hostActions` option. Programs are told apart by the
+ * argv's first word, which the harness config names below. Once a start has
+ * run, every probe after it reads running, as the real launcher would.
+ */
+function harnessHostActions(): HostActions {
+  let started = false;
+  const run: HostActionRunner = async (argv) => {
+    if (argv[0] === 'harness-start') {
+      await new Promise((r) => setTimeout(r, HOST_ACTION_START_MS));
+      started = true;
+      return { code: 0 };
+    }
+    return { code: started ? 0 : 1 };
+  };
+  return HostActions.fromConfig(
+    {
+      launcher: {
+        label: HOST_ACTION_LABEL,
+        status: ['harness-status'],
+        start: ['harness-start'],
+      },
+    },
+    run,
+  );
 }
 
 export interface Viewer {
@@ -331,6 +376,7 @@ export async function bootViewer(
     // would silently run the fallback path and the saved-zone feature could
     // never be observed, so the harness carries it the way cli.ts does.
     uiPrefs: await UiPrefsStore.open(join(dir, 'ui-prefs.json')),
+    hostActions: opts.hostActions ? harnessHostActions() : undefined,
   });
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
