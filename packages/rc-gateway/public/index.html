@@ -398,6 +398,7 @@
       #rail .rh {
         display: flex;
         align-items: center;
+        background: var(--g1-band);
         padding: 6px 10px;
         font-size: 10px;
         letter-spacing: 0.1em;
@@ -987,9 +988,13 @@
         font-size: 18px;
       }
       /* The inspector sheet, in place under the status line. Bounded, so it
-         can never push the composer off the screen however much it holds. */
+         can never push the composer off the screen however much it holds, and
+         the one band that gives way when the frame runs out (the keyboard up
+         with the sheet and the tools open): it shrinks and scrolls inside
+         itself before the composer would leave the screen. */
       #h1-sheet {
-        flex: none;
+        flex: 0 1 auto;
+        min-height: 0;
         max-height: 55%;
         overflow-y: auto;
         display: flex;
@@ -1121,7 +1126,8 @@
       /* Bands that come and go above the transcript keep the column's gutter
          now that the column itself has none. */
       #pane-chat > #cards {
-        flex: none;
+        flex: 0 1 auto;
+        min-height: 0;
         max-height: 50%;
         overflow-y: auto;
         padding: 8px 12px 0;
@@ -1212,6 +1218,7 @@
       }
       #h1-tools .pill {
         flex: none;
+        box-sizing: border-box;
         min-height: 44px;
         padding: 0 14px;
         border: 1px solid var(--g1-edge);
@@ -2099,6 +2106,7 @@
           #load-earlier,
           #recap-toggle,
           #jump-bottom {
+            box-sizing: border-box;
             min-height: 36px;
             padding: 0 14px;
             border-radius: 18px;
@@ -5460,8 +5468,12 @@
       // and the virtualized path only re-anchors on an append, so nothing else
       // would bring them back. The test is #74's arithmetic: a pure height
       // change moves the gap by exactly the height lost, so a gap no larger
-      // than the loss is a reader who was at the end. A larger gap is a reader
-      // who had scrolled up to read, and they are left where they are.
+      // than the loss is a reader who was at the end. So is one the view
+      // still counts as near the end: this observer was created before the
+      // view's, so it runs before a scroll the shrink causes can update that
+      // reading, and a reader a few pixels short of the end is still
+      // following it. A larger gap is a reader who had scrolled up to read,
+      // and they are left where they are.
       let transcriptBoxH = 0;
       function onTranscriptBox() {
         const tr = $('transcript');
@@ -5470,7 +5482,9 @@
         transcriptBoxH = h;
         if (lost <= 0 || !transcriptView) return;
         const gap = tr.scrollHeight - tr.scrollTop - h;
-        if (gap > 1 && gap <= lost + 1) transcriptView.scrollToEnd();
+        if (gap > 1 && (gap <= lost + 1 || transcriptView.isNearBottom())) {
+          transcriptView.scrollToEnd();
+        }
       }
       if (typeof ResizeObserver === 'function') {
         new ResizeObserver(onTranscriptBox).observe($('transcript'));
