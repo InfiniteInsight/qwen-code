@@ -15,11 +15,19 @@
  * frame to subscribers (callers invoke {@link UsageIngester.ingest} alongside the
  * normal relay, never in its place).
  *
- * `extractUsage` reads the runtime frame shape `data.update._meta.usage`
- * (confirmed against the serve demo: `inputTokens` / `outputTokens` /
- * `cacheReadInputTokens`), tolerant of snake_case aliases. The model-id field's
- * exact placement in `_meta` is not pinned by a type, so it is read defensively
- * and falls back to `''` (which simply yields a rate-table miss → unpriced row).
+ * `extractUsage` reads the runtime frame shape `data.update._meta.usage`. The
+ * cached-token key was re-pinned against the EMITTER, not the serve demo:
+ * `createTranscriptUsageUpdate` (packages/acp-bridge/src/transcript-replay.ts)
+ * writes `cachedReadTokens` from `cachedContentTokenCount`, and the cli,
+ * web-shell and sdk readers all read that same name. The `cacheReadInputTokens`
+ * spelling this file used to lead with belongs to a DIFFERENT payload
+ * (protocol.ts), so leading with it left `tokensCached` at 0 on every live frame.
+ *
+ * The model id is not in `_meta` at all. `buildUpdateMeta` emits only `usage`,
+ * `timestamp` and `qwenTranscript`, so `modelId` falls back to `''` on every real
+ * turn and `lookupRate` misses every time (306 of 306 live rows unpriced). That
+ * needs a per-session model source, not a defensive read, and is tracked as
+ * Qwen-Code-Remote#181; the pricing math below is correct with or without it.
  */
 
 import type { RateTableHolder } from './rateTable.js';
@@ -90,8 +98,13 @@ export function extractUsage(data: unknown): ExtractedUsage | null {
   const u = usage as Record<string, unknown>;
   const tokensIn = num(u['inputTokens'] ?? u['input_tokens']);
   const tokensOut = num(u['outputTokens'] ?? u['output_tokens']);
+  // `cachedReadTokens` first: it is what the daemon emits. The other two are a
+  // different payload's spelling, kept as aliases, and were previously the only
+  // names read here, which is why every live row stored tokens_cached = 0.
   const tokensCached = num(
-    u['cacheReadInputTokens'] ?? u['cache_read_input_tokens'],
+    u['cachedReadTokens'] ??
+      u['cacheReadInputTokens'] ??
+      u['cache_read_input_tokens'],
   );
   // No usage signal at all → treat as a non-usage frame.
   if (tokensIn === 0 && tokensOut === 0 && tokensCached === 0) return null;
@@ -212,12 +225,20 @@ export class UsageIngester {
     const usage = extractUsage(data);
     if (!usage) return undefined;
     const table = this.deps.rates.current();
+    // The daemon's `inputTokens` IS `promptTokenCount`, which already CONTAINS the
+    // cached subset: the emitter's own upstream fixture states it (promptTokenCount
+    // 9 == input 2 + cached 7, anthropicContentGenerator.test). Pricing the full
+    // input AND the cached read charges the cached tokens twice, so the PRICED
+    // input is the uncached remainder. The stored row keeps the reported totals and
+    // only the price is net. Clamped because a malformed frame could report more
+    // cached than input, and a negative bill is worse than a zero one.
+    const pricedIn = Math.max(0, usage.tokensIn - usage.tokensCached);
     const costMicrocents = computeCostMicrocents(
       table,
       usage.modelServiceId,
       usage.modelId,
       {
-        in: usage.tokensIn,
+        in: pricedIn,
         out: usage.tokensOut,
         cached: usage.tokensCached,
       },
