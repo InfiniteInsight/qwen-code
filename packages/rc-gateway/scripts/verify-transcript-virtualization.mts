@@ -17653,6 +17653,482 @@ PAGE_SCENARIOS.push({
   });
 }
 
+// #188 (h1). The laptop, derived from the phone: at 1100px and wider the List
+// screen is a 280px pane on the left that never shuts, the chat column is
+// capped at 80ch and centred in what the panes leave, and the sheet, More and
+// a panel open as one 320px pane on the right with the chat beside them.
+// Under 1100 none of it applies. Read at 1280x810 and 1440x900 for the panes,
+// at 390x844, 360x780 and 1099x810 for the phone left as it was, and at 390
+// and 1280 for a card that pins while a screen or a pane is up. In-page code
+// is a plain string throughout: the transform rewrites a named arrow in a
+// callback into a __name(...) call the page does not define.
+{
+  // Every band's box in viewport pixels, 80ch in the column's own face,
+  // whether the chat is what is painted at the middle of the transcript's
+  // box (nothing over it), and where focus is.
+  const READ_BANDS = String.raw`(() => {
+    const ids = ['h1-bar', 'h1-statusline', 'h1-sheet', 'h1-sheet-head', 'transcript-wrap', 'cards', 'plan', 'h1-tools', 'composer', 'pane-chat', 'list-screen', 'more-screen', 'panel-screen', 'dir-picker', 'archived-view', 'h1-menu', 'h1-actions'];
+    const out = { vw: innerWidth, vh: innerHeight, docW: document.documentElement.scrollWidth, box: {} };
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (!el || el.getClientRects().length === 0) { out.box[id] = null; continue; }
+      const b = el.getBoundingClientRect();
+      out.box[id] = { x: b.left, y: b.top, w: b.width, h: b.height };
+    }
+    const pc = document.getElementById('pane-chat');
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:absolute;visibility:hidden;width:80ch';
+    pc.appendChild(probe);
+    out.ch80 = probe.getBoundingClientRect().width;
+    probe.remove();
+    const t = document.getElementById('transcript-wrap').getBoundingClientRect();
+    const hit = t.height > 0 ? document.elementFromPoint(t.left + t.width / 2, t.top + t.height / 2) : null;
+    out.chatOnTop = !!hit && pc.contains(hit);
+    const a = document.activeElement;
+    out.focus = !a ? '' : a.id ? a.id : a.dataset && a.dataset.panel && a.closest('#more-screen') ? 'row:' + a.dataset.panel : a.tagName.toLowerCase();
+    out.listHidden = document.getElementById('list-screen').hidden;
+    out.state = document.getElementById('h1-state').textContent;
+    return out;
+  })()`;
+  type Box = { x: number; y: number; w: number; h: number } | null;
+  type Bands = {
+    vw: number; vh: number; docW: number; box: Record<string, Box>; ch80: number;
+    chatOnTop: boolean; focus: string; listHidden: boolean; state: string;
+  };
+  const readBands = (page: Page) => page.evaluate(READ_BANDS) as Promise<Bands>;
+  const near = (a: number, b: number) => Math.abs(a - b) <= 1;
+  const fmt = (b: Box): string =>
+    b ? `${Math.round(b.w)}x${Math.round(b.h)} at ${Math.round(b.x)},${Math.round(b.y)}` : 'not drawn';
+  const isBox = (b: Box, x: number, y: number, w: number, h: number): boolean =>
+    !!b && near(b.x, x) && near(b.y, y) && near(b.w, w) && near(b.h, h);
+  // The column: every band of the chat screen at one x and one width, the
+  // lesser of what the panes leave and 80ch, centred in what they leave.
+  const column = (r: Bands, right: number, at: string): { w: number; x: number } => {
+    const room = r.vw - LEFT_PANE - right;
+    const w = Math.min(room, r.ch80);
+    const x = LEFT_PANE + (room - w) / 2;
+    for (const id of ['h1-bar', 'h1-statusline', 'transcript-wrap', 'cards', 'plan', 'h1-tools', 'composer', 'pane-chat']) {
+      const b = r.box[id];
+      if (!b && ['cards', 'plan', 'h1-tools'].includes(id)) continue; // not up just now
+      expect(!!b && near(b.x, x) && near(b.w, w), `${id} is ${fmt(b)} at ${at}, not the column, ${w.toFixed(1)}px at x ${x.toFixed(1)}`);
+    }
+    expect(r.docW === r.vw, `the page scrolls sideways at ${at} (${r.docW} of ${r.vw})`);
+    return { w, x };
+  };
+  const PLAN_FRAMES = (): Frame[] =>
+    new Frames()
+      .ev('client_joined')
+      .user('why does the nightly fail on arm64?')
+      .asst('The arm64 job pins node:20-alpine, which lacks the toolchain the native build needs.')
+      .done()
+      .upd({
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'read the workflow', priority: 'medium', status: 'completed' },
+          { content: 'switch the image', priority: 'medium', status: 'in_progress' },
+          { content: 're-run the nightly', priority: 'medium', status: 'pending' },
+        ],
+      }).list;
+  const settleBands = (page: Page) =>
+    page.evaluate('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))');
+
+  PAGE_SCENARIOS.push({
+    name: 'P171 at 1280x810 and 1440x900 the list is a 280px pane that never shuts, and the chat column is 80ch centred in what it leaves, with the phone’s bar, status line, strip and composer in it',
+    waitView: false,
+    frames: PLAN_FRAMES,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForSelector('#plan', { state: 'visible' });
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [1280, 810],
+        [1440, 900],
+      ] as const) {
+        const at = `${w}x${h}`;
+        await page.setViewportSize({ width: w, height: h });
+        await settleBands(page);
+        const r = await readBands(page);
+        expect(
+          isBox(r.box['list-screen']!, 0, 0, LEFT_PANE, h) && r.listHidden,
+          `the list is ${fmt(r.box['list-screen']!)} at ${at}, not the ${LEFT_PANE}px pane drawn at rest without being opened`,
+        );
+        const col = column(r, 0, at);
+        // Both widths leave more than 80ch, so the cap is what sets it.
+        expect(near(col.w, r.ch80), `the column is ${col.w}px at ${at}, not 80ch (${r.ch80}px)`);
+        // The phone's bands, at the phone's heights, down the column.
+        const bar = r.box['h1-bar']!;
+        const st = r.box['h1-statusline']!;
+        const tx = r.box['transcript-wrap']!;
+        const plan = r.box['plan']!;
+        const comp = r.box['composer']!;
+        expect(
+          near(bar.y, 0) && near(bar.h, 56) && near(st.y, 56) && near(st.h, 45) && near(tx.y, 101) &&
+            near(tx.y + tx.h, plan.y) && near(plan.y + plan.h, comp.y) && near(comp.y + comp.h, h),
+          `the column does not stack bar 56, status line 44, transcript, strip, composer to the fold at ${at}: bar ${fmt(bar)}, status ${fmt(st)}, transcript ${fmt(tx)}, strip ${fmt(plan)}, composer ${fmt(comp)}`,
+        );
+        expect(r.box['more-screen'] === null && r.box['h1-sheet'] === null, `a right-hand pane is up at rest at ${at}`);
+        // The title takes the reader to the pane's search, and opens no
+        // screen over the chat.
+        await page.click('#h1-title');
+        const s = await readBands(page);
+        const find = (await page.evaluate(`document.getElementById('list-find').getClientRects().length > 0`)) as boolean;
+        expect(
+          s.focus === 'past-filter' && find && s.listHidden && s.chatOnTop && isBox(s.box['list-screen']!, 0, 0, LEFT_PANE, h),
+          `the title did not focus the pane's search at ${at} (focus ${s.focus}, field ${find}, list ${fmt(s.box['list-screen']!)}, chat on top ${s.chatOnTop})`,
+        );
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('Escape');
+        lines.push(
+          `${at}: list ${LEFT_PANE}x${h} at 0,0; column ${col.w.toFixed(1)}px = ${(col.w / (r.ch80 / 80)).toFixed(1)}ch at x ${col.x.toFixed(1)}, bar 56, status 44, transcript ${Math.round(tx.h)}, strip ${Math.round(plan.h)}, composer ${Math.round(comp.h)} to ${Math.round(comp.y + comp.h)}; the title focuses the pane's search`,
+        );
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P172 at 1280x810 and 1440x900 the sheet, More and a panel open as one 320px pane on the right, one at a time, with the chat beside them in the column the panes leave',
+    waitView: false,
+    frames: PLAN_FRAMES,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [1280, 810],
+        [1440, 900],
+      ] as const) {
+        const at = `${w}x${h}`;
+        await page.setViewportSize({ width: w, height: h });
+        const right = (r: Bands, id: string, what: string) => {
+          expect(
+            isBox(r.box[id]!, w - RIGHT_PANE, 0, RIGHT_PANE, h),
+            `${what} is ${fmt(r.box[id]!)} at ${at}, not the ${RIGHT_PANE}px right-hand pane`,
+          );
+          expect(r.chatOnTop, `${what} covers the chat at ${at}`);
+          expect(isBox(r.box['list-screen']!, 0, 0, LEFT_PANE, h), `the list pane went with ${what} up at ${at}`);
+          return column(r, RIGHT_PANE, `${at} with ${what} up`);
+        };
+        // The sheet, with its head: the name of what the pane holds and
+        // the way back to the chat beside it.
+        await page.click('#h1-status');
+        await settleBands(page);
+        const sheet = await readBands(page);
+        const col = right(sheet, 'h1-sheet', 'the sheet');
+        const head = sheet.box['h1-sheet-head'];
+        expect(
+          isBox(head!, w - RIGHT_PANE + 1, 0, RIGHT_PANE - 1, 56),
+          `the sheet's head is ${fmt(head!)} at ${at}, not a 56px head across the pane`,
+        );
+        // The ⋯ menu hangs under ⋯, the column's right edge, with the pane up.
+        await page.click('#h1-actions');
+        const menu = await readBands(page);
+        const m = menu.box['h1-menu']!;
+        const act = menu.box['h1-actions']!;
+        expect(!!m && near(m.x + m.w, act.x + act.w) && m.y >= act.y + act.h, `the ⋯ menu is ${fmt(m)} at ${at}, not under ⋯ (${fmt(act)})`);
+        await page.keyboard.press('Escape');
+        // More takes the pane: the sheet shuts as it opens.
+        await page.click('#h1-more');
+        await settleBands(page);
+        const more = await readBands(page);
+        right(more, 'more-screen', 'More');
+        expect(more.box['h1-sheet'] === null, `the sheet stayed up under More at ${at}`);
+        // A panel over More in the same pane, as on the phone.
+        await page.click('#more-screen .row[data-panel="perms"]');
+        await settleBands(page);
+        const panel = await readBands(page);
+        right(panel, 'panel-screen', 'a panel');
+        expect(!!panel.box['more-screen'], `More went from under the panel at ${at}`);
+        // And the sheet takes it back: More and the panel shut.
+        await page.click('#h1-status');
+        await settleBands(page);
+        const back = await readBands(page);
+        right(back, 'h1-sheet', 'the sheet again');
+        expect(back.box['more-screen'] === null && back.box['panel-screen'] === null, `More or the panel stayed up under the sheet at ${at}`);
+        await page.click('#h1-sheet-close');
+        await settleBands(page);
+        const shut = await readBands(page);
+        const free = column(shut, 0, `${at} with the pane shut`);
+        lines.push(
+          `${at}: sheet, More and a panel each ${RIGHT_PANE}x${h} at ${w - RIGHT_PANE},0, one at a time, the chat beside them in a ${col.w.toFixed(1)}px column (${(col.w / (sheet.ch80 / 80)).toFixed(1)}ch) at x ${col.x.toFixed(1)}, back to ${free.w.toFixed(1)}px when it shuts; the ⋯ menu under ⋯`,
+        );
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P173 in the pane layout Escape shuts the right-hand pane and hands focus back to what opened it, a level at a time, and leaves it alone from the composer',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.setViewportSize({ width: 1280, height: 810 });
+      const up = async () => {
+        const r = await readBands(page);
+        return {
+          sheet: r.box['h1-sheet'] !== null,
+          more: r.box['more-screen'] !== null,
+          panel: r.box['panel-screen'] !== null,
+          focus: r.focus,
+        };
+      };
+      const steps: string[] = [];
+      const step = async (what: string, want: { sheet: boolean; more: boolean; panel: boolean; focus: string }) => {
+        const got = await up();
+        expect(JSON.stringify(got) === JSON.stringify(want), `${what}: ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+        steps.push(`${what} -> ${want.focus}`);
+      };
+      // The status line keeps focus when it opens the sheet beside the chat,
+      // so Escape from it is Escape from the pane's opener.
+      await page.click('#h1-status');
+      await step('the status line opens the sheet', { sheet: true, more: false, panel: false, focus: 'h1-status' });
+      await page.keyboard.press('Escape');
+      await step('Escape on the status line', { sheet: false, more: false, panel: false, focus: 'h1-status' });
+      await page.click('#h1-status');
+      await page.focus('#h1-sheet-close');
+      await page.keyboard.press('Escape');
+      await step('Escape inside the sheet', { sheet: false, more: false, panel: false, focus: 'h1-status' });
+      await page.click('#h1-status');
+      await page.click('#h1-sheet-close');
+      await step('the sheet’s own way back', { sheet: false, more: false, panel: false, focus: 'h1-status' });
+      // More, and a panel over it: a level at a time.
+      await page.click('#h1-more');
+      await step('≡ opens More', { sheet: false, more: true, panel: false, focus: 'row:rewind' });
+      await page.keyboard.press('Escape');
+      await step('Escape in More', { sheet: false, more: false, panel: false, focus: 'h1-more' });
+      await page.click('#h1-more');
+      await page.click('#more-screen .row[data-panel="usage"]');
+      await step('a row opens its panel', { sheet: false, more: true, panel: true, focus: 'panel-back' });
+      await page.keyboard.press('Escape');
+      await step('Escape in the panel', { sheet: false, more: true, panel: false, focus: 'row:usage' });
+      await page.keyboard.press('Escape');
+      await step('Escape in More again', { sheet: false, more: false, panel: false, focus: 'h1-more' });
+      // A pointer click on nothing leaves focus on nothing: Escape from
+      // there is the pane's too.
+      await page.click('#h1-more');
+      await page.evaluate('document.activeElement && document.activeElement.blur()');
+      await page.keyboard.press('Escape');
+      await step('Escape with focus on nothing', { sheet: false, more: false, panel: false, focus: 'h1-more' });
+      // The composer is the chat's: Escape typed there does not reach
+      // across to a pane, which is a reader still at work beside it.
+      await page.click('#h1-more');
+      await page.click('#prompt');
+      await page.keyboard.press('Escape');
+      await step('Escape in the composer', { sheet: false, more: true, panel: false, focus: 'prompt' });
+      await page.click('#more-back');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return steps.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P174 under 1100 the phone layout is the layout: at 390x844, 360x780 and 1099x810 every band is the screen wide and stacked as before, every screen covers it, and 1100 is where the panes begin',
+    waitView: false,
+    frames: PLAN_FRAMES,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForSelector('#plan', { state: 'visible' });
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [390, 844],
+        [360, 780],
+        [1099, 810],
+      ] as const) {
+        const at = `${w}x${h}`;
+        await page.setViewportSize({ width: w, height: h });
+        await settleBands(page);
+        const r = await readBands(page);
+        const bar = r.box['h1-bar']!;
+        const st = r.box['h1-statusline']!;
+        const tx = r.box['transcript-wrap']!;
+        const plan = r.box['plan']!;
+        const comp = r.box['composer']!;
+        // At rest: the bar 56, the status line 44 and its rule, then the
+        // transcript, the strip and the composer on the fold, each the
+        // screen wide from x 0, and nothing of the panes.
+        expect(
+          isBox(bar, 0, 0, w, 56) && isBox(st, 0, 56, w, 45) && isBox(tx, 0, 101, w, plan.y - 101) &&
+            isBox(plan, 0, tx.y + tx.h, w, plan.h) && isBox(comp, 0, h - comp.h, w, comp.h) &&
+            isBox(r.box['pane-chat']!, 0, 56, w, h - 56),
+          `the chat is not the phone's at ${at}: bar ${fmt(bar)}, status ${fmt(st)}, transcript ${fmt(tx)}, strip ${fmt(plan)}, composer ${fmt(comp)}, pane ${fmt(r.box['pane-chat']!)}`,
+        );
+        expect(
+          r.box['list-screen'] === null && r.box['more-screen'] === null && r.box['h1-sheet'] === null && r.docW === w,
+          `something of the pane layout is drawn at ${at} (list ${fmt(r.box['list-screen']!)}, More ${fmt(r.box['more-screen']!)}, sheet ${fmt(r.box['h1-sheet']!)}, document ${r.docW})`,
+        );
+        // The sheet in place under the status line, with no head of its own.
+        await page.click('#h1-status');
+        await settleBands(page);
+        const s = await readBands(page);
+        const sh = s.box['h1-sheet']!;
+        expect(
+          isBox(sh, 0, 101, w, sh.h) && near(s.box['transcript-wrap']!.y, 101 + sh.h) && s.box['h1-sheet-head'] === null,
+          `the sheet is not in place under the status line at ${at}: sheet ${fmt(sh)}, transcript ${fmt(s.box['transcript-wrap']!)}, head ${fmt(s.box['h1-sheet-head']!)}`,
+        );
+        await page.click('#h1-status');
+        // The list, More and a panel each the whole screen, back from each.
+        await page.click('#h1-title');
+        const l = await readBands(page);
+        expect(
+          isBox(l.box['list-screen']!, 0, 0, w, h) && !l.listHidden && l.focus === 'list-back',
+          `the title did not open the list as a screen at ${at} (${fmt(l.box['list-screen']!)}, focus ${l.focus})`,
+        );
+        await page.click('#list-back');
+        await page.click('#h1-more');
+        const m = await readBands(page);
+        expect(isBox(m.box['more-screen']!, 0, 0, w, h), `More is ${fmt(m.box['more-screen']!)} at ${at}, not the screen`);
+        await page.click('#more-screen .row[data-panel="perms"]');
+        const p = await readBands(page);
+        expect(isBox(p.box['panel-screen']!, 0, 0, w, h), `a panel is ${fmt(p.box['panel-screen']!)} at ${at}, not the screen`);
+        await page.click('#panel-back');
+        await page.click('#more-back');
+        lines.push(
+          `${at}: bar ${Math.round(bar.w)}x56 at 0,0, status 0,56, transcript 0,101 ${Math.round(tx.h)}px, strip ${Math.round(plan.h)}, composer ${Math.round(comp.h)} to ${Math.round(comp.y + comp.h)}; sheet in place ${Math.round(sh.h)}px under the status line; list, More and a panel ${w}x${h}`,
+        );
+      }
+      // One pixel on, the panes.
+      await page.setViewportSize({ width: 1100, height: 810 });
+      await settleBands(page);
+      const edge = await readBands(page);
+      expect(isBox(edge.box['list-screen']!, 0, 0, LEFT_PANE, 810), `the list is not the pane at 1100x810 (${fmt(edge.box['list-screen']!)})`);
+      const col = column(edge, 0, '1100x810');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `${lines.join('; ')}; at 1100x810 the list is the ${LEFT_PANE}px pane and the column ${col.w.toFixed(1)}px`;
+    },
+  });
+
+  // The daemon's status read with whatever is pending, for the cards below;
+  // the page's own poll reads it, and refreshPendingCards is that poll's read,
+  // called rather than waited on.
+  const PENDING = (requestId: string) => ({
+    requestId,
+    kind: 'permission',
+    createdAt: '2026-10-28T09:00:00.000Z',
+    action: { type: 'execute', title: 'gh cache delete --all', input: { command: 'gh cache delete --all --repo InfiniteInsight/qwen-code', description: 'Deletes every Actions cache in the repo.' } },
+    options: [
+      { optionId: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
+    ],
+  });
+  const READ_PIN = String.raw`(() => {
+    const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+    const on = (el) => {
+      if (!el || el.getClientRects().length === 0) return null;
+      const b = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+      return { top: b.top, bottom: b.bottom, left: b.left, right: b.right, mine: !!hit && el.contains(hit) };
+    };
+    return { id: card ? card.dataset.requestId : null, allow: on(card && card.querySelector('.pc-allow')), deny: on(card && card.querySelector('.pc-deny')) };
+  })()`;
+  type Pin = {
+    id: string | null;
+    allow: { top: number; bottom: number; left: number; right: number; mine: boolean } | null;
+    deny: { top: number; bottom: number; left: number; right: number; mine: boolean } | null;
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P175 a card that pins while More, a panel or the list is up is on screen at once: under 1100 the screens shut onto the chat with focus on the status line, at 1280 it pins in the column beside the pane, which stays',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const pending = new Map<string, unknown>();
+      await page.route(/\/session\/[^/]+\/status$/, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ workspaceCwd: '/proj', clientCount: 1, hasActivePrompt: true, pendingInteractions: [...pending.values()] }),
+        }),
+      );
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const raise = async (id: string) => {
+        pending.set(id, PENDING(id));
+        await page.evaluate('refreshPendingCards(watchedSessionId)');
+        await page.waitForFunction(
+          `(() => { const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)'); return !!c && c.dataset.requestId === ${JSON.stringify(id)}; })()`,
+          null,
+          { timeout: 10_000 },
+        );
+        await settleBands(page);
+      };
+      // Answered elsewhere: the daemon stops listing it and the card retires,
+      // so the next one raised is a new pin.
+      const drop = async (id: string) => {
+        pending.delete(id);
+        await page.evaluate('refreshPendingCards(watchedSessionId)');
+        await page.waitForFunction(`!document.getElementById('pane-chat').dataset.card`, null, { timeout: 10_000 });
+      };
+      const shown = (p: Pin, vh: number, at: string) => {
+        expect(!!p.allow && !!p.deny && p.allow.mine && p.deny.mine, `the card's Allow and Deny are not on top at ${at} (${JSON.stringify(p)})`);
+        expect(vh - p.allow!.bottom <= 120, `Allow ends ${Math.round(vh - p.allow!.bottom)}px from the bottom at ${at}, out of the thumb zone`);
+      };
+      const lines: string[] = [];
+
+      // 390, a panel up and a reader typing into it.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.click('#h1-more');
+      await page.click('#more-screen .row[data-panel="perms"]');
+      await page.evaluate(String.raw`Array.from(document.querySelectorAll('#panel-perms input:not([type=radio]):not([type=checkbox])')).find((e) => e.getClientRects().length > 0).focus()`);
+      await page.keyboard.type('Bash(gh');
+      const typing = (await page.evaluate(`document.activeElement.tagName === 'INPUT' && document.activeElement.closest('#panel-screen') !== null`)) as boolean;
+      expect(typing, 'setup: focus is not in a field of the panel');
+      await raise('p175a');
+      const a = await readBands(page);
+      const pa = (await page.evaluate(READ_PIN)) as Pin;
+      expect(
+        a.box['more-screen'] === null && a.box['panel-screen'] === null && a.chatOnTop,
+        `the card pinned under a panel at 390 (More ${fmt(a.box['more-screen']!)}, panel ${fmt(a.box['panel-screen']!)})`,
+      );
+      shown(pa, 844, '390 from a panel');
+      expect(a.focus === 'h1-status' && a.state === 'waiting for you', `focus went to ${a.focus} and the status line reads ${JSON.stringify(a.state)} at 390`);
+      const saved = (await page.evaluate(`localStorage.getItem('qwen-rc:ui:panel')`)) as string | null;
+      expect(saved === null, `the shut panel is still saved to come back on a reload (${saved})`);
+      lines.push(`390, a panel up with focus in its field: More and the panel shut, Allow and Deny on top ${Math.round(844 - pa.allow!.bottom)}px from the bottom, focus on the status line reading ${JSON.stringify(a.state)}`);
+      await drop('p175a');
+
+      // 360, the List screen up.
+      await page.setViewportSize({ width: 360, height: 780 });
+      await page.click('#h1-title');
+      await raise('p175b');
+      const b = await readBands(page);
+      const pb = (await page.evaluate(READ_PIN)) as Pin;
+      expect(b.box['list-screen'] === null && b.listHidden && b.chatOnTop, `the card pinned under the list at 360 (${fmt(b.box['list-screen']!)})`);
+      shown(pb, 780, '360 from the list');
+      expect(b.focus === 'h1-status', `focus went to ${b.focus} at 360`);
+      lines.push(`360, the list up: it shut, the card on top, focus on the status line`);
+      await drop('p175b');
+
+      // 1280, a panel up in the right-hand pane: it stays, and the card pins
+      // in the column beside it; focus is left where the reader had it.
+      await page.setViewportSize({ width: 1280, height: 810 });
+      await page.click('#h1-more');
+      await page.click('#more-screen .row[data-panel="perms"]');
+      await raise('p175c');
+      const c = await readBands(page);
+      const pc = (await page.evaluate(READ_PIN)) as Pin;
+      expect(
+        isBox(c.box['panel-screen']!, 1280 - RIGHT_PANE, 0, RIGHT_PANE, 810) && !!c.box['more-screen'],
+        `the panel did not stay up beside the card at 1280 (${fmt(c.box['panel-screen']!)})`,
+      );
+      shown(pc, 810, '1280 beside a panel');
+      const col = column(c, RIGHT_PANE, '1280 with a panel and a card');
+      expect(
+        pc.allow!.left >= col.x && pc.allow!.right <= col.x + col.w && c.focus === 'panel-back',
+        `the card is not in the column beside the pane, or focus moved (${JSON.stringify(pc.allow)}, column ${col.x}-${col.x + col.w}, focus ${c.focus})`,
+      );
+      lines.push(`1280, a panel up: it stayed, the card on top in the ${col.w.toFixed(1)}px column beside it, focus left on ${c.focus}`);
+      await page.click('#panel-back');
+      await page.click('#more-back');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return lines.join('; ');
+    },
+  });
+}
+
 /** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
 function pgParseRgb(css: string): { r: number; g: number; b: number; a: number } | null {
   const m = /^rgba?\(([^)]+)\)$/.exec(css.trim());
