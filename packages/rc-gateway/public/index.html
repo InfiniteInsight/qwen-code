@@ -18,6 +18,41 @@
          viewport and grows with the page instead. A definite height here would
          also let the flex items shrink below their content, which is the same
          class of failure that made the bounded conversation column be reverted. */
+      /* #177. The g1 sheet's palette, named once. Every value is the sheet's
+         own (g1-ops-console-drawer-1to1.html), so a rule that uses one of these
+         is drawing the sheet rather than a near miss of it. The page still
+         carries older literal hexes in rules this pass did not need to touch;
+         new and restyled rules use the names.
+         color-scheme is what makes the browser's own parts of a control (the
+         select's open list, the date picker's icon, checkboxes, scrollbars)
+         render for a dark page. Without it those parts stay light whatever the
+         author colours say, which is the mix of white and black this fixes. */
+      :root {
+        color-scheme: dark;
+        /* Grounds, darkest to lightest: the page, a band (rail, drawer,
+           composer, every card), and a control or the bar. */
+        --g1-page: #0d1117;
+        --g1-band: #10151c;
+        --g1-raise: #161b22;
+        /* The rule between bands, and a control's edge. */
+        --g1-line: #21262d;
+        --g1-edge: #30363d;
+        /* Ink, brightest to dimmest. On the band ground, ink, ink-mid and
+           ink-lo all clear 4.5:1 and are fit for body text; ink-dim measures
+           3.99:1 and is for small labels only, which is how the sheet uses it. */
+        --g1-ink-hi: #e6edf3;
+        --g1-ink: #cbd5e1;
+        --g1-ink-mid: #8b949e;
+        --g1-ink-lo: #7d8590;
+        --g1-ink-dim: #6e7681;
+        --g1-accent: #1f6feb;
+        --g1-link: #58a6ff;
+        --g1-warn: #d29922;
+        /* #180. The rail's selected-row ground, and the tint the sheet gives
+           the one verb that destroys something (its .ic.end). */
+        --g1-on: #1f2937;
+        --g1-danger: #f38ba8;
+      }
       body {
         font-family: system-ui, sans-serif;
         min-height: 100vh;
@@ -40,7 +75,7 @@
         font-size: 1.2rem;
       }
       section {
-        border: 1px solid #ccc;
+        border: 1px solid var(--g1-line);
         border-radius: 8px;
         padding: 1rem;
         margin-bottom: 1rem;
@@ -61,14 +96,57 @@
         cursor: not-allowed;
         opacity: 0.55;
       }
+      /* #177. Every native control in the app takes the sheet's control look:
+         raised ground, the edge rule, body ink. :where() keeps this at zero
+         specificity on purpose, so any rule that already names a control (the
+         composer's field and verbs, the rail's rows and filter, the bar's
+         search, the fork button) still wins without having to restate itself.
+         Checkboxes and radios are left to color-scheme: an author border or
+         background on one does not restyle the native box, it only risks a
+         half-styled one. */
+      :where(#app-body)
+        :where(
+          button,
+          select,
+          textarea,
+          input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color'])
+        ) {
+        color: var(--g1-ink);
+        background-color: var(--g1-raise);
+        border: 1px solid var(--g1-edge);
+        border-radius: 4px;
+      }
+      /* Chrome's default placeholder grey measured 4.11:1 on the composer's
+         field, under the 4.5:1 floor for text this size. */
+      :where(#app-body) ::placeholder {
+        color: var(--g1-ink-lo);
+      }
+      /* A visible ring on the dark ground. The browser's own ring is a thin
+         dark-and-light pair that disappears against #10151c at a glance. */
+      :where(#app-body)
+        :where(button, select, textarea, input, summary, [tabindex]):focus-visible {
+        outline: 2px solid var(--g1-link);
+        outline-offset: 1px;
+      }
+      /* An unstyled link is #0000ee, which is 1.95:1 on the band ground. */
+      :where(#app-body) a {
+        color: var(--g1-link);
+      }
+      /* The status line, on the page ground in the sheet's status ink (its
+         .status rule). It was #444, written for the white pane. */
       #status {
         min-height: 1.2em;
-        color: #444;
+        color: var(--g1-ink-mid);
+        background: var(--g1-page);
         margin-bottom: 0.5rem;
       }
+      /* Permission and question cards keep the amber edge that says "this
+         needs you", on the band ground. The light yellow fill they had was
+         the last light card on the page, and light ink inherited from the
+         dark pane would have been unreadable on it. */
       .card {
-        border: 1px solid #c80;
-        background: #fffbe6;
+        border: 1px solid var(--g1-warn);
+        background: var(--g1-band);
         border-radius: 8px;
         padding: 0.6rem;
         margin-bottom: 0.5rem;
@@ -85,7 +163,7 @@
         margin-bottom: 0.5rem;
       }
       .ask-q {
-        border: 1px solid #ddd;
+        border: 1px solid var(--g1-edge);
         border-radius: 6px;
         padding: 8px;
       }
@@ -161,7 +239,7 @@
         justify-content: space-between;
         align-items: center;
         gap: 0.5rem;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--g1-raise);
         padding: 0.3rem 0;
         font-size: 0.85rem;
       }
@@ -175,10 +253,10 @@
          browser API must not read as the product's own engine (#97). */
       .cmd-kind {
         font-size: 0.68rem;
-        border: 1px solid #ccc;
+        border: 1px solid var(--g1-edge);
         border-radius: 4px;
         padding: 0 4px;
-        color: #666;
+        color: var(--g1-ink-lo);
         margin-right: 0.4rem;
       }
       .cmd-count {
@@ -191,7 +269,7 @@
         display: flex;
         flex-direction: column;
         gap: 0.15rem;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--g1-raise);
         padding: 0.3rem 0;
         font-size: 0.85rem;
         overflow-wrap: anywhere;
@@ -277,6 +355,21 @@
           padding-left: 0.5rem;
           padding-right: 0.5rem;
         }
+        /* #177. The page title is a row of its own above the bar, about 49px
+           of a phone's height for a name the browser tab already shows. The
+           sheet drops it at this same break (its .bar h1). The bar itself is
+           untouched, so it stays the one row #176 made it. */
+        #app-body > h1 {
+          display: none;
+        }
+      }
+      /* #177. A <dialog> takes the browser's Canvas colours, white on a light
+         scheme, so the model picker opened as a white sheet over the dark page.
+         Its rows are buttons that clear their own ground and border, so they
+         sit on this one. */
+      #model-picker-dialog {
+        background: var(--g1-band);
+        color: var(--g1-ink);
       }
       .tab-pane {
         display: none;
@@ -284,8 +377,14 @@
       .tab-pane.active {
         display: block;
       }
+      /* #177. A pinned pane and every Operations, Settings and Diagnostics
+         card is a band in g1's sense: the band ground under the line rule, the
+         same pair the sheet gives the rail, the drawer and the composer. Only
+         colours change here; padding, radius and margins are what they were, so
+         nothing moves. */
       .pin-area > details {
-        border: 1px solid #ccc;
+        background: var(--g1-band);
+        border: 1px solid var(--g1-line);
         border-radius: 6px;
         margin-bottom: 0.5rem;
         padding: 0.5rem;
@@ -296,7 +395,8 @@
         font-size: 0.9rem;
       }
       details.ops-collapse {
-        border: 1px solid #ccc;
+        background: var(--g1-band);
+        border: 1px solid var(--g1-line);
         border-radius: 8px;
         padding: 0.75rem 1rem;
         margin-bottom: 1rem;
@@ -305,7 +405,7 @@
         cursor: pointer;
       }
       .ops-note {
-        color: #888;
+        color: var(--g1-ink-lo);
         font-size: 0.85rem;
         margin: 0.4rem 0;
       }
@@ -322,7 +422,7 @@
       .help-text {
         margin: 0.5rem 0;
         padding: 0.5rem 0.75rem;
-        border-left: 3px solid #07f;
+        border-left: 3px solid var(--g1-accent);
         border-radius: 4px;
         background: rgba(128, 128, 128, 0.12);
         font-size: 0.85rem;
@@ -479,6 +579,95 @@
         width: 100%;
         cursor: pointer;
       }
+      /* #180. A row is the conversation button plus its actions button, side
+         by side in one wrapper: a button cannot hold another button, and the
+         row's own button keeps everything P27 and P124 read off it (its text,
+         aria-current, data-session). The separator moves to the wrapper so it
+         runs under both. */
+      #rail .srow {
+        display: flex;
+        align-items: stretch;
+        border-bottom: 1px solid #161b22;
+      }
+      #rail .srow > .s {
+        flex: 1 1 auto;
+        min-width: 0;
+        border-bottom: 0;
+      }
+      #rail .srow:has(> .s.on) {
+        background: var(--g1-on);
+      }
+      /* Faded out rather than hidden at rest: an invisible-but-present button
+         stays in the tab order, so Tab still reaches it from its row, and a
+         hidden one would be skipped. Hover, focus on the row or the button, or
+         an open menu bring it up. A device that cannot hover gets it always,
+         or a tablet wider than the break would have no way to find it. */
+      #rail .more {
+        flex: none;
+        width: 24px;
+        padding: 0;
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        color: var(--g1-ink-lo);
+        background: none;
+        border: 0;
+        border-radius: 0;
+        cursor: pointer;
+        opacity: 0;
+      }
+      #rail .srow:hover > .more,
+      #rail .srow:focus-within > .more,
+      #rail .more[aria-expanded='true'] {
+        opacity: 1;
+      }
+      #rail .more:hover {
+        color: var(--g1-ink-hi);
+      }
+      @media (hover: none) {
+        #rail .more {
+          opacity: 1;
+        }
+      }
+      /* The menu the actions button opens. One element for every row, placed
+         beside whichever row asked; fixed rather than inside the rail, because
+         the phone strip scrolls sideways and clips anything that hangs out of
+         it. The control ground and edge, so it reads as a raised surface over
+         the band it opens on. */
+      #rail-menu {
+        position: fixed;
+        z-index: 200;
+        display: flex;
+        flex-direction: column;
+        min-width: 9rem;
+        padding: 4px 0;
+        background: var(--g1-raise);
+        border: 1px solid var(--g1-edge);
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      }
+      #rail-menu[hidden] {
+        display: none;
+      }
+      #rail-menu [role='menuitem'] {
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        color: var(--g1-ink);
+        background: none;
+        border: 0;
+        border-radius: 0;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+      #rail-menu [role='menuitem']:hover,
+      #rail-menu [role='menuitem']:focus {
+        background: var(--g1-on);
+        color: var(--g1-ink-hi);
+      }
+      #rail-menu [role='menuitem'].danger {
+        color: var(--g1-danger);
+      }
       /* Collapsed, g1b. The column is 40px, so the header stacks and keeps only
          the glyph. Both halves matter: the word "conversations" sets a
          min-content width well past the flex basis, which is what let the column
@@ -542,6 +731,12 @@
       #rail.collapsed .s span {
         display: none;
       }
+      /* #180. The collapsed rail is a column of numbers at 40px, or a strip of
+         them on a phone; there is no room for a second control per row, and
+         expanding brings the actions back with the titles they act on. */
+      #rail.collapsed .more {
+        display: none;
+      }
       .mid {
         display: flex;
         flex-direction: column;
@@ -555,23 +750,76 @@
       #rail:empty {
         display: none;
       }
-      /* The panes keep the light surface they have today. This one rule is shared
-         by all four panes (chat, ops, settings, diag), so flipping it is the shell
-         task's call across the whole page, not #121's call for the chat regions.
-         .card sets #fffbe6 and #status sets #444, and a light page element on a
-         dark ground is unreadable rather than unfinished.
+      /* #177. The shell task's call: all four panes (chat, ops, settings, diag)
+         share this one rule, and it was the white ground every light island on
+         the page sat on. It is now no ground at all, so a pane shows the page
+         ground behind it and each band inside it paints its own, which is how
+         the sheet builds the column. The ink is the sheet's body ink, so
+         anything that names no colour of its own reads on every band here.
+         The two light cards this pane colour used to excuse, .card at #fffbe6
+         and #status at #444, are restyled above with it.
 
-         #transcript's colour is left unnamed, and the reason is not what an
-         earlier version of this comment claimed. It said the rows compute "#000 on
-         #fff"; measured, they do not. #transcript sets background #111 below, so an
-         unnamed row computes #000 on #111, which is 1.11:1 and unreadable. What
-         actually makes the unnamed value safe is that every row kind names its own
-         colour, and the only elements left inheriting are the virtualizer's own
-         wrappers, which hold no text of their own. P126 measures that per row
-         rather than leaving it as a claim in a comment. */
+         #transcript's rows still name their own colours, and that is what makes
+         them safe, not this inherited value: #transcript sets background #111
+         below, and the old inherited #000 on it was 1.11:1. The only elements
+         that inherit are the virtualizer's own wrappers, which hold no text.
+         P126 measures every text-bearing element per band instead of leaving
+         that as a claim in a comment. */
       .tab-pane {
-        background: #fff;
-        color: #000;
+        background: transparent;
+        color: var(--g1-ink);
+      }
+      /* #177. The composer and the inspector drawer are bands: the band ground
+         under the line rule. The composer is a <section>, so its border and
+         radius come from that rule and only the ground is named here. */
+      #composer {
+        background: var(--g1-band);
+      }
+      /* The sheet's prompt draws no ring of its own (its textarea sets outline
+         none, as this one does below), so the field it sits in takes the ring
+         colour while it holds focus. Without this a keyboard user tabbing into
+         the prompt sees nothing change. */
+      #composer .field:focus-within {
+        border-color: var(--g1-link);
+      }
+      /* #177, the drawer's export at 390. The band is inline content (the model
+         name, a text run, the mode select, persist, export) and at 390 the
+         second line is already full when export arrives, so it wrapped onto a
+         third line of its own, 36px of the fold for one button. A right float
+         at the head of the band reserves a corner beside the model name, and
+         export sits in it. The reserve only exists while there is an export to
+         hold, so a band written with plain text (the verifier's filled band)
+         keeps its full width. The control takes the sheet's drawer-control
+         size here, which is what lets the corner stay one text line tall. */
+      @media (max-width: 860px) {
+        #session-footer {
+          position: relative;
+        }
+        #session-footer:has(> #footer-export)::before {
+          content: '';
+          float: right;
+          width: 62px;
+          height: 1.2em;
+        }
+        #session-footer > #footer-export {
+          position: absolute;
+          top: 6px;
+          right: 8px;
+          width: 54px;
+          height: 1.6em;
+          padding: 0;
+          font-size: 11px;
+        }
+        /* The two answer slots are empty spans with a left margin until a mode
+           change or an export has something to say. At 390 that margin alone
+           was past the end of the full second line, so an empty slot opened a
+           third line on its own: measured on the harness's band, 88px before
+           this pass, 72px with export moved and 52px with this. They show as
+           soon as they hold text. */
+        #session-footer > #footer-mode-note:empty,
+        #session-footer > #footer-export-note:empty {
+          display: none;
+        }
       }
       /* #120. The composer takes the sheet's three rows: the field, the control
          row under it, the idle row under that. Scoped under #composer because the
@@ -823,6 +1071,25 @@
         #rail .s span {
           display: none;
         }
+        /* #180. On the strip the wrapper is the cell and carries the separator,
+           and the actions button is always shown at the 44px floor: there is
+           no hover on a phone to bring it up. */
+        #rail .srow {
+          flex: none;
+          border-bottom: 0;
+          border-right: 1px solid #161b22;
+        }
+        #rail .srow > .s {
+          border-right: 0;
+        }
+        #rail .more {
+          opacity: 1;
+          width: 44px;
+          min-height: 44px;
+        }
+        #rail-menu [role='menuitem'] {
+          min-height: 44px;
+        }
         #rail .plus {
           flex: none;
           border-bottom: 0;
@@ -1036,7 +1303,7 @@
             style="
               max-height: 30vh;
               overflow: auto;
-              border: 1px solid #ccc;
+              border: 1px solid var(--g1-edge);
               border-radius: 4px;
               margin-bottom: 0.4rem;
             "
@@ -1107,6 +1374,12 @@
              at the bottom. Absolutely positioned on purpose: an in-flow sibling
              above #transcript would take height out of the bounded scroller,
              which is what broke the render-all fallback's scroll pin. */
+          /* #177. Both pills are controls on the transcript, so they take the
+             control ground and edge, with the bright ink so they still read
+             as something to press over the rows they float on. They were white,
+             the brightest thing on the page, painted over the first lines of
+             the conversation. The shadow stays: it is what lifts a dark pill
+             off a dark row. */
           #load-earlier {
             position: absolute;
             top: 8px;
@@ -1114,14 +1387,14 @@
             transform: translateX(-50%);
             z-index: 2;
             border-radius: 999px;
-            background: #fff;
-            color: #111;
-            border: 1px solid #ccc;
+            background: var(--g1-raise);
+            color: var(--g1-ink-hi);
+            border: 1px solid var(--g1-edge);
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
             font-size: 0.85rem;
           }
           #load-earlier[disabled] {
-            color: #666;
+            color: var(--g1-ink-dim);
           }
           #jump-bottom {
             position: absolute;
@@ -1130,9 +1403,9 @@
             transform: translateX(-50%);
             z-index: 2;
             border-radius: 999px;
-            background: #fff;
-            color: #111;
-            border: 1px solid #ccc;
+            background: var(--g1-raise);
+            color: var(--g1-ink-hi);
+            border: 1px solid var(--g1-edge);
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
             font-size: 0.85rem;
           }
@@ -1638,13 +1911,17 @@
           ></div>
           <div id="plan-more" hidden style="color: #8fa0c0; font-size: 0.78rem"></div>
         </div>
+        <!-- #177. The drawer is a band like the composer under it: the band
+             ground, and the line rule drawn as an inset shadow rather than a
+             border so the band keeps the exact box the fold checks measure. -->
         <div
           id="session-footer"
           style="
             display: none;
             margin-top: 8px;
             padding: 6px 8px;
-            background: #14171c;
+            background: var(--g1-band);
+            box-shadow: inset 0 0 0 1px var(--g1-line);
             border-radius: 6px;
             color: #9aa0a6;
             font-family: ui-monospace, monospace;
@@ -10313,6 +10590,11 @@
       let railFilter = '';
       let railCollapsed = false;
       let railEls = null;
+      // #180. The row-actions menu, built on first use (railMenu below), and
+      // the row it is open for. Declared with the rail's other state, ahead of
+      // every function that reads it.
+      let railMenuEl = null;
+      let railMenuFor = null; // { anchor, sessionId } while open
 
       function railTitle(s) {
         return (
@@ -10374,7 +10656,16 @@
         // the folder picker now and nothing else on the page says New
         // conversation until it is open.
         h2b.textContent = '+ new conversation';
-        helpText.append(h1, h1b, h2, h2b, document.createTextNode('.'));
+        // #180: the help names the row actions where it names the rows.
+        helpText.append(
+          h1,
+          h1b,
+          h2,
+          h2b,
+          document.createTextNode(
+            '. The ⋯ on a row archives or deletes that conversation, renames it while it is open, and ends the one on screen while it is running.',
+          ),
+        );
 
         const ws = document.createElement('div');
         ws.className = 'ws';
@@ -10393,6 +10684,9 @@
 
         const list = document.createElement('div');
         list.className = 'list';
+        // #180: the phone strip scrolls sideways, so an open row menu follows
+        // its row rather than staying where the row was.
+        list.addEventListener('scroll', placeRailMenu);
 
         const plus = document.createElement('button');
         plus.type = 'button';
@@ -10527,9 +10821,195 @@
               { hostTerminal: true },
             );
           };
-          list.appendChild(row);
+          // #180. The row's actions, beside it rather than in it. Named for the
+          // conversation, because a list of identical "more" buttons tells a
+          // screen reader nothing about which row each one acts on, and titled
+          // with the same phrase so a pointer gets it as a tooltip.
+          const more = document.createElement('button');
+          more.type = 'button';
+          more.className = 'more';
+          more.textContent = '⋯';
+          more.title = 'Actions for ' + title;
+          more.setAttribute('aria-label', 'Actions for ' + title);
+          more.setAttribute('aria-haspopup', 'menu');
+          more.setAttribute('aria-expanded', 'false');
+          more.setAttribute('aria-controls', 'rail-menu');
+          more.onclick = () => toggleRailMenu(more, s);
+          const wrap = document.createElement('div');
+          wrap.className = 'srow';
+          wrap.dataset.session = String(s.sessionId);
+          wrap.append(row, more);
+          list.appendChild(wrap);
         }
         list.appendChild(plus);
+        // The 30 s poll rebuilds these rows. A menu open on one of them stays
+        // open on its replacement rather than closing under the reader's
+        // pointer, and closes only if the conversation it was for is gone.
+        if (railMenuFor) {
+          const again = Array.from(list.querySelectorAll('.srow')).find(
+            (w) => w.dataset.session === railMenuFor.sessionId,
+          );
+          if (again) {
+            railMenuFor.anchor = again.querySelector('.more');
+            railMenuFor.anchor.setAttribute('aria-expanded', 'true');
+            placeRailMenu();
+          } else {
+            closeRailMenu(false);
+          }
+        }
+      }
+
+      // #180. The rail's per-row menu: Archive and Delete on a row with a
+      // transcript, Rename on a row the daemon has open, and End session on
+      // the conversation on screen while it is live. Every item
+      // calls the handler that already does that job, so there is one fetch
+      // per action on the page and the rail adds none:
+      // archivePastConversation and deletePastConversation (the New
+      // conversation panel's past rows, which also stop the watch when the
+      // removed one is on screen and refresh the list the rail is drawn
+      // from), renameSession (Operations > Rename session), and the composer's
+      // end-session handler with its own confirm.
+      function railMenu() {
+        if (railMenuEl) return railMenuEl;
+        railMenuEl = document.createElement('div');
+        railMenuEl.id = 'rail-menu';
+        railMenuEl.setAttribute('role', 'menu');
+        railMenuEl.hidden = true;
+        railMenuEl.addEventListener('keydown', onRailMenuKey);
+        // Inside the app rather than on body, so the app's [hidden] before
+        // pairing hides it too and its controls take the app's control rules.
+        $('app-body').appendChild(railMenuEl);
+        return railMenuEl;
+      }
+
+      function toggleRailMenu(anchor, s) {
+        if (railMenuFor && railMenuFor.sessionId === s.sessionId) {
+          closeRailMenu(true);
+          return;
+        }
+        closeRailMenu(false);
+        const menu = railMenu();
+        const title = railTitle(s);
+        const items = [];
+        // The rename route reaches only a conversation the daemon has open: a
+        // transcript it is not running answers that there is nothing to rename
+        // (see Operations > Rename session's help). So Rename is offered where
+        // the daemon's live-state says the conversation is open, and a past
+        // row shows no item that could only fail.
+        if (s.live) items.push(['Rename', false, () => renameFromRail(s)]);
+        // A live-only row has no transcript to file away or remove, which is
+        // why the past rows offer it neither (issue #111); the rail follows
+        // the same rule rather than offering two actions that can only fail.
+        if (!s.liveOnly) {
+          items.push(
+            ['Archive', false, () => archivePastConversation(s.sessionId, pastConvosCwd)],
+            ['Delete', true, () => deletePastConversation(s.sessionId, title, pastConvosCwd)],
+          );
+        }
+        // Ending is offered where it means something: the conversation on
+        // screen, and only while the daemon's live-state says it is running.
+        // The handler acts on the watched session and asks its own confirm.
+        if (s.sessionId === watchedSessionId && s.live) {
+          items.push(['End session', true, () => $('end-session').onclick()]);
+        }
+        menu.textContent = '';
+        menu.setAttribute('aria-label', 'Actions for ' + title);
+        for (const [label, danger, act] of items) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.setAttribute('role', 'menuitem');
+          b.tabIndex = -1;
+          b.textContent = label;
+          if (danger) b.className = 'danger';
+          b.onclick = () => {
+            closeRailMenu(true);
+            void act();
+          };
+          menu.appendChild(b);
+        }
+        railMenuFor = { anchor: anchor, sessionId: s.sessionId };
+        anchor.setAttribute('aria-expanded', 'true');
+        menu.hidden = false;
+        placeRailMenu();
+        menu.querySelector('[role="menuitem"]').focus({ preventScroll: true });
+      }
+
+      function closeRailMenu(refocus) {
+        if (!railMenuFor) return;
+        const anchor = railMenuFor.anchor;
+        railMenuFor = null;
+        railMenuEl.hidden = true;
+        anchor.setAttribute('aria-expanded', 'false');
+        if (refocus && anchor.isConnected) anchor.focus({ preventScroll: true });
+      }
+
+      // Under the button, right edges together, kept on screen: flipped above
+      // the button when there is no room below, and pulled in from either side.
+      function placeRailMenu() {
+        if (!railMenuFor) return;
+        const r = railMenuFor.anchor.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return closeRailMenu(false);
+        const m = railMenuEl;
+        const w = m.offsetWidth;
+        const h = m.offsetHeight;
+        const left = Math.min(Math.max(4, r.right - w), window.innerWidth - 4 - w);
+        let top = r.bottom + 2;
+        if (top + h > window.innerHeight - 4) top = Math.max(4, r.top - 2 - h);
+        m.style.left = Math.round(left) + 'px';
+        m.style.top = Math.round(top) + 'px';
+      }
+
+      // The menu-button keys: arrows move and wrap, Home and End jump, Escape
+      // shuts it back onto the button. Tab shuts it onto the button too rather
+      // than out of a menu that has just been hidden, which would drop focus
+      // on the page body.
+      function onRailMenuKey(e) {
+        const items = Array.from(railMenuEl.querySelectorAll('[role="menuitem"]'));
+        const i = items.indexOf(document.activeElement);
+        let next = -1;
+        if (e.key === 'ArrowDown') next = (i + 1) % items.length;
+        else if (e.key === 'ArrowUp') next = (i - 1 + items.length) % items.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = items.length - 1;
+        else if (e.key === 'Escape' || e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          closeRailMenu(true);
+          return;
+        }
+        if (next < 0) return;
+        e.preventDefault();
+        items[next].focus({ preventScroll: true });
+      }
+
+      // A press anywhere else shuts it, the way a native menu does. The
+      // button is left to its own handler, which toggles.
+      document.addEventListener(
+        'pointerdown',
+        (e) => {
+          if (!railMenuFor) return;
+          if (railMenuEl.contains(e.target) || railMenuFor.anchor.contains(e.target)) return;
+          closeRailMenu(false);
+        },
+        true,
+      );
+      window.addEventListener('resize', placeRailMenu);
+      window.addEventListener('scroll', placeRailMenu);
+
+      // Rename from the rail: the page's own prompt idiom (window.confirm
+      // guards End session and Delete; nothing on the page edits inline), then
+      // the same rename Operations > Rename session sends. Its answer goes to
+      // the status line, since the panel's own result line is on another tab.
+      async function renameFromRail(s) {
+        if (!token()) return setStatus('pair first');
+        const now = strOr(s.title, '');
+        const next = window.prompt('Rename "' + railTitle(s) + '" to:', now);
+        if (next === null) return;
+        const title = next.trim();
+        if (title === '' || title === now) return;
+        setStatus('renaming…');
+        setStatus(await renameSession(s.sessionId, title));
+        void refreshPastConversations(pastConvosCwd);
       }
 
       function renderPastConversations(sessions, cwd, truncated) {
@@ -14291,6 +14771,25 @@
       // { sessionId, ...effective }, so the body carries the title it says it
       // now holds. A handler that read only r.ok would print the typed name
       // over a daemon that stored something else.
+      // #180: the request and the reading of its answer, shared by this panel
+      // and the rail's row menu so the two cannot drift. Answers the line to
+      // print.
+      async function renameSession(id, title) {
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/metadata',
+          { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
+        );
+        if (!r.ok) {
+          // display_name_too_long and invalid_metadata are both about the name
+          // and both come back as 400, so the code is what tells the reader
+          // which one they hit.
+          return 'rename failed: ' + r.code;
+        }
+        const stored = r.body && r.body.displayName;
+        return typeof stored === 'string' && stored !== ''
+          ? 'title set: ' + stored
+          : 'the daemon accepted the rename but returned no name';
+      }
       $('rename-set').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('rename-result');
@@ -14305,22 +14804,7 @@
           return;
         }
         out.textContent = 'saving\u2026';
-        const r = await rcCall(
-          '/session/' + encodeURIComponent(id) + '/metadata',
-          { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
-        );
-        if (!r.ok) {
-          // display_name_too_long and invalid_metadata are both about the name
-          // and both come back as 400, so the code is what tells the reader
-          // which one they hit.
-          out.textContent = 'rename failed: ' + r.code;
-          return;
-        }
-        const stored = r.body && r.body.displayName;
-        out.textContent =
-          typeof stored === 'string' && stored !== ''
-            ? 'title set: ' + stored
-            : 'the daemon accepted the rename but returned no name';
+        out.textContent = await renameSession(id, title);
       };
 
       // The daemon's own queue for one session. This is not the outbox strip
