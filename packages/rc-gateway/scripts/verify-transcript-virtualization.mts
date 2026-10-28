@@ -2470,6 +2470,11 @@ type PageScenario =
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
+      /**
+       * #189. Install the stand-in visual viewport (KEYBOARD_JS) before the
+       * page loads, so keyboardUp can raise the keyboard.
+       */
+      keyboard?: boolean;
       /** Wait for transcriptView before run() (default true). */
       waitView?: boolean;
       /** Also fail on console errors (page errors always fail). */
@@ -2568,12 +2573,93 @@ async function openList(page: Page): Promise<void> {
 }
 
 /**
+ * #189 (h1). The sizes the page section reads at, in the spec's order: 390x844
+ * is the primary set, then the keyboard open over it (KEYBOARD_OPEN, below),
+ * then 360x780, the narrowest phone the spec draws (named in the size lists
+ * of the scenarios that hold the fold, legibility, overflow and the card to
+ * it), then 1280x810, the check that the laptop layout still derives from the
+ * phone (#188). PHONE is what a scenario that sets no size runs at:
+ * runPageScenario sets it before the page loads, so the load itself is a
+ * phone's, and a scenario whose claim is about the laptop asks for LAPTOP by
+ * name.
+ */
+const PHONE = { width: 390, height: 844 };
+const LAPTOP = { width: 1280, height: 810 };
+
+/**
+ * #189 (h1). The keyboard-open state: a phone keyboard with its suggestion
+ * bar over PHONE leaves a 390x480 visible viewport, and the composer and a
+ * pinned card have to work inside it. No headless browser raises a keyboard,
+ * so a scenario that sets `keyboard` gets KEYBOARD_JS installed before the
+ * page's own script runs: a stand-in visualViewport (the property is
+ * [Replaceable]) that reports the window less what the keys cover and fires
+ * the resize the page listens for, the way P137 first faked it. The page's
+ * own handler does the rest, so nothing here moves the layout itself.
+ */
+const KEYBOARD_OPEN = { width: 390, height: 480 };
+/** What the keys cover of PHONE to leave KEYBOARD_OPEN visible: 364px. */
+const KEYBOARD_KEYS = PHONE.height - KEYBOARD_OPEN.height;
+const KEYBOARD_JS = String.raw`
+(function () {
+  var fake = new EventTarget();
+  var covered = 0;
+  Object.defineProperties(fake, {
+    height: { get: function () { return window.innerHeight - covered; } },
+    width: { get: function () { return window.innerWidth; } },
+    offsetTop: { value: 0 },
+    offsetLeft: { value: 0 },
+    pageTop: { get: function () { return window.scrollY; } },
+    pageLeft: { value: 0 },
+    scale: { value: 1 },
+  });
+  window.__kb = function (px) {
+    covered = px;
+    fake.dispatchEvent(new Event('resize'));
+  };
+  try { window.visualViewport = fake; } catch (e) { /* defined below */ }
+  if (window.visualViewport !== fake) {
+    Object.defineProperty(window, 'visualViewport', { value: fake, configurable: true });
+  }
+})();
+`;
+/** Three frames, so whatever the last event queued has been laid out. */
+async function frames3(page: Page): Promise<void> {
+  await page.evaluate(
+    'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))))',
+  );
+}
+/**
+ * Raises the keyboard: focuses what a reader would have tapped to raise it
+ * (the composer's field unless told otherwise), then has the keys cover
+ * `keys` px of the window. Returns the visible height left.
+ */
+async function keyboardUp(
+  page: Page,
+  keys = KEYBOARD_KEYS,
+  focus = '#prompt',
+): Promise<number> {
+  await page.focus(focus);
+  await page.evaluate(`window.__kb(${keys})`);
+  await page.waitForTimeout(150);
+  await frames3(page);
+  return (await page.evaluate(
+    'window.visualViewport.offsetTop + window.visualViewport.height',
+  )) as number;
+}
+/** Puts the keyboard away and lets the layout come back. */
+async function keyboardDown(page: Page): Promise<void> {
+  await page.evaluate('window.__kb(0)');
+  await page.waitForTimeout(150);
+  await frames3(page);
+}
+
+/**
  * #188 (h1). At 1100px and wider the page is the laptop layout derived from
  * the phone: the List screen is a 280px pane on the left that never shuts (so
  * its back button is not drawn), the chat column is capped at 80ch and centred
  * in what is left, and the sheet, More and a panel open as one 320px pane on
- * the right. The default viewport (1280x720) is in it, so a scenario that
- * leaves the viewport alone reads the pane layout.
+ * the right. LAPTOP is in it; PHONE, the default since #189, is not, so a
+ * scenario that leaves the viewport alone reads the phone layout.
  */
 const PANE_MIN = 1100;
 const LEFT_PANE = 280;
@@ -3359,9 +3445,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
         });
       // #188: read at 390, where a panel screen covers the chat, so the
       // round trip has nothing to rewrap and must leave the reader exactly
-      // where they were.
-      await page.setViewportSize({ width: 390, height: 844 });
-      await settlePage(page);
+      // where they were. #189: 390 is the default, and the raw round trip and
+      // the pinned follow are read there too; only the pane's leg is not.
       await page.evaluate(() => {
         const s = document.getElementById('transcript')!;
         s.scrollTop = Math.floor(s.scrollHeight / 2);
@@ -3380,11 +3465,21 @@ const PAGE_SCENARIOS: PageScenario[] = [
         Math.abs(s1.top - s0.top) <= 2 && s1.first === s0.first && !s1.pill,
         `a panel screen round trip moved the reader: ${JSON.stringify(s0)} -> ${JSON.stringify(s1)}`,
       );
+      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      await page.waitForTimeout(300);
+      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      await settlePage(page);
+      const s2 = await read();
+      expect(
+        Math.abs(s2.top - s1.top) <= 2 && s2.first === s1.first && !s2.pill,
+        `raw round trip moved the reader: ${JSON.stringify(s1)} -> ${JSON.stringify(s2)}`,
+      );
       // #188: in the pane layout the panel opens beside the chat and the
       // column narrows to what the two panes leave, so the rows rewrap and
       // rewrap back and the pixel offset is not the reader's place any more.
       // The row they were reading is: it is still the first one on screen.
-      await page.setViewportSize({ width: 1280, height: 720 });
+      // #189: the derivation check, at LAPTOP, then back to the phone.
+      await page.setViewportSize(LAPTOP);
       await settlePage(page);
       const w0 = await read();
       await openPanel(page, 'diag');
@@ -3399,15 +3494,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
         w1.first === w0.first && !w1.pill,
         `a panel round trip beside the chat moved the reader off their row: ${JSON.stringify(w0)} -> ${JSON.stringify(w1)} (column ${narrow}px while it was open)`,
       );
-      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
-      await page.waitForTimeout(300);
-      await page.evaluate(() => document.getElementById('raw-toggle')!.click());
+      await page.setViewportSize(PHONE);
       await settlePage(page);
-      const s2 = await read();
-      expect(
-        Math.abs(s2.top - w1.top) <= 2 && s2.first === w1.first && !s2.pill,
-        `raw round trip moved the reader: ${JSON.stringify(w1)} -> ${JSON.stringify(s2)}`,
-      );
       // Pinned, and the answer grows while the transcript is hidden.
       await page.click('#jump-bottom');
       await settlePage(page);
@@ -3438,7 +3526,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         s3.shown && (s3.text ?? '').endsWith(' tail while hidden'),
         `hidden-time chunk not shown: ${JSON.stringify(s3.text)}`,
       );
-      return `reader kept at ${Math.round(s0.top)} (item ${s0.first}) through a panel screen at 390, and on item ${w1.first} through a panel beside the chat at 1280 (column ${narrow}px while open); pinned view followed the hidden-time chunk`;
+      return `reader kept at ${Math.round(s0.top)} (item ${s0.first}) through a panel screen and a raw round trip at 390, and on item ${w1.first} through a panel beside the chat at 1280 (column ${narrow}px while open); pinned view followed the hidden-time chunk at 390`;
     },
   },
   {
@@ -3859,43 +3947,49 @@ const PAGE_SCENARIOS: PageScenario[] = [
       return f.done().list;
     },
     run: async ({ page, viewer }) => {
-      // The height the bug was reported at. Deliberately not the harness
-      // default: at a tall viewport the transcript clears the fold whatever
-      // the panels do, so a short one is the only height that can go red.
-      await page.setViewportSize({ width: 1280, height: 720 });
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 44, 30_000);
       await settlePage(page);
-      const g = await page.evaluate(() => {
-        const tr = document.getElementById('transcript') as HTMLDivElement;
-        // #185: the folder screen, which is what the panel became.
-        const dp = document.getElementById('dir-picker') as HTMLElement;
-        const tb = tr.getBoundingClientRect();
-        return {
-          dirPickerOpen: !dp.hidden,
-          docHeight: document.documentElement.scrollHeight,
-          scrollY: Math.round(scrollY),
-          transcript: [Math.round(tb.top), Math.round(tb.bottom)],
-          transcriptOnScreen:
-            tb.top < innerHeight && tb.bottom > 0 && tr.offsetHeight > 0,
-        };
-      });
-      // Nothing here scrolls the page: the property is about load state, so a
-      // scrollY that is not zero would mean the assertion below was measured
-      // after something had already moved the document.
-      expect(g.scrollY === 0, `the page had already scrolled to ${g.scrollY}`);
-      expect(
-        !g.dirPickerOpen,
-        'the New conversation panel is open by default again, which is what ' +
-          'pushed the transcript below the fold',
-      );
-      expect(
-        g.transcriptOnScreen,
-        `the transcript is below the fold at load, viewport 720 and it sits ` +
-          `at ${JSON.stringify(g.transcript)} of a ${g.docHeight}px document`,
-      );
-      return `transcript ${JSON.stringify(g.transcript)} visible in a 720px ` +
-        `viewport, document ${g.docHeight}px, panel collapsed`;
+      // #189: read first as the page loaded, at the phone, then at the height
+      // the bug was reported at. That one is deliberately short: at a tall
+      // viewport the transcript clears the fold whatever the panels do, so a
+      // short one is the only height that can go red.
+      const lines: string[] = [];
+      for (const vp of [PHONE, { width: 1280, height: 720 }]) {
+        await page.setViewportSize(vp);
+        await page.waitForTimeout(300);
+        await settlePage(page);
+        const g = await page.evaluate(() => {
+          const tr = document.getElementById('transcript') as HTMLDivElement;
+          // #185: the folder screen, which is what the panel became.
+          const dp = document.getElementById('dir-picker') as HTMLElement;
+          const tb = tr.getBoundingClientRect();
+          return {
+            dirPickerOpen: !dp.hidden,
+            docHeight: document.documentElement.scrollHeight,
+            scrollY: Math.round(scrollY),
+            transcript: [Math.round(tb.top), Math.round(tb.bottom)],
+            transcriptOnScreen:
+              tb.top < innerHeight && tb.bottom > 0 && tr.offsetHeight > 0,
+          };
+        });
+        // Nothing here scrolls the page: the property is about load state, so
+        // a scrollY that is not zero would mean the assertion below was
+        // measured after something had already moved the document.
+        expect(g.scrollY === 0, `the page had already scrolled to ${g.scrollY}`);
+        expect(
+          !g.dirPickerOpen,
+          'the New conversation panel is open by default again, which is what ' +
+            'pushed the transcript below the fold',
+        );
+        expect(
+          g.transcriptOnScreen,
+          `the transcript is below the fold at load, viewport ${vp.width}x${vp.height} and it sits ` +
+            `at ${JSON.stringify(g.transcript)} of a ${g.docHeight}px document`,
+        );
+        lines.push(`${vp.width}x${vp.height}: transcript ${JSON.stringify(g.transcript)}, document ${g.docHeight}px`);
+      }
+      return `${lines.join('; ')}, both on screen without scrolling, panel collapsed`;
     },
   },
   {
@@ -4471,6 +4565,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
       const ctx = page.context();
       const b = await ctx.newPage();
       try {
+        // #189: a second phone, as runPageScenario sizes the first.
+        await b.setViewportSize(PHONE);
         await b.addInitScript({ content: PAGE_HELPERS_JS });
         await b.goto(`${viewer.url}/ui/`, { waitUntil: 'domcontentloaded' });
         await b.waitForFunction(() => typeof startWatch === 'function');
@@ -4661,7 +4757,6 @@ const PAGE_SCENARIOS: PageScenario[] = [
         stopped.marked.length === 0 && stopped.titles.length === 2,
         `after Unwatch the list still marked a row or lost one (${JSON.stringify(stopped)})`,
       );
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `marked rather than offered for one; at 390 the title then the row reached the other conversation, on screen after one tap with the folder screen shut, the one on screen marked and the folder named; the search narrows and clears; mark gone on Unwatch`;
     },
   },
@@ -4704,7 +4799,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
       }));
       expect(
         fed.list === fed.dir,
-        `the conversation list was fetched for ${JSON.stringify(fed.list)} while the folder on screen is ${JSON.stringify(fed.dir)}, so the rail would list some other folder's conversations`,
+        `the conversation list was fetched for ${JSON.stringify(fed.list)} while the folder on screen is ${JSON.stringify(fed.dir)}, so the list would show some other folder's conversations`,
       );
 
       // The feed is real but the control still has to be drawn from it, and
@@ -4740,7 +4835,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
       // conversation there is nothing on offer, only the one you are on, marked.
       expect(
         quiet.rows === 1 && quiet.marked === 1,
-        `a default load left the rail offering something other than the one conversation on screen (${JSON.stringify(quiet)})`,
+        `a default load left the list offering something other than the one conversation on screen (${JSON.stringify(quiet)})`,
       );
 
       // The second conversation arrives with the conversation on screen
@@ -4767,7 +4862,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
       }));
       expect(
         grown.rows === 2 && grown.listed && !grown.panelOpen,
-        `a conversation arrived in the folder while the rail sat there, and it did not come on screen with the panel shut (${JSON.stringify(grown)})`,
+        `a conversation arrived in the folder while the list sat there, and it did not come on screen with the folder screen shut (${JSON.stringify(grown)})`,
       );
 
       return `load path filled ${JSON.stringify(fed.dir)} on its own (${fed.count} conversations found), list matches the folder on screen, rows drawn by a list arriving rather than by the watch`;
@@ -5142,7 +5237,6 @@ const PAGE_SCENARIOS: PageScenario[] = [
           `${at}: transcript ${g.transcriptHeight}px (floor ${g.floor}), strip ${JSON.stringify(g.strip)} on the composer`,
         );
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `${lines.join('; ')}; nothing scrolls the document`;
     },
   },
@@ -5996,6 +6090,24 @@ PAGE_SCENARIOS.push({
     );
     await page.click('#archived-back');
 
+    // #189: the run above is the phone's, the default now. #188's half is
+    // the derivation check: at LAPTOP the filed half opens over the list in
+    // the list's own pane, as it opens over the list on the phone.
+    await page.setViewportSize(LAPTOP);
+    await page.click('#list-archived-open');
+    await page.waitForFunction(`!document.getElementById('archived-view').hidden`);
+    const paned = (await page.evaluate(String.raw`(() => {
+      const r = document.getElementById('archived-view').getBoundingClientRect();
+      return [r.left, r.top, r.width, r.height].map(Math.round);
+    })()`)) as number[];
+    expect(
+      paned.join(',') === [0, 0, LEFT_PANE, LAPTOP.height].join(','),
+      `at ${LAPTOP.width}x${LAPTOP.height} Archived did not open over the list in its ${LEFT_PANE}px pane (${paned.join(',')})`,
+    );
+    await page.click('#archived-back');
+    await page.setViewportSize(PHONE);
+    await openList(page);
+
     // The one refusal the daemon makes here is about a Live call, and the fix
     // is a specific act rather than a retry, so a bare status number would send
     // the operator off looking in the wrong place.
@@ -6020,7 +6132,7 @@ PAGE_SCENARIOS.push({
     );
     await closeList(page);
 
-    return `the row menu offers Archive only where a transcript exists; the filed half is its own screen behind Archived (1) on the list, restore-only and unpressable; archive sends no confirm and carries the cwd; restore names the id; a Live-call refusal is named`;
+    return `the row menu offers Archive only where a transcript exists; the filed half is its own screen behind Archived (1) on the list, ${filed.screen.join('x')} at 390 and ${LEFT_PANE}x${LAPTOP.height} in the list's pane at 1280, restore-only and unpressable; archive sends no confirm and carries the cwd; restore names the id; a Live-call refusal is named`;
   },
 });
 
@@ -7047,7 +7159,7 @@ PAGE_SCENARIOS.push({
 // one the card folds to ("Allowed once"). The option carries the kind the
 // daemon always sends (allow_once), which is what maps it to that button.
 PAGE_SCENARIOS.push({
-  name: 'P47 an answered permission card leaves the strip',
+  name: 'P47 an answered permission card confirms the vote and leaves its pinned place',
   frames: () =>
     new Frames().ev('permission_request', {
       requestId: 'p47-req',
@@ -7102,7 +7214,7 @@ PAGE_SCENARIOS.push({
       )
       .then(() => true)
       .catch(() => false);
-    expect(gone, 'the answered card never left the strip');
+    expect(gone, 'the answered card never left its pinned place');
     return 'the pinned card confirmed the vote, then left on its own, so an answered prompt does not pile up';
   },
 });
@@ -11467,6 +11579,8 @@ PAGE_SCENARIOS.push({
       // thing under test.
       const b = await page.context().newPage();
       try {
+        // #189: a second phone, as runPageScenario sizes the first.
+        await b.setViewportSize(PHONE);
         await b.addInitScript({ content: PAGE_HELPERS_JS });
         await b.goto(`${viewer.url}/ui/`, { waitUntil: 'domcontentloaded' });
         await b.waitForFunction(() => typeof startWatch === 'function');
@@ -12189,7 +12303,7 @@ PAGE_SCENARIOS.push({
       const lines: string[] = [];
       for (const [w, h] of [
         [390, 844],
-        [1280, 720],
+        [1280, 810],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
         const r = await read();
@@ -12243,7 +12357,7 @@ PAGE_SCENARIOS.push({
       // the list there is the pane, on screen already, so the key puts the
       // reader in its field, and the second Escape hands focus back to the
       // chat's title rather than shutting a pane that never shuts.
-      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.setViewportSize(LAPTOP);
       await page.focus('#prompt');
       await page.keyboard.press('Control+k');
       const byKey = (await page.evaluate(
@@ -12437,7 +12551,6 @@ PAGE_SCENARIOS.push({
           `${at}: transcript ${rest.txW}px wide at rest with no rail; the title ${pane ? 'focuses the search of the list pane' : 'opens the list'} ${open.w}x${open.h}, bar ${open.head}, folder line ${open.folder}, rows ${open.rowH[0]}px, ⋯ ${open.moreW[0]}px, New conversation here ${open.newH}px ending ${open.vh - open.newBottom}px above the bottom, ${open.taps} controls at 44px or over`,
         );
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ') + '; back, Escape and the row on screen return to the chat (at 1280, Escape and the row return focus to the title beside the pane)';
     },
   });
@@ -12520,7 +12633,7 @@ PAGE_SCENARIOS.push({
       const lines: string[] = [];
       for (const [w, h] of [
         [390, 844],
-        [1280, 720],
+        [1280, 810],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
         await blur();
@@ -12548,7 +12661,9 @@ PAGE_SCENARIOS.push({
       expect(rest.lost === '', `verbs lost from the move: ${rest.lost}`);
       expect(rest.stopInRow, 'cancel is not in the composer row, where Stop takes Send’s place');
 
-      // The field grows with what is in it to 132px, then scrolls.
+      // The field grows with what is in it to 132px, then scrolls. #189: on
+      // the phone, the primary set, where the growth costs the transcript.
+      await page.setViewportSize(PHONE);
       await page.fill('#prompt', 'line\n'.repeat(3) + 'line');
       const four = await look();
       await page.fill('#prompt', 'line\n'.repeat(20) + 'line');
@@ -12562,7 +12677,6 @@ PAGE_SCENARIOS.push({
 
       // A suggestion arrives: painted inside the field, behind the box, grey
       // italic, and only the first of the frame's three.
-      await page.setViewportSize({ width: 390, height: 844 });
       await blur();
       await page.evaluate((sid) => {
         renderIdleGhost({ sessionId: sid, suggestions: ['first suggestion', 'second', 'third'] });
@@ -12603,7 +12717,6 @@ PAGE_SCENARIOS.push({
       const after = await page.evaluate(() => transcriptModel.items.length);
       expect(after === before, `accepting a suggestion sent it: the model went from ${before} rows to ${after}`);
 
-      await page.setViewportSize({ width: 1280, height: 720 });
       return (
         lines.join('; ') +
         '; field grows 44 to 132; every verb id kept, Stop in the row; ghost paints behind the field, one of three; Tab fills without sending'
@@ -12886,7 +12999,7 @@ PAGE_SCENARIOS.push({
       };
       await page.setViewportSize({ width: 390, height: 844 });
       const seen = await readStack();
-      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.setViewportSize(LAPTOP);
       const wideSeen = await readStack();
 
       expect(
@@ -12926,7 +13039,7 @@ PAGE_SCENARIOS.push({
 
       const worst = { kind: '', ratio: 99 };
       for (const row of painted) {
-        const ratio = pgShellCheck(row, '1280x720 transcript');
+        const ratio = pgShellCheck(row, '390x844 transcript');
         if (ratio < worst.ratio) {
           worst.kind = row.kind;
           worst.ratio = ratio;
@@ -12939,7 +13052,8 @@ PAGE_SCENARIOS.push({
       // sheet shut, open as the page draws it, and open with every row filled
       // past what the page draws (a long model name, a deep folder), each
       // with the tools open as well. The frame gives the composer its place,
-      // so all three have to land on the fold.
+      // so all three have to land on the fold. #189: the phones first, 390
+      // then 360, then the laptop at its short and its usual height.
       const fold: {
         w: number;
         shut: number;
@@ -12948,9 +13062,10 @@ PAGE_SCENARIOS.push({
         viewH: number;
       }[] = [];
       for (const [w, h] of [
+        [390, 844],
+        [360, 780],
         [1280, 720],
         [1280, 810],
-        [390, 844],
       ]) {
         await page.setViewportSize({ width: w, height: h });
         const bottom = () =>
@@ -12982,7 +13097,6 @@ PAGE_SCENARIOS.push({
           );
         }
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
 
       // #177. The transcript was the only ground this read, and it was the one
       // ground that was already dark. Every band the shell pass restyled is
@@ -12993,12 +13107,15 @@ PAGE_SCENARIOS.push({
       // opened with its help. #187: those cards are read on the panel screens
       // More's rows open, each screen with its opening sentence. Last in the
       // scenario on purpose, because it opens screens and panels, and the fold
-      // readings above are about the resting page.
+      // readings above are about the resting page. #189: read at both phones
+      // and then the laptop; a band that wraps or truncates at 360 can paint
+      // a different element than it does at 390.
       const bands: string[] = [];
       let bandRows = 0;
       for (const [w, h] of [
-        [1280, 810],
         [390, 844],
+        [360, 780],
+        [1280, 810],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
         for (const s of SHELL_SURFACES) {
@@ -13023,7 +13140,6 @@ PAGE_SCENARIOS.push({
           bands.push(`${at} ${low.kind} ${low.ratio.toFixed(2)}`);
         }
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
 
       return (
         painted.length +
@@ -13035,7 +13151,7 @@ PAGE_SCENARIOS.push({
         worst.ratio.toFixed(2) +
         ':1, worst per band [' +
         bands.join('; ') +
-        ']; the retired status strip, inspector and tab bar stayed retired; the stack is bar, status line, sheet, transcript, strip, tools, composer at 390, and the same without the sheet at 1280, where the sheet is the right-hand pane; composer clears the fold at 1280x720, 1280x810 and 390x844 with the sheet shut, open and filled, tools open (' +
+        ']; the retired status strip, inspector and tab bar stayed retired; the stack is bar, status line, sheet, transcript, strip, tools, composer at 390, and the same without the sheet at 1280, where the sheet is the right-hand pane; composer clears the fold at 390x844, 360x780, 1280x720 and 1280x810 with the sheet shut, open and filled, tools open (' +
         fold.map((f) => f.w + 'x' + f.viewH + ': ' + f.shut + '/' + f.open + '/' + f.filled).join(', ') +
         ')'
       );
@@ -13220,7 +13336,6 @@ PAGE_SCENARIOS.push({
     run: async ({ page }) => {
       // A fresh load with nothing watched: the state where a new conversation
       // is most wanted. The list is fed by the load's own browse (P28).
-      await page.setViewportSize({ width: 1280, height: 720 });
       await page.waitForFunction('pastConvosCwd !== null');
 
       const rest = await readPicker(page);
@@ -13235,8 +13350,8 @@ PAGE_SCENARIOS.push({
 
       const lines: string[] = [];
       for (const [w, h] of [
-        [1280, 720],
         [390, 844],
+        [1280, 810],
       ] as const) {
         const at = `${w}x${h}`;
         await page.setViewportSize({ width: w, height: h });
@@ -13313,7 +13428,6 @@ PAGE_SCENARIOS.push({
       );
       await page.click('#dir-back');
       await page.click('#list-back');
-      await page.setViewportSize({ width: 1280, height: 720 });
 
       return (
         'hidden at rest and out of the chat column, change opens it with focus on its back button, Tab reaches its create, Escape and back return to change, Enter reopens it; ' +
@@ -13455,7 +13569,6 @@ PAGE_SCENARIOS.push({
         // The root is shared for the whole process, so the plant goes with
         // the scenario.
         rmSync(top, { recursive: true, force: true });
-        await page.setViewportSize({ width: 1280, height: 720 });
       }
       return `recent browsed to ${shown(top)}, its folder row to ${shown(inner)} and the list followed, typed path and the folder's create both POST ${shown(top)}, a refusal keeps the screen and is said over it, a row of the list resumes and shuts both screens`;
     },
@@ -13495,7 +13608,6 @@ PAGE_SCENARIOS.push({
       return f.list;
     },
     run: async ({ page, viewer }) => {
-      await page.setViewportSize({ width: 1280, height: 720 });
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 44, 30_000);
       await settlePage(page);
@@ -13550,8 +13662,9 @@ PAGE_SCENARIOS.push({
       expect(plusSays === 'false', `the + does not say the tools are shut (aria-expanded ${plusSays})`);
 
       for (const [w, h] of [
-        [1280, 720],
         [390, 844],
+        [360, 780],
+        [1280, 810],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
         await openTools(page);
@@ -13628,11 +13741,14 @@ PAGE_SCENARIOS.push({
           };
         })()`) as Promise<FoldReading>;
 
+      // #189: the phones first, 390 then 360, then the laptop at its short
+      // and its usual height.
       const lines: string[] = [];
       for (const [w, h] of [
+        [390, 844],
+        [360, 780],
         [1280, 720],
         [1280, 810],
-        [390, 844],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
         await relaid();
@@ -13680,7 +13796,6 @@ PAGE_SCENARIOS.push({
         }
         lines.push(`${at}: transcript ${restH}px at rest, composer bottom ${bottoms.join(', ')}`);
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
 
       return (
         'Attach, Dictate, Files, Artifacts as 44px pills in a 52px scroller behind the +, picker and both lists open; ' +
@@ -13775,10 +13890,12 @@ PAGE_SCENARIOS.push({
       } as Record<ShellSurface, [string, keyof typeof G1][]>;
       type Ground = { sel: string; n: number; off: string[] };
       type Big = { kind: string; bg: string };
+      // #189: both phones, then the laptop.
       const lines: string[] = [];
       for (const [w, h] of [
-        [1280, 810],
         [390, 844],
+        [360, 780],
+        [1280, 810],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
         let cards = 0;
@@ -13859,7 +13976,6 @@ PAGE_SCENARIOS.push({
           `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, the List, folder and archived screens on #0d1117 with #10151c heads and New conversation here on #1f6feb, ${PANEL_SURFACES.length} panel screens on #0d1117 with ${cards} cards on #10151c, no light box; no page title, export in the menu`,
         );
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ');
     },
   });
@@ -14184,12 +14300,6 @@ PAGE_SCENARIOS.push({
   };
   const rowCount = (page: Page) =>
     page.evaluate(`transcriptModel.items.length`) as Promise<number>;
-  // Three frames, so whatever the last event queued (a fit, a restore, a
-  // render pass) has run before the page is read.
-  const frames3 = (page: Page) =>
-    page.evaluate(
-      'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))))',
-    );
 
   // The idle switch is held by the gateway, which the harness boots with no
   // idle runtime, so it reports the switch unavailable. A route plays the
@@ -14234,7 +14344,6 @@ PAGE_SCENARIOS.push({
       });
     },
     run: async ({ page, viewer }) => {
-      await page.setViewportSize({ width: 1280, height: 720 });
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 6, 30_000);
       await page.waitForSelector('#composer', { state: 'visible' });
@@ -14356,7 +14465,7 @@ PAGE_SCENARIOS.push({
         // session is in; the reader's last choice is named beside it.
         want(got['mode'] === 'default', `the mode select shows ${got['mode']}, not the daemon's default`);
         want(got['persist'] === true, 'the persist box came back unticked');
-        want(String(got['modeNote']).includes('YOLO'), `the drawer does not name the mode last set here (${JSON.stringify(got['modeNote'])})`);
+        want(String(got['modeNote']).includes('YOLO'), `the sheet does not name the mode last set here (${JSON.stringify(got['modeNote'])})`);
         want(got['idleChecked'] === false, 'the idle box shows the saved state over the gateway’s');
         want(String(got['idleStatus']).includes('last set here: on'), `the idle line does not name the state last set here (${JSON.stringify(got['idleStatus'])})`);
         want(got['folder'] === folder, `the folder is ${got['folder']}`);
@@ -14586,33 +14695,6 @@ PAGE_SCENARIOS.push({
     },
   });
 
-  // No headless browser raises a keyboard, so a stand-in visual viewport is
-  // installed before the page's script runs (visualViewport is [Replaceable])
-  // and told to shrink by a phone keyboard's height. The page's own handler
-  // does the rest.
-  const FAKE_VIEWPORT_JS = String.raw`
-(function () {
-  var fake = new EventTarget();
-  var covered = 0;
-  Object.defineProperties(fake, {
-    height: { get: function () { return window.innerHeight - covered; } },
-    width: { get: function () { return window.innerWidth; } },
-    offsetTop: { value: 0 },
-    offsetLeft: { value: 0 },
-    pageTop: { get: function () { return window.scrollY; } },
-    pageLeft: { value: 0 },
-    scale: { value: 1 },
-  });
-  window.__kb = function (px) {
-    covered = px;
-    fake.dispatchEvent(new Event('resize'));
-  };
-  try { window.visualViewport = fake; } catch (e) { /* defined below */ }
-  if (window.visualViewport !== fake) {
-    Object.defineProperty(window, 'visualViewport', { value: fake, configurable: true });
-  }
-})();
-`;
   PAGE_SCENARIOS.push({
     name: 'P137 with the keyboard up the composer sits above it at 390, and the layout comes back when it goes',
     frames: () => {
@@ -14624,9 +14706,7 @@ PAGE_SCENARIOS.push({
       }
       return f.list;
     },
-    before: async (page) => {
-      await page.addInitScript({ content: FAKE_VIEWPORT_JS });
-    },
+    keyboard: true,
     run: async ({ page, viewer }) => {
       await page.setViewportSize({ width: 390, height: 844 });
       await watch(page, viewer.sessionId);
@@ -15367,9 +15447,7 @@ PAGE_SCENARIOS.push({
       P144_PLAN(f);
       return f.list;
     },
-    before: async (page) => {
-      await page.addInitScript({ content: FAKE_VIEWPORT_JS });
-    },
+    keyboard: true,
     run: async ({ page, viewer }) => {
       await page.setViewportSize({ width: 390, height: 844 });
       await watch(page, viewer.sessionId);
@@ -15645,7 +15723,6 @@ PAGE_SCENARIOS.push({
         lines.push(`${at}: ${pane ? 'the pane’s search focused, Escape twice' : 'open with focus on back, back'} onto the title, same conversation, window and shared pointers on ${after.win.slice(0, 8)}, ${after.rows} rows kept`);
       }
       expect(sent.length === 0, `opening and leaving the list sent ${JSON.stringify(sent)}`);
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ') + '; no resume or create sent';
     },
   });
@@ -15714,7 +15791,6 @@ PAGE_SCENARIOS.push({
       );
       expect(!!left && !left.on && !left.current, `the conversation left is still marked (${JSON.stringify(left)})`);
       await page.click('#list-back');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `one tap resumed ${OTHER.slice(0, 8)} with cwd ${CWD}, the chat came back naming it, this window's pointer followed, and the list marks it with the blue rule and not the one left`;
     },
   });
@@ -15772,7 +15848,6 @@ PAGE_SCENARIOS.push({
       const stillOpen = (await page.evaluate(`!document.getElementById('list-screen').hidden`)) as boolean;
       expect(stillOpen, 'Escape in the search field shut the whole list rather than the search');
       await page.click('#list-back');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `the field is hidden at rest; the button reveals and focuses it; "beta" narrowed 30 rows to its 3 in any case on one page and was kept for ${CWD}; no match says so; Escape cleared it, hid it and brought back 25 rows and the pager with the list still up`;
     },
   });
@@ -15871,7 +15946,6 @@ PAGE_SCENARIOS.push({
         await page.click('#list-back');
       } finally {
         plant.cleanup();
-        await page.setViewportSize({ width: 1280, height: 720 });
       }
       return `the list ends with Archived (1) at 48px; it opens a 390x844 screen with focus on its back listing the filed one with a 44px Restore; Restore sent its id in the list's folder, the count went to Archived (0), and back showed the row returned to the list`;
     },
@@ -15928,7 +16002,6 @@ PAGE_SCENARIOS.push({
         return `48px at the foot (bottom ${btn.bottom} of 844), the folder line names the planted folder, the press sent POST /session with that cwd and scope thread, the stub answered ${answer.sessionId}, the page opened its stream and the list shut`;
       } finally {
         plant.cleanup();
-        await page.setViewportSize({ width: 1280, height: 720 });
       }
     },
   });
@@ -16011,7 +16084,6 @@ PAGE_SCENARIOS.push({
         return `25 of 30 rows on page 1 in a ${top.clientH}px scroller (${top.scrollH}px of content); a swipe moved the first row ${top.firstTop} -> ${end.firstTop} while New conversation here stayed at ${top.btn[0]}-${top.btn[1]} and the page did not scroll; the pager and Archived end above the thumb zone; next showed the last 5 from the top`;
       } finally {
         plant.cleanup();
-        await page.setViewportSize({ width: 1280, height: 720 });
       }
     },
   });
@@ -16044,9 +16116,9 @@ PAGE_SCENARIOS.push({
       };
       const lines: string[] = [];
       for (const [w, h, key] of [
-        [1280, 720, 'Control+k'],
-        [1280, 720, 'Meta+k'],
         [390, 844, 'Control+k'],
+        [1280, 810, 'Control+k'],
+        [1280, 810, 'Meta+k'],
       ] as const) {
         const at = `${key} at ${w}x${h}`;
         await page.setViewportSize({ width: w, height: h });
@@ -16065,7 +16137,7 @@ PAGE_SCENARIOS.push({
       // so the key puts the reader in the list's search and More stays.
       for (const [w, h] of [
         [390, 844],
-        [1280, 720],
+        [1280, 810],
       ] as const) {
         const pane = w >= PANE_MIN;
         await page.setViewportSize({ width: w, height: h });
@@ -16119,11 +16191,13 @@ PAGE_SCENARIOS.push({
       const o4 = OTHER.slice(0, 4);
       // #188: walked on the List screen at 390 and in the list pane at 1280,
       // where Enter on the title lands in the pane's search (the pane has no
-      // way back to start on) and the walk goes on from there.
+      // way back to start on) and the walk goes on from there. #189: the
+      // pane's walk first, so the phone's is last and leaves the List screen
+      // up: the row menu and Enter on a row below are read at 390.
       const walks: string[] = [];
       for (const [w, h] of [
+        [1280, 810],
         [390, 844],
-        [1280, 720],
       ] as const) {
         const pane = w >= PANE_MIN;
         await page.setViewportSize({ width: w, height: h });
@@ -16143,7 +16217,13 @@ PAGE_SCENARIOS.push({
         }
         expect(walk.join(',') === want.join(','), `Tab walked ${JSON.stringify(walk)} at ${w}x${h}, not ${JSON.stringify(want)}`);
         walks.push(`${w}: ${walk.join(' > ')}`);
-        if (!pane) await page.keyboard.press('Escape');
+        // The pane's walk opened its search field, and the field stays shown
+        // until it is put away (P150), so Escape in it before the phone walks.
+        if (pane) {
+          await page.focus('#past-filter');
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(`document.getElementById('list-find').hidden`);
+        }
       }
 
       // Back to the other row's ⋯, its menu by Enter and the arrows, Escape
@@ -16405,32 +16485,6 @@ PAGE_SCENARIOS.push({
     for (const row of rows) worst = Math.min(worst, pgShellCheck(row, label));
     return `${rows.length} text rows, worst ${worst.toFixed(2)}:1`;
   };
-  // P137's stand-in for the visual viewport, so the keyboard can be raised.
-  const KB_JS = String.raw`
-(function () {
-  var fake = new EventTarget();
-  var covered = 0;
-  Object.defineProperties(fake, {
-    height: { get: function () { return window.innerHeight - covered; } },
-    width: { get: function () { return window.innerWidth; } },
-    offsetTop: { value: 0 },
-    offsetLeft: { value: 0 },
-    pageTop: { get: function () { return window.scrollY; } },
-    pageLeft: { value: 0 },
-    scale: { value: 1 },
-  });
-  window.__kb = function (px) {
-    covered = px;
-    fake.dispatchEvent(new Event('resize'));
-  };
-  try { window.visualViewport = fake; } catch (e) { /* defined below */ }
-  if (window.visualViewport !== fake) {
-    Object.defineProperty(window, 'visualViewport', { value: fake, configurable: true });
-  }
-})();
-`;
-  const frames3 = (page: Page) =>
-    page.evaluate('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))))');
   const PLAN = (f: Frames): Frames =>
     f.upd({
       sessionUpdate: 'plan',
@@ -16450,9 +16504,7 @@ PAGE_SCENARIOS.push({
       return f.ev('permission_request', permFrame('p156', BIG_CMD)).list;
     },
     stub: { sessionStatus: statusBody([permPending('p156', BIG_CMD)]) },
-    before: async (page) => {
-      await page.addInitScript({ content: KB_JS });
-    },
+    keyboard: true,
     run: async ({ page, viewer }) => {
       await serveDecision(page, [{ requestId: 'other-request', decisionSource: 'policy', ruleId: 'not-this-one' }, { requestId: 'p156', decisionSource: 'default' }]);
       await page.setViewportSize({ width: 390, height: 844 });
@@ -16505,6 +16557,9 @@ PAGE_SCENARIOS.push({
       const want = ['pc-opt:Always Allow in project: gh api', 'pc-opt:Always Allow for user: gh api', 'pc-deny:Deny', 'pc-allow:Allow once'];
       for (const w of want) expect(text.buttons.includes(w), `no button ${JSON.stringify(w)} among ${JSON.stringify(text.buttons)}`);
 
+      // #189: each size reads the place, the thumb zone, the command box
+      // wrapping inside the card rather than past it, and the card's
+      // legibility, so the second phone is held to all of it.
       const lines: string[] = [];
       for (const [w, h] of [[390, 844], [360, 780], [1280, 810]] as const) {
         await page.setViewportSize({ width: w, height: h });
@@ -16514,12 +16569,19 @@ PAGE_SCENARIOS.push({
         expect(c.card!.top >= c.wrap!.bottom - 1 && c.card!.bottom <= c.composer!.top, `${w}x${h}: the card is not between the transcript (ends ${c.wrap!.bottom}) and the composer (starts ${c.composer!.top}): ${c.card!.top}-${c.card!.bottom}`);
         expect(c.plan === null, `${w}x${h}: the to-do strip is on screen between the card and the composer`);
         expect(c.composer!.bottom <= c.vh + 1 && c.scrollY === 0, `${w}x${h}: the composer is under the fold (${c.composer!.bottom} of ${c.vh}, scrolled ${c.scrollY})`);
-        lines.push(`${w}x${h} card ${Math.round(c.card!.h)}px, ${inThumbZone(c, c.deny, c.allow, `${w}x${h}`)}`);
+        const side = (await page.evaluate(String.raw`(() => {
+          const cmd = document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-cmd');
+          const card = cmd.closest('.pcard').getBoundingClientRect();
+          return { sw: cmd.scrollWidth, cw: cmd.clientWidth, right: card.right, docW: document.documentElement.scrollWidth, vw: innerWidth };
+        })()`)) as { sw: number; cw: number; right: number; docW: number; vw: number };
+        expect(
+          side.sw <= side.cw + 1 && side.right <= side.vw + 0.5 && side.docW <= side.vw,
+          `${w}x${h}: the command or the card runs past the screen sideways (${JSON.stringify(side)})`,
+        );
+        lines.push(`${w}x${h} card ${Math.round(c.card!.h)}px, ${inThumbZone(c, c.deny, c.allow, `${w}x${h}`)}, ${await legible(page, `${w}x${h}`)}`);
       }
-      lines.push(await legible(page, '1280x810'));
       await page.setViewportSize({ width: 390, height: 844 });
       await frames3(page);
-      lines.push(await legible(page, '390x844'));
 
       // The keyboard up: the card rides above the composer, the composer above
       // the keys, and the transcript's floating pills stay off the card.
@@ -16971,6 +17033,101 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  // #189 (h1). The card's half of the keyboard-open state (the composer's is
+  // P176): a reader who taps "Or tell it what to do instead" has the keys up
+  // over a pinned card, and the card has to stay answerable and readable.
+  // At KEYBOARD_OPEN, Allow and Deny whole between the status line and the
+  // keys and on top where a thumb lands, the 2 KB command still a scroller
+  // with some of it on screen and its end reachable, and Allow once still
+  // sending its vote.
+  PAGE_SCENARIOS.push({
+    name: 'P177 with the keyboard open at 390x480 a pinned card keeps Allow and Deny on screen above the keys and its command box scrollable, and Allow once still answers',
+    keyboard: true,
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('clear the stale alpine caches');
+      PLAN(f);
+      f.asst('The old alpine entries are dead weight; I can clear them.');
+      return f.ev('permission_request', permFrame('p177', BIG_CMD)).list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p177', BIG_CMD)]) },
+    run: async ({ page, viewer }) => {
+      const votes = recordVotes(page);
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p177');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await frames3(page);
+
+      const visible = await keyboardUp(page);
+      expect(visible === KEYBOARD_OPEN.height, `the keys left ${visible}px visible, not ${KEYBOARD_OPEN.height}`);
+      const c = await readCard(page);
+      // Each button whole between the status line and the keys, resting on
+      // the composer, and what a tap at its centre lands on.
+      const btns = (await page.evaluate(String.raw`(() => {
+        const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+        const top = document.getElementById('h1-statusline').getBoundingClientRect().bottom;
+        return ['.pc-deny', '.pc-allow'].map((sel) => {
+          const e = card.querySelector(sel);
+          const b = e.getBoundingClientRect();
+          const hit = document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+          return { sel, top: b.top, bottom: b.bottom, h: b.height, above: top, mine: !!hit && (hit === e || e.contains(hit)) };
+        });
+      })()`)) as Array<{ sel: string; top: number; bottom: number; h: number; above: number; mine: boolean }>;
+      for (const b of btns) {
+        expect(b.h >= 48, `${b.sel} is ${b.h}px with the keys up, under 48`);
+        expect(
+          b.top >= b.above - 0.5 && b.bottom <= c.visible + 0.5 && b.bottom <= c.composer!.top + 0.5,
+          `${b.sel} spans ${Math.round(b.top)}-${Math.round(b.bottom)} with the keys up, not between the status line (${Math.round(b.above)}) and the composer (${Math.round(c.composer!.top)}) above the keys at ${c.visible}`,
+        );
+        expect(b.mine, `something is drawn over ${b.sel} with the keys up`);
+      }
+      expect(c.composer!.bottom <= c.visible + 0.5 && c.scrollY === 0, `the composer ends at ${c.composer!.bottom} under the keys at ${c.visible}, or the document scrolled ${c.scrollY}px`);
+
+      // The command: still a scroller, some of it on screen and on top, and
+      // its last words reachable by scrolling it.
+      const cmd = (await page.evaluate(String.raw`(() => {
+        const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+        const box = card.querySelector('.pc-cmd');
+        const b = box.getBoundingClientRect();
+        const top = Math.max(b.top, document.getElementById('h1-statusline').getBoundingClientRect().bottom);
+        const bottom = Math.min(b.bottom, window.visualViewport.offsetTop + window.visualViewport.height);
+        const hit = document.elementFromPoint((b.left + b.right) / 2, (top + bottom) / 2);
+        const before = { h: box.scrollHeight, client: box.clientHeight };
+        box.scrollTop = box.scrollHeight;
+        const reached = Math.abs(box.scrollTop + box.clientHeight - box.scrollHeight) <= 1;
+        box.scrollTop = 0;
+        // Lines of the command on screen, the box's padding left out, so a
+        // box squashed to its padding does not count as readable.
+        const cs = getComputedStyle(box);
+        const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
+        const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+        return {
+          shown: Math.round(bottom - top),
+          lines: Math.floor((bottom - top - pad) / lh),
+          mine: !!hit && (hit === box || box.contains(hit)),
+          before,
+          reached,
+          whole: box.textContent.endsWith('echo END-OF-COMMAND'),
+          oy: getComputedStyle(box).overflowY,
+        };
+      })()`)) as { shown: number; lines: number; mine: boolean; before: { h: number; client: number }; reached: boolean; whole: boolean; oy: string };
+      expect(cmd.whole, 'the command box lost the end of the command with the keys up');
+      expect(
+        (cmd.oy === 'auto' || cmd.oy === 'scroll') && cmd.before.h > cmd.before.client && cmd.reached,
+        `the command box does not scroll with the keys up (overflow-y ${cmd.oy}, ${JSON.stringify(cmd.before)}, reached the end: ${cmd.reached})`,
+      );
+      expect(cmd.lines >= 2 && cmd.mine, `${cmd.lines} lines (${cmd.shown}px) of the command box are on screen with the keys up${cmd.mine ? '' : ', under something else'}, under two`);
+
+      // Answered with the keys still up.
+      await page.click('#cards .pcard .pc-allow');
+      await waitVote(votes, 'p177', page);
+      const vote = votes.find((v) => v.requestId === 'p177')!;
+      expect(vote.body === '{"outcome":"selected","optionId":"proceed_once"}', `Allow once with the keys up sent ${vote.body}`);
+      await keyboardDown(page);
+      const [deny, allow] = btns as [typeof btns[0], typeof btns[0]];
+      return `keys up over ${KEYBOARD_OPEN.width}x${KEYBOARD_OPEN.height}: Deny ${Math.round(deny.top)}-${Math.round(deny.bottom)} and Allow ${Math.round(allow.top)}-${Math.round(allow.bottom)} on top, composer ${Math.round(c.composer!.top)}-${Math.round(c.composer!.bottom)}; ${cmd.lines} lines (${cmd.shown}px) of the command box on screen, scrolling ${cmd.before.client} of ${cmd.before.h}px to its end; Allow once sent ${vote.body}`;
+    },
+  });
+
   // ---- #187 (h1): the More screen and its panel screens -----------------
   // More.dc.html's rows, in its order, under its four groups. Time zone is the
   // one row the drawing does not have: the stamp zone card is per device and
@@ -17254,7 +17411,6 @@ PAGE_SCENARIOS.push({
         await page.click('#more-back');
         lines.push(`${at}: ${pane ? `the ${RIGHT_PANE}px right-hand pane` : 'the screen'}, 56px head, ${MORE_ROWS.length} rows of 48 in 4 groups, 12px uppercase heads, chevron 16px in`);
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ') + '; Permission rules 4, Dictation "auto, auto-send off", Diagnostics ok, the rest blank until the page knows';
     },
   });
@@ -17320,7 +17476,6 @@ PAGE_SCENARIOS.push({
       expect(k.list && !k.panel && !k.more && k.saved === null, `Ctrl-K over a panel screen left ${JSON.stringify(k)}`);
       await page.keyboard.press('Escape');
       await page.keyboard.press('Escape');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `${MORE_ROWS.length} rows each opened their own screen alone, titled with the row's name over a 56px head, one sentence first, focus on back; back and Escape land on the row, Escape again on ≡; Ctrl-K over a screen shut it and More under the list`;
     },
   });
@@ -17399,7 +17554,6 @@ PAGE_SCENARIOS.push({
       }
       expect(lost.length === 0, `controls lost: ${lost.slice(0, 8).join('; ')}`);
       await openPanel(page, 'chat');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `card for card, old -> new: ${counts.join(', ')}; every named control drawn two taps from the chat; ${PHONE_IDS.length} This phone settings on Dictation; ${total} controls across the ${MORE_ROWS.length} screens (${perPanel.join(', ')}); no tab bar, pane, pin, fold or ?`;
     },
   });
@@ -17443,7 +17597,6 @@ PAGE_SCENARIOS.push({
         lines.push(`${w}x${h}`);
       }
       await openPanel(page, 'chat');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `More and all ${MORE_ROWS.length} panel screens, gated cards shown, fit with nothing past either edge at ${lines.join(' and ')}`;
     },
   });
@@ -17540,7 +17693,6 @@ PAGE_SCENARIOS.push({
       const presses = asked;
       await page.waitForTimeout(2500);
       expect(asked === presses && presses === 3, `/rc/usage was asked ${asked} times for 3 presses, so something polls it`);
-      await page.setViewportSize({ width: 1280, height: 720 });
       return "no cost before Usage was read; $0.42 on the sheet's Context line and on More's Usage and cost once it was; a by-model read left it, a by-session read without the conversation took it away; 3 reads for 3 presses";
     },
   });
@@ -17606,7 +17758,6 @@ PAGE_SCENARIOS.push({
       expect(app.state.startsWith('Installed'), `standalone reads ${JSON.stringify(app.state)}`);
       expect(app.how === null && !app.button, `standalone still offers the steps or the button (${JSON.stringify(app)})`);
       expect((await rowValue()) === 'installed', 'More does not say installed when standalone');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `browser: ${JSON.stringify(plain.state)} with the iOS and Android lines and no button; offered: a button that fired the prompt once and went; standalone: ${JSON.stringify(app.state)}, no steps, no button, More reads installed`;
     },
   });
@@ -17615,7 +17766,6 @@ PAGE_SCENARIOS.push({
     name: 'P170 the More rows are reached by Tab in reading order, Enter opens one onto its way back, and Escape walks back to ≡',
     waitView: false,
     run: async ({ page }) => {
-      await page.setViewportSize({ width: 1280, height: 720 });
       const where = () =>
         page.evaluate(String.raw`(() => {
           const a = document.activeElement;
@@ -17783,7 +17933,6 @@ PAGE_SCENARIOS.push({
           `${at}: list ${LEFT_PANE}x${h} at 0,0; column ${col.w.toFixed(1)}px = ${(col.w / (r.ch80 / 80)).toFixed(1)}ch at x ${col.x.toFixed(1)}, bar 56, status 44, transcript ${Math.round(tx.h)}, strip ${Math.round(plan.h)}, composer ${Math.round(comp.h)} to ${Math.round(comp.y + comp.h)}; the title focuses the pane's search`,
         );
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ');
     },
   });
@@ -17855,7 +18004,6 @@ PAGE_SCENARIOS.push({
           `${at}: sheet, More and a panel each ${RIGHT_PANE}x${h} at ${w - RIGHT_PANE},0, one at a time, the chat beside them in a ${col.w.toFixed(1)}px column (${(col.w / (sheet.ch80 / 80)).toFixed(1)}ch) at x ${col.x.toFixed(1)}, back to ${free.w.toFixed(1)}px when it shuts; the ⋯ menu under ⋯`,
         );
       }
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ');
     },
   });
@@ -17920,7 +18068,6 @@ PAGE_SCENARIOS.push({
       await page.keyboard.press('Escape');
       await step('Escape in the composer', { sheet: false, more: true, panel: false, focus: 'prompt' });
       await page.click('#more-back');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return steps.join('; ');
     },
   });
@@ -17997,7 +18144,6 @@ PAGE_SCENARIOS.push({
       const edge = await readBands(page);
       expect(isBox(edge.box['list-screen']!, 0, 0, LEFT_PANE, 810), `the list is not the pane at 1100x810 (${fmt(edge.box['list-screen']!)})`);
       const col = column(edge, 0, '1100x810');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return `${lines.join('; ')}; at 1100x810 the list is the ${LEFT_PANE}px pane and the column ${col.w.toFixed(1)}px`;
     },
   });
@@ -18123,8 +18269,115 @@ PAGE_SCENARIOS.push({
       lines.push(`1280, a panel up: it stayed, the card on top in the ${col.w.toFixed(1)}px column beside it, focus left on ${c.focus}`);
       await page.click('#panel-back');
       await page.click('#more-back');
-      await page.setViewportSize({ width: 1280, height: 720 });
       return lines.join('; ');
+    },
+  });
+}
+
+// #189 (h1). The keyboard-open state as its own set: PHONE with the keys up,
+// a 390x480 visible viewport (KEYBOARD_OPEN). P137 and P145 hold that the
+// layout follows the visual viewport; this holds what a reader typing needs
+// from it: the field they are typing in and the Send that sends it, on screen
+// above the keys, with nothing over either. The card's half is P177, beside
+// the card scenarios it shares its fixtures with. In-page code is a plain
+// string: the transform rewrites a named arrow in a callback into a
+// __name(...) call the page does not define.
+{
+  // Where the composer's row is, and whether each control is what a tap at
+  // its centre would land on (a box can be on screen and still be covered).
+  const READ_ROW = String.raw`(() => {
+    const vv = window.visualViewport;
+    const r = (e) => {
+      if (!e || e.getClientRects().length === 0) return null;
+      const b = e.getBoundingClientRect();
+      const hit = document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+      return { top: b.top, bottom: b.bottom, h: b.height, mine: !!hit && (hit === e || e.contains(hit)) };
+    };
+    const id = (k) => document.getElementById(k);
+    return {
+      visible: vv.offsetTop + vv.height,
+      open: document.documentElement.classList.contains('kb-open'),
+      scrollY: window.scrollY,
+      focused: document.activeElement === id('prompt'),
+      // The field is the box the textarea and its ghost sit in (P125).
+      field: r(document.querySelector('#composer .field')),
+      send: r(id('send')),
+      plus: r(id('h1-plus')),
+      composer: r(id('composer')),
+      status: r(id('h1-statusline')),
+      transcriptH: document.getElementById('transcript').clientHeight,
+    };
+  })()`;
+  type RowBox = { top: number; bottom: number; h: number; mine: boolean } | null;
+  type RowRead = {
+    visible: number; open: boolean; scrollY: number; focused: boolean;
+    field: RowBox; send: RowBox; plus: RowBox; composer: RowBox; status: RowBox; transcriptH: number;
+  };
+  const readRow = (page: Page) => page.evaluate(READ_ROW) as Promise<RowRead>;
+  // Every control of the row whole between the status line and the keys,
+  // and on top where a thumb would land. The document must not have
+  // scrolled: the frame is meant to fit the visible height, and the stand-in
+  // viewport's offsetTop stays 0, so a scroll would also put every reading
+  // in the wrong space.
+  const aboveKeys = (r: RowRead, label: string): void => {
+    for (const [name, b] of [['the field', r.field], ['Send', r.send], ['the +', r.plus]] as const) {
+      expect(!!b, `${label}: ${name} is not drawn (${JSON.stringify(r)})`);
+      expect(
+        b!.bottom <= r.visible + 0.5 && b!.top >= (r.status ? r.status.bottom : 0) - 0.5,
+        `${label}: ${name} spans ${Math.round(b!.top)}-${Math.round(b!.bottom)}, not between the status line and the keys at ${r.visible}`,
+      );
+      expect(b!.mine, `${label}: something is drawn over ${name}`);
+    }
+    expect(r.composer!.bottom <= r.visible + 0.5, `${label}: the composer ends at ${r.composer!.bottom}, under the keys at ${r.visible}`);
+    expect(r.scrollY === 0, `${label}: the document scrolled ${r.scrollY}px to show the field`);
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P176 with the keyboard open at 390x480 the field and Send are on screen above the keys, the field growing to its 132px keeps them there, and both come back when the keys go',
+    keyboard: true,
+    frames: () => {
+      const f = new Frames().ev('client_joined');
+      for (let k = 0; k < 14; k++) {
+        f.user(`question ${k}: why does the nightly build fail on the arm64 runner?`);
+        f.asst(`answer ${k}: the arm64 job pins an image without the native toolchain.`);
+        f.done();
+      }
+      return f.list;
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 43, 30_000);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await settlePage(page);
+      const rest = await readRow(page);
+      expect(!rest.open && rest.visible === PHONE.height, `setup: the keyboard is up before it was raised (${JSON.stringify(rest)})`);
+
+      // Raised from the field, the way a reader raises it.
+      const visible = await keyboardUp(page);
+      expect(visible === KEYBOARD_OPEN.height, `the keys left ${visible}px visible, not ${KEYBOARD_OPEN.height}`);
+      const up = await readRow(page);
+      expect(up.open && up.focused, `the page did not take the keyboard, or the field lost focus (${JSON.stringify({ open: up.open, focused: up.focused })})`);
+      aboveKeys(up, 'keys up, field empty');
+      expect(up.field!.h >= 44, `the field is ${up.field!.h}px with the keys up, under the 44px row`);
+
+      // Typing grows the field to its cap; the row grows upward, not under
+      // the keys. Filled rather than typed: Enter in the field sends.
+      await page.fill('#prompt', Array.from({ length: 8 }, (_, i) => `line ${i + 1} of a longer message`).join('\n'));
+      await frames3(page);
+      const grown = await readRow(page);
+      expect(grown.field!.h >= 131 && grown.field!.h <= 133, `the field is ${grown.field!.h}px after 8 lines with the keys up, not its 132px cap`);
+      aboveKeys(grown, 'keys up, field grown');
+
+      // The keys go: the row is back on the fold where it was.
+      await keyboardDown(page);
+      await page.fill('#prompt', '');
+      await frames3(page);
+      const down = await readRow(page);
+      expect(
+        !down.open && Math.abs(down.composer!.bottom - rest.composer!.bottom) <= 1 && down.send!.mine,
+        `the row did not come back when the keys went (composer ${rest.composer!.bottom} -> ${down.composer!.bottom}, Send on top ${down.send!.mine})`,
+      );
+      return `keys up over ${KEYBOARD_OPEN.width}x${KEYBOARD_OPEN.height}: field ${Math.round(up.field!.top)}-${Math.round(up.field!.bottom)}, Send ${Math.round(up.send!.top)}-${Math.round(up.send!.bottom)}, composer ends ${Math.round(up.composer!.bottom)}, transcript ${up.transcriptH}px, nothing over either; grown to ${Math.round(grown.field!.h)}px the field spans ${Math.round(grown.field!.top)}-${Math.round(grown.field!.bottom)} and Send ends ${Math.round(grown.send!.bottom)}; keys down, the composer back at ${Math.round(down.composer!.bottom)}`;
     },
   });
 }
@@ -18278,7 +18531,13 @@ async function runPageScenario(
   });
   page.on('dialog', (d) => void d.dismiss());
   try {
+    // #189 (h1): the phone is the primary set, so a scenario that sets no
+    // size reads the page as a phone loads it. Set here, once, before the
+    // load, rather than left to the browser's 1280x720, which since #188 is
+    // the laptop layout and was what every unsized scenario used to read.
+    await page.setViewportSize(PHONE);
     await page.addInitScript({ content: PAGE_HELPERS_JS });
+    if (s.keyboard) await page.addInitScript({ content: KEYBOARD_JS });
     if (s.before) await s.before(page);
     await page.goto(`${url}/ui/`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof startWatch === 'function');
