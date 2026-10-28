@@ -2507,8 +2507,8 @@ async function watch(page: Page, sessionId: string): Promise<void> {
  * Diagnostics are rows on the More screen (≡) and open as screens with a back
  * button; the conversation's actions are in the ⋯ menu; the model, mode and
  * folder are in the sheet the status line opens; Attach, Dictate, Files and
- * Artifacts are behind the composer's +; on a phone the conversation list is
- * behind the bar's title.
+ * Artifacts are behind the composer's +; the conversation list is the List
+ * screen behind the bar's title at every width (#185).
  */
 async function openTab(page: Page, id: string): Promise<void> {
   if (id === 'chat') {
@@ -2533,10 +2533,42 @@ async function clickTool(page: Page, id: string): Promise<void> {
   await page.click('#' + id);
 }
 async function openList(page: Page): Promise<void> {
-  const open = (await page.evaluate(
-    `document.getElementById('rail').classList.contains('panel-open')`,
-  )) as boolean;
-  if (!open) await page.click('#h1-title');
+  if (!(await page.isVisible('#list-screen'))) await page.click('#h1-title');
+}
+
+/**
+ * #185. Serves `rows.list` as the conversations of `cwd` and moves the page's
+ * list there through its own refresh. Rows drawn by calling
+ * renderPastConversations do not last: the load's own browse can land after
+ * them, and a watch, a resume or an Unwatch refreshes the list from the
+ * gateway (#35), which reads the harness folder's empty listing. Served, every
+ * one of those reads the same rows back. Change `rows.list` and call
+ * `refreshPastConversations` to move them.
+ */
+async function serveList(
+  page: Page,
+  cwd: string,
+  rows: { list: Record<string, unknown>[] },
+): Promise<void> {
+  await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+  await page.route(
+    (u) =>
+      u.pathname === '/rc/sessions' &&
+      u.searchParams.get('cwd') === cwd &&
+      !u.searchParams.has('archiveState'),
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sessions: rows.list, truncated: false }),
+      }),
+  );
+  await page.evaluate(
+    `curDirPath = ${JSON.stringify(cwd)}; refreshPastConversations(${JSON.stringify(cwd)})`,
+  );
+  await page.waitForFunction(
+    `pastConvosCwd === ${JSON.stringify(cwd)} && pastConvos.length >= ${rows.list.length}`,
+  );
 }
 
 /** Polls until the page has seen frame `lastId`; returns the elapsed ms. */
@@ -3760,12 +3792,11 @@ const PAGE_SCENARIOS: PageScenario[] = [
       await settlePage(page);
       const g = await page.evaluate(() => {
         const tr = document.getElementById('transcript') as HTMLDivElement;
-        const dp = document.getElementById(
-          'dir-picker',
-        ) as HTMLDetailsElement;
+        // #185: the folder screen, which is what the panel became.
+        const dp = document.getElementById('dir-picker') as HTMLElement;
         const tb = tr.getBoundingClientRect();
         return {
-          dirPickerOpen: dp.open,
+          dirPickerOpen: !dp.hidden,
           docHeight: document.documentElement.scrollHeight,
           scrollY: Math.round(scrollY),
           transcript: [Math.round(tb.top), Math.round(tb.bottom)],
@@ -4433,164 +4464,129 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    // #50, re-pointed at the rail by #119. This region is the visible half of
-    // multi-conversation support, and the whole reason it exists as its own
-    // region is that the only other route to a conversation lives inside
-    // #dir-picker, which is shut by default (and since #175 hidden until the
-    // rail's + opens it, which P128 holds). So the load-bearing property
-    // is not that it lists conversations, it is that it is reachable WITHOUT
-    // opening that panel. An implementation that put it inside the panel would
-    // pass a test that only asked "does it list them", which is the assertion
-    // this one refuses to make on its own. Asserted on the real page because
-    // on-screen-ness is the claim.
-    name: 'P27 the way to another conversation is on screen without opening the panel',
+    // #50, re-pointed at the rail by #119 and at the List screen by #185
+    // (h1). The region is the visible half of multi-conversation support, and
+    // the load-bearing property was never that it lists conversations: it is
+    // that another conversation is in reach without going through the folder
+    // panel. The rail put it on screen; on a phone the List screen puts it two
+    // taps from the chat (the title, then the row), with nothing in between,
+    // and the folder screen stays shut the whole way. Driven with real taps
+    // on the real page at 390, because reach is the claim. In-page code is a
+    // plain string: the transform rewrites a named arrow in a callback into a
+    // __name(...) call the page does not define.
+    name: 'P27 another conversation is two taps from the chat, the title and its row, without the folder screen',
     run: async ({ page, viewer }) => {
       const here = viewer.sessionId;
       const OTHER = '22222222-3333-4444-5555-666666666666';
       const CWD = '/home/evan/scratch';
+      await page.setViewportSize({ width: 390, height: 844 });
       // Gate on the first frame, not on watchedSessionId, for the reason P26
       // documents: the id is assigned before the hand-off that clears the
       // transcript, so waiting on it releases too early.
       await watch(page, here);
       await waitForFrame(page, 1, 30_000);
-
-      const state = () =>
-        page.evaluate(() => {
-          const rail = document.getElementById('rail') as HTMLDivElement;
-          const rows = Array.from(
-            rail.querySelectorAll('.s'),
-          ) as HTMLButtonElement[];
-          return {
-            shown: !rail.hidden && rail.offsetHeight > 0,
-            // The property the whole region exists for.
-            insidePanel: document.getElementById('dir-picker')!.contains(rail),
-            panelOpen: (
-              document.getElementById('dir-picker') as HTMLDetailsElement
-            ).open,
-            titles: rows.map((r) => r.textContent ?? ''),
-            marked: rows
-              .filter((r) => r.getAttribute('aria-current') === 'true')
-              .map((r) => r.textContent ?? ''),
-            folder: rail.querySelector('.ws')?.textContent ?? '',
-          };
-        });
-
-      // A folder with one conversation. The dropdown hid itself here because a
-      // select holding only the option already chosen is a control that cannot
-      // do anything. The rail is a region rather than a control, so what
-      // survives is the property underneath that rule: the row for the
-      // conversation you are on is marked as where you are, not offered as
-      // somewhere to go.
-      await page.evaluate(
-        ([id, cwd]) => {
-          renderPastConversations([{ sessionId: id, title: 'only one' }], cwd, false);
-        },
-        [here, CWD],
+      await page.route(`**/session/${OTHER}/resume`, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: OTHER, lastEventId: 0 }),
+        }),
       );
-      const alone = await state();
+
+      type ListState = {
+        listShown: boolean;
+        folderScreen: boolean;
+        titles: string[];
+        marked: string[];
+        folder: string;
+        otherHit: boolean;
+      };
+      const state = (other: string) =>
+        page.evaluate(String.raw`(() => {
+          const scr = document.getElementById('list-screen');
+          const rows = Array.from(document.querySelectorAll('#past-list .s'));
+          const o = rows.find((r) => r.dataset.session === ${JSON.stringify(other)});
+          let hit = false;
+          if (o && o.getClientRects().length > 0) {
+            const b = o.getBoundingClientRect();
+            const at = document.elementFromPoint(b.left + 40, b.top + b.height / 2);
+            hit = !!at && o.contains(at) && b.bottom <= innerHeight;
+          }
+          return {
+            listShown: !scr.hidden && scr.getClientRects().length > 0,
+            folderScreen: !document.getElementById('dir-picker').hidden,
+            titles: rows.map((r) => (r.querySelector('.tt') || r).textContent || ''),
+            marked: rows.filter((r) => r.getAttribute('aria-current') === 'true').map((r) => (r.querySelector('.tt') || r).textContent || ''),
+            folder: document.getElementById('list-folder').title,
+            otherHit: hit,
+          };
+        })()`) as Promise<ListState>;
+
+      // A folder with one conversation: the row for the conversation you are
+      // on is marked as where you are, not offered as somewhere to go.
+      const rows = { list: [{ sessionId: here, title: 'only one' }] as Record<string, unknown>[] };
+      await serveList(page, CWD, rows);
+      const alone = await state(OTHER);
       expect(
-        alone.shown && alone.titles.length === 1 && alone.marked.length === 1,
+        alone.titles.length === 1 && alone.marked.length === 1,
         `a folder with one conversation left it unmarked as the one on screen (${JSON.stringify(alone)})`,
       );
 
-      // Two conversations, so there is somewhere to go.
-      await page.evaluate(
-        ([id, other, cwd]) => {
-          renderPastConversations(
-            [
-              { sessionId: id, title: 'the one on screen' },
-              { sessionId: other, title: 'the other one' },
-            ],
-            cwd,
-            false,
-          );
-        },
-        [here, OTHER, CWD],
-      );
-      const two = await state();
-      expect(
-        !two.insidePanel,
-        'the rail is inside #dir-picker, so reaching another conversation costs the click this region exists to remove',
-      );
-      expect(
-        !two.panelOpen,
-        'the test assumed the panel is collapsed, which is what makes the assertion above mean anything',
-      );
-      expect(
-        two.shown,
-        `two conversations in the folder and no rail on screen (${JSON.stringify(two)})`,
-      );
-      expect(
-        two.titles.some((t) => t.includes('the other one')),
-        `the other conversation is not listed (${JSON.stringify(two.titles)})`,
-      );
-      expect(
-        two.marked.length === 1 && two.marked[0].includes('the one on screen'),
-        `the rail does not mark the conversation on screen (${JSON.stringify(two.marked)})`,
-      );
-      expect(
-        two.folder.includes(CWD),
-        `the rail does not say which folder it is listing (${JSON.stringify(two.folder)})`,
-      );
+      // Two conversations, so there is somewhere to go. The chat is at rest.
+      rows.list = [
+        { sessionId: here, title: 'the one on screen' },
+        { sessionId: OTHER, title: 'the other one' },
+      ];
+      await page.evaluate(`refreshPastConversations(${JSON.stringify(CWD)})`);
+      await page.waitForFunction(`pastConvos.length === 2`);
+      const rest = await state(OTHER);
+      expect(!rest.listShown, 'the list is up over the chat at rest');
 
-      // The rail is the folder's whole set, not whatever the panel's filter
-      // currently happens to show. A rail that inherited that view state would
-      // quietly drop conversations the reader cannot get back to.
-      await page.evaluate(() => {
-        const f = document.getElementById('past-filter') as HTMLInputElement;
-        f.value = 'nothing matches this';
-        f.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-      const filtered = await state();
+      // Tap one: the title. The other conversation is on screen, painted at
+      // its own spot, and nothing else had to be opened to get there.
+      await page.click('#h1-title');
+      const one = await state(OTHER);
+      expect(one.listShown, 'the title did not open the list');
+      expect(!one.folderScreen, 'reaching the list opened the folder screen, so the rows are behind it');
       expect(
-        filtered.shown && filtered.titles.some((t) => t.includes('the other one')),
-        `the panel's filter took rows off the rail (${JSON.stringify(filtered.titles)})`,
+        one.otherHit,
+        `after one tap the other conversation is not on screen to tap (${JSON.stringify(one)})`,
       );
+      expect(
+        one.marked.length === 1 && one.marked[0] === 'the one on screen',
+        `the list does not mark the conversation on screen (${JSON.stringify(one.marked)})`,
+      );
+      expect(one.folder === CWD, `the list does not say which folder it is listing (${JSON.stringify(one.folder)})`);
 
-      // And the other way round, which is a new property rather than a kept one:
-      // one set now has two filters over it, so the rail's own filter has to
-      // narrow the rail without reaching into the panel's list.
-      await page.evaluate(() => {
-        const f = document.getElementById('past-filter') as HTMLInputElement;
-        f.value = '';
-        f.dispatchEvent(new Event('input', { bubbles: true }));
-        const i = document.querySelector('#rail .flt input') as HTMLInputElement;
-        i.value = 'other';
-        i.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-      const railFiltered = await state();
-      const panelRows = await page.evaluate(
-        () => document.querySelectorAll('#past-list .token-row').length,
-      );
+      // The list's own search narrows it, and clearing it brings the folder
+      // back whole: it is one list with one filter now, not two.
+      await page.click('#list-search');
+      await page.keyboard.type('other');
+      const narrowed = await state(OTHER);
       expect(
-        railFiltered.titles.length === 1 &&
-          railFiltered.titles[0].includes('the other one'),
-        `the rail's own filter did not narrow the rail (${JSON.stringify(railFiltered.titles)})`,
+        narrowed.titles.length === 1 && narrowed.titles[0] === 'the other one',
+        `the search did not narrow the list (${JSON.stringify(narrowed.titles)})`,
       );
-      expect(
-        panelRows === 2,
-        `the rail's filter reached into the panel's list (${panelRows} rows, expected the folder's 2)`,
-      );
-      await page.evaluate(() => {
-        const i = document.querySelector('#rail .flt input') as HTMLInputElement;
-        i.value = '';
-        i.dispatchEvent(new Event('input', { bubbles: true }));
-      });
+      await page.keyboard.press('Escape');
+      const whole = await state(OTHER);
+      expect(whole.titles.length === 2, `putting the search away did not bring the folder back (${JSON.stringify(whole.titles)})`);
 
-      // Unwatching leaves no conversation on screen, so the mark goes away. The
-      // region stays and keeps naming the folder, which is a deliberate change
-      // from the dropdown: the rows are still conversations you can go back into,
-      // which is not something the select could claim once there was nothing to
-      // switch from.
-      await page.evaluate(() => {
-        (document.getElementById('stop') as HTMLButtonElement).click!();
-      });
-      const stopped = await state();
+      // Tap two: the row. The conversation changes and the chat comes back.
+      await page.click(`#past-list .s[data-session="${OTHER}"]`);
+      await page.waitForFunction(`watchedSessionId === ${JSON.stringify(OTHER)}`, null, { timeout: 10_000 });
+      const two = await state(OTHER);
+      expect(!two.listShown, 'picking the other conversation left the list over the chat');
+
+      // Unwatching leaves no conversation on screen, so the mark goes away and
+      // the rows stay, still conversations you can go back into.
+      await page.evaluate(`document.getElementById('stop').click()`);
+      const stopped = await state(OTHER);
       expect(
-        stopped.marked.length === 0,
-        `the rail still marked a row as on screen after Unwatch (${JSON.stringify(stopped.marked)})`,
+        stopped.marked.length === 0 && stopped.titles.length === 2,
+        `after Unwatch the list still marked a row or lost one (${JSON.stringify(stopped)})`,
       );
-      return `marked rather than offered for one, on screen with the panel shut for two, lists the other, marks the one on screen, survives the panel filter, its own filter narrows only itself, mark gone on Unwatch`;
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `marked rather than offered for one; at 390 the title then the row reached the other conversation, on screen after one tap with the folder screen shut, the one on screen marked and the folder named; the search narrows and clears; mark gone on Unwatch`;
     },
   },
   {
@@ -4601,20 +4597,20 @@ const PAGE_SCENARIOS: PageScenario[] = [
     // other half, that a default load feeds it, and it does it by watching the
     // page fill its own state rather than by calling anything. The chain is
     // capabilities -> browseTo -> renderDirList -> refreshPastConversations ->
-    // renderPastConversations -> renderRail, and nothing but that chain
+    // renderPastConversations -> renderList, and nothing but that chain
     // assigns curDirPath or pastConvosCwd.
     //
     // The two halves are independently load-bearing. Remove the browse-time
-    // refresh and the first half fails; remove the renderRail call from
+    // refresh and the first half fails; remove the renderList call from
     // renderPastConversations and only the second does.
-    name: 'P28 a default load feeds the rail without anything being driven',
+    // #185 (h1): the rail is the List screen's rows (#past-list) now, read
+    // with the screen shut as the rail was read with the panel shut.
+    name: 'P28 a default load feeds the list without anything being driven',
     run: async ({ page, viewer }) => {
       // The premise that makes this control necessary at all: on a load the
       // folder panel is shut, so everything inside it is off screen.
       const premise = await page.evaluate(() => ({
-        panelOpen: (
-          document.getElementById('dir-picker') as HTMLDetailsElement
-        ).open,
+        panelOpen: !(document.getElementById('dir-picker') as HTMLElement).hidden,
       }));
       expect(
         !premise.panelOpen,
@@ -4660,8 +4656,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
         [here, fed.dir],
       );
       const quiet = await page.evaluate(() => ({
-        rows: document.querySelectorAll('#rail .s').length,
-        marked: document.querySelectorAll('#rail .s[aria-current="true"]').length,
+        rows: document.querySelectorAll('#past-list .s').length,
+        marked: document.querySelectorAll('#past-list .s[aria-current="true"]').length,
       }));
       // The rail is a region, so it does not come and go the way the dropdown
       // did. What carries over is the rule underneath that: with one
@@ -4687,20 +4683,18 @@ const PAGE_SCENARIOS: PageScenario[] = [
         [here, OTHER, fed.dir],
       );
       const grown = await page.evaluate(() => ({
-        rows: document.querySelectorAll('#rail .s').length,
-        listed: Array.from(document.querySelectorAll('#rail .s b')).some((b) =>
+        rows: document.querySelectorAll('#past-list .s').length,
+        listed: Array.from(document.querySelectorAll('#past-list .s .tt')).some((b) =>
           (b.textContent ?? '').includes('the other one'),
         ),
-        panelOpen: (
-          document.getElementById('dir-picker') as HTMLDetailsElement
-        ).open,
+        panelOpen: !(document.getElementById('dir-picker') as HTMLElement).hidden,
       }));
       expect(
         grown.rows === 2 && grown.listed && !grown.panelOpen,
         `a conversation arrived in the folder while the rail sat there, and it did not come on screen with the panel shut (${JSON.stringify(grown)})`,
       );
 
-      return `load path filled ${JSON.stringify(fed.dir)} on its own (${fed.count} conversations found), list matches the folder on screen, rail drawn by a list arriving rather than by the watch`;
+      return `load path filled ${JSON.stringify(fed.dir)} on its own (${fed.count} conversations found), list matches the folder on screen, rows drawn by a list arriving rather than by the watch`;
     },
   },
   {
@@ -5473,7 +5467,7 @@ PAGE_SCENARIOS.push({
 });
 
 PAGE_SCENARIOS.push({
-  // #89. The rail is a scan of the on-disk chats dir, so a conversation whose
+  // #89. The list is a scan of the on-disk chats dir, so a conversation whose
   // transcript has not been written yet gets no row at all: the device that did
   // not start it cannot see it, cannot resume it, and cannot tell it apart from
   // one that already ended. Only the daemon's in-memory snapshot knows it is
@@ -5481,6 +5475,9 @@ PAGE_SCENARIOS.push({
   // snapshot rather than merely annotated where rows already exist. Asserted on
   // the real page because the row itself is the claim, and a badge on existing
   // rows would pass a test that never asked for the missing one.
+  // #185 (h1): the rows are the List screen's. "open" is the row's live dot
+  // (named "open"), and what a row offers is what its ⋯ menu holds, read by
+  // opening it.
   name: 'P37 a conversation with no transcript is listed, and an unreadable snapshot changes nothing',
   waitView: false,
   run: async ({ page }) => {
@@ -5529,79 +5526,74 @@ PAGE_SCENARIOS.push({
       }),
     );
 
-    const readRows = () =>
-      page.evaluate(() => {
-        const box = document.getElementById('past-list') as HTMLDivElement;
-        return Array.from(box.querySelectorAll('.token-row')).map((el) => {
-          const row = el as HTMLElement;
-          const line = row.firstElementChild as HTMLElement;
-          const kids = Array.from(line.children) as HTMLElement[];
-          return {
-            label: kids[0]?.textContent ?? '',
-            marks: kids.slice(1).map((k) => k.textContent ?? ''),
-            buttons: Array.from(row.querySelectorAll('button')).map(
-              (b) => b.textContent ?? '',
-            ),
-          };
-        });
-      });
+    type Row = { id: string; label: string; sub: string; open: boolean; items: string[] };
+    const readRows = async (): Promise<Row[]> => {
+      const rows = (await page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => ({
+        id: w.dataset.session,
+        label: (w.querySelector('.tt') || w).textContent || '',
+        sub: w.querySelector('.sub') ? w.querySelector('.sub').textContent : '',
+        open: !!w.querySelector('.dot[aria-label="open"]'),
+        items: [],
+      }))`)) as Row[];
+      await openList(page);
+      for (const r of rows) {
+        await page.click(`#past-list .srow[data-session="${r.id}"] > .more`);
+        r.items = (await page.evaluate(
+          String.raw`Array.from(document.querySelectorAll('#list-menu [role="menuitem"]')).map((b) => b.textContent)`,
+        )) as string[];
+        await page.keyboard.press('Escape');
+      }
+      return rows;
+    };
 
     // curDirPath is what the page sets when it browses into a folder, and the
     // render is skipped unless it matches the cwd being refreshed. Set here so
     // the call below goes all the way through rather than returning early.
-    await page.evaluate(([cwd]) => {
-      curDirPath = cwd;
-      return refreshPastConversations(cwd);
-    }, [CWD, 0]);
+    await page.evaluate(`curDirPath = ${JSON.stringify(CWD)}; refreshPastConversations(${JSON.stringify(CWD)})`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 5_000 }).catch(() => undefined);
     const rows = await readRows();
 
     expect(
       rows.length === 2,
-      `the rail listed ${rows.length} rows, wanted the transcript row plus the transcript-less one (${JSON.stringify(rows)})`,
+      `the list has ${rows.length} rows, wanted the transcript row plus the transcript-less one (${JSON.stringify(rows)})`,
     );
     // The live-only row is the whole point of #89, so it has to be the row that
     // is NOT on disk. Its label is the session-id fallback because it has no
-    // title, and no separator, because it has no mtime either.
+    // title, and it has no separator, because it has no mtime either.
     const only = rows.find((r) => r.label.startsWith('session 77777777'));
     expect(
       !!only,
-      `the conversation with no transcript is not in the rail at all (${JSON.stringify(rows.map((r) => r.label))})`,
+      `the conversation with no transcript is not on the list at all (${JSON.stringify(rows.map((r) => r.label))})`,
     );
     expect(
-      !only!.label.includes('\u00b7'),
-      `the transcript-less row shows a separator with nothing after it (${JSON.stringify(only!.label)})`,
+      !only!.sub.includes('·'),
+      `the transcript-less row shows a separator with nothing after it (${JSON.stringify(only!.sub)})`,
     );
+    expect(only!.open, `the transcript-less row does not say it is open (${JSON.stringify(only)})`);
+    // No delete or archive on that row: delete's confirm promises a transcript
+    // is removed for good, and there is no transcript to remove or file.
     expect(
-      only!.marks.includes('open'),
-      `the transcript-less row does not say it is open (${JSON.stringify(only)})`,
-    );
-    // No delete on that row: its confirm text promises a transcript is removed
-    // for good, and there is no transcript to remove.
-    expect(
-      only!.buttons.length === 0,
-      `the transcript-less row offers a delete that cannot do what its confirm says (${JSON.stringify(only!.buttons)})`,
+      !only!.items.includes('Delete') && !only!.items.includes('Archive'),
+      `the transcript-less row offers an action that cannot do what it says (${JSON.stringify(only!.items)})`,
     );
 
-    const disk = rows.find((r) => r.label.startsWith('on disk'));
+    const disk = rows.find((r) => r.label === 'on disk');
     expect(!!disk, `the row that was already listed went missing (${JSON.stringify(rows)})`);
     expect(
-      disk!.label.includes('\u00b7'),
-      `the test assumed the disk row shows a time, so the marker assertions below mean anything (${JSON.stringify(disk!.label)})`,
+      disk!.sub.length > 0,
+      `the test assumed the disk row shows a time, so the marker assertions below mean anything (${JSON.stringify(disk!.sub)})`,
     );
+    expect(disk!.open, `the snapshot names this conversation and the row does not say so (${JSON.stringify(disk)})`);
     expect(
-      disk!.marks.includes('open'),
-      `the snapshot names this conversation and the row does not say so (${JSON.stringify(disk)})`,
-    );
-    expect(
-      disk!.buttons.includes('delete'),
-      `a conversation that has a transcript lost its delete (${JSON.stringify(disk!.buttons)})`,
+      disk!.items.includes('Delete'),
+      `a conversation that has a transcript lost its delete (${JSON.stringify(disk!.items)})`,
     );
 
     // The honesty property. A snapshot the page cannot read is NOT a statement
     // that nothing is open: the route can be unsupported on an older daemon, or
     // refused by the per-workspace trust check. The list must come back exactly
     // as the disk scan alone, because an unreadable snapshot that emptied the
-    // rail would be worse than never having tried.
+    // list would be worse than never having tried.
     await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
       route.fulfill({
         status: 502,
@@ -5609,22 +5601,23 @@ PAGE_SCENARIOS.push({
         body: JSON.stringify({ error: 'Daemon unavailable', code: 'daemon_unavailable' }),
       }),
     );
-    await page.evaluate(([cwd]) => refreshPastConversations(cwd), [CWD, 0]);
+    await page.evaluate(`refreshPastConversations(${JSON.stringify(CWD)})`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`, null, { timeout: 5_000 }).catch(() => undefined);
     const blind = await readRows();
     expect(
-      blind.length === 1 && blind[0]!.label.startsWith('on disk'),
+      blind.length === 1 && blind[0]!.label === 'on disk',
       `an unreadable snapshot changed the list rather than leaving it as the disk scan (${JSON.stringify(blind.map((r) => r.label))})`,
     );
     expect(
-      !blind[0]!.marks.includes('open'),
+      !blind[0]!.open,
       `with no snapshot the row still claims to be open, which is a claim about state it cannot know (${JSON.stringify(blind[0])})`,
     );
     expect(
-      blind[0]!.buttons.includes('delete'),
-      `with no snapshot the surviving row lost its delete (${JSON.stringify(blind[0]!.buttons)})`,
+      blind[0]!.items.includes('Delete'),
+      `with no snapshot the surviving row lost its delete (${JSON.stringify(blind[0]!.items)})`,
     );
 
-    return `2 rows with the transcript-less one listed as open and undeletable; an unreadable snapshot leaves the disk row alone and unmarked`;
+    return `2 rows with the transcript-less one listed as open and offered no delete or archive; an unreadable snapshot leaves the disk row alone and unmarked`;
   },
 });
 
@@ -5719,6 +5712,12 @@ PAGE_SCENARIOS.push({
 });
 
 PAGE_SCENARIOS.push({
+  // #185 (h1): archive is on each row's ⋯ menu on the List screen, and the
+  // filed half is its own screen behind the list's Archived (n), where the
+  // spec puts it. The claims are the ones #111 made: archive is offered only
+  // where a transcript exists, it sends no confirm and carries the cwd, the
+  // filed half lists restore-only rows that are not pressable, restore sends
+  // the id, and a Live-call refusal is named.
   name: 'P39 a conversation can be filed away and put back, and the filed half is not pressable',
   waitView: false,
   run: async ({ page }) => {
@@ -5735,7 +5734,7 @@ PAGE_SCENARIOS.push({
     //
     // The transcript-less id is named ONLY by the snapshot below, never by this
     // listing. If it appeared here too it would have a transcript on disk, so
-    // the merge would be right to offer it the at-rest buttons, and the
+    // the merge would be right to offer it the at-rest actions, and the
     // assertion that the row carries none would be guarding nothing.
     await page.route(/\/rc\/sessions\?cwd=/, (route) => {
       const wantArchived = route.request().url().includes('archiveState=archived');
@@ -5749,7 +5748,7 @@ PAGE_SCENARIOS.push({
       });
     });
     // The snapshot names the transcript-less row so it is listed at all, which
-    // is the #89 behaviour the rail row below depends on.
+    // is the #89 behaviour the row below depends on.
     await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
       route.fulfill({
         status: 200,
@@ -5783,89 +5782,70 @@ PAGE_SCENARIOS.push({
     await verb(/\/rc\/sessions\/unarchive$/, 'unarchive', 'unarchived', GONE);
 
     const status = () =>
-      page.evaluate(() => (document.getElementById('status') as HTMLElement).textContent ?? '');
-    const railButtons = () =>
-      page.evaluate(() => {
-        const box = document.getElementById('past-list') as HTMLElement;
-        return Array.from(box.querySelectorAll('.token-row')).map((row) => ({
-          label: ((row.firstElementChild?.children[0] as HTMLElement) ?? row).textContent ?? '',
-          buttons: Array.from(row.querySelectorAll('button')).map((b) => b.textContent ?? ''),
-        }));
-      });
+      page.evaluate(`document.getElementById('status').textContent || ''`) as Promise<string>;
+    const menuOf = async (id: string): Promise<string[]> => {
+      await page.click(`#past-list .srow[data-session="${id}"] > .more`);
+      const items = (await page.evaluate(
+        String.raw`Array.from(document.querySelectorAll('#list-menu [role="menuitem"]')).map((b) => b.textContent)`,
+      )) as string[];
+      await page.keyboard.press('Escape');
+      return items;
+    };
 
-    await page.evaluate(([cwd]) => {
-      curDirPath = cwd;
-      return refreshPastConversations(cwd);
-    }, [CWD]);
-    const rows = await railButtons();
-    const diskRow = rows.find((r) => r.label.startsWith('on disk'));
-    expect(!!diskRow, `the disk row is missing from the rail (${JSON.stringify(rows)})`);
+    await page.evaluate(`curDirPath = ${JSON.stringify(CWD)}; refreshPastConversations(${JSON.stringify(CWD)})`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 5_000 }).catch(() => undefined);
+    await openList(page);
+    const diskItems = await menuOf(DISK);
     expect(
-      diskRow!.buttons.includes('archive'),
-      `a conversation with a transcript offers no way to file it away (${JSON.stringify(diskRow!.buttons)})`,
+      diskItems.includes('Archive'),
+      `a conversation with a transcript offers no way to file it away (${JSON.stringify(diskItems)})`,
     );
-    const liveRow = rows.find((r) => r.label.startsWith('session 77777777'));
-    expect(!!liveRow, `the transcript-less row went missing (${JSON.stringify(rows)})`);
+    const liveItems = await menuOf(LIVEONLY);
     expect(
-      liveRow!.buttons.length === 0,
-      `the transcript-less row was offered an at-rest action it cannot perform (${JSON.stringify(liveRow!.buttons)})`,
+      !liveItems.includes('Archive') && !liveItems.includes('Delete'),
+      `the transcript-less row was offered an at-rest action it cannot perform (${JSON.stringify(liveItems)})`,
     );
 
-    // The placement ruling: the filed half is not something to reach for while
-    // working, so it lives under Settings and not on the main screen.
-    const placed = await page.evaluate(() => {
-      const det = document.getElementById('archived-view');
+    // The placement ruling, as #185 draws it: the filed half is not something
+    // to reach for while working, so it is its own screen behind the list's
+    // Archived (n), not on the chat screen and not a card in a panel. The
+    // count is read when the list opens, so it is waited for.
+    await page
+      .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (1)'`, null, { timeout: 5_000 })
+      .catch(() => undefined);
+    const placed =(await page.evaluate(String.raw`(() => {
+      const scr = document.getElementById('archived-view');
+      const door = document.getElementById('list-archived-open');
       return {
-        exists: !!det,
-        inSettings: !!document.getElementById('pane-settings')?.contains(det ?? null),
-        inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
+        exists: !!scr,
+        hidden: !!scr && scr.hidden,
+        inChat: document.getElementById('pane-chat').contains(scr),
+        inPane: !!scr.closest('.tab-pane'),
+        doorInList: document.getElementById('list-screen').contains(door),
+        door: door.textContent.trim(),
       };
-    });
-    expect(placed.exists, 'there is no archived section in the page at all');
-    expect(placed.inSettings, 'the archived section is not under Settings');
-    expect(!placed.inChat, 'the archived section sits on the main screen');
-
-    // The ? is one delegated listener on document keyed on aria-controls (the
-    // rule P35 proves for the seven surfaces). A panel added after P35 was
-    // written is only covered by that rule if it follows it, so check this one
-    // rather than inherit the older scenario's conclusion.
-    const help = await page.evaluate(() => {
-      const det = document.getElementById('archived-view') as HTMLDetailsElement | null;
-      const btn = det?.querySelector('.help-btn') as HTMLButtonElement | null;
-      if (!btn) return 'no ? button';
-      const before = (document.getElementById('help-archived-view') as HTMLElement)?.hidden;
-      btn.click();
-      const el = document.getElementById('help-archived-view') as HTMLElement | null;
-      return `${before === true}/${el ? !el.hidden : 'no help element'}/${btn.getAttribute('aria-expanded')}`;
-    });
+    })()`)) as { exists: boolean; hidden: boolean; inChat: boolean; inPane: boolean; doorInList: boolean; door: string };
+    expect(placed.exists, 'there is no archived screen in the page at all');
+    expect(placed.hidden, 'the archived screen is up at rest');
+    expect(!placed.inChat && !placed.inPane, 'the archived list sits on the chat screen or in a panel');
     expect(
-      help === 'true/true/true',
-      `the archived section's ? did not behave like the other panels' (got ${help})`,
+      placed.doorInList && placed.door === 'Archived (1)',
+      `the list's way to the filed half is missing or does not count it (${JSON.stringify(placed)})`,
     );
 
-    // Press archive. The body is the load-bearing part: archive is reversible,
-    // so it must NOT carry the confirm that only delete requires, and it must
-    // name the cwd or it would act on whichever workspace the gateway defaults
-    // to rather than the folder the row came from.
-    await page.evaluate(() => {
-      const box = document.getElementById('past-list') as HTMLElement;
-      for (const row of Array.from(box.querySelectorAll('.token-row'))) {
-        const btn = Array.from(row.querySelectorAll('button')).find(
-          (b) => b.textContent === 'archive',
-        );
-        if (btn) {
-          (btn as HTMLButtonElement).click();
-          return;
-        }
-      }
-    });
+    // Archive from the row's menu. The body is the load-bearing part: archive
+    // is reversible, so it must NOT carry the confirm that only delete
+    // requires, and it must name the cwd or it would act on whichever
+    // workspace the gateway defaults to rather than the folder the row is in.
+    await page.click(`#past-list .srow[data-session="${DISK}"] > .more`);
+    await page.click('#list-menu [role="menuitem"]:text-is("Archive")');
     await page.waitForFunction(
-      () => !((document.getElementById('status') as HTMLElement).textContent ?? '').includes('archiving'),
+      `!(document.getElementById('status').textContent || '').includes('archiving')`,
       null,
       { timeout: 8000 },
     );
     const arc = posts.find((x) => x.path === 'archive');
-    expect(!!arc, `pressing archive sent nothing (${JSON.stringify(posts)})`);
+    expect(!!arc, `pressing Archive sent nothing (${JSON.stringify(posts)})`);
     expect(
       JSON.stringify(arc!.body.sessionIds) === JSON.stringify([DISK]),
       `archive did not name the conversation on the row that was pressed (${JSON.stringify(arc!.body)})`,
@@ -5880,56 +5860,74 @@ PAGE_SCENARIOS.push({
     );
     expect(
       (await status()) === 'archived',
-      `pressing archive did not report what it did (${JSON.stringify(await status())})`,
+      `pressing Archive did not report what it did (${JSON.stringify(await status())})`,
     );
 
-    // The filed half, listed and put back.
-    await page.evaluate(() => refreshArchivedConversations());
-    const filed = await page.evaluate(() => {
-      const box = document.getElementById('archived-list') as HTMLElement;
-      return Array.from(box.querySelectorAll('.token-row')).map((row) => ({
-        label: ((row.children[0] as HTMLElement) ?? row).textContent ?? '',
-        buttons: Array.from(row.querySelectorAll('button')).map((b) => b.textContent ?? ''),
-        pressable: (row as (HTMLElement & { onclick: unknown })).onclick !== null,
-      }));
-    });
+    // The filed half, opened, listed and put back.
+    await page.click('#list-archived-open');
+    await page.waitForFunction(`document.querySelectorAll('#archived-list .arow').length > 0`, null, { timeout: 5_000 }).catch(() => undefined);
+    const filed = (await page.evaluate(String.raw`(() => {
+      const scr = document.getElementById('archived-view').getBoundingClientRect();
+      return {
+        screen: [Math.round(scr.width), Math.round(scr.height)],
+        rows: Array.from(document.querySelectorAll('#archived-list .arow')).map((row) => ({
+          label: (row.querySelector('.tt') || row).textContent || '',
+          buttons: Array.from(row.querySelectorAll('button')).map((b) => b.textContent),
+          pressable: row.onclick !== null || row.tagName === 'BUTTON' || row.hasAttribute('tabindex'),
+        })),
+      };
+    })()`)) as { screen: number[]; rows: { label: string; buttons: string[]; pressable: boolean }[] };
+    const vp = page.viewportSize()!;
     expect(
-      filed.length === 1 && filed[0]!.label.startsWith('filed away'),
-      `the archived listing did not show the filed conversation (${JSON.stringify(filed)})`,
+      filed.screen[0] === vp.width && filed.screen[1] === vp.height,
+      `Archived did not open as a screen of its own (${filed.screen.join('x')})`,
     );
     expect(
-      filed[0]!.buttons.includes('restore'),
-      `an archived conversation offers no way back (${JSON.stringify(filed[0]!)})`,
+      filed.rows.length === 1 && filed.rows[0]!.label === 'filed away',
+      `the archived screen did not show the filed conversation (${JSON.stringify(filed.rows)})`,
     );
-    // The honesty property. The rail's rows are pressable because they open a
+    expect(
+      filed.rows[0]!.buttons.includes('Restore'),
+      `an archived conversation offers no way back (${JSON.stringify(filed.rows[0]!)})`,
+    );
+    // The honesty property. The list's rows are pressable because they open a
     // conversation; these must not be, because the daemon refuses to read an
     // archived transcript. A row that looked pressable would promise a read
     // that cannot happen.
     expect(
-      !filed[0]!.pressable,
-      `an archived row is pressable, promising a read the daemon refuses (${JSON.stringify(filed[0]!)})`,
+      !filed.rows[0]!.pressable,
+      `an archived row is pressable, promising a read the daemon refuses (${JSON.stringify(filed.rows[0]!)})`,
     );
 
-    await page.evaluate(() => {
-      const box = document.getElementById('archived-list') as HTMLElement;
-      const btn = box.querySelector('button');
-      if (btn) (btn as HTMLButtonElement).click();
-    });
+    // The ? is one delegated listener on document keyed on aria-controls (the
+    // rule P35 proves for the seven surfaces), so this screen's follows it.
+    const help = (await page.evaluate(String.raw`(() => {
+      const btn = document.querySelector('#archived-view .help-btn');
+      if (!btn) return 'no ? button';
+      const el = document.getElementById('help-archived-view');
+      const before = el.hidden;
+      btn.click();
+      return String(before === true) + '/' + String(!el.hidden) + '/' + btn.getAttribute('aria-expanded');
+    })()`)) as string;
+    expect(help === 'true/true/true', `the archived screen's ? did not behave like the other panels' (got ${help})`);
+
+    await page.click('#archived-list .arow button');
     await page.waitForFunction(
-      () => !((document.getElementById('status') as HTMLElement).textContent ?? '').includes('restoring'),
+      `!(document.getElementById('status').textContent || '').includes('restoring')`,
       null,
       { timeout: 8000 },
     );
     const back = posts.find((x) => x.path === 'unarchive');
-    expect(!!back, `pressing restore sent nothing (${JSON.stringify(posts)})`);
+    expect(!!back, `pressing Restore sent nothing (${JSON.stringify(posts)})`);
     expect(
       JSON.stringify(back!.body.sessionIds) === JSON.stringify([GONE]),
       `restore did not name the archived conversation on the row pressed (${JSON.stringify(back!.body)})`,
     );
     expect(
       (await status()) === 'restored',
-      `pressing restore did not report what it did (${JSON.stringify(await status())})`,
+      `pressing Restore did not report what it did (${JSON.stringify(await status())})`,
     );
+    await page.click('#archived-back');
 
     // The one refusal the daemon makes here is about a Live call, and the fix
     // is a specific act rather than a retry, so a bare status number would send
@@ -5941,20 +5939,10 @@ PAGE_SCENARIOS.push({
         body: JSON.stringify({ error: 'An active Live session cannot be archived', code: 'live_session_active' }),
       }),
     );
-    await page.evaluate(() => {
-      const box = document.getElementById('past-list') as HTMLElement;
-      for (const row of Array.from(box.querySelectorAll('.token-row'))) {
-        const btn = Array.from(row.querySelectorAll('button')).find(
-          (b) => b.textContent === 'archive',
-        );
-        if (btn) {
-          (btn as HTMLButtonElement).click();
-          return;
-        }
-      }
-    });
+    await page.click(`#past-list .srow[data-session="${DISK}"] > .more`);
+    await page.click('#list-menu [role="menuitem"]:text-is("Archive")');
     await page.waitForFunction(
-      () => !((document.getElementById('status') as HTMLElement).textContent ?? '').includes('archiving'),
+      `!(document.getElementById('status').textContent || '').includes('archiving')`,
       null,
       { timeout: 8000 },
     );
@@ -5963,8 +5951,9 @@ PAGE_SCENARIOS.push({
       said.includes('live call'),
       `a refused archive read "${said}" rather than naming the live call that blocks it`,
     );
+    await page.click('#list-back');
 
-    return `rail offers archive only where a transcript exists; the filed half sits under Settings, lists as restore-only and unpressable; archive sends no confirm and carries the cwd; a Live-call refusal is named`;
+    return `the row menu offers Archive only where a transcript exists; the filed half is its own screen behind Archived (1) on the list, restore-only and unpressable; archive sends no confirm and carries the cwd; restore names the id; a Live-call refusal is named`;
   },
 });
 
@@ -11597,7 +11586,8 @@ PAGE_SCENARIOS.push({
       }
 
       // The list is drawn through the same entry point a real load uses, so the
-      // rail is populated the way it is on the page rather than by hand.
+      // List screen's rows are populated the way they are on the page rather
+      // than by hand.
       await page.evaluate(
         ([here, other, dir]) => {
           renderPastConversations(
@@ -11612,10 +11602,10 @@ PAGE_SCENARIOS.push({
         [viewer.sessionId, OTHER, DIR],
       );
       const listed = await page.evaluate(
-        (id) => !!document.querySelector(`#rail .s[data-session="${id}"]`),
+        (id) => !!document.querySelector(`#past-list .s[data-session="${id}"]`),
         OTHER,
       );
-      expect(listed, `the rail lists no row for ${OTHER}, so the tap below could not have switched to it`);
+      expect(listed, `the list has no row for ${OTHER}, so the tap below could not have switched to it`);
 
       const responded = page.waitForResponse(
         (r) => r.url().includes('/rc/terminals'),
@@ -11625,7 +11615,7 @@ PAGE_SCENARIOS.push({
       // missing call on a path, so the assertion has to travel that path.
       await page.evaluate((id) => {
         const row = document.querySelector(
-          `#rail .s[data-session="${id}"]`,
+          `#past-list .s[data-session="${id}"]`,
         ) as HTMLButtonElement;
         row.click();
       }, OTHER);
@@ -11674,7 +11664,7 @@ PAGE_SCENARIOS.push({
         `the flagged hand-off asked the host for ${JSON.stringify(asked)}`,
       );
 
-      return `a rail row tap asks for the conversation it selected; the unflagged hand-off the resync self-heal uses asks for nothing; the flagged one asks`;
+      return `a list row tap asks for the conversation it selected; the unflagged hand-off the resync self-heal uses asks for nothing; the flagged one asks`;
     },
   });
 
@@ -12107,17 +12097,19 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P123 the bar is one 56px row of ≡, title and ⋯ at 390 and 1280, the tab bar and pins are gone, and search is one row under ≡ and still ⌘K',
+    name: 'P123 the bar is one 56px row of ≡, title and ⋯ at 390 and 1280, the tab bar and pins are gone, and search is the list’s, by its button and by ⌘K',
     // #184 (h1), rewritten from #118/#176's bar. The claims kept: the bar is one
     // row exactly the viewport wide at 390 (it wrapped to two rows once), and
-    // search across sessions is findable without a key a phone does not have,
-    // and does what it names when pressed. What changed is what the bar holds:
-    // the spec's 56px row of ≡, the conversation's title and ⋯, with no page
-    // title above it, no tab bar and no "Pin to Chat" boxes anywhere. Search
-    // moved to a row on the More screen ≡ opens (the list screen's own search
-    // is slice 2), and ⌘K still opens it on a keyboard. In-page code is a plain
-    // string: the transform rewrites a named arrow in a callback into a
-    // __name(...) call the page does not define.
+    // search is findable without a key a phone does not have, and does what it
+    // names when pressed. What changed is what the bar holds: the spec's 56px
+    // row of ≡, the conversation's title and ⋯, with no page title above it, no
+    // tab bar and no "Pin to Chat" boxes anywhere. #185: search is the List
+    // screen's (the parity table's row for ⌘K), so #bar-search, the More row
+    // slice 1 left it as, is retired: the title opens the list, its search
+    // button reveals the field and focuses it, and ⌘K opens the list with the
+    // field focused. In-page code is a plain string: the transform rewrites a
+    // named arrow in a callback into a __name(...) call the page does not
+    // define.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
@@ -12157,7 +12149,7 @@ PAGE_SCENARIOS.push({
             tabBar: !!document.getElementById('tab-bar') || !!document.querySelector('.tab-bar'),
             pins: document.querySelectorAll('.pin-cb, #pin-area').length,
             pageTitleShown: on(h1),
-            searchInBar: bar.contains(document.getElementById('bar-search')),
+            searchInBar: !!bar.querySelector('#list-search, #past-filter, #bar-search'),
           };
         })()`) as Promise<BarReading>;
 
@@ -12187,184 +12179,183 @@ PAGE_SCENARIOS.push({
         lines.push(`${at}: 56px, one row, 44px ≡ and ⋯, title ${JSON.stringify(r.titleText)}`);
       }
 
-      // Search, at the width it had to be found at without a key: ≡, then
-      // the row, which moves to Operations, opens the panel and focuses the box.
+      // Search, at the width it had to be found at without a key: the title,
+      // then the list's search button, which reveals the field and focuses it.
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.click('#h1-more');
-      await page.waitForSelector('#bar-search', { state: 'visible' });
-      const named = (await page.getAttribute('#bar-search', 'aria-label')) ?? '';
-      expect(named === 'Search across sessions', `the search row is labelled ${JSON.stringify(named)}`);
-      await page.click('#bar-search');
+      const retired = (await page.evaluate(`!document.getElementById('bar-search')`)) as boolean;
+      expect(retired, '#bar-search is still on the page, a second search beside the list’s');
+      await page.click('#h1-title');
+      const named = (await page.getAttribute('#list-search', 'aria-label')) ?? '';
+      expect(named === 'Search conversations', `the list's search button is labelled ${JSON.stringify(named)}`);
+      await page.click('#list-search');
       const opened = (await page.evaluate(String.raw`({
-        open: document.getElementById('search').open,
-        focused: document.activeElement === document.getElementById('search-q'),
-        ops: document.getElementById('pane-ops').classList.contains('active'),
-        moreShut: document.getElementById('more-screen').hidden,
-        back: document.getElementById('pane-head').getClientRects().length > 0,
-      })`)) as { open: boolean; focused: boolean; ops: boolean; moreShut: boolean; back: boolean };
-      expect(opened.ops, 'the search row did not move to Operations at 390');
-      expect(opened.open, 'the search row did not open the search panel at 390');
-      expect(opened.focused, 'the search row did not focus the search box at 390');
-      expect(opened.moreShut && opened.back, `Operations did not open as a screen with a way back (${JSON.stringify(opened)})`);
-      await openTab(page, 'chat');
+        list: !document.getElementById('list-screen').hidden,
+        field: document.getElementById('list-find').getClientRects().length > 0,
+        focused: document.activeElement === document.getElementById('past-filter'),
+      })`)) as { list: boolean; field: boolean; focused: boolean };
+      expect(
+        opened.list && opened.field && opened.focused,
+        `the title and the search button did not reveal and focus the field at 390 (${JSON.stringify(opened)})`,
+      );
+      await page.click('#list-back');
 
-      // The keyboard way in is unchanged at 1280.
+      // The keyboard way in: ⌘K / Ctrl-K at 1280 opens the same field.
       await page.setViewportSize({ width: 1280, height: 720 });
       await page.focus('#prompt');
       await page.keyboard.press('Control+k');
       const byKey = (await page.evaluate(
-        String.raw`document.activeElement === document.getElementById('search-q') && document.getElementById('pane-ops').classList.contains('active')`,
+        String.raw`document.activeElement === document.getElementById('past-filter') && !document.getElementById('list-screen').hidden`,
       )) as boolean;
-      expect(byKey, 'Ctrl-K at 1280 no longer opens the search box');
-      await openTab(page, 'chat');
-      return lines.join('; ') + '; no tab bar, pins or page title; ≡ > Search across sessions opens and focuses the search at 390, Ctrl-K at 1280';
+      expect(byKey, 'Ctrl-K at 1280 does not open the list with its search field focused');
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
+      const shut = (await page.evaluate(`document.getElementById('list-screen').hidden`)) as boolean;
+      expect(shut, 'two Escapes from the search field did not put the search away and then the list');
+      return lines.join('; ') + '; no tab bar, pins or page title; #bar-search retired; the title and the list’s search button reveal and focus the field at 390, Ctrl-K at 1280 opens it focused';
     },
   });
   PAGE_SCENARIOS.push({
-    name: 'P124 the rail is a column at 1280, collapsed or not, and at 390 a full-screen list the title opens, nothing in it under 44px',
-    // #119, g1 "The rail holds conversations, not workspaces", then #184 (h1).
-    // The 1280 claims are kept as they were: the declared 190px column, its
-    // parts drawn, collapsing to 40px. At 390 the strip is gone: the spec
-    // retires the rail at phone widths, and until slice 2 builds the List
-    // screen the bar's title opens the rail itself as a screen of its own.
-    // So the 390 claims are that it costs nothing at rest, that the title
-    // opens it full screen with everything the region is for (the folder,
-    // the filter, the rows, the +), that nothing in it is under the 44px tap
-    // floor, and that the way back (its back button, Escape, the row you are
-    // on) returns to the chat with focus on the title.
+    name: 'P124 there is no rail at any width, and the title opens the List screen as drawn at 390 and 1280, nothing in it under 44px',
+    // #119, g1 "The rail holds conversations, not workspaces", then #184 and
+    // #185 (h1). The rail was a 190px column at 1280 and, under 860px, a
+    // screen the title opened. The spec retires it at every width for the
+    // List screen, so the claims are now: nothing of it is on the chat screen
+    // at either width (the transcript runs the full width), the title opens
+    // the list as a screen of its own at both, drawn to List.dc.html (a 56px
+    // bar, a 44px folder line, 64px rows each with a 44px ⋯, New conversation
+    // here at 48px in the thumb zone), nothing in it under the 44px tap floor,
+    // nothing wider than the screen, and the ways back (back, Escape, the row
+    // you are on) return to the chat with focus on the title.
+    // No helper function inside evaluate anywhere in here, on purpose. The
+    // transform rewrites a named arrow into a __name(...) call and the page
+    // has no __name, so the readings are plain strings.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
       const OTHER = '22222222-3333-4444-5555-666666666666';
       const CWD = '/home/evan/scratch';
-      await page.evaluate(
-        ([here, other, cwd]) => {
-          renderPastConversations(
-            [
-              { sessionId: here, title: 'the one on screen' },
-              { sessionId: other, title: 'the other one' },
-            ],
-            cwd,
-            false,
-          );
-        },
-        [viewer.sessionId, OTHER, CWD],
-      );
-
-      // No helper function inside evaluate anywhere in here, on purpose. The
-      // transform rewrites a named arrow into a __name(...) call and the page
-      // has no __name, so a helper declared in the callback throws at run time.
+      await serveList(page, CWD, {
+        list: [
+          { sessionId: viewer.sessionId, title: 'the one on screen' },
+          { sessionId: OTHER, title: 'the other one', updatedAt: new Date().toISOString(), preview: 'a first prompt' },
+        ],
+      });
+      type Reading = {
+        rail: boolean;
+        ctl: boolean;
+        shown: boolean;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        vw: number;
+        vh: number;
+        txX: number;
+        txW: number;
+        head: number;
+        folder: number;
+        rowH: number[];
+        moreW: number[];
+        newH: number;
+        newBottom: number;
+        newW: number;
+        under44: string[];
+        taps: number;
+        overflow: boolean;
+        docW: number;
+        expanded: string | null;
+        focusOnTitle: boolean;
+      };
       const measure = () =>
-        page.evaluate(() => {
-          const rail = document.getElementById('rail') as HTMLElement;
-          const list = rail.querySelector('.list') as HTMLElement;
-          const folder = rail.querySelector('.ws') as HTMLElement | null;
-          const flt = rail.querySelector('.flt') as HTMLElement | null;
-          const input = rail.querySelector('.flt input') as HTMLElement | null;
-          const row = rail.querySelector('.s') as HTMLElement | null;
-          const plus = rail.querySelector('.plus') as HTMLElement | null;
-          const ctl = rail.querySelector('.rh .ctl') as HTMLElement | null;
-          const rr = rail.getBoundingClientRect();
-          const taps = Array.from(rail.querySelectorAll('button,a,[tabindex]'))
+        page.evaluate(String.raw`(() => {
+          const scr = document.getElementById('list-screen');
+          const r = scr.getBoundingClientRect();
+          const tx = document.getElementById('transcript').getBoundingClientRect();
+          const h = (sel) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().height) : 0; };
+          const nb = document.getElementById('list-new').getBoundingClientRect();
+          const taps = Array.from(scr.querySelectorAll('button,a,input,[tabindex]'))
             .filter((e) => e.getClientRects().length > 0)
-            .map((e) => Math.round(e.getBoundingClientRect().height));
+            .map((e) => { const b = e.getBoundingClientRect(); return { k: (e.id || e.className || e.tagName), w: Math.round(b.width), h: Math.round(b.height) }; });
           return {
-            shown: rail.getClientRects().length > 0 && rr.height > 0,
-            railW: Math.round(rr.width),
-            railH: Math.round(rr.height),
-            railTop: Math.round(rr.top),
-            vw: window.innerWidth,
-            vh: window.innerHeight,
-            folderShown: !!folder && folder.getClientRects().length > 0,
-            filterShown: !!flt && flt.getClientRects().length > 0,
-            inputH: input ? Math.round(input.getBoundingClientRect().height) : 0,
-            rowShown: !!row && row.getClientRects().length > 0,
-            rowW: row ? Math.round(row.getBoundingClientRect().width) : 0,
-            plusInList: !!list && !!plus && list.contains(plus),
-            plusShown: !!plus && plus.getClientRects().length > 0,
-            ctlShown: !!ctl && ctl.getClientRects().length > 0,
-            railOverflows: rail.scrollWidth > rail.clientWidth + 1,
-            under44: taps.filter((h) => h < 44).length,
+            rail: !!document.getElementById('rail'),
+            ctl: !!document.querySelector('#list-screen .ctl'),
+            shown: !scr.hidden && scr.getClientRects().length > 0,
+            x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+            vw: innerWidth, vh: innerHeight,
+            txX: Math.round(tx.x), txW: Math.round(tx.width),
+            head: h('#list-screen .scr-head'),
+            folder: h('#list-folder'),
+            rowH: Array.from(document.querySelectorAll('#past-list .s')).map((e) => Math.round(e.getBoundingClientRect().height)),
+            moreW: Array.from(document.querySelectorAll('#past-list .more')).map((e) => Math.round(e.getBoundingClientRect().width)),
+            newH: Math.round(nb.height), newBottom: Math.round(nb.bottom), newW: Math.round(nb.width),
+            under44: taps.filter((t) => t.h < 44 || t.w < 44).map((t) => t.k + ' ' + t.w + 'x' + t.h),
             taps: taps.length,
-            collapsed: rail.classList.contains('collapsed'),
-            expanded: document.getElementById('h1-title')!.getAttribute('aria-expanded'),
+            overflow: scr.scrollWidth > scr.clientWidth + 1 || document.getElementById('list-body').scrollWidth > document.getElementById('list-body').clientWidth + 1,
+            docW: document.documentElement.scrollWidth,
+            expanded: document.getElementById('h1-title').getAttribute('aria-expanded'),
             focusOnTitle: document.activeElement === document.getElementById('h1-title'),
           };
-        });
-      const toggle = () =>
-        page.evaluate(() => {
-          (document.querySelector('#rail .rh .ctl') as HTMLButtonElement).click();
-        });
+        })()`) as Promise<Reading>;
 
-      // Desktop, expanded: the declared column, and everything the region is
-      // for is present.
+      const lines: string[] = [];
+      for (const [w, ht] of [
+        [390, 844],
+        [1280, 810],
+      ] as const) {
+        const at = `${w}x${ht}`;
+        await page.setViewportSize({ width: w, height: ht });
+        await page.focus('#prompt');
+        // At rest: no rail, no strip, no column. The transcript has the width.
+        const rest = await measure();
+        expect(!rest.rail, `the rail element is still on the page at ${at}`);
+        expect(!rest.shown, `the list is over the chat at rest at ${at}`);
+        expect(
+          rest.txX === 0 && rest.txW === rest.vw,
+          `the transcript is ${rest.txW}px from x ${rest.txX} at ${at}, so something still takes a column beside it`,
+        );
+        expect(rest.expanded === 'false', `the title does not say the list is shut at ${at} (aria-expanded ${rest.expanded})`);
+
+        // Opened by the title: the whole screen, drawn as List.dc.html is.
+        await page.click('#h1-title');
+        const open = await measure();
+        expect(
+          open.shown && open.x === 0 && open.y === 0 && open.w === open.vw && open.h === open.vh,
+          `the title did not open the list as a screen of its own at ${at} (${open.w}x${open.h} at ${open.x},${open.y})`,
+        );
+        expect(open.expanded === 'true', `the title does not say the list is open at ${at}`);
+        expect(open.head === 56 && open.folder === 44, `the bar is ${open.head}px and the folder line ${open.folder}px at ${at}, not 56 and 44`);
+        expect(
+          open.rowH.length === 2 && open.rowH.every((x) => x === 64),
+          `the rows are ${JSON.stringify(open.rowH)}px tall at ${at}, not 64`,
+        );
+        expect(open.moreW.every((x) => x === 44), `the row ⋯ buttons are ${JSON.stringify(open.moreW)}px wide at ${at}, not 44`);
+        expect(
+          open.newH === 48 && open.newBottom === open.vh - 24 && open.vh - open.newBottom < 120,
+          `New conversation here is ${open.newH}px with its bottom at ${open.newBottom} of ${open.vh} at ${at}, not 48px in the thumb zone`,
+        );
+        expect(!open.ctl, `a collapse control is drawn on the list at ${at}`);
+        expect(open.under44.length === 0, `${open.under44.length} of ${open.taps} list controls are under 44px at ${at}: ${open.under44.join(', ')}`);
+        expect(!open.overflow && open.docW === open.vw, `the list is wider than the screen at ${at} (document ${open.docW})`);
+
+        // The ways back: the back button, Escape, and the row you are on.
+        await page.click('#list-back');
+        const backed = await measure();
+        expect(!backed.shown && backed.focusOnTitle, `the back button did not return to the chat with focus on the title at ${at}`);
+        await page.click('#h1-title');
+        await page.keyboard.press('Escape');
+        const escaped = await measure();
+        expect(!escaped.shown && escaped.focusOnTitle, `Escape did not shut the list back onto the title at ${at}`);
+        await page.click('#h1-title');
+        await page.click(`#past-list .s[data-session="${viewer.sessionId}"]`);
+        const picked = await measure();
+        expect(!picked.shown, `tapping the conversation already on screen left the list over it at ${at}`);
+        lines.push(
+          `${at}: transcript ${rest.txW}px wide at rest with no rail; the title opens the list ${open.w}x${open.h}, bar ${open.head}, folder line ${open.folder}, rows ${open.rowH[0]}px, ⋯ ${open.moreW[0]}px, New conversation here ${open.newH}px ending ${open.vh - open.newBottom}px above the bottom, ${open.taps} controls at 44px or over`,
+        );
+      }
       await page.setViewportSize({ width: 1280, height: 720 });
-      const wide = await measure();
-      expect(wide.railW === 190, `the rail is ${wide.railW}px wide at 1280, not the 190px column g1 draws`);
-      expect(!wide.railOverflows, 'the rail overflows its own box at 1280, so a long title breaks the layout');
-      expect(wide.folderShown, 'the folder line is not drawn at 1280');
-      expect(wide.filterShown, 'the filter is not drawn at 1280');
-      expect(wide.rowShown, 'no conversation row is drawn at 1280');
-      expect(wide.plusInList, 'the + sits outside the list at 1280, so it does not scroll with the rows');
-
-      // Desktop, collapsed: 40px, and the parts that need room give it up.
-      await toggle();
-      const wideShut = await measure();
-      expect(wideShut.collapsed, 'the toggle did not collapse the rail at 1280');
-      expect(wideShut.railW === 40, `the collapsed rail is ${wideShut.railW}px wide at 1280, not 40px`);
-      expect(!wideShut.folderShown, 'the folder line is still drawn on the collapsed rail');
-      expect(!wideShut.filterShown, 'the filter is still drawn on the collapsed rail');
-      expect(
-        wideShut.rowW === 39 || wideShut.rowW === 40,
-        `collapsed rows are ${wideShut.rowW}px wide, not the 40px gutter`,
-      );
-      // The title brings a collapsed column back, since numbers are no list.
-      await page.click('#h1-title');
-      const fromTitle = await measure();
-      expect(!fromTitle.collapsed, 'the title did not bring the collapsed rail back at 1280');
-
-      // Phone, at rest: no strip and no column, nothing of the fold spent.
-      await page.setViewportSize({ width: 390, height: 844 });
-      await page.focus('#prompt');
-      const rest = await measure();
-      expect(!rest.shown, `the rail is on the chat screen at rest at 390 (${rest.railW}x${rest.railH})`);
-      expect(rest.expanded === 'false', `the title does not say the list is shut (aria-expanded ${rest.expanded})`);
-
-      // Phone, opened by the title: the whole screen, every part drawn, the
-      // collapse control gone (a full-screen list has nothing to collapse to),
-      // and nothing under the tap floor.
-      await page.click('#h1-title');
-      const open = await measure();
-      expect(
-        open.shown && open.railW === open.vw && open.railTop === 0 && open.railH === open.vh,
-        `the title did not open the list full screen at 390 (${open.railW}x${open.railH} at ${open.railTop})`,
-      );
-      expect(open.expanded === 'true', 'the title does not say the list is open');
-      expect(open.folderShown && open.filterShown && open.rowShown && open.plusShown, `the open list is missing a part at 390 (${JSON.stringify(open)})`);
-      expect(open.inputH >= 44, `the filter input is ${open.inputH}px tall at 390, under the 44px tap floor`);
-      expect(!open.ctlShown, 'the collapse control is drawn on the full-screen list');
-      expect(open.under44 === 0, `${open.under44} of ${open.taps} list controls are under 44px tall at 390`);
-      expect(open.plusInList, 'the + left the list at 390');
-
-      // The ways back: the back button, Escape, and the row you are on.
-      await page.click('#rail .rh .back');
-      const backed = await measure();
-      expect(!backed.shown && backed.focusOnTitle, `the back button did not return to the chat with focus on the title (${JSON.stringify({ shown: backed.shown, focus: backed.focusOnTitle })})`);
-      await page.click('#h1-title');
-      await page.keyboard.press('Escape');
-      const escaped = await measure();
-      expect(!escaped.shown && escaped.focusOnTitle, 'Escape did not shut the list back onto the title');
-      await page.click('#h1-title');
-      await page.click(`#rail .s[data-session="${viewer.sessionId}"]`);
-      const picked = await measure();
-      expect(!picked.shown, 'tapping the conversation already on screen left the list over it');
-
-      await page.setViewportSize({ width: 1280, height: 720 });
-      return (
-        `1280: ${wide.railW}px column, collapsed ${wideShut.railW}px, the title brings it back; ` +
-        `390: nothing at rest, the title opens it ${open.railW}x${open.railH}, ${open.taps} controls all at 44px or over, back, Escape and the row on screen return to the chat`
-      );
+      return lines.join('; ') + '; back, Escape and the row on screen return to the chat';
     },
   });
   PAGE_SCENARIOS.push({
@@ -12560,6 +12551,7 @@ PAGE_SCENARIOS.push({
     | 'list'
     | 'more'
     | 'picker'
+    | 'archived'
     | 'ops'
     | 'settings'
     | 'diag';
@@ -12569,6 +12561,7 @@ PAGE_SCENARIOS.push({
     'list',
     'more',
     'picker',
+    'archived',
     'ops',
     'settings',
     'diag',
@@ -12584,14 +12577,14 @@ PAGE_SCENARIOS.push({
       '#composer',
     ],
     menu: ['#h1-menu'],
-    list: ['#rail'],
+    list: ['#list-screen'],
     more: ['#more-screen'],
     picker: ['#dir-picker'],
+    archived: ['#archived-view'],
     ops: ['#pane-ops'],
     settings: ['#pane-settings'],
     diag: ['#pane-diag'],
   };
-  const phoneWide = (page: Page): boolean => (page.viewportSize()?.width ?? 1280) <= 860;
   const openShellSurface = async (page: Page, s: ShellSurface): Promise<void> => {
     await openTab(page, 'chat');
     if (s === 'chat') {
@@ -12610,15 +12603,22 @@ PAGE_SCENARIOS.push({
     } else if (s === 'menu') {
       await openMenu(page);
     } else if (s === 'list') {
-      if (phoneWide(page)) await openList(page);
-      await page.evaluate(`document.getElementById('help-rail').hidden = false`);
+      // #185: the List screen at every width, with its search field out so
+      // the field is read too.
+      await openList(page);
+      if (!(await page.isVisible('#list-find'))) await page.click('#list-search');
     } else if (s === 'more') {
       await page.click('#h1-more');
     } else if (s === 'picker') {
-      if (phoneWide(page)) await openList(page);
-      await page.click('#rail .plus');
+      await openList(page);
+      await page.click('#list-folder');
       await page.waitForFunction(`!document.getElementById('dir-picker').hidden`);
       await page.evaluate(`document.getElementById('help-dir-picker').hidden = false`);
+    } else if (s === 'archived') {
+      await openList(page);
+      await page.click('#list-archived-open');
+      await page.waitForFunction(`!document.getElementById('archived-view').hidden`);
+      await page.evaluate(`document.getElementById('help-archived-view').hidden = false`);
     } else {
       await openTab(page, s);
       await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
@@ -12647,17 +12647,18 @@ PAGE_SCENARIOS.push({
     } else if (s === 'menu') {
       await page.keyboard.press('Escape');
     } else if (s === 'list') {
-      await page.evaluate(`document.getElementById('help-rail').hidden = true`);
-      if (phoneWide(page)) await page.click('#rail .rh .back');
+      await page.click('#list-search');
+      await page.click('#list-back');
     } else if (s === 'more') {
       await page.click('#more-back');
-    } else if (s === 'picker') {
-      await page.evaluate(`document.getElementById('help-dir-picker').hidden = true`);
-      // Focus is inside the panel (the + moves it there, P128), so Escape
-      // shuts it the way a reader would.
+    } else if (s === 'picker' || s === 'archived') {
+      const id = s === 'picker' ? 'dir-picker' : 'archived-view';
+      await page.evaluate(`document.getElementById('help-${id}').hidden = true`);
+      // Focus is inside the screen (opening it moves focus to its back
+      // button, P128), so Escape shuts it the way a reader would.
       await page.keyboard.press('Escape');
-      await page.waitForFunction(`document.getElementById('dir-picker').hidden`);
-      if (phoneWide(page)) await page.click('#rail .rh .back');
+      await page.waitForFunction(`document.getElementById('${id}').hidden`);
+      await page.click('#list-back');
     } else {
       await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
         d.querySelectorAll('.help-text').forEach((h) => { h.hidden = true; });
@@ -12930,8 +12931,10 @@ PAGE_SCENARIOS.push({
   // row: were the root the host's again, the plant would land where the route no
   // longer looks and the rows on screen would be the machine's own, which fails
   // both halves at once.
+  // #185 (h1): the rows are the List screen's, and the planted one has to be
+  // on that screen when the title opens it, not only in the DOM.
   PAGE_SCENARIOS.push({
-    name: 'P127 the rail reads the harness chats dir and not the host directory',
+    name: 'P127 the list reads the harness chats dir and not the host directory',
     run: async ({ page }) => {
       // The chain that makes this observable without anything being driven:
       // GET /rc/fs with no path defaults to $HOME, the folder browser renders
@@ -12966,11 +12969,9 @@ PAGE_SCENARIOS.push({
       );
 
       const rows = () =>
-        page.evaluate(() =>
-          Array.from(
-            (document.getElementById('past-list') as HTMLElement).querySelectorAll('.token-row'),
-          ).map((row) => row.textContent ?? ''),
-        );
+        page.evaluate(
+          String.raw`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((t) => t.textContent || '')`,
+        ) as Promise<string[]>;
 
       const CANARY = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
       const TITLE = 'planted by P127';
@@ -12983,7 +12984,7 @@ PAGE_SCENARIOS.push({
       try {
         expect(
           before.length === 0,
-          `a default load listed ${before.length} conversations for ${JSON.stringify(dir)} (${JSON.stringify(before.slice(0, 3))}), so the rail is reading somewhere other than the harness root`,
+          `a default load listed ${before.length} conversations for ${JSON.stringify(dir)} (${JSON.stringify(before.slice(0, 3))}), so the list is reading somewhere other than the harness root`,
         );
 
         mkdirSync(chatsDir, { recursive: true });
@@ -13003,282 +13004,219 @@ PAGE_SCENARIOS.push({
         }, [dir]);
         const after = await rows();
         expect(
-          after.length === 1 && after[0].includes(TITLE),
-          `a transcript planted in the harness root did not reach the rail on its own (${JSON.stringify(after)})`,
+          after.length === 1 && after[0] === TITLE,
+          `a transcript planted in the harness root did not reach the list on its own (${JSON.stringify(after)})`,
         );
+        // On the List screen, where a reader finds it: the title opens it and
+        // the planted row is painted at its own spot.
+        await openList(page);
+        const onScreen = (await page.evaluate(String.raw`(() => {
+          const row = document.querySelector('#past-list .s[data-session="${CANARY}"]');
+          if (!row || row.getClientRects().length === 0) return false;
+          const b = row.getBoundingClientRect();
+          const at = document.elementFromPoint(b.left + 40, b.top + b.height / 2);
+          return !!at && row.contains(at);
+        })()`)) as boolean;
+        expect(onScreen, 'the planted row is not on the List screen the title opens');
+        await page.click('#list-back');
       } finally {
         // The root is shared for the whole process, so the plant must not
         // outlive the scenario or a later one lists a row it never asked for.
         rmSync(planted, { force: true });
       }
 
-      return `a default load listed nothing for ${JSON.stringify(dir)} rather than the host's conversations, then listed exactly the transcript planted in ${chatsDir.replace(root, '<root>')}`;
+      return `a default load listed nothing for ${JSON.stringify(dir)} rather than the host's conversations, then listed exactly the transcript planted in ${chatsDir.replace(root, '<root>')}, on the List screen the title opens`;
     },
   });
 
-  // #175 (a). The New conversation panel was a closed <details> heading the
-  // Chat column: a second door beside the rail's +, and about 70px of the fold
-  // every time the page loaded. It is now hidden at rest and the + is its only
-  // way in. The + is pressed with real input here, pointer and keyboard,
-  // rather than .click(), because the claims are that the panel is reachable
-  // and keyboard-reachable, not that a handler exists. In-page code is a plain
-  // string throughout: the transform rewrites a named arrow in a callback into
-  // a __name(...) call the page does not define.
+  // #175 (a), then #185 (h1). The New conversation panel was a closed
+  // <details> heading the Chat column, then a panel behind the rail's +. The
+  // spec puts its folder browser, recent folders and typed path behind the
+  // List screen's `change`, as a screen of its own with a back button, and
+  // the create behind New conversation here. The claims kept: it costs
+  // nothing at rest, it opens only from its one door, everything it held is
+  // drawn when it is open, focus goes into it and comes back to the door, and
+  // it never pushes the page sideways. Pressed with real input, pointer and
+  // keyboard, because the claims are reach, not that a handler exists.
+  // In-page code is a plain string throughout: the transform rewrites a
+  // named arrow in a callback into a __name(...) call the page does not
+  // define.
   type PickerReading = {
     hidden: boolean;
-    open: boolean;
     h: number;
-    summaryShown: boolean;
-    firstInColumn: string;
+    inChat: boolean;
     expanded: string | null;
     controls: string | null;
     focusInPanel: boolean;
     focusOn: string;
     missing: string;
-    railShown: boolean;
-    folderShown: boolean;
-    filterShown: boolean;
-    plusShown: boolean;
+    backOnTop: boolean;
     docW: number;
     vw: number;
+    vh: number;
+    top: number;
+    w: number;
     panelRight: number;
-    summaryOnTop: boolean;
+    folderLine: string;
   };
   const readPicker = (page: Page) =>
     page.evaluate(String.raw`(() => {
       const p = document.getElementById('dir-picker');
-      const rail = document.getElementById('rail');
-      const plus = rail.querySelector('.plus');
+      const door = document.getElementById('list-folder');
       const on = (el) => !!el && el.getClientRects().length > 0;
-      // The first thing the Chat column actually lays out, which is what a
-      // reader sees heading it.
-      const first = Array.from(document.getElementById('pane-chat').children).find(
-        (k) => on(k) && k.getBoundingClientRect().height > 0,
-      );
       const a = document.activeElement;
-      // The summary names the panel and shuts it, so it has to be what is
-      // painted at its own spot, not merely laid out somewhere: on a phone
-      // the sticky rail strip can sit on top of it.
-      const sr = p.querySelector('summary').getBoundingClientRect();
-      const hit = sr.height > 0 ? document.elementFromPoint(sr.left + 10, sr.top + sr.height / 2) : null;
+      const r = p.getBoundingClientRect();
+      // The way back names the screen's exit, so it has to be what is
+      // painted at its own spot, not merely laid out under the list.
+      const bb = document.getElementById('dir-back').getBoundingClientRect();
+      const hit = bb.height > 0 ? document.elementFromPoint(bb.left + bb.width / 2, bb.top + bb.height / 2) : null;
       return {
-        summaryOnTop: !!hit && p.querySelector('summary').contains(hit),
         hidden: p.hidden,
-        open: p.open,
-        h: Math.round(p.getBoundingClientRect().height),
-        summaryShown: on(p.querySelector('summary')),
-        firstInColumn: first ? first.id || first.className : '',
-        expanded: plus ? plus.getAttribute('aria-expanded') : null,
-        controls: plus ? plus.getAttribute('aria-controls') : null,
+        h: Math.round(r.height),
+        inChat: document.getElementById('pane-chat').contains(p),
+        expanded: door.getAttribute('aria-expanded'),
+        controls: door.getAttribute('aria-controls'),
         focusInPanel: p.contains(a),
-        focusOn: a === plus ? 'plus' : a && a.id ? a.id : a ? a.tagName.toLowerCase() : '',
-        // Everything the panel held before the move, which must all still be
-        // drawn once it is open.
-        missing: ['dir-current', 'dir-list', 'dir-use', 'new-session-cwd', 'new-session', 'dir-recent', 'past-filter', 'past-list']
+        focusOn: a === door ? 'change' : a && a.id ? a.id : a ? a.tagName.toLowerCase() : '',
+        // Everything the panel held apart from its past list, which is the
+        // List screen's rows now.
+        missing: ['dir-current', 'dir-list', 'dir-use', 'new-session-cwd', 'new-session', 'dir-recent']
           .filter((id) => !on(document.getElementById(id)))
           .join(','),
-        railShown: !rail.hidden && rail.offsetHeight > 0,
-        folderShown: on(rail.querySelector('.ws')),
-        filterShown: on(rail.querySelector('.flt')),
-        plusShown: on(plus),
+        backOnTop: !!hit && document.getElementById('dir-back').contains(hit),
         docW: document.documentElement.scrollWidth,
-        vw: window.innerWidth,
-        panelRight: Math.round(p.getBoundingClientRect().right),
+        vw: innerWidth,
+        vh: innerHeight,
+        top: Math.round(r.top),
+        w: Math.round(r.width),
+        panelRight: Math.round(r.right),
+        folderLine: (document.getElementById('list-cwd').textContent || '').trim(),
       };
     })()`) as Promise<PickerReading>;
 
   PAGE_SCENARIOS.push({
-    name: 'P128 the New conversation panel costs nothing at rest and opens only from the rail +, over the chat at 1280 and as its own screen at 390',
+    name: 'P128 the folder screen costs nothing at rest and opens only from the list’s change, as a screen of its own at 390 and 1280',
     waitView: false,
     run: async ({ page }) => {
-      // A fresh load with nothing watched: the state where the panel is most
-      // wanted and where the old summary row cost the fold every time. The
-      // rail is fed by the load's own browse (P28), so wait for the folder.
+      // A fresh load with nothing watched: the state where a new conversation
+      // is most wanted. The list is fed by the load's own browse (P28).
       await page.setViewportSize({ width: 1280, height: 720 });
       await page.waitForFunction('pastConvosCwd !== null');
 
       const rest = await readPicker(page);
       expect(
-        rest.hidden && !rest.open && rest.h === 0 && !rest.summaryShown,
-        `the panel is drawn at rest (hidden ${rest.hidden}, open ${rest.open}, ${rest.h}px, summary shown ${rest.summaryShown})`,
-      );
-      expect(
-        rest.firstInColumn !== 'dir-picker',
-        'the New conversation panel still heads the Chat column at rest',
+        rest.hidden && rest.h === 0 && !rest.inChat,
+        `the folder screen is drawn at rest or sits in the chat column (hidden ${rest.hidden}, ${rest.h}px, in the chat ${rest.inChat})`,
       );
       expect(
         rest.controls === 'dir-picker' && rest.expanded === 'false',
-        `the + does not say what it opens or that it is shut (aria-controls ${rest.controls}, aria-expanded ${rest.expanded})`,
-      );
-      await page.setViewportSize({ width: 390, height: 844 });
-      const restPhone = await readPicker(page);
-      expect(
-        restPhone.hidden && restPhone.h === 0 && !restPhone.summaryShown,
-        `the panel is drawn at rest at 390 (${restPhone.h}px)`,
-      );
-      await page.setViewportSize({ width: 1280, height: 720 });
-
-      // Pointer: the + opens it, everything it held is drawn, and focus lands
-      // inside it rather than staying at the foot of the rail.
-      await page.click('#rail .plus');
-      const opened = await readPicker(page);
-      expect(
-        !opened.hidden && opened.open && opened.h > 0,
-        `the + did not open the panel (hidden ${opened.hidden}, open ${opened.open}, ${opened.h}px)`,
-      );
-      expect(opened.expanded === 'true', 'the + does not say the panel is open');
-      expect(opened.missing === '', `the open panel is missing ${opened.missing}`);
-      expect(
-        opened.focusInPanel,
-        `opening the panel left focus on ${opened.focusOn}, outside it`,
+        `change does not say what it opens or that it is shut (aria-controls ${rest.controls}, aria-expanded ${rest.expanded})`,
       );
 
-      // Keyboard: the summary shuts it and hands focus back to the +, Enter on
-      // the + opens it again, Tab reaches the panel's first control, and
-      // Escape shuts it from inside.
-      await page.keyboard.press('Enter');
-      // The details' toggle event is queued, not dispatched inline, so the
-      // panel hides a task after the key. Waited for rather than read at once;
-      // a panel that never hides falls through to the assertion below.
-      await page
-        .waitForFunction(`document.getElementById('dir-picker').hidden`, null, { timeout: 3_000 })
-        .catch(() => undefined);
-      const shutBySummary = await readPicker(page);
-      expect(
-        shutBySummary.hidden && shutBySummary.h === 0,
-        'shutting the summary left the panel on the page, which is the summary row #175 removed',
-      );
-      expect(
-        shutBySummary.focusOn === 'plus' && shutBySummary.expanded === 'false',
-        `shutting the panel left focus on ${shutBySummary.focusOn} and the + reading ${shutBySummary.expanded}`,
-      );
-      await page.keyboard.press('Enter');
-      const reopened = await readPicker(page);
-      expect(
-        !reopened.hidden && reopened.focusInPanel,
-        `Enter on the + did not open the panel and move into it (focus on ${reopened.focusOn})`,
-      );
-      let reached = '';
-      for (let i = 0; i < 6 && reached !== 'dir-use'; i++) {
-        await page.keyboard.press('Tab');
-        reached = (await readPicker(page)).focusOn;
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [1280, 720],
+        [390, 844],
+      ] as const) {
+        const at = `${w}x${h}`;
+        await page.setViewportSize({ width: w, height: h });
+        // Rows with long previews, drawn through the page's own renderer, so
+        // the overflow check below has something wide to hold: a nowrap
+        // preview's full length once became the list's min-content (#175).
+        await page.evaluate(String.raw`renderPastConversations(
+          [1, 2, 3].map((n) => ({
+            sessionId: '0000000' + n + '-aaaa-bbbb-cccc-dddddddddddd',
+            title: 'planted past row ' + n,
+            updatedAt: new Date().toISOString(),
+            preview: 'a long first prompt that does not wrap, ' + 'so its whole length is the line. '.repeat(12),
+          })),
+          pastConvosCwd,
+          false,
+        )`);
+        await openList(page);
+
+        // Pointer: change opens it over the list, the whole screen, with
+        // everything it held drawn and focus on its way back.
+        await page.click('#list-folder');
+        const opened = await readPicker(page);
+        expect(
+          !opened.hidden && opened.top === 0 && opened.w === w && opened.h === h,
+          `change did not open the folder screen as a screen of its own at ${at} (${opened.w}x${opened.h} at ${opened.top})`,
+        );
+        expect(opened.expanded === 'true', `change does not say the folder screen is open at ${at}`);
+        expect(opened.missing === '', `the open folder screen is missing ${opened.missing} at ${at}`);
+        expect(opened.focusInPanel && opened.focusOn === 'dir-back', `opening it left focus on ${opened.focusOn} at ${at}`);
+        expect(opened.backOnTop, `the folder screen's back button is not on top at ${at}, so its way out is under the list`);
+        expect(
+          opened.docW <= opened.vw && opened.panelRight <= opened.vw,
+          `the folder screen overflows at ${at}: document ${opened.docW}px, right edge ${opened.panelRight}`,
+        );
+
+        // Keyboard: Tab from the back button reaches the folder's create,
+        // Escape shuts it back onto change, Enter on change opens it again,
+        // and the back button shuts it onto change too.
+        let reached = '';
+        for (let i = 0; i < 8 && reached !== 'dir-use'; i++) {
+          await page.keyboard.press('Tab');
+          reached = (await readPicker(page)).focusOn;
+        }
+        expect(reached === 'dir-use', `Tab from the back button never reached the folder's create at ${at}, it stopped on ${reached}`);
+        await page.keyboard.press('Escape');
+        const shutByEscape = await readPicker(page);
+        expect(
+          shutByEscape.hidden && shutByEscape.focusOn === 'change' && shutByEscape.expanded === 'false',
+          `Escape did not shut the folder screen back onto change at ${at} (hidden ${shutByEscape.hidden}, focus on ${shutByEscape.focusOn})`,
+        );
+        await page.keyboard.press('Enter');
+        const reopened = await readPicker(page);
+        expect(!reopened.hidden && reopened.focusInPanel, `Enter on change did not open the folder screen at ${at}`);
+        await page.click('#dir-back');
+        const backed = await readPicker(page);
+        expect(backed.hidden && backed.focusOn === 'change', `the back button did not shut it onto change at ${at} (focus on ${backed.focusOn})`);
+        await page.click('#list-back');
+        lines.push(`${at}: ${opened.w}x${opened.h} screen over the list, focus on its back, no overflow (${opened.docW}/${opened.vw})`);
       }
-      expect(
-        reached === 'dir-use',
-        `Tab from the panel's summary never reached Use this folder, it stopped on ${reached}`,
-      );
-      await page.keyboard.press('Escape');
-      const shutByEscape = await readPicker(page);
-      expect(
-        shutByEscape.hidden && shutByEscape.focusOn === 'plus',
-        `Escape did not shut the panel back to the + (hidden ${shutByEscape.hidden}, focus on ${shutByEscape.focusOn})`,
-      );
 
-      // The + is a toggle: the same door shuts it.
-      await page.click('#rail .plus');
-      await page.click('#rail .plus');
-      const toggled = await readPicker(page);
-      expect(toggled.hidden, 'pressing the + a second time did not shut the panel');
-
-      // Phone: #184 (h1) moved the + into the conversation list the bar's
-      // title opens, and the open panel is a screen of its own over that
-      // list. It must not push the page sideways. What pushed it was a past
-      // row's preview line (nowrap, so its full length became the list's
-      // min-content), and the harness root holds no conversations (#178), so
-      // rows with long previews are drawn through the page's own renderer
-      // first. Without them the panel has nothing wide in it and the overflow
-      // check below would pass vacuously.
-      await page.evaluate(String.raw`renderPastConversations(
-        [1, 2, 3].map((n) => ({
-          sessionId: '0000000' + n + '-aaaa-bbbb-cccc-dddddddddddd',
-          title: 'planted past row ' + n,
-          updatedAt: new Date().toISOString(),
-          preview: 'a long first prompt that does not wrap, ' + 'so its whole length is the line. '.repeat(12),
-        })),
-        pastConvosCwd,
-        false,
-      )`);
+      // No folder: a first browse that failed is exactly when the typed path
+      // is the way in, so the door has to survive it.
       await page.setViewportSize({ width: 390, height: 844 });
-      await openList(page);
-      await page.click('#rail .plus');
-      const previews = (await page.evaluate(
-        String.raw`document.querySelectorAll('#past-list .token-row').length`,
-      )) as number;
-      expect(previews === 3, `the planted past rows did not draw (${previews} rows), so the overflow check below has nothing wide to hold`);
-      const phone = await readPicker(page);
-      expect(!phone.hidden && phone.missing === '', `the + did not open the whole panel at 390 (missing ${phone.missing})`);
-      expect(
-        phone.docW <= phone.vw && phone.panelRight <= phone.vw,
-        `the open panel overflows at 390: document ${phone.docW}px, panel right edge ${phone.panelRight}, viewport ${phone.vw}`,
-      );
-      // Its summary, the row that names it and shuts it, is what is painted at
-      // its own spot: on top of the list it was opened from, not under it.
-      expect(
-        phone.summaryOnTop,
-        'the open panel\'s summary is not on top at 390, so the row that names and shuts it is hidden under the list',
-      );
-      const screen = (await page.evaluate(String.raw`(() => {
-        const r = document.getElementById('dir-picker').getBoundingClientRect();
-        return { top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
-      })()`)) as { top: number; w: number; h: number };
-      expect(
-        screen.top === 0 && screen.w === 390 && screen.h === 844,
-        `the panel is not a screen of its own at 390 (${JSON.stringify(screen)})`,
-      );
-      await page.keyboard.press('Escape');
-      const phoneShut = await readPicker(page);
-      expect(
-        phoneShut.hidden && phoneShut.focusOn === 'plus',
-        `Escape at 390 did not shut the panel back onto the + in the list (focus on ${phoneShut.focusOn})`,
-      );
-      await page.click('#rail .rh .back');
-      await page.setViewportSize({ width: 1280, height: 720 });
-
-      // No folder: the rail used to drop out entirely, which would now take
-      // the panel's only door with it, exactly when a failed first browse
-      // makes the typed path the way in.
       await page.evaluate('renderPastConversations([], null, false)');
+      await openList(page);
+      await page.click('#list-folder');
       const bare = await readPicker(page);
       expect(
-        bare.railShown && bare.plusShown,
-        `with no folder the rail or its + is gone, so the panel has no door (rail ${bare.railShown}, + ${bare.plusShown})`,
+        !bare.hidden && bare.missing === '' && bare.folderLine === 'no folder yet',
+        `with no folder the list's change did not open the folder screen, or the line did not say so (${JSON.stringify({ hidden: bare.hidden, missing: bare.missing, line: bare.folderLine })})`,
       );
-      expect(
-        !bare.folderShown && !bare.filterShown,
-        `with no folder the rail still draws a folder line (${bare.folderShown}) or a filter (${bare.filterShown}) with nothing behind them`,
-      );
-      await page.click('#rail .plus');
-      const bareOpen = await readPicker(page);
-      expect(
-        !bareOpen.hidden && bareOpen.missing === '',
-        'with no folder the + did not open the panel',
-      );
+      await page.click('#dir-back');
+      await page.click('#list-back');
+      await page.setViewportSize({ width: 1280, height: 720 });
 
       return (
-        'hidden at rest at 1280 and 390, + opens it with focus inside, summary, Escape and the + shut it back to the +, Tab reaches Use this folder, ' +
-        `at 390 the + in the title's list opens it as a ${screen.w}x${screen.h} screen with its summary on top, no overflow (${phone.docW}/${phone.vw}), Escape back to the +; the + survives a folderless rail`
+        'hidden at rest and out of the chat column, change opens it with focus on its back button, Tab reaches its create, Escape and back return to change, Enter reopens it; ' +
+        lines.join('; ') +
+        '; change survives a list with no folder'
       );
     },
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P129 the browse, recent, typed-path and past paths all work from behind the rail +',
-    // #175 (a), the other half of P128. Moving the panel behind the + is only
-    // safe if every way in it held still lands where it did: a recent
-    // workspace browses, a folder row browses, a typed path and Use this folder
-    // both reach the one create POST, and a past row resumes. Each is driven
-    // with real input on the panel the + opened, so a control left hidden or
-    // unwired by the move fails here rather than in a reader's hand. The
-    // create POST is answered 403 by a route, because what is asserted is the
-    // cwd the page sends, and a real create would start a session the stub
-    // cannot stream.
+    name: 'P129 the browse, recent, typed-path and past paths all work from behind the list’s change',
+    // #175 (a), then #185 (h1), the other half of P128. Moving the folder
+    // browser behind `change` is only safe if every way in it held still
+    // lands where it did: a recent folder browses, a folder row browses (and
+    // the list under the screen follows the folder, which is what `change` is
+    // for), a typed path and the folder's create both reach the one create
+    // POST, a refusal keeps the screen, and a past row (a row of the list
+    // now) resumes and shuts what was opened to get there. Driven with real
+    // input on the screen `change` opened. The create POST is answered 403 by
+    // a route, because what is asserted is the cwd the page sends.
     // #178: the folders it walks are planted inside the harness root rather
     // than read off the host, so the run depends on nothing this machine's
-    // $HOME holds and prints none of its paths. The page still lands on $HOME
-    // at load (GET /rc/fs defaults there), and nothing here reads that.
+    // $HOME holds and prints none of its paths.
     waitView: false,
     run: async ({ page, viewer }) => {
-      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.setViewportSize({ width: 390, height: 844 });
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
       // Refused before any write if the root is the real ~/.qwen, the same
       // guard P127 keeps for its plant: an inherited QWEN_RUNTIME_DIR can name
@@ -13295,7 +13233,8 @@ PAGE_SCENARIOS.push({
       rmSync(top, { recursive: true, force: true });
       mkdirSync(inner, { recursive: true });
       try {
-        await page.click('#rail .plus');
+        await openList(page);
+        await page.click('#list-folder');
 
         // Recent: the planted folder, seeded through the page's own store and
         // renderer, then tapped.
@@ -13305,18 +13244,21 @@ PAGE_SCENARIOS.push({
         await page.click('#dir-recent button');
         await page.waitForFunction(`curDirPath === ${JSON.stringify(top)}`);
 
-        // Browse: a real tap on the planted subfolder's row.
+        // Browse: a real tap on the planted subfolder's row. The list under the
+        // screen follows the folder it landed on.
         await page.click('#dir-list .token-row >> text="inner/"');
         await page.waitForFunction(`curDirPath === ${JSON.stringify(inner)}`);
-        const browsed = (await page.evaluate(
-          String.raw`document.getElementById('dir-current').textContent`,
-        )) as string;
+        await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(inner)}`, null, { timeout: 5_000 });
+        const browsed = (await page.evaluate(String.raw`({
+          current: document.getElementById('dir-current').textContent,
+          line: document.getElementById('list-folder').title,
+        })`)) as { current: string; line: string };
         expect(
-          browsed === inner,
-          `a folder row did not browse: the panel shows ${JSON.stringify(shown(browsed))}`,
+          browsed.current === inner && browsed.line === inner,
+          `a folder row did not browse, or the list's folder line did not follow it (${JSON.stringify({ current: shown(browsed.current), line: shown(browsed.line) })})`,
         );
 
-        // Typed path and Use this folder: both funnel into the one create POST.
+        // Typed path and the folder's create: both funnel into the one POST.
         const isCreate = (u: URL) => u.pathname === '/session';
         await page.route(isCreate, async (route) => {
           if (route.request().method() !== 'POST') return route.continue();
@@ -13340,57 +13282,59 @@ PAGE_SCENARIOS.push({
           `the typed path sent cwd ${JSON.stringify(shown(typed ?? ''))}, not the path typed`,
         );
         // Typing and leaving the field browses there (its change handler), so
-        // Use this folder now names whatever the browser landed on.
+        // the folder's create now names whatever the browser landed on.
         await page.waitForFunction(`curDirPath === ${JSON.stringify(top)}`);
         const used = await createCwd(() => page.click('#dir-use'));
         expect(
           used === top,
-          `Use this folder sent cwd ${JSON.stringify(shown(used ?? ''))}, not the folder on screen`,
+          `the folder's create sent cwd ${JSON.stringify(shown(used ?? ''))}, not the folder on screen`,
         );
         // The request leaving is not the answer landing: wait for the page to
-        // say the refusal before asking what it did with the panel.
+        // say the refusal before asking what it did with the screen.
         await page.waitForFunction(
           String.raw`/not authorized/.test(document.getElementById('status').textContent)`,
           null,
           { timeout: 5_000 },
         );
-        const refusedOpen = (await page.evaluate(
-          String.raw`!document.getElementById('dir-picker').hidden`,
-        )) as boolean;
-        expect(
-          refusedOpen,
-          'a refused create shut the panel, so the reader loses the folder they picked',
-        );
+        const refused = (await page.evaluate(String.raw`({
+          open: !document.getElementById('dir-picker').hidden,
+          toast: (() => {
+            const t = document.getElementById('status');
+            if (t.getClientRects().length === 0) return false;
+            const b = t.getBoundingClientRect();
+            const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return !!at && t.contains(at);
+          })(),
+        })`)) as { open: boolean; toast: boolean };
+        expect(refused.open, 'a refused create shut the folder screen, so the reader loses the folder they picked');
+        expect(refused.toast, 'the refusal is not on screen over the folder screen, so the reader is not told why');
         await page.unroute(isCreate);
 
-        // Past: a row for the stub's own conversation, tapped. Nothing is
-        // watched yet, so arriving in it is a change of conversation, and the
-        // panel that was opened to get there shuts behind it.
+        // Past: a row of the list for the stub's own conversation, tapped.
+        // Nothing is watched yet, so arriving in it is a change of
+        // conversation, and the screens opened to get there shut behind it.
+        await page.click('#dir-back');
         await page.evaluate(
-          `renderPastConversations([{ sessionId: ${JSON.stringify(viewer.sessionId)}, title: 'resume me from the panel' }], curDirPath, false)`,
+          `renderPastConversations([{ sessionId: ${JSON.stringify(viewer.sessionId)}, title: 'resume me from the list' }], curDirPath, false)`,
         );
-        // The title, not the row's middle, which can land on its archive or
-        // delete button.
-        await page.click('#past-list .token-row >> text=resume me from the panel');
+        await page.click('#past-list .s >> text=resume me from the list');
         await page.waitForFunction(`watchedSessionId === ${JSON.stringify(viewer.sessionId)}`);
-        // A panel that never shuts falls through to the assertion, which says so.
-        await page
-          .waitForFunction(`document.getElementById('dir-picker').hidden`, null, { timeout: 5_000 })
-          .catch(() => undefined);
         const arrived = (await page.evaluate(String.raw`({
-          hidden: document.getElementById('dir-picker').hidden,
-          expanded: document.querySelector('#rail .plus').getAttribute('aria-expanded'),
-        })`)) as { hidden: boolean; expanded: string };
+          list: document.getElementById('list-screen').hidden,
+          folder: document.getElementById('dir-picker').hidden,
+          expanded: document.getElementById('list-folder').getAttribute('aria-expanded'),
+        })`)) as { list: boolean; folder: boolean; expanded: string };
         expect(
-          arrived.hidden && arrived.expanded === 'false',
-          `arriving in a conversation left the panel open (hidden ${arrived.hidden}, + reads ${arrived.expanded})`,
+          arrived.list && arrived.folder && arrived.expanded === 'false',
+          `arriving in a conversation left the list or the folder screen open (${JSON.stringify(arrived)})`,
         );
       } finally {
         // The root is shared for the whole process, so the plant goes with
         // the scenario.
         rmSync(top, { recursive: true, force: true });
+        await page.setViewportSize({ width: 1280, height: 720 });
       }
-      return `recent browsed to ${shown(top)}, its folder row to ${shown(inner)}, typed path and Use this folder both POST ${shown(top)}, a refusal keeps the panel, a past row resumes and shuts it`;
+      return `recent browsed to ${shown(top)}, its folder row to ${shown(inner)} and the list followed, typed path and the folder's create both POST ${shown(top)}, a refusal keeps the screen and is said over it, a row of the list resumes and shuts both screens`;
     },
   });
 
@@ -13649,7 +13593,12 @@ PAGE_SCENARIOS.push({
       // #184: the drawer band is the sheet now, filled by the same render.
       await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
 
-      const G1 = { page: 'rgb(13, 17, 23)', band: 'rgb(16, 21, 28)', raise: 'rgb(22, 27, 34)' };
+      const G1 = {
+        page: 'rgb(13, 17, 23)',
+        band: 'rgb(16, 21, 28)',
+        raise: 'rgb(22, 27, 34)',
+        accent: 'rgb(31, 111, 235)',
+      };
       // #184 (h1): the spec's grounds. The bar, the sheet, the tools and the
       // composer are bands; the status line sits on the page ground under the
       // bar; the pills, the toast and the ⋯ menu are raised controls; the More
@@ -13666,12 +13615,28 @@ PAGE_SCENARIOS.push({
           ['#status', 'raise'],
         ],
         menu: [['#h1-menu', 'raise']],
-        list: [['#rail .rh', 'band']],
+        // #185: the List screen as drawn: the page ground, the bar and the
+        // thumb zone on the band, the folder line on the page, the button on
+        // the accent.
+        list: [
+          ['#list-screen', 'page'],
+          ['#list-screen .scr-head', 'band'],
+          ['#list-folder', 'page'],
+          ['#list-foot', 'band'],
+          ['#list-new', 'accent'],
+        ],
         more: [
           ['#more-screen', 'page'],
           ['#more-screen .row', 'band'],
         ],
-        picker: [['#dir-picker', 'band']],
+        picker: [
+          ['#dir-picker', 'page'],
+          ['#dir-picker .scr-head', 'band'],
+        ],
+        archived: [
+          ['#archived-view', 'page'],
+          ['#archived-view .scr-head', 'band'],
+        ],
         ops: [['#pane-ops details.ops-collapse', 'band']],
         settings: [['#pane-settings details.ops-collapse', 'band']],
         diag: [['#pane-diag details.ops-collapse', 'band']],
@@ -13759,7 +13724,7 @@ PAGE_SCENARIOS.push({
         await page.keyboard.press('Escape');
         expect(exOpen, `opening the ⋯ menu at ${w} did not show export`);
         lines.push(
-          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, panel and ${cards} cards on #10151c, no light box; no page title, export in the menu`,
+          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, the List, folder and archived screens on #0d1117 with #10151c heads and New conversation here on #1f6feb, ${cards} cards on #10151c, no light box; no page title, export in the menu`,
         );
       }
       await page.setViewportSize({ width: 1280, height: 720 });
@@ -13769,19 +13734,21 @@ PAGE_SCENARIOS.push({
 
   // #180. Archive and delete lived only on the New conversation panel's past
   // rows, behind the rail's +, and nothing on the rail itself could rename,
-  // file away or remove a conversation. Every rail row now carries a ⋯ menu.
-  // Driven with real input at both widths the sheet draws, by pointer and by
-  // keyboard, because the claims are that it is reachable and operable, not
-  // that a handler exists. The conversations are transcripts planted under
+  // file away or remove a conversation. Every rail row got a ⋯ menu, and #185
+  // (h1) carries it onto the List screen's rows, where it is a 44px button
+  // always drawn (the list is the phone's layout at every width, so there is
+  // no hover to fade it in on). Driven with real input at both widths the
+  // sheet draws, by pointer and by keyboard, because the claims are that it is
+  // reachable and operable, not that a handler exists. The conversations are transcripts planted under
   // the harness root, in a folder of the scenario's own: P127 holds that the
   // folder the page lands on lists nothing, and the pool runs scenarios side
   // by side in one root. The daemon's half of archive is answered here (the
   // stub daemon has no archive), and it does what the daemon does to the
   // listing: the transcript leaves the folder's chats dir. Everything on the
-  // page's side is real, including the refresh that redraws the rail from
+  // page's side is real, including the refresh that redraws the list from
   // disk. Delete is only ever dismissed, so no delete request may leave.
   PAGE_SCENARIOS.push({
-    name: 'P132 every rail row has a menu that archives and deletes it, and renames it while it is open, by pointer and by keyboard, at 1280 and in the list at 390',
+    name: 'P132 every list row has a menu that archives and deletes it, and renames it while it is open, by pointer and by keyboard, on the List screen at 1280 and 390',
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
@@ -13869,7 +13836,7 @@ PAGE_SCENARIOS.push({
         await page.evaluate(
           `curDirPath = ${JSON.stringify(folder)}; refreshPastConversations(${JSON.stringify(folder)})`,
         );
-        await page.waitForFunction(`document.querySelectorAll('#rail .srow').length === 4`);
+        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 4`);
 
         type MenuReading = {
           open: boolean;
@@ -13881,7 +13848,7 @@ PAGE_SCENARIOS.push({
         };
         const readMenu = () =>
           page.evaluate(String.raw`(() => {
-            const m = document.getElementById('rail-menu');
+            const m = document.getElementById('list-menu');
             if (!m) return { open: false, items: [], focus: '', label: '', bg: '', inView: false };
             const r = m.getBoundingClientRect();
             const a = document.activeElement;
@@ -13905,7 +13872,7 @@ PAGE_SCENARIOS.push({
         };
         const readMore = (id: string) =>
           page.evaluate(String.raw`(() => {
-            const w = Array.from(document.querySelectorAll('#rail .srow')).find((x) => x.dataset.session === ${JSON.stringify(id)});
+            const w = Array.from(document.querySelectorAll('#past-list .srow')).find((x) => x.dataset.session === ${JSON.stringify(id)});
             const b = w ? w.querySelector('.more') : null;
             if (!b) return null;
             const r = b.getBoundingClientRect();
@@ -13919,7 +13886,7 @@ PAGE_SCENARIOS.push({
               focused: document.activeElement === b,
             };
           })()`) as Promise<MoreReading | null>;
-        const rowSel = (id: string) => `#rail .srow[data-session="${id}"]`;
+        const rowSel = (id: string) => `#past-list .srow[data-session="${id}"]`;
         // A past row offers what can act on a transcript; Rename only where the
         // daemon has the conversation open, since its route reaches nothing
         // else; End session only on the open row on screen.
@@ -13935,30 +13902,22 @@ PAGE_SCENARIOS.push({
           await page.setViewportSize({ width: w, height: h });
           await page.mouse.move(w - 2, h - 2);
           const phone = w < 860;
-          // #184 (h1): on a phone the rail is the list the bar's title opens,
-          // so it is opened before its rows are read.
-          if (phone) await openList(page);
+          // #185 (h1): the rows are the List screen's at every width, so the
+          // list the bar's title opens is opened before its rows are read.
+          await openList(page);
 
-          // At rest: named for its row and announced as a menu button; faded
-          // out on a desktop row nobody is pointing at, and a 44px cell on the
-          // phone strip, where there is no hover to bring it up.
+          // At rest: named for its row and announced as a menu button, and a
+          // 44px cell always drawn, at both widths.
           const rest = await readMore(DEL);
           expect(rest !== null, `the row for a planted conversation has no actions button at ${at}`);
           expect(
             rest!.label === `Actions for ${TITLE[DEL]}` && rest!.popup === 'menu' && rest!.expanded === 'false',
             `the actions button does not name its row or say it opens a menu at ${at} (${JSON.stringify(rest)})`,
           );
-          if (phone) {
-            expect(
-              rest!.opacity === '1' && rest!.w >= 44 && rest!.h >= 44,
-              `the actions button on the phone strip is ${rest!.w}x${rest!.h} at opacity ${rest!.opacity}, not an always-shown 44px cell`,
-            );
-          } else {
-            expect(rest!.opacity === '0', `the actions button shows at rest at ${at} (opacity ${rest!.opacity})`);
-            await page.hover(`${rowSel(DEL)} > .s`);
-            const hovered = await readMore(DEL);
-            expect(hovered!.opacity === '1', `hovering the row did not bring up its actions at ${at}`);
-          }
+          expect(
+            rest!.opacity === '1' && rest!.w >= 44 && rest!.h >= 44,
+            `the actions button is ${rest!.w}x${rest!.h} at opacity ${rest!.opacity} at ${at}, not an always-shown 44px cell`,
+          );
 
           // Pointer: the menu opens on the row, on the shell, inside the
           // viewport, with focus on its first item, and Escape puts focus
@@ -13979,7 +13938,7 @@ PAGE_SCENARIOS.push({
           expect((await readMore(DEL))!.expanded === 'true', `the button does not say its menu is open at ${at}`);
           expect(byClick.bg === 'rgb(22, 27, 34)', `the menu is ${byClick.bg}, not the sheet's control ground`);
           expect(byClick.inView, `the menu hangs outside the viewport at ${at}`);
-          for (const row of await readShellText(page, ['#rail-menu'])) pgShellCheck(row, `${at} rail menu`);
+          for (const row of await readShellText(page, ['#list-menu'])) pgShellCheck(row, `${at} row menu`);
           await page.keyboard.press('Escape');
           const shut = await readMenu();
           const back = await readMore(DEL);
@@ -13995,7 +13954,6 @@ PAGE_SCENARIOS.push({
           await page.keyboard.press('Tab');
           const tabbed = await readMore(HERE);
           expect(tabbed!.focused, `Tab from the row on screen did not reach its actions button at ${at}`);
-          if (!phone) expect(tabbed!.opacity === '1', `focus did not bring up the actions button at ${at}`);
           await page.keyboard.press(phone ? 'Space' : 'Enter');
           const byKey = await readMenu();
           expect(byKey.open, `${phone ? 'Space' : 'Enter'} on the actions button opened no menu at ${at}`);
@@ -14021,9 +13979,9 @@ PAGE_SCENARIOS.push({
           // the new name the same way, and a dismissed one sends nothing either.
           const before = asked.length;
           await page.click(`${rowSel(DEL)} > .more`);
-          await page.click('#rail-menu [role="menuitem"]:text-is("Delete")');
+          await page.click('#list-menu [role="menuitem"]:text-is("Delete")');
           await page.click(`${rowSel(HERE)} > .more`);
-          await page.click('#rail-menu [role="menuitem"]:text-is("Rename")');
+          await page.click('#list-menu [role="menuitem"]:text-is("Rename")');
           await page.waitForTimeout(300);
           const asks = asked.slice(before);
           expect(
@@ -14035,10 +13993,10 @@ PAGE_SCENARIOS.push({
             `Delete and Rename did not each ask, naming the conversation, at ${at} (${JSON.stringify(asks)})`,
           );
           expect(sent.length === 0, `a dismissed ask still sent ${JSON.stringify(sent)} at ${at}`);
-          expect((await readMore(DEL)) !== null, `dismissing Delete still took the row off the rail at ${at}`);
+          expect((await readMore(DEL)) !== null, `dismissing Delete still took the row off the list at ${at}`);
 
           // Archive, from the keyboard on the phone and the pointer on the
-          // desktop: the request names the row, and the row leaves the rail
+          // desktop: the request names the row, and the row leaves the list
           // through the page's own refresh. On a past row Archive is the first
           // item, so the keyboard path is open and activate.
           const target = ARC[i]!;
@@ -14049,22 +14007,22 @@ PAGE_SCENARIOS.push({
             await page.keyboard.press('Enter');
           } else {
             await page.click(`${rowSel(target)} > .more`);
-            await page.click('#rail-menu [role="menuitem"]:text-is("Archive")');
+            await page.click('#list-menu [role="menuitem"]:text-is("Archive")');
           }
           await page
             .waitForFunction(`!document.querySelector('${rowSel(target)}')`, null, { timeout: 5_000 })
             .catch(() => undefined);
           expect(archived.includes(target), `Archive at ${at} sent nothing for the row (${JSON.stringify(archived)})`);
           const left = (await page.evaluate(
-            String.raw`Array.from(document.querySelectorAll('#rail .srow')).map((x) => x.dataset.session)`,
+            String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((x) => x.dataset.session)`,
           )) as string[];
-          expect(!left.includes(target), `the archived row is still on the rail at ${at}`);
+          expect(!left.includes(target), `the archived row is still on the list at ${at}`);
           expect(
             left.includes(HERE) && left.includes(DEL),
             `archiving one row took others with it at ${at} (${JSON.stringify(left)})`,
           );
           lines.push(
-            `${at}: ${phone ? 'in the list the title opens, 44px button always shown' : 'button fades in on hover and focus'}, click and ${phone ? 'Space' : 'Enter'} open it, a past row offers ${PAST} with no Rename, the open row ${FOUR}, Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
+            `${at}: on the List screen the title opens, 44px button always shown, click and ${phone ? 'Space' : 'Enter'} open it, a past row offers ${PAST} with no Rename, the open row ${FOUR}, Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
           );
         }
         return lines.join('; ');
@@ -14165,8 +14123,9 @@ PAGE_SCENARIOS.push({
 
         // Each control changed the way the reader changes it: a real event on
         // the real element, so the page's own listener is what saves it.
+        // #185: the filter is the List screen's search field, #past-filter.
         await page.evaluate(String.raw`(() => {
-          const flt = document.querySelector('#rail .flt input');
+          const flt = document.getElementById('past-filter');
           flt.value = 'P133 Filter';
           flt.dispatchEvent(new Event('input', { bubbles: true }));
           const lang = document.getElementById('dictate-lang');
@@ -14239,8 +14198,11 @@ PAGE_SCENARIOS.push({
             idleChecked: v('idle-suggest-toggle').checked,
             idleStatus: v('idle-suggest-status').textContent,
             folder: curDirPath,
-            railInput: document.querySelector('#rail .flt input').value,
-            railFilter,
+            railInput: document.getElementById('past-filter').value,
+            railFilter: pastFilter,
+            // Kept text has to be on show, or it hides rows for a reason the
+            // reader cannot see.
+            fieldShown: !document.getElementById('list-find').hidden,
             rows: transcriptModel.items
               .filter((i) => i.kind === 'thought' || i.kind === 'tool')
               .map((i) => i.kind + ':' + !!i.expanded),
@@ -14265,7 +14227,10 @@ PAGE_SCENARIOS.push({
         want(got['idleChecked'] === false, 'the idle box shows the saved state over the gateway’s');
         want(String(got['idleStatus']).includes('last set here: on'), `the idle line does not name the state last set here (${JSON.stringify(got['idleStatus'])})`);
         want(got['folder'] === folder, `the folder is ${got['folder']}`);
-        want(got['railInput'] === 'P133 Filter' && got['railFilter'] === 'p133 filter', `the rail filter is ${JSON.stringify(got['railInput'])} / ${JSON.stringify(got['railFilter'])}`);
+        want(
+          got['railInput'] === 'P133 Filter' && got['railFilter'] === 'p133 filter' && got['fieldShown'] === true,
+          `the list's search is ${JSON.stringify(got['railInput'])} / ${JSON.stringify(got['railFilter'])}, field shown ${got['fieldShown']}`,
+        );
         const rows = got['rows'] as string[];
         want(rows.includes('thought:true') && rows.includes('tool:true'), `the opened rows came back closed (${JSON.stringify(rows)})`);
         expect(fails.length === 0, `not restored: ${fails.join('; ')}`);
@@ -14281,7 +14246,7 @@ PAGE_SCENARIOS.push({
           };
         })()`)) as { thought: boolean; tool: boolean };
         expect(drawn.thought && drawn.tool, `the restored rows are not drawn open (${JSON.stringify(drawn)})`);
-        return 'the open pane, dictation language and auto-send, persist box, folder, rail filter and two opened rows came back; the mode control and the idle box show the daemon and gateway state and name the one last set here';
+        return 'the open pane, dictation language and auto-send, persist box, folder, the list’s search text (its field on show) and two opened rows came back; the mode control and the idle box show the daemon and gateway state and name the one last set here';
       } finally {
         rmSync(folder, { recursive: true, force: true });
       }
@@ -15423,6 +15388,599 @@ PAGE_SCENARIOS.push({
       for (let i = 0; i < 30 && prompts.length < 2; i++) await page.waitForTimeout(100);
       expect(prompts.length === 2 && prompts[1] === 'do the thing', `retry sent ${JSON.stringify(prompts)}`);
       return `the refused bubble reads ${JSON.stringify(marker.note)} with retry; over a draft it said ${JSON.stringify(status)}; with the composer empty it sent the same text again`;
+    },
+  });
+}
+
+// #185 (h1). The List screen: the title opens it at every width, a row resumes
+// that conversation and comes back to the chat, its search filters the rows,
+// Archived (n) opens the filed half with restore, New conversation here starts
+// one in the folder it shows, the rows scroll under a thumb-zone button that
+// does not move, ⌘K opens it with the search focused, and every row and its
+// menu are reachable from the keyboard. In-page code is a plain string
+// throughout: the transform rewrites a named arrow in a callback into a
+// __name(...) call the page does not define.
+{
+  // Plants `titles.length` transcripts in a folder of the scenario's own under
+  // the harness root, the way P127 and P132 do, and refuses first if the root
+  // is the real ~/.qwen. Returns the folder, its chats dir and the ids.
+  const plantFolder = (name: string, titles: string[], idBase: string) => {
+    const root = harnessRuntimeRoot();
+    const realHome = join(homedir(), '.qwen');
+    expect(
+      root !== realHome && !root.startsWith(realHome + '/'),
+      `the harness root ${root} sits inside the real ${realHome}, so planting transcripts there would write into a live history`,
+    );
+    const folder = join(root, name);
+    const chatsDir = resolveChatsDir(folder);
+    expect(
+      chatsDir === root || chatsDir.startsWith(root + '/'),
+      `the chats dir for the planted folder is ${chatsDir}, outside the harness root ${root}`,
+    );
+    rmSync(folder, { recursive: true, force: true });
+    mkdirSync(folder, { recursive: true });
+    mkdirSync(chatsDir, { recursive: true });
+    const ids = titles.map((_, i) => `${idBase}-4000-8000-${String(i + 1).padStart(12, '0')}`);
+    const write = (id: string, title: string) =>
+      writeFileSync(
+        join(chatsDir, `${id}.jsonl`),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: title, titleSource: 'manual' },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { parts: [{ text: `the first prompt of ${title}` }] } }) +
+          '\n',
+      );
+    titles.forEach((t, i) => write(ids[i]!, t));
+    return {
+      folder,
+      chatsDir,
+      ids,
+      write,
+      cleanup: () => {
+        for (const id of ids) rmSync(join(chatsDir, `${id}.jsonl`), { force: true });
+        rmSync(folder, { recursive: true, force: true });
+      },
+    };
+  };
+  const pointerOf = String.raw`((raw) => { try { return raw ? JSON.parse(raw).sessionId : null; } catch (e) { return 'unreadable'; } })`;
+
+  PAGE_SCENARIOS.push({
+    name: 'P148 the title opens the List screen and back returns to the same conversation, its window and shared pointers untouched, at 390 and 1280',
+    waitView: false,
+    frames: () => new Frames().ev('client_joined').user('p148 question').asst('p148 answer').done().list,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 3, 30_000);
+      await page.waitForFunction('transcriptModel.items.length >= 2');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`${pointerOf}(sessionStorage.getItem('qwen-rc:window-session')) === watchedSessionId`, null, { timeout: 10_000 });
+      const sent: string[] = [];
+      page.on('request', (r) => {
+        const p = new URL(r.url()).pathname;
+        if (r.method() === 'POST' && (/\/resume$/.test(p) || p === '/session')) sent.push(p);
+      });
+      type Reading = { id: string; win: string; shared: string; rows: number; list: boolean; focus: string; expanded: string };
+      const read = () =>
+        page.evaluate(String.raw`(() => ({
+          id: watchedSessionId,
+          win: ${pointerOf}(sessionStorage.getItem('qwen-rc:window-session')),
+          shared: ${pointerOf}(localStorage.getItem('qwen-rc:watched-session')),
+          rows: transcriptModel.items.length,
+          list: !document.getElementById('list-screen').hidden,
+          focus: document.activeElement ? document.activeElement.id : '',
+          expanded: document.getElementById('h1-title').getAttribute('aria-expanded'),
+        }))()`) as Promise<Reading>;
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [390, 844],
+        [1280, 810],
+      ] as const) {
+        const at = `${w}x${h}`;
+        await page.setViewportSize({ width: w, height: h });
+        const before = await read();
+        await page.click('#h1-title');
+        const opened = await read();
+        expect(
+          opened.list && opened.focus === 'list-back' && opened.expanded === 'true',
+          `the title did not open the list with focus on its back at ${at} (${JSON.stringify(opened)})`,
+        );
+        await page.click('#list-back');
+        const after = await read();
+        expect(!after.list && after.focus === 'h1-title', `back did not return to the chat onto the title at ${at} (${JSON.stringify(after)})`);
+        expect(
+          after.id === before.id && after.win === before.win && after.shared === before.shared && after.id === viewer.sessionId,
+          `going to the list and back moved the conversation or its pointers at ${at}: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`,
+        );
+        expect(after.rows === before.rows, `the transcript lost rows on the way back at ${at} (${before.rows} -> ${after.rows})`);
+        lines.push(`${at}: open with focus on back, back onto the title, same conversation, window and shared pointers on ${after.win.slice(0, 8)}, ${after.rows} rows kept`);
+      }
+      expect(sent.length === 0, `opening and leaving the list sent ${JSON.stringify(sent)}`);
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return lines.join('; ') + '; no resume or create sent';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P149 a tap on a row resumes that conversation in the list’s folder, returns to the chat, and the list then marks it',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const here = viewer.sessionId;
+      const OTHER = '33333333-4444-5555-6666-777777777777';
+      const CWD = '/home/evan/p149';
+      await watch(page, here);
+      await waitForFrame(page, 1, 30_000);
+      const resumed: Record<string, unknown>[] = [];
+      await page.route(`**/session/${OTHER}/resume`, (route) => {
+        resumed.push(JSON.parse(route.request().postData() || '{}') as Record<string, unknown>);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: OTHER, lastEventId: 0 }),
+        });
+      });
+      await serveList(page, CWD, {
+        list: [
+          { sessionId: here, title: 'p149 here' },
+          { sessionId: OTHER, title: 'p149 there' },
+        ],
+      });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await openList(page);
+      await page.click(`#past-list .s[data-session="${OTHER}"]`);
+      await page.waitForFunction(`watchedSessionId === ${JSON.stringify(OTHER)}`, null, { timeout: 10_000 });
+      await page.waitForFunction(`${pointerOf}(sessionStorage.getItem('qwen-rc:window-session')) === ${JSON.stringify(OTHER)}`, null, { timeout: 10_000 }).catch(() => undefined);
+      const after = (await page.evaluate(String.raw`({
+        list: !document.getElementById('list-screen').hidden,
+        title: document.getElementById('h1-title-text').textContent,
+        win: ${pointerOf}(sessionStorage.getItem('qwen-rc:window-session')),
+        chat: document.getElementById('pane-chat').classList.contains('active'),
+      })`)) as { list: boolean; title: string; win: string; chat: boolean };
+      expect(
+        resumed.length === 1 && resumed[0]!.cwd === CWD,
+        `the row asked for ${JSON.stringify(resumed)}, not one resume in the list's folder ${CWD}`,
+      );
+      expect(!after.list && after.chat, `picking a row did not return to the chat (${JSON.stringify(after)})`);
+      expect(after.title === 'p149 there', `the bar names ${JSON.stringify(after.title)}, not the conversation picked`);
+      expect(after.win === OTHER, `this window's pointer is on ${JSON.stringify(after.win)}, not the conversation picked`);
+      await openList(page);
+      const marks = (await page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => ({
+        id: w.dataset.session,
+        on: w.classList.contains('on'),
+        current: w.querySelector('.s').getAttribute('aria-current') === 'true',
+        rule: getComputedStyle(w.querySelector('.s')).borderLeftColor,
+      }))`)) as { id: string; on: boolean; current: boolean; rule: string }[];
+      const there = marks.find((m) => m.id === OTHER);
+      const left = marks.find((m) => m.id === here);
+      expect(
+        !!there && there.on && there.current && there.rule === 'rgb(88, 166, 255)',
+        `the list does not mark the conversation picked with the blue rule (${JSON.stringify(there)})`,
+      );
+      expect(!!left && !left.on && !left.current, `the conversation left is still marked (${JSON.stringify(left)})`);
+      await page.click('#list-back');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `one tap resumed ${OTHER.slice(0, 8)} with cwd ${CWD}, the chat came back naming it, this window's pointer followed, and the list marks it with the blue rule and not the one left`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P150 the search button reveals a field that filters the rows by name, keeps what was typed for the folder, and puts it all back when it is put away',
+    waitView: false,
+    run: async ({ page }) => {
+      const CWD = '/home/evan/p150';
+      await serveList(page, CWD, {
+        list: Array.from({ length: 30 }, (_, i) => ({
+          sessionId: 'cccccccc-1500-4000-8000-' + String(i + 1).padStart(12, '0'),
+          title: i < 27 ? 'alpha ' + (i + 1) : ['Beta one', 'beta two', 'BETA three'][i - 27],
+        })),
+      });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await openList(page);
+      type Reading = { rows: string[]; pager: string; none: string; field: boolean; focus: boolean; expanded: string; saved: string | null; value: string };
+      const read = () =>
+        page.evaluate(String.raw`({
+          rows: Array.from(document.querySelectorAll('#past-list .s .tt')).map((t) => t.textContent),
+          pager: (document.getElementById('past-pager').textContent || '').trim(),
+          none: (document.querySelector('#past-list .none') || { textContent: '' }).textContent,
+          field: document.getElementById('list-find').getClientRects().length > 0,
+          focus: document.activeElement === document.getElementById('past-filter'),
+          expanded: document.getElementById('list-search').getAttribute('aria-expanded'),
+          saved: localStorage.getItem('qwen-rc:ui:rail-filter'),
+          value: document.getElementById('past-filter').value,
+        })`) as Promise<Reading>;
+      const rest = await read();
+      expect(!rest.field && rest.rows.length === 25 && /page 1 of 2/.test(rest.pager), `at rest the list is not 25 rows with a pager and no field (${JSON.stringify({ ...rest, rows: rest.rows.length })})`);
+      await page.click('#list-search');
+      const shown = await read();
+      expect(shown.field && shown.focus && shown.expanded === 'true', `the search button did not reveal and focus the field (${JSON.stringify(shown)})`);
+      await page.keyboard.type('beta');
+      const beta = await read();
+      expect(
+        beta.rows.length === 3 && beta.rows.every((t) => /beta/i.test(t)) && beta.pager === '',
+        `"beta" did not narrow the list to its three rows, case aside, on one page (${JSON.stringify(beta.rows)}, pager ${JSON.stringify(beta.pager)})`,
+      );
+      expect(
+        beta.saved === JSON.stringify({ cwd: CWD, text: 'beta' }),
+        `what was typed is not kept with the folder (${beta.saved})`,
+      );
+      await page.fill('#past-filter', 'nothing is called this');
+      const none = await read();
+      expect(none.rows.length === 0 && /No conversations match "nothing is called this"/.test(none.none), `a search with no match does not say so (${JSON.stringify(none)})`);
+      await page.keyboard.press('Escape');
+      const away = await read();
+      const focusOnButton = (await page.evaluate(`document.activeElement === document.getElementById('list-search')`)) as boolean;
+      expect(
+        !away.field && away.value === '' && away.rows.length === 25 && away.saved === null && focusOnButton,
+        `Escape in the field did not put the search away, clear it and bring the rows back (${JSON.stringify({ ...away, rows: away.rows.length, focusOnButton })})`,
+      );
+      const stillOpen = (await page.evaluate(`!document.getElementById('list-screen').hidden`)) as boolean;
+      expect(stillOpen, 'Escape in the search field shut the whole list rather than the search');
+      await page.click('#list-back');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `the field is hidden at rest; the button reveals and focuses it; "beta" narrowed 30 rows to its 3 in any case on one page and was kept for ${CWD}; no match says so; Escape cleared it, hid it and brought back 25 rows and the pager with the list still up`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P151 Archived (n) opens the filed half as a screen of its own, and Restore puts a row back on the list',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+      const plant = plantFolder('p151-folder', ['p151 still here', 'p151 put back'], 'bbbbbbbb-1510');
+      const [STAYS, BACK] = plant.ids as [string, string];
+      // The second one starts archived: off the folder's chats dir, on the
+      // archived listing. The daemon's half of restore is played here (the
+      // stub has no archive): it moves the transcript back, which is what
+      // makes the row return through the page's own refresh.
+      rmSync(join(plant.chatsDir, `${BACK}.jsonl`), { force: true });
+      let filed = [{ sessionId: BACK, title: 'p151 put back', updatedAt: new Date(Date.now() - 3 * 86400_000).toISOString(), archived: true }];
+      const restored: Record<string, unknown>[] = [];
+      try {
+        await page.route(/archiveState=archived/, (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ sessions: filed, truncated: false }),
+          }),
+        );
+        await page.route(/\/rc\/sessions\/unarchive$/, async (route) => {
+          const body = JSON.parse(route.request().postData() || '{}') as { sessionIds?: string[] };
+          restored.push(body as Record<string, unknown>);
+          plant.write(BACK, 'p151 put back');
+          filed = [];
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ action: 'unarchive', requested: 1, unarchived: body.sessionIds ?? [] }),
+          });
+        });
+        await page.evaluate(`browseTo(${JSON.stringify(plant.folder)})`);
+        await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(plant.folder)} && pastConvos.length === 1`);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await openList(page);
+        await page
+          .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (1)'`, null, { timeout: 5_000 })
+          .catch(() => undefined);
+        const door = (await page.evaluate(String.raw`(() => {
+          const b = document.getElementById('list-archived-open');
+          const r = b.getBoundingClientRect();
+          const rows = Array.from(document.querySelectorAll('#past-list .srow'));
+          const last = rows[rows.length - 1].getBoundingClientRect();
+          return { text: b.textContent.trim(), h: Math.round(r.height), afterRows: r.top >= last.bottom - 1 };
+        })()`)) as { text: string; h: number; afterRows: boolean };
+        expect(
+          door.text === 'Archived (1)' && door.h >= 48 && door.afterRows,
+          `the list does not end with Archived (1) at 48px (${JSON.stringify(door)})`,
+        );
+        await page.click('#list-archived-open');
+        await page.waitForFunction(`document.querySelectorAll('#archived-list .arow').length === 1`, null, { timeout: 5_000 });
+        const scr = (await page.evaluate(String.raw`(() => {
+          const r = document.getElementById('archived-view').getBoundingClientRect();
+          return {
+            w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top),
+            focus: document.activeElement ? document.activeElement.id : '',
+            row: (document.querySelector('#archived-list .arow .tt') || {}).textContent,
+            restoreH: Math.round(document.querySelector('#archived-list .arow button').getBoundingClientRect().height),
+          };
+        })()`)) as { w: number; h: number; top: number; focus: string; row: string; restoreH: number };
+        expect(
+          scr.w === 390 && scr.h === 844 && scr.top === 0 && scr.focus === 'archived-back',
+          `Archived (1) did not open a screen of its own with focus on its back (${JSON.stringify(scr)})`,
+        );
+        expect(scr.row === 'p151 put back' && scr.restoreH >= 44, `the archived screen does not list the filed one with a 44px Restore (${JSON.stringify(scr)})`);
+        await page.click('#archived-list .arow button');
+        await page.waitForFunction(`(document.getElementById('status').textContent || '') === 'restored'`, null, { timeout: 8_000 });
+        expect(
+          restored.length === 1 &&
+            JSON.stringify(restored[0]!.sessionIds) === JSON.stringify([BACK]) &&
+            restored[0]!.cwd === plant.folder,
+          `Restore sent ${JSON.stringify(restored)}, not the filed id in the list's folder`,
+        );
+        await page
+          .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (0)'`, null, { timeout: 5_000 })
+          .catch(() => undefined);
+        await page.click('#archived-back');
+        await page.waitForFunction(`!!document.querySelector('#past-list .srow[data-session="${BACK}"]')`, null, { timeout: 8_000 });
+        const back = (await page.evaluate(String.raw`({
+          rows: Array.from(document.querySelectorAll('#past-list .srow')).map((w) => w.dataset.session),
+          door: document.getElementById('list-archived-open').textContent.trim(),
+          focus: document.activeElement === document.getElementById('list-archived-open'),
+          archivedShut: document.getElementById('archived-view').hidden,
+        })`)) as { rows: string[]; door: string; focus: boolean; archivedShut: boolean };
+        expect(
+          back.rows.includes(BACK) && back.rows.includes(STAYS) && back.door === 'Archived (0)',
+          `Restore did not put the row back on the list, or the count did not follow (${JSON.stringify(back)})`,
+        );
+        expect(back.archivedShut && back.focus, `the archived screen's back did not return to the list onto Archived (${JSON.stringify(back)})`);
+        await page.click('#list-back');
+      } finally {
+        plant.cleanup();
+        await page.setViewportSize({ width: 1280, height: 720 });
+      }
+      return `the list ends with Archived (1) at 48px; it opens a 390x844 screen with focus on its back listing the filed one with a 44px Restore; Restore sent its id in the list's folder, the count went to Archived (0), and back showed the row returned to the list`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P152 New conversation here is 48px in the thumb zone and starts a conversation in the folder the list shows',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 30_000);
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+      const plant = plantFolder('p152-folder', [], 'eeeeeeee-1520');
+      try {
+        await page.evaluate(`browseTo(${JSON.stringify(plant.folder)})`);
+        await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(plant.folder)}`);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await openList(page);
+        const btn = (await page.evaluate(String.raw`(() => {
+          const r = document.getElementById('list-new').getBoundingClientRect();
+          return { h: Math.round(r.height), w: Math.round(r.width), bottom: Math.round(r.bottom), text: document.getElementById('list-new').textContent.trim(), line: document.getElementById('list-folder').title };
+        })()`)) as { h: number; w: number; bottom: number; text: string; line: string };
+        expect(
+          btn.h === 48 && btn.bottom === 844 - 24 && btn.text === 'New conversation here',
+          `New conversation here is ${btn.w}x${btn.h} ending at ${btn.bottom}, not 48px in the thumb zone (${JSON.stringify(btn)})`,
+        );
+        expect(btn.line === plant.folder, `the folder line names ${JSON.stringify(btn.line)}, not the folder the list was moved to`);
+        const req = page.waitForRequest((r) => new URL(r.url()).pathname === '/session' && r.method() === 'POST');
+        const res = page.waitForResponse((r) => new URL(r.url()).pathname === '/session' && r.request().method() === 'POST');
+        // The page moving onto what was created is read off the wire: the
+        // stub mints an id (stub-agent-N) that its events route then treats as
+        // gone, so watchedSessionId only holds it until the page lets it go.
+        // The stream request for that id is the page having taken it up.
+        const streamed: string[] = [];
+        page.on('request', (r) => {
+          const m = /^\/session\/([^/]+)\/events$/.exec(new URL(r.url()).pathname);
+          if (m) streamed.push(decodeURIComponent(m[1]!));
+        });
+        await page.click('#list-new');
+        const body = JSON.parse((await req).postData() || '{}') as { cwd?: string; scope?: string };
+        const answer = (await (await res).json()) as { sessionId?: string };
+        expect(
+          body.cwd === plant.folder && body.scope === 'thread',
+          `New conversation here sent ${JSON.stringify(body)}, not a new thread in ${plant.folder}`,
+        );
+        expect(typeof answer.sessionId === 'string', `the stub did not answer the create (${JSON.stringify(answer)})`);
+        for (let i = 0; i < 50 && !streamed.includes(answer.sessionId!); i++) await page.waitForTimeout(100);
+        expect(
+          streamed.includes(answer.sessionId!),
+          `the page did not take up the conversation the stub created (streams opened for ${JSON.stringify(streamed)})`,
+        );
+        const after = (await page.evaluate(`document.getElementById('list-screen').hidden`)) as boolean;
+        expect(after, 'the new conversation came on but the list stayed over it');
+        return `48px at the foot (bottom ${btn.bottom} of 844), the folder line names the planted folder, the press sent POST /session with that cwd and scope thread, the stub answered ${answer.sessionId}, the page opened its stream and the list shut`;
+      } finally {
+        plant.cleanup();
+        await page.setViewportSize({ width: 1280, height: 720 });
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P153 a folder of 30 conversations scrolls under a New conversation here that does not move, and the second page is one thumb away',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+      const titles = Array.from({ length: 30 }, (_, i) => `p153 row ${String(i + 1).padStart(2, '0')}`);
+      const plant = plantFolder('p153-folder', titles, 'dddddddd-1530');
+      try {
+        await page.evaluate(`browseTo(${JSON.stringify(plant.folder)})`);
+        await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(plant.folder)} && pastConvos.length === 30`, null, { timeout: 10_000 });
+        await page.setViewportSize({ width: 390, height: 844 });
+        await openList(page);
+        type Reading = {
+          rows: number;
+          firstTop: number;
+          btn: number[];
+          scrollH: number;
+          clientH: number;
+          scrollTop: number;
+          footTop: number;
+          archived: number[];
+          pager: number[];
+          next: number[];
+          docScroll: number;
+          listTop: number;
+        };
+        const read = () =>
+          page.evaluate(String.raw`(() => {
+            const r = (el) => { const b = el.getBoundingClientRect(); return [Math.round(b.top), Math.round(b.bottom), Math.round(b.height)]; };
+            const body = document.getElementById('list-body');
+            const rows = document.querySelectorAll('#past-list .s');
+            const next = Array.from(document.querySelectorAll('#past-pager button')).find((b) => /next/.test(b.textContent));
+            return {
+              rows: rows.length,
+              firstTop: rows.length ? Math.round(rows[0].getBoundingClientRect().top) : -1,
+              btn: r(document.getElementById('list-new')),
+              scrollH: body.scrollHeight,
+              clientH: body.clientHeight,
+              scrollTop: Math.round(body.scrollTop),
+              footTop: Math.round(document.getElementById('list-foot').getBoundingClientRect().top),
+              archived: r(document.getElementById('list-archived-open')),
+              pager: r(document.getElementById('past-pager')),
+              next: next ? r(next) : [],
+              docScroll: Math.round(document.scrollingElement.scrollTop),
+              listTop: Math.round(document.getElementById('list-screen').getBoundingClientRect().top),
+            };
+          })()`) as Promise<Reading>;
+        const top = await read();
+        expect(top.rows === 25 && top.scrollH > top.clientH, `30 conversations did not make a list that scrolls (${top.rows} rows, ${top.scrollH}/${top.clientH})`);
+        // A thumb's swipe over the rows: the wheel is the input a headless page
+        // takes for it, and it scrolls whatever is under the pointer.
+        await page.mouse.move(195, 400);
+        for (let i = 0; i < 6; i++) {
+          await page.mouse.wheel(0, 600);
+          await page.waitForTimeout(80);
+        }
+        await page.waitForTimeout(300);
+        const end = await read();
+        expect(end.scrollTop > 0 && end.firstTop < top.firstTop, `the swipe did not scroll the rows (scrollTop ${end.scrollTop}, first row ${top.firstTop} -> ${end.firstTop})`);
+        expect(
+          JSON.stringify(end.btn) === JSON.stringify(top.btn) && end.listTop === 0 && end.docScroll === 0,
+          `New conversation here moved with the rows, or the page scrolled instead of the list (${JSON.stringify(top.btn)} -> ${JSON.stringify(end.btn)}, page ${end.docScroll})`,
+        );
+        expect(
+          end.archived[1]! <= end.footTop && end.pager[1]! <= end.footTop && end.next[2]! >= 44,
+          `at the end of the rows the pager and Archived are not on screen above the thumb zone (${JSON.stringify({ archived: end.archived, pager: end.pager, foot: end.footTop })})`,
+        );
+        // The rest of the folder is the next page, one tap away.
+        await page.click('#past-pager button:has-text("next")');
+        const second = await read();
+        expect(
+          second.rows === 5 && second.scrollTop === 0 && JSON.stringify(second.btn) === JSON.stringify(top.btn),
+          `next did not show the last 5 from the top with the button where it was (${JSON.stringify({ rows: second.rows, scrollTop: second.scrollTop, btn: second.btn })})`,
+        );
+        await page.click('#list-back');
+        return `25 of 30 rows on page 1 in a ${top.clientH}px scroller (${top.scrollH}px of content); a swipe moved the first row ${top.firstTop} -> ${end.firstTop} while New conversation here stayed at ${top.btn[0]}-${top.btn[1]} and the page did not scroll; the pager and Archived end above the thumb zone; next showed the last 5 from the top`;
+      } finally {
+        plant.cleanup();
+        await page.setViewportSize({ width: 1280, height: 720 });
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P154 ⌘K and Ctrl-K open the List screen with its search field focused, from the chat, from More and at either width',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const read = () =>
+        page.evaluate(String.raw`({
+          list: !document.getElementById('list-screen').hidden,
+          field: document.getElementById('list-find').getClientRects().length > 0,
+          focus: document.activeElement === document.getElementById('past-filter'),
+          more: !document.getElementById('more-screen').hidden,
+        })`) as Promise<{ list: boolean; field: boolean; focus: boolean; more: boolean }>;
+      const shut = async () => {
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('Escape');
+        expect((await read()).list === false, 'two Escapes did not shut the list again');
+      };
+      const lines: string[] = [];
+      for (const [w, h, key] of [
+        [1280, 720, 'Control+k'],
+        [1280, 720, 'Meta+k'],
+        [390, 844, 'Control+k'],
+      ] as const) {
+        const at = `${key} at ${w}x${h}`;
+        await page.setViewportSize({ width: w, height: h });
+        await page.focus('#prompt');
+        await page.keyboard.press(key);
+        const got = await read();
+        expect(got.list && got.field && got.focus, `${at} from the composer did not open the list with the search focused (${JSON.stringify(got)})`);
+        await page.keyboard.type('x');
+        const typed = (await page.evaluate(`document.getElementById('past-filter').value`)) as string;
+        expect(typed === 'x', `${at}: typing after the key did not land in the search (${JSON.stringify(typed)})`);
+        await shut();
+        lines.push(at);
+      }
+      // From the More screen, which the list replaces on top.
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.click('#h1-more');
+      await page.keyboard.press('Control+k');
+      const fromMore = await read();
+      expect(fromMore.list && fromMore.focus && !fromMore.more, `Ctrl-K over More did not put the list and its search on top (${JSON.stringify(fromMore)})`);
+      await shut();
+      return `${lines.join(', ')} each opened the list with the field focused and took typing; from More it replaced More; two Escapes put the search and then the list away`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P155 every row, its ⋯ and the list’s own controls are reachable by Tab in reading order, the menu by its keys, and Enter on a row resumes it',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const here = viewer.sessionId;
+      const OTHER = '55555555-6666-7777-8888-999999999999';
+      const CWD = '/home/evan/p155';
+      await watch(page, here);
+      await waitForFrame(page, 1, 30_000);
+      await page.route(`**/session/${OTHER}/resume`, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: OTHER, lastEventId: 0 }),
+        }),
+      );
+      await serveList(page, CWD, {
+        list: [
+          { sessionId: here, title: 'p155 here' },
+          { sessionId: OTHER, title: 'p155 there' },
+        ],
+      });
+      await page.setViewportSize({ width: 1280, height: 720 });
+      const where = () =>
+        page.evaluate(String.raw`(() => {
+          const a = document.activeElement;
+          if (!a) return '';
+          if (a.id) return a.id;
+          const row = a.closest('.srow');
+          if (row) return (a.classList.contains('more') ? 'more:' : 'row:') + row.dataset.session.slice(0, 4);
+          if (a.closest('#list-menu')) return 'item:' + a.textContent;
+          return a.tagName.toLowerCase();
+        })()`) as Promise<string>;
+      await page.focus('#h1-title');
+      await page.keyboard.press('Enter');
+      const start = await where();
+      expect(start === 'list-back', `Enter on the title did not open the list onto its back button (focus on ${start})`);
+      const walk: string[] = [start];
+      for (let i = 0; i < 8; i++) {
+        await page.keyboard.press('Tab');
+        walk.push(await where());
+      }
+      const h4 = here.slice(0, 4);
+      const o4 = OTHER.slice(0, 4);
+      const want = ['list-back', 'list-search', 'list-folder', `row:${h4}`, `more:${h4}`, `row:${o4}`, `more:${o4}`, 'list-archived-open', 'list-new'];
+      expect(walk.join(',') === want.join(','), `Tab walked ${JSON.stringify(walk)}, not ${JSON.stringify(want)}`);
+
+      // Back to the other row's ⋯, its menu by Enter and the arrows, Escape
+      // back onto the button.
+      for (let i = 0; i < 2; i++) await page.keyboard.press('Shift+Tab');
+      expect((await where()) === `more:${o4}`, `Shift+Tab did not come back to the other row's ⋯ (${await where()})`);
+      await page.keyboard.press('Enter');
+      const menu: string[] = [await where()];
+      for (const key of ['ArrowDown', 'ArrowDown', 'End', 'Home']) {
+        await page.keyboard.press(key);
+        menu.push(await where());
+      }
+      expect(
+        menu.join(',') === 'item:Archive,item:Delete,item:Archive,item:Delete,item:Archive',
+        `the row menu's keys walked ${JSON.stringify(menu)}`,
+      );
+      await page.keyboard.press('Escape');
+      expect((await where()) === `more:${o4}`, `Escape did not return focus to the row's ⋯ (${await where()})`);
+
+      // Enter on the row itself resumes it and returns to the chat.
+      await page.keyboard.press('Shift+Tab');
+      expect((await where()) === `row:${o4}`, `Shift+Tab from the ⋯ did not reach its row (${await where()})`);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(`watchedSessionId === ${JSON.stringify(OTHER)}`, null, { timeout: 10_000 });
+      const after = (await page.evaluate(String.raw`({ list: !document.getElementById('list-screen').hidden, focus: document.activeElement === document.getElementById('h1-title') })`)) as { list: boolean; focus: boolean };
+      expect(!after.list && after.focus, `Enter on a row did not return to the chat onto the title (${JSON.stringify(after)})`);
+      return `Enter on the title opened the list onto back; Tab walked ${walk.join(' > ')}; the ⋯ opened by Enter, arrows wrapped, End and Home jumped, Escape came back; Enter on the row resumed it and returned onto the title`;
     },
   });
 }
