@@ -231,9 +231,53 @@ export interface Viewer {
 
 export const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
+/**
+ * The runtime root a harness page reads conversations from (#178).
+ *
+ * The chats dir is resolved per request by `sessions/chatsPath.ts#runtimeBaseDir`,
+ * which falls back to the real `~/.qwen`. Left alone, a harness page's rail lists
+ * this machine's own conversations: `GET /rc/fs` with no path defaults to `$HOME`,
+ * the folder browser renders that, and `renderDirList` then asks for that folder's
+ * conversations. So any rail assertion is a statement about the host rather than
+ * about the page, and a full run prints the user's session titles.
+ *
+ * The root is created ONCE PER PROCESS rather than once per boot. The variable is
+ * read at request time, not captured at construction, and the pool in
+ * `verify-transcript-virtualization.mts` boots up to four viewers inside one Node
+ * process, so a per-boot value with a restore would let one scenario's request
+ * resolve against another scenario's directory. Nothing in `scripts/` seeds a
+ * chats dir (the scenarios needing particular rows intercept `/rc/sessions` with
+ * `page.route`), so one shared empty root is deterministic.
+ *
+ * An inherited `QWEN_RUNTIME_DIR` is respected rather than replaced: whoever set
+ * it already owns the isolation, and moving the ground under them would be the
+ * same fault pointed the other way.
+ */
+let harnessRoot: string | undefined;
+
+/** The runtime root the booted pages scan for conversations. */
+export function harnessRuntimeRoot(): string {
+  if (harnessRoot) return harnessRoot;
+  const inherited = process.env['QWEN_RUNTIME_DIR'];
+  if (inherited) {
+    harnessRoot = inherited;
+    return harnessRoot;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-home-'));
+  process.env['QWEN_RUNTIME_DIR'] = dir;
+  process.once('exit', () => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  harnessRoot = dir;
+  return dir;
+}
+
 export async function bootViewer(
   opts: BootViewerOptions = {},
 ): Promise<Viewer> {
+  // Before anything can be served, so no request ever resolves against the
+  // host's `~/.qwen` (#178).
+  harnessRuntimeRoot();
   const stub = await startStubDaemon({
     frames: opts.frames,
     holdOpenMs: opts.holdOpenMs,
