@@ -1,0 +1,19 @@
+{
+  "name": "qwen-rc",
+  "short_name": "qwen-rc",
+  "description": "Remote viewer for a qwen-code workstation",
+  "id": "/ui/",
+  "start_url": "/ui/",
+  "scope": "/ui/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
