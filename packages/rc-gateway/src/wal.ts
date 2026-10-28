@@ -138,17 +138,41 @@ export class SessionWal {
 
   // -- accessors ----------------------------------------------------------
 
-  /** Earliest retained event id or null when empty. */
+  /**
+   * Earliest retained event id or null when empty.
+   *
+   * Deliberately not resynced like latestId(). On disk this only moves when a
+   * whole segment is pruned, and nothing in the tree reads it to decide
+   * anything; replayFrom() reads `_earliest` for its truncation test and that
+   * path resyncs first, so it is covered where it matters.
+   */
   earliestId(): number | null {
     return this._earliest;
   }
 
-  /** Latest retained event id or null when empty. */
+  /**
+   * Latest retained event id or null when empty.
+   *
+   * Resyncs an evicted instance because this is not a display accessor. Four
+   * callers compute a NEW id as `(latestId() ?? 0) + 1` off it: the events-route
+   * relay re-anchors a fresh epoch's offset here (routes/sessionEvents.ts), the
+   * rewind and fork markers place themselves here, and the recovery orchestrator
+   * stamps its terminal marker here. A stale answer does not just read old, it
+   * makes the next writer anchor below ids the WAL already holds and append a
+   * colliding one.
+   */
   latestId(): number | null {
+    this.resyncIfEvicted();
     return this._latest;
   }
 
-  /** Number of retained events across all segments. */
+  /**
+   * Number of retained events across all segments.
+   *
+   * Not resynced: nothing in the tree reads this to decide anything (the two
+   * `.count()` calls in this package are on SearchIndex, not a WAL), and an
+   * evicted handle's count is corrected by its next append anyway.
+   */
   count(): number {
     return this.frames.length;
   }
@@ -164,10 +188,7 @@ export class SessionWal {
     // Evicted instances may have been superseded by a fresh one that rotated or
     // pruned segments; resync from disk so this write and the bound enforcement
     // below act on the real state rather than a stale snapshot.
-    if (this.evicted) {
-      this.evicted = false;
-      this.recover();
-    }
+    this.resyncIfEvicted();
     const encoded = encodeFrame(frame);
     const fd = this.ensureOpen();
     writeSync(fd, encoded, 0, encoded.length);
@@ -234,6 +255,7 @@ export class SessionWal {
    *   transitions to live streaming.
    */
   replayFrom(lastEventId: number): ReplayResult {
+    this.resyncIfEvicted();
     // Empty WAL: nothing retained. Anything but the genesis cursor (0) is
     // treated as truncated since we cannot vouch for the gap.
     if (this._earliest === null) {
@@ -272,6 +294,26 @@ export class SessionWal {
   }
 
   // -- internals ----------------------------------------------------------
+
+  /**
+   * Re-read the on-disk truth when this handle has been dropped from the shared
+   * registry, so the decision about to be made off `frames`/`_earliest`/`_latest`
+   * is made against the current log rather than a snapshot taken before another
+   * instance started writing it.
+   *
+   * Both the write path and the read paths need it, and they need the SAME rule,
+   * which is why it lives here instead of inline in append(). The window this
+   * does not close is stated rather than papered over: another instance can
+   * still append between this resync and the caller's next call, so an evicted
+   * handle that is held for the life of a long stream can still be one write
+   * behind. Closing that needs one handle per session to be handed out at all,
+   * which is the fan-out half of the issue, not something a resync can fix.
+   */
+  private resyncIfEvicted(): void {
+    if (!this.evicted) return;
+    this.evicted = false;
+    this.recover();
+  }
 
   private ensureOpen(): number {
     if (this.fd === null) {
