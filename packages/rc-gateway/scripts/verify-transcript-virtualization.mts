@@ -2500,6 +2500,45 @@ async function watch(page: Page, sessionId: string): Promise<void> {
   }, sessionId);
 }
 
+/**
+ * #184 (h1). The ways to a control that is not on the Chat screen at rest,
+ * each taken the way a reader takes it and only when what holds the control
+ * is shut, so a scenario can call one twice. Operations, Settings and
+ * Diagnostics are rows on the More screen (≡) and open as screens with a back
+ * button; the conversation's actions are in the ⋯ menu; the model, mode and
+ * folder are in the sheet the status line opens; Attach, Dictate, Files and
+ * Artifacts are behind the composer's +; on a phone the conversation list is
+ * behind the bar's title.
+ */
+async function openTab(page: Page, id: string): Promise<void> {
+  if (id === 'chat') {
+    if (await page.isVisible('#more-screen')) await page.click('#more-back');
+    if (await page.isVisible('#pane-head')) await page.click('#pane-head .tab[data-tab="chat"]');
+    return;
+  }
+  if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
+  await page.click(`#more-screen .tab[data-tab="${id}"]`);
+}
+async function openMenu(page: Page): Promise<void> {
+  if (!(await page.isVisible('#h1-menu'))) await page.click('#h1-actions');
+}
+async function openSheet(page: Page): Promise<void> {
+  if (!(await page.isVisible('#h1-sheet'))) await page.click('#h1-status');
+}
+async function openTools(page: Page): Promise<void> {
+  if (!(await page.isVisible('#h1-tools'))) await page.click('#h1-plus');
+}
+async function clickTool(page: Page, id: string): Promise<void> {
+  await openTools(page);
+  await page.click('#' + id);
+}
+async function openList(page: Page): Promise<void> {
+  const open = (await page.evaluate(
+    `document.getElementById('rail').classList.contains('panel-open')`,
+  )) as boolean;
+  if (!open) await page.click('#h1-title');
+}
+
 /** Polls until the page has seen frame `lastId`; returns the elapsed ms. */
 async function waitForFrame(
   page: Page,
@@ -2566,12 +2605,12 @@ async function checkTranscriptMissing(
       'function',
   }));
   expect(ui.pairWired, 'pair button not wired');
-  await page.click('.tab[data-tab="diag"]');
+  await openTab(page, 'diag');
   const diag = await page.evaluate(() =>
     document.getElementById('pane-diag')!.classList.contains('active'),
   );
   expect(diag, 'the Diagnostics tab did not open');
-  await page.click('.tab[data-tab="chat"]');
+  await openTab(page, 'chat');
   await watch(page, viewer.sessionId);
   await waitForFrame(page, 5 * 7, 30_000);
   const n = await note();
@@ -2847,7 +2886,6 @@ const PAGE_SCENARIOS: PageScenario[] = [
           const f = forks[0];
           const fRow = f ? __pg.row(f.id) : null;
           const aRow = lastAsst >= 0 ? __pg.row(items[lastAsst]!.id) : null;
-          const sel = fRow ? fRow.querySelector('select') : null;
           return {
             forks: forks.length,
             forkRows: document.querySelectorAll('#transcript .bubble-fork')
@@ -2855,9 +2893,12 @@ const PAGE_SCENARIOS: PageScenario[] = [
             afterAsst: !!f && items[lastAsst + 1] === f,
             turn: f ? f.turn : -1,
             domNext: !!fRow && !!aRow && aRow.nextElementSibling === fRow,
-            button: fRow?.querySelector('button')?.textContent ?? null,
-            mode: sel ? sel.value : null,
-            options: sel ? Array.from(sel.options).map((o) => o.value) : [],
+            // #184: the row is the turn's three actions; the include/empty
+            // choice the select carried is asked on tap.
+            buttons: fRow
+              ? Array.from(fRow.querySelectorAll('button')).map((b) => b.textContent)
+              : [],
+            select: !!fRow && !!fRow.querySelector('select'),
             asstText: lastAsst >= 0 ? items[lastAsst]!.text : null,
           };
         });
@@ -2873,10 +2914,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
         s1.domNext,
         'turn 1: fork row is not the next row after the answer',
       );
-      expect(s1.button === 'Fork from here', `button ${s1.button}`);
       expect(
-        s1.mode === 'include' && s1.options.join(',') === 'include,empty',
-        `select ${s1.mode} [${s1.options.join(',')}]`,
+        s1.buttons.join(',') === 'Fork here,Rewind to here,Copy' && !s1.select,
+        `the turn's actions read ${JSON.stringify(s1.buttons)} (select ${s1.select})`,
       );
       await page.evaluate(() => {
         addUser('second question');
@@ -2937,9 +2977,16 @@ const PAGE_SCENARIOS: PageScenario[] = [
           s3.domNext,
         `late chunk: ${JSON.stringify(s3)}`,
       );
-      await page.selectOption('#transcript .bubble-fork select', 'empty');
-      // The prompt for a fork name is dismissed: no request, no state change.
-      await page.click('#transcript .bubble-fork button');
+      // #184: the mode is asked on tap, as a two-option sheet, and kept on
+      // the item. The prompt for a fork name is then dismissed: no request,
+      // no state change beyond the mode.
+      await page.click('#transcript .bubble-fork .act-fork');
+      await page.waitForSelector('#h1-ask', { state: 'visible' });
+      const asked = (await page.evaluate(String.raw`Array.from(
+        document.querySelectorAll('#h1-ask button[data-value]'),
+      ).map((b) => b.dataset.value)`)) as string[];
+      expect(asked.join(',') === 'include,empty', `the fork asked ${JSON.stringify(asked)}`);
+      await page.click('#h1-ask button[data-value="empty"]');
       await page.waitForTimeout(200);
       const s4 = await page.evaluate(() => {
         const f = transcriptModel.forkItem!;
@@ -2947,9 +2994,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
       });
       expect(
         s4.mode === 'empty' && !s4.busy && s4.note === '',
-        `after select + dismissed click: ${JSON.stringify(s4)}`,
+        `after choosing empty + a dismissed name: ${JSON.stringify(s4)}`,
       );
-      return `fork follows the newest answer (turn ${s3.turn}); mode stored as ${s4.mode}`;
+      return `fork follows the newest answer (turn ${s3.turn}); asked include/empty and stored ${s4.mode}`;
     },
   },
   {
@@ -3235,9 +3282,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
       await settlePage(page);
       const s0 = await read();
       expect(s0.gap > 200 && !s0.pill, `setup: ${JSON.stringify(s0)}`);
-      await page.click('.tab[data-tab="diag"]');
+      await openTab(page, 'diag');
       await page.waitForTimeout(300);
-      await page.click('.tab[data-tab="chat"]');
+      await openTab(page, 'chat');
       await settlePage(page);
       const s1 = await read();
       expect(
@@ -3256,7 +3303,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
       // Pinned, and the answer grows while the transcript is hidden.
       await page.click('#jump-bottom');
       await settlePage(page);
-      await page.click('.tab[data-tab="diag"]');
+      await openTab(page, 'diag');
       await page.evaluate(() =>
         __pg.update({
           sessionUpdate: 'agent_message_chunk',
@@ -3264,7 +3311,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         }),
       );
       await page.waitForTimeout(300);
-      await page.click('.tab[data-tab="chat"]');
+      await openTab(page, 'chat');
       await settlePage(page);
       const s3 = await page.evaluate(() => {
         const asst = transcriptModel.curAsst!;
@@ -4903,22 +4950,20 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    // The chat window is not bounded the way #74 bounded it: the column is
-    // not pinned to calc(100vh - 4rem) with the box shrinking to whatever its
-    // siblings left, which squeezed the transcript onto its 60px floor at a
-    // 720px window, the "chat window is way too small" fault. The transcript
-    // box carries its own max-height cap and the document scrolls past it.
-    // Until #175 that cap was a flat 75vh; it is now fitted to the room the
-    // bands around it leave (fitTranscript), so the composer can clear the
-    // fold, and held between 30vh and 75vh. The 30vh floor is what keeps the
-    // #74 fault out, so it is asserted here in place of the bare 60px check:
-    // this scenario's to-do strip is the kind of band that drives the fit to
-    // its floor at 720. The to-do strip takes its own row in normal flow below
-    // the chat window: it is not pinned to the foot of the viewport and it
-    // never overlaps the transcript, and it is reached by scrolling to the end
-    // of the document rather than held on screen. Asserted on pixels because
-    // the claim is about pixels.
-    name: 'P31 the chat window keeps a 30vh to 75vh transcript and the strip sits below it',
+    // The chat window is not bounded the way #74 bounded it, with the box
+    // shrinking to whatever its siblings left until it sat on a 60px floor at
+    // a 720px window, the "chat window is way too small" fault. Until #175 the
+    // box carried a flat 75vh cap; #175 fitted the cap to the room the bands
+    // left, held between 30vh and 75vh. #184 (h1) makes the transcript the
+    // frame's one flexible region instead: every band takes what it draws and
+    // the transcript takes the rest, so the cap and its 75vh ceiling are gone
+    // and the claims that survive are the ones the reader feels. The box never
+    // drops under the 30vh floor that keeps #74's fault out, the to-do strip
+    // never covers transcript pixels, and the strip sits on screen between the
+    // transcript and the composer without any scrolling, the place the spec
+    // gives it as the only band there. Asserted on pixels because the claim
+    // is about pixels.
+    name: 'P31 the transcript fills the frame above a 30vh floor and the strip sits on screen between it and the composer',
     frames: () => {
       const f = new Frames();
       const plan = (entries: Array<[string, string]>) =>
@@ -4957,112 +5002,78 @@ const PAGE_SCENARIOS: PageScenario[] = [
         page.evaluate(() => {
           const tr = document.getElementById('transcript') as HTMLDivElement;
           const box = document.getElementById('plan') as HTMLDivElement;
+          const comp = document.getElementById('composer') as HTMLElement;
           const tb = tr.getBoundingClientRect();
           const pb = box.getBoundingClientRect();
-          const cap = Math.round(innerHeight * 0.75);
+          const cb = comp.getBoundingClientRect();
           const floor = Math.round(innerHeight * 0.3);
           return {
             inner: innerHeight,
-            cap,
             floor,
             transcript: [Math.round(tb.top), Math.round(tb.bottom)],
             transcriptHeight: tr.clientHeight,
-            // The box scrolls its own history under a cap of at most 75vh, the
-            // ceiling it had before #175 fitted the cap to the room.
-            withinCap: tr.clientHeight <= cap + 1,
             scrolls: tr.scrollHeight > tr.clientHeight,
             // The reported fault was the box collapsing onto its 60px floor.
-            // A fitted cap that followed the bands all the way down would be
-            // that fault again, so the fit's own 30vh floor is what is held.
             aboveFloor: tr.clientHeight >= floor - 1,
             stripShown: box.offsetHeight > 0,
             strip: [Math.round(pb.top), Math.round(pb.bottom)],
-            // The strip is in normal flow below the chat window, so at the top
-            // of a full document it sits below the fold. What has to hold is
-            // that it never covers transcript pixels and never rides at the
-            // foot of the viewport the way the position: sticky pin did.
             belowTranscript: pb.top >= tb.bottom - 1,
-            overlapsTranscript: pb.top < tb.bottom - 1,
-            pinned: Math.abs(innerHeight - 8 - pb.bottom) <= 1,
-            stripOnScreen:
-              pb.height > 0 && pb.top < innerHeight && pb.bottom > 0,
+            // Directly above the composer: nothing between them, which is what
+            // the spec's "only band" means on the page.
+            onComposer: Math.abs(cb.top - pb.bottom) <= 1,
+            stripOnScreen: pb.height > 0 && pb.top >= 0 && pb.bottom <= innerHeight,
+            composerBottom: Math.round(cb.bottom),
+            docScrolls: document.documentElement.scrollHeight > innerHeight + 1,
           };
         });
       const lines: string[] = [];
       // 720 is the height P25 uses and the height the fault was reported at.
       // 1080 rides along so the scenario cannot pass on a rule that only binds
-      // when the window is nearly empty.
-      for (const height of [720, 1080]) {
-        await page.setViewportSize({ width: 1280, height });
-        // The reachability check at the foot of this loop leaves the window
-        // scrolled, and the placement claims are about the strip's own row, so
-        // every height starts from the top of the document.
-        await page.evaluate(() => window.scrollTo(0, 0));
+      // when the window is nearly empty. 390x844 is the phone the page is for.
+      for (const [width, height] of [
+        [1280, 720],
+        [1280, 1080],
+        [390, 844],
+      ] as const) {
+        await page.setViewportSize({ width, height });
         // settlePage waits on the transcript, and a viewport change is a
         // relayout and not new frames, so it needs its own beat.
         await page.waitForTimeout(300);
         await settlePage(page);
         const g = await read();
+        const at = `${width}x${height}`;
         // First, because a strip that is not on screen at all would satisfy
         // every claim below by being nowhere.
         expect(
           g.stripShown,
-          `no strip in the ${height}px window, so the placement claims below ` +
-            'would pass vacuously',
+          `no strip at ${at}, so the placement claims below would pass vacuously`,
         );
         expect(
           g.scrolls,
-          `the transcript already shows all it holds at ${height}px, so this ` +
-            'window does not exercise the cap',
-        );
-        expect(
-          g.withinCap,
-          `the transcript is ${g.transcriptHeight}px in a ${g.inner}px window ` +
-            `at ${height}px, past its ${g.cap}px (75vh) cap`,
+          `the transcript already shows all it holds at ${at}, so this window does not exercise the box`,
         );
         expect(
           g.aboveFloor,
-          `the transcript is ${g.transcriptHeight}px at ${height}px, under ` +
-            `the ${g.floor}px (30vh) floor: this is the window that read as too ` +
-            'small',
+          `the transcript is ${g.transcriptHeight}px at ${at}, under the ${g.floor}px (30vh) floor: this is the window that read as too small`,
         );
         expect(
           g.belowTranscript,
-          `the strip does not sit below the chat window at ${height}px: ` +
-            `strip ${JSON.stringify(g.strip)} transcript ` +
-            JSON.stringify(g.transcript),
+          `the strip covers the chat window at ${at}: strip ${JSON.stringify(g.strip)} transcript ${JSON.stringify(g.transcript)}`,
         );
         expect(
-          !g.overlapsTranscript,
-          `the strip covers the chat window at ${height}px: ` +
-            `strip ${JSON.stringify(g.strip)} transcript ` +
-            JSON.stringify(g.transcript),
+          g.onComposer,
+          `the strip is not the band directly above the composer at ${at}: strip ${JSON.stringify(g.strip)}`,
         );
         expect(
-          !g.pinned,
-          `the strip is pinned to the foot of the ${height}px window, which is ` +
-            `how it floated over transcript pixels: ` +
-            JSON.stringify(g.strip),
-        );
-        // Reachability, the property that survives dropping the pin: the strip
-        // holds the end of the document, so scrolling there finds it.
-        await page.evaluate(() =>
-          window.scrollTo(0, document.documentElement.scrollHeight),
-        );
-        await page.waitForTimeout(300);
-        const atEnd = await read();
-        expect(
-          atEnd.stripOnScreen,
-          `the strip is not on screen at the end of the ${height}px document: ` +
-            JSON.stringify(atEnd.strip),
+          g.stripOnScreen && g.composerBottom <= g.inner && !g.docScrolls,
+          `the strip or the composer is off screen at ${at} without scrolling (strip ${JSON.stringify(g.strip)}, composer bottom ${g.composerBottom}, document scrolls ${g.docScrolls})`,
         );
         lines.push(
-          `${height}px: transcript ${g.transcriptHeight}px (${g.floor} to ${g.cap}), ` +
-            `strip ${JSON.stringify(g.strip)} below it, ` +
-            `${JSON.stringify(atEnd.strip)} at the end`,
+          `${at}: transcript ${g.transcriptHeight}px (floor ${g.floor}), strip ${JSON.stringify(g.strip)} on the composer`,
         );
       }
-      return `${lines.join('; ')}; the transcript stays between 30vh and 75vh at both heights`;
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `${lines.join('; ')}; nothing scrolls the document`;
     },
   },
 ];
@@ -5184,6 +5195,9 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
+    // #184: the mic is the Dictate pill behind the composer's +, and the tag
+    // rides beside it there, so the tools are opened before it is read.
+    await openTools(page);
     const s = await page.evaluate(() => {
       const tag = document.getElementById('dictate-engine');
       const mic = document.getElementById('dictate') as HTMLButtonElement;
@@ -5223,6 +5237,7 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
+    await openTools(page); // #184: the mic and its tag are behind the +
     const s = await page.evaluate(() => {
       const tag = document.getElementById('dictate-engine');
       const mic = document.getElementById('dictate') as HTMLButtonElement;
@@ -5303,7 +5318,7 @@ PAGE_SCENARIOS.push({
   name: 'P35 the seven unseen surfaces have screens under Settings',
   waitView: false,
   run: async ({ page }) => {
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
     const s = await page.evaluate((ids) => {
       const settings = document.getElementById('pane-settings');
       const chat = document.getElementById('pane-chat');
@@ -5386,7 +5401,7 @@ PAGE_SCENARIOS.push({
   name: 'P36 an unseen surface says why it has nothing rather than showing a blank',
   waitView: false,
   run: async ({ page }) => {
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
 
     // Routes the harness gateway genuinely does not mount: the panel must name
     // the absence, not render an empty table that reads as "no data".
@@ -7220,7 +7235,7 @@ PAGE_SCENARIOS.push({
     // The panel lives under Settings, not Operations: its ancestor chain is
     // details#ws-files inside #pane-settings, which is where P35 finds the
     // other unseen surfaces too.
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
     const gate = await page.evaluate(() => {
       const sec = document.getElementById('ws-files');
       return {
@@ -7409,7 +7424,7 @@ PAGE_SCENARIOS.push({
   // proves the same thing without reaching into another panel.
   waitView: false,
   run: async ({ page }) => {
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
     const state = await page.evaluate(() => {
       const sec = document.getElementById('ws-files');
       return {
@@ -7453,6 +7468,7 @@ PAGE_SCENARIOS.push({
     // Armed before the click: the save can land while the click is still in
     // flight, and a listener attached afterwards would miss it entirely.
     const armed = page.waitForEvent('download', { timeout: 15_000 });
+    await openMenu(page); // #184: Export or share is in the ⋯ menu
     await page.click('#footer-export');
     const dl = await armed;
 
@@ -7519,6 +7535,7 @@ PAGE_SCENARIOS.push({
         produced = true;
       })
       .catch(() => undefined);
+    await openMenu(page); // #184: Export or share is in the ⋯ menu
     await page.click('#footer-export');
     const note = await page.waitForFunction(
       () => {
@@ -7866,7 +7883,7 @@ PAGE_SCENARIOS.push({
         new URL(r.url()).pathname === `/session/${viewer.sessionId}/attachments`,
       { timeout: 15_000 },
     );
-    await page.click('#stored-toggle');
+    await clickTool(page, 'stored-toggle');
     const res = await answered;
     expect(
       res.status() === 200,
@@ -7941,7 +7958,7 @@ PAGE_SCENARIOS.push({
     });
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
-    await page.click('#stored-toggle');
+    await clickTool(page, 'stored-toggle');
     await page.waitForFunction(
       () =>
         (document.getElementById('stored-list')?.textContent ?? '').includes(
@@ -8036,7 +8053,7 @@ PAGE_SCENARIOS.push({
         new URL(r.url()).pathname === `/session/${viewer.sessionId}/attachments`,
       { timeout: 15_000 },
     );
-    await page.click('#stored-toggle');
+    await clickTool(page, 'stored-toggle');
     const res = await answered;
     expect(
       res.status() === 502,
@@ -8110,7 +8127,7 @@ PAGE_SCENARIOS.push({
 
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
-      await page.click('#stored-toggle');
+      await clickTool(page, 'stored-toggle');
       // The window the guard has to survive: A's request is on the wire and
       // unanswered. Polling the flag rather than sleeping, so a slow machine
       // cannot fall through before the request exists.
@@ -8418,7 +8435,7 @@ PAGE_SCENARIOS.push({
 
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
-      await page.click('#stored-toggle');
+      await clickTool(page, 'stored-toggle');
       await page.waitForFunction(
         () => (document.getElementById('stored-list')?.textContent ?? '').includes('plate.png'),
         null,
@@ -8516,7 +8533,7 @@ PAGE_SCENARIOS.push({
 
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
-      await page.click('#stored-toggle');
+      await clickTool(page, 'stored-toggle');
       await page.waitForFunction(
         () => (document.getElementById('stored-list')?.textContent ?? '').includes('notes.txt'),
         null,
@@ -8590,7 +8607,7 @@ PAGE_SCENARIOS.push({
 
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
-      await page.click('#stored-toggle');
+      await clickTool(page, 'stored-toggle');
       await page.waitForFunction(
         () => (document.getElementById('stored-list')?.textContent ?? '').includes('plate.png'),
         null,
@@ -8636,7 +8653,7 @@ PAGE_SCENARIOS.push({
 
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
-      await page.click('#stored-toggle');
+      await clickTool(page, 'stored-toggle');
       await page.waitForFunction(
         () => (document.getElementById('stored-list')?.textContent ?? '').includes('secret.dat'),
         null,
@@ -10014,7 +10031,7 @@ PAGE_SCENARIOS.push({
     );
 
   const openPermPanel = async (page: Page): Promise<void> => {
-    await page.click('.tab[data-tab="ops"]');
+    await openTab(page, 'ops');
     await page.click('#perm-rules > summary');
   };
 
@@ -10236,7 +10253,7 @@ PAGE_SCENARIOS.push({
   // The panel sits under Settings, beside the other workspace surfaces
   // (ws-target, ws-trust, ws-mcp, ws-tools, ws-files), not under Ops.
   const openDiagPanel = async (page: Page): Promise<void> => {
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
     await page.click('#ws-diagnostics > summary');
   };
 
@@ -10260,7 +10277,7 @@ PAGE_SCENARIOS.push({
     );
 
   const openInvPanel = async (page: Page): Promise<void> => {
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
     await page.click('#ws-inventory > summary');
   };
 
@@ -10285,7 +10302,7 @@ PAGE_SCENARIOS.push({
     // The settings tab, not ops: like every other ws-* surface, this panel lives
     // in the settings pane, and clicking the wrong tab leaves the summary
     // hidden, which reads as a broken selector rather than a pane boundary (D59).
-    await page.click('.tab[data-tab="settings"]');
+    await openTab(page, 'settings');
     await page.click('#ws-context > summary');
   };
 
@@ -11700,8 +11717,10 @@ PAGE_SCENARIOS.push({
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
       // Markup from boot, hidden until the daemon's own feature list says
-      // asking would work, so becoming visible is the gate firing.
-      await page.waitForSelector('#btw-toggle', { state: 'visible' });
+      // asking would work, so becoming un-hidden is the gate firing. #184:
+      // the control is an item in the ⋯ menu, so it is on screen only while
+      // the menu is open; the gate is read off its attribute.
+      await page.waitForFunction(`!document.getElementById('btw-toggle').hidden`);
 
       // No inner helper here on purpose: a function declared inside the
       // callback gets an esbuild keepNames wrapper that does not exist in the
@@ -11729,6 +11748,7 @@ PAGE_SCENARIOS.push({
         `the answer box already costs layout height before anyone asked (${JSON.stringify(before.box)})`,
       );
 
+      await openMenu(page);
       await page.click('#btw-toggle');
       await page.waitForSelector('#btw-question', { state: 'visible' });
       await page.fill('#btw-question', BTW_QUESTION);
@@ -11841,7 +11861,11 @@ PAGE_SCENARIOS.push({
       await watch(page, A);
       await page.waitForSelector('#composer', { state: 'visible' });
       // Markup from boot, hidden until the daemon's own feature list says the
-      // route exists, so becoming visible is the gate firing.
+      // route exists, so becoming un-hidden is the gate firing. #184: the
+      // control sits in the sheet the status line opens, under the folder it
+      // moves, so the sheet is opened before it is read or pressed.
+      await page.waitForFunction(`!document.getElementById('wt-reset').hidden`);
+      await openSheet(page);
       await page.waitForSelector('#wt-reset', { state: 'visible' });
 
       // No inner helper in these evaluates: a function declared inside the
@@ -12083,183 +12107,131 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P123 the bar is one row at 390, searches by glyph there, and keeps the phrase and pins at 1280',
-    // g1 "Top bar", gap 10 option B (#118), then #176. The affordance lived only
-    // behind a key you already knew, and the verifier had no bar assertion of
-    // any kind, so nothing could have noticed the label going missing again.
-    // #176 changed what the phone reading is: at 390 the four tabs plus three
-    // "Pin to Chat" boxes wrapped to two rows (72px against the sheet's 53px)
-    // and left \u2318K alone on the second, naming a key a phone does not have. So
-    // the narrow claims are now one row, no pins, and a magnifier that still
-    // opens the search box when tapped, and the wide claims keep the phrase
-    // and prove the pins still pin where they are drawn.
-    // In-page code is a plain string: the transform rewrites a named arrow in
-    // a callback into a __name(...) call the page does not define.
+    name: 'P123 the bar is one 56px row of ≡, title and ⋯ at 390 and 1280, the tab bar and pins are gone, and search is one row under ≡ and still ⌘K',
+    // #184 (h1), rewritten from #118/#176's bar. The claims kept: the bar is one
+    // row exactly the viewport wide at 390 (it wrapped to two rows once), and
+    // search across sessions is findable without a key a phone does not have,
+    // and does what it names when pressed. What changed is what the bar holds:
+    // the spec's 56px row of ≡, the conversation's title and ⋯, with no page
+    // title above it, no tab bar and no "Pin to Chat" boxes anywhere. Search
+    // moved to a row on the More screen ≡ opens (the list screen's own search
+    // is slice 2), and ⌘K still opens it on a keyboard. In-page code is a plain
+    // string: the transform rewrites a named arrow in a callback into a
+    // __name(...) call the page does not define.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
       type BarReading = {
-        inBar: boolean;
-        shown: boolean;
-        label: string;
-        name: string;
-        keyShown: boolean;
-        wordShown: boolean;
-        glyphShown: boolean;
-        pinsShown: number;
         barH: number;
         barScroll: number;
         barClient: number;
         vw: number;
         rowSpread: number;
+        more: [number, number];
+        actions: [number, number];
+        titleText: string;
+        tabBar: boolean;
+        pins: number;
+        pageTitleShown: boolean;
+        searchInBar: boolean;
       };
       const read = () =>
         page.evaluate(String.raw`(() => {
-          const bar = document.getElementById('tab-bar');
-          const keys = document.getElementById('bar-search');
+          const bar = document.getElementById('h1-bar');
           const on = (el) => !!el && el.getClientRects().length > 0;
-          // One row means every item shares a line: the spread of their
-          // vertical centres stays inside one item's height.
           const mids = Array.from(bar.children)
             .filter((k) => on(k))
             .map((k) => { const r = k.getBoundingClientRect(); return r.top + r.height / 2; });
+          const box = (id) => { const r = document.getElementById(id).getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; };
+          const h1 = document.querySelector('#app-body > h1');
           return {
-            inBar: !!keys.closest('#tab-bar'),
-            shown: on(keys),
-            label: (keys.innerText || '').trim(),
-            name: keys.getAttribute('aria-label') || '',
-            keyShown: on(keys.querySelector('.kk')),
-            wordShown: on(keys.querySelector('.kl')),
-            glyphShown: on(keys.querySelector('.kg')),
-            pinsShown: Array.from(bar.querySelectorAll('.pin-cb')).filter((p) => on(p)).length,
             barH: Math.round(bar.getBoundingClientRect().height),
             barScroll: bar.scrollWidth,
             barClient: bar.clientWidth,
             vw: window.innerWidth,
             rowSpread: Math.round(Math.max(...mids) - Math.min(...mids)),
+            more: box('h1-more'),
+            actions: box('h1-actions'),
+            titleText: (document.getElementById('h1-title').innerText || '').trim(),
+            tabBar: !!document.getElementById('tab-bar') || !!document.querySelector('.tab-bar'),
+            pins: document.querySelectorAll('.pin-cb, #pin-area').length,
+            pageTitleShown: on(h1),
+            searchInBar: bar.contains(document.getElementById('bar-search')),
           };
         })()`) as Promise<BarReading>;
 
-      // The harness opens a default-viewport context (lib/viewerHarness.mts:
-      // 305, newContext with no viewport), so the narrow reading has to be
-      // made here rather than assumed from the phone scenarios. 390 is the
-      // width the break exists for, and the one the sheet measured.
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [390, 844],
+        [1280, 720],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        const r = await read();
+        const at = `${w}x${h}`;
+        expect(r.barH === 56, `the bar is ${r.barH}px tall at ${at}, not the 56px the spec draws`);
+        expect(
+          r.barScroll === r.vw && r.barClient === r.vw,
+          `the bar is not exactly the viewport wide at ${at}: scrollWidth ${r.barScroll}, clientWidth ${r.barClient}, viewport ${r.vw}`,
+        );
+        expect(r.rowSpread <= 4, `the bar items sit ${r.rowSpread}px apart vertically at ${at}, so they are not one row`);
+        expect(
+          r.more[0] === 44 && r.more[1] === 44 && r.actions[0] === 44 && r.actions[1] === 44,
+          `≡ is ${r.more.join('x')} and ⋯ is ${r.actions.join('x')} at ${at}, not 44x44`,
+        );
+        expect(r.titleText.length > 0, `the bar carries no title at ${at}`);
+        expect(!r.tabBar, `a tab bar is still on the page at ${at}`);
+        expect(r.pins === 0, `${r.pins} pin controls are still on the page at ${at}`);
+        expect(!r.pageTitleShown, `the page title is still a row above the bar at ${at}`);
+        expect(!r.searchInBar, `search is still a control in the bar at ${at}`);
+        lines.push(`${at}: 56px, one row, 44px ≡ and ⋯, title ${JSON.stringify(r.titleText)}`);
+      }
+
+      // Search, at the width it had to be found at without a key: ≡, then
+      // the row, which moves to Operations, opens the panel and focuses the box.
       await page.setViewportSize({ width: 390, height: 844 });
-      const narrow = await read();
-      expect(narrow.inBar, 'the search control is not inside the bar');
-      expect(narrow.shown, 'the search control is not on screen at 390');
-      expect(
-        !narrow.keyShown && !narrow.label.includes('\u2318'),
-        'the bar still names \u2318K at 390, a key a phone does not have, got ' +
-          JSON.stringify(narrow.label),
-      );
-      expect(
-        narrow.glyphShown && narrow.label === '\u{1F50D}',
-        'the search control at 390 is not the magnifier, got ' +
-          JSON.stringify(narrow.label),
-      );
-      expect(
-        narrow.name === 'Search across sessions',
-        'the glyph has no phrase for a screen reader, aria-label ' +
-          JSON.stringify(narrow.name),
-      );
-      expect(
-        narrow.pinsShown === 0,
-        `${narrow.pinsShown} Pin to Chat boxes are still drawn at 390`,
-      );
-      expect(
-        narrow.barScroll === narrow.vw && narrow.barClient === narrow.vw,
-        'the bar is not exactly the viewport wide at 390, scrollWidth ' +
-          narrow.barScroll +
-          ' and clientWidth ' +
-          narrow.barClient +
-          ' against ' +
-          narrow.vw,
-      );
-      expect(
-        narrow.barH <= 53,
-        `the bar is ${narrow.barH}px tall at 390, over the sheet's 53px, so it wrapped`,
-      );
-      expect(
-        narrow.rowSpread <= 4,
-        `the bar items sit ${narrow.rowSpread}px apart vertically at 390, so they are not one row`,
-      );
-      // Naming it is half of it: the control has to do the thing it names, and
-      // the phone is where it changed, so it is tapped at this width.
+      await page.click('#h1-more');
+      await page.waitForSelector('#bar-search', { state: 'visible' });
+      const named = (await page.getAttribute('#bar-search', 'aria-label')) ?? '';
+      expect(named === 'Search across sessions', `the search row is labelled ${JSON.stringify(named)}`);
       await page.click('#bar-search');
       const opened = (await page.evaluate(String.raw`({
         open: document.getElementById('search').open,
         focused: document.activeElement === document.getElementById('search-q'),
-        ops: document.querySelector('.tab[data-tab="ops"]').classList.contains('active'),
-      })`)) as { open: boolean; focused: boolean; ops: boolean };
-      expect(opened.ops, 'the glyph did not move to the Operations tab at 390');
-      expect(opened.open, 'the glyph did not open the search panel at 390');
-      expect(
-        opened.focused,
-        'the glyph did not focus the search box at 390, so it names a way in it ' +
-          'does not open',
-      );
-      await page.click('.tab[data-tab="chat"]');
+        ops: document.getElementById('pane-ops').classList.contains('active'),
+        moreShut: document.getElementById('more-screen').hidden,
+        back: document.getElementById('pane-head').getClientRects().length > 0,
+      })`)) as { open: boolean; focused: boolean; ops: boolean; moreShut: boolean; back: boolean };
+      expect(opened.ops, 'the search row did not move to Operations at 390');
+      expect(opened.open, 'the search row did not open the search panel at 390');
+      expect(opened.focused, 'the search row did not focus the search box at 390');
+      expect(opened.moreShut && opened.back, `Operations did not open as a screen with a way back (${JSON.stringify(opened)})`);
+      await openTab(page, 'chat');
 
+      // The keyboard way in is unchanged at 1280.
       await page.setViewportSize({ width: 1280, height: 720 });
-      const wide = await read();
-      expect(
-        wide.wordShown && wide.keyShown && !wide.glyphShown,
-        'the phrase did not come back at 1280, where the bar has the room',
-      );
-      expect(
-        wide.label === '\u2318K search',
-        'the bar label is ' + JSON.stringify(wide.label) + ', not the phrase',
-      );
-      expect(
-        wide.pinsShown === 3,
-        `${wide.pinsShown} of 3 Pin to Chat boxes are drawn at 1280`,
-      );
-      // Hidden below the break is only safe if they still work above it.
-      const pinned = async () =>
-        (await page.evaluate(String.raw`Array.from(
-          document.querySelectorAll('#pin-area > details > summary'),
-        ).map((s) => s.textContent)`)) as string[];
-      await page.click('.pin-cb[data-pin="settings"]');
-      const withPin = await pinned();
-      expect(
-        withPin.length === 1,
-        `pinning Settings at 1280 left ${JSON.stringify(withPin)} in the pin area`,
-      );
-      await page.click('.pin-cb[data-pin="settings"]');
-      const unpinned = await pinned();
-      expect(
-        unpinned.length === 0,
-        `unpinning Settings at 1280 left ${JSON.stringify(unpinned)} in the pin area`,
-      );
-      await page.click('#bar-search');
-      const wideOpen = (await page.evaluate(
-        String.raw`document.activeElement === document.getElementById('search-q')`,
+      await page.focus('#prompt');
+      await page.keyboard.press('Control+k');
+      const byKey = (await page.evaluate(
+        String.raw`document.activeElement === document.getElementById('search-q') && document.getElementById('pane-ops').classList.contains('active')`,
       )) as boolean;
-      expect(wideOpen, 'the phrase at 1280 no longer opens the search box');
-      return (
-        '390: one row ' +
-        narrow.barScroll +
-        '/' +
-        narrow.vw +
-        ' at ' +
-        narrow.barH +
-        'px, magnifier opens search, no pins; 1280: ' +
-        wide.label +
-        ', 3 pins, Settings pins and unpins'
-      );
+      expect(byKey, 'Ctrl-K at 1280 no longer opens the search box');
+      await openTab(page, 'chat');
+      return lines.join('; ') + '; no tab bar, pins or page title; ≡ > Search across sessions opens and focuses the search at 390, Ctrl-K at 1280';
     },
-  },
-  {
-    name: 'P124 the rail is a column at 1280 and a strip at 390, collapsed or not',
-    // #119, g1 "The rail holds conversations, not workspaces" and its mobile
-    // section. Measured rather than read out of the CSS, because the two things
-    // most likely to break are both invisible in the source: the strip's height
-    // is emergent (the 44px tap floor plus the header's padding plus the rail's
-    // border, never declared), and #rail.collapsed outranks the media block's
-    // #rail, so a phone that lost the collapsed override keeps the desktop 40px
-    // column while the CSS still reads as though it were handled.
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P124 the rail is a column at 1280, collapsed or not, and at 390 a full-screen list the title opens, nothing in it under 44px',
+    // #119, g1 "The rail holds conversations, not workspaces", then #184 (h1).
+    // The 1280 claims are kept as they were: the declared 190px column, its
+    // parts drawn, collapsing to 40px. At 390 the strip is gone: the spec
+    // retires the rail at phone widths, and until slice 2 builds the List
+    // screen the bar's title opens the rail itself as a screen of its own.
+    // So the 390 claims are that it costs nothing at rest, that the title
+    // opens it full screen with everything the region is for (the folder,
+    // the filter, the rows, the +), that nothing in it is under the 44px tap
+    // floor, and that the way back (its back button, Escape, the row you are
+    // on) returns to the chat with focus on the title.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
@@ -12286,191 +12258,128 @@ PAGE_SCENARIOS.push({
       const measure = () =>
         page.evaluate(() => {
           const rail = document.getElementById('rail') as HTMLElement;
-          const head = rail.querySelector('.rh') as HTMLElement;
           const list = rail.querySelector('.list') as HTMLElement;
           const folder = rail.querySelector('.ws') as HTMLElement | null;
           const flt = rail.querySelector('.flt') as HTMLElement | null;
           const input = rail.querySelector('.flt input') as HTMLElement | null;
           const row = rail.querySelector('.s') as HTMLElement | null;
           const plus = rail.querySelector('.plus') as HTMLElement | null;
+          const ctl = rail.querySelector('.rh .ctl') as HTMLElement | null;
           const rr = rail.getBoundingClientRect();
-          // measure.mjs's tap rule, scoped to the rail. It counts
-          // button,a,[tabindex], which leaves the filter input out, so the
-          // input is read separately against the same floor.
-          const taps = Array.from(
-            rail.querySelectorAll('button,a,[tabindex]'),
-          )
-            .map((e) => Math.round(e.getBoundingClientRect().height))
-            .filter((h) => h > 0);
+          const taps = Array.from(rail.querySelectorAll('button,a,[tabindex]'))
+            .filter((e) => e.getClientRects().length > 0)
+            .map((e) => Math.round(e.getBoundingClientRect().height));
           return {
+            shown: rail.getClientRects().length > 0 && rr.height > 0,
             railW: Math.round(rr.width),
             railH: Math.round(rr.height),
-            parentW: (rail.parentElement as HTMLElement).clientWidth,
-            headDir: getComputedStyle(head).flexDirection,
+            railTop: Math.round(rr.top),
+            vw: window.innerWidth,
+            vh: window.innerHeight,
             folderShown: !!folder && folder.getClientRects().length > 0,
             filterShown: !!flt && flt.getClientRects().length > 0,
-            inputShown: !!input && input.getClientRects().length > 0,
-            inputH: input
-              ? Math.round(input.getBoundingClientRect().height)
-              : 0,
+            inputH: input ? Math.round(input.getBoundingClientRect().height) : 0,
             rowShown: !!row && row.getClientRects().length > 0,
             rowW: row ? Math.round(row.getBoundingClientRect().width) : 0,
-            plusShown: !!plus && plus.getClientRects().length > 0,
             plusInList: !!list && !!plus && list.contains(plus),
-            scrollsX: !!list && list.scrollWidth > list.clientWidth + 1,
+            plusShown: !!plus && plus.getClientRects().length > 0,
+            ctlShown: !!ctl && ctl.getClientRects().length > 0,
             railOverflows: rail.scrollWidth > rail.clientWidth + 1,
             under44: taps.filter((h) => h < 44).length,
             taps: taps.length,
             collapsed: rail.classList.contains('collapsed'),
+            expanded: document.getElementById('h1-title')!.getAttribute('aria-expanded'),
+            focusOnTitle: document.activeElement === document.getElementById('h1-title'),
           };
         });
       const toggle = () =>
         page.evaluate(() => {
-          const rail = document.getElementById('rail') as HTMLElement;
-          const buttons = rail.querySelectorAll('.rh button');
-          (buttons[buttons.length - 1] as HTMLButtonElement).click();
+          (document.querySelector('#rail .rh .ctl') as HTMLButtonElement).click();
         });
 
       // Desktop, expanded: the declared column, and everything the region is
       // for is present.
       await page.setViewportSize({ width: 1280, height: 720 });
       const wide = await measure();
-      expect(
-        wide.railW === 190,
-        `the rail is ${wide.railW}px wide at 1280, not the 190px column g1 draws`,
-      );
-      expect(
-        !wide.railOverflows,
-        'the rail overflows its own box at 1280, so a long title breaks the layout',
-      );
+      expect(wide.railW === 190, `the rail is ${wide.railW}px wide at 1280, not the 190px column g1 draws`);
+      expect(!wide.railOverflows, 'the rail overflows its own box at 1280, so a long title breaks the layout');
       expect(wide.folderShown, 'the folder line is not drawn at 1280');
-      expect(wide.inputShown, 'the filter is not drawn at 1280');
+      expect(wide.filterShown, 'the filter is not drawn at 1280');
       expect(wide.rowShown, 'no conversation row is drawn at 1280');
-      expect(
-        wide.plusInList,
-        'the + sits outside the list at 1280, so it does not scroll with the rows',
-      );
+      expect(wide.plusInList, 'the + sits outside the list at 1280, so it does not scroll with the rows');
 
       // Desktop, collapsed: 40px, and the parts that need room give it up.
       await toggle();
       const wideShut = await measure();
       expect(wideShut.collapsed, 'the toggle did not collapse the rail at 1280');
-      expect(
-        wideShut.railW === 40,
-        `the collapsed rail is ${wideShut.railW}px wide at 1280, not 40px`,
-      );
-      expect(
-        !wideShut.folderShown,
-        'the folder line is still drawn on the collapsed rail',
-      );
-      expect(
-        !wideShut.filterShown,
-        'the filter is still drawn on the collapsed rail',
-      );
+      expect(wideShut.railW === 40, `the collapsed rail is ${wideShut.railW}px wide at 1280, not 40px`);
+      expect(!wideShut.folderShown, 'the folder line is still drawn on the collapsed rail');
+      expect(!wideShut.filterShown, 'the filter is still drawn on the collapsed rail');
       expect(
         wideShut.rowW === 39 || wideShut.rowW === 40,
         `collapsed rows are ${wideShut.rowW}px wide, not the 40px gutter`,
       );
-      await toggle();
+      // The title brings a collapsed column back, since numbers are no list.
+      await page.click('#h1-title');
+      const fromTitle = await measure();
+      expect(!fromTitle.collapsed, 'the title did not bring the collapsed rail back at 1280');
 
-      // Phone, expanded: a strip across the top, and nothing in it under the
-      // tap floor. The height is a band rather than a number because nothing
-      // declares it.
+      // Phone, at rest: no strip and no column, nothing of the fold spent.
       await page.setViewportSize({ width: 390, height: 844 });
-      const narrow = await measure();
-      expect(
-        narrow.railW === narrow.parentW,
-        `the rail is ${narrow.railW}px across a ${narrow.parentW}px column at 390, so it is still a side column`,
-      );
-      expect(
-        narrow.railH <= 72,
-        `the rail is ${narrow.railH}px tall at 390, so it is a column rather than a strip`,
-      );
-      expect(
-        !narrow.folderShown,
-        'the folder line is drawn on the strip, where g1 drops it',
-      );
-      expect(
-        narrow.inputH >= 44,
-        `the filter input is ${narrow.inputH}px tall at 390, under the 44px tap floor`,
-      );
-      expect(
-        narrow.scrollsX,
-        'the strip list does not scroll sideways at 390, so a second conversation is unreachable',
-      );
-      expect(
-        narrow.under44 === 0,
-        `${narrow.under44} of ${narrow.taps} rail controls are under 44px tall at 390`,
-      );
-      expect(
-        narrow.plusInList,
-        'the + left the list at 390, where g1 keeps it in the scrolling row',
-      );
+      await page.focus('#prompt');
+      const rest = await measure();
+      expect(!rest.shown, `the rail is on the chat screen at rest at 390 (${rest.railW}x${rest.railH})`);
+      expect(rest.expanded === 'false', `the title does not say the list is shut (aria-expanded ${rest.expanded})`);
 
-      // Phone, collapsed: still a strip. This is the one the selector
-      // specificity makes easy to lose.
-      await toggle();
-      const narrowShut = await measure();
+      // Phone, opened by the title: the whole screen, every part drawn, the
+      // collapse control gone (a full-screen list has nothing to collapse to),
+      // and nothing under the tap floor.
+      await page.click('#h1-title');
+      const open = await measure();
       expect(
-        narrowShut.collapsed,
-        'the toggle did not collapse the rail at 390',
+        open.shown && open.railW === open.vw && open.railTop === 0 && open.railH === open.vh,
+        `the title did not open the list full screen at 390 (${open.railW}x${open.railH} at ${open.railTop})`,
       );
-      expect(
-        narrowShut.railW === narrowShut.parentW,
-        `the collapsed rail is ${narrowShut.railW}px across a ${narrowShut.parentW}px column at 390, so it stayed a 40px desktop column on a phone`,
-      );
-      expect(
-        narrowShut.railH <= 72,
-        `the collapsed rail is ${narrowShut.railH}px tall at 390, not a strip`,
-      );
-      // Collapsing must not change the strip's height. This is the assertion
-      // the media override exists to satisfy, and the width check above cannot
-      // carry it: on a phone the shell is a column, so the desktop
-      // #rail.collapsed flex basis lands on the HEIGHT. Without the override
-      // naming #rail.collapsed the strip squashes from 57px to 40px while
-      // staying full width, which reads as passing to a width-only guard.
-      expect(
-        narrowShut.railH === narrow.railH,
-        `the rail is ${narrow.railH}px tall expanded but ${narrowShut.railH}px collapsed at 390, so collapsing squashed the strip`,
-      );
-      expect(
-        narrowShut.headDir === 'row',
-        `the collapsed header is a ${narrowShut.headDir} at 390, so it kept the desktop column`,
-      );
-      expect(
-        narrowShut.under44 === 0,
-        `${narrowShut.under44} of ${narrowShut.taps} rail controls are under 44px tall when collapsed at 390`,
-      );
+      expect(open.expanded === 'true', 'the title does not say the list is open');
+      expect(open.folderShown && open.filterShown && open.rowShown && open.plusShown, `the open list is missing a part at 390 (${JSON.stringify(open)})`);
+      expect(open.inputH >= 44, `the filter input is ${open.inputH}px tall at 390, under the 44px tap floor`);
+      expect(!open.ctlShown, 'the collapse control is drawn on the full-screen list');
+      expect(open.under44 === 0, `${open.under44} of ${open.taps} list controls are under 44px tall at 390`);
+      expect(open.plusInList, 'the + left the list at 390');
 
+      // The ways back: the back button, Escape, and the row you are on.
+      await page.click('#rail .rh .back');
+      const backed = await measure();
+      expect(!backed.shown && backed.focusOnTitle, `the back button did not return to the chat with focus on the title (${JSON.stringify({ shown: backed.shown, focus: backed.focusOnTitle })})`);
+      await page.click('#h1-title');
+      await page.keyboard.press('Escape');
+      const escaped = await measure();
+      expect(!escaped.shown && escaped.focusOnTitle, 'Escape did not shut the list back onto the title');
+      await page.click('#h1-title');
+      await page.click(`#rail .s[data-session="${viewer.sessionId}"]`);
+      const picked = await measure();
+      expect(!picked.shown, 'tapping the conversation already on screen left the list over it');
+
+      await page.setViewportSize({ width: 1280, height: 720 });
       return (
-        '1280: ' +
-        wide.railW +
-        'px column, collapsed ' +
-        wideShut.railW +
-        'px; 390: ' +
-        narrow.railW +
-        'x' +
-        narrow.railH +
-        ' strip, collapsed ' +
-        narrowShut.railW +
-        'x' +
-        narrowShut.railH +
-        ', ' +
-        narrow.taps +
-        ' controls all at 44px or over'
+        `1280: ${wide.railW}px column, collapsed ${wideShut.railW}px, the title brings it back; ` +
+        `390: nothing at rest, the title opens it ${open.railW}x${open.railH}, ${open.taps} controls all at 44px or over, back, Escape and the row on screen return to the chat`
       );
     },
   });
   PAGE_SCENARIOS.push({
-    name: 'P125 the composer row carries the verbs and the ghost paints in the field',
-    // #120, g1 "The field", "The idle suggestion, drawn as ghost text" and
-    // "The control row". Measured, because the failures this layout invites are
-    // invisible in the source: the ghost is a layer BEHIND a transparent field
-    // (a textarea takes no children, and a ::before on one computes without
-    // ever painting, which is why the caret bar lives on the wrapper), the
-    // verbs moved out of their own block above the transcript, and the pill
-    // stack is gone by design, which strands suggestions 2 and 3 of the
-    // daemon's default three.
+    name: 'P125 the composer is one row of +, the field and Send, the verbs kept their ids, and the ghost paints in the field',
+    // #120's composer row, rewritten for #184 (h1). The claims kept: the verbs
+    // did not get lost in the move (every id is on the page, and the one used
+    // on every turn, cancel, sits in the row as Stop), the old blocks stay
+    // retired, the field is transparent so a ghost behind it shows, and the
+    // idle suggestion paints as grey italic text INSIDE the field, BEHIND the
+    // box, one of the daemon's three, gone on a keystroke, back on an empty
+    // box, and filled (never sent) by Tab. What changed is the row: the spec's
+    // + 44x44, the field 44px growing to 132, and Send 44x44 green, with
+    // nothing else in it at rest, at the 44px floor and on the fold at 390.
+    // The two verbs that end or rewind are in the ⋯ menu now (P139), and the
+    // symbol help that explained them is retired with them.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
@@ -12479,79 +12388,51 @@ PAGE_SCENARIOS.push({
       const look = () =>
         page.evaluate(() => {
           const composer = document.getElementById('composer') as HTMLElement;
+          const crow = composer.querySelector('.crow') as HTMLElement;
           const field = composer.querySelector('.field') as HTMLElement;
           const ta = document.getElementById('prompt') as HTMLElement;
           const ghost = document.getElementById('idle-ghost') as HTMLElement;
-          const crow = composer.querySelector('.crow') as HTMLElement;
-          const sgroup = crow.querySelector('.sgroup') as HTMLElement;
-          const mic = crow.querySelector('.mic') as HTMLElement;
-          const interim = document.getElementById('dictate-interim') as HTMLElement;
           const send = document.getElementById('send') as HTMLElement;
+          const plus = document.getElementById('h1-plus') as HTMLElement;
           const use = ghost.querySelector('.use') as HTMLElement | null;
-          // Order along the row as PAINTED, which is the sheet's claim. The
-          // empty interim slot is display:none, so it is not in the line; the
-          // auto-send label is. Reading the DOM order instead would pass even
-          // if the CSS rearranged the row.
-          const kids = Array.from(crow.children) as HTMLElement[];
-          const line = kids
+          // Order along the row as PAINTED. Reading the DOM order instead would
+          // pass even if the CSS rearranged the row.
+          const line = (Array.from(crow.children) as HTMLElement[])
             .filter((k) => k.getClientRects().length > 0)
-            .map((k) =>
-              k === sgroup ? 'sgroup' : k === mic ? 'mic' : k === send ? 'send' : k.id || k.className,
-            );
+            .sort((x, y) => x.getBoundingClientRect().left - y.getBoundingClientRect().left)
+            .map((k) => k.id || k.className);
           const fr = field.getBoundingClientRect();
           const gr = ghost.getBoundingClientRect();
-          // measure.mjs's rule (button,a,[tabindex]) plus the select, which the
-          // sheet floors but the metric cannot see. The auto-send checkbox is
-          // deliberately NOT counted: the sheet gives it no floor, and a bare
-          // checkbox is 13px in every browser.
+          const sr = send.getBoundingClientRect();
+          const pr = plus.getBoundingClientRect();
           const taps = Array.from(crow.querySelectorAll('button,select,a,[tabindex]'))
-            .map((e) => Math.round(e.getBoundingClientRect().height))
-            .filter((h) => h > 0);
+            .filter((e) => e.getClientRects().length > 0)
+            .map((e) => Math.round(e.getBoundingClientRect().height));
           return {
-            focused: document.activeElement === ta,
+            rowOrder: line.join(','),
+            plus: [Math.round(pr.width), Math.round(pr.height)],
+            send: [Math.round(sr.width), Math.round(sr.height)],
+            sendBg: getComputedStyle(send).backgroundColor,
             fieldH: Math.round(fr.height),
-            caret: getComputedStyle(field, '::before').content,
-            caretW: getComputedStyle(field, '::before').width,
             taBg: getComputedStyle(ta).backgroundColor,
+            taFont: getComputedStyle(ta).fontSize,
             ghostShown: ghost.getClientRects().length > 0,
             ghostText: ghost.textContent || '',
             ghostBehind:
               Number(getComputedStyle(ghost).zIndex || 0) <= 0 &&
               getComputedStyle(ghost).position === 'absolute',
             ghostInside:
-              gr.left >= fr.left - 1 &&
-              gr.top >= fr.top - 1 &&
-              gr.right <= fr.right + 1,
+              gr.left >= fr.left - 1 && gr.top >= fr.top - 1 && gr.right <= fr.right + 1,
             ghostItalic: getComputedStyle(ghost).fontStyle,
             ghostColor: getComputedStyle(ghost).color,
-            // null at rest: the affordance is only built when a suggestion is
-            // painted, and getComputedStyle on null throws inside evaluate.
             useStyle: use ? getComputedStyle(use).fontStyle : 'absent',
-            rowOrder: line.join(','),
-            verbsRight:
-              sgroup.getBoundingClientRect().left > mic.getBoundingClientRect().right,
-            sendLast: kids[kids.length - 1] === send,
-            interimShown: interim.getClientRects().length > 0,
-            // The three verbs, not the help button beside them and not the
-            // reconnect, which is authored hidden until self-heal gives up.
-            verbs: Array.from(sgroup.querySelectorAll('button'))
-              .filter((b) => b.id !== 'reconnect' && !b.classList.contains('help-btn'))
-              .map((b) => ({
-                id: b.id,
-                text: (b.textContent || '').trim(),
-                title: b.getAttribute('title') || '',
-              })),
-            endTint: getComputedStyle(sgroup.querySelector('.ic.end') as HTMLElement).color,
-            helpTarget:
-              sgroup.querySelector('.help-btn')?.getAttribute('aria-controls') || '',
             oldBlock: !!document.getElementById('session-controls'),
             oldChips: !!document.getElementById('idle-chips'),
+            oldHelp: !!document.getElementById('help-session-controls'),
             lost: ['cancel-turn', 'end-session', 'rewind-chat', 'reconnect']
               .filter((id) => !document.getElementById(id))
               .join(','),
-            outside: ['cancel-turn', 'end-session', 'rewind-chat']
-              .filter((id) => !sgroup.contains(document.getElementById(id) as Node))
-              .join(','),
+            stopInRow: crow.contains(document.getElementById('cancel-turn')),
             under44: taps.filter((h) => h < 44).length,
             taps: taps.length,
             composerBottom: Math.round(composer.getBoundingClientRect().bottom),
@@ -12562,108 +12443,67 @@ PAGE_SCENARIOS.push({
       const blur = () =>
         page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur?.());
 
-      await page.setViewportSize({ width: 1280, height: 720 });
-      await blur();
-
-      // Resting: nothing suggested, the caret bar drawn, the row in order.
-      const rest = await look();
-      expect(!rest.focused, 'the field is focused at rest, so the caret check below proves nothing');
-      expect(!rest.ghostShown, 'a ghost is painted with nothing to suggest');
-      expect(
-        rest.fieldH >= 52,
-        `the field is ${rest.fieldH}px tall, under the 52px g1 draws`,
-      );
-      expect(
-        rest.caret !== 'none' && rest.caretW === '1px',
-        `the unfocused field draws no caret bar (content ${rest.caret}, width ${rest.caretW})`,
-      );
-      expect(
-        rest.taBg === 'rgba(0, 0, 0, 0)',
-        `the textarea is ${rest.taBg}, so a ghost behind it could never show through`,
-      );
-      // #175 folds the attachment controls into this row as one group, after
-      // the dictation cluster and before the verbs, which keep their place at
-      // the far end. g1 draws no attachment controls at all; the group sits
-      // where it does not move anything the sheet does draw. P130 holds the
-      // group's own claims.
-      expect(
-        rest.rowOrder === 'mic,dictate-engine,dictate-lang,lab,agroup,sgroup,send',
-        `the row reads ${rest.rowOrder}, not the order g1 draws plus the #175 group`,
-      );
-      expect(
-        !rest.interimShown,
-        'the interim slot is drawn while empty, so it holds a row of its own',
-      );
-      expect(rest.verbsRight, 'the session verbs are not pushed to the row end');
-      expect(rest.sendLast, 'Send is not the last control in the row');
-      expect(
-        !rest.oldBlock,
-        'the session-controls block is still on the page beside the row that now carries its verbs',
-      );
-      expect(!rest.oldChips, 'idle-chips is still on the page beside the ghost');
-      expect(rest.lost === '', `verbs lost from the move: ${rest.lost}`);
-      expect(rest.outside === '', `verbs not inside the row: ${rest.outside}`);
-      expect(
-        rest.verbs.length === 3,
-        `the row carries ${rest.verbs.length} verbs, not the three g1 draws`,
-      );
-      for (const v of rest.verbs) {
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [390, 844],
+        [1280, 720],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await blur();
+        const rest = await look();
+        const at = `${w}x${h}`;
+        expect(!rest.ghostShown, `a ghost is painted with nothing to suggest at ${at}`);
         expect(
-          v.text.length <= 2 && v.title.length > 10,
-          `#${v.id} reads "${v.text}" with title "${v.title}", so it is not a symbol carrying its phrase`,
+          rest.rowOrder === 'h1-plus,field,send',
+          `the row reads ${rest.rowOrder} at ${at}, not +, the field and Send`,
         );
+        expect(
+          rest.plus.join('x') === '44x44' && rest.send.join('x') === '44x44',
+          `+ is ${rest.plus.join('x')} and Send ${rest.send.join('x')} at ${at}, not 44x44`,
+        );
+        expect(rest.sendBg === 'rgb(35, 134, 54)', `Send is ${rest.sendBg}, not the spec's green`);
+        expect(rest.fieldH === 44, `the empty field is ${rest.fieldH}px at ${at}, not 44`);
+        expect(rest.taBg === 'rgba(0, 0, 0, 0)', `the textarea is ${rest.taBg}, so a ghost behind it could never show through`);
+        expect(rest.taFont === '16px', `the field's text is ${rest.taFont}, and under 16px iOS zooms the page on focus`);
+        expect(rest.under44 === 0, `${rest.under44} of ${rest.taps} row controls are under 44px at ${at}`);
+        expect(rest.composerBottom <= rest.viewH, `the composer bottom is ${rest.composerBottom} in a ${rest.viewH}px viewport at ${at}`);
+        lines.push(`${at}: ${rest.rowOrder}, field ${rest.fieldH}px`);
       }
-      expect(
-        rest.endTint === 'rgb(243, 139, 168)',
-        `the end-session verb is ${rest.endTint}, not the tint g1 gives it`,
-      );
-      expect(
-        rest.helpTarget === 'help-session-controls',
-        `the row help button targets "${rest.helpTarget}"`,
-      );
+      const rest = await look();
+      expect(!rest.oldBlock && !rest.oldChips && !rest.oldHelp, 'a retired block (session-controls, idle-chips or the verbs help) is back on the page');
+      expect(rest.lost === '', `verbs lost from the move: ${rest.lost}`);
+      expect(rest.stopInRow, 'cancel is not in the composer row, where Stop takes Send’s place');
 
-      // The drawn caret stands in for the real one only while unfocused. A
-      // focused field already has the browser caret, so a bar beside it reads
-      // as two. This is the deliberate deviation from the sheet, pinned.
-      await page.focus('#prompt');
-      const lit = await look();
+      // The field grows with what is in it to 132px, then scrolls.
+      await page.fill('#prompt', 'line\n'.repeat(3) + 'line');
+      const four = await look();
+      await page.fill('#prompt', 'line\n'.repeat(20) + 'line');
+      const many = await look();
+      await page.fill('#prompt', '');
+      const back = await look();
       expect(
-        lit.caret === 'none',
-        `the focused field still draws its own caret bar (${lit.caret}), so two carets paint`,
+        four.fieldH > 44 && four.fieldH < 132 && many.fieldH === 132 && back.fieldH === 44,
+        `the field did not grow and shrink with its text: 4 lines ${four.fieldH}px, 21 lines ${many.fieldH}px, empty ${back.fieldH}px`,
       );
-      await blur();
 
       // A suggestion arrives: painted inside the field, behind the box, grey
       // italic, and only the first of the frame's three.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await blur();
       await page.evaluate((sid) => {
         renderIdleGhost({ sessionId: sid, suggestions: ['first suggestion', 'second', 'third'] });
       }, viewer.sessionId);
       const withGhost = await look();
       expect(withGhost.ghostShown, 'the suggestion is not painted in the field');
-      expect(
-        withGhost.ghostText.startsWith('first suggestion'),
-        `the ghost reads "${withGhost.ghostText}", so it is not the first suggestion`,
-      );
-      expect(
-        !withGhost.ghostText.includes('second'),
-        'the ghost carries more than one suggestion, which g1 forbids',
-      );
-      expect(
-        withGhost.ghostBehind,
-        'the ghost is not a layer behind the field, so it would sit on top of what is typed',
-      );
-      expect(
-        withGhost.ghostInside,
-        'the ghost is painted outside the field box rather than inside it',
-      );
+      expect(withGhost.ghostText.startsWith('first suggestion'), `the ghost reads "${withGhost.ghostText}", so it is not the first suggestion`);
+      expect(!withGhost.ghostText.includes('second'), 'the ghost carries more than one suggestion, which g1 forbids');
+      expect(withGhost.ghostBehind, 'the ghost is not a layer behind the field, so it would sit on top of what is typed');
+      expect(withGhost.ghostInside, 'the ghost is painted outside the field box rather than inside it');
       expect(
         withGhost.ghostItalic === 'italic' && withGhost.ghostColor === 'rgb(91, 100, 112)',
-        `the ghost is ${withGhost.ghostColor} ${withGhost.ghostItalic}, not the grey italic g1 measures`,
+        `the ghost is ${withGhost.ghostColor} ${withGhost.ghostItalic}, not the grey italic the spec draws`,
       );
-      expect(
-        withGhost.useStyle === 'normal',
-        `the use affordance is ${withGhost.useStyle}, so it does not read as an action`,
-      );
+      expect(withGhost.useStyle === 'normal', `the use affordance is ${withGhost.useStyle}, so it does not read as an action`);
 
       // Any typed character removes it.
       await page.focus('#prompt');
@@ -12677,44 +12517,22 @@ PAGE_SCENARIOS.push({
         ta.value = '';
         ta.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      const back = await look();
-      expect(back.ghostShown, 'the suggestion did not return once the box was empty');
+      const again = await look();
+      expect(again.ghostShown, 'the suggestion did not return once the box was empty');
       const before = await page.evaluate(() => transcriptModel.items.length);
       await page.focus('#prompt');
       await page.keyboard.press('Tab');
       const accepted = await look();
       expect(!accepted.ghostShown, 'Tab did not take the suggestion, so the keyboard path is missing');
       const filled = await page.$eval('#prompt', (el) => (el as HTMLTextAreaElement).value);
-      expect(
-        filled === 'first suggestion',
-        `Tab left "${filled}" in the box, so it did not fill the suggestion`,
-      );
-      // Filling is not sending: the transcript gained nothing.
+      expect(filled === 'first suggestion', `Tab left "${filled}" in the box, so it did not fill the suggestion`);
       const after = await page.evaluate(() => transcriptModel.items.length);
-      expect(
-        after === before,
-        `accepting a suggestion sent it: the model went from ${before} rows to ${after}`,
-      );
+      expect(after === before, `accepting a suggestion sent it: the model went from ${before} rows to ${after}`);
 
-      // Phone: the row stays on the 44px floor and the composer clears the fold.
-      await page.setViewportSize({ width: 390, height: 844 });
-      const narrow = await look();
-      expect(
-        narrow.under44 === 0,
-        `${narrow.under44} of ${narrow.taps} row controls are under 44px tall at 390`,
-      );
-      expect(
-        narrow.composerBottom <= narrow.viewH + 1,
-        `the composer bottom is ${narrow.composerBottom} in a ${narrow.viewH}px viewport at 390`,
-      );
-
+      await page.setViewportSize({ width: 1280, height: 720 });
       return (
-        'row ' +
-        rest.rowOrder +
-        '; 3 verbs as symbols with titles; field ' +
-        rest.fieldH +
-        'px, caret drawn only unfocused; ghost paints behind the field, one of three; ' +
-        'Tab fills without sending; 390 row all at 44px or over'
+        lines.join('; ') +
+        '; field grows 44 to 132; every verb id kept, Stop in the row; ghost paints behind the field, one of three; Tab fills without sending'
       );
     },
   });
@@ -12731,46 +12549,78 @@ PAGE_SCENARIOS.push({
   // without having looked. In-page code is a plain string throughout: the
   // transform rewrites a named arrow in a callback into a __name(...) call the
   // page does not define.
-  type ShellSurface = 'chat' | 'picker' | 'ops' | 'settings' | 'diag';
-  const SHELL_SURFACES: ShellSurface[] = ['chat', 'picker', 'ops', 'settings', 'diag'];
+  // #184 (h1): the surfaces are the H1 shell's. The Chat screen is read with
+  // its sheet and its tools open and a toast up, so every band it can show is
+  // on screen; the ⋯ menu, the conversation list (a column at 1280, a screen
+  // of its own at 390) and the More screen are read as surfaces of their own,
+  // since each covers what is under it while it is open.
+  type ShellSurface =
+    | 'chat'
+    | 'menu'
+    | 'list'
+    | 'more'
+    | 'picker'
+    | 'ops'
+    | 'settings'
+    | 'diag';
+  const SHELL_SURFACES: ShellSurface[] = [
+    'chat',
+    'menu',
+    'list',
+    'more',
+    'picker',
+    'ops',
+    'settings',
+    'diag',
+  ];
   const SHELL_ROOTS: Record<ShellSurface, string[]> = {
     chat: [
-      '#tab-bar',
-      '#rail',
-      '#status',
+      '#h1-bar',
+      '#h1-statusline',
+      '#h1-sheet',
       '#crash-banner',
       '#transcript-wrap',
-      '#session-footer',
+      '#h1-tools',
       '#composer',
     ],
+    menu: ['#h1-menu'],
+    list: ['#rail'],
+    more: ['#more-screen'],
     picker: ['#dir-picker'],
     ops: ['#pane-ops'],
     settings: ['#pane-settings'],
     diag: ['#pane-diag'],
   };
+  const phoneWide = (page: Page): boolean => (page.viewportSize()?.width ?? 1280) <= 860;
   const openShellSurface = async (page: Page, s: ShellSurface): Promise<void> => {
+    await openTab(page, 'chat');
     if (s === 'chat') {
-      await page.click('.tab[data-tab="chat"]');
-      // The status line is read with a line in it: between turns it can be
-      // empty, and an empty line paints no ink to measure.
+      await openSheet(page);
+      await openTools(page);
+      // The status toast is read with a line in it: it shows only while
+      // fresh, and an empty one paints no ink to measure.
       await page.evaluate(String.raw`(() => {
         document.getElementById('load-earlier').hidden = false;
         document.getElementById('jump-bottom').hidden = false;
         showCrashBanner(false);
-        document.getElementById('help-session-controls').hidden = false;
         const st = document.getElementById('status');
-        if (!st.textContent.trim()) {
-          st.dataset.shellRead = 'empty';
-          st.textContent = 'status line';
-        }
+        st.dataset.shellRead = st.textContent;
+        st.textContent = 'status line';
       })()`);
+    } else if (s === 'menu') {
+      await openMenu(page);
+    } else if (s === 'list') {
+      if (phoneWide(page)) await openList(page);
+      await page.evaluate(`document.getElementById('help-rail').hidden = false`);
+    } else if (s === 'more') {
+      await page.click('#h1-more');
     } else if (s === 'picker') {
-      await page.click('.tab[data-tab="chat"]');
+      if (phoneWide(page)) await openList(page);
       await page.click('#rail .plus');
       await page.waitForFunction(`!document.getElementById('dir-picker').hidden`);
       await page.evaluate(`document.getElementById('help-dir-picker').hidden = false`);
     } else {
-      await page.click(`.tab[data-tab="${s}"]`);
+      await openTab(page, s);
       await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
         if (d.hidden) {
           d.dataset.shellRead = 'hidden';
@@ -12787,20 +12637,27 @@ PAGE_SCENARIOS.push({
         document.getElementById('load-earlier').hidden = true;
         document.getElementById('jump-bottom').hidden = true;
         document.getElementById('crash-banner').hidden = true;
-        document.getElementById('help-session-controls').hidden = true;
         const st = document.getElementById('status');
-        if (st.dataset.shellRead === 'empty') {
-          st.textContent = '';
-          delete st.dataset.shellRead;
-        }
+        st.textContent = st.dataset.shellRead || '';
+        delete st.dataset.shellRead;
+        st.classList.remove('fresh');
       })()`);
+      await page.click('#h1-status');
+      await page.click('#h1-plus');
+    } else if (s === 'menu') {
+      await page.keyboard.press('Escape');
+    } else if (s === 'list') {
+      await page.evaluate(`document.getElementById('help-rail').hidden = true`);
+      if (phoneWide(page)) await page.click('#rail .rh .back');
+    } else if (s === 'more') {
+      await page.click('#more-back');
     } else if (s === 'picker') {
       await page.evaluate(`document.getElementById('help-dir-picker').hidden = true`);
       // Focus is inside the panel (the + moves it there, P128), so Escape
       // shuts it the way a reader would.
       await page.keyboard.press('Escape');
       await page.waitForFunction(`document.getElementById('dir-picker').hidden`);
-      await page.evaluate('window.scrollTo(0, 0)');
+      if (phoneWide(page)) await page.click('#rail .rh .back');
     } else {
       await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
         d.querySelectorAll('.help-text').forEach((h) => { h.hidden = true; });
@@ -12810,7 +12667,7 @@ PAGE_SCENARIOS.push({
           delete d.dataset.shellRead;
         }
       })`);
-      await page.click('.tab[data-tab="chat"]');
+      await openTab(page, 'chat');
     }
   };
   // Every visible element under the roots that paints text of its own, with
@@ -12891,43 +12748,39 @@ PAGE_SCENARIOS.push({
       // #177: the transcript's rows are read by the same collector as every
       // band below, so a row and a band are held to one rule.
       const painted = await readShellText(page, ['#transcript']);
-      const seen = await page.evaluate(() => {
+      // #184 (h1): the stack is the spec's chat screen: bar, status line,
+      // sheet, transcript, to-do strip, tools, composer. The sheet, the strip
+      // and the tools come and go, so all three are opened for the reading and
+      // put back after; a hidden element reports a zero rect, which would sort
+      // it to the top and read as a position it does not have.
+      await openSheet(page);
+      await openTools(page);
+      const seen = (await page.evaluate(String.raw`(() => {
+        const plan = document.getElementById('plan');
+        const wasHidden = plan.hidden;
+        plan.hidden = false;
+        const ids = ['h1-bar', 'h1-statusline', 'h1-sheet', 'transcript', 'plan', 'h1-tools', 'composer'];
+        const tops = ids.map((k) => ({
+          k,
+          top: Math.round(document.getElementById(k).getBoundingClientRect().top),
+        }));
+        plan.hidden = wasHidden;
         return {
           rows: transcriptModel.items.length,
           strip: document.getElementById('status-strip') !== null,
           drawer: document.getElementById('inspector') !== null,
-          // The stack order the sheet draws: status, transcript, to-do strip,
-          // inspector drawer, composer. #session-footer starts display:none and
-          // renderFooter bails without a model, so it is shown here to read
-          // where it actually lands. The pane sets no flex and no order, so this is
-          // paint order.
-          stack: (() => {
-            // Two of the five are hidden on this host: the drawer until a model
-            // is configured, the strip because no to-do tool is registered
-            // (#81). A hidden element reports a zero rect, which would sort it
-            // to the top of the column and read as a position it does not have,
-            // so both are shown for the reading and put back after.
-            const hidden = ['plan', 'session-footer'].map((k) => ({
-              e: document.getElementById(k) as HTMLElement,
-              was: (document.getElementById(k) as HTMLElement).style.display,
-            }));
-            for (const h of hidden) {
-              h.e.hidden = false;
-              h.e.style.display = 'block';
-            }
-            const ids = ['status', 'transcript', 'plan', 'session-footer', 'composer'];
-            const tops = ids.map((k) => ({
-              k,
-              top: Math.round((document.getElementById(k) as HTMLElement).getBoundingClientRect().top),
-            }));
-            for (const h of hidden) {
-              h.e.style.display = h.was;
-              if (h.e.id === 'plan') h.e.hidden = true;
-            }
-            return tops;
-          })(),
+          tabBar: document.getElementById('tab-bar') !== null,
+          stack: tops,
         };
-      });
+      })()`)) as {
+        rows: number;
+        strip: boolean;
+        drawer: boolean;
+        tabBar: boolean;
+        stack: { k: string; top: number }[];
+      };
+      await page.click('#h1-status');
+      await page.click('#h1-plus');
 
       expect(
         seen.rows > 0,
@@ -12938,8 +12791,8 @@ PAGE_SCENARIOS.push({
         'no element in the transcript paints text of its own, so the guard measures nothing',
       );
       expect(
-        !seen.strip && !seen.drawer,
-        `the retired slots returned (status-strip ${seen.strip}, inspector ${seen.drawer})`,
+        !seen.strip && !seen.drawer && !seen.tabBar,
+        `the retired slots returned (status-strip ${seen.strip}, inspector ${seen.drawer}, tab bar ${seen.tabBar})`,
       );
 
       // Sorted on the measured top, not on the order the ids were asked for.
@@ -12947,8 +12800,8 @@ PAGE_SCENARIOS.push({
       // fail, which is the exact shape of a guard that proves nothing.
       const order = [...seen.stack].sort((a, b) => a.top - b.top).map((t) => t.k);
       expect(
-        order.join(' ') === 'status transcript plan session-footer composer',
-        `the column stack is ${seen.stack.map((t) => t.k + '@' + t.top).join(' ')}, but the sheet draws status -> transcript -> to-do strip -> drawer -> composer`,
+        order.join(' ') === 'h1-bar h1-statusline h1-sheet transcript plan h1-tools composer',
+        `the column stack is ${seen.stack.map((t) => t.k + '@' + t.top).join(' ')}, but the spec draws bar -> status line -> sheet -> transcript -> to-do strip -> tools -> composer`,
       );
 
       const worst = { kind: '', ratio: 99 };
@@ -12960,38 +12813,17 @@ PAGE_SCENARIOS.push({
         }
       }
 
-      // The composer has to clear the fold at both widths, which #121 asks for
-      // by name and nothing in the tree did. It is the exact failure the sheet
-      // records: a band added above the composer once pushed it out of reach.
-      // Three drawer states are read because the band's cost is what this task
-      // adds. They have to be forced, because the page does not offer a hidden
-      // rest state once a turn has run: renderFooter at index.html:4814 sets
-      // display:none only in its no-ctxInfo branch and never sets it back, so
-      // with a live turn the band is already painted and reading it untouched
-      // twice, which an earlier draft of this leg did, measures one quantity
-      // under two names. So each state is set explicitly here: hidden, as-is,
-      // and filled with model, tokens, cwd and mode. The strip stays out of it:
-      // no to-do tool is registered (#81), so a filled strip is a state this
-      // host cannot produce and drawing one here would be a fiction.
-      //
-      // Until #175 only the hidden band was asserted at 390: the band put the
-      // composer 66px under the fold there (910 in 844), held in #151 rather
-      // than shipped red. #175 took the New conversation summary row and the
-      // attachment row out of the column and folded the bar to one row, so on
-      // this short transcript the 390 readings are now 634, 730 and 692, and
-      // every state is asserted at every width, plus 1280x810, the height the
-      // 2026-10-27 audit measured at. This transcript is short, so it never
-      // reaches its cap; P130 holds the same claim with a transcript long
-      // enough to fill it, which is the case the audit actually measured.
-      // Note the page's own band costs more than a typed sentence: at 390 the
-      // as-is reading was 910 against 872 for the synthetic fill, because
-      // renderFooter lays out model, tokens, cwd, a mode select and a checkbox,
-      // which wrap to more lines than one string does. Measuring only a typed
-      // string would have understated the overflow by 38px.
+      // The composer has to clear the fold at every width, which #121 asks for
+      // by name. #184: the band that once pushed it out of reach was the
+      // drawer; its successor is the sheet, so the three states read are the
+      // sheet shut, open as the page draws it, and open with every row filled
+      // past what the page draws (a long model name, a deep folder), each
+      // with the tools open as well. The frame gives the composer its place,
+      // so all three have to land on the fold.
       const fold: {
         w: number;
-        hidden: number;
-        asis: number;
+        shut: number;
+        open: number;
         filled: number;
         viewH: number;
       }[] = [];
@@ -13001,38 +12833,32 @@ PAGE_SCENARIOS.push({
         [390, 844],
       ]) {
         await page.setViewportSize({ width: w, height: h });
-        fold.push({
-          w,
-          ...(await page.evaluate(() => {
-            const foot = document.getElementById('session-footer') as HTMLElement;
-            const comp = document.getElementById('composer') as HTMLElement;
-            // The band's own state is saved and put back rather than cleared. An
-            // earlier draft ended with textContent = '', which erased what
-            // renderFooter had written, so the second width measured a band the
-            // run itself had emptied.
-            const wasDisplay = foot.style.display;
-            const wasHtml = foot.innerHTML;
-            // No named arrow anywhere in here. The transform rewrites one into a
-            // __name(...) call the page does not define, so it throws at run
-            // time. The rect is read inline at each step instead.
-            foot.style.display = 'none';
-            const hidden = Math.round(comp.getBoundingClientRect().bottom);
-            foot.style.display = wasDisplay;
-            const asis = Math.round(comp.getBoundingClientRect().bottom);
-            foot.textContent =
-              'gpt-4o 12.3k/128k /home/evan/projects/qwen-code-remote mode: default';
-            const filled = Math.round(comp.getBoundingClientRect().bottom);
-            foot.innerHTML = wasHtml;
-            foot.style.display = wasDisplay;
-            return { hidden, asis, filled, viewH: window.innerHeight };
-          })),
-        });
+        const bottom = () =>
+          page.evaluate(`Math.round(document.getElementById('composer').getBoundingClientRect().bottom)`) as Promise<number>;
+        const shut = await bottom();
+        await openSheet(page);
+        await openTools(page);
+        const open = await bottom();
+        await page.evaluate(String.raw`(() => {
+          const foot = document.getElementById('session-footer');
+          window.__p126Sheet = foot.innerHTML;
+          const extra = document.createElement('div');
+          extra.style.whiteSpace = 'pre-line';
+          extra.textContent = 'qwen3-coder-480b-a35b-instruct-awq-int4-long-context-preview\n' +
+            '/home/evan/projects/qwen-code-remote/packages/rc-gateway/a/very/deep/folder\n'.repeat(6);
+          foot.appendChild(extra);
+        })()`);
+        const filled = await bottom();
+        await page.evaluate(String.raw`document.getElementById('session-footer').innerHTML = window.__p126Sheet`);
+        await page.click('#h1-status');
+        await page.click('#h1-plus');
+        fold.push({ w, shut, open, filled, viewH: h });
       }
       for (const f of fold) {
-        for (const k of ['hidden', 'asis', 'filled'] as const) {
+        for (const k of ['shut', 'open', 'filled'] as const) {
           expect(
             f[k] <= f.viewH + 1,
-            `with the drawer ${k} the composer bottom is ${f[k]} at ${f.w}px, in a ${f.viewH}px viewport`,
+            `with the sheet ${k} the composer bottom is ${f[k]} at ${f.w}px, in a ${f.viewH}px viewport`,
           );
         }
       }
@@ -13088,8 +12914,8 @@ PAGE_SCENARIOS.push({
         worst.ratio.toFixed(2) +
         ':1, worst per band [' +
         bands.join('; ') +
-        ']; the retired status strip and inspector stayed retired; composer clears the fold at 1280x720, 1280x810 and 390x844 with the drawer hidden, as the page draws it and filled (' +
-        fold.map((f) => f.w + 'x' + f.viewH + ': ' + f.hidden + '/' + f.asis + '/' + f.filled).join(', ') +
+        ']; the retired status strip, inspector and tab bar stayed retired; the stack is bar, status line, sheet, transcript, strip, tools, composer; composer clears the fold at 1280x720, 1280x810 and 390x844 with the sheet shut, open and filled, tools open (' +
+        fold.map((f) => f.w + 'x' + f.viewH + ': ' + f.shut + '/' + f.open + '/' + f.filled).join(', ') +
         ')'
       );
     },
@@ -13262,7 +13088,7 @@ PAGE_SCENARIOS.push({
     })()`) as Promise<PickerReading>;
 
   PAGE_SCENARIOS.push({
-    name: 'P128 the New conversation panel costs nothing at rest and opens only from the rail +',
+    name: 'P128 the New conversation panel costs nothing at rest and opens only from the rail +, over the chat at 1280 and as its own screen at 390',
     waitView: false,
     run: async ({ page }) => {
       // A fresh load with nothing watched: the state where the panel is most
@@ -13354,12 +13180,14 @@ PAGE_SCENARIOS.push({
       const toggled = await readPicker(page);
       expect(toggled.hidden, 'pressing the + a second time did not shut the panel');
 
-      // Phone: the + sits in the strip, and the open panel must not push the
-      // page sideways. What pushed it was a past row's preview line (nowrap, so
-      // its full length became the list's min-content), and the harness root
-      // holds no conversations (#178), so rows with long previews are drawn
-      // through the page's own renderer first. Without them the panel has
-      // nothing wide in it and the overflow check below would pass vacuously.
+      // Phone: #184 (h1) moved the + into the conversation list the bar's
+      // title opens, and the open panel is a screen of its own over that
+      // list. It must not push the page sideways. What pushed it was a past
+      // row's preview line (nowrap, so its full length became the list's
+      // min-content), and the harness root holds no conversations (#178), so
+      // rows with long previews are drawn through the page's own renderer
+      // first. Without them the panel has nothing wide in it and the overflow
+      // check below would pass vacuously.
       await page.evaluate(String.raw`renderPastConversations(
         [1, 2, 3].map((n) => ({
           sessionId: '0000000' + n + '-aaaa-bbbb-cccc-dddddddddddd',
@@ -13371,6 +13199,7 @@ PAGE_SCENARIOS.push({
         false,
       )`);
       await page.setViewportSize({ width: 390, height: 844 });
+      await openList(page);
       await page.click('#rail .plus');
       const previews = (await page.evaluate(
         String.raw`document.querySelectorAll('#past-list .token-row').length`,
@@ -13382,35 +13211,27 @@ PAGE_SCENARIOS.push({
         phone.docW <= phone.vw && phone.panelRight <= phone.vw,
         `the open panel overflows at 390: document ${phone.docW}px, panel right edge ${phone.panelRight}, viewport ${phone.vw}`,
       );
+      // Its summary, the row that names it and shuts it, is what is painted at
+      // its own spot: on top of the list it was opened from, not under it.
       expect(
         phone.summaryOnTop,
-        'the open panel\'s summary is not on screen at 390, so the row that names and shuts it is hidden (under the sticky rail strip, or scrolled away)',
+        'the open panel\'s summary is not on top at 390, so the row that names and shuts it is hidden under the list',
       );
-      // Opened from further down the page, the panel's top is off screen and
-      // has to be brought back without landing under the sticky strip. A
-      // resting 390 page no longer scrolls (that is #175's point), so a spacer
-      // stands in for whatever band made it long, and is removed after.
-      await page.keyboard.press('Escape');
-      await page.evaluate(String.raw`(() => {
-        const s = document.createElement('div');
-        s.id = 'p128-spacer';
-        s.style.height = '2000px';
-        document.getElementById('pane-chat').appendChild(s);
-        window.scrollTo(0, document.documentElement.scrollHeight);
-      })()`);
-      const scrolledTo = (await page.evaluate('Math.round(window.scrollY)')) as number;
-      expect(scrolledTo > 500, `the spacer did not scroll the page (scrollY ${scrolledTo}), so this leg would test nothing`);
-      await page.click('#rail .plus');
-      await page.waitForTimeout(300);
-      const phoneLow = await readPicker(page);
+      const screen = (await page.evaluate(String.raw`(() => {
+        const r = document.getElementById('dir-picker').getBoundingClientRect();
+        return { top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+      })()`)) as { top: number; w: number; h: number };
       expect(
-        !phoneLow.hidden && phoneLow.summaryOnTop,
-        'opened from the foot of the page at 390, the panel\'s summary is not on screen',
+        screen.top === 0 && screen.w === 390 && screen.h === 844,
+        `the panel is not a screen of its own at 390 (${JSON.stringify(screen)})`,
       );
       await page.keyboard.press('Escape');
-      await page.evaluate(
-        "document.getElementById('p128-spacer').remove(); window.scrollTo(0, 0)",
+      const phoneShut = await readPicker(page);
+      expect(
+        phoneShut.hidden && phoneShut.focusOn === 'plus',
+        `Escape at 390 did not shut the panel back onto the + in the list (focus on ${phoneShut.focusOn})`,
       );
+      await page.click('#rail .rh .back');
       await page.setViewportSize({ width: 1280, height: 720 });
 
       // No folder: the rail used to drop out entirely, which would now take
@@ -13435,7 +13256,7 @@ PAGE_SCENARIOS.push({
 
       return (
         'hidden at rest at 1280 and 390, + opens it with focus inside, summary, Escape and the + shut it back to the +, Tab reaches Use this folder, ' +
-        `no overflow at 390 (${phone.docW}/${phone.vw}), the + survives a folderless rail`
+        `at 390 the + in the title's list opens it as a ${screen.w}x${screen.h} screen with its summary on top, no overflow (${phone.docW}/${phone.vw}), Escape back to the +; the + survives a folderless rail`
       );
     },
   });
@@ -13576,15 +13397,18 @@ PAGE_SCENARIOS.push({
   // #175 (b) and the fold. The audit measured the composer 258px under the
   // fold at 1280x810 and 498px under at 390x844 with a transcript long enough
   // to fill its box, which is the case P126's short transcript never reaches.
-  // So this scenario carries fourteen turns and an in-progress tool row, and
-  // asserts the issue's own "done when": the composer's bottom on screen at
-  // 1280x720, 1280x810 and 390x844 with the drawer band drawn, nothing
-  // horizontally overflowing, and the attachment controls in the control row.
-  // It also holds the fitted cap's two bounds and the one thing a box that
-  // shrinks under a reader can break: the newest row has to stay on screen.
+  // So this scenario carries fourteen turns and an in-progress tool row.
+  // #184 (h1) rewrote what it holds: the composer is one row, and the
+  // attachment controls moved behind its + with Dictate, as 44px pills in a
+  // sideways scroller. The claims kept are the same three: the tools still do
+  // what they did, the composer's bottom is on the fold (composerUnderFold 0)
+  // with nothing overflowing sideways, and the newest row stays on screen
+  // when something shrinks the transcript under a reader at the end. The
+  // states read are the ones H1 can put on top of a full transcript: at rest,
+  // the sheet open, the tools open, and both.
   const P130_MARKER = 'newest-row-marker';
   PAGE_SCENARIOS.push({
-    name: 'P130 the composer is three rows with Attach, Files and Artifacts in its control row, and clears the fold with a full transcript',
+    name: 'P130 the composer is one row with Attach, Dictate, Files and Artifacts behind its +, and clears the fold with a full transcript in every state',
     frames: () => {
       const f = new Frames().ev('client_joined');
       for (let k = 0; k < 14; k++) {
@@ -13608,8 +13432,8 @@ PAGE_SCENARIOS.push({
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 44, 30_000);
       await settlePage(page);
-      // The fit runs a frame after whatever resized the column, so a reading
-      // taken straight after a change would measure the layout before it.
+      // A frame or two after whatever resized the column, so a reading
+      // taken straight after a change does not measure the layout before it.
       const relaid = async () => {
         await page.waitForTimeout(300);
         await page.evaluate(
@@ -13617,112 +13441,102 @@ PAGE_SCENARIOS.push({
         );
       };
 
-      type RowReading = {
-        btns: {
-          id: string;
-          inRow: boolean;
-          text: string;
-          title: string;
-          label: string;
-          wordShown: boolean;
-          glyphShown: boolean;
-          h: number;
-        }[];
-        fieldToRow: number;
-        rowToIdle: number;
+      type ToolsReading = {
+        open: boolean;
+        bandH: number;
+        scrollsX: boolean;
+        overflowsPage: boolean;
+        pills: { id: string; text: string; title: string; label: string; h: number; inTools: boolean }[];
       };
-      const readRow = () =>
+      const readTools = () =>
         page.evaluate(String.raw`(() => {
-          const comp = document.getElementById('composer');
-          const crow = comp.querySelector('.crow');
-          const on = (el) => !!el && el.getClientRects().length > 0;
-          const fr = comp.querySelector('.field').getBoundingClientRect();
-          const cr = crow.getBoundingClientRect();
-          const ir = comp.querySelector('.idle').getBoundingClientRect();
+          const tools = document.getElementById('h1-tools');
+          const r = tools.getBoundingClientRect();
           return {
-            btns: ['attach', 'stored-toggle', 'artifacts-toggle'].map((id) => {
+            open: tools.getClientRects().length > 0,
+            bandH: Math.round(r.height),
+            scrollsX: getComputedStyle(tools).overflowX === 'auto',
+            overflowsPage: document.documentElement.scrollWidth > window.innerWidth,
+            pills: ['attach', 'dictate', 'stored-toggle', 'artifacts-toggle'].map((id) => {
               const b = document.getElementById(id);
               return {
                 id,
-                inRow: crow.contains(b),
-                text: (b.innerText || '').trim(),
+                text: (b.innerText || '').replace(/\s+/g, ' ').trim(),
                 title: b.getAttribute('title') || '',
                 label: b.getAttribute('aria-label') || '',
-                wordShown: on(b.querySelector('.w')),
-                glyphShown: on(b.querySelector('.g')),
                 h: Math.round(b.getBoundingClientRect().height),
+                inTools: tools.contains(b),
               };
             }),
-            // Three rows means nothing lays out between them but the row's
-            // own 6px top margin: the old attachment row sat in the first gap.
-            fieldToRow: Math.round(cr.top - fr.bottom),
-            rowToIdle: Math.round(ir.top - cr.bottom),
           };
-        })()`) as Promise<RowReading>;
+        })()`) as Promise<ToolsReading>;
 
       const WORDS: Record<string, string> = {
-        attach: 'Attach',
+        attach: 'Attach file',
+        dictate: 'Dictate',
         'stored-toggle': 'Files',
         'artifacts-toggle': 'Artifacts',
       };
-      const wide = await readRow();
-      for (const b of wide.btns) {
-        expect(b.inRow, `#${b.id} is not in the composer's control row`);
-        expect(
-          b.wordShown && !b.glyphShown && b.text === WORDS[b.id],
-          `#${b.id} reads ${JSON.stringify(b.text)} at 1280, not the short word ${WORDS[b.id]}`,
-        );
-        expect(
-          b.title.length > 10 && b.label === b.title && b.label.includes(b.text),
-          `#${b.id} does not carry its phrase in title and aria-label (title ${JSON.stringify(b.title)}, label ${JSON.stringify(b.label)})`,
-        );
-      }
-      expect(
-        wide.fieldToRow <= 7 && wide.rowToIdle <= 7,
-        `the composer is not three rows at 1280: ${wide.fieldToRow}px between the field and the control row, ${wide.rowToIdle}px between that row and the idle row`,
-      );
+      const shut = await readTools();
+      expect(!shut.open && shut.bandH === 0, `the tools cost ${shut.bandH}px at rest`);
+      const plusSays = await page.getAttribute('#h1-plus', 'aria-expanded');
+      expect(plusSays === 'false', `the + does not say the tools are shut (aria-expanded ${plusSays})`);
 
-      // The three controls still do what they did before the move.
-      const chooser = page.waitForEvent('filechooser', { timeout: 5_000 });
-      await page.click('#attach');
-      await chooser;
-      for (const [btn, box] of [
-        ['stored-toggle', 'stored'],
-        ['artifacts-toggle', 'artifacts'],
+      for (const [w, h] of [
+        [1280, 720],
+        [390, 844],
       ] as const) {
-        await page.click('#' + btn);
-        await page.waitForSelector('#' + box, { state: 'visible' });
-        const expanded = await page.getAttribute('#' + btn, 'aria-expanded');
-        expect(expanded === 'true', `#${btn} opened its list but reads aria-expanded ${expanded}`);
-        await page.click('#' + btn);
-        await page.waitForSelector('#' + box, { state: 'hidden' });
-      }
-
-      await page.setViewportSize({ width: 390, height: 844 });
-      await relaid();
-      const narrow = await readRow();
-      for (const b of narrow.btns) {
+        await page.setViewportSize({ width: w, height: h });
+        await openTools(page);
+        const t = await readTools();
+        const at = `${w}x${h}`;
         expect(
-          b.glyphShown && !b.wordShown && b.text.length > 0 && b.text.length <= 2,
-          `#${b.id} reads ${JSON.stringify(b.text)} at 390, not a glyph`,
+          t.open && t.bandH >= 52 && t.bandH <= 53,
+          `the open tools are ${t.bandH}px at ${at}, not the 52px the spec draws (plus its 1px rule)`,
         );
-        expect(b.h >= 44, `#${b.id} is ${b.h}px tall at 390, under the 44px floor`);
+        expect(t.scrollsX && !t.overflowsPage, `the tools do not scroll sideways inside themselves at ${at}`);
+        for (const b of t.pills) {
+          expect(b.inTools, `#${b.id} is not behind the composer's +`);
+          // Files carries its count once the store has answered (P142).
+          expect(b.text.includes(WORDS[b.id]!), `#${b.id} reads ${JSON.stringify(b.text)} at ${at}, not ${WORDS[b.id]}`);
+          expect(b.h >= 44, `#${b.id} is ${b.h}px tall at ${at}, under the 44px floor`);
+          if (b.id !== 'dictate') {
+            expect(
+              b.title.length > 10 && b.label === b.title,
+              `#${b.id} does not carry its phrase in title and aria-label (title ${JSON.stringify(b.title)}, label ${JSON.stringify(b.label)})`,
+            );
+          }
+        }
+        expect(
+          (await page.getAttribute('#h1-plus', 'aria-expanded')) === 'true',
+          `the + does not say the tools are open at ${at}`,
+        );
+        // The tools still do what they did before the move.
+        const chooser = page.waitForEvent('filechooser', { timeout: 5_000 });
+        await page.click('#attach');
+        await chooser;
+        for (const [btn, box] of [
+          ['stored-toggle', 'stored'],
+          ['artifacts-toggle', 'artifacts'],
+        ] as const) {
+          await page.click('#' + btn);
+          await page.waitForSelector('#' + box, { state: 'visible' });
+          const expanded = await page.getAttribute('#' + btn, 'aria-expanded');
+          expect(expanded === 'true', `#${btn} opened its list but reads aria-expanded ${expanded}`);
+          await page.click('#' + btn);
+          await page.waitForSelector('#' + box, { state: 'hidden' });
+        }
+        await page.click('#h1-plus');
+        await relaid();
+        const closed = await readTools();
+        expect(!closed.open, `the + did not shut the tools at ${at}`);
       }
-      expect(
-        narrow.fieldToRow <= 7 && narrow.rowToIdle <= 7,
-        `the composer is not three rows at 390: gaps ${narrow.fieldToRow}px and ${narrow.rowToIdle}px`,
-      );
-      const phoneChooser = page.waitForEvent('filechooser', { timeout: 5_000 });
-      await page.click('#attach');
-      await phoneChooser;
 
       type FoldReading = {
         vh: number;
         vw: number;
         docW: number;
         bottom: number;
-        footShown: boolean;
-        footH: number;
         trH: number;
         scrolls: boolean;
         markerSeen: boolean;
@@ -13730,7 +13544,6 @@ PAGE_SCENARIOS.push({
       const readFold = () =>
         page.evaluate(String.raw`(() => {
           const comp = document.getElementById('composer');
-          const foot = document.getElementById('session-footer');
           const tr = document.getElementById('transcript');
           const t = tr.getBoundingClientRect();
           const row = Array.from(tr.querySelectorAll('.bubble')).find((b) =>
@@ -13742,41 +13555,11 @@ PAGE_SCENARIOS.push({
             vw: window.innerWidth,
             docW: document.documentElement.scrollWidth,
             bottom: Math.round(comp.getBoundingClientRect().bottom),
-            footShown: foot.getClientRects().length > 0 && foot.offsetHeight > 0,
-            footH: foot.offsetHeight,
             trH: tr.clientHeight,
             scrolls: tr.scrollHeight > tr.clientHeight + 1,
             markerSeen: !!m && m.bottom <= t.bottom + 1 && m.top >= t.top - 1,
           };
         })()`) as Promise<FoldReading>;
-      // The band filled taller than the page draws it: a real model name, a
-      // token count, a deep cwd and a mode, one per line, which is what a
-      // configured drawer wraps to on a phone. Taller on purpose, at a fixed
-      // width: that is the one change that shrinks the box under a reader at
-      // the end without a resize or an append, so it is the case the fit's
-      // re-pin exists for. Saved and put back so the next width reads the
-      // page's own band.
-      const fillBand = () =>
-        page.evaluate(String.raw`(() => {
-          const foot = document.getElementById('session-footer');
-          window.__p130Band = {
-            html: foot.innerHTML,
-            display: foot.style.display,
-            ws: foot.style.whiteSpace,
-          };
-          foot.style.display = 'block';
-          foot.style.whiteSpace = 'pre-line';
-          foot.textContent =
-            'model qwen3-coder-480b-a35b-instruct\ntokens 65.5k of 262.1k\n' +
-            'cwd /home/evan/projects/qwen-code-remote/packages/rc-gateway\nmode default';
-        })()`);
-      const restoreBand = () =>
-        page.evaluate(String.raw`(() => {
-          const foot = document.getElementById('session-footer');
-          foot.innerHTML = window.__p130Band.html;
-          foot.style.display = window.__p130Band.display;
-          foot.style.whiteSpace = window.__p130Band.ws;
-        })()`);
 
       const lines: string[] = [];
       for (const [w, h] of [
@@ -13785,51 +13568,57 @@ PAGE_SCENARIOS.push({
         [390, 844],
       ] as const) {
         await page.setViewportSize({ width: w, height: h });
-        await page.evaluate('window.scrollTo(0, 0)');
         await relaid();
-        const asis = await readFold();
         const at = `${w}x${h}`;
-        // Each premise first, so a pass below cannot be vacuous.
-        expect(asis.footShown, `the drawer band is not drawn at ${at}, so the fold claim would be about a page without it`);
-        expect(asis.scrolls, `the transcript holds less than its box at ${at}, so its cap is not being exercised`);
-        expect(
-          asis.bottom <= asis.vh,
-          `composerUnderFold is ${asis.bottom - asis.vh} at ${at}: the composer bottom is ${asis.bottom} in a ${asis.vh}px viewport`,
-        );
-        expect(asis.docW <= asis.vw, `the page overflows sideways at ${at}: ${asis.docW}px in a ${asis.vw}px viewport`);
-        expect(
-          asis.trH >= Math.round(asis.vh * 0.3) - 1 && asis.trH <= Math.floor(asis.vh * 0.75) + 1,
-          `the transcript is ${asis.trH}px at ${at}, outside its 30vh to 75vh bounds`,
-        );
-        expect(
-          asis.markerSeen,
-          `the newest row is not on screen in the transcript at ${at}, so the fitted box left the reader short of it`,
-        );
-        await fillBand();
-        await relaid();
-        const filled = await readFold();
-        await restoreBand();
-        await relaid();
-        expect(
-          filled.footH > asis.footH,
-          `the filled band is ${filled.footH}px against ${asis.footH}px as drawn at ${at}, so it never shrank the transcript and the re-pin below is untested`,
-        );
-        expect(
-          filled.bottom <= filled.vh,
-          `with the drawer band filled the composer bottom is ${filled.bottom} at ${at}, in a ${filled.vh}px viewport`,
-        );
-        expect(
-          filled.markerSeen,
-          `filling the drawer band shrank the transcript and left the newest row off screen at ${at}`,
-        );
-        lines.push(`${at}: composer ${asis.bottom}/${filled.bottom}, transcript ${asis.trH}px`);
+        const states: [string, () => Promise<void>, () => Promise<void>][] = [
+          ['at rest', async () => {}, async () => {}],
+          ['sheet open', () => openSheet(page), () => page.click('#h1-status')],
+          ['tools open', () => openTools(page), () => page.click('#h1-plus')],
+          [
+            'sheet and tools open',
+            async () => {
+              await openSheet(page);
+              await openTools(page);
+            },
+            async () => {
+              await page.click('#h1-status');
+              await page.click('#h1-plus');
+            },
+          ],
+        ];
+        const bottoms: string[] = [];
+        let restH = 0;
+        for (const [label, open, close] of states) {
+          await open();
+          await relaid();
+          const f = await readFold();
+          await close();
+          await relaid();
+          // Each premise first, so a pass below cannot be vacuous.
+          expect(f.scrolls, `the transcript holds less than its box at ${at} ${label}, so the fold is not being exercised`);
+          expect(
+            f.bottom <= f.vh,
+            `composerUnderFold is ${f.bottom - f.vh} at ${at} ${label}: the composer bottom is ${f.bottom} in a ${f.vh}px viewport`,
+          );
+          expect(f.docW <= f.vw, `the page overflows sideways at ${at} ${label}: ${f.docW}px in a ${f.vw}px viewport`);
+          expect(
+            f.markerSeen,
+            `the newest row is not on screen at ${at} ${label}, so what shrank the transcript left the reader short of it`,
+          );
+          if (label === 'at rest') restH = f.trH;
+          bottoms.push(`${label} ${f.bottom}`);
+        }
+        if (w === 390) {
+          expect(restH >= 600, `the transcript at rest is ${restH}px at 390x844, under the 600px h1 promises`);
+        }
+        lines.push(`${at}: transcript ${restH}px at rest, composer bottom ${bottoms.join(', ')}`);
       }
       await page.setViewportSize({ width: 1280, height: 720 });
 
       return (
-        'Attach, Files, Artifacts in the control row as words at 1280 and 44px glyphs at 390, picker, both lists open; three rows at both widths; ' +
+        'Attach, Dictate, Files, Artifacts as 44px pills in a 52px scroller behind the +, picker and both lists open; ' +
         lines.join('; ') +
-        ' (as drawn / band filled), newest row on screen, no sideways overflow'
+        '; newest row on screen in every state, no sideways overflow'
       );
     },
   });
@@ -13850,23 +13639,37 @@ PAGE_SCENARIOS.push({
   // break and back above it, and export shares the drawer's first line at 390
   // without covering any of the band's text.
   PAGE_SCENARIOS.push({
-    name: 'P131 every restyled band sits on the sheet shell, nothing large is light, and the phone drops the title and keeps export in the drawer row',
+    name: 'P131 every restyled band sits on the sheet shell, nothing large is light, no page title at any width, and export lives in the ⋯ menu',
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
       await page.evaluate(String.raw`__pg.liveTurn('what is the plan', 'here is the plan', 'tc-1')`);
       await settlePage(page);
-      await page.waitForFunction(`document.getElementById('session-footer').offsetHeight > 0`);
+      // #184: the drawer band is the sheet now, filled by the same render.
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
 
       const G1 = { page: 'rgb(13, 17, 23)', band: 'rgb(16, 21, 28)', raise: 'rgb(22, 27, 34)' };
+      // #184 (h1): the spec's grounds. The bar, the sheet, the tools and the
+      // composer are bands; the status line sits on the page ground under the
+      // bar; the pills, the toast and the ⋯ menu are raised controls; the More
+      // screen is the page ground with band rows.
       const want: Record<ShellSurface, [string, keyof typeof G1][]> = {
         chat: [
-          ['#status', 'page'],
-          ['#session-footer', 'band'],
+          ['#h1-bar', 'band'],
+          ['#h1-statusline', 'page'],
+          ['#h1-sheet', 'band'],
+          ['#h1-tools', 'band'],
           ['#composer', 'band'],
           ['#load-earlier', 'raise'],
           ['#jump-bottom', 'raise'],
+          ['#status', 'raise'],
+        ],
+        menu: [['#h1-menu', 'raise']],
+        list: [['#rail .rh', 'band']],
+        more: [
+          ['#more-screen', 'page'],
+          ['#more-screen .row', 'band'],
         ],
         picker: [['#dir-picker', 'band']],
         ops: [['#pane-ops details.ops-collapse', 'band']],
@@ -13935,79 +13738,32 @@ PAGE_SCENARIOS.push({
           );
         }
 
-        // The phone reclaims, read on the resting Chat column.
+        // The reclaims, read on the resting Chat column: no page title row at
+        // any width (the spec's bar has none), and export where the parity
+        // table puts it, in the ⋯ menu, not a control of its own in a band.
         const rest = (await page.evaluate(String.raw`(() => {
-          const title = document.querySelector('#app-body > h1');
-          const foot = document.getElementById('session-footer');
           const ex = document.getElementById('footer-export');
-          const first = foot.firstElementChild;
-          const fr = foot.getBoundingClientRect();
-          const er = ex.getBoundingClientRect();
-          const mr = first.getBoundingClientRect();
-          // Every run of the band's own text, as laid out, so the check below
-          // sees whether export was painted over any of it. Read twice: as the
-          // page drew it, and with a model name long enough to run the first
-          // line into the corner. The harness's name stops short of the corner
-          // with or without the reserve, so on its own it could not tell a
-          // band that keeps the corner clear from one that only happens to.
-          const covering = () => {
-            const runs = [];
-            const walk = document.createTreeWalker(foot, NodeFilter.SHOW_TEXT);
-            for (let t = walk.nextNode(); t; t = walk.nextNode()) {
-              if (!(t.textContent || '').trim() || ex.contains(t)) continue;
-              const r = document.createRange();
-              r.selectNodeContents(t);
-              for (const b of r.getClientRects()) runs.push([b.left, b.top, b.right, b.bottom]);
-            }
-            const e = ex.getBoundingClientRect();
-            return runs.filter(([l, t, r, b]) => l < e.right && r > e.left && t < e.bottom && b > e.top).length;
-          };
-          const asDrawn = covering();
-          const name = first.textContent;
-          first.textContent = '\u{1F9E0} qwen3-coder-480b-a35b-instruct-awq-int4-long-context-preview';
-          const longName = covering();
-          first.textContent = name;
           return {
-            titleShown: !!title && title.getClientRects().length > 0,
-            exShown: ex.getClientRects().length > 0,
-            sharesFirstLine: er.top < mr.bottom && er.bottom > mr.top,
-            inside: er.left >= fr.left && er.right <= fr.right && er.top >= fr.top && er.bottom <= fr.bottom,
-            covers: asDrawn + longName,
-            footH: Math.round(fr.height),
+            titleShown: !!document.querySelector('#app-body > h1'),
+            exInMenu: document.getElementById('h1-menu').contains(ex),
+            exShownAtRest: ex.getClientRects().length > 0,
+            barH: Math.round(document.getElementById('h1-bar').getBoundingClientRect().height),
           };
-        })()`)) as {
-          titleShown: boolean;
-          exShown: boolean;
-          sharesFirstLine: boolean;
-          inside: boolean;
-          covers: number;
-          footH: number;
-        };
-        if (w === 390) {
-          expect(!rest.titleShown, 'the page title is still a row above the bar at 390');
-          expect(rest.exShown, 'the drawer has no export at 390');
-          expect(
-            rest.sharesFirstLine,
-            'export is not on the drawer\'s first line at 390, so it took a line of its own',
-          );
-          expect(rest.inside, 'export is drawn outside the drawer band at 390');
-          expect(
-            rest.covers === 0,
-            `export is painted over ${rest.covers} runs of the drawer's text at 390, as drawn or with a long model name`,
-          );
-        } else {
-          expect(rest.titleShown, `the page title is gone at ${w}, where the sheet keeps it`);
-          expect(rest.exShown, `the drawer has no export at ${w}`);
-        }
+        })()`)) as { titleShown: boolean; exInMenu: boolean; exShownAtRest: boolean; barH: number };
+        expect(!rest.titleShown, `the page title is on the page at ${w}`);
+        expect(rest.exInMenu && !rest.exShownAtRest, `export is not in the ⋯ menu, or is drawn at rest, at ${w} (${JSON.stringify(rest)})`);
+        await openMenu(page);
+        const exOpen = (await page.evaluate(
+          `document.getElementById('footer-export').getClientRects().length > 0`,
+        )) as boolean;
+        await page.keyboard.press('Escape');
+        expect(exOpen, `opening the ⋯ menu at ${w} did not show export`);
         lines.push(
-          `${w}x${h}: status on #0d1117, drawer, composer, panel and ${cards} cards on #10151c, pills on #161b22, no light box; title ${rest.titleShown ? 'shown' : 'hidden'}, drawer ${rest.footH}px`,
+          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, panel and ${cards} cards on #10151c, no light box; no page title, export in the menu`,
         );
       }
       await page.setViewportSize({ width: 1280, height: 720 });
-      return (
-        lines.join('; ') +
-        '; export shares the model line at 390 and covers no text, as drawn or with a long model name'
-      );
+      return lines.join('; ');
     },
   });
 
@@ -14025,7 +13781,7 @@ PAGE_SCENARIOS.push({
   // page's side is real, including the refresh that redraws the rail from
   // disk. Delete is only ever dismissed, so no delete request may leave.
   PAGE_SCENARIOS.push({
-    name: 'P132 every rail row has a menu that archives and deletes it, and renames it while it is open, by pointer and by keyboard, at 1280 and 390',
+    name: 'P132 every rail row has a menu that archives and deletes it, and renames it while it is open, by pointer and by keyboard, at 1280 and in the list at 390',
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
@@ -14179,6 +13935,9 @@ PAGE_SCENARIOS.push({
           await page.setViewportSize({ width: w, height: h });
           await page.mouse.move(w - 2, h - 2);
           const phone = w < 860;
+          // #184 (h1): on a phone the rail is the list the bar's title opens,
+          // so it is opened before its rows are read.
+          if (phone) await openList(page);
 
           // At rest: named for its row and announced as a menu button; faded
           // out on a desktop row nobody is pointing at, and a 44px cell on the
@@ -14305,7 +14064,7 @@ PAGE_SCENARIOS.push({
             `archiving one row took others with it at ${at} (${JSON.stringify(left)})`,
           );
           lines.push(
-            `${at}: ${phone ? '44px button always shown' : 'button fades in on hover and focus'}, click and ${phone ? 'Space' : 'Enter'} open it, a past row offers ${PAST} with no Rename, the open row ${FOUR}, Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
+            `${at}: ${phone ? 'in the list the title opens, 44px button always shown' : 'button fades in on hover and focus'}, click and ${phone ? 'Space' : 'Enter'} open it, a past row offers ${PAST} with no Rename, the open row ${FOUR}, Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
           );
         }
         return lines.join('; ');
@@ -14418,9 +14177,12 @@ PAGE_SCENARIOS.push({
           auto.dispatchEvent(new Event('change', { bubbles: true }));
         })()`);
 
-        await page.waitForSelector('#footer-mode');
+        // #184 (h1): the mode is a segmented control in the sheet the status
+        // line opens; a tap on a segment drives the same select and handler.
+        await openSheet(page);
+        await page.waitForSelector('#footer-mode-persist');
         await page.check('#footer-mode-persist');
-        await page.selectOption('#footer-mode', 'yolo');
+        await page.click('#session-footer .seg button[data-mode="yolo"]');
         await page.waitForFunction(
           `(JSON.parse(localStorage.getItem('qwen-rc:ui:approval-mode') || '{}'))[watchedSessionId] === 'yolo'`,
         );
@@ -14448,9 +14210,9 @@ PAGE_SCENARIOS.push({
           `tapping did not open the rows before the reload (${JSON.stringify(opened)})`,
         );
 
-        // Operations pinned under Chat, then Settings opened, last.
-        await page.check('.pin-cb[data-pin="ops"]');
-        await page.click('.tab[data-tab="settings"]');
+        // Settings opened, last. #184 retired the pins with the tab bar, so
+        // the pane that comes back is the one claim left here.
+        await openTab(page, 'settings');
 
         // The gateway forgets the idle switch, as a restart would.
         p133IdleOn = false;
@@ -14468,8 +14230,7 @@ PAGE_SCENARIOS.push({
           return {
             tab: active ? active.dataset.tab : null,
             settingsShown: v('pane-settings').classList.contains('active'),
-            opsPinned: document.querySelector('.pin-cb[data-pin="ops"]').checked,
-            pinnedSections: document.querySelectorAll('#pin-area > details').length,
+            paneHead: v('pane-head').getClientRects().length > 0,
             lang: v('dictate-lang').value,
             autosend: v('dictate-autosend').checked,
             mode: v('footer-mode').value,
@@ -14490,8 +14251,10 @@ PAGE_SCENARIOS.push({
         const want = (ok: boolean, what: string) => {
           if (!ok) fails.push(what);
         };
-        want(got['tab'] === 'settings' && got['settingsShown'] === true, `tab ${got['tab']}`);
-        want(got['opsPinned'] === true && got['pinnedSections'] === 1, `ops pinned ${got['opsPinned']} with ${got['pinnedSections']} pinned sections`);
+        want(
+          got['tab'] === 'settings' && got['settingsShown'] === true && got['paneHead'] === true,
+          `tab ${got['tab']}, shown ${got['settingsShown']}, as a screen with a way back ${got['paneHead']}`,
+        );
         want(got['lang'] === 'fr-FR', `dictation language ${got['lang']}`);
         want(got['autosend'] === true, 'auto-send unticked');
         // The daemon still reports default, and the select shows what the
@@ -14508,7 +14271,7 @@ PAGE_SCENARIOS.push({
         expect(fails.length === 0, `not restored: ${fails.join('; ')}`);
 
         // And they are open on screen, not only in the model.
-        await page.click('.tab[data-tab="chat"]');
+        await openTab(page, 'chat');
         await settlePage(page);
         const drawn = (await page.evaluate(String.raw`(() => {
           const body = document.querySelector('#transcript .thought-body');
@@ -14518,7 +14281,7 @@ PAGE_SCENARIOS.push({
           };
         })()`)) as { thought: boolean; tool: boolean };
         expect(drawn.thought && drawn.tool, `the restored rows are not drawn open (${JSON.stringify(drawn)})`);
-        return 'tab, pin, dictation language and auto-send, persist box, folder, rail filter and two opened rows came back; the mode select and the idle box show the daemon and gateway state and name the one last set here';
+        return 'the open pane, dictation language and auto-send, persist box, folder, rail filter and two opened rows came back; the mode control and the idle box show the daemon and gateway state and name the one last set here';
       } finally {
         rmSync(folder, { recursive: true, force: true });
       }
@@ -14693,8 +14456,10 @@ PAGE_SCENARIOS.push({
           return el ? el.getAttribute('content') : null;
         };
         const link = document.querySelector('link[rel="manifest"]');
+        const touch = document.querySelector('link[rel="apple-touch-icon"]');
         return {
           manifest: link ? link.href : null,
+          touch: touch ? touch.href : null,
           theme: meta('theme-color'),
           viewport: meta('viewport'),
           capable: meta('apple-mobile-web-app-capable'),
@@ -14705,7 +14470,21 @@ PAGE_SCENARIOS.push({
       expect(head['theme'] === '#0d1117', `theme-color is ${head['theme']}`);
       expect(String(head['viewport']).includes('viewport-fit=cover'), `the viewport is ${head['viewport']}`);
       expect(head['capable'] === 'yes' && head['statusBar'] === 'black-translucent', `apple metas ${head['capable']} / ${head['statusBar']}`);
-      return `${type}, display standalone, start_url and scope /ui/, an SVG icon served as ${iconType}; the page links it with theme-color, viewport-fit=cover and the apple metas`;
+      // #184. iOS ignores an SVG home-screen icon, so the page links a PNG
+      // rendered from it at the 180px iOS asks for. Read off the wire: the
+      // type the gateway serves it with and the size in the PNG's own header.
+      expect(head['touch'] === `${viewer.url}/ui/apple-touch-icon.png`, `the page links ${head['touch']} as its apple-touch-icon`);
+      const png = await fetch(`${viewer.url}/ui/apple-touch-icon.png`);
+      const pngType = png.headers.get('content-type') ?? '';
+      const bytes = Buffer.from(await png.arrayBuffer());
+      const sig = bytes.subarray(1, 4).toString('latin1');
+      const pw = bytes.readUInt32BE(16);
+      const ph = bytes.readUInt32BE(20);
+      expect(
+        png.status === 200 && pngType.startsWith('image/png') && sig === 'PNG' && pw === 180 && ph === 180,
+        `the touch icon answered ${png.status} as ${pngType}, ${sig} ${pw}x${ph}`,
+      );
+      return `${type}, display standalone, start_url and scope /ui/, an SVG icon served as ${iconType}; the page links it with theme-color, viewport-fit=cover and the apple metas, and a 180x180 PNG apple-touch-icon served as ${pngType}`;
     },
   });
 
@@ -14763,7 +14542,9 @@ PAGE_SCENARIOS.push({
           appH: document.documentElement.style.getPropertyValue('--app-h'),
           composerBottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
           sendBottom: Math.round(document.getElementById('send').getBoundingClientRect().bottom),
-          cap: document.getElementById('transcript').style.getPropertyValue('--tx-cap'),
+          // #184: the transcript's own height. #175's fitted cap (--tx-cap)
+          // is gone, so the box is what has to come back.
+          cap: document.getElementById('transcript').clientHeight + 'px',
           visible: window.visualViewport.offsetTop + window.visualViewport.height,
         }))()`) as Promise<{ open: boolean; appH: string; composerBottom: number; sendBottom: number; cap: string; visible: number }>;
       const rest = await read();
@@ -14790,6 +14571,858 @@ PAGE_SCENARIOS.push({
         `the layout did not come back: transcript ${rest.cap} -> ${down.cap}, composer ${rest.composerBottom} -> ${down.composerBottom}`,
       );
       return `keyboard ${KEYS}px: shell ${up.appH}, transcript ${rest.cap} -> ${up.cap}, composer bottom ${rest.composerBottom} -> ${up.composerBottom} (Send ${up.sendBottom}) under a ${up.visible}px visible height; back to ${down.cap} / ${down.composerBottom} when it went`;
+    },
+  });
+
+  // ---- #184 (h1): the chat shell -----------------------------------------
+  // Read at 390x844 first, the phone the spec draws, through the controls a
+  // reader uses. In-page code is a plain string wherever it names a helper:
+  // the transform rewrites a named arrow in a callback into a __name(...) call
+  // the page does not define.
+
+  PAGE_SCENARIOS.push({
+    name: 'P138 the status line names the state, model, fill and mode, and opens the sheet in place, where the mode buttons drive the mode handler',
+    // #184. The drawer band and the status strip became one 44px line and a
+    // sheet under it. The line is only worth its row if it says what the
+    // conversation is doing, and the sheet only if it pushes the transcript
+    // down rather than covering it and its mode buttons reach the same POST
+    // the drawer's select made, once per change and never for a press on the
+    // mode already in force.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const posted: { mode?: string; persist?: boolean }[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'POST' && /\/session\/[^/]+\/approval-mode$/.test(new URL(r.url()).pathname)) {
+          posted.push(JSON.parse(r.postData() || '{}') as { mode?: string });
+        }
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.waitForFunction(`document.getElementById('h1-tokens').textContent !== ''`);
+      type Line = {
+        h: number;
+        state: string;
+        word: string;
+        model: string;
+        tokens: string;
+        mode: string;
+        dot: string;
+        expanded: string;
+        sheet: { shown: boolean; top: number; h: number };
+        lineBottom: number;
+        trTop: number;
+        composerBottom: number;
+        rows: string[];
+        modes: { id: string; pressed: string }[];
+        bar: boolean;
+        keep: boolean;
+        sel: string;
+        focusOnLine: boolean;
+      };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const b = document.getElementById('h1-status');
+          const line = document.getElementById('h1-statusline').getBoundingClientRect();
+          const sheet = document.getElementById('h1-sheet');
+          const sr = sheet.getBoundingClientRect();
+          const t = (id) => (document.getElementById(id).textContent || '').trim();
+          const sel = document.getElementById('footer-mode');
+          return {
+            h: Math.round(line.height),
+            state: b.dataset.state,
+            word: t('h1-state'),
+            model: t('h1-model'),
+            tokens: t('h1-tokens'),
+            mode: t('h1-mode'),
+            dot: getComputedStyle(b.querySelector('.dot')).backgroundColor,
+            expanded: b.getAttribute('aria-expanded'),
+            sheet: { shown: sheet.getClientRects().length > 0, top: Math.round(sr.top), h: Math.round(sr.height) },
+            lineBottom: Math.round(line.bottom),
+            trTop: Math.round(document.getElementById('transcript').getBoundingClientRect().top),
+            composerBottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
+            rows: Array.from(document.querySelectorAll('#session-footer .sh-lbl')).map((l) => l.textContent),
+            modes: Array.from(document.querySelectorAll('#session-footer .seg button')).map((x) => ({ id: x.dataset.mode, pressed: x.getAttribute('aria-pressed') })),
+            bar: !!document.querySelector('#session-footer .ctx-bar > div'),
+            keep: !!document.querySelector('#session-footer .keep #footer-mode-persist'),
+            sel: sel ? sel.value : '',
+            focusOnLine: document.activeElement === b,
+          };
+        })()`) as Promise<Line>;
+
+      const rest = await read();
+      expect(rest.h === 45, `the status line is ${rest.h}px with its rule, not the 44px row the spec draws`);
+      expect(
+        rest.state === 'idle' && rest.word === 'idle' && rest.dot === 'rgb(63, 185, 80)',
+        `an idle conversation reads ${rest.state} ${JSON.stringify(rest.word)} with a ${rest.dot} dot, not idle in green`,
+      );
+      expect(rest.model !== '' && rest.mode !== '', `the line does not name the model (${JSON.stringify(rest.model)}) and the mode (${JSON.stringify(rest.mode)})`);
+      expect(rest.tokens === '65.5k/262.1k', `the line's fill reads ${JSON.stringify(rest.tokens)}, not the daemon's 65.5k/262.1k`);
+      expect(!rest.sheet.shown && rest.expanded === 'false', 'the sheet is open at rest');
+
+      await page.click('#h1-status');
+      const open = await read();
+      expect(open.sheet.shown && open.expanded === 'true', 'tapping the status line did not open the sheet');
+      expect(open.sheet.top === open.lineBottom, `the sheet does not open in place under the line (sheet top ${open.sheet.top}, line bottom ${open.lineBottom})`);
+      expect(
+        open.trTop === rest.trTop + open.sheet.h,
+        `the sheet covers the transcript instead of pushing it down (transcript top ${rest.trTop} -> ${open.trTop}, sheet ${open.sheet.h}px)`,
+      );
+      expect(open.composerBottom <= 844, `with the sheet open the composer bottom is ${open.composerBottom} in an 844px viewport`);
+      for (const want of ['Model', 'Mode', 'Context', 'Folder on host']) {
+        expect(open.rows.includes(want), `the sheet has no ${want} row (${JSON.stringify(open.rows)})`);
+      }
+      expect(open.bar && open.keep, `the sheet is missing the context bar (${open.bar}) or the keep-this-mode box (${open.keep})`);
+      expect(open.modes.length > 1, `the mode control has ${open.modes.length} buttons`);
+      const pressed = open.modes.filter((m) => m.pressed === 'true');
+      expect(pressed.length === 1 && pressed[0]!.id === open.sel, `the pressed mode ${JSON.stringify(pressed)} is not the select's ${open.sel}`);
+
+      // A segment drives the mode handler: one POST naming it, and the control
+      // follows the daemon's answer.
+      const target = open.modes.find((m) => m.pressed !== 'true')!.id;
+      await page.click(`#session-footer .seg button[data-mode="${target}"]`);
+      await page.waitForFunction(
+        `document.querySelector('#session-footer .seg button[data-mode="${target}"]').getAttribute('aria-pressed') === 'true'`,
+      );
+      const after = await read();
+      expect(
+        posted.length === 1 && posted[0]!.mode === target,
+        `the segment posted ${JSON.stringify(posted)}, not one approval-mode for ${target}`,
+      );
+      expect(after.sel === target && after.mode !== rest.mode, `the select reads ${after.sel} and the line ${after.mode} after the change`);
+      // The mode in force is not a change, so it sends nothing.
+      await page.click(`#session-footer .seg button[data-mode="${target}"]`);
+      await page.waitForTimeout(300);
+      expect(posted.length === 1, `pressing the mode already in force posted again (${posted.length})`);
+
+      // Shut by Escape from inside it, back onto the line, and by the line.
+      await page.focus(`#session-footer .seg button[data-mode="${target}"]`);
+      await page.keyboard.press('Escape');
+      const esc = await read();
+      expect(!esc.sheet.shown && esc.focusOnLine && esc.expanded === 'false', `Escape did not shut the sheet onto the status line (${JSON.stringify({ shown: esc.sheet.shown, focus: esc.focusOnLine })})`);
+      await page.click('#h1-status');
+      await page.click('#h1-status');
+      const shut = await read();
+      expect(!shut.sheet.shown && shut.trTop === rest.trTop, 'the second tap did not shut the sheet and give the transcript its room back');
+      return `idle in green, ${rest.model} · ${rest.tokens} · ${rest.mode}; the sheet opens in place (${open.sheet.h}px, transcript pushed down), ${open.modes.length} mode buttons, ${target} posted once and followed; Escape and the line shut it`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P139 the ⋯ menu holds the conversation actions, by pointer and by keyboard, offers Rename and End session only while it is open, and End session asks first',
+    // #184. The verbs that sat in the composer row as symbols, the drawer's
+    // export and the recap and side-question buttons are items in one menu.
+    // Each item is the control that did the job before, so pressing it is the
+    // old handler; the claims are that the menu is reachable and operable,
+    // that it offers only what can act on what is on screen, and that ending
+    // a session still asks first (the harness dismisses the ask).
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_recap', 'session_btw'] },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const HERE = viewer.sessionId;
+      const TITLE = 'p139 the one on screen';
+      const ended: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/end')) ended.push(r.url());
+      });
+      const asked: { type: string; message: string }[] = [];
+      page.on('dialog', (d) => asked.push({ type: d.type(), message: d.message() }));
+      await watch(page, HERE);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(
+        `!document.getElementById('recap-toggle').hidden && !document.getElementById('btw-toggle').hidden && pastConvosCwd !== null`,
+      );
+      await page.waitForTimeout(300);
+      const plant = (live: boolean) =>
+        page.evaluate(
+          `renderPastConversations([{ sessionId: ${JSON.stringify(HERE)}, title: ${JSON.stringify(TITLE)}, live: ${live} }], pastConvosCwd, false)`,
+        );
+      type MenuReading = { open: boolean; items: string[]; focus: string; expanded: string; bg: string; inView: boolean };
+      const readMenu = () =>
+        page.evaluate(String.raw`(() => {
+          const m = document.getElementById('h1-menu');
+          const r = m.getBoundingClientRect();
+          const a = document.activeElement;
+          return {
+            open: m.getClientRects().length > 0,
+            items: Array.from(m.querySelectorAll('[role="menuitem"]'))
+              .filter((b) => b.getClientRects().length > 0)
+              .map((b) => (b.textContent || '').trim()),
+            focus: m.contains(a) ? (a.textContent || '').trim() : a === document.getElementById('h1-actions') ? '⋯' : '',
+            expanded: document.getElementById('h1-actions').getAttribute('aria-expanded'),
+            bg: getComputedStyle(m).backgroundColor,
+            inView: r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+          };
+        })()`) as Promise<MenuReading>;
+      const ALL = 'Where did I leave off?,Ask a side question,Rename,Rewind to a turn,Export or share,Archive,End session';
+
+      await plant(true);
+      await page.click('#h1-actions');
+      const byClick = await readMenu();
+      expect(byClick.open && byClick.expanded === 'true', 'tapping ⋯ opened no menu');
+      expect(byClick.items.join(',') === ALL, `the menu reads ${JSON.stringify(byClick.items)}, not ${ALL}`);
+      expect(byClick.focus === 'Where did I leave off?', `opening the menu left focus on ${JSON.stringify(byClick.focus)}, not its first item`);
+      expect(byClick.bg === 'rgb(22, 27, 34)' && byClick.inView, `the menu is ${byClick.bg} or hangs off screen`);
+      // The menu's ink is held to its floor by P126, which reads it as a
+      // surface of its own.
+      await page.keyboard.press('Escape');
+      const shut = await readMenu();
+      expect(!shut.open && shut.focus === '⋯' && shut.expanded === 'false', `Escape did not shut the menu onto ⋯ (${JSON.stringify(shut)})`);
+
+      // Keyboard: Enter on ⋯ opens it, the arrows wrap, Home and End jump.
+      await page.keyboard.press('Enter');
+      const walk: string[] = [(await readMenu()).focus];
+      for (const key of ['ArrowDown', 'ArrowUp', 'ArrowUp', 'Home', 'End', 'ArrowDown']) {
+        await page.keyboard.press(key);
+        walk.push((await readMenu()).focus);
+      }
+      const W = 'Where did I leave off?,Ask a side question,Where did I leave off?,End session,Where did I leave off?,End session,Where did I leave off?';
+      expect(walk.join(',') === W, `the menu keys walked ${JSON.stringify(walk)}`);
+      await page.keyboard.press('Escape');
+
+      // A conversation the daemon does not have open can be neither renamed
+      // nor ended, so the menu does not offer either.
+      await plant(false);
+      await page.click('#h1-actions');
+      const past = await readMenu();
+      await page.keyboard.press('Escape');
+      expect(
+        !past.items.includes('Rename') && !past.items.includes('End session') && past.items.includes('Archive'),
+        `a conversation that is not open offers ${JSON.stringify(past.items)}`,
+      );
+
+      // End session asks, naming the session, and a dismissed ask ends nothing.
+      await plant(true);
+      const before = asked.length;
+      await page.click('#h1-actions');
+      await page.click('#end-session');
+      await page.waitForTimeout(300);
+      const asks = asked.slice(before);
+      expect(
+        asks.length === 1 && asks[0]!.type === 'confirm' && asks[0]!.message.includes(HERE),
+        `End session did not ask first, naming the session (${JSON.stringify(asks)})`,
+      );
+      expect(ended.length === 0, `a dismissed End session still sent ${JSON.stringify(ended)}`);
+      expect(!(await readMenu()).open, 'the menu stayed open behind the item that was pressed');
+
+      // Rename asks for the name, naming the conversation; Rewind to a turn
+      // opens the turn picker, the handler it always had.
+      await page.click('#h1-actions');
+      await page.click('#h1-menu-rename');
+      await page.waitForTimeout(200);
+      const rn = asked[asked.length - 1]!;
+      expect(rn.type === 'prompt' && rn.message.includes(TITLE), `Rename asked ${JSON.stringify(rn)}`);
+      await page.click('#h1-actions');
+      await page.click('#rewind-chat');
+      const picker = (await page.evaluate(`document.getElementById('rewind-pick').style.display`)) as string;
+      expect(picker === '', `Rewind to a turn did not open the turn picker (display ${JSON.stringify(picker)})`);
+      return `7 items for an open conversation, Rename and End session gone for one that is not; Enter opens, arrows wrap, Home and End jump, Escape returns to ⋯; End session asked and ended nothing when dismissed; Rename asked, Rewind opened its picker`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P140 every finished turn carries Fork here, Rewind to here and Copy under its answer: Fork asks include or empty, Rewind calls the rewind with that turn, Copy copies the turn',
+    // #184. The fork row was one control under the newest answer with a select
+    // beside it. The spec puts three actions under the last answer of each
+    // turn and asks the fork's mode on tap. What matters is that each action
+    // reaches the handler it names with the turn it sits under: a fork that
+    // posted the latest turn from an earlier answer, or a rewind that kept
+    // the wrong number of turns, would look identical on screen.
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 1, 10_000);
+      await page.evaluate(() => {
+        __pg.liveTurn('first question', 'answer one');
+        __pg.liveTurn('second question', 'answer two');
+      });
+      await settlePage(page);
+      const forks: { fromTurn?: number; transcript?: string }[] = [];
+      const rewinds: { toTurn?: number }[] = [];
+      await page.route(/\/session\/[^/]+\/fork$/, async (route) => {
+        forks.push(JSON.parse(route.request().postData() || '{}') as { fromTurn?: number });
+        await route.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"refused by the scenario"}' });
+      });
+      await page.route(/\/session\/[^/]+\/rewind$/, async (route) => {
+        rewinds.push(JSON.parse(route.request().postData() || '{}') as { toTurn?: number });
+        await route.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"refused by the scenario"}' });
+      });
+      // The name prompt and the rewind's confirm answered as a reader would,
+      // and the clipboard read back, so each action can be followed to its end.
+      await page.evaluate(String.raw`(() => {
+        window.prompt = () => '';
+        window.confirm = () => true;
+        window.__copied = null;
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          configurable: true,
+          value: (t) => { window.__copied = t; return Promise.resolve(); },
+        });
+      })()`);
+      type Acts = { text: string; buttons: string[]; gap: number; inRow: boolean } | null;
+      const actsFor = (answer: string) =>
+        page.evaluate(String.raw`(() => {
+          const items = transcriptModel.items;
+          const a = items.find((i) => i.kind === 'asst' && i.text === ${JSON.stringify(answer)});
+          const row = a ? __pg.row(a.id) : null;
+          if (!row) return null;
+          let box = row.querySelector('.turn-acts');
+          let inRow = !!box;
+          if (!box) {
+            const next = row.nextElementSibling;
+            box = next ? next.querySelector('.turn-acts:not([hidden])') : null;
+          }
+          if (!box) return null;
+          const bubble = row.querySelector('.bubble');
+          return {
+            text: a.text,
+            buttons: Array.from(box.querySelectorAll('button')).map((b) => b.textContent),
+            gap: Math.round(box.getBoundingClientRect().top - bubble.getBoundingClientRect().bottom),
+            inRow,
+          };
+        })()`) as Promise<Acts>;
+      const one = await actsFor('answer one');
+      const two = await actsFor('answer two');
+      for (const [name, a] of [
+        ['the first turn', one],
+        ['the latest turn', two],
+      ] as const) {
+        expect(a !== null, `${name}'s answer carries no actions`);
+        expect(a!.buttons.join(',') === 'Fork here,Rewind to here,Copy', `${name}'s actions read ${JSON.stringify(a!.buttons)}`);
+        expect(a!.gap >= -8 && a!.gap <= 2, `${name}'s actions sit ${a!.gap}px from its answer, not under it`);
+      }
+      const sel = (answer: string, act: string) =>
+        page.evaluate(String.raw`(() => {
+          const a = transcriptModel.items.find((i) => i.kind === 'asst' && i.text === ${JSON.stringify(answer)});
+          const row = __pg.row(a.id);
+          const box = row.querySelector('.turn-acts') || row.nextElementSibling.querySelector('.turn-acts');
+          box.querySelector('.act-${act}').setAttribute('data-p140', ${JSON.stringify(answer + act)});
+        })()`).then(() => `[data-p140="${answer + act}"]`);
+
+      // Fork from the first turn: asked, then posted with that turn.
+      await page.click(await sel('answer one', 'fork'));
+      await page.waitForSelector('#h1-ask', { state: 'visible' });
+      const options = (await page.evaluate(
+        String.raw`Array.from(document.querySelectorAll('#h1-ask button[data-value]')).map((b) => b.dataset.value + ':' + b.textContent)`,
+      )) as string[];
+      expect(
+        options.length === 2 && options[0]!.startsWith('include:') && options[1]!.startsWith('empty:'),
+        `the fork asked ${JSON.stringify(options)}, not include or empty`,
+      );
+      await page.click('#h1-ask button[data-value="empty"]');
+      for (let i = 0; i < 20 && forks.length === 0; i++) await page.waitForTimeout(100);
+      expect(
+        forks.length === 1 && forks[0]!.fromTurn === 1 && forks[0]!.transcript === 'empty',
+        `Fork here on the first turn posted ${JSON.stringify(forks)}, not fromTurn 1 empty`,
+      );
+      // Cancel asks nothing more and posts nothing.
+      await page.click(await sel('answer two', 'fork'));
+      await page.click('#h1-ask button.cancel');
+      await page.waitForTimeout(200);
+      expect(forks.length === 1, `a cancelled fork still posted (${forks.length})`);
+
+      // Rewind to the first turn: the picker's own Rewind, with turn 1.
+      await page.click(await sel('answer one', 'rewind'));
+      for (let i = 0; i < 20 && rewinds.length === 0; i++) await page.waitForTimeout(100);
+      const picked = (await page.evaluate(`document.getElementById('rewind-turn-pick').value`)) as string;
+      expect(
+        rewinds.length === 1 && rewinds[0]!.toTurn === 1 && picked === '1',
+        `Rewind to here on the first turn posted ${JSON.stringify(rewinds)} with the picker on ${picked}`,
+      );
+      // The latest turn has nothing after it, and says so instead of asking.
+      await page.click(await sel('answer two', 'rewind'));
+      await page.waitForTimeout(200);
+      const latestNote = (await page.evaluate(
+        `transcriptModel.forkItem ? transcriptModel.forkItem.note : ''`,
+      )) as string;
+      expect(rewinds.length === 1 && latestNote.includes('latest turn'), `Rewind on the latest turn posted or said nothing (${rewinds.length}, ${JSON.stringify(latestNote)})`);
+
+      // Copy takes the turn's answer.
+      await page.click(await sel('answer two', 'copy'));
+      await page.waitForFunction(`window.__copied !== null`);
+      const copied = (await page.evaluate(`window.__copied`)) as string;
+      expect(copied === 'answer two', `Copy took ${JSON.stringify(copied)}`);
+      return `both turns carry Fork here, Rewind to here, Copy under the answer (earlier turn in its row ${one!.inRow}, latest ${two!.inRow ? 'in its row' : 'on the fork row'}); Fork asked include or empty and posted fromTurn 1 empty, Rewind posted toTurn 1 through the picker, the latest turn's Rewind says why not, Copy took ${JSON.stringify(copied)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P141 while a turn runs Stop takes Send’s place in the row, red, and calls the cancel handler, and Send comes back when the turn ends',
+    // #184. Stop is the one control a running turn needs, so it takes the
+    // place a thumb already reaches for. It is the ⊘ verb's own button and
+    // handler (#cancel-turn), moved: a Stop that called anything else could
+    // look right and cancel nothing.
+    stub: { promptDelayMs: 12_000 },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const cancels: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/cancel')) cancels.push(r.url());
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      type Row = {
+        send: boolean;
+        stop: boolean;
+        queue: boolean;
+        sendBox: number[];
+        stopBox: number[];
+        stopBorder: string;
+        stopColor: string;
+        state: string;
+        word: string;
+        dot: string;
+      };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const on = (id) => document.getElementById(id).getClientRects().length > 0;
+          const box = (id) => { const r = document.getElementById(id).getBoundingClientRect(); return [Math.round(r.right), Math.round(r.width), Math.round(r.height)]; };
+          const stop = document.getElementById('cancel-turn');
+          const b = document.getElementById('h1-status');
+          return {
+            send: on('send'),
+            stop: on('cancel-turn'),
+            queue: on('queue'),
+            sendBox: box('send'),
+            stopBox: box('cancel-turn'),
+            stopBorder: getComputedStyle(stop).borderTopColor,
+            stopColor: getComputedStyle(stop).color,
+            state: b.dataset.state,
+            word: document.getElementById('h1-state').textContent,
+            dot: getComputedStyle(b.querySelector('.dot')).backgroundColor,
+          };
+        })()`) as Promise<Row>;
+      const rest = await read();
+      expect(rest.send && !rest.stop && !rest.queue, `at rest the row shows Send ${rest.send}, Stop ${rest.stop}, Queue ${rest.queue}`);
+
+      await page.fill('#prompt', 'hold the turn');
+      await page.click('#send');
+      const run = await read();
+      expect(!run.send && run.stop, `while the turn runs the row shows Send ${run.send} and Stop ${run.stop}`);
+      expect(
+        run.stopBox.join(',') === rest.sendBox.join(','),
+        `Stop is not in Send's place: Stop ${run.stopBox.join(',')} against Send ${rest.sendBox.join(',')} (right, width, height)`,
+      );
+      expect(
+        run.stopBorder === 'rgb(248, 81, 73)' && run.stopColor === 'rgb(248, 81, 73)',
+        `Stop is drawn ${run.stopColor} on a ${run.stopBorder} outline, not the spec's red`,
+      );
+      expect(run.queue, 'the way to queue is not on screen while the turn holds Send (#70)');
+      expect(
+        run.state === 'run' && run.word.startsWith('running') && run.dot === 'rgb(88, 166, 255)',
+        `the status line reads ${run.state} ${JSON.stringify(run.word)} with a ${run.dot} dot while the turn runs`,
+      );
+
+      await page.click('#cancel-turn');
+      for (let i = 0; i < 30 && cancels.length === 0; i++) await page.waitForTimeout(100);
+      expect(cancels.length === 1 && cancels[0]!.includes(viewer.sessionId), `Stop sent ${JSON.stringify(cancels)}, not one cancel for the session on screen`);
+      await page.waitForFunction(`/cancel/.test(document.getElementById('session-verb-result').textContent)`);
+
+      // The turn ends over the watch: Send comes back in Stop's place.
+      await page.evaluate(`renderFrame({ type: 'turn_complete', data: {} })`);
+      await page.waitForFunction(`document.getElementById('send').getClientRects().length > 0`, null, { timeout: 5_000 });
+      const done = await read();
+      expect(done.send && !done.stop && !done.queue && done.state === 'idle', `after the turn the row shows Send ${done.send}, Stop ${done.stop}, Queue ${done.queue}, state ${done.state}`);
+      return `rest: Send; running: Stop at ${run.stopBox.join('/')} in Send's place, red, Queue beside it, the line running in blue; Stop posted one cancel; turn_complete gave Send back`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P142 the + opens the tools as a sideways scroller of 44px pills directly over the composer, and Files counts what the store holds',
+    // #184. Attach, Dictate, Files and Artifacts left the composer row for a
+    // 52px scroller the + opens. A scroller that wraps would cost a row per
+    // tool on a phone, which is the fold the row was emptied to protect, so
+    // the claim is that it scrolls sideways instead, sits on the composer,
+    // and names how many files the store holds once it has been asked.
+    waitView: false,
+    stub: {
+      attachmentListResult: {
+        attachments: [
+          { type: 'resource', attachmentId: 'crash.log', mimeType: 'text/plain', size: 2048 },
+          { type: 'image', attachmentId: 'shot.png', mimeType: 'image/png', size: 4096 },
+        ],
+      },
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      type Tools = {
+        shown: boolean;
+        h: number;
+        bottom: number;
+        composerTop: number;
+        composerBottom: number;
+        order: string;
+        under44: number;
+        scrollW: number;
+        clientW: number;
+        files: string;
+        expanded: string;
+      };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const t = document.getElementById('h1-tools');
+          const r = t.getBoundingClientRect();
+          const kids = Array.from(t.children)
+            .filter((k) => k.getClientRects().length > 0)
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          return {
+            shown: t.getClientRects().length > 0,
+            h: Math.round(r.height),
+            bottom: Math.round(r.bottom),
+            composerTop: Math.round(document.getElementById('composer').getBoundingClientRect().top),
+            composerBottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
+            order: kids.map((k) => k.id).join(','),
+            under44: kids.filter((k) => k.tagName === 'BUTTON' && k.getBoundingClientRect().height < 44).length,
+            scrollW: t.scrollWidth,
+            clientW: t.clientWidth,
+            files: (document.getElementById('stored-toggle').textContent || '').replace(/\s+/g, ' ').trim(),
+            expanded: document.getElementById('h1-plus').getAttribute('aria-expanded'),
+          };
+        })()`) as Promise<Tools>;
+      const rest = await read();
+      expect(!rest.shown && rest.expanded === 'false', 'the tools are open at rest');
+      await page.click('#h1-plus');
+      const open = await read();
+      expect(open.shown && open.expanded === 'true', 'the + did not open the tools');
+      expect(open.bottom === open.composerTop, `the tools are not directly over the composer (tools bottom ${open.bottom}, composer top ${open.composerTop})`);
+      expect(
+        open.order === 'attach,dictate,dictate-engine,stored-toggle,artifacts-toggle',
+        `the tools read ${open.order}, not Attach file, Dictate (with its engine), Files, Artifacts`,
+      );
+      expect(open.under44 === 0, `${open.under44} pills are under 44px`);
+      expect(open.composerBottom <= 844, `with the tools open the composer bottom is ${open.composerBottom}`);
+      expect(open.scrollW > open.clientW, `the pills fit in ${open.clientW}px at 390, so the sideways scroll is not exercised (${open.scrollW})`);
+      const moved = (await page.evaluate(
+        `(() => { const t = document.getElementById('h1-tools'); t.scrollLeft = 1000; return t.scrollLeft; })()`,
+      )) as number;
+      expect(moved > 0, 'the tools do not scroll sideways, so the last pill is out of reach');
+      const docW = (await page.evaluate('document.documentElement.scrollWidth')) as number;
+      expect(docW === 390, `the open tools push the page to ${docW}px`);
+
+      expect(open.files === 'Files', `Files reads ${JSON.stringify(open.files)} before the store has been asked`);
+      await page.click('#stored-toggle');
+      await page.waitForFunction(`/\\(2\\)/.test(document.getElementById('stored-toggle').textContent)`);
+      const counted = await read();
+      expect(counted.files === 'Files (2)', `Files reads ${JSON.stringify(counted.files)} once the store answered two`);
+      await page.click('#stored-toggle');
+      await page.click('#h1-plus');
+      const shut = await read();
+      expect(!shut.shown && shut.expanded === 'false', 'the + did not shut the tools');
+      return `the + opened ${open.h}px of tools on the composer, ${open.order}, all 44px, scrolling ${open.scrollW}/${open.clientW}; Files counted ${counted.files}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P143 Where did I leave off? is a pill at the top of the transcript that opens the recap in place under it, and the ⋯ menu opens the same',
+    // #184. The recap button was a control in the composer; the spec makes it
+    // a pill beside load-earlier at the top of the transcript, opening the
+    // recap in place under the pills. Bounded inside the transcript, so an
+    // answer of any length scrolls in its card instead of pushing the composer.
+    waitView: false,
+    stub: { capabilitiesFeatures: ['session_recap'] },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const SENTENCE = 'p143 moved the nightly to bookworm-slim and opened PR 311';
+      await page.route(/\/session\/[^/]+\/recap$/, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: viewer.sessionId, recap: SENTENCE }),
+        }),
+      );
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#recap-toggle', { state: 'visible' });
+      type Pill = { pillTop: number; pillH: number; pillBottom: number; inTop: boolean; trTop: number; trBottom: number; recap: { shown: boolean; top: number; bottom: number; text: string }; expanded: string };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const p = document.getElementById('recap-toggle').getBoundingClientRect();
+          const t = document.getElementById('transcript').getBoundingClientRect();
+          const r = document.getElementById('recap');
+          const rr = r.getBoundingClientRect();
+          return {
+            pillTop: Math.round(p.top), pillH: Math.round(p.height), pillBottom: Math.round(p.bottom),
+            inTop: document.getElementById('tx-top').contains(document.getElementById('recap-toggle')),
+            trTop: Math.round(t.top), trBottom: Math.round(t.bottom),
+            recap: { shown: r.getClientRects().length > 0, top: Math.round(rr.top), bottom: Math.round(rr.bottom), text: r.textContent || '' },
+            expanded: document.getElementById('recap-toggle').getAttribute('aria-expanded'),
+          };
+        })()`) as Promise<Pill>;
+      const rest = await read();
+      expect(rest.inTop && rest.pillTop - rest.trTop >= 4 && rest.pillTop - rest.trTop <= 16, `the pill is not at the top of the transcript (pill ${rest.pillTop}, transcript ${rest.trTop})`);
+      expect(rest.pillH === 36, `the pill is ${rest.pillH}px, not the 36px the spec draws`);
+      expect(!rest.recap.shown, 'the recap is open at rest');
+      await page.click('#recap-toggle');
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('p143')`);
+      const open = await read();
+      expect(open.expanded === 'true' && open.recap.text.includes(SENTENCE), `the pill did not open the recap (${JSON.stringify(open.recap)})`);
+      expect(
+        open.recap.top >= open.pillBottom && open.recap.bottom <= open.trBottom,
+        `the recap does not open in place under the pills, inside the transcript (recap ${open.recap.top}-${open.recap.bottom}, pill bottom ${open.pillBottom}, transcript bottom ${open.trBottom})`,
+      );
+      await page.click('#recap-toggle');
+      const shut = await read();
+      expect(!shut.recap.shown && shut.expanded === 'false', 'a second tap on the pill did not put the recap away');
+      await openMenu(page);
+      await page.click('#h1-menu-recap');
+      await page.waitForFunction(`document.getElementById('recap').getClientRects().length > 0`);
+      return `pill ${rest.pillH}px at ${rest.pillTop - rest.trTop}px into the transcript; the recap opens under it (${open.recap.top}-${open.recap.bottom}) and goes on a second tap; ⋯ > Where did I leave off? opens it too`;
+    },
+  });
+
+  // A plan of six, one done: three open rows show and two are counted.
+  const P144_PLAN = (f: Frames): Frames =>
+    f.upd({
+      sessionUpdate: 'plan',
+      entries: [
+        { content: 'read the workflow', priority: 'medium', status: 'completed' },
+        { content: 'switch both jobs', priority: 'medium', status: 'in_progress' },
+        { content: 're-run the nightly', priority: 'medium', status: 'pending' },
+        { content: 'check the cache key', priority: 'medium', status: 'pending' },
+        { content: 'clear the old caches', priority: 'medium', status: 'pending' },
+        { content: 'close the issue', priority: 'medium', status: 'pending' },
+      ],
+    });
+  PAGE_SCENARIOS.push({
+    name: 'P144 the to-do strip sits on the composer with a count line, three rows and the rest counted, folds by a tap or a key, and stays folded across a reload',
+    // #184. The strip is the only band between the transcript and the
+    // composer, and folded it is what the transcript's 600px at 390 is
+    // measured with, so the fold has to be the reader's to keep.
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('fix the nightly');
+      P144_PLAN(f);
+      return f.asst('on it').done().list;
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 5, 30_000);
+      await page.waitForSelector('#plan', { state: 'visible' });
+      await settlePage(page);
+      type Strip = { count: string; rows: string[]; more: string; rowsShown: boolean; moreShown: boolean; expanded: string; mark: string; h: number; bottom: number; composerTop: number; trH: number };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const p = document.getElementById('plan');
+          const r = p.getBoundingClientRect();
+          const on = (id) => document.getElementById(id).getClientRects().length > 0;
+          return {
+            count: document.getElementById('plan-count').textContent,
+            rows: (document.getElementById('plan-rows').textContent || '').split('\n'),
+            more: document.getElementById('plan-more').textContent,
+            rowsShown: on('plan-rows'),
+            moreShown: on('plan-more'),
+            expanded: p.getAttribute('aria-expanded'),
+            mark: document.getElementById('plan-mark').textContent,
+            h: Math.round(r.height),
+            bottom: Math.round(r.bottom),
+            composerTop: Math.round(document.getElementById('composer').getBoundingClientRect().top),
+            trH: document.getElementById('transcript').clientHeight,
+          };
+        })()`) as Promise<Strip>;
+      const open = await read();
+      expect(open.count === '1 of 6 done', `the count line reads ${JSON.stringify(open.count)}`);
+      expect(
+        open.rows.length === 3 && open.rows[0] === '▸ switch both jobs' && open.rows[1] === '▫ re-run the nightly',
+        `the strip's rows read ${JSON.stringify(open.rows)}`,
+      );
+      expect(open.more === '2 more open' && open.moreShown, `the rest is counted as ${JSON.stringify(open.more)}`);
+      expect(open.expanded === 'true' && open.mark === 'hide', `the open strip says ${open.expanded} / ${open.mark}`);
+      expect(open.bottom === open.composerTop, `the strip is not the band on the composer (strip bottom ${open.bottom}, composer top ${open.composerTop})`);
+
+      await page.click('#plan');
+      const folded = await read();
+      expect(folded.expanded === 'false' && !folded.rowsShown && !folded.moreShown && folded.mark === 'show', `a tap did not fold the strip (${JSON.stringify(folded)})`);
+      expect(folded.h <= 37, `the folded strip is ${folded.h}px, more than its count line`);
+      expect(folded.trH === open.trH + open.h - folded.h, `folding gave the transcript ${folded.trH - open.trH}px of the ${open.h - folded.h}px it freed`);
+
+      await page.focus('#plan');
+      await page.keyboard.press('Enter');
+      const byEnter = await read();
+      await page.keyboard.press(' ');
+      const bySpace = await read();
+      expect(byEnter.expanded === 'true' && bySpace.expanded === 'false', `Enter and Space did not toggle the fold (${byEnter.expanded}, ${bySpace.expanded})`);
+      const kept = (await page.evaluate(`localStorage.getItem('qwen-rc:ui:plan-folded')`)) as string | null;
+      expect(kept === 'true', `the fold is not kept (${JSON.stringify(kept)})`);
+      await reloadAndRestore(page, await rowCount(page));
+      await page.waitForSelector('#plan', { state: 'visible' });
+      const back = await read();
+      expect(back.expanded === 'false' && !back.rowsShown, 'the strip came back open after a reload');
+      return `count ${JSON.stringify(open.count)}, 3 rows, ${JSON.stringify(open.more)}, ${open.h}px open and ${folded.h}px folded on the composer; tap, Enter and Space fold it; folded after a reload`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P145 at 390x844 the transcript is at least 600px at rest with the strip folded, and composerUnderFold is 0 with the sheet open, the tools open and the keyboard up',
+    // #184's done-when, read as numbers on one page: fourteen turns, a plan
+    // folded to its count line, then every state H1 can stack on top of it,
+    // and the keyboard from P137 (a stand-in visual viewport, shrunk by an
+    // iPhone keyboard's height) with the sheet and the tools still open.
+    frames: () => {
+      const f = new Frames().ev('client_joined');
+      for (let k = 0; k < 14; k++) {
+        f.user(`question ${k}: why does the nightly build fail on the arm64 runner?`);
+        f.asst(`answer ${k}: the arm64 job pins an image without the native toolchain.`);
+        f.done();
+      }
+      P144_PLAN(f);
+      return f.list;
+    },
+    before: async (page) => {
+      await page.addInitScript({ content: FAKE_VIEWPORT_JS });
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 43, 30_000);
+      await page.waitForSelector('#plan', { state: 'visible' });
+      await settlePage(page);
+      if ((await page.getAttribute('#plan', 'aria-expanded')) === 'true') await page.click('#plan');
+      await frames3(page);
+      const read = () =>
+        page.evaluate(String.raw`(() => ({
+          trH: document.getElementById('transcript').clientHeight,
+          bottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
+          sendBottom: Math.round(document.getElementById('send').getBoundingClientRect().bottom),
+          visible: window.visualViewport.offsetTop + window.visualViewport.height,
+        }))()`) as Promise<{ trH: number; bottom: number; sendBottom: number; visible: number }>;
+      const rest = await read();
+      expect(rest.trH >= 600, `the transcript at rest with the strip folded is ${rest.trH}px at 390x844, under 600`);
+      expect(rest.bottom <= 844, `composerUnderFold is ${rest.bottom - 844} at rest`);
+      await openSheet(page);
+      await frames3(page);
+      const sheet = await read();
+      await page.click('#h1-status');
+      await openTools(page);
+      await frames3(page);
+      const tools = await read();
+      await openSheet(page);
+      await frames3(page);
+      const both = await read();
+      for (const [k, r] of [
+        ['the sheet open', sheet],
+        ['the tools open', tools],
+        ['the sheet and the tools open', both],
+      ] as const) {
+        expect(r.bottom <= 844, `composerUnderFold is ${r.bottom - 844} with ${k}: the composer bottom is ${r.bottom}`);
+      }
+      const KEYS = 336;
+      await page.focus('#prompt');
+      await page.evaluate(`window.__kb(${KEYS})`);
+      await page.waitForTimeout(150);
+      await frames3(page);
+      const kb = await read();
+      expect(
+        kb.bottom <= kb.visible + 1 && kb.sendBottom <= kb.visible + 1,
+        `with the keyboard up (and the sheet and tools open) the composer bottom is ${kb.bottom} and Send ${kb.sendBottom}, under the keyboard's top edge at ${kb.visible}`,
+      );
+      await page.evaluate(`window.__kb(0)`);
+      await page.click('#h1-status');
+      await page.click('#h1-plus');
+      return `transcript ${rest.trH}px at rest with the strip folded; composer bottom ${rest.bottom} at rest, ${sheet.bottom} sheet open, ${tools.bottom} tools open, ${both.bottom} both, ${kb.bottom} with a ${KEYS}px keyboard over a ${kb.visible}px visible height (transcript ${kb.trH}px there)`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P146 a queued message is the outbox bubble, queued · sends after this turn, with send now handing it to the running turn and drop discarding it',
+    // #70's queue, drawn as the spec's outbox bubble. Send now has to mean
+    // something while Send is held for the turn, so it hands the text to the
+    // turn that is running through the mid-turn route Operations already
+    // uses; it leaves the queue only when the daemon says it holds it.
+    stub: { promptDelayMs: 12_000 },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const handed: string[] = [];
+      await page.route(/\/session\/[^/]+\/mid-turn-message$/, async (route) => {
+        handed.push((JSON.parse(route.request().postData() || '{}') as { message?: string }).message ?? '');
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ accepted: true, messageId: 'p146-1' }) });
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.fill('#prompt', 'the turn is running');
+      await page.click('#send');
+      await page.fill('#prompt', 'queued while busy');
+      await page.click('#queue');
+      type Bubble = { shown: boolean; text: string; note: string; style: string; right: number; composerRight: number; buttons: string[] };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const q = document.getElementById('queued');
+          const t = document.getElementById('queued-text');
+          return {
+            shown: q.getClientRects().length > 0,
+            text: t.textContent,
+            note: document.getElementById('queued-note').textContent,
+            style: getComputedStyle(t).borderTopStyle,
+            right: Math.round(t.getBoundingClientRect().right),
+            composerRight: Math.round(document.getElementById('composer').getBoundingClientRect().right),
+            buttons: Array.from(q.querySelectorAll('button')).filter((b) => b.getClientRects().length > 0).map((b) => b.textContent),
+          };
+        })()`) as Promise<Bubble>;
+      const q = await read();
+      expect(q.shown && q.text === 'queued while busy', `the queued message is not shown waiting (${JSON.stringify(q)})`);
+      expect(q.note === 'queued · sends after this turn', `the bubble says ${JSON.stringify(q.note)}`);
+      expect(q.style === 'dashed' && q.composerRight - q.right <= 12, `the bubble is not the dashed outbox at the right (${q.style}, right ${q.right} of ${q.composerRight})`);
+      expect(q.buttons.join(',') === 'send now,drop', `the bubble offers ${JSON.stringify(q.buttons)}`);
+
+      await page.click('#queued-now');
+      await page.waitForFunction(`document.getElementById('queued').hidden`);
+      const left = (await page.evaluate('outbox.length')) as number;
+      expect(handed.length === 1 && handed[0] === 'queued while busy' && left === 0, `send now handed ${JSON.stringify(handed)} and left ${left} queued`);
+
+      await page.fill('#prompt', 'a second thought');
+      await page.click('#queue');
+      await page.click('#queued-discard');
+      const dropped = (await page.evaluate(`({ hidden: document.getElementById('queued').hidden, n: outbox.length })`)) as { hidden: boolean; n: number };
+      expect(dropped.hidden && dropped.n === 0 && handed.length === 1, `drop left ${JSON.stringify(dropped)} and handed ${handed.length}`);
+      return `the dashed bubble reads ${JSON.stringify(q.note)} with send now and drop; send now handed it to the running turn and emptied the queue; drop discarded the next one`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P147 a refused message says not sent under its bubble with a retry that sends the same text again, and never over a draft',
+    // #62's marker, with the spec's retry beside it. Retry goes through Send
+    // with the refused text, so it is one more ordinary send, and it refuses
+    // to take a draft the reader has started, by the rule the queue's drain
+    // keeps.
+    stub: { promptStatus: 503 },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const prompts: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/prompt')) {
+          prompts.push((JSON.parse(r.postData() || '{}') as { prompt?: string }).prompt ?? '');
+        }
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.fill('#prompt', 'do the thing');
+      await page.click('#send');
+      await page.waitForFunction(`transcriptModel.items.some((i) => i.kind === 'user' && i.notSent)`);
+      await settlePage(page);
+      const marker = (await page.evaluate(String.raw`(() => {
+        const row = Array.from(document.querySelectorAll('#transcript .bubble.user')).find((b) => b.querySelector('.not-sent:not([hidden])'));
+        const retry = row ? row.querySelector('.retry') : null;
+        if (retry) retry.setAttribute('data-p147', 'retry');
+        return {
+          note: row ? row.querySelector('.not-sent').textContent : '',
+          retry: !!retry && retry.getClientRects().length > 0,
+        };
+      })()`)) as { note: string; retry: boolean };
+      expect(marker.note.startsWith('not sent: ') && marker.retry, `the refused bubble reads ${JSON.stringify(marker)}`);
+
+      // Over a draft, retry says why and sends nothing.
+      await page.fill('#prompt', 'a draft');
+      await page.click('[data-p147="retry"]');
+      await page.waitForTimeout(200);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(prompts.length === 1 && /clear it to retry/.test(status), `retry over a draft sent ${prompts.length} or said ${JSON.stringify(status)}`);
+
+      await page.fill('#prompt', '');
+      await page.click('[data-p147="retry"]');
+      for (let i = 0; i < 30 && prompts.length < 2; i++) await page.waitForTimeout(100);
+      expect(prompts.length === 2 && prompts[1] === 'do the thing', `retry sent ${JSON.stringify(prompts)}`);
+      return `the refused bubble reads ${JSON.stringify(marker.note)} with retry; over a draft it said ${JSON.stringify(status)}; with the composer empty it sent the same text again`;
     },
   });
 }
