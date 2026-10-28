@@ -14025,7 +14025,7 @@ PAGE_SCENARIOS.push({
   // page's side is real, including the refresh that redraws the rail from
   // disk. Delete is only ever dismissed, so no delete request may leave.
   PAGE_SCENARIOS.push({
-    name: 'P132 every rail row has a menu that renames, archives and deletes it, by pointer and by keyboard, at 1280 and 390',
+    name: 'P132 every rail row has a menu that archives and deletes it, and renames it while it is open, by pointer and by keyboard, at 1280 and 390',
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
@@ -14164,7 +14164,10 @@ PAGE_SCENARIOS.push({
             };
           })()`) as Promise<MoreReading | null>;
         const rowSel = (id: string) => `#rail .srow[data-session="${id}"]`;
-        const THREE = 'Rename,Archive,Delete';
+        // A past row offers what can act on a transcript; Rename only where the
+        // daemon has the conversation open, since its route reaches nothing
+        // else; End session only on the open row on screen.
+        const PAST = 'Archive,Delete';
         const FOUR = 'Rename,Archive,Delete,End session';
         const lines: string[] = [];
 
@@ -14205,11 +14208,15 @@ PAGE_SCENARIOS.push({
           const byClick = await readMenu();
           expect(byClick.open, `clicking the actions button opened no menu at ${at}`);
           expect(
-            byClick.items.join(',') === THREE,
-            `a planted row's menu reads ${JSON.stringify(byClick.items)} at ${at}, not ${THREE}`,
+            byClick.items.join(',') === PAST,
+            `a past row's menu reads ${JSON.stringify(byClick.items)} at ${at}, not ${PAST}`,
+          );
+          expect(
+            !byClick.items.includes('Rename'),
+            `a past row offers Rename at ${at}, which the daemon can only refuse for a conversation it does not have open`,
           );
           expect(byClick.label === `Actions for ${TITLE[DEL]}`, `the menu is labelled ${JSON.stringify(byClick.label)}`);
-          expect(byClick.focus === 'Rename', `opening the menu left focus on ${JSON.stringify(byClick.focus)}, not its first item`);
+          expect(byClick.focus === 'Archive', `opening the menu left focus on ${JSON.stringify(byClick.focus)}, not its first item`);
           expect((await readMore(DEL))!.expanded === 'true', `the button does not say its menu is open at ${at}`);
           expect(byClick.bg === 'rgb(22, 27, 34)', `the menu is ${byClick.bg}, not the sheet's control ground`);
           expect(byClick.inView, `the menu hangs outside the viewport at ${at}`);
@@ -14251,12 +14258,12 @@ PAGE_SCENARIOS.push({
           expect((await readMore(HERE))!.focused, `Escape did not return focus to the live row's button at ${at}`);
 
           // Delete asks first, naming the conversation, and a dismissed ask
-          // sends nothing and keeps the row. Rename asks for the new name the
-          // same way, and a dismissed one sends nothing either.
+          // sends nothing and keeps the row. Rename, on the open row, asks for
+          // the new name the same way, and a dismissed one sends nothing either.
           const before = asked.length;
           await page.click(`${rowSel(DEL)} > .more`);
           await page.click('#rail-menu [role="menuitem"]:text-is("Delete")');
-          await page.click(`${rowSel(DEL)} > .more`);
+          await page.click(`${rowSel(HERE)} > .more`);
           await page.click('#rail-menu [role="menuitem"]:text-is("Rename")');
           await page.waitForTimeout(300);
           const asks = asked.slice(before);
@@ -14265,7 +14272,7 @@ PAGE_SCENARIOS.push({
               asks[0]!.type === 'confirm' &&
               asks[0]!.message.includes(TITLE[DEL]!) &&
               asks[1]!.type === 'prompt' &&
-              asks[1]!.message.includes(TITLE[DEL]!),
+              asks[1]!.message.includes(TITLE[HERE]!),
             `Delete and Rename did not each ask, naming the conversation, at ${at} (${JSON.stringify(asks)})`,
           );
           expect(sent.length === 0, `a dismissed ask still sent ${JSON.stringify(sent)} at ${at}`);
@@ -14273,13 +14280,13 @@ PAGE_SCENARIOS.push({
 
           // Archive, from the keyboard on the phone and the pointer on the
           // desktop: the request names the row, and the row leaves the rail
-          // through the page's own refresh.
+          // through the page's own refresh. On a past row Archive is the first
+          // item, so the keyboard path is open and activate.
           const target = ARC[i]!;
           if (phone) {
             await page.focus(`${rowSel(target)} > .s`);
             await page.keyboard.press('Tab');
             await page.keyboard.press('Space');
-            await page.keyboard.press('ArrowDown');
             await page.keyboard.press('Enter');
           } else {
             await page.click(`${rowSel(target)} > .more`);
@@ -14298,7 +14305,7 @@ PAGE_SCENARIOS.push({
             `archiving one row took others with it at ${at} (${JSON.stringify(left)})`,
           );
           lines.push(
-            `${at}: ${phone ? '44px button always shown' : 'button fades in on hover and focus'}, click and ${phone ? 'Space' : 'Enter'} open it, ${THREE} (+End session on the live row), Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
+            `${at}: ${phone ? '44px button always shown' : 'button fades in on hover and focus'}, click and ${phone ? 'Space' : 'Enter'} open it, a past row offers ${PAST} with no Rename, the open row ${FOUR}, Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
           );
         }
         return lines.join('; ');

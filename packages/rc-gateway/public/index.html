@@ -10663,7 +10663,7 @@
           h2,
           h2b,
           document.createTextNode(
-            '. The ⋯ on a row renames, archives or deletes that conversation, and ends the one on screen while it is running.',
+            '. The ⋯ on a row archives or deletes that conversation, renames it while it is open, and ends the one on screen while it is running.',
           ),
         );
 
@@ -10859,8 +10859,9 @@
         }
       }
 
-      // #180. The rail's per-row menu: Rename, Archive, Delete, and End
-      // session on the conversation on screen while it is live. Every item
+      // #180. The rail's per-row menu: Archive and Delete on a row with a
+      // transcript, Rename on a row the daemon has open, and End session on
+      // the conversation on screen while it is live. Every item
       // calls the handler that already does that job, so there is one fetch
       // per action on the page and the rail adds none:
       // archivePastConversation and deletePastConversation (the New
@@ -10889,7 +10890,13 @@
         closeRailMenu(false);
         const menu = railMenu();
         const title = railTitle(s);
-        const items = [['Rename', false, () => renameFromRail(s)]];
+        const items = [];
+        // The rename route reaches only a conversation the daemon has open: a
+        // transcript it is not running answers that there is nothing to rename
+        // (see Operations > Rename session's help). So Rename is offered where
+        // the daemon's live-state says the conversation is open, and a past
+        // row shows no item that could only fail.
+        if (s.live) items.push(['Rename', false, () => renameFromRail(s)]);
         // A live-only row has no transcript to file away or remove, which is
         // why the past rows offer it neither (issue #111); the rail follows
         // the same rule rather than offering two actions that can only fail.
