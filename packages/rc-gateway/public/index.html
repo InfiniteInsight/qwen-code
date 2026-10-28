@@ -2511,6 +2511,12 @@
                 (messages held during a running turn; list with session-read, send
                 with session-write)
               </div>
+              <!-- #187: kept from the retired help because it is what a sender
+                   needs before sending, not a how-to. -->
+              <div class="ops-note">
+                Once held, a message is never sent twice, so withdraw is the only
+                way to take one back.
+              </div>
               <div>
                 <input
                   id="mid-turn-id"
@@ -2866,6 +2872,12 @@
               <h2>Rename session</h2>
               <div class="ops-note">
                 (titles a session the daemon has open; requires session-write scope)
+              </div>
+              <!-- #187: kept from the retired help, the limit a title is
+                   refused on. -->
+              <div class="ops-note">
+                200 characters is the limit, and a title over it is refused rather
+                than cut short.
               </div>
               <div>
                 <input id="rename-id" placeholder="session id (blank = watched)" />
