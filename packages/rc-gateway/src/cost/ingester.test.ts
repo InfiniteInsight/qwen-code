@@ -94,6 +94,29 @@ describe('extractUsage', () => {
     );
     expect(u).toMatchObject({ modelServiceId: 'openai', stage: 'stage1' });
   });
+
+  it('reads the cached count off the key the live daemon actually emits', () => {
+    // The shape createTranscriptUsageUpdate writes: cachedReadTokens, and NO
+    // modelId in _meta (its placement is Qwen-Code-Remote#181, asserted here so a
+    // change to either is visible). Every guard above uses the other spelling, so
+    // none of them could see this key regress to 0.
+    const u = extractUsage({
+      sessionId: 's',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { text: 'hi' },
+        _meta: {
+          usage: { inputTokens: 900, outputTokens: 10, cachedReadTokens: 700 },
+        },
+      },
+    });
+    expect(u).toMatchObject({
+      tokensIn: 900,
+      tokensOut: 10,
+      tokensCached: 700,
+      modelId: '',
+    });
+  });
 });
 
 describe('UsageTickCoalescer', () => {
@@ -243,6 +266,35 @@ describe('UsageIngester', () => {
     );
     expect(r).toBeUndefined();
     expect(ticks).toHaveLength(0);
+  });
+
+  it('does not charge the cached tokens twice', () => {
+    const { ingester } = makeIngester();
+    const MICRO = 1_000_000;
+    // 900 input of which 700 were cached reads: bill the 200 that were not at
+    // input(200), the 700 at cachedRead(20), and 10 out at 800.
+    // 200*200 + 700*20 + 10*800 = 40000 + 14000 + 8000 = 62000 microcents.
+    // Charging the full 900 at input would give 202000, so this fails loudly.
+    const cost = ingester.ingest(
+      'sess_1',
+      frame({ inputTokens: 900, outputTokens: 10, cachedReadTokens: 700 }),
+      { attributionTokenId: 't', subActor: null },
+    );
+    expect(cost).toBe(Math.round(0.062 * MICRO));
+    // The ROW still records what the model reported; only the price is net.
+    expect(store.sessionTotals('sess_1').tokensInTotal).toBe(900);
+  });
+
+  it('clamps a frame that reports more cached than input instead of billing negative', () => {
+    const { ingester } = makeIngester();
+    const cost = ingester.ingest(
+      'sess_1',
+      frame({ inputTokens: 5, outputTokens: 0, cachedReadTokens: 9 }),
+      { attributionTokenId: 't', subActor: null },
+    );
+    // pricedIn clamps to 0, leaving 9 * 20 = 180. Without the clamp the input
+    // term is -4 * 200 = -800 and the row bills -620.
+    expect(cost).toBe(180);
   });
 
   it('resets the prompt total on a prompt boundary but keeps the session total', () => {
