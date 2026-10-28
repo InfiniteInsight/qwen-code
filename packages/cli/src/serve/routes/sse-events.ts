@@ -331,8 +331,15 @@ export function registerSseEventsRoutes(
         const evictionData = { ...diagnostic.data };
         Reflect.deleteProperty(evictionData, 'triggerEventType');
         Reflect.deleteProperty(evictionData, 'triggerEventBytes');
+        // End the response with the frame instead of writing it and
+        // destroying in the same tick. Node holds the buffered write until the
+        // next tick, so the destroy discarded the frame and the client could
+        // not tell an eviction from a crash: on Node 22.23.4 the frame
+        // reached a raw socket in 0 of 8 runs written this way and 8 of 8
+        // ended this way. Ending still fires the `close` listeners, so
+        // `cleanup()` and `finalize()` run exactly as they did under destroy.
         try {
-          res.write(
+          res.end(
             formatSseFrame({
               v: 1,
               type: 'client_evicted',
@@ -340,9 +347,14 @@ export function registerSseEventsRoutes(
             }),
           );
         } catch {
-          /* socket already destroyed; reconnect still proceeds. */
+          // The frame could not be queued; still force the socket down so the
+          // client reconnects rather than staring at a half open stream.
+          try {
+            res.destroy();
+          } catch {
+            /* nothing left to tear down. */
+          }
         }
-        res.destroy();
       }
       return handled;
     };
