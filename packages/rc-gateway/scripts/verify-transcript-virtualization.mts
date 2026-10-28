@@ -6994,14 +6994,17 @@ PAGE_SCENARIOS.push({
 // pile the reader has to scroll past. The note is what makes this prove the
 // VOTE retired it: the pending poll retires the same shape with a different
 // word, so watching only for a removal would pass even if vote() never called
-// retireCard at all.
+// retireCard at all. #186: the card is the pinned one between the transcript
+// and the composer, Allow once is its own button, and the vote's word is the
+// one the card folds to ("Allowed once"). The option carries the kind the
+// daemon always sends (allow_once), which is what maps it to that button.
 PAGE_SCENARIOS.push({
   name: 'P47 an answered permission card leaves the strip',
   frames: () =>
     new Frames().ev('permission_request', {
       requestId: 'p47-req',
       toolCall: { kind: 'exec', title: 'run the tests' },
-      options: [{ optionId: 'allow_once', name: 'Allow once' }],
+      options: [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }],
     }).list,
   // The request stays listed as pending. The stub's default status reports
   // none, and the page's 5s sweep would otherwise retire the card before the
@@ -7017,7 +7020,7 @@ PAGE_SCENARIOS.push({
           requestId: 'p47-req',
           kind: 'permission',
           action: { type: 'exec', title: 'run the tests' },
-          options: [{ optionId: 'allow_once', label: 'Allow once' }],
+          options: [{ optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' }],
         },
       ],
     },
@@ -7025,50 +7028,49 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForFunction(
-      () => document.querySelectorAll('#cards .card').length === 1,
+      `document.querySelectorAll('#cards .pcard').length === 1`,
       null,
       { timeout: 15_000 },
     );
     // Tag the node rather than counting the strip. The poll still lists this
     // request, so a later poll could draw a fresh card, and "the strip is
     // empty" would race that redraw. "This card left" is the actual claim.
-    await page.evaluate(() => {
-      document.querySelector('#cards .card')?.setAttribute('data-probe', '1');
-    });
+    await page.evaluate(
+      `document.querySelector('#cards .pcard').setAttribute('data-probe', '1')`,
+    );
 
-    await page.click('#cards .card button');
+    await page.click('#cards .pcard .pc-allow');
     await page.waitForFunction(
-      () =>
-        document
-          .querySelector('#cards .card[data-probe]')
-          ?.textContent?.includes('voted: selected'),
+      `(document.querySelector('#cards .pcard[data-probe]')?.textContent || '').includes('Allowed once')`,
       null,
       { timeout: 10_000 },
     );
 
     const gone = await page
       .waitForFunction(
-        () => document.querySelector('#cards .card[data-probe]') === null,
+        `document.querySelector('#cards .pcard[data-probe]') === null`,
         null,
         { timeout: 15_000 },
       )
       .then(() => true)
       .catch(() => false);
     expect(gone, 'the answered card never left the strip');
-    return 'the card confirmed the vote, then left the strip on its own, so an answered prompt does not pile up';
+    return 'the pinned card confirmed the vote, then left on its own, so an answered prompt does not pile up';
   },
 });
 
 // The other half of #116. A vote the daemon refused leaves the request live on
 // the daemon, so a card greyed out over it is the worst case of the issue: a
-// dead card in the pile with the retry taken away as well.
+// dead card in the pile with the retry taken away as well. #186: the pinned
+// card holds its controls while the vote is in flight, so this is also the
+// proof that a failure hands them back.
 PAGE_SCENARIOS.push({
   name: 'P48 a refused vote leaves the card pressable so it can be retried',
   frames: () =>
     new Frames().ev('permission_request', {
       requestId: 'p48-req',
       toolCall: { kind: 'exec', title: 'run the tests' },
-      options: [{ optionId: 'allow_once', name: 'Allow once' }],
+      options: [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }],
     }).list,
   stub: {
     permissionStatus: 502,
@@ -7081,7 +7083,7 @@ PAGE_SCENARIOS.push({
           requestId: 'p48-req',
           kind: 'permission',
           action: { type: 'exec', title: 'run the tests' },
-          options: [{ optionId: 'allow_once', label: 'Allow once' }],
+          options: [{ optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' }],
         },
       ],
     },
@@ -7089,44 +7091,40 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForFunction(
-      () => document.querySelectorAll('#cards .card').length === 1,
+      `document.querySelectorAll('#cards .pcard').length === 1`,
       null,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      document.querySelector('#cards .card')?.setAttribute('data-probe', '1');
-    });
+    await page.evaluate(
+      `document.querySelector('#cards .pcard').setAttribute('data-probe', '1')`,
+    );
 
-    await page.click('#cards .card button');
+    await page.click('#cards .pcard .pc-allow');
     await page.waitForFunction(
-      () =>
-        document
-          .querySelector('#cards .card[data-probe]')
-          ?.textContent?.includes('vote failed'),
+      `(document.querySelector('#cards .pcard[data-probe]')?.textContent || '').includes('vote failed')`,
       null,
       { timeout: 10_000 },
     );
 
-    const state = await page.evaluate(() => {
-      const el = document.querySelector('#cards .card[data-probe]');
-      const btns = Array.from(
-        el?.querySelectorAll('button') ?? [],
-      ) as HTMLButtonElement[];
+    const state = (await page.evaluate(String.raw`(() => {
+      const el = document.querySelector('#cards .pcard[data-probe]');
+      const btns = Array.from(el ? el.querySelectorAll('button') : []);
       return {
         attached: el !== null,
         pressable: btns.some((b) => !b.disabled),
-        note: el?.textContent ?? '',
+        allowPressable: !!el && !el.querySelector('.pc-allow').disabled,
+        note: el ? el.textContent : '',
       };
-    });
+    })()`)) as { attached: boolean; pressable: boolean; allowPressable: boolean; note: string };
     expect(
       state.attached,
       'the refused card was dropped, so the reader cannot retry it',
     );
     expect(
-      state.pressable,
-      `every button on the refused card is disabled: ${state.note}`,
+      state.pressable && state.allowPressable,
+      `the refused card's Allow once is still disabled: ${state.note}`,
     );
-    return `the refused vote was reported (${JSON.stringify(state.note)}) and the card stayed pressable, so the retry is still there`;
+    return `the refused vote was reported (${JSON.stringify(state.note)}) and the card stayed pressable, Allow once included, so the retry is still there`;
   },
 });
 
@@ -15981,6 +15979,826 @@ PAGE_SCENARIOS.push({
       const after = (await page.evaluate(String.raw`({ list: !document.getElementById('list-screen').hidden, focus: document.activeElement === document.getElementById('h1-title') })`)) as { list: boolean; focus: boolean };
       expect(!after.list && after.focus, `Enter on a row did not return to the chat onto the title (${JSON.stringify(after)})`);
       return `Enter on the title opened the list onto back; Tab walked ${walk.join(' > ')}; the ⋯ opened by Enter, arrows wrapped, End and Home jumped, Escape came back; Enter on the row resumed it and returned onto the title`;
+    },
+  });
+}
+
+// #186 (h1). The permission and question cards, pinned between the transcript
+// and the composer: the full command in a box that scrolls, Allow and Deny in
+// the thumb zone, every option the daemon offers on a button, the vote bodies
+// the strip card sent, Always allow writing its overlay before it votes, the
+// question card paging, the status line's amber word and the field's
+// placeholder, a request raised in the background on screen as soon as the
+// return's first read lands, a push deep link landing on the card, and a
+// mangled link no longer showing the pairing gate. Read at 390x844 first, then
+// 360x780 and 1280x810. In-page code is a plain string throughout: the
+// transform rewrites a named arrow in a callback into a __name(...) call the
+// page does not define.
+{
+  // A 2 KB command whose last words are a marker, so a preview, an ellipsis
+  // or a dropped tail all show as the marker missing.
+  const BIG_CMD = (() => {
+    const unit =
+      'gh api repos/InfiniteInsight/qwen-code/actions/caches --paginate --jq ".actions_caches[] | select(.key | startswith(\\"node-alpine\\")) | .id" | xargs -n1 -I{} gh api -X DELETE repos/InfiniteInsight/qwen-code/actions/caches/{} && ';
+    let s = '';
+    while (s.length < 2048) s += unit;
+    return s + 'echo END-OF-COMMAND';
+  })();
+  const DESC = 'Deletes every alpine Actions cache in the repo.';
+  // The option list the qwen daemon sends for a shell call
+  // (acp-integration/session/permissionUtils.ts toPermissionOptions 'exec').
+  type Opt = { optionId: string; name: string; kind: string };
+  const EXEC_OPTIONS: Opt[] = [
+    { optionId: 'proceed_always_project', name: 'Always Allow in project: gh api', kind: 'allow_always' },
+    { optionId: 'proceed_always_user', name: 'Always Allow for user: gh api', kind: 'allow_always' },
+    { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+    { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+  ];
+  const QUESTION_OPTIONS: Opt[] = [
+    { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+    { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+  ];
+  const permFrame = (requestId: string, command: string, kind = 'execute', options = EXEC_OPTIONS) => ({
+    requestId,
+    toolCall: {
+      toolCallId: 'tc-' + requestId,
+      title: command.slice(0, 60),
+      kind,
+      rawInput: { command, description: DESC },
+    },
+    options,
+  });
+  const permPending = (requestId: string, command: string, kind = 'execute', options = EXEC_OPTIONS) => ({
+    requestId,
+    kind: 'permission',
+    createdAt: '2026-10-28T09:00:00.000Z',
+    action: { type: kind, title: command.slice(0, 60), input: { command, description: DESC } },
+    options: options.map((o) => ({ optionId: o.optionId, label: o.name, kind: o.kind })),
+  });
+  const QUESTIONS = [
+    {
+      header: 'Caches',
+      question: 'Which caches should go?',
+      multiSelect: false,
+      options: [
+        { label: 'Only the nine alpine layer caches', description: '1.2 GB' },
+        { label: 'Everything, the npm caches rebuild in a minute', description: '1.9 GB' },
+        { label: 'Nothing, leave them to expire', description: 'Keeps the stale layers until GitHub evicts them after a week' },
+      ],
+    },
+    {
+      header: 'Branch',
+      question: 'Which branch should the cleanup run on?',
+      multiSelect: false,
+      options: [
+        { label: 'main', description: 'default' },
+        { label: 'release/0.9', description: '' },
+      ],
+    },
+  ];
+  const questionFrame = (requestId: string) => ({
+    requestId,
+    toolCall: { toolCallId: 'tc-' + requestId, title: 'ask_user_question', kind: 'other', rawInput: { questions: QUESTIONS } },
+    options: QUESTION_OPTIONS,
+  });
+  const questionPending = (requestId: string) => ({
+    requestId,
+    kind: 'user_question',
+    createdAt: '2026-10-28T09:00:00.000Z',
+    questions: QUESTIONS,
+    options: QUESTION_OPTIONS.map((o) => ({ optionId: o.optionId, label: o.name, kind: o.kind })),
+  });
+  const statusBody = (pending: unknown[]) => ({
+    workspaceCwd: '/proj',
+    clientCount: 1,
+    hasActivePrompt: true,
+    pendingInteractions: pending,
+  });
+  // The daemon's own status read, answering what is still pending as the
+  // scenario votes: a request leaves the list once its vote lands, the way
+  // the daemon drops it, so the page's 5s poll neither retires a card early
+  // nor draws an answered one again.
+  const serveStatus = async (page: Page, pending: Map<string, unknown>): Promise<void> => {
+    await page.route(/\/session\/[^/]+\/status$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(statusBody([...pending.values()])),
+      }),
+    );
+  };
+  // Every vote the page sends, as the bytes it put on the wire.
+  const recordVotes = (page: Page): Array<{ requestId: string; body: string; at: number }> => {
+    const votes: Array<{ requestId: string; body: string; at: number }> = [];
+    page.on('request', (r) => {
+      const m = /\/permission\/([^/?]+)$/.exec(new URL(r.url()).pathname);
+      if (!m || r.method() !== 'POST') return;
+      votes.push({ requestId: decodeURIComponent(m[1]!), body: r.postData() ?? '', at: Date.now() });
+    });
+    return votes;
+  };
+  // The gateway's record of its policy decision for a request, which is
+  // where the card's why line reads it from (the frame carries none). The
+  // harness gateway evaluates nothing, so the route plays the record.
+  const serveDecision = async (page: Page, rows: Array<{ requestId: string; decisionSource: string; ruleId?: string }>): Promise<void> => {
+    await page.route(/\/rc\/audit\?/, (route) => {
+      if (new URL(route.request().url()).searchParams.get('action') !== 'policy_decision') return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(
+          rows.map((r, i) => ({
+            ts: 1_800_000_000_000 - i,
+            action: 'policy_decision',
+            detail: { requestId: r.requestId, action: 'prompt', tool: 'execute', voted: false, decisionSource: r.decisionSource, reason: r.decisionSource === 'default' ? 'default' : 'rule-prompt', ...(r.ruleId ? { ruleId: r.ruleId } : {}) },
+          })),
+        ),
+      });
+    });
+  };
+  const pinnedId = (page: Page) =>
+    page.evaluate(`(() => { const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)'); return c ? c.dataset.requestId : null; })()`) as Promise<string | null>;
+  const waitPinned = (page: Page, requestId: string, timeout = 15_000) =>
+    page.waitForFunction(
+      `(() => { const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)'); return !!c && c.dataset.requestId === ${JSON.stringify(requestId)}; })()`,
+      null,
+      { timeout },
+    );
+  // The card behind an answered one pins as soon as the answer lands, not
+  // when the answered card's 6s confirmation ends: under half of that.
+  const NEXT_PIN_MS = 2_500;
+  const waitVote = async (votes: Array<{ requestId: string }>, requestId: string, page: Page) => {
+    for (let i = 0; i < 100 && !votes.some((v) => v.requestId === requestId); i++) await page.waitForTimeout(50);
+    expect(votes.some((v) => v.requestId === requestId), `no vote went out for ${requestId}`);
+  };
+  // Where the pinned card and its controls are, in viewport pixels.
+  const READ_CARD = String.raw`(() => {
+    const r = (el) => {
+      if (!el || el.getClientRects().length === 0) return null;
+      const b = el.getBoundingClientRect();
+      return { top: b.top, bottom: b.bottom, left: b.left, right: b.right, h: b.height, w: b.width };
+    };
+    const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+    const q = (s) => (card ? card.querySelector(s) : null);
+    const vv = window.visualViewport;
+    return {
+      vw: innerWidth,
+      vh: innerHeight,
+      visible: vv ? vv.offsetTop + vv.height : innerHeight,
+      card: r(card),
+      allow: r(q('.pc-allow')),
+      deny: r(q('.pc-deny')),
+      answer: r(q('.pc-answer')),
+      cancel: r(q('.pc-cancel')),
+      composer: r(document.getElementById('composer')),
+      wrap: r(document.getElementById('transcript-wrap')),
+      plan: r(document.getElementById('plan')),
+      scrollY: window.scrollY,
+    };
+  })()`;
+  type Box = { top: number; bottom: number; left: number; right: number; h: number; w: number } | null;
+  type CardRead = {
+    vw: number; vh: number; visible: number; card: Box; allow: Box; deny: Box; answer: Box; cancel: Box;
+    composer: Box; wrap: Box; plan: Box; scrollY: number;
+  };
+  const readCard = (page: Page) => page.evaluate(READ_CARD) as Promise<CardRead>;
+  // The thumb zone at a size: the button's centre, where a thumb lands, inside
+  // the bottom 120px, its bottom edge in it too, and nothing but the card's
+  // own padding between the row and the composer under it.
+  const inThumbZone = (c: CardRead, a: Box, b: Box, label: string): string => {
+    expect(!!a && !!b && !!c.composer, `${label}: the card's buttons are not on screen (${JSON.stringify(c)})`);
+    for (const [name, x] of [['first', a!], ['second', b!]] as const) {
+      const mid = (x.top + x.bottom) / 2;
+      expect(x.h >= 48, `${label}: the ${name} button is ${x.h}px tall, under 48`);
+      expect(c.vh - mid <= 120 && c.vh - x.bottom <= 120, `${label}: the ${name} button's centre is ${Math.round(c.vh - mid)}px and its bottom ${Math.round(c.vh - x.bottom)}px from the bottom, outside the 120px thumb zone`);
+      expect(x.bottom <= c.composer!.top && c.composer!.top - x.bottom <= 16, `${label}: the ${name} button ends ${Math.round(c.composer!.top - x.bottom)}px above the composer, not resting on it`);
+    }
+    return `${label} ${Math.round(c.vh - a!.bottom)}-${Math.round(c.vh - a!.top)}px from the bottom (centre ${Math.round(c.vh - (a!.top + a!.bottom) / 2)})`;
+  };
+  // Every text-bearing element in the card, collected the way P126 collects
+  // them (pgShellCheck does the arithmetic).
+  const CARD_TEXT = String.raw`(() => {
+    const out = [];
+    const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+    if (!card) return out;
+    const skip = ['checkbox', 'radio', 'file', 'hidden', 'range', 'color'];
+    for (const e of [card, ...card.querySelectorAll('*')]) {
+      const tag = e.tagName.toLowerCase();
+      const ctl = tag === 'textarea' || (tag === 'input' && !skip.includes(e.type));
+      const own = Array.from(e.childNodes).some((x) => x.nodeType === 3 && (x.textContent || '').trim() !== '');
+      const val = ctl && ((e.value || '') !== '' || (e.placeholder || '') !== '');
+      if (!own && !val) continue;
+      if (e.getClientRects().length === 0) continue;
+      const cs = getComputedStyle(e);
+      const chain = [];
+      for (let up = e; up; up = up.parentElement) {
+        const s = getComputedStyle(up);
+        chain.push([s.backgroundColor, s.opacity]);
+      }
+      const cls = typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : '';
+      out.push({
+        kind: tag + cls,
+        color: ctl && !own && (e.value || '') === '' ? getComputedStyle(e, '::placeholder').color : cs.color,
+        size: parseFloat(cs.fontSize),
+        disabled: !!e.closest(':disabled'),
+        chain,
+      });
+    }
+    return out;
+  })()`;
+  const legible = async (page: Page, label: string): Promise<string> => {
+    const rows = (await page.evaluate(CARD_TEXT)) as Array<{ kind: string; color: string; size: number; disabled: boolean; chain: [string, string][] }>;
+    expect(rows.length > 0, `${label}: the card paints no text`);
+    let worst = Infinity;
+    for (const row of rows) worst = Math.min(worst, pgShellCheck(row, label));
+    return `${rows.length} text rows, worst ${worst.toFixed(2)}:1`;
+  };
+  // P137's stand-in for the visual viewport, so the keyboard can be raised.
+  const KB_JS = String.raw`
+(function () {
+  var fake = new EventTarget();
+  var covered = 0;
+  Object.defineProperties(fake, {
+    height: { get: function () { return window.innerHeight - covered; } },
+    width: { get: function () { return window.innerWidth; } },
+    offsetTop: { value: 0 },
+    offsetLeft: { value: 0 },
+    pageTop: { get: function () { return window.scrollY; } },
+    pageLeft: { value: 0 },
+    scale: { value: 1 },
+  });
+  window.__kb = function (px) {
+    covered = px;
+    fake.dispatchEvent(new Event('resize'));
+  };
+  try { window.visualViewport = fake; } catch (e) { /* defined below */ }
+  if (window.visualViewport !== fake) {
+    Object.defineProperty(window, 'visualViewport', { value: fake, configurable: true });
+  }
+})();
+`;
+  const frames3 = (page: Page) =>
+    page.evaluate('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))))');
+  const PLAN = (f: Frames): Frames =>
+    f.upd({
+      sessionUpdate: 'plan',
+      entries: [
+        { content: 'read the workflow', priority: 'medium', status: 'completed' },
+        { content: 'clear the old caches', priority: 'medium', status: 'in_progress' },
+        { content: 're-run the nightly', priority: 'medium', status: 'pending' },
+      ],
+    });
+
+  PAGE_SCENARIOS.push({
+    name: 'P156 a permission card pins between the transcript and the composer with its whole 2 KB command in a box that scrolls, Allow and Deny 48px in the thumb zone at 390x844, 360x780 and 1280x810, and above the keyboard when it is up',
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('clear the stale alpine caches');
+      PLAN(f);
+      f.asst('The old alpine entries are dead weight; I can clear them.');
+      return f.ev('permission_request', permFrame('p156', BIG_CMD)).list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p156', BIG_CMD)]) },
+    before: async (page) => {
+      await page.addInitScript({ content: KB_JS });
+    },
+    run: async ({ page, viewer }) => {
+      await serveDecision(page, [{ requestId: 'other-request', decisionSource: 'policy', ruleId: 'not-this-one' }, { requestId: 'p156', decisionSource: 'default' }]);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p156');
+      await page.waitForFunction(`/Policy:/.test(document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-why').textContent)`, null, { timeout: 10_000 });
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await frames3(page);
+
+      // The strip card is retired: no .card and no "Approve: <option>".
+      const retired = (await page.evaluate(String.raw`({
+        card: document.querySelectorAll('.card').length,
+        approve: Array.from(document.querySelectorAll('button')).filter((b) => /^Approve: /.test(b.textContent || '')).length,
+        inTranscript: !!document.querySelector('#transcript .pcard, #transcript-wrap .pcard'),
+      })`)) as { card: number; approve: number; inTranscript: boolean };
+      expect(retired.card === 0 && retired.approve === 0 && !retired.inTranscript, `the strip card is back (${JSON.stringify(retired)})`);
+
+      // What the card says: the kind in words, the host, the description.
+      const text = (await page.evaluate(String.raw`(() => {
+        const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+        const cmd = c.querySelector('.pc-cmd');
+        const cs = getComputedStyle(cmd);
+        const before = { top: cmd.scrollTop, h: cmd.scrollHeight, client: cmd.clientHeight, sw: cmd.scrollWidth, cw: cmd.clientWidth };
+        cmd.scrollTop = cmd.scrollHeight;
+        const reached = Math.abs(cmd.scrollTop + cmd.clientHeight - cmd.scrollHeight) <= 1;
+        cmd.scrollTop = 0;
+        return {
+          title: c.querySelector('.pc-title').textContent,
+          side: c.querySelector('.pc-side').textContent,
+          why: c.querySelector('.pc-why').textContent,
+          cmd: cmd.textContent,
+          ws: cs.whiteSpace, wb: cs.wordBreak, oy: cs.overflowY, maxH: cs.maxHeight, to: cs.textOverflow,
+          before, reached,
+          buttons: Array.from(c.querySelectorAll('button')).map((b) => (b.className || '') + ':' + b.textContent.trim()),
+        };
+      })()`)) as {
+        title: string; side: string; why: string; cmd: string; ws: string; wb: string; oy: string; maxH: string; to: string;
+        before: { top: number; h: number; client: number; sw: number; cw: number }; reached: boolean; buttons: string[];
+      };
+      expect(text.title === 'Wants to run a command', `the header reads ${JSON.stringify(text.title)}`);
+      expect(/on \S+/.test(text.side), `the header names no host (${JSON.stringify(text.side)})`);
+      expect(text.why === DESC + ' Policy: no rule matched, so it asks.', `the why line reads ${JSON.stringify(text.why)}`);
+      expect(text.cmd === BIG_CMD, `the command box holds ${text.cmd.length} of the ${BIG_CMD.length} characters (ends ${JSON.stringify(text.cmd.slice(-30))})`);
+      expect(text.ws === 'pre-wrap' && text.wb === 'break-all' && text.to !== 'ellipsis', `the box is not wrapping it whole (${text.ws}, ${text.wb}, ${text.to})`);
+      expect(text.maxH === '120px' && (text.oy === 'auto' || text.oy === 'scroll'), `the box is not a bounded scroller (max-height ${text.maxH}, overflow-y ${text.oy})`);
+      expect(text.before.h > text.before.client && text.reached, `the 2 KB command does not scroll inside its box (${JSON.stringify(text.before)}, reached the end: ${text.reached})`);
+      expect(text.before.sw <= text.before.cw + 1, `the command runs ${text.before.sw - text.before.cw}px past the box sideways`);
+      // Every option the daemon sent has a button: the two allow_always under
+      // their own names, allow_once as Allow once, reject_once as Deny.
+      const want = ['pc-opt:Always Allow in project: gh api', 'pc-opt:Always Allow for user: gh api', 'pc-deny:Deny', 'pc-allow:Allow once'];
+      for (const w of want) expect(text.buttons.includes(w), `no button ${JSON.stringify(w)} among ${JSON.stringify(text.buttons)}`);
+
+      const lines: string[] = [];
+      for (const [w, h] of [[390, 844], [360, 780], [1280, 810]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await frames3(page);
+        const c = await readCard(page);
+        expect(!!c.card && !!c.wrap, `${w}x${h}: no pinned card (${JSON.stringify(c)})`);
+        expect(c.card!.top >= c.wrap!.bottom - 1 && c.card!.bottom <= c.composer!.top, `${w}x${h}: the card is not between the transcript (ends ${c.wrap!.bottom}) and the composer (starts ${c.composer!.top}): ${c.card!.top}-${c.card!.bottom}`);
+        expect(c.plan === null, `${w}x${h}: the to-do strip is on screen between the card and the composer`);
+        expect(c.composer!.bottom <= c.vh + 1 && c.scrollY === 0, `${w}x${h}: the composer is under the fold (${c.composer!.bottom} of ${c.vh}, scrolled ${c.scrollY})`);
+        lines.push(`${w}x${h} card ${Math.round(c.card!.h)}px, ${inThumbZone(c, c.deny, c.allow, `${w}x${h}`)}`);
+      }
+      lines.push(await legible(page, '1280x810'));
+      await page.setViewportSize({ width: 390, height: 844 });
+      await frames3(page);
+      lines.push(await legible(page, '390x844'));
+
+      // The keyboard up: the card rides above the composer, the composer above
+      // the keys, and the transcript's floating pills stay off the card.
+      await page.focus('#prompt');
+      await page.evaluate(`window.__kb(336)`);
+      await page.waitForTimeout(150);
+      await frames3(page);
+      const up = await readCard(page);
+      const over = (await page.evaluate(String.raw`(() => {
+        const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+        const head = c.querySelector('.pc-head').getBoundingClientRect();
+        const pts = [[head.left + 20, head.top + head.height / 2], [(head.left + head.right) / 2, head.top + head.height / 2], [head.right - 20, head.top + head.height / 2]];
+        return pts.map(([x, y]) => { const e = document.elementFromPoint(x, y); return e && e.closest('.pcard') === c ? '' : (e ? e.tagName + '#' + e.id + '.' + e.className : 'none'); }).filter(Boolean);
+      })()`)) as string[];
+      expect(
+        !!up.allow && !!up.composer && up.allow.bottom <= up.composer.top && up.composer.bottom <= up.visible + 1,
+        `with the keyboard up Allow ends at ${up.allow?.bottom}, the composer at ${up.composer?.bottom}, the keys start at ${up.visible}`,
+      );
+      expect(over.length === 0, `something floats over the card's header with the keyboard up: ${over.join(', ')}`);
+      lines.push(`keyboard 336px: Allow ends ${Math.round(up.allow!.bottom)}, composer ${Math.round(up.composer!.bottom)} of ${up.visible} visible, nothing over the card`);
+      await page.evaluate(`window.__kb(0)`);
+      await page.evaluate(`document.activeElement && document.activeElement.blur()`);
+      await frames3(page);
+
+      // Answered, the strip comes back.
+      await page.click('#cards .pcard .pc-allow');
+      await page.waitForFunction(`!document.getElementById('pane-chat').dataset.card`, null, { timeout: 10_000 });
+      await frames3(page);
+      const after = await readCard(page);
+      expect(after.plan !== null, 'the to-do strip did not come back once the card was answered');
+      return `${BIG_CMD.length}-char command whole and scrolling in a 120px box; why ${JSON.stringify(text.why)}; ${lines.join('; ')}; the strip folds while pinned and returns after`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P157 Allow once, Deny, a daemon option of its own and a question answer send the same bytes the strip card sent, and each answer pins the next card at once',
+    frames: () =>
+      new Frames()
+        .ev('client_joined')
+        .ev('permission_request', permFrame('p157-a', 'npm test'))
+        .ev('permission_request', permFrame('p157-b', 'rm -rf node_modules'))
+        .ev('permission_request', permFrame('p157-c', 'gh api user'))
+        .ev('permission_request', questionFrame('p157-q')).list,
+    run: async ({ page, viewer }) => {
+      const pending = new Map<string, unknown>([
+        ['p157-a', permPending('p157-a', 'npm test')],
+        ['p157-b', permPending('p157-b', 'rm -rf node_modules')],
+        ['p157-c', permPending('p157-c', 'gh api user')],
+        ['p157-q', questionPending('p157-q')],
+      ]);
+      await serveStatus(page, pending);
+      const votes = recordVotes(page);
+      page.on('requestfinished', (r) => {
+        const m = /\/permission\/([^/?]+)$/.exec(new URL(r.url()).pathname);
+        if (m) pending.delete(decodeURIComponent(m[1]!));
+      });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+
+      await waitPinned(page, 'p157-a');
+      const waiting = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-more').textContent`)) as string;
+      expect(waiting === '+3 waiting', `the pinned card counts ${JSON.stringify(waiting)} behind it, not +3 waiting`);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-allow');
+      await waitVote(votes, 'p157-a', page);
+      await waitPinned(page, 'p157-b', NEXT_PIN_MS);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-deny');
+      await waitVote(votes, 'p157-b', page);
+      await waitPinned(page, 'p157-c', NEXT_PIN_MS);
+      // The second of the daemon's own choices, which starts past the edge of
+      // its sideways row: reachable means a press scrolls it in and lands.
+      const edge = (await page.evaluate(String.raw`(() => {
+        const row = document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-extra');
+        const b = row.querySelector('button[data-option-id="proceed_always_user"]');
+        return { rowRight: row.getBoundingClientRect().right, right: b.getBoundingClientRect().right, rowH: row.getBoundingClientRect().height };
+      })()`)) as { rowRight: number; right: number; rowH: number };
+      expect(edge.rowH <= 45, `the daemon's choices take ${edge.rowH}px, more than one 44px row`);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) button[data-option-id="proceed_always_user"]');
+      await waitVote(votes, 'p157-c', page);
+      await waitPinned(page, 'p157-q', NEXT_PIN_MS);
+      await page.check('#cards .pcard:not([hidden]):not(.retiring) .pq-page:not([hidden]) .pq-opt:nth-child(2) input');
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-answer');
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pq-page:not([hidden]) .pq-opt:nth-child(2) input');
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-answer');
+      await waitVote(votes, 'p157-q', page);
+
+      // The bodies the strip card's vote() built for the same presses:
+      // JSON.stringify of { outcome, optionId, answers? } or { outcome }.
+      const want: Record<string, string> = {
+        'p157-a': '{"outcome":"selected","optionId":"proceed_once"}',
+        'p157-b': '{"outcome":"cancelled"}',
+        'p157-c': '{"outcome":"selected","optionId":"proceed_always_user"}',
+        'p157-q': '{"outcome":"selected","optionId":"proceed_once","answers":{"0":"Everything, the npm caches rebuild in a minute","1":"release/0.9"}}',
+      };
+      for (const [id, body] of Object.entries(want)) {
+        const got = votes.filter((v) => v.requestId === id);
+        expect(got.length === 1, `${id} was voted ${got.length} times`);
+        expect(got[0]!.body === body, `${id} sent ${got[0]!.body}, not ${body}`);
+      }
+      return `Allow once ${want['p157-a']}, Deny ${want['p157-b']}, the daemon's second allow_always (its right edge at ${Math.round(edge.right)}px against the row's ${Math.round(edge.rowRight)}px, one ${Math.round(edge.rowH)}px row) ${want['p157-c']}, the question ${want['p157-q']}; one vote each, and the pinned card counted +3 waiting`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P158 Always allow writes a 24h overlay for this conversation and the tool’s kind before it votes Allow once, a refused overlay votes nothing, and a kind no overlay can name offers none',
+    frames: () =>
+      new Frames()
+        .ev('client_joined')
+        .ev('permission_request', permFrame('p158-a', 'gh cache delete --all'))
+        .ev('permission_request', permFrame('p158-b', 'gh cache list'))
+        .ev('permission_request', permFrame('p158-c', 'spawn a helper', 'other', [
+          { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+        ])).list,
+    run: async ({ page, viewer }) => {
+      const pending = new Map<string, unknown>([
+        ['p158-a', permPending('p158-a', 'gh cache delete --all')],
+        ['p158-b', permPending('p158-b', 'gh cache list')],
+        ['p158-c', permPending('p158-c', 'spawn a helper', 'other')],
+      ]);
+      await serveStatus(page, pending);
+      const votes = recordVotes(page);
+      page.on('requestfinished', (r) => {
+        const m = /\/permission\/([^/?]+)$/.exec(new URL(r.url()).pathname);
+        if (m) pending.delete(decodeURIComponent(m[1]!));
+      });
+      // The harness gateway mounts no overlay store, so the route plays it:
+      // the first write lands (after a pause, so a vote sent without waiting
+      // for it would show), the second is refused as a guest token would be.
+      const overlays: Array<{ body: string; answeredAt: number }> = [];
+      await page.route(/\/rc\/permission-overlays$/, async (route) => {
+        if (route.request().method() !== 'POST') return route.continue();
+        const n = overlays.length;
+        overlays.push({ body: route.request().postData() ?? '', answeredAt: 0 });
+        if (n === 0) {
+          await new Promise((r) => setTimeout(r, 400));
+          overlays[n]!.answeredAt = Date.now();
+          await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ overlay: { id: 'ov-1', action: 'allow' } }) });
+        } else {
+          overlays[n]!.answeredAt = Date.now();
+          await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'forbidden' }) });
+        }
+      });
+      await serveDecision(page, [{ requestId: 'p158-a', decisionSource: 'policy', ruleId: 'ask-gh-cache' }]);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p158-a');
+      await page.waitForFunction(`/Policy:/.test(document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-why').textContent)`, null, { timeout: 10_000 });
+      const why = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-why').textContent`)) as string;
+      expect(why === DESC + ' Policy: rule ask-gh-cache asks.', `the why line reads ${JSON.stringify(why)}`);
+      const label = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-always').textContent`)) as string;
+      expect(
+        label === 'Always allow commands in this conversation for 24 hours, on this gateway',
+        `the button reads ${JSON.stringify(label)}`,
+      );
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-always');
+      await waitVote(votes, 'p158-a', page);
+      expect(overlays.length === 1, `${overlays.length} overlay writes for one press`);
+      const sent = JSON.parse(overlays[0]!.body) as Record<string, unknown>;
+      const wantOverlay = { action: 'allow', ttlSeconds: 86400, sessionId: viewer.sessionId, tool: 'execute', reason: 'Always allow, from the permission card' };
+      expect(JSON.stringify(sent) === JSON.stringify(wantOverlay), `the overlay sent ${overlays[0]!.body}, not ${JSON.stringify(wantOverlay)}`);
+      const vote = votes.find((v) => v.requestId === 'p158-a')!;
+      expect(vote.at >= overlays[0]!.answeredAt, `the vote went out ${overlays[0]!.answeredAt - vote.at}ms before the overlay was answered`);
+      expect(vote.body === '{"outcome":"selected","optionId":"proceed_once"}', `Always allow voted ${vote.body}, not Allow once's body`);
+      // The vote has left; the card folds once its answer is back.
+      await page
+        .waitForFunction(`document.querySelector('#cards .pcard.retiring[data-request-id="p158-a"]') !== null`, null, { timeout: 10_000 })
+        .catch(() => {});
+      const done = (await page.evaluate(`(document.querySelector('#cards .pcard[data-request-id="p158-a"] .pc-note') || {}).textContent || ''`)) as string;
+      expect(/24h/.test(done), `the card folded to ${JSON.stringify(done)}, which does not say how long`);
+
+      // Refused: nothing is voted, the card says so and stays answerable.
+      await waitPinned(page, 'p158-b', NEXT_PIN_MS);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-always');
+      await page.waitForFunction(`/Always allow was not set/.test(document.querySelector('#cards .pcard[data-request-id="p158-b"] .pc-note').textContent)`, null, { timeout: 10_000 });
+      await page.waitForTimeout(300);
+      expect(!votes.some((v) => v.requestId === 'p158-b'), 'a refused overlay still voted');
+      const live = (await page.evaluate(`!document.querySelector('#cards .pcard[data-request-id="p158-b"] .pc-allow').disabled`)) as boolean;
+      expect(live, 'after a refused overlay Allow once is disabled');
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-deny');
+      await waitVote(votes, 'p158-b', page);
+
+      // A kind an overlay cannot name exactly ('other') gets no Always allow.
+      await waitPinned(page, 'p158-c', NEXT_PIN_MS);
+      const none = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-always') === null`)) as boolean;
+      expect(none, 'a card of kind other offers Always allow');
+      return `why ${JSON.stringify(why)}; the overlay ${overlays[0]!.body} was answered ${vote.at - overlays[0]!.answeredAt}ms before the vote ${vote.body}; the card folded to ${JSON.stringify(done)}; a 403 voted nothing and left Allow once pressable; kind other offers no Always allow`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P159 a question card pages two questions as 1 of 2 and 2 of 2, three 48px option rows with the detail column, a free answer, Cancel and Answer in the thumb zone',
+    frames: () =>
+      new Frames().ev('client_joined').ev('permission_request', questionFrame('p159')).list,
+    stub: { sessionStatus: statusBody([questionPending('p159')]) },
+    run: async ({ page, viewer }) => {
+      const votes = recordVotes(page);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p159');
+      await frames3(page);
+      const READ_Q = String.raw`(() => {
+        const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+        const page = c.querySelector('.pq-page:not([hidden])');
+        const rows = Array.from(page.querySelectorAll('.pq-opt'));
+        const box = (e) => { const b = e.getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, h: b.height }; };
+        const free = page.querySelector('.pq-free input');
+        return {
+          title: c.querySelector('.pc-title').textContent,
+          count: c.querySelector('.pq-count').textContent,
+          back: c.querySelector('.pq-back').getClientRects().length > 0,
+          primary: c.querySelector('.pc-answer').textContent,
+          cancel: c.querySelector('.pc-cancel').textContent,
+          rows: rows.map((r) => ({
+            h: box(r).h,
+            type: r.querySelector('input').type,
+            checked: r.querySelector('input').checked,
+            label: box(r.querySelector('.pq-lbl')),
+            detail: r.querySelector('.pq-detail') ? { text: r.querySelector('.pq-detail').textContent, box: box(r.querySelector('.pq-detail')) } : null,
+            sub: r.querySelector('.pq-sub') ? r.querySelector('.pq-sub').textContent : null,
+          })),
+          free: free ? { type: free.type, h: box(free).h, size: getComputedStyle(free).fontSize, value: free.value } : null,
+          state: document.getElementById('h1-state').textContent,
+        };
+      })()`;
+      type Q = {
+        title: string; count: string; back: boolean; primary: string; cancel: string;
+        rows: Array<{ h: number; type: string; checked: boolean; label: Box; detail: { text: string; box: Box } | null; sub: string | null }>;
+        free: { type: string; h: number; size: string; value: string } | null; state: string;
+      };
+      const one = (await page.evaluate(READ_Q)) as Q;
+      expect(one.title === 'Which caches should go?' && one.count === 'Caches · 1 of 2', `page one reads ${JSON.stringify([one.title, one.count])}`);
+      expect(one.state === 'asking you', `the status line reads ${JSON.stringify(one.state)} under a question`);
+      expect(one.rows.length === 3 && one.rows.every((r) => r.h >= 48 && r.type === 'radio'), `the options are not three 48px radio rows (${JSON.stringify(one.rows.map((r) => [r.type, r.h]))})`);
+      expect(one.rows[0]!.checked && !one.rows[1]!.checked, 'the first option (the recommendation) is not chosen by default');
+      expect(one.rows[0]!.detail?.text === '1.2 GB' && one.rows[0]!.detail.box!.left >= one.rows[0]!.label!.right, `the short detail is not a column right of the label (${JSON.stringify(one.rows[0])})`);
+      expect(one.rows[2]!.detail === null && one.rows[2]!.sub === QUESTIONS[0]!.options[2]!.description, `the sentence-long detail is not under its label (${JSON.stringify(one.rows[2])})`);
+      expect(!!one.free && one.free.type === 'text' && one.free.h >= 44 && one.free.size === '16px', `the free answer is ${JSON.stringify(one.free)}`);
+      expect(!one.back && one.primary === 'Next' && one.cancel === 'Cancel', `page one offers back ${one.back}, ${JSON.stringify(one.primary)}, ${JSON.stringify(one.cancel)}`);
+      const qc = await readCard(page);
+      const zone = inThumbZone(qc, qc.cancel, qc.answer, '390x844');
+
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pq-page:not([hidden]) .pq-opt:nth-child(3) input');
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-answer');
+      const two = (await page.evaluate(READ_Q)) as Q;
+      expect(two.title === 'Which branch should the cleanup run on?' && two.count === 'Branch · 2 of 2', `page two reads ${JSON.stringify([two.title, two.count])}`);
+      expect(two.back && two.primary === 'Answer', `page two offers back ${two.back} and ${JSON.stringify(two.primary)}`);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pq-back');
+      const again = (await page.evaluate(READ_Q)) as Q;
+      expect(again.count === 'Caches · 1 of 2' && again.rows[2]!.checked && !again.rows[0]!.checked, `back did not return to page one as it was left (${JSON.stringify(again.rows.map((r) => r.checked))})`);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-answer');
+      await page.fill('#cards .pcard:not([hidden]):not(.retiring) .pq-page:not([hidden]) .pq-free input', 'release/1.0, after the tag');
+      const typed = (await page.evaluate(READ_Q)) as Q;
+      expect(typed.rows.every((r) => !r.checked), 'typing an answer left an option chosen as well');
+      await page.press('#cards .pcard:not([hidden]):not(.retiring) .pq-page:not([hidden]) .pq-free input', 'Enter');
+      await waitVote(votes, 'p159', page);
+      const body = votes.find((v) => v.requestId === 'p159')!.body;
+      const want = '{"outcome":"selected","optionId":"proceed_once","answers":{"0":"Nothing, leave them to expire","1":"release/1.0, after the tag"}}';
+      expect(body === want, `the answer sent ${body}, not ${want}`);
+      return `1 of 2 and 2 of 2 with back, three radio rows of ${one.rows.map((r) => Math.round(r.h)).join('/')}px, 1.2 GB in the column and the sentence under its label, a 16px free answer; Cancel/Answer ${zone}; Enter answered ${body}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P160 the status line reads waiting for you or asking you on the amber dot while a card is pinned, the field reads Or tell it what to do instead under a permission, and both go when it is answered',
+    frames: () =>
+      new Frames()
+        .ev('client_joined')
+        .user('clear the caches')
+        .ev('permission_request', permFrame('p160-p', 'gh cache delete --all'))
+        .ev('permission_request', questionFrame('p160-q')).list,
+    run: async ({ page, viewer }) => {
+      const pending = new Map<string, unknown>([
+        ['p160-p', permPending('p160-p', 'gh cache delete --all')],
+        ['p160-q', questionPending('p160-q')],
+      ]);
+      await serveStatus(page, pending);
+      page.on('requestfinished', (r) => {
+        const m = /\/permission\/([^/?]+)$/.exec(new URL(r.url()).pathname);
+        if (m) pending.delete(decodeURIComponent(m[1]!));
+      });
+      const READ = String.raw`(() => {
+        const b = document.getElementById('h1-status');
+        const p = document.getElementById('prompt');
+        const cs = getComputedStyle(p);
+        const ctx = document.createElement('canvas').getContext('2d');
+        ctx.font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+        return {
+          state: b.dataset.state,
+          word: document.getElementById('h1-state').textContent,
+          dot: getComputedStyle(document.getElementById('h1-dot')).backgroundColor,
+          ph: p.placeholder,
+          fits: ctx.measureText(p.placeholder).width <= p.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+          full: ctx.measureText('Or tell it what to do instead').width <= p.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+        };
+      })()`;
+      type S = { state: string; word: string; dot: string; ph: string; fits: boolean; full: boolean };
+      await page.setViewportSize({ width: 1280, height: 810 });
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p160-p');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await frames3(page);
+      const wide = (await page.evaluate(READ)) as S;
+      expect(wide.state === 'wait' && wide.word === 'waiting for you' && wide.dot === 'rgb(210, 153, 34)', `under a permission the status line reads ${JSON.stringify(wide)}`);
+      expect(wide.full && wide.ph === 'Or tell it what to do instead', `at 1280 the field reads ${JSON.stringify(wide.ph)}`);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await frames3(page);
+      const narrow = (await page.evaluate(READ)) as S;
+      expect(
+        narrow.fits && (narrow.full ? narrow.ph === 'Or tell it what to do instead' : narrow.ph === 'Or tell it what to do'),
+        `at 390 the field reads ${JSON.stringify(narrow.ph)} (the whole sentence fits: ${narrow.full}; this one fits: ${narrow.fits})`,
+      );
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-deny');
+      await waitPinned(page, 'p160-q', NEXT_PIN_MS);
+      const q = (await page.evaluate(READ)) as S;
+      expect(q.state === 'wait' && q.word === 'asking you' && q.dot === 'rgb(210, 153, 34)' && q.ph === 'Message', `under a question the status line and field read ${JSON.stringify(q)}`);
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-cancel');
+      await page.waitForFunction(`!document.getElementById('pane-chat').dataset.card`, null, { timeout: 10_000 });
+      const gone = (await page.evaluate(READ)) as S;
+      expect(gone.state !== 'wait' && gone.word !== 'waiting for you' && gone.word !== 'asking you' && gone.ph === 'Message', `answered, the status line and field still read ${JSON.stringify(gone)}`);
+      return `permission: ${wide.word} on ${wide.dot}, field ${JSON.stringify(wide.ph)} at 1280 and ${JSON.stringify(narrow.ph)} at 390 (Queue and Stop share the row); question: ${q.word}, field ${JSON.stringify(q.ph)}; answered: ${gone.state} ${JSON.stringify(gone.word)}, field ${JSON.stringify(gone.ph)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P161 a request raised while the page was in the background is asked for first on return and on screen in the frame its answer lands',
+    run: async ({ page, viewer }) => {
+      const pending = new Map<string, unknown>();
+      await serveStatus(page, pending);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await page.waitForFunction('watchStreamAlive === true', null, { timeout: 10_000 });
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // Away: the page goes hidden, and the phone kills its stream, as a
+      // screen-off does. The request is raised on the daemon while it is gone.
+      await page.evaluate(String.raw`(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        document.dispatchEvent(new Event('visibilitychange'));
+        controller.abort();
+      })()`);
+      await page.waitForFunction('watchStreamAlive === false');
+      pending.set('p161', permPending('p161', 'gh cache delete --all'));
+      await page.waitForTimeout(5_500); // a full poll tick: nothing is asked while hidden
+      const early = (await page.evaluate(`document.querySelectorAll('#cards .pcard').length`)) as number;
+      expect(early === 0, 'the page polled while hidden');
+      // Back: count frames from the return, note when the card is inserted and
+      // when its read answered, and the order the return's reads went out in.
+      const got = (await page.evaluate(String.raw`new Promise((resolve) => {
+        // A long-lived page can fill the resource timing buffer, and a full
+        // buffer drops new entries, which would hide the very reads read here.
+        performance.clearResourceTimings();
+        const t0 = performance.now();
+        let frame = 0;
+        let insertedAt = null;
+        let insertedFrame = null;
+        const mo = new MutationObserver(() => {
+          if (insertedAt === null && document.querySelector('#cards .pcard')) {
+            insertedAt = performance.now();
+            insertedFrame = frame;
+          }
+        });
+        mo.observe(document.getElementById('cards'), { childList: true });
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+        document.dispatchEvent(new Event('visibilitychange'));
+        const tick = (now) => {
+          frame += 1;
+          const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+          const r = c ? c.getBoundingClientRect() : null;
+          const shown = !!r && r.height > 0 && r.top >= 0 && r.bottom <= innerHeight;
+          if (shown || frame > 240) {
+            mo.disconnect();
+            const reads = performance.getEntriesByType('resource')
+              .filter((e) => e.startTime >= t0 - 1)
+              .sort((a, b) => a.startTime - b.startTime)
+              .map((e) => ({ path: new URL(e.name).pathname, start: e.startTime - t0, end: e.responseEnd - t0 }));
+            resolve({ shown, frame, ms: now - t0, insertedAt: insertedAt === null ? null : insertedAt - t0, insertedFrame, reads });
+            return;
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      })`)) as {
+        shown: boolean; frame: number; ms: number; insertedAt: number | null; insertedFrame: number | null;
+        reads: Array<{ path: string; start: number; end: number }>;
+      };
+      expect(got.shown, `the card never came on screen after the return (${JSON.stringify(got)})`);
+      const first = got.reads[0];
+      expect(!!first && /\/session\/[^/]+\/status$/.test(first.path), `the return's first read was ${JSON.stringify(first)}, not the pending status (${JSON.stringify(got.reads.map((r) => r.path))})`);
+      const status = got.reads.find((r) => /\/status$/.test(r.path));
+      expect(!!status, `the return made no status read (${JSON.stringify(got.reads.map((r) => r.path))})`);
+      expect(got.insertedAt !== null && got.insertedAt - status!.end < 16.7, `the card was inserted ${got.insertedAt === null ? 'never' : (got.insertedAt - status!.end).toFixed(1) + 'ms'} after its read answered`);
+      expect(got.insertedFrame !== null && got.frame - got.insertedFrame <= 1, `the card was inserted in frame ${got.insertedFrame} and first on screen in frame ${got.frame}`);
+      return `the status read went out first (${first!.start.toFixed(1)}ms after the return) and answered at ${status!.end.toFixed(1)}ms; the card was inserted ${(got.insertedAt! - status!.end).toFixed(1)}ms later and on screen in frame ${got.frame} after the return (${got.ms.toFixed(1)}ms), ${got.frame - got.insertedFrame!} frame after it was inserted`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P162 a push deep link lands on the card: pinned before the transcript paints, in the thumb zone, and nothing scrolls it away while the replay lands',
+    frames: () => {
+      const f = new Frames().ev('client_joined');
+      for (let k = 0; k < 8; k++) {
+        f.user(`question ${k}: why does the nightly fail on arm64?`);
+        f.asst(`answer ${k}: the arm64 job pins an image without the native toolchain.`);
+        f.done();
+      }
+      return f.list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p162', 'gh cache delete --all --repo InfiniteInsight/qwen-code')]) },
+    before: async (page) => {
+      await page.addInitScript({
+        content: String.raw`(() => {
+          window.__h1c = { card: null, row: null };
+          const mo = new MutationObserver(() => {
+            if (window.__h1c.card === null && document.querySelector('#cards .pcard')) window.__h1c.card = performance.now();
+            if (window.__h1c.row === null && document.querySelector('#transcript [data-index]')) window.__h1c.row = performance.now();
+          });
+          mo.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-index'] });
+        })()`,
+      });
+    },
+    run: async ({ page, viewer }) => {
+      // The status read answers 400ms late, as a phone's can, so the card is
+      // first only because the page waits for it rather than because the
+      // read happened to win a race with the transcript's stream.
+      await page.route(/\/session\/[^/]+\/status$/, async (route) => {
+        await new Promise((r) => setTimeout(r, 400));
+        await route.continue();
+      });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto(`${viewer.url}/ui/?session=${viewer.sessionId}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring)') !== null`, null, { timeout: 15_000 });
+      await waitForFrame(page, 25, 30_000);
+      // The frames are in; the view mounts their rows on its next pass.
+      await page.waitForFunction(`window.__h1c.row !== null`, null, { timeout: 10_000 });
+      const order = (await page.evaluate(`({ ...window.__h1c, search: location.search, watched: watchedSessionId })`)) as { card: number | null; row: number | null; search: string; watched: string };
+      expect(order.watched === viewer.sessionId, `the link opened ${order.watched}`);
+      expect(order.search === '', `the link was not scrubbed (${order.search})`);
+      expect(order.card !== null && order.row !== null && order.card < order.row, `the card (${order.card}) was not pinned before the transcript's first row (${order.row})`);
+      const a = await readCard(page);
+      const zone = inThumbZone(a, a.deny, a.allow, '390x844');
+      // The replay keeps landing and the poll keeps asking; the card stays put.
+      await page.waitForTimeout(1_500);
+      await settlePage(page);
+      const b = await readCard(page);
+      expect(
+        !!b.card && Math.abs(b.card.top - a.card!.top) < 1 && Math.abs(b.allow!.top - a.allow!.top) < 1 && b.scrollY === 0,
+        `the card moved from ${a.card!.top} to ${b.card?.top} (page scrolled ${b.scrollY}) while the transcript settled`,
+      );
+      return `pinned ${(order.row! - order.card!).toFixed(0)}ms before the transcript's first row; ${zone}; still at ${Math.round(b.card!.top)}px after the replay settled, page unscrolled, link scrubbed`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P163 a mangled ?session= link is scrubbed and the page opens on a valid token instead of showing the pairing gate',
+    run: async ({ page, viewer }) => {
+      for (const bad of ['%E0%A4%A', '%', 'abc%ZZ']) {
+        await page.goto(`${viewer.url}/ui/?session=${bad}`, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(`!document.getElementById('app-body').hidden || !document.getElementById('auth-gate').hidden`, null, { timeout: 10_000 });
+        await page.waitForTimeout(300);
+        const s = (await page.evaluate(String.raw`({
+          app: !document.getElementById('app-body').hidden,
+          gate: !document.getElementById('auth-gate').hidden,
+          search: location.search,
+          status: document.getElementById('status').textContent,
+        })`)) as { app: boolean; gate: boolean; search: string; status: string };
+        expect(s.app && !s.gate, `?session=${bad} showed the pairing gate over a valid token (${JSON.stringify(s)})`);
+        expect(s.search === '', `?session=${bad} was left in the address bar (${s.search})`);
+      }
+      const said = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      return `three undecodable ?session= values each left the app open on its token, with the link scrubbed; the page said ${JSON.stringify(said)}`;
     },
   });
 }
