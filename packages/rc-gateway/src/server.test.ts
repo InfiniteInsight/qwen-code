@@ -628,6 +628,30 @@ describe('gateway app', () => {
     expect(res.headers.get('content-type')).toMatch(/javascript/);
   });
 
+  // #182. Served by the same static mount as sw.js. A browser ignores a
+  // manifest it is not given as application/manifest+json (or JSON), so the
+  // type is pinned here rather than left to whichever mime table ships.
+  it('serves the web app manifest and its icon at /ui/ without auth', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/manifest.webmanifest`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(
+      /^application\/manifest\+json/,
+    );
+    const body = (await res.json()) as {
+      display?: string;
+      start_url?: string;
+      icons?: Array<{ src: string; type?: string }>;
+    };
+    expect(body.display).toBe('standalone');
+    expect(body.start_url).toBe('/ui/');
+    const src = body.icons?.[0]?.src ?? '';
+    expect(src).not.toBe('');
+    const icon = await fetch(new URL(src, `${url}/ui/manifest.webmanifest`));
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get('content-type')).toMatch(/^image\/svg\+xml/);
+  });
+
   it('serves the vendored virtual-core at /ui/vendor/virtual-core.js without auth', async () => {
     const { url } = await boot();
     const res = await fetch(`${url}/ui/vendor/virtual-core.js`);

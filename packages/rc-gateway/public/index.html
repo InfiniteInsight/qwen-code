@@ -2,7 +2,25 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- #182. viewport-fit=cover lets the page run under the home indicator,
+         and the composer then pads itself by env(safe-area-inset-bottom) so its
+         controls stay clear of it. The manifest and the apple-* metas are what
+         make the page installable to a home screen, which iOS also requires
+         before it delivers web push. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1117" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="qwen-rc" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <title>qwen-rc viewer</title>
     <style>
       /* The g1 shell (#117): a dark, full-bleed application frame instead of the
@@ -61,6 +79,14 @@
         color: #cbd5e1;
         display: flex;
         flex-direction: column;
+        /* #182. The installed app draws under a translucent status bar
+           (black-translucent) and, in landscape, beside the notch. These
+           insets are 0 in a desktop browser and in a phone's browser tab, so
+           the page is unchanged there. border-box keeps 100vh meaning the
+           viewport rather than the viewport plus the inset. */
+        box-sizing: border-box;
+        padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+          0 env(safe-area-inset-left, 0px);
       }
       /* The pairing form is not a region and has nothing to fill it, so it keeps
          the measure the page had before the shell went full-bleed. */
@@ -430,7 +456,8 @@
       }
       .tab-bar.sticky {
         position: sticky;
-        top: 0;
+        /* #182: below the status bar the installed app draws under. */
+        top: env(safe-area-inset-top, 0px);
         z-index: 100;
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
       }
@@ -468,7 +495,8 @@
         flex: 0 0 190px;
         align-self: stretch;
         position: sticky;
-        top: 0;
+        /* #182: below the status bar the installed app draws under. */
+        top: env(safe-area-inset-top, 0px);
         max-height: 100vh;
         display: flex;
         flex-direction: column;
@@ -774,6 +802,18 @@
          radius come from that rule and only the ground is named here. */
       #composer {
         background: var(--g1-band);
+        /* #182. The section's own 1rem, plus whatever the home indicator
+           takes. env() is 0 on a desktop and in a browser tab with a toolbar
+           under the page, so this only grows on a phone that draws the page to
+           its bottom edge (viewport-fit=cover, or the installed app). */
+        padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+      }
+      /* #182. While the on-screen keyboard is up, the shell is the height the
+         keyboard leaves (the visual viewport) rather than the layout viewport
+         it covers, so nothing lays the composer out underneath it. Set and
+         cleared by syncKeyboardViewport. */
+      :root.kb-open body {
+        min-height: var(--app-h, 100vh);
       }
       /* The sheet's prompt draws no ring of its own (its textarea sets outline
          none, as this one does below), so the field it sits in takes the ring
@@ -4202,6 +4242,65 @@
       // rebuild below.
       const WINDOW_KEY = 'qwen-rc:window-session';
 
+      // #182. The page's own view state, kept across a reload. On a phone the
+      // browser evicts a background tab within minutes, so every return to the
+      // app is a cold load, and anything held only in memory (the language the
+      // mic listens in, the draft, the open tab, where the reader was) had to be
+      // set again each time. Each piece lives under its own name below this
+      // prefix. Every read checks the shape it gets back and every write is
+      // best-effort: storage can be full, disabled (a private window) or hold a
+      // value an older page wrote, and none of that may stop the page loading,
+      // so a bad or missing value reads as absent and the control keeps the
+      // default it has today.
+      const UI_PREFIX = 'qwen-rc:ui:';
+      // How many conversations a per-conversation record remembers. The oldest
+      // conversation is dropped first, so the store cannot grow without bound
+      // across a long-lived profile.
+      const UI_SESSION_CAP = 30;
+
+      function uiRead(name, valid) {
+        try {
+          const raw = localStorage.getItem(UI_PREFIX + name);
+          if (raw === null) return undefined;
+          const value = JSON.parse(raw);
+          return valid(value) ? value : undefined;
+        } catch {
+          return undefined;
+        }
+      }
+      function uiWrite(name, value) {
+        try {
+          if (value === undefined) localStorage.removeItem(UI_PREFIX + name);
+          else localStorage.setItem(UI_PREFIX + name, JSON.stringify(value));
+        } catch {
+          /* full or unavailable: the control still works, it just forgets */
+        }
+      }
+      const isPlainObject = (v) =>
+        v !== null && typeof v === 'object' && !Array.isArray(v);
+      // A record keyed by conversation id. Only the entry is shape-checked, so
+      // one bad entry costs that conversation its value and not every other.
+      function uiSessionRead(name, sessionId, valid) {
+        if (!sessionId) return undefined;
+        const all = uiRead(name, isPlainObject);
+        if (!all || !Object.prototype.hasOwnProperty.call(all, sessionId)) {
+          return undefined;
+        }
+        return valid(all[sessionId]) ? all[sessionId] : undefined;
+      }
+      // Re-inserts the entry so the object's key order is oldest-written first,
+      // which is what the cap trims from. Conversation ids are never integer
+      // strings, so the insertion order JSON keeps is the order written.
+      function uiSessionWrite(name, sessionId, value) {
+        if (!sessionId) return;
+        const all = uiRead(name, isPlainObject) || {};
+        delete all[sessionId];
+        if (value !== undefined) all[sessionId] = value;
+        const ids = Object.keys(all);
+        for (let i = 0; i < ids.length - UI_SESSION_CAP; i++) delete all[ids[i]];
+        uiWrite(name, Object.keys(all).length ? all : undefined);
+      }
+
       // #77. Is some other window on this origin already on this same conversation
       // right now? Storage cannot answer that, and the question matters because
       // the shared record is read in two situations that look identical to the
@@ -4390,6 +4489,7 @@
             btn.classList.remove('active');
           }
         }
+        saveTab(tabId);
       }
 
       document.getElementById('tab-bar').addEventListener('click', (e) => {
@@ -4444,7 +4544,60 @@
             pinState[tabId] = null;
           }
         }
+        savePins();
       });
+
+      // #182. The open tab and the pinned panes come back after a reload. The
+      // tab follows the conversation pointer's rule (#50): this window's own
+      // record first, then the profile-wide one, so a second window keeps its
+      // own tab while a rebuilt tab still opens where the last one was.
+      const TAB_NAME = 'tab';
+      const PINS_NAME = 'pins';
+      function saveTab(tabId) {
+        try {
+          sessionStorage.setItem(UI_PREFIX + TAB_NAME, JSON.stringify(tabId));
+        } catch {
+          /* per-window copy is best-effort */
+        }
+        uiWrite(TAB_NAME, tabId);
+      }
+      function loadTab() {
+        const ok = (v) => TAB_IDS.includes(v);
+        try {
+          const own = sessionStorage.getItem(UI_PREFIX + TAB_NAME);
+          if (own !== null) {
+            const v = JSON.parse(own);
+            if (ok(v)) return v;
+          }
+        } catch {
+          /* fall through to the shared record */
+        }
+        return uiRead(TAB_NAME, ok);
+      }
+      function savePins() {
+        const pinned = PIN_ORDER.filter((id) => pinState[id]);
+        uiWrite(PINS_NAME, pinned.length ? pinned : undefined);
+      }
+      // Runs while the script loads, before the auth check reveals the app, so
+      // the first frame the reader sees already has their panes where they left
+      // them. Pins go first: pinning the tab that is open sends the page back to
+      // Chat, so the tab is applied after. Driven through the checkboxes' own
+      // change handler so a restored pin is built exactly the way a tapped one
+      // is.
+      (function restoreTabsAndPins() {
+        const pins = uiRead(
+          PINS_NAME,
+          (v) => Array.isArray(v) && v.every((id) => PIN_ORDER.includes(id)),
+        );
+        for (const id of pins || []) {
+          const cb = document.querySelector('.pin-cb[data-pin="' + id + '"]');
+          if (!cb || cb.checked) continue;
+          cb.checked = true;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const tab = loadTab();
+        if (tab && tab !== 'chat') switchTab(tab);
+      })();
 
       // "?" help buttons in Operations section headers. Delegated on document
       // so it keeps working after the pane's nodes are moved into/out of a pin.
@@ -4466,8 +4619,9 @@
         btn.setAttribute('aria-expanded', String(!panel.hidden));
       });
 
-      // Sticky tab bar (Settings > UI preferences). Not persisted — resets on
-      // reload, per the no-localStorage-for-UI-state constraint.
+      // Sticky tab bar (Settings > UI preferences). Resets on reload: it was
+      // written under a no-localStorage-for-UI-state rule that #182 lifted for
+      // the controls it names (see UI_PREFIX), and this one was not among them.
       $('sticky-tabs').onchange = () => {
         $('tab-bar').classList.toggle('sticky', $('sticky-tabs').checked);
       };
@@ -4475,10 +4629,11 @@
       // Stamp timezone (Settings > UI preferences). Issue #80: a viewer session
       // is often read somewhere other than the machine it watches, so the zone
       // its times print in is the reader's to choose. It is saved on the gateway
-      // keyed to THIS paired token rather than in this tab — the constraint that
-      // keeps UI state out of localStorage still holds, and a token is what a
-      // device already is to the gateway, which is how push quiet hours are
-      // keyed too.
+      // keyed to THIS paired token rather than in this tab. It was written under
+      // a rule that kept UI state out of localStorage, which #182 has since
+      // lifted for the page's view state (UI_PREFIX); the zone stays on the
+      // gateway because a token is what a device already is to the gateway,
+      // which is how push quiet hours are keyed too.
       const stampZoneSelect = $('stamp-zone');
       // The zone the view is rendering in, or null while that is still unknown.
       // Kept here because the boot read and the view's own attach resolve in
@@ -4838,15 +4993,21 @@
         // Another tab, or the raw view: nothing to fit, and a hidden box
         // measures zero, which would read as all the room in the world.
         if (tr.getClientRects().length === 0) return;
-        const vh = window.innerHeight;
+        // #182: the height the keyboard leaves while it is up, so the fit
+        // that keeps the composer on the fold keeps it above the keyboard.
+        const vh = appViewportHeight();
         const box = tr.getBoundingClientRect();
         const above = box.top + window.scrollY;
         const below = pane.getBoundingClientRect().bottom - box.bottom;
         const room = Math.floor(vh - above - below);
-        const cap = Math.max(
-          Math.round(vh * 0.3),
-          Math.min(Math.floor(vh * 0.75), room),
-        );
+        // #182: while the keyboard is up the 30% floor is dropped and the
+        // transcript takes only the room left, however little. The reader is
+        // typing, and the bands around the transcript already take most of a
+        // phone's visible height (measured at 390x844: about 460px), so a floor
+        // there would be the thing that puts the composer's Send under the
+        // keys. It comes back the moment the keyboard goes.
+        const floor = keyboardCovers > 0 ? 0 : Math.round(vh * 0.3);
+        const cap = Math.max(floor, Math.min(Math.floor(vh * 0.75), room));
         const want = cap + 'px';
         if (tr.style.getPropertyValue('--tx-cap') === want) return;
         tr.style.setProperty('--tx-cap', want);
@@ -4875,6 +5036,78 @@
         fitWatch.observe($('pane-chat'));
         fitWatch.observe($('tab-bar'));
         fitWatch.observe($('rail'));
+      }
+
+      // #182. The on-screen keyboard. Neither phone browser shrinks the layout
+      // viewport for it any more: iOS Safari never did, and Chrome on Android
+      // has resized only the visual viewport by default since 108. So
+      // innerHeight, and every vh unit, still counts the screen the keyboard
+      // covers, the fit above sizes the transcript for that whole height, and
+      // the composer the reader is typing into lands under the keys. The visual
+      // viewport is the part still on screen. While it is shorter than the
+      // layout viewport by more than KEYBOARD_MIN_PX, the shell takes its
+      // height (--app-h, read by the :root.kb-open rule), the fit measures
+      // against it, and the page is scrolled just far enough that the
+      // composer's bottom edge is on screen.
+      // The floor keeps out what is not a keyboard: a rounding remainder, a
+      // browser toolbar sliding in or out, and a desktop's horizontal scrollbar
+      // (innerHeight counts it, the visual viewport does not). The smallest
+      // keyboard-like strip, the shortcut bar iOS shows with a hardware
+      // keyboard, is taller than this.
+      const KEYBOARD_MIN_PX = 40;
+      let keyboardCovers = 0; // px of the layout viewport under the keyboard
+      function appViewportHeight() {
+        return window.innerHeight - keyboardCovers;
+      }
+      function syncKeyboardViewport() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        // A pinch zoom shrinks the visual viewport by its scale too. That is
+        // the reader looking closer, not a keyboard, and resizing the shell
+        // under a zoomed page would move what they are looking at.
+        const gap = window.innerHeight - vv.height;
+        const covers =
+          vv.scale > 1.01 || gap < KEYBOARD_MIN_PX ? 0 : Math.round(gap);
+        if (covers === keyboardCovers) return;
+        keyboardCovers = covers;
+        const root = document.documentElement;
+        if (covers > 0) {
+          root.style.setProperty('--app-h', Math.round(vv.height) + 'px');
+          root.classList.add('kb-open');
+        } else {
+          root.style.removeProperty('--app-h');
+          root.classList.remove('kb-open');
+        }
+        queueFitTranscript();
+      }
+      // Lines the composer's bottom edge up with the keyboard's top edge. Only
+      // while the reader is typing in the composer: a keyboard raised for the
+      // rail's filter or a settings field must not drag the page to the
+      // composer. Both ways, because the browser pans the page to the focused
+      // field before this page has shrunk its layout, and once the layout fits
+      // the visible height that pan leaves the page scrolled past its own end.
+      // Rects are layout-viewport coordinates and the visual viewport's bottom
+      // edge sits at offsetTop + height in that same space.
+      function keepComposerInView() {
+        const vv = window.visualViewport;
+        const box = $('composer');
+        if (!vv || keyboardCovers === 0 || !box) return;
+        if (!box.contains(document.activeElement)) return;
+        const over = box.getBoundingClientRect().bottom - (vv.offsetTop + vv.height);
+        if (over > 1) window.scrollBy(0, Math.ceil(over));
+        else if (over < -1 && window.scrollY > 0) {
+          window.scrollBy(0, Math.max(Math.floor(over), -window.scrollY));
+        }
+      }
+      if (window.visualViewport) {
+        const onViewport = () => {
+          syncKeyboardViewport();
+          // Queued after the fit (syncKeyboardViewport queues it first), so the
+          // composer is measured where the new transcript cap puts it.
+          requestAnimationFrame(keepComposerInView);
+        };
+        window.visualViewport.addEventListener('resize', onViewport);
+        window.visualViewport.addEventListener('scroll', onViewport);
       }
 
       $('jump-bottom').addEventListener('click', () => {
@@ -5277,6 +5510,10 @@
       // for the model, which is the case for an env-configured model with no
       // declared size: the daemon answers those with a zero window rather than
       // an error. The model name updates on `model_switched` too.
+      // #182: the last approval mode set from this page and confirmed by the
+      // daemon, per conversation, and the drawer's persist box (see renderFooter).
+      const MODE_NAME = 'approval-mode';
+      const MODE_PERSIST_NAME = 'approval-persist';
       let caps = null; // GET /rc/capabilities body (task #27 gating)
       let ctxInfo = null; // { modelName, modeName, currentModeId, availableModes, cwd }
       let liveIn = 0; // last turn's prompt (input) tokens
@@ -5347,6 +5584,23 @@
           f.append(document.createTextNode('   ·   ' + rest.join('   ·   ')));
         }
         if (hasModes) {
+          // #182. The daemon's mode is what the select shows: it is the mode
+          // the session is actually in, and the page never sends one on the
+          // reader's behalf. What the page keeps is the last mode the reader
+          // set here and the daemon confirmed. It fills the select only when
+          // the daemon names no mode it also lists (the select would otherwise
+          // claim its first option), and when the daemon reports a different
+          // one, which is what a session resumed after a daemon restart does,
+          // the note says what was set before so it is one tap to put back.
+          const known = (id) => ctxInfo.availableModes.find((m) => m.id === id);
+          const chosen = uiSessionRead(
+            MODE_NAME,
+            watchedSessionId,
+            (v) => typeof v === 'string' && !!known(v),
+          );
+          const shown = known(ctxInfo.currentModeId)
+            ? ctxInfo.currentModeId
+            : chosen;
           const sel = document.createElement('select');
           sel.id = 'footer-mode';
           sel.style.marginLeft = '10px';
@@ -5354,13 +5608,19 @@
             const o = document.createElement('option');
             o.value = m.id;
             o.textContent = m.name;
-            if (m.id === ctxInfo.currentModeId) o.selected = true;
+            if (m.id === shown) o.selected = true;
             sel.appendChild(o);
           }
           const cb = document.createElement('input');
           cb.type = 'checkbox';
           cb.id = 'footer-mode-persist';
           cb.title = 'persist this mode for future sessions in this workspace';
+          // #182: the box is rebuilt with the band on every render, so its
+          // state has to come from somewhere other than the old node.
+          cb.checked = uiRead(MODE_PERSIST_NAME, (v) => v === true) === true;
+          cb.addEventListener('change', () =>
+            uiWrite(MODE_PERSIST_NAME, cb.checked ? true : undefined),
+          );
           const cbl = document.createElement('label');
           cbl.style.marginLeft = '6px';
           cbl.appendChild(cb);
@@ -5369,6 +5629,9 @@
           note.id = 'footer-mode-note';
           note.style.marginLeft = '8px';
           note.style.fontSize = '12px';
+          if (chosen && known(ctxInfo.currentModeId) && chosen !== shown) {
+            note.textContent = 'last set here: ' + known(chosen).name;
+          }
           sel.addEventListener('change', () => changeApprovalMode(sel, cb));
           f.append(sel, cbl, note);
         }
@@ -5497,6 +5760,11 @@
             return;
           }
           const out = await res.json().catch(() => ({}));
+          // #182: kept only when the daemon names the mode it is now in, so
+          // the page never remembers a mode it merely asked for.
+          if (typeof out.mode === 'string' && out.mode) {
+            uiSessionWrite(MODE_NAME, id, out.mode);
+          }
           if (ctxInfo) {
             ctxInfo.currentModeId = out.mode || mode;
             const m = (ctxInfo.availableModes || []).find(
@@ -8194,7 +8462,7 @@
             startPendingCardsPoll(); // issue #46: recover lost question cards while watching
             applyWorkspaceControlGating();
             renderRecentWorkspaces();
-            void browseTo();
+            void browseToSavedFolder(); // #182: the folder the reader left
             void loadDaemonManifest();
             void loadStampZone(); // issue #80: the reader's stamp zone
             // A ?session= push deep link (#40) wins over the persisted
@@ -8849,6 +9117,233 @@
         watchedSessionCwd = null;
       }
 
+      // ---- #182: what the reader had open, and where they were ------------
+      // A reload rebuilds the transcript by replaying the conversation from
+      // event 0, and the model numbers its items afresh, so an item id names
+      // nothing on the next page. The gateway's event id does: it is the id the
+      // replay carries again for the same frame. So each item is stamped with
+      // the id of the frame that created it (rcEv), and a saved place or a
+      // saved open row is keyed by that. Rows no frame created (the local echo
+      // of a send, a page of stored history) stay unstamped rather than borrow
+      // some other frame's id, and are simply not used as keys.
+      let frameEventId = null; // set by the stream loop around renderFrame
+      // A tool row is keyed by its call id, which the daemon assigns and the
+      // replay repeats; anything else by the frame that made it.
+      function rowKey(item) {
+        if (item.kind === 'tool' && typeof item.toolCallId === 'string' && item.toolCallId) {
+          return 'c:' + item.toolCallId;
+        }
+        return item.rcEv != null ? 'e:' + item.rcEv : null;
+      }
+
+      // Open thoughts and tool rows, per conversation, newest last and capped
+      // so a long conversation cannot grow the record without bound.
+      const EXPANDED_NAME = 'expanded';
+      const EXPANDED_CAP = 200;
+      let expandedCache = { sessionId: null, keys: [] };
+      function expandedKeys() {
+        if (expandedCache.sessionId !== watchedSessionId) {
+          const saved = uiSessionRead(
+            EXPANDED_NAME,
+            watchedSessionId,
+            (v) => Array.isArray(v) && v.every((k) => typeof k === 'string'),
+          );
+          expandedCache = {
+            sessionId: watchedSessionId,
+            keys: saved ? saved.slice(-EXPANDED_CAP) : [],
+          };
+        }
+        return expandedCache.keys;
+      }
+      function setExpanded(key, open) {
+        if (!key || !watchedSessionId) return;
+        const keys = expandedKeys();
+        const at = keys.indexOf(key);
+        if (open === at >= 0) return;
+        if (at >= 0) keys.splice(at, 1);
+        if (open) keys.push(key);
+        if (keys.length > EXPANDED_CAP) keys.splice(0, keys.length - EXPANDED_CAP);
+        uiSessionWrite(
+          EXPANDED_NAME,
+          watchedSessionId,
+          keys.length ? keys.slice() : undefined,
+        );
+      }
+      // The model tells its listeners about every append and update, and this
+      // listener is registered before the view's, so a restored row is already
+      // open when the view first draws it. A tool row can be opened as it
+      // arrives. A thought cannot: the model closes every thought when it
+      // finishes (finishThought), so a restored one is reopened on that first
+      // finished update instead, and only later updates, which only a tap
+      // makes, are read as the reader opening or closing it.
+      transcriptModel.subscribe((ev) => {
+        const item = ev && ev.item;
+        if (!item) return;
+        if (ev.type === 'append') {
+          if (item.rcEv === undefined) item.rcEv = frameEventId;
+          if (item.kind === 'tool' && expandedKeys().includes(rowKey(item))) {
+            item.expanded = true;
+          }
+          return;
+        }
+        if (ev.type !== 'update') return;
+        if (item.kind === 'thought') {
+          if (item.live) return;
+          if (!item.rcSettled) {
+            item.rcSettled = true;
+            if (expandedKeys().includes(rowKey(item))) item.expanded = true;
+            return;
+          }
+          setExpanded(rowKey(item), !!item.expanded);
+        } else if (item.kind === 'tool') {
+          setExpanded(rowKey(item), !!item.expanded);
+        }
+      });
+
+      // Where the reader was: the row at the transcript's top edge, as the
+      // frame that made it plus which of that frame's rows it is, and its
+      // offset from the edge. Nothing is kept while the reader follows the
+      // end, since the end is where a load lands anyway.
+      const PLACE_NAME = 'place';
+      // How long the replay has to be quiet before the place is put back.
+      // The daemon ends a replay with replay_complete, which applies it at
+      // once; this covers a replay that carries no sentinel.
+      const PLACE_QUIET_MS = 250;
+      // A place that has not come back by then is given up, so a replay that
+      // never reaches the saved row cannot hold the reader's own scrolling
+      // hostage (the save below is off while a restore is pending).
+      const PLACE_RESTORE_MS = 20_000;
+      let placeRestore = null; // { sessionId, ev, nth, top, until }
+      let placeTimer = null;
+      let placeSaveTimer = null;
+      function rowsOfFrame(ev) {
+        return transcriptModel.items.filter((i) => i.rcEv === ev);
+      }
+      function readPlace() {
+        if (!transcriptView || !watchedSessionId) return null;
+        if (typeof transcriptView.readerAnchor !== 'function') return null;
+        // A hidden transcript measures nothing; keep what was saved.
+        if ($('transcript').getClientRects().length === 0) return null;
+        const at = transcriptView.readerAnchor((i) => i.rcEv != null);
+        if (!at || at.end) return at && at.end ? { end: true } : null;
+        if (!at.item) return null;
+        const nth = rowsOfFrame(at.item.rcEv).indexOf(at.item);
+        if (nth < 0) return null;
+        return { ev: at.item.rcEv, nth, top: Math.round(at.top) };
+      }
+      function savePlace() {
+        if (placeSaveTimer !== null) clearTimeout(placeSaveTimer);
+        placeSaveTimer = null;
+        // A pending restore owns the position: the replay's own follow to the
+        // end would otherwise overwrite the place before it is put back.
+        if (placeRestore) return;
+        const p = readPlace();
+        if (!p) return;
+        uiSessionWrite(PLACE_NAME, watchedSessionId, p.end ? undefined : p);
+      }
+      $('transcript').addEventListener(
+        'scroll',
+        () => {
+          if (placeSaveTimer !== null) clearTimeout(placeSaveTimer);
+          placeSaveTimer = setTimeout(savePlace, PLACE_QUIET_MS);
+        },
+        { passive: true },
+      );
+      // The phone's last chance: a tab going to the background may never run
+      // its timers again before it is evicted.
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') savePlace();
+      });
+      window.addEventListener('pagehide', savePlace);
+
+      function armPlaceRestore(sessionId) {
+        cancelPlaceRestore();
+        const saved = uiSessionRead(
+          PLACE_NAME,
+          sessionId,
+          (v) =>
+            isPlainObject(v) &&
+            Number.isInteger(v.ev) &&
+            Number.isInteger(v.nth) &&
+            v.nth >= 0 &&
+            typeof v.top === 'number' &&
+            Number.isFinite(v.top),
+        );
+        if (!saved) return;
+        placeRestore = {
+          sessionId,
+          ev: saved.ev,
+          nth: saved.nth,
+          top: saved.top,
+          until: Date.now() + PLACE_RESTORE_MS,
+        };
+      }
+      function cancelPlaceRestore() {
+        placeRestore = null;
+        if (placeTimer !== null) clearTimeout(placeTimer);
+        placeTimer = null;
+      }
+      // Called after every rendered frame. Each frame pushes the attempt back,
+      // so it runs once the replay has gone quiet (or at once on the replay's
+      // own end marker).
+      function notePlaceFrame(replayDone) {
+        if (!placeRestore) return;
+        if (placeTimer !== null) clearTimeout(placeTimer);
+        placeTimer = setTimeout(applyPlaceRestore, replayDone ? 0 : PLACE_QUIET_MS);
+      }
+      function applyPlaceRestore() {
+        placeTimer = null;
+        const r = placeRestore;
+        if (!r) return;
+        if (r.sessionId !== watchedSessionId || Date.now() > r.until) {
+          cancelPlaceRestore();
+          return;
+        }
+        // The view attaches after its bundles load, which can trail the replay.
+        if (!transcriptView) {
+          placeTimer = setTimeout(applyPlaceRestore, 100);
+          return;
+        }
+        const item = rowsOfFrame(r.ev)[r.nth];
+        if (!item) {
+          // The replay has carried the saved frame's id and still drew no such
+          // row (a rewind cut it, or the history was trimmed): the place is
+          // gone, so the reader stays at the end. Otherwise the frame is still
+          // to come and the next one re-arms the attempt.
+          if (lastSeenEventId !== null && lastSeenEventId >= r.ev) {
+            cancelPlaceRestore();
+          }
+          return;
+        }
+        cancelPlaceRestore();
+        if (typeof transcriptView.restorePlace === 'function') {
+          transcriptView.restorePlace(item, r.top);
+        }
+      }
+      // The reader moving the transcript themselves wins over a restore that
+      // has not landed yet.
+      for (const type of ['wheel', 'touchstart', 'keydown']) {
+        $('transcript').addEventListener(type, cancelPlaceRestore, {
+          passive: true,
+        });
+      }
+
+      // The composer's draft, per conversation. Saved on every keystroke and
+      // after every write the page makes itself; an empty composer removes it.
+      const DRAFTS_NAME = 'drafts';
+      function loadDraft(sessionId) {
+        return (
+          uiSessionRead(DRAFTS_NAME, sessionId, (v) => typeof v === 'string') ||
+          ''
+        );
+      }
+      function saveDraft() {
+        if (!watchedSessionId) return;
+        const text = $('prompt').value;
+        uiSessionWrite(DRAFTS_NAME, watchedSessionId, text.trim() ? text : undefined);
+      }
+      $('prompt').addEventListener('input', saveDraft);
+
       // #59: a 404 means the daemon no longer knows this session, so the
       // stream can never resume and the status poll has nothing left to
       // redraw. Drop the watch the way Unwatch does, including
@@ -8960,6 +9455,7 @@
         if (!g || g.hidden || !g.dataset.suggestion) return false;
         const ta = $('prompt');
         ta.value = g.dataset.suggestion;
+        saveDraft(); // #182: a programmatic write fires no input event
         clearIdleGhost();
         ta.focus();
         return true;
@@ -9006,6 +9502,7 @@
       // Per-session idle-suggestion toggle (`/suggest on|off|status`). Reads the
       // EFFECTIVE state from GET so it never shows a lie (the POST narrows-only:
       // a `true` intent under a global-off reports back as disabled).
+      const IDLE_NAME = 'idle-suggest'; // #182: last state set here, per session
       function renderIdleToggle(s) {
         const cb = $('idle-suggest-toggle');
         const st = $('idle-suggest-status');
@@ -9034,6 +9531,19 @@
             ? s.maxSuggestionsPerHour
             : '?';
         st.textContent = ' — ' + rem + '/' + cap + ' left this hour';
+        // #182: the box shows the gateway's effective state, never the saved
+        // one, by the same rule as the approval mode (see renderFooter). The
+        // per-session switch lives in the gateway's memory, so a gateway
+        // restart forgets it; when the state reported differs from the one
+        // last set here, the line says so and the reader can tick it back.
+        const setHere = uiSessionRead(
+          IDLE_NAME,
+          watchedSessionId,
+          (v) => typeof v === 'boolean',
+        );
+        if (setHere !== undefined && setHere !== !!s.enabled) {
+          st.textContent += ' · last set here: ' + (setHere ? 'on' : 'off');
+        }
       }
       async function refreshIdleToggle() {
         const cb = $('idle-suggest-toggle');
@@ -9062,6 +9572,7 @@
       }
       $('idle-suggest-toggle').onchange = async () => {
         if (!watchedSessionId || !token()) return;
+        const askedFor = watchedSessionId;
         const cb = $('idle-suggest-toggle');
         const desired = cb.checked;
         cb.disabled = true;
@@ -9080,7 +9591,13 @@
             },
           );
           if (res.ok) {
-            renderIdleToggle(await res.json()); // reflect EFFECTIVE state
+            const s = await res.json();
+            // #182: the state the gateway reports back, which under a global
+            // off is not the one asked for (the POST only narrows).
+            if (s && typeof s.enabled === 'boolean') {
+              uiSessionWrite(IDLE_NAME, askedFor, s.enabled);
+            }
+            renderIdleToggle(s); // reflect EFFECTIVE state
           } else {
             setStatus('idle toggle failed (' + res.status + ')');
             await refreshIdleToggle();
@@ -9109,6 +9626,11 @@
         $('unsent-note').textContent = 'not sent: ' + note;
         $('unsent-text').textContent = text;
         $('unsent').hidden = false;
+        // #182: the card lives in memory, so a reload before the reader acts on
+        // it would lose the text. It is saved as this conversation's draft
+        // instead, which a reload puts back in the composer. The composer is
+        // empty on this path (checked above), so nothing typed is overwritten.
+        if (watchedSessionId) uiSessionWrite(DRAFTS_NAME, watchedSessionId, text);
       }
       $('unsent-restore').onclick = () => {
         if (!unsent) return clearUnsent();
@@ -9116,6 +9638,7 @@
           return setStatus('the composer has a draft: clear it to restore');
         }
         $('prompt').value = unsent.text;
+        saveDraft(); // #182: back in the composer, so a draft again
         clearUnsent();
         $('prompt').focus();
       };
@@ -9210,6 +9733,7 @@
         // Cleared here, so the composer is free for the next thought. The text
         // is not lost: it is on the queued strip and in storage.
         $('prompt').value = '';
+        saveDraft(); // #182: the queue holds it now, not the draft
         saveOutbox();
         renderQueued();
         setStatus('queued, sends when this turn ends');
@@ -10243,6 +10767,12 @@
         // the duration of the turn and then discards whatever was typed in the
         // meantime.
         $('prompt').value = '';
+        // #182: the saved draft goes at the same moment. The send awaits the
+        // whole turn, and a phone that evicts the tab mid-turn would otherwise
+        // come back with the sent text offered as a draft to send again. A
+        // refusal hands the text back through the unsent card, and restoring
+        // it from there makes it a draft again.
+        saveDraft();
         // #109: taken here rather than at the fetch, because the strip is
         // cleared on dispatch for the same reason the text is: a send whose
         // socket dies must not leave a file staged that the reader already
@@ -10438,9 +10968,16 @@
         return base.replace(/\/+$/, '') + '/' + name;
       }
 
+      // #182: the folder the panel (and so the rail) was on, so a reload opens
+      // there instead of at the server's default.
+      const FOLDER_NAME = 'folder';
+
       function renderDirList(body) {
         curDirPath = body.path;
         curDirParent = body.parent ?? null;
+        if (typeof curDirPath === 'string' && curDirPath) {
+          uiWrite(FOLDER_NAME, curDirPath);
+        }
         $('dir-current').textContent = body.path;
         const list = $('dir-list');
         list.textContent = '';
@@ -10479,8 +11016,14 @@
       // `parent` as the ".." target and `entries` as tappable subfolder rows.
       // On error (403/404/etc), setStatus and DO NOT navigate — curDirPath
       // stays put so "Use this folder" still targets the last good listing.
-      async function browseTo(path) {
-        if (!token()) return setStatus('pair first');
+      // #182: resolves whether it landed, and `quiet` keeps a failure off the
+      // status line, for the boot's attempt at the saved folder, which falls
+      // back to the default on its own and has nothing to report.
+      async function browseTo(path, quiet) {
+        if (!token()) {
+          if (!quiet) setStatus('pair first');
+          return false;
+        }
         try {
           const qs = path ? '?path=' + encodeURIComponent(path) : '';
           const res = await fetch('/rc/fs' + qs, {
@@ -10494,13 +11037,24 @@
             } catch {
               /* non-JSON error body */
             }
-            setStatus(msg);
-            return;
+            if (!quiet) setStatus(msg);
+            return false;
           }
           renderDirList(await res.json());
+          return true;
         } catch (e) {
-          setStatus('browse error: ' + e);
+          if (!quiet) setStatus('browse error: ' + e);
+          return false;
         }
+      }
+
+      // #182: the boot's browse. The saved folder when it still lists (it can
+      // have been deleted, or be outside what this gateway serves), else the
+      // server's default, which is what every load did before.
+      async function browseToSavedFolder() {
+        const saved = uiRead(FOLDER_NAME, (v) => typeof v === 'string' && !!v);
+        if (saved && (await browseTo(saved, true))) return;
+        await browseTo();
       }
 
       // Common tail for all three pickers (browse / type / recent): drop the
@@ -10584,9 +11138,25 @@
       // The skeleton is built once and only the rows are redrawn, because the
       // rail is re-drawn on every poll tick and a filter input rebuilt under the
       // caret loses what you were typing.
-      // Collapse state is not persisted, per the no-localStorage-for-UI-state
-      // constraint the sticky tabs follow.
+      // Collapse state is not persisted: it was written under the
+      // no-localStorage-for-UI-state rule the sticky tabs followed, and #182,
+      // which lifted that rule for the controls it names, did not name this.
+      // The filter is one of them, and it is kept with the folder it was typed
+      // in, because the filter is per-folder (renderPastConversations clears it
+      // on a folder change) and a filter carried into another folder would
+      // hide rows for a reason the reader can no longer see.
       // createElement + textContent only, never innerHTML: titles are model data.
+      const RAIL_FILTER_NAME = 'rail-filter';
+      function savedRailFilter(cwd) {
+        const saved = uiRead(
+          RAIL_FILTER_NAME,
+          (v) =>
+            isPlainObject(v) &&
+            typeof v.cwd === 'string' &&
+            typeof v.text === 'string',
+        );
+        return saved && saved.cwd === cwd ? saved.text : '';
+      }
       let railFilter = '';
       let railCollapsed = false;
       let railEls = null;
@@ -10676,8 +11246,18 @@
         input.type = 'search';
         input.placeholder = 'filter by name';
         input.setAttribute('aria-label', 'Filter conversations by name');
+        // #182: a rail built after the folder landed starts with that
+        // folder's saved filter (railFilter holds it lowercased, so the
+        // reader's own spelling is read back from storage).
+        input.value = railFilter ? savedRailFilter(pastConvosCwd) : '';
         input.oninput = () => {
           railFilter = input.value.trim().toLowerCase();
+          uiWrite(
+            RAIL_FILTER_NAME,
+            input.value.trim() && typeof pastConvosCwd === 'string'
+              ? { cwd: pastConvosCwd, text: input.value }
+              : undefined,
+          );
           renderRailRows();
         };
         flt.appendChild(input);
@@ -11018,8 +11598,11 @@
           pastPage = 1; // workspace switch → page 1
           pastFilter = ''; // issue #44: filter is per-workspace view state
           $('past-filter').value = '';
-          railFilter = ''; // #119: the rail's filter is per-folder too
-          if (railEls) railEls.input.value = '';
+          // #119: the rail's filter is per-folder too. #182: so the folder
+          // being opened gets back the filter last typed in it, if any.
+          const kept = savedRailFilter(cwd);
+          railFilter = kept.trim().toLowerCase();
+          if (railEls) railEls.input.value = kept;
         }
         pastConvosCwd = cwd;
         pastTruncated = Boolean(truncated);
@@ -11714,7 +12297,21 @@
         if (id !== watchedSessionId && !$('dir-picker').hidden) {
           setDirPickerOpen(false);
         }
+        // #182: the draft belongs to the conversation it was typed for, the
+        // same rule the outbox (#70) follows, so a switch files the composer's
+        // text under the conversation being left and brings back the one being
+        // opened. A re-watch of the same conversation (a self-heal) leaves the
+        // composer alone.
+        const switching = id !== watchedSessionId;
+        if (switching) {
+          saveDraft();
+          // The reader's place in the conversation being left is saved now,
+          // while its rows are still the ones on screen.
+          savePlace();
+          cancelPlaceRestore();
+        }
         watchedSessionId = id;
+        if (switching) $('prompt').value = loadDraft(id);
         // The stored list names a conversation, so a switch refetches it rather
         // than leaving the previous session's files under this heading.
         syncStoredForSession();
@@ -11866,10 +12463,12 @@
             for (const block of blocks) {
               const lines = block.split('\n');
               const idLine = lines.find((l) => l.startsWith('id:'));
+              let blockEventId = null; // #182: stamps the rows this frame makes
               if (idLine) {
                 const parsed = Number(idLine.slice(3).trim());
                 if (Number.isFinite(parsed)) {
                   lastSeenEventId = parsed;
+                  blockEventId = parsed;
                   persistWatch();
                 }
               }
@@ -11913,7 +12512,13 @@
                 resolveCard(ev.data.requestId);
               }
               log(JSON.stringify(ev));
-              renderFrame(ev);
+              frameEventId = blockEventId;
+              try {
+                renderFrame(ev);
+              } finally {
+                frameEventId = null;
+              }
+              notePlaceFrame(ev && ev.type === 'replay_complete');
             }
           }
           // issue #85: name which of the two it was. A silent socket is not the
@@ -13221,6 +13826,10 @@
             // hits a resync the self-heal can re-resume without a re-tap.
             watchedSessionCwd = typeof cwd === 'string' && cwd ? cwd : null;
             startWatch(sessionId, 0, title || null);
+            // #182: once the replay has rebuilt the rows, put the reader back on
+            // the row they were reading rather than at the end. Armed after
+            // startWatch, which drops any restore for a conversation it leaves.
+            armPlaceRestore(sessionId);
             // #77: asked after startWatch, never before it, so the wait for an
             // answer is never between the reader and their transcript. The
             // answer is compared against the session this window actually came
@@ -16166,6 +16775,33 @@
       // browser; only the final transcript reaches #prompt. Graceful degradation:
       // when the API is absent (headless/Firefox) the controls are disabled, so
       // the composer never breaks.
+      //
+      // #182: the language and auto-send are the reader's settings, so they come
+      // back after a reload. Applied here, while the script loads and before the
+      // app is shown. A saved language this page no longer lists is dropped
+      // rather than forced into the select, which would show it blank.
+      (function restoreDictationPrefs() {
+        const NAME = 'dictation';
+        const lang = $('dictate-lang');
+        const auto = $('dictate-autosend');
+        const saved = uiRead(
+          NAME,
+          (v) =>
+            isPlainObject(v) &&
+            typeof v.lang === 'string' &&
+            typeof v.autosend === 'boolean',
+        );
+        if (saved) {
+          if (Array.from(lang.options).some((o) => o.value === saved.lang)) {
+            lang.value = saved.lang;
+          }
+          auto.checked = saved.autosend;
+        }
+        const save = () =>
+          uiWrite(NAME, { lang: lang.value, autosend: auto.checked });
+        lang.addEventListener('change', save);
+        auto.addEventListener('change', save);
+      })();
       (function () {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         const dictate = $('dictate');
@@ -16227,6 +16863,8 @@
               ta.value = ta.value
                 ? ta.value + ' ' + final.trim()
                 : final.trim();
+              // A programmatic write fires no input event (#182).
+              saveDraft();
             }
             // Live interim preview (cleared on end); textContent → XSS-safe.
             interimEl.textContent = interim;

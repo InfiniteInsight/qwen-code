@@ -366,6 +366,9 @@
     // A user expand/collapse of a thought: { item, top } where `top` is the
     // clicked header's offset in the viewport. The next pass keeps it there.
     var hold = null;
+    // A restorePlace() request: { item, top }, applied by the next pass that
+    // runs while the scroller is rendered (see goToPlace).
+    var pendingPlace = null;
     var quiet = false; // the current model event is that toggle's own touch
     // The zone THIS view renders message times in. Per-view rather than shared,
     // because the preference is the reader's and two views on one page can read
@@ -1422,6 +1425,7 @@
       }
       if (virtualizer) {
         if (relayoutFrom && rendered()) relayout();
+        if (pendingPlace && rendered()) goToPlace();
         if (written.length) measureRows(written, false);
         setSizerHeight();
         // Measuring newly mounted rows can move the others or change which
@@ -1456,6 +1460,7 @@
       } else if (structural) {
         syncAllRows(now);
       }
+      if (!virtualizer && pendingPlace && rendered()) goToPlace();
       structural = false;
       // A hidden scroller (display:none) keeps the request for later.
       if (scroller.clientHeight > 0) {
@@ -1546,12 +1551,15 @@
     // above the top edge (else the first one below it) and its offset from
     // the edge. Row tops are still the old layout's here: only heights have
     // reflowed to the new width.
-    function readerPlace() {
+    // `usable`, when given, limits the choice to rows whose item it accepts
+    // (the page's saved place can only name a row it can find again).
+    function readerPlace(usable) {
       if (nearBottom) return { end: true };
       var edge = scroller.getBoundingClientRect().top;
       var above = null;
       var below = null;
       mounted.forEach(function (m) {
+        if (usable && !usable(m.item)) return;
         var y = m.row.getBoundingClientRect().top - edge;
         var place = { item: m.item, top: y, row: true };
         if (y <= 0) {
@@ -1561,6 +1569,32 @@
         }
       });
       return above || below || { end: false };
+    }
+
+    // Puts a row back at `top` px below the scroller's top edge (#182: a reload
+    // returns the reader to where they were). The virtualized path jumps to
+    // the row's estimated offset first, the way relayout() does, because a row
+    // that far from the viewport is not mounted and keepHeld() can only
+    // correct a row it can measure; the hold then removes whatever error the
+    // estimate left once the rows around it are measured.
+    function goToPlace() {
+      var place = pendingPlace;
+      pendingPlace = null;
+      if (items.indexOf(place.item) < 0) return;
+      pendingEnd = false;
+      follow = false;
+      if (virtualizer) {
+        virtualizer.getTotalSize();
+        var at = virtualizer.getOffsetForIndex(
+          items.indexOf(place.item),
+          'start',
+        );
+        if (at) {
+          scroller.scrollTop = at[0] - place.top;
+          virtualizer.scrollOffset = scroller.scrollTop;
+        }
+      }
+      hold = { item: place.item, top: place.top, row: true };
     }
 
     // Put a toggled thought's header back where the user clicked it, undoing
@@ -1701,6 +1735,21 @@
         var place = readerPlace();
         if (place.end) pendingEnd = true;
         else if (place.item) hold = place;
+      },
+      // #182. Where the reader is, for a page that saves it across a reload:
+      // { end: true } while following the end, else { item, top } for the
+      // row at the top edge (see readerPlace), or { end: false } when no
+      // mounted row qualifies.
+      readerAnchor: function (usable) {
+        return readerPlace(usable);
+      },
+      // #182. Puts `item`'s row `top` px below the top edge on the next pass.
+      // Like anchorReader, the write happens inside the pass, so virtual-core's
+      // own corrections are not applied a second time on top of it.
+      restorePlace: function (item, top) {
+        if (!item || typeof top !== 'number' || !isFinite(top)) return;
+        pendingPlace = { item: item, top: top };
+        schedule();
       },
       isNearBottom: function () {
         return nearBottom;

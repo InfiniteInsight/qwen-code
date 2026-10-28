@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="qwen-rc">
+  <!-- The installed-app icon (#182). Drawn as strokes rather than <text>, so
+       the monogram does not depend on whichever fonts the launcher has. -->
+  <rect width="512" height="512" rx="96" fill="#0d1117"/>
+  <g fill="none" stroke="#e6edf3" stroke-width="44" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M116 166 V322"/>
+    <path d="M116 232 Q116 166 186 166"/>
+    <path d="M397 196 A82 82 0 1 0 397 292"/>
+  </g>
+  <path d="M140 378 H372" stroke="#1f6feb" stroke-width="20" stroke-linecap="round"/>
+</svg>

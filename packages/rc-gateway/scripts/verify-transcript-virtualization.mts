@@ -14317,6 +14317,483 @@ PAGE_SCENARIOS.push({
   });
 }
 
+// #182. On a phone the browser evicts a background tab within minutes, so a
+// return to the app is a cold load. These hold that what the reader set on the
+// page survives one, and that the page can be installed.
+{
+  // Reloads the page and waits for it to be back on a conversation with the
+  // replay drawn, which is read as the model holding as many rows as it did
+  // before. Not waitForFrame: the restore sets lastSeenEventId to the saved
+  // cursor before the replay starts, so the last id is "seen" at once.
+  const reloadAndRestore = async (page: Page, rows: number): Promise<void> => {
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(`typeof startWatch === 'function'`);
+    await page.waitForFunction(`watchedSessionId !== null`);
+    await page.waitForFunction(`transcriptModel.items.length >= ${rows}`, null, {
+      timeout: 30_000,
+    });
+  };
+  const rowCount = (page: Page) =>
+    page.evaluate(`transcriptModel.items.length`) as Promise<number>;
+  // Three frames, so whatever the last event queued (a fit, a restore, a
+  // render pass) has run before the page is read.
+  const frames3 = (page: Page) =>
+    page.evaluate(
+      'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))))',
+    );
+
+  // The idle switch is held by the gateway, which the harness boots with no
+  // idle runtime, so it reports the switch unavailable. A route plays the
+  // gateway instead, and forgets the switch across the reload the way a
+  // gateway restart does: that is the case the page's saved state is for.
+  let p133IdleOn = false;
+  PAGE_SCENARIOS.push({
+    name: 'P133 every setting the page keeps comes back after a reload, and the daemon’s own state still wins where it has one',
+    frames: () =>
+      new Frames()
+        .ev('client_joined')
+        .user('p133 question')
+        .thought('p133 thinking about it. ')
+        .upd({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-p133',
+          title: 'read_file',
+          status: 'completed',
+          rawInput: { path: '/p133/file.ts' },
+        })
+        .asst('p133 answer')
+        .done().list,
+    before: async (page) => {
+      await page.route('**/session/*/idle-suggest-toggle', async (route) => {
+        const req = route.request();
+        if (req.method() === 'POST') {
+          const body = req.postDataJSON() as { enabled?: unknown } | null;
+          p133IdleOn = body?.enabled === true;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            sessionId: 'p133',
+            available: true,
+            enabled: p133IdleOn,
+            globalEnabled: true,
+            maxSuggestionsPerHour: 6,
+            remainingThisHour: 6,
+          }),
+        });
+      });
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 6, 30_000);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+
+      // The folder, planted under the harness root for the reason P129 gives.
+      const root = harnessRuntimeRoot();
+      const realHome = join(homedir(), '.qwen');
+      expect(
+        root !== realHome && !root.startsWith(realHome + '/'),
+        `the harness root ${root} sits inside the real ${realHome}, so planting a folder there would write into a live home`,
+      );
+      const folder = join(root, 'p133-folder');
+      mkdirSync(folder, { recursive: true });
+      try {
+        await page.evaluate(`browseTo(${JSON.stringify(folder)})`);
+        await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(folder)}`);
+
+        // Each control changed the way the reader changes it: a real event on
+        // the real element, so the page's own listener is what saves it.
+        await page.evaluate(String.raw`(() => {
+          const flt = document.querySelector('#rail .flt input');
+          flt.value = 'P133 Filter';
+          flt.dispatchEvent(new Event('input', { bubbles: true }));
+          const lang = document.getElementById('dictate-lang');
+          lang.value = 'fr-FR';
+          lang.dispatchEvent(new Event('change', { bubbles: true }));
+          const auto = document.getElementById('dictate-autosend');
+          auto.checked = true;
+          auto.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+
+        await page.waitForSelector('#footer-mode');
+        await page.check('#footer-mode-persist');
+        await page.selectOption('#footer-mode', 'yolo');
+        await page.waitForFunction(
+          `(JSON.parse(localStorage.getItem('qwen-rc:ui:approval-mode') || '{}'))[watchedSessionId] === 'yolo'`,
+        );
+
+        await page.waitForFunction(
+          `!document.getElementById('idle-suggest-toggle').disabled`,
+        );
+        await page.evaluate(String.raw`(() => {
+          const cb = document.getElementById('idle-suggest-toggle');
+          cb.checked = true;
+          cb.dispatchEvent(new Event('change'));
+        })()`);
+        await page.waitForFunction(
+          `(JSON.parse(localStorage.getItem('qwen-rc:ui:idle-suggest') || '{}'))[watchedSessionId] === true`,
+        );
+
+        // A thought and a tool row opened by tapping them.
+        await page.click('#transcript .thought-head');
+        await page.click('#transcript .tool-head');
+        const opened = (await page.evaluate(
+          `transcriptModel.items.filter((i) => i.kind === 'thought' || i.kind === 'tool').map((i) => i.kind + ':' + !!i.expanded)`,
+        )) as string[];
+        expect(
+          opened.includes('thought:true') && opened.includes('tool:true'),
+          `tapping did not open the rows before the reload (${JSON.stringify(opened)})`,
+        );
+
+        // Operations pinned under Chat, then Settings opened, last.
+        await page.check('.pin-cb[data-pin="ops"]');
+        await page.click('.tab[data-tab="settings"]');
+
+        // The gateway forgets the idle switch, as a restart would.
+        p133IdleOn = false;
+        await reloadAndRestore(page, await rowCount(page));
+        await page.waitForSelector('#footer-mode', { state: 'attached' });
+        await page.waitForFunction(
+          `!document.getElementById('idle-suggest-toggle').disabled`,
+        );
+        await page.waitForFunction(`curDirPath === ${JSON.stringify(folder)}`);
+        await frames3(page);
+
+        const got = (await page.evaluate(String.raw`(() => {
+          const v = (id) => document.getElementById(id);
+          const active = document.querySelector('.tab.active');
+          return {
+            tab: active ? active.dataset.tab : null,
+            settingsShown: v('pane-settings').classList.contains('active'),
+            opsPinned: document.querySelector('.pin-cb[data-pin="ops"]').checked,
+            pinnedSections: document.querySelectorAll('#pin-area > details').length,
+            lang: v('dictate-lang').value,
+            autosend: v('dictate-autosend').checked,
+            mode: v('footer-mode').value,
+            persist: v('footer-mode-persist').checked,
+            modeNote: v('footer-mode-note').textContent,
+            idleChecked: v('idle-suggest-toggle').checked,
+            idleStatus: v('idle-suggest-status').textContent,
+            folder: curDirPath,
+            railInput: document.querySelector('#rail .flt input').value,
+            railFilter,
+            rows: transcriptModel.items
+              .filter((i) => i.kind === 'thought' || i.kind === 'tool')
+              .map((i) => i.kind + ':' + !!i.expanded),
+          };
+        })()`)) as Record<string, unknown>;
+
+        const fails: string[] = [];
+        const want = (ok: boolean, what: string) => {
+          if (!ok) fails.push(what);
+        };
+        want(got['tab'] === 'settings' && got['settingsShown'] === true, `tab ${got['tab']}`);
+        want(got['opsPinned'] === true && got['pinnedSections'] === 1, `ops pinned ${got['opsPinned']} with ${got['pinnedSections']} pinned sections`);
+        want(got['lang'] === 'fr-FR', `dictation language ${got['lang']}`);
+        want(got['autosend'] === true, 'auto-send unticked');
+        // The daemon still reports default, and the select shows what the
+        // session is in; the reader's last choice is named beside it.
+        want(got['mode'] === 'default', `the mode select shows ${got['mode']}, not the daemon's default`);
+        want(got['persist'] === true, 'the persist box came back unticked');
+        want(String(got['modeNote']).includes('YOLO'), `the drawer does not name the mode last set here (${JSON.stringify(got['modeNote'])})`);
+        want(got['idleChecked'] === false, 'the idle box shows the saved state over the gateway’s');
+        want(String(got['idleStatus']).includes('last set here: on'), `the idle line does not name the state last set here (${JSON.stringify(got['idleStatus'])})`);
+        want(got['folder'] === folder, `the folder is ${got['folder']}`);
+        want(got['railInput'] === 'P133 Filter' && got['railFilter'] === 'p133 filter', `the rail filter is ${JSON.stringify(got['railInput'])} / ${JSON.stringify(got['railFilter'])}`);
+        const rows = got['rows'] as string[];
+        want(rows.includes('thought:true') && rows.includes('tool:true'), `the opened rows came back closed (${JSON.stringify(rows)})`);
+        expect(fails.length === 0, `not restored: ${fails.join('; ')}`);
+
+        // And they are open on screen, not only in the model.
+        await page.click('.tab[data-tab="chat"]');
+        await settlePage(page);
+        const drawn = (await page.evaluate(String.raw`(() => {
+          const body = document.querySelector('#transcript .thought-body');
+          return {
+            thought: !!body && !body.hidden && body.getClientRects().length > 0,
+            tool: !!document.querySelector('#transcript .tool-detail'),
+          };
+        })()`)) as { thought: boolean; tool: boolean };
+        expect(drawn.thought && drawn.tool, `the restored rows are not drawn open (${JSON.stringify(drawn)})`);
+        return 'tab, pin, dictation language and auto-send, persist box, folder, rail filter and two opened rows came back; the mode select and the idle box show the daemon and gateway state and name the one last set here';
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P134 a draft survives a reload, stays with the conversation it was typed for, and goes when it is sent',
+    run: async ({ page, viewer }) => {
+      const A = viewer.sessionId;
+      const B = '22222222-3333-4444-5555-666666666666';
+      const draft = () => page.inputValue('#prompt');
+      const stored = () =>
+        page.evaluate(
+          `JSON.parse(localStorage.getItem('qwen-rc:ui:drafts') || '{}')`,
+        ) as Promise<Record<string, string>>;
+      const switchTo = async (id: string) => {
+        await page.evaluate(
+          `lastSeenEventId = null; void startWatch(${JSON.stringify(id)});`,
+        );
+        await page.waitForFunction(`watchedSessionId === ${JSON.stringify(id)}`);
+      };
+
+      await watch(page, A);
+      await waitForFrame(page, 1, 30_000);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // Typed, so the page sees the input events a reader's keys make.
+      await page.click('#prompt');
+      await page.keyboard.type('half a thought for A');
+      await reloadAndRestore(page, 0);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const back = await draft();
+      expect(back === 'half a thought for A', `the draft did not survive the reload (${JSON.stringify(back)})`);
+
+      // Another conversation has its own composer, and coming back finds the
+      // first one's text where it was left.
+      await switchTo(B);
+      const onB = await draft();
+      expect(onB === '', `conversation B opened with A's draft in the composer (${JSON.stringify(onB)})`);
+      await page.click('#prompt');
+      await page.keyboard.type('a note for B');
+      await switchTo(A);
+      const onA = await draft();
+      expect(onA === 'half a thought for A', `switching back to A did not bring its draft back (${JSON.stringify(onA)})`);
+
+      // Sent: gone from the composer and from storage, so a reload brings
+      // nothing back to send twice. B's draft is untouched.
+      await page.click('#send');
+      await page.waitForFunction(`document.getElementById('prompt').value === ''`);
+      const after = await stored();
+      expect(!(A in after), `A's draft is still stored after the send (${JSON.stringify(after)})`);
+      expect(after[B] === 'a note for B', `B's draft was lost (${JSON.stringify(after)})`);
+      await reloadAndRestore(page, 0);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const reloaded = await draft();
+      expect(reloaded === '', `the sent text came back as a draft after a reload (${JSON.stringify(reloaded)})`);
+      return 'a typed draft came back after a reload, B opened empty and kept its own, A got its own back, and a send cleared it so a reload brought nothing back';
+    },
+  });
+
+  // The row at the transcript's top edge: its place in the model's list, its
+  // offset from the edge, and enough of it to name in a failure.
+  type P135Top = { index: number; y: number; kind: string; text: string } | null;
+  const readTop = (page: Page) =>
+    page.evaluate(String.raw`(() => {
+      const s = document.getElementById('transcript');
+      const edge = s.getBoundingClientRect().top;
+      let best = null;
+      s.querySelectorAll('.vrow').forEach((r) => {
+        const b = r.getBoundingClientRect();
+        if (b.height > 0 && b.bottom - edge > 1 && (!best || b.top - edge < best.y)) {
+          best = { id: Number(r.getAttribute('data-id')), y: b.top - edge };
+        }
+      });
+      if (!best) return null;
+      const items = transcriptModel.items;
+      const index = items.findIndex((i) => i.id === best.id);
+      const it = items[index] || {};
+      return { index, y: Math.round(best.y), kind: it.kind || '', text: String(it.text || it.label || '').slice(0, 48) };
+    })()`) as Promise<P135Top>;
+  const P135_TURNS = 80;
+  PAGE_SCENARIOS.push({
+    name: 'P135 a reader scrolled up in a long transcript lands on the same row after a reload, and one at the end stays at the end',
+    frames: () => replayFrames(P135_TURNS, 2),
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const last = P135_TURNS * 7;
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, last, 60_000);
+      await settlePage(page, 300);
+
+      const rows = await rowCount(page);
+      await page.evaluate(
+        `(() => { const s = document.getElementById('transcript'); s.scrollTop = Math.round(s.scrollHeight * 0.4); })()`,
+      );
+      await settlePage(page, 400);
+      const before = await readTop(page);
+      expect(before !== null && before.index > 0, `no row at the top edge after scrolling up (${JSON.stringify(before)})`);
+      // The save waits for the scrolling to stop.
+      await page.waitForFunction(
+        `!!(JSON.parse(localStorage.getItem('qwen-rc:ui:place') || '{}'))[watchedSessionId]`,
+        null,
+        { timeout: 5_000 },
+      );
+
+      await reloadAndRestore(page, rows);
+      // Put back once the replay goes quiet, then measured once it settles.
+      await page
+        .waitForFunction(`transcriptView !== null && !transcriptView.isNearBottom()`, null, {
+          timeout: 10_000,
+        })
+        .catch(() => undefined);
+      await settlePage(page, 400);
+      const after = await readTop(page);
+      expect(
+        after !== null && before !== null && Math.abs(after.index - before!.index) <= 1,
+        `the reload landed on row ${after?.index} (${JSON.stringify(after)}), not within one row of ${before?.index} (${JSON.stringify(before)})`,
+      );
+
+      // A reader following the end keeps no place, so a reload lands at the
+      // end as every load did before.
+      await page.evaluate(
+        `(() => { const s = document.getElementById('transcript'); s.scrollTop = s.scrollHeight; })()`,
+      );
+      await settlePage(page, 400);
+      await page.waitForFunction(
+        `!(JSON.parse(localStorage.getItem('qwen-rc:ui:place') || '{}'))[watchedSessionId]`,
+        null,
+        { timeout: 5_000 },
+      );
+      await reloadAndRestore(page, rows);
+      await settlePage(page, 400);
+      const end = (await page.evaluate(`__pg.gap()`)) as number;
+      expect(end <= 2, `a reader at the end came back ${end}px short of it`);
+      return `row ${before!.index} (${before!.kind}, ${before!.y}px from the edge) came back as row ${after!.index} (${after!.y}px) at 390x844 over ${P135_TURNS} turns; at the end it stayed at the end`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P136 the web app manifest is served with its own type, installs standalone, and the page links it',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const at = `${viewer.url}/ui/manifest.webmanifest`;
+      const res = await fetch(at);
+      const type = res.headers.get('content-type') ?? '';
+      expect(res.status === 200, `GET /ui/manifest.webmanifest answered ${res.status}`);
+      expect(type.startsWith('application/manifest+json'), `the manifest is served as ${JSON.stringify(type)}`);
+      const m = (await res.json()) as {
+        name?: string;
+        short_name?: string;
+        display?: string;
+        start_url?: string;
+        scope?: string;
+        theme_color?: string;
+        background_color?: string;
+        icons?: { src?: string; sizes?: string; type?: string }[];
+      };
+      expect(m.display === 'standalone', `display is ${JSON.stringify(m.display)}`);
+      expect(m.name === 'qwen-rc' && m.short_name === 'qwen-rc', `named ${JSON.stringify([m.name, m.short_name])}`);
+      expect(m.start_url === '/ui/' && m.scope === '/ui/', `start_url ${m.start_url}, scope ${m.scope}`);
+      expect(m.theme_color === '#0d1117' && m.background_color === '#0d1117', `colours ${m.theme_color} / ${m.background_color}`);
+      const icon = (m.icons ?? []).find((i) => i.type === 'image/svg+xml' && i.sizes === 'any');
+      expect(!!icon && !!icon.src, `no scalable icon in ${JSON.stringify(m.icons)}`);
+      const iconRes = await fetch(new URL(icon!.src!, at));
+      const iconType = iconRes.headers.get('content-type') ?? '';
+      expect(iconRes.status === 200 && iconType.startsWith('image/svg+xml'), `the icon answered ${iconRes.status} as ${iconType}`);
+      expect((await iconRes.text()).includes('<svg'), 'the icon is not an SVG document');
+
+      const head = (await page.evaluate(String.raw`(() => {
+        const meta = (n) => {
+          const el = document.querySelector('meta[name="' + n + '"]');
+          return el ? el.getAttribute('content') : null;
+        };
+        const link = document.querySelector('link[rel="manifest"]');
+        return {
+          manifest: link ? link.href : null,
+          theme: meta('theme-color'),
+          viewport: meta('viewport'),
+          capable: meta('apple-mobile-web-app-capable'),
+          statusBar: meta('apple-mobile-web-app-status-bar-style'),
+        };
+      })()`)) as Record<string, string | null>;
+      expect(head['manifest'] === at, `the page links ${head['manifest']}, not ${at}`);
+      expect(head['theme'] === '#0d1117', `theme-color is ${head['theme']}`);
+      expect(String(head['viewport']).includes('viewport-fit=cover'), `the viewport is ${head['viewport']}`);
+      expect(head['capable'] === 'yes' && head['statusBar'] === 'black-translucent', `apple metas ${head['capable']} / ${head['statusBar']}`);
+      return `${type}, display standalone, start_url and scope /ui/, an SVG icon served as ${iconType}; the page links it with theme-color, viewport-fit=cover and the apple metas`;
+    },
+  });
+
+  // No headless browser raises a keyboard, so a stand-in visual viewport is
+  // installed before the page's script runs (visualViewport is [Replaceable])
+  // and told to shrink by a phone keyboard's height. The page's own handler
+  // does the rest.
+  const FAKE_VIEWPORT_JS = String.raw`
+(function () {
+  var fake = new EventTarget();
+  var covered = 0;
+  Object.defineProperties(fake, {
+    height: { get: function () { return window.innerHeight - covered; } },
+    width: { get: function () { return window.innerWidth; } },
+    offsetTop: { value: 0 },
+    offsetLeft: { value: 0 },
+    pageTop: { get: function () { return window.scrollY; } },
+    pageLeft: { value: 0 },
+    scale: { value: 1 },
+  });
+  window.__kb = function (px) {
+    covered = px;
+    fake.dispatchEvent(new Event('resize'));
+  };
+  try { window.visualViewport = fake; } catch (e) { /* defined below */ }
+  if (window.visualViewport !== fake) {
+    Object.defineProperty(window, 'visualViewport', { value: fake, configurable: true });
+  }
+})();
+`;
+  PAGE_SCENARIOS.push({
+    name: 'P137 with the keyboard up the composer sits above it at 390, and the layout comes back when it goes',
+    frames: () => {
+      const f = new Frames().ev('client_joined');
+      for (let k = 0; k < 14; k++) {
+        f.user(`question ${k}: why does the nightly build fail on the arm64 runner?`);
+        f.asst(`answer ${k}: the arm64 job pins an image without the native toolchain.`);
+        f.done();
+      }
+      return f.list;
+    },
+    before: async (page) => {
+      await page.addInitScript({ content: FAKE_VIEWPORT_JS });
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 43, 30_000);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await settlePage(page);
+      const KEYS = 336; // an iPhone keyboard with its suggestion bar
+      const read = () =>
+        page.evaluate(String.raw`(() => ({
+          open: document.documentElement.classList.contains('kb-open'),
+          appH: document.documentElement.style.getPropertyValue('--app-h'),
+          composerBottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
+          sendBottom: Math.round(document.getElementById('send').getBoundingClientRect().bottom),
+          cap: document.getElementById('transcript').style.getPropertyValue('--tx-cap'),
+          visible: window.visualViewport.offsetTop + window.visualViewport.height,
+        }))()`) as Promise<{ open: boolean; appH: string; composerBottom: number; sendBottom: number; cap: string; visible: number }>;
+      const rest = await read();
+      expect(!rest.open && rest.composerBottom <= 844, `before the keyboard: ${JSON.stringify(rest)}`);
+
+      await page.focus('#prompt');
+      await page.evaluate(`window.__kb(${KEYS})`);
+      await page.waitForTimeout(150);
+      await frames3(page);
+      const up = await read();
+      expect(up.open && up.appH === `${844 - KEYS}px`, `the shell did not take the visible height (${JSON.stringify(up)})`);
+      expect(
+        up.composerBottom <= up.visible + 1 && up.sendBottom <= up.visible + 1,
+        `the composer's bottom is at ${up.composerBottom}px and Send at ${up.sendBottom}px, under the keyboard's top edge at ${up.visible}px`,
+      );
+
+      await page.evaluate(`window.__kb(0)`);
+      await page.waitForTimeout(150);
+      await frames3(page);
+      const down = await read();
+      expect(!down.open && down.appH === '', `the keyboard went and the shell kept its height (${JSON.stringify(down)})`);
+      expect(
+        down.cap === rest.cap && Math.abs(down.composerBottom - rest.composerBottom) <= 1,
+        `the layout did not come back: transcript ${rest.cap} -> ${down.cap}, composer ${rest.composerBottom} -> ${down.composerBottom}`,
+      );
+      return `keyboard ${KEYS}px: shell ${up.appH}, transcript ${rest.cap} -> ${up.cap}, composer bottom ${rest.composerBottom} -> ${up.composerBottom} (Send ${up.sendBottom}) under a ${up.visible}px visible height; back to ${down.cap} / ${down.composerBottom} when it went`;
+    },
+  });
+}
+
 /** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
 function pgParseRgb(css: string): { r: number; g: number; b: number; a: number } | null {
   const m = /^rgba?\(([^)]+)\)$/.exec(css.trim());
