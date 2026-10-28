@@ -991,8 +991,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
 
   // Load the policy fail-closed, layered over the same workspace cwd resolved
   // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
-  // <cwd>/.qwen/policy.yaml (workspace rules prepended → override at equal
-  // specificity). Absent user file → default-prompt; a MALFORMED user file still
+  // <cwd>/.qwen/policy.yaml (the workspace layer can only narrow: its allow
+  // rules and defaults are logged and dropped, and its deny/prompt decision
+  // wins only when stricter; issue #156). Absent user file → default-prompt;
+  // a MALFORMED user file still
   // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
   // malformed workspace file is logged + ignored (fail-closed: keep user policy).
   const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');

@@ -315,10 +315,16 @@ Whenever a `deny` must beat a broader `allow`, give the `deny` a higher
 out-rank a `tool:` rule.
 
 For a per-project override, create `<workspaceCwd>/.qwen/policy.yaml` in the
-directory the `qwen serve` daemon is running against. Its rules are
-prepended ahead of the user-scope rules, so a workspace rule wins any tie in
-specificity against a user rule; its `defaults` block, if present, is
-ignored — only the user-scope file controls the fallback action.
+directory the `qwen serve` daemon is running against. A workspace file can
+only make the policy stricter, because it can arrive with a cloned repository
+or be written by the model itself. It may add `deny` and `prompt` rules. Its
+`allow` rules and its `defaults` block are ignored, and the gateway logs
+each one it ignores. The two files are decided separately, and the workspace
+decision applies only when it is stricter than the user one (`deny` beats
+`prompt`, which beats `allow`). So a workspace `deny` or `prompt` tightens a
+user `allow` or the user default, whatever the priorities. A workspace
+`prompt` never softens a user `deny`, and no workspace `priority` outranks a
+user rule. `priority` only orders rules within the same file.
 
 `originScope` and `sessionTag` are accepted by the schema but are never
 populated by the running gateway, so a rule that matches on either of them
@@ -330,6 +336,11 @@ newly-effective-rule advisories described above:
 ```bash
 npx qwen-rc policy lint ~/.qwen/rc/policy.yaml
 ```
+
+Linting a workspace file (`<dir>/.qwen/policy.yaml`) also fails, with exit
+code 1, when the file contains an `allow` rule or a `defaults` block. Each
+part the gateway would ignore is listed, so check a cloned repository's file
+this way before you run the gateway on it.
 
 Dry-run the effective, layered policy against a single simulated call,
 without a running gateway:

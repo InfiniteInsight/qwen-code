@@ -12,6 +12,7 @@ import {
   type QuotaOracle,
   type ToolCallContext,
 } from './evaluator.js';
+import { formatExplanation } from './explain.js';
 
 const NOW = new Date('2026-06-11T12:00:00Z');
 
@@ -337,5 +338,84 @@ describe('explainPolicy — condition reasons', () => {
     expect(trace[0].downgraded).toBe(false);
     // The quota WAS consulted (oracle, room) → no dry-run caveat flag.
     expect(trace[0].quotaNotEvaluated).toBeUndefined();
+  });
+});
+
+describe('explainPolicy: layered (workspace) policy, issue #156', () => {
+  // A merged policy: the workspace rule carries a higher priority than the
+  // user rule, yet only tightens.
+  const layered: Policy = {
+    defaults: { action: 'prompt', requireScope: 'approve' },
+    rules: [
+      {
+        id: 'ws-prompt-exec',
+        match: { tool: 'execute' },
+        action: 'prompt',
+        priority: 1000,
+        layer: 'workspace',
+      },
+      {
+        id: 'ws-deny-fetch',
+        match: { tool: 'fetch' },
+        action: 'deny',
+        layer: 'workspace',
+      },
+      {
+        id: 'user-deny-exec',
+        match: { tool: 'execute' },
+        action: 'deny',
+        priority: 100,
+      },
+      { id: 'user-allow-fetch', match: { tool: 'fetch' }, action: 'allow' },
+    ],
+  };
+
+  it('decision matches evaluate(): the user deny holds over a higher-priority workspace prompt', () => {
+    const exp = explainPolicy(layered, { tool: 'execute' }, NOW);
+    expect(exp.decision).toEqual(evaluate(layered, { tool: 'execute' }, NOW));
+    expect(exp.decision).toMatchObject({
+      action: 'deny',
+      ruleId: 'user-deny-exec',
+    });
+  });
+
+  it('decision matches evaluate(): a workspace deny tightens a user allow', () => {
+    const exp = explainPolicy(layered, { tool: 'fetch' }, NOW);
+    expect(exp.decision).toEqual(evaluate(layered, { tool: 'fetch' }, NOW));
+    expect(exp.decision).toMatchObject({
+      action: 'deny',
+      ruleId: 'ws-deny-fetch',
+    });
+  });
+
+  it('traces the user layer first, then the workspace layer, each with its own winner', () => {
+    const { trace } = explainPolicy(layered, { tool: 'execute' }, NOW);
+    expect(trace.map((t) => [t.id, t.layer, t.status])).toEqual([
+      ['user-deny-exec', undefined, 'matched'],
+      ['user-allow-fetch', undefined, 'not-reached'],
+      ['ws-prompt-exec', 'workspace', 'matched'],
+      ['ws-deny-fetch', 'workspace', 'not-reached'],
+    ]);
+  });
+
+  it('formatExplanation labels workspace entries and says the layer only tightens', () => {
+    const out = formatExplanation(
+      explainPolicy(layered, { tool: 'execute' }, NOW),
+    );
+    expect(out).toContain('MATCHED   ws-prompt-exec -> prompt [workspace]');
+    expect(out).toContain('MATCHED   user-deny-exec -> deny\n');
+    expect(out).toMatch(/workspace rules can only tighten/i);
+    expect(out).toContain('decision: deny (source: rule user-deny-exec)');
+  });
+
+  it('a user-only policy renders no workspace note', () => {
+    const out = formatExplanation(
+      explainPolicy(
+        policy([{ id: 'a', match: { tool: 'bash' }, action: 'allow' }]),
+        { tool: 'bash' },
+        NOW,
+      ),
+    );
+    expect(out).not.toMatch(/workspace/i);
   });
 });
