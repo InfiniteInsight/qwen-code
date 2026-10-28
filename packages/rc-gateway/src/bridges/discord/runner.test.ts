@@ -36,7 +36,12 @@ afterEach(async () => {
 });
 
 function harness(
-  opts: { sleep?: (ms: number, s: AbortSignal) => Promise<void> } = {},
+  opts: {
+    sleep?: (ms: number, s: AbortSignal) => Promise<void>;
+    /** Extra or replacement BridgeClient methods. */
+    client?: Record<string, unknown>;
+    log?: (msg: string) => void;
+  } = {},
 ) {
   const created: Array<{
     channelId: string;
@@ -97,6 +102,7 @@ function harness(
     subscribeEvents: async (sessionId: string) => {
       subscribed.push(sessionId);
     },
+    ...opts.client,
   } as unknown as BridgeClient;
 
   const bridge = new DiscordBridge({
@@ -112,6 +118,7 @@ function harness(
     // immediately, so without this the reconnect loop would spin). The reconnect
     // test overrides this to exercise re-subscription.
     sleep: opts.sleep ?? (() => new Promise<void>(() => {})),
+    ...(opts.log ? { log: opts.log } : {}),
     setTimer: (_ms, fn) => {
       timers.push(fn);
       return () => {
@@ -368,5 +375,70 @@ describe('DiscordBridge runner — session_update streaming', () => {
     // back in the channel (fresh turn), no new thread yet
     expect(h.created[h.created.length - 1].channelId).toBe('chan_1');
     expect(h.threadsMade).toHaveLength(1);
+  });
+});
+
+// #155: each gateway handler fired `void handle...()`, so a rejected
+// BridgeClient call (its fetch failed) was an unhandled rejection that exited
+// the in-process bridge, which is the gateway.
+describe('DiscordBridge runner, a failed dispatch', () => {
+  function trackUnhandledRejections() {
+    const seen: unknown[] = [];
+    const onRejection = (reason: unknown) => seen.push(reason);
+    process.on('unhandledRejection', onRejection);
+    return { seen, stop: () => process.off('unhandledRejection', onRejection) };
+  }
+  const fetchFailed = async () => {
+    throw new TypeError('fetch failed');
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  it('logs a rejected message, slash command and button instead of crashing', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const logs: string[] = [];
+    const h = harness({
+      client: {
+        sendPrompt: fetchFailed,
+        redeemInvite: fetchFailed,
+        vote: fetchFailed,
+      },
+      log: (m) => logs.push(m),
+    });
+    await h.bridge.start(new AbortController().signal);
+    const tracker = trackUnhandledRejections();
+    try {
+      h.handlers()!.onMessage({
+        channelId: 'chan_1',
+        authorId: 'u1',
+        isBot: false,
+        content: 'run the tests',
+      });
+      h.handlers()!.onSlash({
+        interactionId: 'int_1',
+        interactionToken: 'tok',
+        channelId: 'chan_9',
+        guildId: 'g1',
+        userId: 'u1',
+        name: 'attach',
+        arg: 'inv_new',
+      });
+      h.handlers()!.onButton({
+        interactionId: 'int_2',
+        interactionToken: 'tok',
+        channelId: 'chan_1',
+        userId: 'u1',
+        customId: 'vote:approve:req_1',
+      });
+      await waitFor(
+        () => logs.filter((l) => l.includes('fetch failed')).length === 3,
+      );
+      await settle();
+      expect(tracker.seen).toEqual([]);
+      expect(logs.join('\n')).toMatch(/message dispatch failed/);
+      expect(logs.join('\n')).toMatch(/slash command dispatch failed/);
+      expect(logs.join('\n')).toMatch(/button dispatch failed/);
+    } finally {
+      tracker.stop();
+    }
   });
 });

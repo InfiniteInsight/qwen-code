@@ -367,12 +367,36 @@ export class MatrixBridge {
       // (power levels, encryption, invites) is applied above regardless.
       if (!initial) {
         for (const msg of ex.messages)
-          await handleMessage(msg, this.dispatchDeps());
+          await this.dispatchSafely('message', () =>
+            handleMessage(msg, this.dispatchDeps()),
+          );
         for (const reaction of ex.reactions)
-          await handleReaction(reaction, this.dispatchDeps());
+          await this.dispatchSafely('reaction', () =>
+            handleReaction(reaction, this.dispatchDeps()),
+          );
       }
       // A !qwen attach this batch may have bound a new session → pick it up.
       this.reconcileSubscriptions(signal);
+    }
+  }
+
+  /**
+   * Run one event's dispatch; a failure is logged and dropped so the sync loop
+   * moves on to the next event (#155). Without this, one rejected gateway call
+   * (BridgeClient rejects when its fetch fails) ended the loop for good while
+   * the heartbeat and SSE loops kept the bridge looking alive. Matches the
+   * Telegram poll loop, whose handleUpdate swallows per update.
+   */
+  private async dispatchSafely(
+    kind: 'message' | 'reaction',
+    run: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await run();
+    } catch (err) {
+      this.log(
+        `matrix bridge: ${kind} dispatch failed: ${(err as Error)?.message ?? String(err)}`,
+      );
     }
   }
 

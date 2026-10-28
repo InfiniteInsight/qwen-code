@@ -1,0 +1,101 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * #155: the adapter's SDK event handlers fired `void` dispatches, so a
+ * rejected onMessage/onReaction (BridgeClient rejects when its fetch fails)
+ * was an unhandled rejection that exited the process. The optional SDK is not
+ * installed on Node 22, so both modules are mocked: the test drives the
+ * handlers the adapter registers on the (fake) MatrixClient.
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import type { EventEmitter } from 'node:events';
+
+// vi.mock factories are hoisted above the imports, so shared state comes from
+// vi.hoisted and the factory imports what it needs itself.
+const { clients } = vi.hoisted(() => ({ clients: [] as EventEmitter[] }));
+
+vi.mock('@vector-im/matrix-bot-sdk', async () => {
+  const { EventEmitter } = await import('node:events');
+  class MatrixClient extends EventEmitter {
+    crypto = { isReady: true, prepare: async () => {} };
+    constructor() {
+      super();
+      clients.push(this);
+    }
+    async getRoomStateEvent() {
+      return { users: {}, users_default: 0 };
+    }
+  }
+  return {
+    MatrixClient,
+    RustSdkCryptoStorageProvider: class {},
+    SimpleFsStorageProvider: class {},
+    AutojoinRoomsMixin: { setupOnClient: () => {} },
+  };
+});
+vi.mock('@matrix-org/matrix-sdk-crypto-nodejs', () => ({
+  StoreType: { Sqlite: 0 },
+}));
+
+const { createMatrixCryptoAdapter } = await import('./cryptoAdapter.js');
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000) {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+function trackUnhandledRejections() {
+  const seen: unknown[] = [];
+  const onRejection = (reason: unknown) => seen.push(reason);
+  process.on('unhandledRejection', onRejection);
+  return { seen, stop: () => process.off('unhandledRejection', onRejection) };
+}
+
+describe('createMatrixCryptoAdapter, a failed dispatch', () => {
+  it('logs a rejected message and reaction dispatch instead of crashing', async () => {
+    const logs: string[] = [];
+    const adapter = await createMatrixCryptoAdapter({
+      homeserverUrl: 'https://hs.example.com',
+      accessToken: 'tok',
+      stateDir: '/nonexistent-state-dir',
+      onMessage: async () => {
+        throw new TypeError('fetch failed');
+      },
+      onReaction: async () => {
+        throw new TypeError('fetch failed');
+      },
+      log: (m) => logs.push(m),
+    });
+    expect(adapter).not.toBeNull();
+    const client = clients.at(-1)!;
+    const tracker = trackUnhandledRejections();
+    try {
+      client.emit('room.message', '!r:h', {
+        sender: '@alice:h',
+        content: { body: 'run the tests' },
+      });
+      client.emit('room.event', '!r:h', {
+        type: 'm.reaction',
+        sender: '@alice:h',
+        content: { 'm.relates_to': { event_id: '$e1', key: '👍' } },
+      });
+      await waitFor(
+        () => logs.filter((l) => l.includes('fetch failed')).length === 2,
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      expect(tracker.seen).toEqual([]);
+      expect(logs.join('\n')).toMatch(/message dispatch failed/);
+      expect(logs.join('\n')).toMatch(/reaction dispatch failed/);
+    } finally {
+      tracker.stop();
+    }
+  });
+});
