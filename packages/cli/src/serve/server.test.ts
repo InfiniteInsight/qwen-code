@@ -39623,11 +39623,20 @@ describe('GET /session/:id/events (SSE)', () => {
     );
 
     release.resolve();
-    const res = await responsePromise;
-    expect(res).toBeInstanceOf(Error);
-    // `res.destroy()` tears the client socket down before the server-side
-    // 'close' listener runs, so the active-stream counter settles a tick
-    // after the request promise rejects.
+    const settled = await responsePromise;
+    // The terminal frame has to survive the eviction, which means the
+    // response is ended with it rather than destroyed in the same tick it was
+    // written. A rejected request here is the bug: the socket died before
+    // Node flushed the buffered write, so the frame never reached the wire and
+    // the client could not tell an eviction from a crash.
+    if (settled instanceof Error) {
+      throw new Error(
+        `the eviction response died mid stream instead of ending with the ` +
+          `client_evicted frame: ${settled.message}`,
+      );
+    }
+    expect(settled.status).toBe(200);
+    expect(settled.text).toContain('event: client_evicted');
     await vi.waitFor(() => {
       expect(getActiveSseCount()).toBe(beforeActive);
     });
