@@ -5367,29 +5367,29 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
-    // #184: the mic is the Dictate pill behind the composer's +, and the tag
-    // rides beside it there, so the tools are opened before it is read.
-    await openTools(page);
-    const s = await page.evaluate(() => {
+    // #190: the tag left the + scroller for More > This phone > Dictation,
+    // beside the language and auto-send it governs, so that screen is
+    // opened before it is read.
+    await openPanel(page, 'dictation');
+    const s = (await page.evaluate(String.raw`(() => {
       const tag = document.getElementById('dictate-engine');
-      const mic = document.getElementById('dictate') as HTMLButtonElement;
+      const mic = document.getElementById('dictate');
+      const card = document.getElementById('dictation-prefs');
       return {
         tag: tag ? tag.textContent : null,
         shown: tag ? tag.getClientRects().length > 0 : false,
-        beside: tag
-          ? tag.previousElementSibling === mic
-          : false,
+        beside: !!tag && !!card && card.contains(tag) && card.contains(document.getElementById('dictate-lang')),
         disabled: mic ? mic.disabled : null,
       };
-    });
+    })()`)) as { tag: string | null; shown: boolean; beside: boolean; disabled: boolean | null };
     expect(
       s.tag === 'browser',
       `the tag reads ${JSON.stringify(s.tag)}, expected "browser"`,
     );
     expect(s.shown, 'the engine tag is not on screen, so it labels nothing');
-    expect(s.beside, 'the engine tag is not beside the mic it labels');
+    expect(s.beside, 'the engine tag is not in the Dictation card beside the language');
     expect(!s.disabled, 'the mic is disabled with an engine installed');
-    return 'engine installed: tag "browser" on screen beside a live mic';
+    return 'engine installed: tag "browser" on screen in the Dictation card, the mic live';
   },
 });
 
@@ -5409,21 +5409,18 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
-    await openTools(page); // #184: the mic and its tag are behind the +
-    const s = await page.evaluate(() => {
+    // #190: the tag is on More > This phone > Dictation, not behind the +.
+    await openPanel(page, 'dictation');
+    const s = (await page.evaluate(String.raw`(() => {
       const tag = document.getElementById('dictate-engine');
-      const mic = document.getElementById('dictate') as HTMLButtonElement;
+      const mic = document.getElementById('dictate');
       return {
         tag: tag ? tag.textContent : null,
         shown: tag ? tag.getClientRects().length > 0 : false,
         disabled: mic ? mic.disabled : null,
-        sr: !!(
-          (window as { SpeechRecognition?: unknown }).SpeechRecognition ||
-          (window as { webkitSpeechRecognition?: unknown })
-            .webkitSpeechRecognition
-        ),
+        sr: !!(window.SpeechRecognition || window.webkitSpeechRecognition),
       };
-    });
+    })()`)) as { tag: string | null; shown: boolean; disabled: boolean | null; sr: boolean };
     expect(!s.sr, 'an engine was present, so this scenario proved nothing');
     expect(
       s.tag === 'no browser engine',
@@ -15262,12 +15259,14 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P142 the + opens the tools as a sideways scroller of 44px pills directly over the composer, and Files counts what the store holds',
+    name: 'P142 the + opens the tools as a sideways scroller of four plain 44px pills directly over the composer, and Files counts what the store holds',
     // #184. Attach, Dictate, Files and Artifacts left the composer row for a
     // 52px scroller the + opens. A scroller that wraps would cost a row per
     // tool on a phone, which is the fold the row was emptied to protect, so
     // the claim is that it scrolls sideways instead, sits on the composer,
     // and names how many files the store holds once it has been asked.
+    // #190: four pills and nothing else; the engine tag that rode beside
+    // Dictate is on the Dictation screen (P187).
     waitView: false,
     stub: {
       attachmentListResult: {
@@ -15288,6 +15287,7 @@ PAGE_SCENARIOS.push({
         composerTop: number;
         composerBottom: number;
         order: string;
+        plain: boolean;
         under44: number;
         scrollW: number;
         clientW: number;
@@ -15308,6 +15308,7 @@ PAGE_SCENARIOS.push({
             composerTop: Math.round(document.getElementById('composer').getBoundingClientRect().top),
             composerBottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
             order: kids.map((k) => k.id).join(','),
+            plain: kids.every((k) => k.tagName === 'BUTTON' && k.classList.contains('pill')),
             under44: kids.filter((k) => k.tagName === 'BUTTON' && k.getBoundingClientRect().height < 44).length,
             scrollW: t.scrollWidth,
             clientW: t.clientWidth,
@@ -15322,8 +15323,8 @@ PAGE_SCENARIOS.push({
       expect(open.shown && open.expanded === 'true', 'the + did not open the tools');
       expect(open.bottom === open.composerTop, `the tools are not directly over the composer (tools bottom ${open.bottom}, composer top ${open.composerTop})`);
       expect(
-        open.order === 'attach,dictate,dictate-engine,stored-toggle,artifacts-toggle',
-        `the tools read ${open.order}, not Attach file, Dictate (with its engine), Files, Artifacts`,
+        open.order === 'attach,dictate,stored-toggle,artifacts-toggle' && open.plain,
+        `the tools read ${open.order}${open.plain ? '' : ' with something not a pill among them'}, not four plain pills Attach file, Dictate, Files, Artifacts`,
       );
       expect(open.under44 === 0, `${open.under44} pills are under 44px`);
       expect(open.composerBottom <= 844, `with the tools open the composer bottom is ${open.composerBottom}`);
@@ -15345,6 +15346,68 @@ PAGE_SCENARIOS.push({
       const shut = await read();
       expect(!shut.shown && shut.expanded === 'false', 'the + did not shut the tools');
       return `the + opened ${open.h}px of tools on the composer, ${open.order}, all 44px, scrolling ${open.scrollW}/${open.clientW}; Files counted ${counted.files}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P187 the dictation engine is named on More > This phone > Dictation, in its own 48px row above the language and auto-send, in the words the + scroller used to carry, and nowhere behind the +',
+    // #190, found by the user on the phone: the `browser` tag beside Dictate
+    // read as a pill that did nothing. The fact it states (the mic is the
+    // browser's speech engine, not the product's) belongs with the other
+    // facts about how this phone listens, so it moved there, same text and
+    // same title. An engine is installed before the page script runs, the
+    // way P33 does, so the tag reads its present state.
+    waitView: false,
+    before: async (page) => {
+      await page.addInitScript({ content: 'window.SpeechRecognition = function () {};' });
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize(PHONE);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await openTools(page);
+      const inTools = (await page.evaluate(String.raw`(() => {
+        const t = document.getElementById('h1-tools');
+        return { tag: !!t.querySelector('#dictate-engine, .cmd-kind'), kids: Array.from(t.children).filter((k) => k.getClientRects().length > 0).length };
+      })()`)) as { tag: boolean; kids: number };
+      expect(!inTools.tag && inTools.kids === 4, `the + scroller still carries a tag, or holds ${inTools.kids} things rather than four pills`);
+      await page.click('#h1-plus');
+      await openPanel(page, 'dictation');
+      type Row = { text: string; h: number; right: number };
+      const got = (await page.evaluate(String.raw`(() => {
+        const card = document.getElementById('dictation-prefs');
+        const tag = document.getElementById('dictate-engine');
+        const rows = Array.from(card.querySelectorAll(':scope > .prow')).map((r) => ({
+          text: (r.textContent || '').replace(/\s+/g, ' ').trim(),
+          h: Math.round(r.getBoundingClientRect().height),
+          right: Math.round(r.getBoundingClientRect().right),
+        }));
+        const tr = tag.getBoundingClientRect();
+        return {
+          rows,
+          tag: tag.textContent,
+          title: tag.title,
+          tagRight: Math.round(tr.right),
+          tagShown: tr.width > 0 && tr.height > 0,
+          vw: innerWidth,
+          docW: document.documentElement.scrollWidth,
+          inRow: tag.closest('.prow') === card.querySelector(':scope > .prow'),
+        };
+      })()`)) as { rows: Row[]; tag: string; title: string; tagRight: number; tagShown: boolean; vw: number; docW: number; inRow: boolean };
+      expect(
+        got.rows.length === 3 && got.rows[0]!.text === 'Engine browser' && /^Language/.test(got.rows[1]!.text) && /^Send when dictation ends on a pause/.test(got.rows[2]!.text),
+        `the Dictation card's rows read ${JSON.stringify(got.rows.map((r) => r.text))}, not Engine browser, then Language, then the auto-send`,
+      );
+      expect(got.inRow && got.tag === 'browser' && /Web Speech API/.test(got.title), `the engine tag is not the first row's, or does not read "browser" with its title (${JSON.stringify([got.inRow, got.tag, got.title])})`);
+      expect(got.rows.every((r) => r.h >= 48), `a Dictation row is under 48px (${JSON.stringify(got.rows.map((r) => r.h))})`);
+      expect(got.tagShown && got.tagRight <= got.vw && got.docW === got.vw, `the tag is off screen at 390 (right ${got.tagRight}, page ${got.docW})`);
+      const more = (await page.evaluate(String.raw`(() => {
+        document.getElementById('panel-back').click();
+        const r = document.querySelector('#more-screen .row[data-panel="dictation"] .val');
+        return r ? r.textContent : null;
+      })()`)) as string | null;
+      await openPanel(page, 'chat');
+      return `the + scroller holds four pills and no tag; Dictation reads ${got.rows.map((r) => `"${r.text.slice(0, 35)}" ${r.h}px`).join(', ')}, the tag inside 390 at ${got.tagRight}px; More's Dictation row still reads ${JSON.stringify(more)}`;
     },
   });
 

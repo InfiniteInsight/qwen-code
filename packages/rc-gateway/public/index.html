@@ -902,6 +902,11 @@
         min-height: 40px;
         max-width: 60%;
       }
+      /* #190: the engine tag ends its row like the select does, so the house
+         tag's trailing gap (it was spacing it from the mic) goes. */
+      .ops-card .prow .cmd-kind {
+        margin-right: 0;
+      }
       #idle-suggest .st {
         display: block;
         color: var(--g1-ink-mid);
@@ -1295,12 +1300,6 @@
       }
       #h1-tools .pill .m {
         margin-right: 6px;
-      }
-      #h1-tools .cmd-kind {
-        flex: none;
-        margin: 0 4px 0 -4px;
-        border-color: var(--g1-edge);
-        color: var(--g1-ink-lo);
       }
       /* #182, #184. The composer: one row on the band, 24px under it for the
          thumb plus whatever the home indicator takes (env() is 0 in a desktop
@@ -3412,6 +3411,21 @@
             <p class="lede">How the composer listens on this phone, and whether it offers a next step when the conversation goes idle.</p>
             <section id="dictation-prefs" class="ops-card">
               <h2>Dictation</h2>
+              <!-- #97. What runs the mic is the browser's Web Speech API, not
+                   the product's voice stack, and the gateway has no transcribe
+                   route to offer instead, so the honest fix is the label.
+                   #190: it sits here beside the language and auto-send it
+                   governs rather than among the + pills, where it read as a
+                   control. -->
+              <div class="prow">
+                <span>Engine</span>
+                <span
+                  class="cmd-kind"
+                  id="dictate-engine"
+                  title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
+                  >browser</span
+                >
+              </div>
               <label class="prow" for="dictate-lang">
                 <span>Language</span>
                 <select id="dictate-lang" title="dictation language">
@@ -4542,8 +4556,10 @@
              with the verbs: Attach still clicks the hidden file input, Dictate
              still runs the browser's recognizer, Files and Artifacts still open
              their bounded lists. 44px tall and in a sideways scroller, so a
-             fifth tool costs no height. The engine tag (#97) stays beside the
-             mic it names. -->
+             fifth tool costs no height. #190: four plain pills; the engine
+             tag (#97) is on More > This phone > Dictation with the other
+             facts about how the phone listens, since a tag among the pills
+             read as a fifth control that did nothing. -->
         <div id="h1-tools" hidden>
           <button
             id="attach"
@@ -4564,16 +4580,6 @@
             <span class="m" aria-hidden="true">🎙</span
             ><span class="w">Dictate</span>
           </button>
-          <!-- #97. The engine is named where the control is drawn. What runs
-               here is the browser's Web Speech API, not the product's voice
-               stack, and the gateway has no transcribe route to offer instead,
-               so the honest fix is the label. -->
-          <span
-            class="cmd-kind"
-            id="dictate-engine"
-            title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
-            >browser</span
-          >
           <button
             id="stored-toggle"
             type="button"
