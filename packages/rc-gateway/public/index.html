@@ -2040,6 +2040,108 @@
         border-radius: 10px;
         font-size: 15px;
       }
+      /* #188 (h1). The sheet's head, drawn only where the sheet is a pane
+         of its own (below). In place under the status line it needs none:
+         the status line it hangs from is its way back. */
+      #h1-sheet-head {
+        display: none;
+      }
+      /* #188 (h1). The laptop, derived from the phone and nothing else. At
+         1100px and wider the List screen is a 280px pane on the left that
+         never shuts, the chat column is capped at 80ch and centred in what
+         is left, and the sheet, More and a panel open as one 320px pane on
+         the right with the chat still beside them. The bar, the status line,
+         the cards, the to-do strip and the composer are the phone's, at the
+         column's width. Every rule for this lives in this one block, so
+         under 1100 the page is the phone layout byte for byte. 1100 is
+         PANE_QUERY in the script; the two say the same width. */
+      @media (min-width: 1100px) {
+        /* The panes are fixed to the window's edges; the app body keeps
+           their width clear, so the column centres in what is between them.
+           The right one is reserved only while something is in it. */
+        #app-body {
+          --h1-left: 280px;
+          --h1-right: 0px;
+          padding-left: var(--h1-left);
+          padding-right: var(--h1-right);
+        }
+        #app-body:has(> #more-screen:not([hidden])),
+        #app-body:has(#h1-sheet:not([hidden])) {
+          --h1-right: 320px;
+        }
+        /* The column: the bar over it and everything in the chat screen
+           under it, one width, centred. 80ch of the body's own face. */
+        #h1-bar,
+        #pane-chat {
+          width: 100%;
+          max-width: 80ch;
+          align-self: center;
+        }
+        /* The ⋯ menu hangs under ⋯, which is the column's right edge now
+           rather than the window's. */
+        #h1-menu {
+          right: calc(
+            var(--h1-right) + 8px +
+              (100vw - var(--h1-left) - var(--h1-right) -
+                min(100vw - var(--h1-left) - var(--h1-right), 80ch)) / 2
+          );
+        }
+        /* The left pane: the List screen as it is drawn, always shown, so
+           its way back has nowhere to go. It keeps its place, so the title
+           still centres. The folder and archived screens stack over it in
+           the same 280px, as they stack over it on the phone. */
+        #list-screen,
+        #list-screen[hidden],
+        #dir-picker,
+        #archived-view {
+          right: auto;
+          width: var(--h1-left);
+          box-sizing: border-box;
+          border-right: 1px solid var(--g1-line);
+        }
+        #list-screen[hidden] {
+          display: flex;
+        }
+        #list-back {
+          visibility: hidden;
+        }
+        /* The right pane: More and a panel in the window's right 320px, the
+           panel over More as on the phone, and the sheet there in place of
+           under the status line. One thing at a time is in it (the script
+           shuts the sheet as More opens and More as the sheet opens). */
+        #more-screen,
+        #panel-screen,
+        #h1-sheet {
+          position: fixed;
+          top: env(safe-area-inset-top, 0px);
+          right: 0;
+          bottom: 0;
+          left: auto;
+          width: 320px;
+          box-sizing: border-box;
+          border-left: 1px solid var(--g1-line);
+        }
+        #h1-sheet {
+          z-index: 69;
+          max-height: none;
+          border-bottom: 0;
+        }
+        #h1-sheet > #h1-sheet-head {
+          display: flex;
+          margin: -12px -16px 0;
+        }
+        /* The chat is beside every pane, so what a pane's buttons report
+           lands at the foot of the transcript, where it does on the chat. */
+        :root:has(#list-screen:not([hidden])) #h1-toasts,
+        :root:has(#dir-picker:not([hidden])) #h1-toasts,
+        :root:has(#archived-view:not([hidden])) #h1-toasts,
+        :root:has(#more-screen:not([hidden])) #h1-toasts,
+        :root:has(#panel-screen:not([hidden])) #h1-toasts {
+          position: absolute;
+          z-index: 3;
+          bottom: 52px;
+        }
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -3430,6 +3532,16 @@
              context fill, the folder, and the keep-this-mode box. The checkout
              handover (#134) sits under the folder it moves. -->
         <div id="h1-sheet" hidden>
+          <!-- #188. Shown only where the sheet is the right-hand pane, as
+               More's head is there: a way back to the chat beside it, and a
+               name for what the pane holds. -->
+          <div class="scr-head" id="h1-sheet-head">
+            <button id="h1-sheet-close" type="button" aria-label="Back to the conversation">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+            </button>
+            <strong class="ttl">This conversation</strong>
+            <span class="scr-sp" aria-hidden="true"></span>
+          </div>
           <div id="h1-sheet-empty">
             Nothing to show until a conversation is open.
           </div>
@@ -4667,6 +4779,14 @@
         (p) => p.dataset.panel,
       );
       let openPanelKey = null;
+      // #188 (h1). The laptop's layout (the @media block of the same width
+      // in the styles): the list is a pane that never shuts, and the sheet,
+      // More and a panel open in one pane beside the chat rather than over
+      // it. What the script does differently there asks this.
+      const PANE_QUERY = window.matchMedia('(min-width: 1100px)');
+      function paneLayout() {
+        return PANE_QUERY.matches;
+      }
       function moreRow(key) {
         return document.querySelector(
           '#more-screen .row[data-panel="' + key + '"]',
@@ -4686,7 +4806,10 @@
         $('h1-more').setAttribute('aria-expanded', String(open));
         if (!open) return;
         closeH1Menu(false);
-        setListOpen(false);
+        // #188: in the pane layout the list is beside More, not under it,
+        // and the sheet is in the one pane More is about to take.
+        if (paneLayout()) setSheetOpen(false);
+        else setListOpen(false);
         renderMoreValues();
         if (quiet) return;
         const first = scr.querySelector('.row');
@@ -5188,6 +5311,7 @@
         ) {
           transcriptView.scrollToEnd();
         }
+        if (pin && pin !== lastPinnedCard) bringChatForward();
         lastPinnedCard = pin;
         let waiting = 0;
         for (const entry of cards.values()) {
@@ -5205,6 +5329,32 @@
         // The status line's word, and the placeholder with it (it is fitted
         // after renderRunControls has settled the row's width).
         renderStatusLine();
+      }
+      // #188 (the first item on #190). A card is the agent stopped until the
+      // reader answers, and it pins in the chat. Under 1100px every screen
+      // (More, a panel, the list and the two over it) covers the chat, so a
+      // card that pins while one is up would wait where nobody can see it:
+      // the screens shut and the chat comes forward. The status line's amber
+      // word says why. Focus that was in a screen that shut goes to that
+      // status line, never to the card: a reader typing into a panel's field
+      // must not land on Allow with their next Enter. In the pane layout the
+      // screens are beside the chat, so the card is on show already and
+      // nothing moves.
+      const CHAT_COVERS = [
+        'more-screen',
+        'panel-screen',
+        'list-screen',
+        'dir-picker',
+        'archived-view',
+      ];
+      function bringChatForward() {
+        if (paneLayout()) return;
+        const up = CHAT_COVERS.map((id) => $(id)).filter((el) => !el.hidden);
+        if (up.length === 0) return;
+        const had = up.some((el) => el.contains(document.activeElement));
+        setMoreOpen(false); // shuts the panel over it too
+        setListOpen(false); // and the folder and archived screens over it
+        if (had) $('h1-status').focus({ preventScroll: true });
       }
       // Under a permission card the field reads as the third answer: neither
       // allow nor deny, but something else. A pending permission keeps the
@@ -6222,22 +6372,60 @@
       // every add, retire and drop calls, so it no longer watches #cards.
 
       // #184. The sheet opens in place under the status line and pushes the
-      // transcript down rather than covering it.
+      // transcript down rather than covering it. #188: in the pane layout it
+      // is the right-hand pane instead, which More and a panel also open in,
+      // so opening it shuts them.
       function setSheetOpen(open) {
         const sheet = $('h1-sheet');
         if (sheet.hidden === !open) return;
         sheet.hidden = !open;
         $('h1-status').setAttribute('aria-expanded', String(open));
-        if (open) closeH1Menu(false);
+        if (!open) return;
+        closeH1Menu(false);
+        if (paneLayout()) setMoreOpen(false);
       }
       $('h1-status').addEventListener('click', () =>
         setSheetOpen($('h1-sheet').hidden),
       );
+      function closeSheetToStatus() {
+        setSheetOpen(false);
+        $('h1-status').focus({ preventScroll: true });
+      }
+      $('h1-sheet-close').addEventListener('click', closeSheetToStatus);
       $('h1-sheet').addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         e.preventDefault();
-        setSheetOpen(false);
-        $('h1-status').focus({ preventScroll: true });
+        closeSheetToStatus();
+      });
+      // #188. In the pane layout the chat stays beside the pane, so focus can
+      // be on what opened it rather than in it: the status line keeps focus
+      // when it opens the sheet, and a pointer click can leave it on nothing.
+      // Escape from there shuts the pane on top and hands focus back to its
+      // opener, the way Escape inside it does. Keys the page has already
+      // spent (a menu, a field, a dialog) are left alone, and so is focus in
+      // the chat's own controls: Escape in the composer does not reach across
+      // to a pane.
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || e.defaultPrevented || !paneLayout()) return;
+        if ($('app-body').hidden || document.querySelector('dialog[open]')) return;
+        const at = e.target;
+        const opener =
+          at === document.body ||
+          at === document.documentElement ||
+          at === $('h1-status') ||
+          at === $('h1-more');
+        if (!opener) return;
+        if (!$('panel-screen').hidden) {
+          e.preventDefault();
+          closePanel(true);
+        } else if (!$('more-screen').hidden) {
+          e.preventDefault();
+          setMoreOpen(false);
+          $('h1-more').focus({ preventScroll: true });
+        } else if (!$('h1-sheet').hidden) {
+          e.preventDefault();
+          closeSheetToStatus();
+        }
       });
 
       // Model picker (footer model name, issue #52): tapping the name opens
@@ -12173,8 +12361,12 @@
           setStatus('open a conversation first');
           return;
         }
-        setMoreOpen(false);
-        setListOpen(false);
+        // #188: in the pane layout the panes are beside the menu, not under
+        // it, so they stay as they are.
+        if (!paneLayout()) {
+          setMoreOpen(false);
+          setListOpen(false);
+        }
         $('h1-menu').hidden = false;
         h1MenuOpen = true;
         $('h1-actions').setAttribute('aria-expanded', 'true');
@@ -12265,6 +12457,12 @@
       function listOpen() {
         return !$('list-screen').hidden;
       }
+      // #188. On screen, which in the pane layout it always is: the list
+      // there is a pane the title does not open, so its hidden mark says
+      // nothing about whether a reader can see it.
+      function listShown() {
+        return listOpen() || paneLayout();
+      }
       function setListOpen(open) {
         const scr = $('list-screen');
         if (!open) {
@@ -12289,7 +12487,12 @@
         setListOpen(false);
         $('h1-title').focus({ preventScroll: true });
       }
-      $('h1-title').addEventListener('click', () => setListOpen(true));
+      // #188: in the pane layout the list is already beside the chat, so the
+      // title takes the reader to its search instead of opening a screen.
+      $('h1-title').addEventListener('click', () => {
+        if (paneLayout()) setListSearch(true);
+        else setListOpen(true);
+      });
       $('list-back').addEventListener('click', closeListToChat);
       $('list-screen').addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
@@ -12335,7 +12538,7 @@
       // List screen with its search field focused, from anywhere on the page.
       function openListSearch() {
         if (h1MenuOpen) closeH1Menu(false);
-        setListOpen(true);
+        if (!paneLayout()) setListOpen(true); // #188: the pane is up already
         setListSearch(true);
       }
 
@@ -12380,7 +12583,7 @@
           $('dir-back').focus({ preventScroll: true });
           return;
         }
-        if (refocus && listOpen()) $('list-folder').focus({ preventScroll: true });
+        if (refocus && listShown()) $('list-folder').focus({ preventScroll: true });
       }
       $('list-folder').addEventListener('click', () => setDirPickerOpen(true));
       $('dir-back').addEventListener('click', () => setDirPickerOpen(false, true));
@@ -12403,7 +12606,7 @@
           void refreshArchivedConversations();
           return;
         }
-        if (refocus && listOpen()) {
+        if (refocus && listShown()) {
           $('list-archived-open').focus({ preventScroll: true });
         }
       }
@@ -12413,6 +12616,12 @@
         if (e.key !== 'Escape') return;
         e.preventDefault();
         setArchivedOpen(false, true);
+      });
+      // #188: a window widened into the pane layout puts the list on screen,
+      // and a list on screen shows its folder's archived count, as one the
+      // title opened does.
+      PANE_QUERY.addEventListener('change', () => {
+        if (paneLayout()) void refreshArchivedCount();
       });
 
       // New conversation here: the create POST the panel's button has always
@@ -13079,7 +13288,7 @@
           pastConvosCwd = cwd;
           // Archived (n) belongs to the folder: read again for this one if
           // the list is up to show it, else marked unknown until it opens.
-          if (listOpen()) void refreshArchivedCount();
+          if (listShown()) void refreshArchivedCount();
           else renderArchivedCount();
         }
         pastConvosCwd = cwd;
