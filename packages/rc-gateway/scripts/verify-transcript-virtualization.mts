@@ -30,7 +30,7 @@
  *   ONLY=V9,V10 npx tsx scripts/verify-transcript-virtualization.mts view
  */
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -4695,7 +4695,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
             folderScreen: !document.getElementById('dir-picker').hidden,
             titles: rows.map((r) => (r.querySelector('.tt') || r).textContent || ''),
             marked: rows.filter((r) => r.getAttribute('aria-current') === 'true').map((r) => (r.querySelector('.tt') || r).textContent || ''),
-            folder: document.getElementById('list-folder').title,
+            // #193: the list spans folders and its folder line is a filter
+            // (All folders), so the folder is named on the row.
+            folder: o && o.querySelector('.dir') ? o.querySelector('.dir').title : '',
             otherHit: hit,
           };
         })()`) as Promise<ListState>;
@@ -4734,7 +4736,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         one.marked.length === 1 && one.marked[0] === 'the one on screen',
         `the list does not mark the conversation on screen (${JSON.stringify(one.marked)})`,
       );
-      expect(one.folder === CWD, `the list does not say which folder it is listing (${JSON.stringify(one.folder)})`);
+      expect(one.folder === CWD, `the other conversation's row does not say which folder it is in (${JSON.stringify(one.folder)})`);
 
       // The list's own search narrows it, and clearing it brings the folder
       // back whole: it is one list with one filter now, not two.
@@ -12524,7 +12526,7 @@ PAGE_SCENARIOS.push({
         expect(open.moreW.every((x) => x === 44), `the row ⋯ buttons are ${JSON.stringify(open.moreW)}px wide at ${at}, not 44`);
         expect(
           open.newH === 48 && open.newBottom === open.vh - 24 && open.vh - open.newBottom < 120,
-          `New conversation here is ${open.newH}px with its bottom at ${open.newBottom} of ${open.vh} at ${at}, not 48px in the thumb zone`,
+          `New conversation is ${open.newH}px with its bottom at ${open.newBottom} of ${open.vh} at ${at}, not 48px in the thumb zone`,
         );
         expect(!open.ctl, `a collapse control is drawn on the list at ${at}`);
         expect(open.under44.length === 0, `${open.under44.length} of ${open.taps} list controls are under 44px at ${at}: ${open.under44.join(', ')}`);
@@ -12554,7 +12556,7 @@ PAGE_SCENARIOS.push({
         expect(!picked.shown && picked.focusOnTitle, `tapping the conversation already on screen left the list over it at ${at}`);
         expect(picked.visible === pane, `the list is ${picked.visible ? '' : 'not '}drawn after the row on screen at ${at}`);
         lines.push(
-          `${at}: transcript ${rest.txW}px wide at rest with no rail; the title ${pane ? 'focuses the search of the list pane' : 'opens the list'} ${open.w}x${open.h}, bar ${open.head}, folder line ${open.folder}, rows ${open.rowH[0]}px, ⋯ ${open.moreW[0]}px, New conversation here ${open.newH}px ending ${open.vh - open.newBottom}px above the bottom, ${open.taps} controls at 44px or over`,
+          `${at}: transcript ${rest.txW}px wide at rest with no rail; the title ${pane ? 'focuses the search of the list pane' : 'opens the list'} ${open.w}x${open.h}, bar ${open.head}, folder line ${open.folder}, rows ${open.rowH[0]}px, ⋯ ${open.moreW[0]}px, New conversation ${open.newH}px ending ${open.vh - open.newBottom}px above the bottom, ${open.taps} controls at 44px or over`,
         );
       }
       return lines.join('; ') + '; back, Escape and the row on screen return to the chat (at 1280, Escape and the row return focus to the title beside the pane)';
@@ -12820,8 +12822,10 @@ PAGE_SCENARIOS.push({
     } else if (s === 'more') {
       await page.click('#h1-more');
     } else if (s === 'picker') {
+      // #193: the folder screen is behind New conversation now; the folder
+      // line opens the folder filter.
       await openList(page);
-      await page.click('#list-folder');
+      await page.click('#list-new');
       await page.waitForFunction(`!document.getElementById('dir-picker').hidden`);
       await page.evaluate(`document.getElementById('help-dir-picker').hidden = false`);
     } else if (s === 'archived') {
@@ -13271,15 +13275,16 @@ PAGE_SCENARIOS.push({
     },
   });
 
-  // #175 (a), then #185 (h1). The New conversation panel was a closed
-  // <details> heading the Chat column, then a panel behind the rail's +. The
-  // spec puts its folder browser, recent folders and typed path behind the
-  // List screen's `change`, as a screen of its own with a back button, and
-  // the create behind New conversation here. The claims kept: it costs
-  // nothing at rest, it opens only from its one door, everything it held is
-  // drawn when it is open, focus goes into it and comes back to the door, and
-  // it never pushes the page sideways. Pressed with real input, pointer and
-  // keyboard, because the claims are reach, not that a handler exists.
+  // #175 (a), then #185 (h1), then #193. The New conversation panel was a
+  // closed <details> heading the Chat column, then a panel behind the rail's
+  // +, then a screen behind the List screen's `change`. #193 puts it behind
+  // the list's New conversation: where a new conversation runs is chosen
+  // there, and the folder line became the list's folder filter. The claims
+  // kept: it costs nothing at rest, it opens only from its one door (now New
+  // conversation, and not the folder line), everything it held is drawn when
+  // it is open, focus goes into it and comes back to the door, and it never
+  // pushes the page sideways. Pressed with real input, pointer and keyboard,
+  // because the claims are reach, not that a handler exists.
   // In-page code is a plain string throughout: the transform rewrites a
   // named arrow in a callback into a __name(...) call the page does not
   // define.
@@ -13300,11 +13305,13 @@ PAGE_SCENARIOS.push({
     w: number;
     panelRight: number;
     folderLine: string;
+    lineControls: string | null;
+    title: string;
   };
   const readPicker = (page: Page) =>
     page.evaluate(String.raw`(() => {
       const p = document.getElementById('dir-picker');
-      const door = document.getElementById('list-folder');
+      const door = document.getElementById('list-new');
       const on = (el) => !!el && el.getClientRects().length > 0;
       const a = document.activeElement;
       const r = p.getBoundingClientRect();
@@ -13319,7 +13326,7 @@ PAGE_SCENARIOS.push({
         expanded: door.getAttribute('aria-expanded'),
         controls: door.getAttribute('aria-controls'),
         focusInPanel: p.contains(a),
-        focusOn: a === door ? 'change' : a && a.id ? a.id : a ? a.tagName.toLowerCase() : '',
+        focusOn: a === door ? 'new' : a && a.id ? a.id : a ? a.tagName.toLowerCase() : '',
         // Everything the panel held apart from its past list, which is the
         // List screen's rows now.
         missing: ['dir-current', 'dir-list', 'dir-use', 'new-session-cwd', 'new-session', 'dir-recent']
@@ -13333,11 +13340,13 @@ PAGE_SCENARIOS.push({
         w: Math.round(r.width),
         panelRight: Math.round(r.right),
         folderLine: (document.getElementById('list-cwd').textContent || '').trim(),
+        lineControls: document.getElementById('list-folder').getAttribute('aria-controls'),
+        title: (p.querySelector('.ttl') || { textContent: '' }).textContent.trim(),
       };
     })()`) as Promise<PickerReading>;
 
   PAGE_SCENARIOS.push({
-    name: 'P128 the folder screen costs nothing at rest and opens only from the list’s change, as a screen of its own at 390 and over the list in its pane at 1280',
+    name: 'P128 the folder screen costs nothing at rest and opens only from the list’s New conversation, as a screen of its own at 390 and over the list in its pane at 1280',
     waitView: false,
     run: async ({ page }) => {
       // A fresh load with nothing watched: the state where a new conversation
@@ -13351,7 +13360,11 @@ PAGE_SCENARIOS.push({
       );
       expect(
         rest.controls === 'dir-picker' && rest.expanded === 'false',
-        `change does not say what it opens or that it is shut (aria-controls ${rest.controls}, aria-expanded ${rest.expanded})`,
+        `New conversation does not say what it opens or that it is shut (aria-controls ${rest.controls}, aria-expanded ${rest.expanded})`,
+      );
+      expect(
+        rest.lineControls === 'list-folders',
+        `the folder line still claims the folder screen (aria-controls ${rest.lineControls}) rather than the folder filter`,
       );
 
       const lines: string[] = [];
@@ -13376,18 +13389,32 @@ PAGE_SCENARIOS.push({
         )`);
         await openList(page);
 
-        // Pointer: change opens it over the list, the whole screen, with
-        // everything it held drawn and focus on its way back.
+        // #193: the folder line is the folder filter now, so pressing it
+        // opens its menu and not the folder screen.
         await page.click('#list-folder');
+        const byLine = await readPicker(page);
+        const filterUp = (await page.evaluate(
+          `!!document.getElementById('list-folders') && !document.getElementById('list-folders').hidden`,
+        )) as boolean;
+        expect(
+          byLine.hidden && filterUp,
+          `the folder line opened the folder screen, or not the folder filter, at ${at} (folder screen hidden ${byLine.hidden}, filter up ${filterUp})`,
+        );
+        await page.keyboard.press('Escape');
+
+        // Pointer: New conversation opens it over the list, the whole
+        // screen, with everything it held drawn and focus on its way back.
+        await page.click('#list-new');
         const opened = await readPicker(page);
         // #188: in the pane layout it opens over the list in the list's own
         // 280px pane, as it opens over the list on the phone.
         const wantW = w >= PANE_MIN ? LEFT_PANE : w;
         expect(
           !opened.hidden && opened.top === 0 && opened.w === wantW && opened.h === h,
-          `change did not open the folder screen as a screen of its own at ${at} (${opened.w}x${opened.h} at ${opened.top}, want ${wantW}x${h})`,
+          `New conversation did not open the folder screen as a screen of its own at ${at} (${opened.w}x${opened.h} at ${opened.top}, want ${wantW}x${h})`,
         );
-        expect(opened.expanded === 'true', `change does not say the folder screen is open at ${at}`);
+        expect(opened.title === 'New conversation', `the folder screen is titled ${JSON.stringify(opened.title)} at ${at}, not New conversation`);
+        expect(opened.expanded === 'true', `New conversation does not say the folder screen is open at ${at}`);
         expect(opened.missing === '', `the open folder screen is missing ${opened.missing} at ${at}`);
         expect(opened.focusInPanel && opened.focusOn === 'dir-back', `opening it left focus on ${opened.focusOn} at ${at}`);
         expect(opened.backOnTop, `the folder screen's back button is not on top at ${at}, so its way out is under the list`);
@@ -13397,8 +13424,8 @@ PAGE_SCENARIOS.push({
         );
 
         // Keyboard: Tab from the back button reaches the folder's create,
-        // Escape shuts it back onto change, Enter on change opens it again,
-        // and the back button shuts it onto change too.
+        // Escape shuts it back onto New conversation, Enter on that opens it
+        // again, and the back button shuts it onto New conversation too.
         let reached = '';
         for (let i = 0; i < 8 && reached !== 'dir-use'; i++) {
           await page.keyboard.press('Tab');
@@ -13408,15 +13435,15 @@ PAGE_SCENARIOS.push({
         await page.keyboard.press('Escape');
         const shutByEscape = await readPicker(page);
         expect(
-          shutByEscape.hidden && shutByEscape.focusOn === 'change' && shutByEscape.expanded === 'false',
-          `Escape did not shut the folder screen back onto change at ${at} (hidden ${shutByEscape.hidden}, focus on ${shutByEscape.focusOn})`,
+          shutByEscape.hidden && shutByEscape.focusOn === 'new' && shutByEscape.expanded === 'false',
+          `Escape did not shut the folder screen back onto New conversation at ${at} (hidden ${shutByEscape.hidden}, focus on ${shutByEscape.focusOn})`,
         );
         await page.keyboard.press('Enter');
         const reopened = await readPicker(page);
-        expect(!reopened.hidden && reopened.focusInPanel, `Enter on change did not open the folder screen at ${at}`);
+        expect(!reopened.hidden && reopened.focusInPanel, `Enter on New conversation did not open the folder screen at ${at}`);
         await page.click('#dir-back');
         const backed = await readPicker(page);
-        expect(backed.hidden && backed.focusOn === 'change', `the back button did not shut it onto change at ${at} (focus on ${backed.focusOn})`);
+        expect(backed.hidden && backed.focusOn === 'new', `the back button did not shut it onto New conversation at ${at} (focus on ${backed.focusOn})`);
         await closeList(page);
         lines.push(`${at}: ${opened.w}x${opened.h} ${w >= PANE_MIN ? 'over the list in its pane' : 'screen over the list'}, focus on its back, no overflow (${opened.docW}/${opened.vw})`);
       }
@@ -13426,25 +13453,25 @@ PAGE_SCENARIOS.push({
       await page.setViewportSize({ width: 390, height: 844 });
       await page.evaluate('renderPastConversations([], null, false)');
       await openList(page);
-      await page.click('#list-folder');
+      await page.click('#list-new');
       const bare = await readPicker(page);
       expect(
         !bare.hidden && bare.missing === '' && bare.folderLine === 'no folder yet',
-        `with no folder the list's change did not open the folder screen, or the line did not say so (${JSON.stringify({ hidden: bare.hidden, missing: bare.missing, line: bare.folderLine })})`,
+        `with no folder the list's New conversation did not open the folder screen, or the line did not say so (${JSON.stringify({ hidden: bare.hidden, missing: bare.missing, line: bare.folderLine })})`,
       );
       await page.click('#dir-back');
       await page.click('#list-back');
 
       return (
-        'hidden at rest and out of the chat column, change opens it with focus on its back button, Tab reaches its create, Escape and back return to change, Enter reopens it; ' +
+        'hidden at rest and out of the chat column; the folder line opens the folder filter, not this; New conversation opens it with focus on its back button, Tab reaches its create, Escape and back return to New conversation, Enter reopens it; ' +
         lines.join('; ') +
-        '; change survives a list with no folder'
+        '; New conversation survives a list with no folder'
       );
     },
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P129 the browse, recent, typed-path and past paths all work from behind the list’s change',
+    name: 'P129 the browse, recent, Start here, typed-path and past paths all work from behind the list’s New conversation',
     // #175 (a), then #185 (h1), the other half of P128. Moving the folder
     // browser behind `change` is only safe if every way in it held still
     // lands where it did: a recent folder browses, a folder row browses (and
@@ -13454,6 +13481,11 @@ PAGE_SCENARIOS.push({
     // now) resumes and shuts what was opened to get there. Driven with real
     // input on the screen `change` opened. The create POST is answered 403 by
     // a route, because what is asserted is the cwd the page sends.
+    // #193: the screen is New conversation's now. A recent folder's name
+    // still browses; its Start here, the typed path's Start here and the
+    // browsed folder's create each POST their own folder; the folder browsed
+    // to becomes the current one, which the list spans with the recent ones
+    // rather than switching to it alone.
     // #178: the folders it walks are planted inside the harness root rather
     // than read off the host, so the run depends on nothing this machine's
     // $HOME holds and prints none of its paths.
@@ -13477,28 +13509,29 @@ PAGE_SCENARIOS.push({
       mkdirSync(inner, { recursive: true });
       try {
         await openList(page);
-        await page.click('#list-folder');
+        await page.click('#list-new');
 
         // Recent: the planted folder, seeded through the page's own store and
-        // renderer, then tapped.
+        // renderer, then its name tapped.
         await page.evaluate(
           `localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(top)}])); renderRecentWorkspaces();`,
         );
-        await page.click('#dir-recent button');
+        await page.click('#dir-recent .rrow .go');
         await page.waitForFunction(`curDirPath === ${JSON.stringify(top)}`);
 
-        // Browse: a real tap on the planted subfolder's row. The list under the
-        // screen follows the folder it landed on.
+        // Browse: a real tap on the planted subfolder's row. The folder it
+        // landed on is the current one, which the list spans beside the
+        // recent folder.
         await page.click('#dir-list .token-row >> text="inner/"');
         await page.waitForFunction(`curDirPath === ${JSON.stringify(inner)}`);
         await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(inner)}`, null, { timeout: 5_000 });
         const browsed = (await page.evaluate(String.raw`({
           current: document.getElementById('dir-current').textContent,
-          line: document.getElementById('list-folder').title,
-        })`)) as { current: string; line: string };
+          spans: listFolders(),
+        })`)) as { current: string; spans: string[] };
         expect(
-          browsed.current === inner && browsed.line === inner,
-          `a folder row did not browse, or the list's folder line did not follow it (${JSON.stringify({ current: shown(browsed.current), line: shown(browsed.line) })})`,
+          browsed.current === inner && JSON.stringify(browsed.spans) === JSON.stringify([inner, top]),
+          `a folder row did not browse, or the list does not span the folder browsed to beside the recent one (${JSON.stringify({ current: shown(browsed.current), spans: browsed.spans.map(shown) })})`,
         );
 
         // Typed path and the folder's create: both funnel into the one POST.
@@ -13511,13 +13544,29 @@ PAGE_SCENARIOS.push({
             body: JSON.stringify({ error: 'refused by the scenario' }),
           });
         });
+        // #193: each press waits for its answer to be handled, because a
+        // create in flight holds the next one off (startConversationIn).
         const createCwd = async (press: () => Promise<void>) => {
           const req = page.waitForRequest(
             (r) => new URL(r.url()).pathname === '/session' && r.method() === 'POST',
           );
           await press();
-          return (JSON.parse((await req).postData() || '{}') as { cwd?: string }).cwd;
+          const cwd = (JSON.parse((await req).postData() || '{}') as { cwd?: string }).cwd;
+          await page.waitForFunction(`!document.getElementById('new-session').disabled`, null, { timeout: 5_000 });
+          return cwd;
         };
+        // #193: a recent folder's Start here sends that folder, whichever
+        // one the browser is on (inner, here).
+        const started = await createCwd(() => page.click(`#dir-recent .rrow[data-folder="${top}"] .start`));
+        expect(
+          started === top,
+          `the recent folder's Start here sent cwd ${JSON.stringify(shown(started ?? ''))}, not that folder`,
+        );
+        const startLabel = (await page.evaluate(`document.getElementById('new-session').textContent.trim()`)) as string;
+        expect(startLabel === 'Start here', `the typed path's button reads ${JSON.stringify(startLabel)}, not Start here`);
+        // Start here dropped its folder into the field the typed path uses;
+        // emptied, so typing the path is a change the field reports.
+        await page.evaluate(`document.getElementById('new-session-cwd').value = ''`);
         await page.fill('#new-session-cwd', top);
         const typed = await createCwd(() => page.click('#new-session'));
         expect(
@@ -13565,7 +13614,7 @@ PAGE_SCENARIOS.push({
         const arrived = (await page.evaluate(String.raw`({
           list: document.getElementById('list-screen').hidden,
           folder: document.getElementById('dir-picker').hidden,
-          expanded: document.getElementById('list-folder').getAttribute('aria-expanded'),
+          expanded: document.getElementById('list-new').getAttribute('aria-expanded'),
         })`)) as { list: boolean; folder: boolean; expanded: string };
         expect(
           arrived.list && arrived.folder && arrived.expanded === 'false',
@@ -13576,7 +13625,7 @@ PAGE_SCENARIOS.push({
         // the scenario.
         rmSync(top, { recursive: true, force: true });
       }
-      return `recent browsed to ${shown(top)}, its folder row to ${shown(inner)} and the list followed, typed path and the folder's create both POST ${shown(top)}, a refusal keeps the screen and is said over it, a row of the list resumes and shuts both screens`;
+      return `recent browsed to ${shown(top)}, its folder row to ${shown(inner)}, which the list then spans beside the recent one; the recent folder's Start here, the typed path's Start here and the folder's create each POST ${shown(top)}; a refusal keeps the screen and is said over it; a row of the list resumes and shuts both screens`;
     },
   });
 
@@ -13979,7 +14028,7 @@ PAGE_SCENARIOS.push({
         await page.keyboard.press('Escape');
         expect(exOpen, `opening the ⋯ menu at ${w} did not show export`);
         lines.push(
-          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, the List, folder and archived screens on #0d1117 with #10151c heads and New conversation here on #1f6feb, ${PANEL_SURFACES.length} panel screens on #0d1117 with ${cards} cards on #10151c, no light box; no page title, export in the menu`,
+          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, the List, folder and archived screens on #0d1117 with #10151c heads and New conversation on #1f6feb, ${PANEL_SURFACES.length} panel screens on #0d1117 with ${cards} cards on #10151c, no light box; no page title, export in the menu`,
         );
       }
       return lines.join('; ');
@@ -15614,9 +15663,12 @@ PAGE_SCENARIOS.push({
 // Archived (n) opens the filed half with restore, New conversation here starts
 // one in the folder it shows, the rows scroll under a thumb-zone button that
 // does not move, ⌘K opens it with the search focused, and every row and its
-// menu are reachable from the keyboard. In-page code is a plain string
-// throughout: the transform rewrites a named arrow in a callback into a
-// __name(...) call the page does not define.
+// menu are reachable from the keyboard. #193 (P182 on): the rows span the
+// current folder and the recent ones, each naming its folder, the folder line
+// filters them, and New conversation opens the folder screen, where Start here
+// starts one in the folder chosen. In-page code is a plain string throughout:
+// the transform rewrites a named arrow in a callback into a __name(...) call
+// the page does not define.
 {
   // Plants `titles.length` transcripts in a folder of the scenario's own under
   // the harness root, the way P127 and P132 do, and refuses first if the root
@@ -15734,12 +15786,16 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P149 a tap on a row resumes that conversation in the list’s folder, returns to the chat, and the list then marks it',
+    name: 'P149 a tap on a row resumes that conversation in the row’s own folder, returns to the chat, and the list then marks it',
+    // #193: the rows span folders, so the resume names the folder the row was
+    // read from, here a recent folder that is not the current one, and the
+    // blue rule follows the conversation into whichever folder it is in.
     waitView: false,
     run: async ({ page, viewer }) => {
       const here = viewer.sessionId;
       const OTHER = '33333333-4444-5555-6666-777777777777';
       const CWD = '/home/evan/p149';
+      const ELSEWHERE = '/home/evan/p149-elsewhere';
       await watch(page, here);
       await waitForFrame(page, 1, 30_000);
       const resumed: Record<string, unknown>[] = [];
@@ -15751,12 +15807,20 @@ PAGE_SCENARIOS.push({
           body: JSON.stringify({ sessionId: OTHER, lastEventId: 0 }),
         });
       });
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === ELSEWHERE && !u.searchParams.has('archiveState'),
+        (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ sessions: [{ sessionId: OTHER, title: 'p149 there' }], truncated: false }),
+          }),
+      );
+      await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(ELSEWHERE)}]))`);
       await serveList(page, CWD, {
-        list: [
-          { sessionId: here, title: 'p149 here' },
-          { sessionId: OTHER, title: 'p149 there' },
-        ],
+        list: [{ sessionId: here, title: 'p149 here' }],
       });
+      await page.waitForFunction(`pastConvos.length === 2`);
       await page.setViewportSize({ width: 390, height: 844 });
       await openList(page);
       await page.click(`#past-list .s[data-session="${OTHER}"]`);
@@ -15776,8 +15840,8 @@ PAGE_SCENARIOS.push({
         })(),
       })`)) as { list: boolean; title: string; win: string; chat: boolean };
       expect(
-        resumed.length === 1 && resumed[0]!.cwd === CWD,
-        `the row asked for ${JSON.stringify(resumed)}, not one resume in the list's folder ${CWD}`,
+        resumed.length === 1 && resumed[0]!.cwd === ELSEWHERE,
+        `the row asked for ${JSON.stringify(resumed)}, not one resume in its own folder ${ELSEWHERE} (the current one is ${CWD})`,
       );
       expect(!after.list && after.chat, `picking a row did not return to the chat (${JSON.stringify(after)})`);
       expect(after.title === 'p149 there', `the bar names ${JSON.stringify(after.title)}, not the conversation picked`);
@@ -15797,27 +15861,44 @@ PAGE_SCENARIOS.push({
       );
       expect(!!left && !left.on && !left.current, `the conversation left is still marked (${JSON.stringify(left)})`);
       await page.click('#list-back');
-      return `one tap resumed ${OTHER.slice(0, 8)} with cwd ${CWD}, the chat came back naming it, this window's pointer followed, and the list marks it with the blue rule and not the one left`;
+      return `one tap resumed ${OTHER.slice(0, 8)} with cwd ${ELSEWHERE}, its row's folder rather than the current ${CWD}; the chat came back naming it, this window's pointer followed, and the list marks it with the blue rule and not the one left`;
     },
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P150 the search button reveals a field that filters the rows by name, keeps what was typed for the folder, and puts it all back when it is put away',
+    name: 'P150 the search button reveals a field that filters the rows of every folder shown by name, keeps what was typed for the view, and puts it all back when it is put away',
+    // #193: the rows span folders, so the search is over all of them (two of
+    // the three betas are in a recent folder, not the current one), and what
+    // was typed is kept with the view it was typed in, '' for All folders,
+    // rather than with the current folder.
     waitView: false,
     run: async ({ page }) => {
       const CWD = '/home/evan/p150';
-      await serveList(page, CWD, {
-        list: Array.from({ length: 30 }, (_, i) => ({
+      const OTHER_DIR = '/home/evan/p150-other';
+      const rowsOf = (from: number, to: number) =>
+        Array.from({ length: 30 }, (_, i) => ({
           sessionId: 'cccccccc-1500-4000-8000-' + String(i + 1).padStart(12, '0'),
           title: i < 27 ? 'alpha ' + (i + 1) : ['Beta one', 'beta two', 'BETA three'][i - 27],
-        })),
-      });
+        })).slice(from, to);
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === OTHER_DIR && !u.searchParams.has('archiveState'),
+        (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ sessions: rowsOf(28, 30), truncated: false }),
+          }),
+      );
+      await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(OTHER_DIR)}]))`);
+      await serveList(page, CWD, { list: rowsOf(0, 28) });
+      await page.waitForFunction('pastConvos.length === 30');
       await page.setViewportSize({ width: 390, height: 844 });
       await openList(page);
-      type Reading = { rows: string[]; pager: string; none: string; field: boolean; focus: boolean; expanded: string; saved: string | null; value: string };
+      type Reading = { rows: string[]; dirs: string[]; pager: string; none: string; field: boolean; focus: boolean; expanded: string; saved: string | null; value: string };
       const read = () =>
         page.evaluate(String.raw`({
           rows: Array.from(document.querySelectorAll('#past-list .s .tt')).map((t) => t.textContent),
+          dirs: Array.from(document.querySelectorAll('#past-list .s .dir')).map((d) => d.title),
           pager: (document.getElementById('past-pager').textContent || '').trim(),
           none: (document.querySelector('#past-list .none') || { textContent: '' }).textContent,
           field: document.getElementById('list-find').getClientRects().length > 0,
@@ -15838,8 +15919,12 @@ PAGE_SCENARIOS.push({
         `"beta" did not narrow the list to its three rows, case aside, on one page (${JSON.stringify(beta.rows)}, pager ${JSON.stringify(beta.pager)})`,
       );
       expect(
-        beta.saved === JSON.stringify({ cwd: CWD, text: 'beta' }),
-        `what was typed is not kept with the folder (${beta.saved})`,
+        beta.dirs.filter((d) => d === CWD).length === 1 && beta.dirs.filter((d) => d === OTHER_DIR).length === 2,
+        `the search did not find its matches in both folders (${JSON.stringify(beta.dirs)})`,
+      );
+      expect(
+        beta.saved === JSON.stringify({ cwd: '', text: 'beta' }),
+        `what was typed is not kept with the All folders view (${beta.saved})`,
       );
       await page.fill('#past-filter', 'nothing is called this');
       const none = await read();
@@ -15854,49 +15939,62 @@ PAGE_SCENARIOS.push({
       const stillOpen = (await page.evaluate(`!document.getElementById('list-screen').hidden`)) as boolean;
       expect(stillOpen, 'Escape in the search field shut the whole list rather than the search');
       await page.click('#list-back');
-      return `the field is hidden at rest; the button reveals and focuses it; "beta" narrowed 30 rows to its 3 in any case on one page and was kept for ${CWD}; no match says so; Escape cleared it, hid it and brought back 25 rows and the pager with the list still up`;
+      return `the field is hidden at rest; the button reveals and focuses it; "beta" narrowed 30 rows in two folders to its 3 (1 in the current folder, 2 in the recent one) in any case on one page and was kept for the All folders view; no match says so; Escape cleared it, hid it and brought back 25 rows and the pager with the list still up`;
     },
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P151 Archived (n) opens the filed half as a screen of its own, and Restore puts a row back on the list',
+    name: 'P151 Archived (n) opens the filed half of every folder the list spans as a screen of its own, and Restore puts a row back in its own folder',
+    // #193: the filed half merges across the same folders as the rows (the
+    // decision recorded on the issue), so it counts and lists both planted
+    // folders' filed conversations, each row naming its folder, and Restore
+    // names the folder of the row pressed, here the recent folder rather
+    // than the current one.
     waitView: false,
     run: async ({ page }) => {
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
-      const plant = plantFolder('p151-folder', ['p151 still here', 'p151 put back'], 'bbbbbbbb-1510');
-      const [STAYS, BACK] = plant.ids as [string, string];
-      // The second one starts archived: off the folder's chats dir, on the
-      // archived listing. The daemon's half of restore is played here (the
-      // stub has no archive): it moves the transcript back, which is what
-      // makes the row return through the page's own refresh.
-      rmSync(join(plant.chatsDir, `${BACK}.jsonl`), { force: true });
-      let filed = [{ sessionId: BACK, title: 'p151 put back', updatedAt: new Date(Date.now() - 3 * 86400_000).toISOString(), archived: true }];
+      const plant = plantFolder('p151-folder', ['p151 still here', 'p151 filed here'], 'bbbbbbbb-1510');
+      const other = plantFolder('p151-other', ['p151 put back'], 'bbbbbbbb-1511');
+      const [STAYS, FILED] = plant.ids as [string, string];
+      const [BACK] = other.ids as [string];
+      // One filed in each folder: off its folder's chats dir, on that
+      // folder's archived listing. The daemon's half of restore is played
+      // here (the stub has no archive): it moves the transcript back, which
+      // is what makes the row return through the page's own refresh.
+      rmSync(join(plant.chatsDir, `${FILED}.jsonl`), { force: true });
+      rmSync(join(other.chatsDir, `${BACK}.jsonl`), { force: true });
+      const filed: Record<string, Record<string, unknown>[]> = {
+        [plant.folder]: [{ sessionId: FILED, title: 'p151 filed here', updatedAt: new Date(Date.now() - 5 * 86400_000).toISOString(), archived: true }],
+        [other.folder]: [{ sessionId: BACK, title: 'p151 put back', updatedAt: new Date(Date.now() - 3 * 86400_000).toISOString(), archived: true }],
+      };
       const restored: Record<string, unknown>[] = [];
       try {
-        await page.route(/archiveState=archived/, (route) =>
-          route.fulfill({
+        await page.route(/archiveState=archived/, (route) => {
+          const cwd = new URL(route.request().url()).searchParams.get('cwd') ?? '';
+          return route.fulfill({
             status: 200,
             contentType: 'application/json',
-            body: JSON.stringify({ sessions: filed, truncated: false }),
-          }),
-        );
+            body: JSON.stringify({ sessions: filed[cwd] ?? [], truncated: false }),
+          });
+        });
         await page.route(/\/rc\/sessions\/unarchive$/, async (route) => {
           const body = JSON.parse(route.request().postData() || '{}') as { sessionIds?: string[] };
           restored.push(body as Record<string, unknown>);
-          plant.write(BACK, 'p151 put back');
-          filed = [];
+          other.write(BACK, 'p151 put back');
+          filed[other.folder] = [];
           await route.fulfill({
             status: 200,
             contentType: 'application/json',
             body: JSON.stringify({ action: 'unarchive', requested: 1, unarchived: body.sessionIds ?? [] }),
           });
         });
+        await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(other.folder)}]))`);
         await page.evaluate(`browseTo(${JSON.stringify(plant.folder)})`);
         await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(plant.folder)} && pastConvos.length === 1`);
         await page.setViewportSize({ width: 390, height: 844 });
         await openList(page);
         await page
-          .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (1)'`, null, { timeout: 5_000 })
+          .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (2)'`, null, { timeout: 5_000 })
           .catch(() => undefined);
         const door = (await page.evaluate(String.raw`(() => {
           const b = document.getElementById('list-archived-open');
@@ -15906,79 +16004,113 @@ PAGE_SCENARIOS.push({
           return { text: b.textContent.trim(), h: Math.round(r.height), afterRows: r.top >= last.bottom - 1 };
         })()`)) as { text: string; h: number; afterRows: boolean };
         expect(
-          door.text === 'Archived (1)' && door.h >= 48 && door.afterRows,
-          `the list does not end with Archived (1) at 48px (${JSON.stringify(door)})`,
+          door.text === 'Archived (2)' && door.h >= 48 && door.afterRows,
+          `the list does not end with Archived (2), one filed in each folder, at 48px (${JSON.stringify(door)})`,
         );
         await page.click('#list-archived-open');
-        await page.waitForFunction(`document.querySelectorAll('#archived-list .arow').length === 1`, null, { timeout: 5_000 });
+        await page.waitForFunction(`document.querySelectorAll('#archived-list .arow').length === 2`, null, { timeout: 5_000 });
         const scr = (await page.evaluate(String.raw`(() => {
           const r = document.getElementById('archived-view').getBoundingClientRect();
           return {
             w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top),
             focus: document.activeElement ? document.activeElement.id : '',
-            row: (document.querySelector('#archived-list .arow .tt') || {}).textContent,
+            rows: Array.from(document.querySelectorAll('#archived-list .arow')).map((row) => ({
+              title: (row.querySelector('.tt') || {}).textContent,
+              dir: (row.querySelector('.dir') || {}).title,
+            })),
             restoreH: Math.round(document.querySelector('#archived-list .arow button').getBoundingClientRect().height),
           };
-        })()`)) as { w: number; h: number; top: number; focus: string; row: string; restoreH: number };
+        })()`)) as { w: number; h: number; top: number; focus: string; rows: { title: string; dir: string }[]; restoreH: number };
         expect(
           scr.w === 390 && scr.h === 844 && scr.top === 0 && scr.focus === 'archived-back',
-          `Archived (1) did not open a screen of its own with focus on its back (${JSON.stringify(scr)})`,
+          `Archived (2) did not open a screen of its own with focus on its back (${JSON.stringify(scr)})`,
         );
-        expect(scr.row === 'p151 put back' && scr.restoreH >= 44, `the archived screen does not list the filed one with a 44px Restore (${JSON.stringify(scr)})`);
-        await page.click('#archived-list .arow button');
+        expect(
+          JSON.stringify(scr.rows) ===
+            JSON.stringify([
+              { title: 'p151 put back', dir: other.folder },
+              { title: 'p151 filed here', dir: plant.folder },
+            ]) && scr.restoreH >= 44,
+          `the archived screen does not list both folders' filed ones, newest first, each naming its folder, with a 44px Restore (${JSON.stringify(scr)})`,
+        );
+        await page.click(`#archived-list .arow[data-session="${BACK}"] button`);
         await page.waitForFunction(`(document.getElementById('status').textContent || '') === 'restored'`, null, { timeout: 8_000 });
         expect(
           restored.length === 1 &&
             JSON.stringify(restored[0]!.sessionIds) === JSON.stringify([BACK]) &&
-            restored[0]!.cwd === plant.folder,
-          `Restore sent ${JSON.stringify(restored)}, not the filed id in the list's folder`,
+            restored[0]!.cwd === other.folder,
+          `Restore sent ${JSON.stringify(restored)}, not the filed id in its own folder`,
         );
         await page
-          .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (0)'`, null, { timeout: 5_000 })
+          .waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (1)'`, null, { timeout: 5_000 })
           .catch(() => undefined);
         await page.click('#archived-back');
         await page.waitForFunction(`!!document.querySelector('#past-list .srow[data-session="${BACK}"]')`, null, { timeout: 8_000 });
         const back = (await page.evaluate(String.raw`({
           rows: Array.from(document.querySelectorAll('#past-list .srow')).map((w) => w.dataset.session),
+          backDir: (document.querySelector('#past-list .srow[data-session="${BACK}"] .dir') || {}).title,
           door: document.getElementById('list-archived-open').textContent.trim(),
           focus: document.activeElement === document.getElementById('list-archived-open'),
           archivedShut: document.getElementById('archived-view').hidden,
-        })`)) as { rows: string[]; door: string; focus: boolean; archivedShut: boolean };
+        })`)) as { rows: string[]; backDir: string; door: string; focus: boolean; archivedShut: boolean };
         expect(
-          back.rows.includes(BACK) && back.rows.includes(STAYS) && back.door === 'Archived (0)',
-          `Restore did not put the row back on the list, or the count did not follow (${JSON.stringify(back)})`,
+          back.rows.includes(BACK) && back.rows.includes(STAYS) && back.backDir === other.folder && back.door === 'Archived (1)',
+          `Restore did not put the row back on the list in its folder, or the count did not follow (${JSON.stringify(back)})`,
         );
         expect(back.archivedShut && back.focus, `the archived screen's back did not return to the list onto Archived (${JSON.stringify(back)})`);
         await page.click('#list-back');
       } finally {
         plant.cleanup();
+        other.cleanup();
       }
-      return `the list ends with Archived (1) at 48px; it opens a 390x844 screen with focus on its back listing the filed one with a 44px Restore; Restore sent its id in the list's folder, the count went to Archived (0), and back showed the row returned to the list`;
+      return `the list ends with Archived (2) at 48px, one filed in each of two folders; it opens a 390x844 screen with focus on its back listing both, newest first, each naming its folder, with a 44px Restore; Restore on the recent folder's sent its id with that folder's cwd, the count went to Archived (1), and back showed the row returned to the list under its folder`;
     },
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P152 New conversation here is 48px in the thumb zone and starts a conversation in the folder the list shows',
+    name: 'P152 New conversation is 48px in the thumb zone and opens the folder screen without sending anything, and Start here there starts one in the folder chosen',
+    // #193: the thumb-zone button no longer starts a conversation in the
+    // folder the list shows; it opens the folder screen, where the folder is
+    // chosen. The create claims (a new thread, the stub's answer taken up,
+    // the list shut behind it) move to the Start here pressed there.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 1, 30_000);
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
       const plant = plantFolder('p152-folder', [], 'eeeeeeee-1520');
+      const posts: string[] = [];
+      page.on('request', (r) => {
+        if (new URL(r.url()).pathname === '/session' && r.method() === 'POST') posts.push(r.postData() || '');
+      });
       try {
-        await page.evaluate(`browseTo(${JSON.stringify(plant.folder)})`);
-        await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(plant.folder)}`);
+        await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(plant.folder)}])); renderRecentWorkspaces();`);
         await page.setViewportSize({ width: 390, height: 844 });
         await openList(page);
         const btn = (await page.evaluate(String.raw`(() => {
           const r = document.getElementById('list-new').getBoundingClientRect();
-          return { h: Math.round(r.height), w: Math.round(r.width), bottom: Math.round(r.bottom), text: document.getElementById('list-new').textContent.trim(), line: document.getElementById('list-folder').title };
-        })()`)) as { h: number; w: number; bottom: number; text: string; line: string };
+          return { h: Math.round(r.height), w: Math.round(r.width), bottom: Math.round(r.bottom), text: document.getElementById('list-new').textContent.trim() };
+        })()`)) as { h: number; w: number; bottom: number; text: string };
         expect(
-          btn.h === 48 && btn.bottom === 844 - 24 && btn.text === 'New conversation here',
-          `New conversation here is ${btn.w}x${btn.h} ending at ${btn.bottom}, not 48px in the thumb zone (${JSON.stringify(btn)})`,
+          btn.h === 48 && btn.bottom === 844 - 24 && btn.text === 'New conversation',
+          `New conversation is ${btn.w}x${btn.h} ending at ${btn.bottom}, reading ${JSON.stringify(btn.text)}, not 48px in the thumb zone (${JSON.stringify(btn)})`,
         );
-        expect(btn.line === plant.folder, `the folder line names ${JSON.stringify(btn.line)}, not the folder the list was moved to`);
+        await page.click('#list-new');
+        await page.waitForTimeout(400);
+        const opened = (await page.evaluate(String.raw`({
+          folder: !document.getElementById('dir-picker').hidden,
+          list: !document.getElementById('list-screen').hidden,
+          focus: document.activeElement ? document.activeElement.id : '',
+          start: Array.from(document.querySelectorAll('#dir-recent .rrow')).map((r) => r.dataset.folder + ':' + (r.querySelector('.start') || {}).textContent),
+        })`)) as { folder: boolean; list: boolean; focus: string; start: string[] };
+        expect(
+          opened.folder && opened.list && opened.focus === 'dir-back' && posts.length === 0,
+          `New conversation did not open the folder screen over the list with nothing sent (${JSON.stringify({ ...opened, posts: posts.length })})`,
+        );
+        expect(
+          JSON.stringify(opened.start) === JSON.stringify([plant.folder + ':Start here']),
+          `the recent folder has no Start here (${JSON.stringify(opened.start)})`,
+        );
         const req = page.waitForRequest((r) => new URL(r.url()).pathname === '/session' && r.method() === 'POST');
         const res = page.waitForResponse((r) => new URL(r.url()).pathname === '/session' && r.request().method() === 'POST');
         // The page moving onto what was created is read off the wire: the
@@ -15990,12 +16122,12 @@ PAGE_SCENARIOS.push({
           const m = /^\/session\/([^/]+)\/events$/.exec(new URL(r.url()).pathname);
           if (m) streamed.push(decodeURIComponent(m[1]!));
         });
-        await page.click('#list-new');
+        await page.click(`#dir-recent .rrow[data-folder="${plant.folder}"] .start`);
         const body = JSON.parse((await req).postData() || '{}') as { cwd?: string; scope?: string };
         const answer = (await (await res).json()) as { sessionId?: string };
         expect(
           body.cwd === plant.folder && body.scope === 'thread',
-          `New conversation here sent ${JSON.stringify(body)}, not a new thread in ${plant.folder}`,
+          `Start here sent ${JSON.stringify(body)}, not a new thread in ${plant.folder}`,
         );
         expect(typeof answer.sessionId === 'string', `the stub did not answer the create (${JSON.stringify(answer)})`);
         for (let i = 0; i < 50 && !streamed.includes(answer.sessionId!); i++) await page.waitForTimeout(100);
@@ -16003,9 +16135,10 @@ PAGE_SCENARIOS.push({
           streamed.includes(answer.sessionId!),
           `the page did not take up the conversation the stub created (streams opened for ${JSON.stringify(streamed)})`,
         );
-        const after = (await page.evaluate(`document.getElementById('list-screen').hidden`)) as boolean;
-        expect(after, 'the new conversation came on but the list stayed over it');
-        return `48px at the foot (bottom ${btn.bottom} of 844), the folder line names the planted folder, the press sent POST /session with that cwd and scope thread, the stub answered ${answer.sessionId}, the page opened its stream and the list shut`;
+        const after = (await page.evaluate(`({ list: document.getElementById('list-screen').hidden, folder: document.getElementById('dir-picker').hidden })`)) as { list: boolean; folder: boolean };
+        expect(after.list && after.folder, `the new conversation came on but the list or the folder screen stayed over it (${JSON.stringify(after)})`);
+        expect(posts.length === 1, `one Start here sent ${posts.length} creates`);
+        return `48px at the foot (bottom ${btn.bottom} of 844) reading New conversation; the press opened the folder screen over the list with focus on its back and sent nothing; the recent folder's Start here sent POST /session with that cwd and scope thread, once; the stub answered ${answer.sessionId}, the page opened its stream and both screens shut`;
       } finally {
         plant.cleanup();
       }
@@ -16013,7 +16146,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P153 a folder of 30 conversations scrolls under a New conversation here that does not move, and the second page is one thumb away',
+    name: 'P153 a folder of 30 conversations scrolls under a New conversation that does not move, and the second page is one thumb away',
     waitView: false,
     run: async ({ page }) => {
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
@@ -16073,7 +16206,7 @@ PAGE_SCENARIOS.push({
         expect(end.scrollTop > 0 && end.firstTop < top.firstTop, `the swipe did not scroll the rows (scrollTop ${end.scrollTop}, first row ${top.firstTop} -> ${end.firstTop})`);
         expect(
           JSON.stringify(end.btn) === JSON.stringify(top.btn) && end.listTop === 0 && end.docScroll === 0,
-          `New conversation here moved with the rows, or the page scrolled instead of the list (${JSON.stringify(top.btn)} -> ${JSON.stringify(end.btn)}, page ${end.docScroll})`,
+          `New conversation moved with the rows, or the page scrolled instead of the list (${JSON.stringify(top.btn)} -> ${JSON.stringify(end.btn)}, page ${end.docScroll})`,
         );
         expect(
           end.archived[1]! <= end.footTop && end.pager[1]! <= end.footTop && end.next[2]! >= 44,
@@ -16087,7 +16220,7 @@ PAGE_SCENARIOS.push({
           `next did not show the last 5 from the top with the button where it was (${JSON.stringify({ rows: second.rows, scrollTop: second.scrollTop, btn: second.btn })})`,
         );
         await page.click('#list-back');
-        return `25 of 30 rows on page 1 in a ${top.clientH}px scroller (${top.scrollH}px of content); a swipe moved the first row ${top.firstTop} -> ${end.firstTop} while New conversation here stayed at ${top.btn[0]}-${top.btn[1]} and the page did not scroll; the pager and Archived end above the thumb zone; next showed the last 5 from the top`;
+        return `25 of 30 rows on page 1 in a ${top.clientH}px scroller (${top.scrollH}px of content); a swipe moved the first row ${top.firstTop} -> ${end.firstTop} while New conversation stayed at ${top.btn[0]}-${top.btn[1]} and the page did not scroll; the pager and Archived end above the thumb zone; next showed the last 5 from the top`;
       } finally {
         plant.cleanup();
       }
@@ -16257,6 +16390,591 @@ PAGE_SCENARIOS.push({
       const after = (await page.evaluate(String.raw`({ list: !document.getElementById('list-screen').hidden, focus: document.activeElement === document.getElementById('h1-title') })`)) as { list: boolean; focus: boolean };
       expect(!after.list && after.focus, `Enter on a row did not return to the chat onto the title (${JSON.stringify(after)})`);
       return `Enter on the title opened the list onto back at 390 and the pane's search at 1280; Tab walked ${walks.join('; ')}; the ⋯ opened by Enter, arrows wrapped, End and Home jumped, Escape came back; Enter on the row resumed it and returned onto the title`;
+    },
+  });
+
+  // #193 (h1, list folders). "In the conversation drop down please also show
+  // the folder/workspace it is in. When I tap new conversation I would expect
+  // to then choose where that convo opens, not here." The list spans the
+  // current folder and every recent one, each row naming its folder, the
+  // folder line filters them, and New conversation opens the folder screen,
+  // where Start here (or the browsed folder's create) starts one in the folder
+  // chosen. The folders are planted under the harness root, the way P127 and
+  // P132 plant, so what is listed is the page's doing and not the host's.
+
+  // The folder line's own shortening, which a row's folder line repeats.
+  const short = (p: string) => p.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~');
+  // Two folders, the first browsed to (the current folder) and the second a
+  // recent one, two conversations in each, their mtimes set so the rows
+  // interleave by time across the folders: a newest, then b, then a, then b.
+  const plantTwo = (tag: string, idBase: string, names?: [string, string]) => {
+    const a = plantFolder(names ? names[0] : `${tag}-alpha`, [`${tag} alpha newest`, `${tag} alpha older`], `${idBase}-000a`);
+    const b = plantFolder(names ? names[1] : `${tag}-beta`, [`${tag} beta newer`, `${tag} beta oldest`], `${idBase}-000b`);
+    const now = Date.now() / 1000;
+    const stamp = (p: { chatsDir: string; ids: string[] }, i: number, minutes: number) =>
+      utimesSync(join(p.chatsDir, `${p.ids[i]}.jsonl`), now - minutes * 60, now - minutes * 60);
+    stamp(a, 0, 1);
+    stamp(b, 0, 5);
+    stamp(a, 1, 10);
+    stamp(b, 1, 20);
+    return {
+      a,
+      b,
+      order: [`${tag} alpha newest`, `${tag} beta newer`, `${tag} alpha older`, `${tag} beta oldest`],
+      cleanup: () => {
+        a.cleanup();
+        b.cleanup();
+      },
+    };
+  };
+  // Seeds the recent list through the page's own store and renderer, then
+  // browses to `current`, whose landing reads it and every recent folder.
+  const spanFolders = async (page: Page, current: string, recent: string[], rows: number) => {
+    await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+    await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', ${JSON.stringify(JSON.stringify(recent))}); renderRecentWorkspaces();`);
+    await page.evaluate(`browseTo(${JSON.stringify(current)})`);
+    await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(current)} && pastConvos.length === ${rows}`, null, { timeout: 10_000 });
+  };
+  type FolderRow = { id: string; title: string; lines: string; dir: string | null; path: string | null; host: string | null; color: string | null; h: number; current: boolean; rule: string };
+  const folderRows = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+      const s = w.querySelector('.s');
+      const dir = s.querySelector('.dir');
+      return {
+        id: w.dataset.session,
+        title: (s.querySelector('.tt') || {}).textContent,
+        lines: Array.from(s.children).map((c) => c.className).join(','),
+        dir: dir ? dir.title : null,
+        path: dir ? dir.querySelector('.cwd').textContent.replace(/[⁦-⁩]/g, '') : null,
+        host: dir && dir.querySelector('.host') ? dir.querySelector('.host').textContent : null,
+        color: dir ? getComputedStyle(dir).color : null,
+        h: Math.round(s.getBoundingClientRect().height),
+        current: s.getAttribute('aria-current') === 'true',
+        rule: getComputedStyle(s).borderLeftColor,
+      };
+    })`) as Promise<FolderRow[]>;
+
+  PAGE_SCENARIOS.push({
+    name: 'P182 the list spans the current folder and the recent ones: two planted folders’ conversations are merged newest first, each row with its folder as a muted second line',
+    waitView: false,
+    run: async ({ page }) => {
+      const t = plantTwo('p182', 'a1820000');
+      try {
+        await spanFolders(page, t.a.folder, [t.b.folder], 4);
+        await page.setViewportSize(PHONE);
+        await openList(page);
+        const rows = await folderRows(page);
+        const line = (await page.evaluate(`document.getElementById('list-cwd').textContent`)) as string;
+        const times = (await page.evaluate(`pastConvos.map((s) => Date.parse(s.updatedAt))`)) as number[];
+        expect(
+          JSON.stringify(rows.map((r) => r.title)) === JSON.stringify(t.order),
+          `the two folders' rows are not merged newest first (${JSON.stringify(rows.map((r) => r.title))}, want ${JSON.stringify(t.order)})`,
+        );
+        expect(
+          times.every((x, i) => i === 0 || times[i - 1]! >= x),
+          `the merged rows are not in updatedAt order (${JSON.stringify(times)})`,
+        );
+        const want = [t.a.folder, t.b.folder, t.a.folder, t.b.folder];
+        expect(
+          rows.every((r, i) => r.dir === want[i] && r.path === short(want[i]!) && r.host === 'on 127.0.0.1'),
+          `a row does not name its folder in the folder line's words (${JSON.stringify(rows.map((r) => [r.dir, r.path, r.host]))})`,
+        );
+        expect(
+          rows.every((r) => r.lines === 't,dir,sub'),
+          `the folder is not each row's second line (${JSON.stringify(rows.map((r) => r.lines))})`,
+        );
+        expect(
+          rows.every((r) => r.color === 'rgb(139, 148, 158)' && r.h === 64),
+          `the folder line is not muted, or it made the rows taller than 64px (${JSON.stringify(rows.map((r) => [r.color, r.h]))})`,
+        );
+        expect(line === 'All folders', `the folder line reads ${JSON.stringify(line)}, not All folders`);
+        await closeList(page);
+      } finally {
+        t.cleanup();
+      }
+      return `two folders planted under the harness root, the current one and a recent one, two conversations each: the list shows all four newest first across the folders (${t.order.join(' > ')}), each 64px row with its folder (path and "on 127.0.0.1") as a muted second line, under All folders`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P183 the folder line is a filter, All folders by default: its menu lists every folder the list spans with a count, an empty recent one included, picking one narrows the rows to it and All folders brings them back, by pointer and by keys, and the conversation on screen is marked in any folder',
+    waitView: false,
+    run: async ({ page }) => {
+      const t = plantTwo('p183', 'a1830000');
+      const empty = plantFolder('p183-empty', [], 'a1830000-000c');
+      try {
+        await spanFolders(page, t.a.folder, [t.b.folder, empty.folder], 4);
+        // The conversation on screen is one of the recent folder's.
+        const onScreen = t.b.ids[0]!;
+        await watch(page, onScreen);
+        await page.waitForFunction(`watchedSessionId === ${JSON.stringify(onScreen)}`);
+        await page.setViewportSize(PHONE);
+        await openList(page);
+        type Menu = { open: boolean; items: { folder: string; label: string; n: string; checked: string }[]; focus: string; right: number; vw: number };
+        const menu = () =>
+          page.evaluate(String.raw`(() => {
+            const m = document.getElementById('list-folders');
+            const a = document.activeElement;
+            return {
+              open: !!m && !m.hidden,
+              items: m ? Array.from(m.querySelectorAll('[role="menuitemradio"]')).map((b) => ({
+                folder: b.dataset.folder,
+                label: b.querySelector('.lbl').textContent.replace(/[⁦-⁩]/g, ''),
+                n: b.querySelector('.n').textContent,
+                checked: b.getAttribute('aria-checked'),
+              })) : [],
+              focus: a && a.dataset && a.dataset.folder !== undefined ? 'item:' + a.dataset.folder : a ? a.id : '',
+              right: m ? Math.round(m.getBoundingClientRect().right) : 0,
+              vw: innerWidth,
+            };
+          })()`) as Promise<Menu>;
+        const head = () =>
+          page.evaluate(String.raw`({
+            text: document.getElementById('list-cwd').textContent.replace(/[⁦-⁩]/g, ''),
+            host: document.getElementById('list-host').textContent,
+            title: document.getElementById('list-folder').title,
+            popup: document.getElementById('list-folder').getAttribute('aria-haspopup'),
+            expanded: document.getElementById('list-folder').getAttribute('aria-expanded'),
+            focus: document.activeElement === document.getElementById('list-folder'),
+            saved: localStorage.getItem('qwen-rc:ui:list-folder'),
+            none: (document.querySelector('#past-list .none') || { textContent: '' }).textContent,
+          })`) as Promise<{ text: string; host: string; title: string; popup: string; expanded: string; focus: boolean; saved: string | null; none: string }>;
+
+        const atRest = await head();
+        const all = await folderRows(page);
+        expect(
+          atRest.text === 'All folders' && atRest.popup === 'menu' && atRest.expanded === 'false' && all.length === 4,
+          `at rest the folder line is not All folders over all four rows (${JSON.stringify({ ...atRest, rows: all.length })})`,
+        );
+        const marked = (rows: FolderRow[]) => rows.filter((r) => r.current).map((r) => [r.id, r.rule]);
+        expect(
+          JSON.stringify(marked(all)) === JSON.stringify([[onScreen, 'rgb(88, 166, 255)']]),
+          `under All folders the conversation on screen, in the recent folder, is not the one marked with the blue rule (${JSON.stringify(marked(all))})`,
+        );
+
+        // Pointer opens the menu: All folders, then each folder in the set
+        // with its count, the empty recent folder included; All ticked and
+        // focused.
+        await page.click('#list-folder');
+        const opened = await menu();
+        const want = [
+          { folder: '', label: 'All folders', n: '4', checked: 'true' },
+          { folder: t.a.folder, label: short(t.a.folder), n: '2', checked: 'false' },
+          { folder: t.b.folder, label: short(t.b.folder), n: '2', checked: 'false' },
+          { folder: empty.folder, label: short(empty.folder), n: '0', checked: 'false' },
+        ];
+        expect(
+          opened.open && JSON.stringify(opened.items) === JSON.stringify(want),
+          `the folder menu does not list All folders and every folder with its count (${JSON.stringify(opened.items)})`,
+        );
+        expect(opened.focus === 'item:' && opened.right <= opened.vw, `the menu opened with focus on ${opened.focus} or past the screen's edge (${opened.right}/${opened.vw})`);
+        expect((await head()).expanded === 'true', 'the folder line does not say its menu is open');
+
+        // Keys: down twice to the recent folder, Enter picks it.
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('ArrowDown');
+        expect((await menu()).focus === 'item:' + t.b.folder, `ArrowDown twice did not reach the recent folder (${(await menu()).focus})`);
+        await page.keyboard.press('Enter');
+        const one = await head();
+        const narrowed = await folderRows(page);
+        expect(
+          !(await menu()).open && one.focus && one.title === t.b.folder && one.text === short(t.b.folder) && one.host === 'on 127.0.0.1',
+          `picking the recent folder did not shut the menu onto the line naming it (${JSON.stringify(one)})`,
+        );
+        expect(
+          JSON.stringify(narrowed.map((r) => r.title)) === JSON.stringify(['p183 beta newer', 'p183 beta oldest']) &&
+            narrowed.every((r) => r.dir === t.b.folder),
+          `the filter did not narrow the rows to the recent folder's (${JSON.stringify(narrowed.map((r) => [r.title, r.dir]))})`,
+        );
+        expect(
+          JSON.stringify(marked(narrowed)) === JSON.stringify([[onScreen, 'rgb(88, 166, 255)']]),
+          `filtered to its folder, the conversation on screen lost its blue rule (${JSON.stringify(marked(narrowed))})`,
+        );
+        expect(one.saved === JSON.stringify(t.b.folder), `the filter is not kept for a reload (${one.saved})`);
+
+        // Pointer onto the empty recent folder: no rows, said so.
+        await page.click('#list-folder');
+        await page.click(`#list-folders [role="menuitemradio"][data-folder="${empty.folder}"]`);
+        const bare = await head();
+        expect(
+          bare.title === empty.folder && (await folderRows(page)).length === 0 && /No conversations in this folder yet/.test(bare.none),
+          `the empty recent folder could not be picked, or did not say it holds nothing (${JSON.stringify(bare)})`,
+        );
+
+        // Escape shuts the menu onto the line and changes nothing.
+        await page.click('#list-folder');
+        await page.keyboard.press('Escape');
+        const escaped = await head();
+        expect(
+          !(await menu()).open && escaped.focus && escaped.title === empty.folder,
+          `Escape did not shut the menu onto the line with the filter as it was (${JSON.stringify(escaped)})`,
+        );
+
+        // All folders brings all four back.
+        await page.click('#list-folder');
+        await page.click('#list-folders [role="menuitemradio"][data-folder=""]');
+        const back = await head();
+        const whole = await folderRows(page);
+        expect(
+          back.text === 'All folders' && back.saved === null && JSON.stringify(whole.map((r) => r.title)) === JSON.stringify(t.order),
+          `All folders did not bring every row back (${JSON.stringify({ ...back, rows: whole.map((r) => r.title) })})`,
+        );
+        await closeList(page);
+      } finally {
+        t.cleanup();
+        empty.cleanup();
+      }
+      return 'All folders over 4 rows at rest, the conversation on screen (in the recent folder) marked; the line opens a menu of All folders (4), the current folder (2), the recent one (2) and an empty recent one (0) with All ticked and focused; ArrowDown twice and Enter narrowed to the recent folder, the line naming it, its conversation still marked, the choice kept for a reload; the empty folder can be picked and says so; Escape shuts the menu changing nothing; All folders brings the four back';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P184 nothing starts a conversation until a folder is chosen: New conversation, back and Escape send nothing, each Start here sends its own folder once, and the folder started in becomes the list’s filter',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const t = plantTwo('p184', 'a1840000');
+      const posts: string[] = [];
+      page.on('request', (r) => {
+        if (new URL(r.url()).pathname === '/session' && r.method() === 'POST') {
+          posts.push((JSON.parse(r.postData() || '{}') as { cwd?: string }).cwd ?? '');
+        }
+      });
+      // The current folder is refused and the recent one created, so both
+      // answers are seen; the created one names the folder it was sent, as
+      // the daemon does, and is the stub's own conversation so it streams.
+      const isCreate = (u: URL) => u.pathname === '/session';
+      await page.route(isCreate, async (route) => {
+        if (route.request().method() !== 'POST') return route.continue();
+        const cwd = (JSON.parse(route.request().postData() || '{}') as { cwd?: string }).cwd;
+        if (cwd !== t.b.folder) {
+          return route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'refused by the scenario' }) });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessionId: viewer.sessionId, workspaceCwd: cwd, attached: false }),
+        });
+      });
+      try {
+        await spanFolders(page, t.a.folder, [t.b.folder], 4);
+        await page.setViewportSize(PHONE);
+        await openList(page);
+        const screens = () =>
+          page.evaluate(String.raw`({
+            list: !document.getElementById('list-screen').hidden,
+            folder: !document.getElementById('dir-picker').hidden,
+            focus: document.activeElement ? document.activeElement.id : '',
+          })`) as Promise<{ list: boolean; folder: boolean; focus: string }>;
+
+        // The button, then back; the button, then Escape; the button and a
+        // wait. None of it sends a create.
+        await page.click('#list-new');
+        const first = await screens();
+        await page.click('#dir-back');
+        const backed = await screens();
+        await page.click('#list-new');
+        await page.keyboard.press('Escape');
+        const escaped = await screens();
+        await page.click('#list-new');
+        await page.waitForTimeout(600);
+        expect(
+          first.folder && first.focus === 'dir-back' && !backed.folder && backed.focus === 'list-new' && !escaped.folder && escaped.focus === 'list-new',
+          `New conversation did not open the folder screen, or back and Escape did not shut it onto New conversation (${JSON.stringify({ first, backed, escaped })})`,
+        );
+        expect(posts.length === 0, `opening and leaving the folder screen sent ${posts.length} creates (${JSON.stringify(posts)})`);
+
+        // The typed path's Start here: one create, its path; refused, so the
+        // screen stays to say why.
+        await page.fill('#new-session-cwd', t.a.folder);
+        await page.click('#new-session');
+        await page.waitForFunction(String.raw`/not authorized/.test(document.getElementById('status').textContent)`, null, { timeout: 5_000 });
+        expect(
+          JSON.stringify(posts) === JSON.stringify([t.a.folder]) && (await screens()).folder,
+          `the typed path's Start here did not send its path once, or the refusal shut the screen (${JSON.stringify(posts)})`,
+        );
+
+        // A recent folder's Start here, tapped twice as a thumb does: one
+        // create, that folder; created, so both screens shut onto the
+        // conversation.
+        await page.waitForFunction(`!document.getElementById('new-session').disabled`, null, { timeout: 5_000 });
+        await page.dblclick(`#dir-recent .rrow[data-folder="${t.b.folder}"] .start`);
+        await page.waitForFunction(`watchedSessionId === ${JSON.stringify(viewer.sessionId)}`, null, { timeout: 10_000 });
+        await page.waitForFunction(`document.getElementById('list-screen').hidden`, null, { timeout: 5_000 });
+        expect(
+          JSON.stringify(posts) === JSON.stringify([t.a.folder, t.b.folder]),
+          `the recent folder's Start here, tapped twice, did not send that folder once (${JSON.stringify(posts)})`,
+        );
+        const after = (await page.evaluate(String.raw`({
+          saved: localStorage.getItem('qwen-rc:ui:list-folder'),
+          recent: JSON.parse(localStorage.getItem('qwen-rc-workspaces') || '[]'),
+        })`)) as { saved: string | null; recent: string[] };
+        expect(
+          after.saved === JSON.stringify(t.b.folder) && after.recent[0] === t.b.folder,
+          `the folder started in is not the list's filter and first in Recent (${JSON.stringify(after)})`,
+        );
+        await openList(page);
+        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 5_000 });
+        const shown = (await page.evaluate(String.raw`({
+          line: document.getElementById('list-folder').title,
+          dirs: Array.from(document.querySelectorAll('#past-list .s .dir')).map((d) => d.title),
+        })`)) as { line: string; dirs: string[] };
+        expect(
+          shown.line === t.b.folder && shown.dirs.length === 2 && shown.dirs.every((d) => d === t.b.folder),
+          `the list did not come back filtered to the folder started in (${JSON.stringify(shown)})`,
+        );
+        // The folder the browser was on is still in the set the list spans.
+        await page.click('#list-folder');
+        await page.click('#list-folders [role="menuitemradio"][data-folder=""]');
+        const everyRow = (await page.evaluate(`document.querySelectorAll('#past-list .srow').length`)) as number;
+        expect(everyRow === 4, `All folders after the create shows ${everyRow} rows, not both folders' 4`);
+        expect(posts.length === 2, `the walk sent ${posts.length} creates in all, not 2`);
+        await closeList(page);
+      } finally {
+        await page.unroute(isCreate);
+        t.cleanup();
+      }
+      return 'New conversation opened the folder screen onto its back; back and Escape shut it onto New conversation; none of it, nor a wait with it open, sent a create; the typed path\'s Start here sent its path once (refused, the screen stayed); the recent folder\'s Start here, tapped twice, sent that folder once and both screens shut; the folder started in became the filter and first in Recent, the list reopened on its two rows, and All folders still shows both folders\' four';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P185 in the 280px pane at 1280 the folder line and each row’s folder line fit, giving way from the start of the path, as they do at 390 and 360, and the folder menu stays in the pane',
+    waitView: false,
+    run: async ({ page }) => {
+      // Long folders with a short last folder under each, which is the one
+      // that has to stay on screen when the rest of the path gives way.
+      const LONG_A = 'p185-alpha-folder-whose-name-runs-well-past-the-edge-of-the-pane';
+      const LONG_B = 'p185-beta-folder-whose-name-also-runs-well-past-the-edge-of-the-pane';
+      const t = plantTwo('p185', 'a1850000', [`${LONG_A}/api`, `${LONG_B}/web`]);
+      try {
+        await spanFolders(page, t.a.folder, [t.b.folder], 4);
+        // Every box that holds a folder: inside its row (or line), the path
+        // cut, the cut at its start (the first character is left of the box)
+        // and the last folder of the path on screen inside the box.
+        const fit = (scope: string) =>
+          page.evaluate(String.raw`(() => {
+            const inBox = (r, b) => r.left >= b.left - 0.5 && r.right <= b.right + 0.5;
+            const ends = (el, full) => {
+              const node = el.firstChild;
+              const text = node.textContent;
+              const seg = full.split('/').pop();
+              const i = text.lastIndexOf(seg);
+              const tail = document.createRange();
+              tail.setStart(node, i);
+              tail.setEnd(node, i + seg.length);
+              const head = document.createRange();
+              head.setStart(node, 1);
+              head.setEnd(node, 2);
+              const b = el.getBoundingClientRect();
+              return {
+                cut: el.scrollWidth > el.clientWidth,
+                tailIn: inBox(tail.getBoundingClientRect(), b),
+                headOut: head.getBoundingClientRect().left < b.left - 1,
+              };
+            };
+            const scr = document.getElementById('list-screen').getBoundingClientRect();
+            const rows = Array.from(document.querySelectorAll('#past-list .s')).map((s) => {
+              const sb = s.getBoundingClientRect();
+              const dir = s.querySelector('.dir');
+              const host = dir.querySelector('.host');
+              return Object.assign(ends(dir.querySelector('.cwd'), dir.title), {
+                dirIn: inBox(dir.getBoundingClientRect(), sb),
+                hostIn: inBox(host.getBoundingClientRect(), sb),
+                subIn: inBox(s.querySelector('.sub').getBoundingClientRect(), sb),
+                rowIn: inBox(sb, scr),
+                h: Math.round(sb.height),
+              });
+            });
+            const line = document.getElementById('list-folder');
+            const lb = line.getBoundingClientRect();
+            const cwd = document.getElementById('list-cwd');
+            const lineRead = line.title && line.title !== 'All folders'
+              ? Object.assign(ends(cwd, line.title), {
+                  hostIn: inBox(document.getElementById('list-host').getBoundingClientRect(), lb),
+                  chevIn: inBox(line.querySelector('.chg').getBoundingClientRect(), lb),
+                })
+              : null;
+            const body = document.getElementById('list-body');
+            return {
+              scope: ${JSON.stringify(scope)},
+              w: Math.round(scr.width),
+              rows: rows,
+              line: lineRead,
+              lineOver: line.scrollWidth > line.clientWidth + 1,
+              bodyOver: body.scrollWidth > body.clientWidth + 1,
+              docW: document.documentElement.scrollWidth,
+              vw: innerWidth,
+            };
+          })()`) as Promise<{
+            scope: string;
+            w: number;
+            rows: { cut: boolean; tailIn: boolean; headOut: boolean; dirIn: boolean; hostIn: boolean; subIn: boolean; rowIn: boolean; h: number }[];
+            line: { cut: boolean; tailIn: boolean; headOut: boolean; hostIn: boolean; chevIn: boolean } | null;
+            lineOver: boolean;
+            bodyOver: boolean;
+            docW: number;
+            vw: number;
+          }>;
+        const check = (got: Awaited<ReturnType<typeof fit>>, wantW: number, nRows: number) => {
+          const at = `${got.scope}`;
+          expect(got.w === wantW && got.rows.length === nRows, `the list is ${got.w}px with ${got.rows.length} rows at ${at}, not ${wantW} with ${nRows}`);
+          expect(
+            got.rows.every((r) => r.dirIn && r.hostIn && r.subIn && r.rowIn && r.h === 64),
+            `a row's folder line, host or second line spills out of its 64px row at ${at} (${JSON.stringify(got.rows)})`,
+          );
+          expect(
+            got.rows.every((r) => r.cut && r.headOut && r.tailIn),
+            `a row's long path is not cut from its start with its last folder on screen at ${at} (${JSON.stringify(got.rows)})`,
+          );
+          expect(!got.lineOver && !got.bodyOver && got.docW === got.vw, `the list overflows sideways at ${at} (line ${got.lineOver}, body ${got.bodyOver}, document ${got.docW}/${got.vw})`);
+          if (got.line) {
+            expect(
+              got.line.cut && got.line.headOut && got.line.tailIn && got.line.hostIn && got.line.chevIn,
+              `the folder line naming one long folder does not give way from the start of its path, or loses its host or chevron, at ${at} (${JSON.stringify(got.line)})`,
+            );
+          }
+        };
+        const lines: string[] = [];
+        for (const [w, h] of [
+          [1280, 810],
+          [390, 844],
+          [360, 780],
+        ] as const) {
+          await page.setViewportSize({ width: w, height: h });
+          await openList(page);
+          const wantW = w >= PANE_MIN ? LEFT_PANE : w;
+          check(await fit(`${w}x${h} all folders`), wantW, 4);
+          // One folder picked: the line names that long folder.
+          await page.click('#list-folder');
+          const menuBox = (await page.evaluate(String.raw`(() => {
+            const m = document.getElementById('list-folders').getBoundingClientRect();
+            const labels = Array.from(document.querySelectorAll('#list-folders .lbl')).map((l) => l.scrollWidth > l.clientWidth);
+            return { left: Math.round(m.left), right: Math.round(m.right), cut: labels.filter(Boolean).length };
+          })()`)) as { left: number; right: number; cut: number };
+          expect(
+            menuBox.left >= 0 && menuBox.right <= wantW && menuBox.cut === 2,
+            `the folder menu leaves the list or does not cut its long paths at ${w}x${h} (${JSON.stringify(menuBox)}, list ${wantW}px)`,
+          );
+          // The line's one-folder reading, with All folders brought back
+          // after so the next width starts the same.
+          await page.click(`#list-folders [role="menuitemradio"][data-folder="${t.b.folder}"]`);
+          const picked = await fit(`${w}x${h} one folder`);
+          expect(picked.line !== null, `the folder line did not name the folder picked at ${w}x${h}`);
+          // Only the picked folder's two rows are under it.
+          check(picked, wantW, 2);
+          await page.click('#list-folder');
+          await page.click(`#list-folders [role="menuitemradio"][data-folder=""]`);
+          lines.push(`${w}x${h}: list ${wantW}px, 4 rows of 64px with folder, host and second line inside, long paths cut from the start with the last folder showing, the folder line the same with one folder picked, the menu ${menuBox.left}-${menuBox.right}`);
+          await closeList(page);
+        }
+        return lines.join('; ');
+      } finally {
+        t.cleanup();
+        const root = harnessRuntimeRoot();
+        rmSync(join(root, LONG_A), { recursive: true, force: true });
+        rmSync(join(root, LONG_B), { recursive: true, force: true });
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P186 a refresh reads at most six folders, all at once, with the live snapshot for the current one only, and the filter, the search, the folder menu and opening the list read nothing',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+      // The 30 s poll is the refresh the list always had, and it would read
+      // too; held off so what is counted below is one refresh and then the
+      // views' own reads.
+      await page.evaluate('clearInterval(pastConvosPollId); pastConvosPollId = null;');
+      const current = (await page.evaluate('curDirPath')) as string;
+      // Seven stored recent folders: more than the page ever stores (five),
+      // so the cap at six reads is the page's and not the store's.
+      const recent = Array.from({ length: 7 }, (_, i) => `/home/evan/p186-${i}`);
+      const reads: { cwd: string; at: number }[] = [];
+      const live: string[] = [];
+      const archived: string[] = [];
+      page.on('request', (r) => {
+        const u = new URL(r.url());
+        if (u.pathname === '/rc/sessions') {
+          if (u.searchParams.has('archiveState')) archived.push(u.searchParams.get('cwd') ?? '');
+          else reads.push({ cwd: u.searchParams.get('cwd') ?? '', at: Date.now() });
+        }
+        if (u.pathname === '/rc/sessions/live-state') live.push(u.searchParams.get('workspace') ?? '');
+      });
+      let firstAnswer = Infinity;
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && (u.searchParams.get('cwd') ?? '').startsWith('/home/evan/p186-'),
+        async (route) => {
+          const cwd = new URL(route.request().url()).searchParams.get('cwd')!;
+          // Held, so a page reading one folder after another would show it
+          // as requests spread over several holds.
+          await new Promise((r) => setTimeout(r, 400));
+          firstAnswer = Math.min(firstAnswer, Date.now());
+          const n = cwd.slice(-1);
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              sessions: route.request().url().includes('archiveState')
+                ? []
+                : [{ sessionId: `a1860000-0000-4000-8000-00000000000${n}`, title: `p186 in ${n}`, updatedAt: new Date(Date.now() - Number(n) * 60_000).toISOString() }],
+              truncated: false,
+            }),
+          });
+        },
+      );
+      await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', ${JSON.stringify(JSON.stringify(recent))})`);
+      reads.length = 0;
+      live.length = 0;
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const one = reads.slice();
+      const wantRead = [current, ...recent.slice(0, 5)];
+      expect(
+        one.length === 6 && JSON.stringify(one.map((r) => r.cwd).sort()) === JSON.stringify(wantRead.slice().sort()),
+        `one refresh read ${one.length} folders (${JSON.stringify(one.map((r) => r.cwd))}), not the current one and the first five recent`,
+      );
+      expect(
+        Math.max(...one.map((r) => r.at)) < firstAnswer,
+        `the folders were read one after another rather than all at once (last read sent ${Math.max(...one.map((r) => r.at)) - firstAnswer}ms after the first answer)`,
+      );
+      expect(
+        JSON.stringify(live) === JSON.stringify([current]),
+        `the live snapshot was read for ${JSON.stringify(live)}, not for the current folder alone`,
+      );
+      const rows = (await page.evaluate('pastConvos.length')) as number;
+      expect(rows === 5, `the five read recent folders' rows are not all listed (${rows})`);
+
+      // The views read from what is kept: opening the list, the folder menu,
+      // a pick and All again, a search and putting it away, shutting and
+      // opening again. Archived (n) is read when the list opens, across the
+      // six folders at most.
+      reads.length = 0;
+      archived.length = 0;
+      await page.setViewportSize(PHONE);
+      await openList(page);
+      await page.click('#list-folder');
+      await page.click(`#list-folders [role="menuitemradio"][data-folder="${recent[2]}"]`);
+      const picked = (await page.evaluate(`document.querySelectorAll('#past-list .srow').length`)) as number;
+      await page.click('#list-folder');
+      await page.click('#list-folders [role="menuitemradio"][data-folder=""]');
+      await page.click('#list-search');
+      await page.keyboard.type('p186');
+      await page.keyboard.press('Escape');
+      await closeList(page);
+      await openList(page);
+      await page.waitForTimeout(600);
+      expect(picked === 1, `picking a folder showed ${picked} rows, not its one`);
+      expect(reads.length === 0, `the views read ${reads.length} folders (${JSON.stringify(reads.map((r) => r.cwd))}) rather than drawing from what was read`);
+      // Archived (n) reads the filed half when the list opens and when the
+      // view changes, over the same six folders and never the ones past
+      // the cap.
+      const outside = archived.filter((c) => !wantRead.includes(c));
+      expect(
+        archived.length > 0 && outside.length === 0,
+        `Archived (n) read ${archived.length} archived listings, ${outside.length} of them outside the six folders (${JSON.stringify(outside)})`,
+      );
+      await closeList(page);
+      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, with the live snapshot for the current folder alone; the five recent folders' rows listed; opening the list, the folder menu, a pick and back, a search and two opens read no folder listing (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
     },
   });
 }
