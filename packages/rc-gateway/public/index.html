@@ -491,23 +491,55 @@
         background: var(--g1-band);
         color: var(--g1-ink);
       }
-      .tab-pane {
-        display: none;
-      }
-      .tab-pane.active {
-        display: block;
-      }
       /* #177. Every Operations, Settings and Diagnostics card is a band in
-         g1's sense: the band ground under the line rule. */
-      details.ops-collapse {
+         g1's sense: the band ground under the line rule. #187 (h1): a card is
+         a section of a panel screen now, always open under its own heading,
+         so there is nothing left to tap open and no summary to style. */
+      .ops-card {
+        min-width: 0;
+        margin: 0 0 12px;
+        padding: 12px 14px;
         background: var(--g1-band);
         border: 1px solid var(--g1-line);
         border-radius: 8px;
-        padding: 0.75rem 1rem;
-        margin-bottom: 1rem;
+        overflow-wrap: anywhere;
       }
-      details.ops-collapse > summary {
-        cursor: pointer;
+      .ops-card > h2 {
+        margin: 0 0 4px;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        font-weight: 600;
+      }
+      /* A row of a card's own controls wraps rather than running off a 360px
+         screen, and its controls take a thumb-sized height. The rows a loader
+         fills all carry an id and their own styles, so they are left alone. */
+      .ops-card > div:not([id]):has(> input, > button, > select, > label) {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .ops-card > div:not([id]) > button,
+      .ops-card > div:not([id]) > input:not([type='checkbox'], [type='radio']),
+      .ops-card > div:not([id]) > select,
+      .ops-card > div:not([id]) > label > select,
+      .ops-card > div:not([id]) > label > input:not([type='checkbox'], [type='radio']) {
+        min-height: 40px;
+        max-width: 100%;
+        box-sizing: border-box;
+      }
+      /* 16px: iOS zooms the page into any field under 16px when it takes
+         focus, and these are the fields a phone types into. */
+      #panel-screen :where(input, select, textarea) {
+        font-size: 16px;
+      }
+      #panel-screen input[type='checkbox'],
+      #panel-screen input[type='radio'] {
+        width: 20px;
+        height: 20px;
+        vertical-align: middle;
+        accent-color: var(--g1-link);
       }
       .ops-note {
         color: var(--g1-ink-lo);
@@ -557,7 +589,7 @@
       }
       /* #184: the column has no gutter of its own now. The Chat screen's
          bands run edge to edge as drawn and keep their own insets, and the
-         other panes take the gutter on their scroller (.tab-pane.active). */
+         panel screens take theirs on their own scroller (#panel-body). */
       .mid {
         position: relative;
         display: flex;
@@ -580,17 +612,20 @@
          below, and the old inherited #000 on it was 1.11:1. The only elements
          that inherit are the virtualizer's own wrappers, which hold no text.
          P126 measures every text-bearing element per band instead of leaving
-         that as a claim in a comment. */
-      .tab-pane {
+         that as a claim in a comment.
+         #187 (h1): the chat pane is the only pane left; the other three are
+         panel screens (#panel-screen), which carry the same ink. */
+      #pane-chat {
         background: transparent;
         color: var(--g1-ink);
       }
       /* #184 (h1). The Chat screen is a frame the height of the screen: the
          bar, the status line, the sheet, the to-do strip, the tools and the
          composer each take what they draw, and the transcript takes the rest
-         (its rule is with the transcript's own styles). The other panes scroll
-         inside the frame rather than with the document, which is what lets
-         the document stop scrolling at all. While the keyboard is up the
+         (its rule is with the transcript's own styles). The screens over it
+         (More, a panel, the list) scroll inside their own frames rather than
+         with the document, which is what lets the document stop scrolling at
+         all. While the keyboard is up the
          frame is the height it leaves (--app-h, #182). */
       body:has(> #app-body:not([hidden])) {
         height: 100vh;
@@ -605,17 +640,12 @@
       :root.kb-open body:has(> #app-body:not([hidden])) {
         height: var(--app-h, 100dvh);
       }
-      .tab-pane.active {
+      #pane-chat {
         flex: 1 1 0;
         min-height: 0;
-        overflow-y: auto;
-        padding: 1rem;
-      }
-      #pane-chat.tab-pane.active {
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        padding: 0;
       }
       /* The bar: ≡ and ⋯ at 44px either side of the title, on the band. */
       #h1-bar {
@@ -706,9 +736,11 @@
       #h1-menu [role='menuitem'].danger {
         color: #ff7b72;
       }
-      /* A screen over the chat: More now, and the shape slice 4's sheet and
-         its panels take. Its own scroller, its own way back. */
-      #more-screen {
+      /* A screen over the chat: More, and over it the panel screen a row
+         opens. Each has its own scroller and its own way back; the panel sits
+         over More so back from it lands on the row it came from. */
+      #more-screen,
+      #panel-screen {
         position: fixed;
         top: env(safe-area-inset-top, 0px);
         left: 0;
@@ -718,12 +750,17 @@
         display: flex;
         flex-direction: column;
         background: var(--g1-page);
+        color: var(--g1-ink);
       }
-      #more-screen[hidden] {
+      #panel-screen {
+        z-index: 71;
+      }
+      #more-screen[hidden],
+      #panel-screen[hidden],
+      #panel-body > .panel[hidden] {
         display: none;
       }
-      .scr-head,
-      #pane-head {
+      .scr-head {
         flex: none;
         height: 56px;
         box-sizing: border-box;
@@ -736,11 +773,12 @@
         color: var(--g1-ink-hi);
         font-size: 16px;
       }
-      #pane-head[hidden] {
-        display: none;
+      /* The drawn head's right-hand 44px, empty, so the title centres. */
+      .scr-head > .scr-sp {
+        width: 44px;
+        flex: none;
       }
-      .scr-head > button,
-      #pane-head > button {
+      .scr-head > button {
         width: 44px;
         height: 44px;
         flex: none;
@@ -759,53 +797,122 @@
         overflow-y: auto;
         padding: 8px 0 24px;
       }
+      /* #187. More as drawn: groups 20px apart, a 12px uppercase head over
+         each, then 48px rows on the band with a rule above each, the label
+         taking the width, the value muted beside the chevron. */
+      #more-body {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        padding: 12px 0 24px;
+      }
+      #more-screen .mgrp {
+        display: flex;
+        flex-direction: column;
+      }
       #more-screen .grp {
-        padding: 16px 16px 6px;
+        padding: 4px 16px 6px;
         font-size: 12px;
-        letter-spacing: 0.06em;
+        font-weight: 600;
+        letter-spacing: 0.04em;
         text-transform: uppercase;
         color: var(--g1-ink-mid);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* The path and the host keep their case: a path is case-sensitive. */
+      #more-ws,
+      #more-host {
+        text-transform: none;
+        letter-spacing: 0;
       }
       #more-screen .row {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        flex-wrap: wrap;
-        gap: 4px 12px;
+        gap: 12px;
         width: 100%;
         box-sizing: border-box;
         min-height: 48px;
-        padding: 6px 16px;
+        padding: 0 16px;
         border: 0;
-        border-bottom: 1px solid var(--g1-line);
+        border-top: 1px solid var(--g1-line);
         border-radius: 0;
         background: var(--g1-band);
         color: var(--g1-ink-hi);
-        font-size: 15px;
         text-align: left;
       }
-      #more-screen .row .chev {
-        color: var(--g1-ink-mid);
-        font-size: 20px;
-      }
-      #more-screen select {
-        min-height: 40px;
-        max-width: 55%;
+      #more-screen .row .lbl {
+        flex: 1 1 auto;
+        min-width: 0;
         font-size: 15px;
       }
-      #more-screen input[type='checkbox'] {
-        width: 20px;
-        height: 20px;
-        vertical-align: middle;
-        accent-color: var(--g1-link);
+      #more-screen .row .val {
+        flex: 0 1 auto;
+        min-width: 0;
+        max-width: 45%;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
-      #more-screen .idle .st {
-        flex-basis: 100%;
+      #more-screen .row .chev {
+        flex: none;
+        color: var(--g1-ink-mid);
+      }
+      /* A panel screen: the sentence that says what it is for, then its
+         cards, on the page ground with a 12px gutter. */
+      #panel-body {
+        padding: 12px 12px 24px;
+      }
+      #panel-body .lede {
+        margin: 0 4px 12px;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      #panel-body .panel-go {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0 0 12px;
+      }
+      #panel-body .panel-go > button {
+        min-height: 44px;
+        border-radius: 10px;
+      }
+      /* Dictation and the idle switch: a label beside its control, 48px. */
+      .ops-card .prow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 48px;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+      }
+      .ops-card .prow select {
+        min-height: 40px;
+        max-width: 60%;
+      }
+      #idle-suggest .st {
+        display: block;
         color: var(--g1-ink-mid);
         font-size: 12px;
       }
-      #more-screen .idle .st:empty {
+      #idle-suggest .st:empty,
+      #install-how[hidden] {
         display: none;
+      }
+      #install-card p {
+        margin: 6px 0;
+        font-size: 15px;
+      }
+      #install-app {
+        min-height: 44px;
+        margin: 6px 0;
+        border-radius: 10px;
       }
       /* The status line: what the conversation is doing, in one row. */
       #h1-statusline {
@@ -1511,7 +1618,8 @@
          the height the keyboard leaves, as the chat frame is (#182), so the
          thumb-zone button rides on the keys rather than under them. */
       :root.kb-open #list-screen,
-      :root.kb-open #dir-picker {
+      :root.kb-open #dir-picker,
+      :root.kb-open #panel-screen {
         bottom: auto;
         height: calc(var(--app-h, 100dvh) - env(safe-area-inset-top, 0px));
       }
@@ -1776,6 +1884,15 @@
         z-index: 76;
         bottom: calc(96px + env(safe-area-inset-bottom, 0px));
       }
+      /* #187. A panel's own buttons report the same way (pair first, not
+         authorized, load failed), and More and a panel have no thumb-zone
+         button for the toast to clear. */
+      :root:has(#more-screen:not([hidden])) #h1-toasts,
+      :root:has(#panel-screen:not([hidden])) #h1-toasts {
+        position: fixed;
+        z-index: 76;
+        bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+      }
       /* #180. A row's menu: one element for every row, placed beside the
          row's ⋯ (placeRowMenu) and drawn as List.dc.html draws it, the ⋯
          menu's surface at 200px. Fixed rather than inside the row, so it is
@@ -2033,61 +2150,1076 @@
           End session
         </button>
       </div>
-      <!-- #184. The interim More screen. Slice 4 replaces it with the grouped
-           sheet; until then it lists the three panes the tab bar held, each of
-           which opens as its own screen with a back button, and the phone's own
-           settings the composer row used to carry (dictation language and
-           auto-send, idle suggestions), which the spec files under This phone.
-           The rows keep the .tab class and data-tab the tab bar's spans had, so
-           switchTab and the saved tab (#182) work unchanged. -->
-      <div id="more-screen" role="dialog" aria-label="More" hidden>
+      <!-- #187 (h1). The More screen, drawn to More.dc.html: back, then four
+           groups of 48px rows with a value column and a chevron. Each row
+           opens one panel screen (#panel-screen below) holding the cards the
+           Operations, Settings and Diagnostics tabs held, every id and handler
+           kept, so the tab bar, its panes and their pins are gone. A value is
+           drawn only where the page already holds the fact (renderMoreValues):
+           a row with nothing to say says nothing rather than a placeholder.
+           Time zone is the one row the drawing does not have: the stamp zone
+           card is per device, and no drawn row is about time. -->
+      <div id="more-screen" role="dialog" aria-labelledby="more-title" hidden>
         <div class="scr-head">
-          <button id="more-back" type="button" aria-label="Back to chat">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+          <button id="more-back" type="button" aria-label="Back to the conversation">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
-          <strong>More</strong>
+          <strong class="ttl" id="more-title">More</strong>
+          <span class="scr-sp" aria-hidden="true"></span>
         </div>
-        <div class="scr-body">
-          <div class="grp">Panels</div>
-          <button type="button" class="tab row" data-tab="ops">
-            <span>Operations</span><span class="chev" aria-hidden="true">›</span>
+        <div class="scr-body" id="more-body">
+          <div class="mgrp" role="group" aria-labelledby="more-g-convo">
+            <div class="grp" id="more-g-convo">This conversation</div>
+            <button type="button" class="row" data-panel="rewind">
+              <span class="lbl">Rewind to a turn</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="fork">
+              <span class="lbl">Fork</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="files">
+              <span class="lbl">Files and artifacts</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="share">
+              <span class="lbl">Export or share</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="usage">
+              <span class="lbl">Usage and cost</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="queue">
+              <span class="lbl">Prompt queue</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="search">
+              <span class="lbl">Search across conversations</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+          </div>
+          <div class="mgrp" role="group" aria-labelledby="more-g-ws">
+            <div class="grp" id="more-g-ws">Workspace<span id="more-ws"></span></div>
+            <button type="button" class="row" data-panel="perms">
+              <span class="lbl">Permission rules</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="mcp">
+              <span class="lbl">MCP servers</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="tools">
+              <span class="lbl">Tools</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="trust">
+              <span class="lbl">Trust and policy</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="memory">
+              <span class="lbl">Memory and skills</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+          </div>
+          <div class="mgrp" role="group" aria-labelledby="more-g-host">
+            <div class="grp" id="more-g-host">Host<span id="more-host"></span></div>
+            <button type="button" class="row" data-panel="daemons">
+              <span class="lbl">Daemons and workspaces</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="sessions">
+              <span class="lbl">All sessions</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="runs">
+              <span class="lbl">Runs and workflows</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="bridges">
+              <span class="lbl">Chat bridges</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="diag">
+              <span class="lbl">Diagnostics</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+          </div>
+          <div class="mgrp" role="group" aria-labelledby="more-g-phone">
+            <div class="grp" id="more-g-phone">This phone</div>
+            <button type="button" class="row" data-panel="notify">
+              <span class="lbl">Notifications</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="dictation">
+              <span class="lbl">Dictation</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="zone">
+              <span class="lbl">Time zone</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="devices">
+              <span class="lbl">Paired devices and tokens</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" data-panel="install">
+              <span class="lbl">Install as app</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- #187. One screen over More for whichever row was opened: its own
+           head (back to More, the row's name) and its own scroller, the
+           shape the List screen's children have. Each .panel is one row's
+           screen: one sentence that says what it is for (the ? buttons and
+           their hidden help are retired for it), then the cards it stacks,
+           each always open with its own heading. -->
+      <div id="panel-screen" role="dialog" aria-labelledby="panel-title" hidden>
+        <div class="scr-head">
+          <button id="panel-back" type="button" aria-label="Back to More">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
-          <button type="button" class="tab row" data-tab="settings">
-            <span>Settings</span><span class="chev" aria-hidden="true">›</span>
-          </button>
-          <button type="button" class="tab row" data-tab="diag">
-            <span>Diagnostics</span><span class="chev" aria-hidden="true">›</span>
-          </button>
-          <div class="grp">This phone</div>
-          <label class="row" for="dictate-lang">
-            <span>Dictation language</span>
-            <select id="dictate-lang" title="dictation language">
-              <option value="">auto</option>
-              <option value="en-US">English (US)</option>
-              <option value="en-GB">English (UK)</option>
-              <option value="es-ES">Spanish</option>
-              <option value="fr-FR">French</option>
-              <option value="de-DE">German</option>
-              <option value="pt-BR">Portuguese (BR)</option>
-              <option value="hi-IN">Hindi</option>
-              <option value="zh-CN">Chinese</option>
-              <option value="ja-JP">Japanese</option>
-            </select>
-          </label>
-          <label
-            class="row"
-            title="when dictation ends on a pause, send the prompt automatically"
-            ><span
-              ><input id="dictate-autosend" type="checkbox" /> Send when
-              dictation ends on a pause</span
-            ></label
-          >
-          <div class="row idle" id="idle-suggest">
-            <label title="next-step suggestions when this session goes idle"
-              ><input id="idle-suggest-toggle" type="checkbox" disabled /> Idle
-              suggestions</label
-            >
-            <span class="st" id="idle-suggest-status"></span>
+          <strong class="ttl" id="panel-title"></strong>
+          <span class="scr-sp" aria-hidden="true"></span>
+        </div>
+        <div class="scr-body" id="panel-body">
+          <div class="panel" id="panel-rewind" data-panel="rewind" hidden>
+            <p class="lede">Rolls a session back to an earlier turn, and lists every turn the daemon recorded, in order, under the label it gave each one.</p>
+            <section id="rewind" class="ops-card">
+              <h2>Rewind</h2>
+              <div class="ops-note">
+                (roll a session back to an earlier turn; requires owner scope)
+              </div>
+              <div>
+                <input id="rewind-id" placeholder="session id (blank = watched)" />
+                <input
+                  id="rewind-turn"
+                  type="number"
+                  min="0"
+                  placeholder="to turn"
+                  title="Turn index to rewind to. 0 discards every turn; the tip is a no-op."
+                />
+                <label
+                  title="Also restore files to their state at that turn's snapshot"
+                  ><input id="rewind-files" type="checkbox" /> restore files</label
+                >
+                <button id="rewind-btn">Rewind</button>
+              </div>
+              <div id="rewind-result"></div>
+            </section>
+            <!-- #126. The turn index shipped as a relay with a test and no caller
+                 anywhere. This is the caller. It is a list rather than a jump, and
+                 the reason is on the wire rather than in here: a jump has to say
+                 which drawn row is turn N, and nothing on the page can. The daemon
+                 stamps a record id onto a stored frame only in three goal-control
+                 call sites (packages/acp-bridge/src/transcript-replay.ts:1881,
+                 :1894, :2342); the emitter that builds every ordinary frame
+                 (createTranscriptMessageUpdate, :521) attaches none, so the
+                 recordId field DaemonSessionClient.hydrateEvent reads at :1569 is
+                 undefined for every row this panel could draw. The only ids a
+                 reader is ever handed are a page's targetRecordId and the opaque
+                 cursor, and neither maps a turn to a row. So the panel answers
+                 "how long is this conversation, and what did the daemon call each
+                 turn" -- including turns never loaded -- and asks for nothing.
+                 Bounded like the panels around it: an open list that grows is how
+                 the to-do strip pushed the composer under the fold on a phone, and
+                 a conversation can hold hundreds of these rows. -->
+            <section id="session-turns" class="ops-card">
+              <h2>Turns</h2>
+              <div class="ops-note">
+                (the daemon's own turn list; requires session-read scope)
+              </div>
+              <div>
+                <input
+                  id="turns-id"
+                  placeholder="session id (blank = watched)"
+                />
+                <button id="turns-load">Read turns</button>
+              </div>
+              <div id="turns-body" style="max-height: 140px; overflow-y: auto">
+                (not loaded)
+              </div>
+            </section>
+          </div>
+          <div class="panel" id="panel-fork" data-panel="fork" hidden>
+            <p class="lede">Creates a new session that starts from a copy of an existing one.</p>
+            <section id="fork-session" class="ops-card">
+              <h2>Fork session</h2>
+              <div class="ops-note">(requires write scope)</div>
+              <div>
+                <input id="fork-id" placeholder="parent session id" />
+                <input id="fork-name" placeholder="optional name" />
+                <input
+                  id="fork-from"
+                  type="number"
+                  min="0"
+                  placeholder="from event (blank = full)"
+                />
+                <select id="fork-mode" title="transcript mode">
+                  <option value="include" selected>include (copy)</option>
+                  <option value="empty">empty (header only)</option>
+                  <option value="summary" disabled>summary (unavailable)</option>
+                </select>
+                <button id="fork-btn">Fork</button>
+              </div>
+              <div id="fork-result"></div>
+            </section>
+          </div>
+          <div class="panel" id="panel-files" data-panel="files" hidden>
+            <p class="lede">Browses the files in the workspace the agent works on; what this conversation was handed and what it produced open under the composer's +.</p>
+            <!-- The conversation's own files and artifacts are the
+                 composer's, under its +; these two take the reader there
+                 rather than drawing the same lists twice. -->
+            <div class="panel-go">
+              <button id="more-files-open" type="button">Files in this conversation</button>
+              <button id="more-artifacts-open" type="button">Artifacts</button>
+            </div>
+            <section id="ws-files" class="ops-card" hidden>
+              <h2>Workspace files <span id="ws-files-target" style="margin-left: 6px; font-size: 0.8rem; color: #888"></span></h2>
+              <div class="ops-note">(reads: write scope)</div>
+              <div
+                id="ws-files-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+            </section>
+          </div>
+          <div class="panel" id="panel-share" data-panel="share" hidden>
+            <p class="lede">Mints a link that lets someone without a token view (or, with approve scope, also answer permission prompts on) one session, for a limited time.</p>
+            <!-- The export the conversation's menu offers, by the same
+                 handler, beside the links that share it. -->
+            <div class="panel-go">
+              <button id="more-export" type="button">Export or share this conversation</button>
+            </div>
+            <section id="share-create" class="ops-card">
+              <h2>Create share link</h2>
+              <div class="ops-note">(requires owner scope)</div>
+              <div>
+                <input id="share-session" placeholder="session id" />
+                <input
+                  id="share-ttl"
+                  type="number"
+                  placeholder="ttl (sec)"
+                  value="3600"
+                />
+                <select id="share-scope">
+                  <option value="view">view</option>
+                  <option value="approve">approve</option>
+                </select>
+                <input id="share-max" type="number" placeholder="max uses" />
+                <button id="share-create-btn">Create</button>
+              </div>
+              <div id="share-result"></div>
+            </section>
+            <section id="share-manage" class="ops-card">
+              <h2>Manage shares</h2>
+              <div class="ops-note">(requires owner scope)</div>
+              <div><button id="list-shares">List shares</button></div>
+              <div id="shares-list">(not listed)</div>
+            </section>
+            <section id="whoami-view" class="ops-card">
+              <h2>Share identity</h2>
+              <div class="ops-note">
+                (a share token's own view; an owner token is refused)
+              </div>
+              <div><button id="whoami-btn">Who am I</button></div>
+              <div id="whoami-out">(not asked)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-usage" data-panel="usage" hidden>
+            <p class="lede">Cost and token totals the gateway recorded, grouped by session, client, chat user, or model, and what the daemon recorded about one conversation.</p>
+            <section id="usage-view" class="ops-card">
+              <h2>Usage</h2>
+              <div class="ops-note">
+                (cost and token totals; needs cost tracking on the gateway)
+              </div>
+              <div>
+                <select id="usage-group" title="group rows by">
+                  <option value="session">by session</option>
+                  <option value="client">by client</option>
+                  <option value="sub_actor">by chat user</option>
+                  <option value="model">by model</option>
+                </select>
+                <input
+                  id="usage-since"
+                  type="text"
+                  size="8"
+                  value="24h"
+                  title="window start: 24h, 7d, or a date"
+                />
+                <button id="load-usage">Load usage</button>
+              </div>
+              <div id="usage-out">(not loaded)</div>
+            </section>
+            <!-- #98. Seven gateway surfaces shipped their backend before anything
+                 drew them, so the owner could not see them at all. They live here
+                 rather than in the chat pane because none of them is something you
+                 look at every session: this is the part of the page you open to
+                 check on something. -->
+            <!-- #124. The daemon's roll-up of ONE conversation. It sits beside
+                 Usage rather than inside the chat pane because it is something you
+                 open to check on a conversation, not something you watch. The two
+                 reads are neighbours on purpose and are still different things:
+                 Usage is the gateway's own cost store, absent entirely when no
+                 store is wired, and it answers across every session. This is the
+                 daemon's accounting of the one conversation you name, and it
+                 carries prompt counts, tool calls and lines written, which the
+                 gateway store has no field for. Bounded like the panels around it,
+                 because an open strip that grows is what pushed the composer under
+                 the fold on a phone. -->
+            <section id="session-stats" class="ops-card">
+              <h2>Session report</h2>
+              <div class="ops-note">
+                (one conversation's own roll-up; requires session-read scope)
+              </div>
+              <div>
+                <input
+                  id="stats-id"
+                  placeholder="session id (blank = watched)"
+                />
+                <button id="stats-load">Read stats</button>
+              </div>
+              <div id="stats-body">(not loaded)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-queue" data-panel="queue" hidden>
+            <p class="lede">What this session has accepted and not finished running: the one prompt in flight plus anything waiting behind it, and messages held for the turn already running.</p>
+            <section id="prompt-queue" class="ops-card">
+              <h2>Prompt queue</h2>
+              <div class="ops-note">
+                (prompts the daemon accepted and has not run; requires
+                session-read scope)
+              </div>
+              <div>
+                <input
+                  id="prompt-queue-id"
+                  placeholder="session id (blank = watched)"
+                />
+                <button id="prompt-queue-list">List queue</button>
+              </div>
+              <div id="prompt-queue-body">(not listed)</div>
+            </section>
+            <section id="mid-turn" class="ops-card">
+              <h2>Mid-turn messages</h2>
+              <div class="ops-note">
+                (messages held during a running turn; list with session-read, send
+                with session-write)
+              </div>
+              <div>
+                <input
+                  id="mid-turn-id"
+                  placeholder="session id (blank = watched)"
+                />
+                <button id="mid-turn-list">List messages</button>
+              </div>
+              <div>
+                <input
+                  id="mid-turn-text"
+                  placeholder="message for the turn in flight"
+                />
+                <button id="mid-turn-send">Send into turn</button>
+                <button id="mid-turn-now">Deliver now</button>
+              </div>
+              <div id="mid-turn-write">(nothing sent)</div>
+              <div id="mid-turn-body">(not listed)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-search" data-panel="search" hidden>
+            <p class="lede">Full-text search across every recorded session transcript.</p>
+            <section id="search" class="ops-card">
+              <h2>Search</h2>
+              <div class="ops-note">
+                (transcripts; requires owner scope)
+              </div>
+              <div>
+                <input id="search-q" placeholder="oauth refresh AND error" />
+                <select id="search-kind">
+                  <option value="all">all</option>
+                  <option value="user">user</option>
+                  <option value="assistant">assistant</option>
+                  <option value="tool">tool</option>
+                </select>
+                <button id="search-btn">Search</button>
+              </div>
+              <div>
+                <label
+                  >since <input id="search-since" type="datetime-local"
+                /></label>
+                <label
+                  >until <input id="search-until" type="datetime-local"
+                /></label>
+                <label
+                  title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
+                  ><input id="search-rank" type="checkbox" /> rank (BM25)</label
+                >
+                <label
+                  id="search-all-daemons-label"
+                  title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
+                  ><input id="search-all-daemons" type="checkbox" disabled /> all
+                  daemons</label
+                >
+              </div>
+              <div id="search-results">(not searched)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-perms" data-panel="perms" hidden>
+            <p class="lede">The allow, ask and deny lists that decide what the agent may do; nothing is applied until you save a list.</p>
+            <section id="perm-rules" class="ops-card" hidden>
+              <h2>Permission rules <span id="perm-rules-target" style="margin-left: 6px; font-size: 0.8rem; color: #888"></span></h2>
+              <div
+                id="perm-rules-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+            </section>
+            <section id="perm-decisions" class="ops-card" hidden>
+              <h2>Permission decisions <span id="perm-decisions-note" style="margin-left: 6px; font-size: 0.8rem; color: #888">gateway-visible decisions only</span></h2>
+              <div
+                id="perm-decisions-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+            </section>
+            <section id="perm-overlays" class="ops-card" hidden>
+              <h2>Session overrides <span id="perm-overlays-note" style="margin-left: 6px; font-size: 0.8rem; color: #888">ephemeral, lost when the gateway restarts</span></h2>
+              <div
+                id="perm-overlays-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+            </section>
+          </div>
+          <div class="panel" id="panel-mcp" data-panel="mcp" hidden>
+            <p class="lede">Lists MCP servers configured for this workspace, with their status and transport, and the ones this one conversation loaded.</p>
+            <section id="ws-mcp" class="ops-card" hidden>
+              <h2>Workspace MCP servers <span id="ws-mcp-target" style="margin-left: 6px; font-size: 0.8rem; color: #888"></span></h2>
+              <div class="ops-note">
+                (reads: write scope · changes: owner scope)
+              </div>
+              <div
+                id="ws-mcp-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+              <div
+                id="ws-mcp-form"
+                hidden
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 6px;
+                "
+              ></div>
+            </section>
+            <!-- #124. What ONE live conversation has loaded: its skills and the MCP
+                 servers its own manager holds. Deliberately not the workspace view.
+                 The SDK builds this payload from one session's own Config
+                 (DaemonSessionResourcesStatus,
+                 packages/sdk-typescript/src/daemon/types.ts:2520), so the MCP half
+                 reports that session's manager and its budget rather than the
+                 workspace-owned pool. A reader who wants the pool has to ask the
+                 workspace, and labelling this as a workspace fact would misstate
+                 which budget the numbers describe.
+                 This panel also draws no authentication verdict at all. The
+                 name-keyed hasOAuthTokens, requiresAuth, authenticationState and
+                 authenticationError fields are always absent on this route, and the
+                 type says a consumer must not read their absence as a negative
+                 authentication state (types.ts:2526-2533). A page printing "not
+                 authenticated" for a server that carries no such field would
+                 invent a verdict the daemon never gave, in the one direction that
+                 sends someone to re-authorise a working server. Absence draws
+                 nothing. Bounded like the panels around it: an open list that grows
+                 is what pushed the composer under the fold on a phone. -->
+            <section id="session-resources" class="ops-card">
+              <h2>Session resources</h2>
+              <div class="ops-note">
+                (one conversation's own skills and MCP servers; requires
+                session-read scope)
+              </div>
+              <div>
+                <input
+                  id="resources-id"
+                  placeholder="session id (blank = watched)"
+                />
+                <button id="resources-load">Read resources</button>
+              </div>
+              <div id="resources-body" style="max-height: 140px; overflow-y: auto">
+                (not loaded)
+              </div>
+            </section>
+          </div>
+          <div class="panel" id="panel-tools" data-panel="tools" hidden>
+            <p class="lede">Lists the tools available to the agent in this workspace.</p>
+            <section id="ws-tools" class="ops-card" hidden>
+              <h2>Workspace tools <span id="ws-tools-target" style="margin-left: 6px; font-size: 0.8rem; color: #888"></span></h2>
+              <div class="ops-note">
+                (reads: write scope · changes: owner scope)
+              </div>
+              <div
+                id="ws-tools-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+            </section>
+          </div>
+          <div class="panel" id="panel-trust" data-panel="trust" hidden>
+            <p class="lede">Shows whether this workspace is trusted, and asks the live policy what it would decide about a tool call, without running anything.</p>
+            <section id="ws-trust" class="ops-card" hidden>
+              <h2>Workspace trust <span id="ws-trust-target" style="margin-left: 6px; font-size: 0.8rem; color: #888"></span></h2>
+              <div class="ops-note">
+                (reads: write scope · changes: owner scope, applied by the local
+                operator on the daemon host)
+              </div>
+              <div
+                id="ws-trust-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                "
+              ></div>
+            </section>
+            <section id="policy-explain-view" class="ops-card">
+              <h2>Policy dry-run</h2>
+              <div class="ops-note">
+                (dry-run against the live policy; requires owner scope)
+              </div>
+              <div>
+                <input
+                  id="explain-tool"
+                  type="text"
+                  size="14"
+                  placeholder="tool name"
+                />
+                <input id="explain-path" type="text" size="14" placeholder="path" />
+                <select id="explain-op" title="operation">
+                  <option value="">any</option>
+                  <option value="read">read</option>
+                  <option value="write">write</option>
+                  <option value="execute">execute</option>
+                </select>
+                <button id="run-explain">Explain</button>
+              </div>
+              <div id="explain-out">(not asked)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-memory" data-panel="memory" hidden>
+            <p class="lede">What this machine loads to tell the model who it is, and what it has installed and configured.</p>
+            <section id="ws-context" class="ops-card">
+              <h2>Workspace context</h2>
+              <div class="ops-note">
+                (this machine's own state; requires write scope)
+              </div>
+              <div>
+                <label
+                  ><input type="radio" name="ctx-kind" value="memory" checked />
+                  context files</label
+                >
+                <label
+                  ><input type="radio" name="ctx-kind" value="agents" />
+                  agents</label
+                >
+                <button id="ctx-load">Read context</button>
+              </div>
+              <div id="ctx-body" style="max-height: 140px; overflow-y: auto">
+                (not loaded)
+              </div>
+            </section>
+            <!-- #123. What is installed and configured on this machine: skills,
+                 model providers, hooks. Host facts, so the routes behind this sit at
+                 write scope and the note below says so.
+                 What this panel deliberately does not print, and why that is a
+                 readability choice rather than a protection: a skill's
+                 `installedPath`, a provider model's `baseUrl` and `envKey`, and a
+                 hook's whole `config` block. The gate on these routes is the scope,
+                 not this page, so a device that can read the route can read those
+                 fields already. What the page adds is not a secret filter, it is
+                 rows a person can read on a phone: which skills exist and whether
+                 each is on, which provider is current, which events have a hook.
+                 On hooks the omission has one more reason worth stating. The daemon
+                 masks every `config.env` and `config.headers` VALUE to a constant
+                 and leaves the key names, and it never masks `config.command`
+                 (packages/cli/src/acp-integration/acpAgent.ts:2549). So a printed
+                 env row would show a variable name beside a string that looks like
+                 content, which reads as a value to anyone skimming. Printing
+                 nothing from that block is the honest rendering.
+                 A disabled skill and a disabled hook both stay on the list. They are
+                 installed, and the reason one is off is the fact someone came to
+                 check. -->
+            <section id="ws-inventory" class="ops-card">
+              <h2>Workspace inventory</h2>
+              <div class="ops-note">
+                (this machine's own state; requires write scope)
+              </div>
+              <div>
+                <label
+                  ><input type="radio" name="inv-kind" value="skills" checked />
+                  skills</label
+                >
+                <label
+                  ><input type="radio" name="inv-kind" value="providers" />
+                  providers</label
+                >
+                <label
+                  ><input type="radio" name="inv-kind" value="hooks" />
+                  hooks</label
+                >
+                <button id="inv-load">Read inventory</button>
+              </div>
+              <div id="inv-body" style="max-height: 140px; overflow-y: auto">
+                (not loaded)
+              </div>
+            </section>
+          </div>
+          <div class="panel" id="panel-daemons" data-panel="daemons" hidden>
+            <p class="lede">Lists the other qwen daemons this gateway knows about, with a health dot for each, and which workspace the workspace controls act on.</p>
+            <section id="daemons" class="ops-card">
+              <h2>Daemons</h2>
+              <div class="ops-note">
+                (multi-daemon registry; requires owner scope)
+              </div>
+              <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
+                (no registry: this daemon has no clients.toml, or your token lacks
+                owner scope)
+              </div>
+              <div id="daemons-body" hidden>
+                <div id="daemons-rows"></div>
+                <div style="margin-top: 6px">
+                  <button id="daemons-refresh-sessions">
+                    Sessions on all daemons
+                  </button>
+                  <button id="daemons-refresh-gpus">Refresh GPUs</button>
+                  <span
+                    id="daemons-updated"
+                    style="color: #888; font-size: 0.85rem"
+                  ></span>
+                </div>
+                <div id="daemons-sessions" hidden>(not fetched)</div>
+                <div id="daemons-gpus" hidden>(not fetched)</div>
+              </div>
+            </section>
+            <section id="ws-target" class="ops-card" hidden>
+              <h2>Workspace</h2>
+              <div class="ops-note">(what the rows under Workspace act on)</div>
+              <div style="margin-top: 6px">
+                <select id="ws-target-select"></select>
+              </div>
+              <div
+                id="ws-target-status"
+                style="margin-top: 4px; font-size: 0.8rem; color: #888"
+              ></div>
+            </section>
+            <section id="peers-view" class="ops-card">
+              <h2>LAN daemons</h2>
+              <div class="ops-note">(mDNS browse, takes about 5s; requires owner scope)</div>
+              <div><button id="browse-peers">Browse LAN</button></div>
+              <div id="peers-out">(not browsed)</div>
+            </section>
+            <section id="llama-swap" class="ops-card">
+              <h2>Models</h2>
+              <div id="llama-swap-empty" style="color: #888; font-size: 0.85rem">
+                (not fetched)
+              </div>
+              <div id="llama-swap-rows"></div>
+              <div style="margin-top: 6px">
+                <button id="llama-swap-refresh">Refresh</button>
+              </div>
+            </section>
+          </div>
+          <div class="panel" id="panel-sessions" data-panel="sessions" hidden>
+            <p class="lede">Shows recorded sessions as a fork tree, so you can see which session was forked from which.</p>
+            <section id="session-tree" class="ops-card">
+              <h2>Sessions</h2>
+              <div class="ops-note">(fork tree; requires owner scope)</div>
+              <div><button id="list-sessions">List sessions</button></div>
+              <pre id="sessions">(not listed)</pre>
+            </section>
+            <section id="rename" class="ops-card">
+              <h2>Rename session</h2>
+              <div class="ops-note">
+                (titles a session the daemon has open; requires session-write scope)
+              </div>
+              <div>
+                <input id="rename-id" placeholder="session id (blank = watched)" />
+                <input
+                  id="rename-title"
+                  maxlength="200"
+                  placeholder="new title for the session"
+                />
+                <button id="rename-set">Set title</button>
+              </div>
+              <div id="rename-result">(no title set)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-runs" data-panel="runs" hidden>
+            <p class="lede">Everything one session has running or has finished, the workflow runs and code reviews on this host, and the agents this gateway has spawned.</p>
+            <section id="runs" class="ops-card">
+              <h2>Runs</h2>
+              <div class="ops-note">
+                (agents, shells and monitors one session has going; requires
+                session-read scope)
+              </div>
+              <div>
+                <input id="runs-id" placeholder="session id (blank = watched)" />
+                <button id="runs-list">List runs</button>
+              </div>
+              <div id="runs-body">(not listed)</div>
+            </section>
+            <section id="workflows" class="ops-card">
+              <h2>Workflows</h2>
+              <div class="ops-note">(requires session-read scope)</div>
+              <div><button id="workflows-list">List runs</button></div>
+              <div id="workflows-body">(not listed)</div>
+            </section>
+            <section id="reviews" class="ops-card">
+              <h2>Reviews</h2>
+              <div class="ops-note">(requires session-read scope)</div>
+              <div>
+                <button id="reviews-list">List reviews</button>
+                <select id="reviews-status" title="filter by status">
+                  <option value="">all</option>
+                  <option value="running">running</option>
+                  <option value="succeeded">succeeded</option>
+                  <option value="failed">failed</option>
+                  <option value="cancelled">cancelled</option>
+                </select>
+              </div>
+              <div id="reviews-body">(not listed)</div>
+            </section>
+            <section id="agents-view" class="ops-card">
+              <h2>Background agents</h2>
+              <div class="ops-note">
+                (gateway-spawned agents; send scope to steer or stop)
+              </div>
+              <div>
+                <select id="agents-status" title="filter by status">
+                  <option value="">any status</option>
+                  <option value="running">running</option>
+                  <option value="blocked">blocked</option>
+                  <option value="completed">completed</option>
+                  <option value="failed">failed</option>
+                  <option value="cancelled">cancelled</option>
+                  <option value="orphaned">orphaned</option>
+                </select>
+                <button id="list-agents">List agents</button>
+              </div>
+              <div id="agents-out">(not listed)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-bridges" data-panel="bridges" hidden>
+            <p class="lede">The chat services currently registered with this gateway.</p>
+            <section id="bridges-view" class="ops-card">
+              <h2>Chat bridges</h2>
+              <div class="ops-note">(registered bridges and bans; requires owner scope)</div>
+              <div>
+                <button id="list-bridges">List bridges</button>
+                <button id="list-bans">List banned</button>
+              </div>
+              <div id="bridges-out">(not listed)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-diag" data-panel="diag" hidden>
+            <p class="lede">What the daemon says about the machine it runs on, the live connections to it, and the gateway's audit history.</p>
+            <!-- #123. What this machine can actually run: the daemon's startup
+                 checks and its environment cells. Both are host facts, which is
+                 why the routes sit at write scope and why the note below says so
+                 rather than leaving it to the reader to discover a 403.
+                 Nothing here is relabelled. Every row is the daemon's own word for
+                 its own state, because DaemonPreflightCell.kind and DaemonStatus
+                 are the daemon's vocabulary and it can add members without this
+                 page changing (src/routes/workspaceDiagnostics.ts). A switch over
+                 the members this page happens to know would draw a check it has
+                 never heard of as nothing at all, which is the failure that hides
+                 a broken machine.
+                 An env_var cell prints presence and never a value. The daemon
+                 guarantees a value is always omitted for that kind
+                 (packages/sdk-typescript/src/daemon/types.ts:3067), so there is no
+                 secret on the wire to print, and the page does not reach for one
+                 that is absent: absence draws nothing here too. -->
+            <section id="ws-diagnostics" class="ops-card">
+              <h2>Workspace diagnostics</h2>
+              <div class="ops-note">
+                (this machine's own state; requires write scope)
+              </div>
+              <div>
+                <label
+                  ><input type="radio" name="diag-kind" value="preflight" checked />
+                  startup checks</label
+                >
+                <label
+                  ><input type="radio" name="diag-kind" value="env" />
+                  environment</label
+                >
+                <button id="diag-load">Read diagnostics</button>
+              </div>
+              <div id="diag-body" style="max-height: 140px; overflow-y: auto">
+                (not loaded)
+              </div>
+            </section>
+            <section id="watch-stream" class="ops-card">
+              <h2>Stream</h2>
+              <div class="ops-note">
+                (the watched session's event feed; the chat screen's status line
+                shows its live state)
+              </div>
+              <div>
+                <button
+                  id="watch"
+                  title="Re-attach to the session on screen (full replay). Self-heal does this automatically with backoff when the stream dies."
+                >
+                  Watch
+                </button>
+                <button
+                  id="stop"
+                  disabled
+                  title="Stop following this session's event stream and cancel the self-heal retries. The turn keeps running on the host."
+                >
+                  Unwatch
+                </button>
+              </div>
+            </section>
+            <section id="owner-events" class="ops-card">
+              <h2>Owner event stream</h2>
+              <div class="ops-note">(live audit feed; requires owner scope)</div>
+              <div>
+                <button id="watch-events">Watch events</button>
+                <button id="stop-events" disabled>Stop</button>
+              </div>
+              <pre id="events">(not connected)</pre>
+            </section>
+            <section id="audit-log" class="ops-card">
+              <h2>Audit log</h2>
+              <div class="ops-note">(history; requires owner scope)</div>
+              <div>
+                <label
+                  >action
+                  <select id="audit-action">
+                    <option value="">(any)</option>
+                    <option>pairing_redeemed</option>
+                    <option>token_minted</option>
+                    <option>token_revoked</option>
+                    <option>auth_failed</option>
+                    <option>scope_denied</option>
+                    <option>permission_voted</option>
+                    <option>prompt_sent</option>
+                    <option>push_sent</option>
+                    <option>push_suppressed</option>
+                    <option>policy_decision</option>
+                    <option>session_list_read</option>
+                  </select>
+                </label>
+                <label
+                  >limit
+                  <input
+                    id="audit-limit"
+                    type="number"
+                    value="50"
+                    min="1"
+                    style="width: 5rem"
+                /></label>
+                <button id="audit-query">Query</button>
+              </div>
+              <pre id="audit">(not queried)</pre>
+            </section>
+            <section id="commands" class="ops-card">
+              <h2>Commands <span id="commands-count" class="cmd-count"></span></h2>
+              <div class="ops-note">(invoke targets the watched session)</div>
+              <div><button id="list-commands">List commands</button></div>
+              <div id="commands-list">(not listed)</div>
+            </section>
+            <section id="raw-log" class="ops-card">
+              <h2>Raw JSON log</h2>
+              <div style="margin-top: 8px">
+                <label style="font-size: 0.8rem; color: #888"
+                  ><input type="checkbox" id="raw-toggle" /> raw JSON</label
+                >
+              </div>
+              <pre id="log" style="display: none"></pre>
+            </section>
+          </div>
+          <div class="panel" id="panel-notify" data-panel="notify" hidden>
+            <p class="lede">Turns on push notifications to this device for permission prompts and finished tasks.</p>
+            <section id="notif-toggle" class="ops-card">
+              <h2>Notifications</h2>
+              <div class="ops-note">
+                (push alerts for permission prompts and task completion; on by
+                default; the button reflects this device's subscription)
+              </div>
+              <div>
+                <button id="enable">Enable notifications</button>
+              </div>
+              <div id="notif-state" style="font-size: 0.85rem; color: #888"></div>
+            </section>
+            <section id="push-prefs" class="ops-card">
+              <h2>Push preferences</h2>
+              <div class="ops-note">
+                (quiet hours + rate cap; requires owner scope)
+              </div>
+              <div>
+                <button id="list-subs">List subscriptions</button>
+                <button id="test-push-btn">Send test push</button>
+                <span id="test-push-result"></span>
+              </div>
+              <div id="subs">(not listed)</div>
+            </section>
+            <section id="snooze" class="ops-card">
+              <h2>Snooze notifications</h2>
+              <div class="ops-note">(requires owner scope)</div>
+              <div>
+                <input
+                  id="snooze-dur"
+                  type="number"
+                  placeholder="seconds"
+                  value="3600"
+                />
+                <select id="snooze-scope">
+                  <option value="all">all</option>
+                  <option value="permission.required">permission.required</option>
+                  <option value="task.completed">task.completed</option>
+                </select>
+                <button id="snooze-btn">Snooze</button>
+                <button id="unsnooze-btn">Unsnooze</button>
+                <button id="snooze-status-btn">Status</button>
+              </div>
+              <div id="snooze-status">(unknown)</div>
+              <div id="snooze-list"></div>
+            </section>
+            <section id="digest" class="ops-card">
+              <h2>Missed while quiet (digest)</h2>
+              <div class="ops-note">(requires owner scope)</div>
+              <div><button id="digest-btn">Refresh digest</button></div>
+              <div id="digest-list">(not loaded)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-dictation" data-panel="dictation" hidden>
+            <p class="lede">How the composer listens on this phone, and whether it offers a next step when the conversation goes idle.</p>
+            <section id="dictation-prefs" class="ops-card">
+              <h2>Dictation</h2>
+              <label class="prow" for="dictate-lang">
+                <span>Language</span>
+                <select id="dictate-lang" title="dictation language">
+                  <option value="">auto</option>
+                  <option value="en-US">English (US)</option>
+                  <option value="en-GB">English (UK)</option>
+                  <option value="es-ES">Spanish</option>
+                  <option value="fr-FR">French</option>
+                  <option value="de-DE">German</option>
+                  <option value="pt-BR">Portuguese (BR)</option>
+                  <option value="hi-IN">Hindi</option>
+                  <option value="zh-CN">Chinese</option>
+                  <option value="ja-JP">Japanese</option>
+                </select>
+              </label>
+              <label
+                class="prow"
+                title="when dictation ends on a pause, send the prompt automatically"
+                ><span
+                  ><input id="dictate-autosend" type="checkbox" /> Send when
+                  dictation ends on a pause</span
+                ></label
+              >
+            </section>
+            <!-- The idle switch is the session's (the gateway keeps it per
+                 conversation), but it is how the composer behaves for the
+                 reader, which is why the spec files it under This phone beside
+                 dictation rather than as a row of its own. -->
+            <section id="idle-suggest" class="ops-card idle">
+              <h2>Idle suggestions</h2>
+              <label
+                class="prow"
+                title="next-step suggestions when this session goes idle"
+                ><span
+                  ><input id="idle-suggest-toggle" type="checkbox" disabled />
+                  Suggest a next step when this conversation goes idle</span
+                ></label
+              >
+              <span class="st" id="idle-suggest-status"></span>
+            </section>
+          </div>
+          <div class="panel" id="panel-zone" data-panel="zone" hidden>
+            <p class="lede">The zone message times are printed in, saved on the gateway for the paired token you are reading with, so a phone and a laptop can each carry their own.</p>
+            <section id="ui-prefs" class="ops-card">
+              <h2>UI preferences</h2>
+              <!-- #184. The sticky tab bar setting went with the tab bar: the bar
+                   that replaced it is always at the top of the screen, so there is
+                   nothing left for the box to pin. -->
+              <div>
+                <label for="stamp-zone">Stamp timezone</label>
+                <select
+                  id="stamp-zone"
+                  title="timezone message times are printed in"
+                ></select>
+              </div>
+            </section>
+          </div>
+          <div class="panel" id="panel-devices" data-panel="devices" hidden>
+            <p class="lede">Lists every access token this gateway has issued, and the web origins it accepts requests from.</p>
+            <section id="token-mgmt" class="ops-card">
+              <h2>Tokens</h2>
+              <div class="ops-note">(active tokens; requires owner scope)</div>
+              <div><button id="list-tokens">List tokens</button></div>
+              <div id="tokens">(not listed)</div>
+            </section>
+            <section id="cors-view" class="ops-card">
+              <h2>Browser origins</h2>
+              <div class="ops-note">(CORS allowlist; requires owner scope)</div>
+              <div>
+                <button id="list-cors">List origins</button>
+                <input
+                  id="cors-origin"
+                  type="text"
+                  size="18"
+                  placeholder="https://host"
+                />
+                <button id="admit-cors">Admit</button>
+              </div>
+              <div id="cors-out">(not listed)</div>
+            </section>
+          </div>
+          <div class="panel" id="panel-install" data-panel="install" hidden>
+            <p class="lede">Puts this page on the home screen as an app of its own, full screen and without the browser's bars.</p>
+            <!-- What the phone offers is the browser's, not the page's: iOS
+                 has no install prompt a page can call, so its two steps are
+                 written out, and Android Chrome's prompt is kept from its
+                 beforeinstallprompt event and offered as a button only once
+                 that event has fired. -->
+            <section id="install-card" class="ops-card">
+              <h2>On this phone</h2>
+              <p id="install-state" role="status"></p>
+              <button id="install-app" type="button" hidden>Install app</button>
+              <div id="install-how">
+                <p><b>iPhone, iPad:</b> tap Share, then Add to Home Screen.</p>
+                <p><b>Android:</b> open the browser menu, then Install app.</p>
+              </div>
+            </section>
           </div>
         </div>
       </div>
@@ -2243,16 +3375,7 @@
       </div>
       <div class="shell-body">
         <div class="mid">
-          <!-- #184. A pane other than Chat opens as a screen of its own with a
-               way back. The back button is the Chat tab, so switchTab marks it
-               like any other tab. -->
-          <div id="pane-head" hidden>
-            <button type="button" class="tab" data-tab="chat" aria-label="Back to chat">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
-            </button>
-            <strong id="pane-head-title"></strong>
-          </div>
-          <div class="tab-pane active" id="pane-chat">
+          <div id="pane-chat">
         <!-- #184. The status line replaces the strip that said "streaming"
              above the transcript and the drawer band under it: one 44px row
              that says what the conversation is doing, on what model, how full,
@@ -3275,1731 +4398,6 @@
           </div>
         </section>
       </div>
-      <div class="tab-pane" id="pane-ops">
-        <details id="daemons" class="ops-collapse">
-          <summary>
-            <strong>Daemons</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Daemons?"
-              aria-expanded="false"
-              aria-controls="help-daemons"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-daemons" hidden>
-            Lists the other qwen daemons this gateway knows about, with a health
-            dot for each. Tap <b>Sessions on all daemons</b> to see every
-            running session across them, or <b>Refresh GPUs</b> to check GPU
-            load. Stays empty unless the gateway has a multi-daemon registry
-            (<code>clients.toml</code>) and your token has owner scope.
-          </div>
-          <div class="ops-note">
-            (multi-daemon registry; requires owner scope)
-          </div>
-          <div id="daemons-empty" style="color: #888; font-size: 0.85rem">
-            (no registry — this daemon has no clients.toml, or your token lacks
-            owner scope)
-          </div>
-          <div id="daemons-body" hidden>
-            <div id="daemons-rows"></div>
-            <div style="margin-top: 6px">
-              <button id="daemons-refresh-sessions">
-                Sessions on all daemons
-              </button>
-              <button id="daemons-refresh-gpus">Refresh GPUs</button>
-              <span
-                id="daemons-updated"
-                style="color: #888; font-size: 0.85rem"
-              ></span>
-            </div>
-            <div id="daemons-sessions" hidden>(not fetched)</div>
-            <div id="daemons-gpus" hidden>(not fetched)</div>
-          </div>
-        </details>
-        <details id="session-tree" class="ops-collapse">
-          <summary>
-            <strong>Sessions</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Sessions?"
-              aria-expanded="false"
-              aria-controls="help-session-tree"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-session-tree" hidden>
-            Shows recorded sessions as a fork tree, so you can see which session
-            was forked from which. Tap <b>List sessions</b> to load it. Needs
-            owner scope.
-          </div>
-          <div class="ops-note">(fork tree; requires owner scope)</div>
-          <div><button id="list-sessions">List sessions</button></div>
-          <pre id="sessions">(not listed)</pre>
-        </details>
-        <details id="rewind" class="ops-collapse">
-          <summary>
-            <strong>Rewind</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Rewind?"
-              aria-expanded="false"
-              aria-controls="help-rewind"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-rewind" hidden>
-            Rolls a session back to an earlier turn. Enter the session id (blank
-            means the session you're watching) and the turn number to rewind to:
-            0 discards every turn, and the latest turn is a no-op. Tick
-            <b>restore files</b> to also put files back to how they were at that
-            turn's snapshot. Needs owner scope.
-          </div>
-          <div class="ops-note">
-            (roll a session back to an earlier turn; requires owner scope)
-          </div>
-          <div>
-            <input id="rewind-id" placeholder="session id (blank = watched)" />
-            <input
-              id="rewind-turn"
-              type="number"
-              min="0"
-              placeholder="to turn"
-              title="Turn index to rewind to. 0 discards every turn; the tip is a no-op."
-            />
-            <label
-              title="Also restore files to their state at that turn's snapshot"
-              ><input id="rewind-files" type="checkbox" /> restore files</label
-            >
-            <button id="rewind-btn">Rewind</button>
-          </div>
-          <div id="rewind-result"></div>
-        </details>
-        <details id="reviews" class="ops-collapse">
-          <summary>
-            <strong>Reviews</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Reviews?"
-              aria-expanded="false"
-              aria-controls="help-reviews"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-reviews" hidden>
-            Lists code reviews run on this host, one per row: status, review id,
-            the session it belongs to, how many findings it produced, and when
-            it was triggered. Tap <b>List reviews</b>; use the dropdown to show
-            only running, succeeded, failed or cancelled reviews. A review that
-            is still running has a <b>cancel</b> button. Needs session-read
-            scope.
-          </div>
-          <div class="ops-note">(requires session-read scope)</div>
-          <div>
-            <button id="reviews-list">List reviews</button>
-            <select id="reviews-status" title="filter by status">
-              <option value="">all</option>
-              <option value="running">running</option>
-              <option value="succeeded">succeeded</option>
-              <option value="failed">failed</option>
-              <option value="cancelled">cancelled</option>
-            </select>
-          </div>
-          <div id="reviews-body">(not listed)</div>
-        </details>
-        <details id="workflows" class="ops-collapse">
-          <summary>
-            <strong>Workflows</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Workflows?"
-              aria-expanded="false"
-              aria-controls="help-workflows"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-workflows" hidden>
-            Lists workflow runs on this host, one per row: status, workflow
-            name, run id, current phase, how many agents it has used and how
-            many tokens it has spent. Tap <b>List runs</b> to load them. A run
-            that is still running has a <b>cancel</b> button. Needs session-read
-            scope.
-          </div>
-          <div class="ops-note">(requires session-read scope)</div>
-          <div><button id="workflows-list">List runs</button></div>
-          <div id="workflows-body">(not listed)</div>
-        </details>
-        <details id="runs" class="ops-collapse">
-          <summary>
-            <strong>Runs</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Runs?"
-              aria-expanded="false"
-              aria-controls="help-runs"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-runs" hidden>
-            Everything one session has running or has finished: subagents,
-            background shell commands and monitors. Enter the session id (blank
-            means the session you're watching) and tap <b>List runs</b>. Read
-            only - stopping a single run is not wired up yet. Needs
-            session-read scope.
-          </div>
-          <div class="ops-note">
-            (agents, shells and monitors one session has going; requires
-            session-read scope)
-          </div>
-          <div>
-            <input id="runs-id" placeholder="session id (blank = watched)" />
-            <button id="runs-list">List runs</button>
-          </div>
-          <div id="runs-body">(not listed)</div>
-        </details>
-        <details id="rename" class="ops-collapse">
-          <summary>
-            <strong>Rename session</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Rename session?"
-              aria-expanded="false"
-              aria-controls="help-rename"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-rename" hidden>
-            Gives a session a title of your own, replacing the one in the list
-            beside it. Enter the session id (blank means the session you're
-            watching), type a title and tap <b>Set title</b>. Two limits are
-            worth knowing before you do. This reaches a session the daemon has
-            <b>open</b>: a transcript it is not currently running answers that
-            there is nothing to rename, and the title on disk is left alone. And
-            the durable record is written after the reply, so the list can still
-            show the old title for a moment; the name printed here is the one
-            the daemon says it holds. 200 characters is the limit, and a title
-            over it is refused rather than cut short. Needs session-write scope.
-          </div>
-          <div class="ops-note">
-            (titles a session the daemon has open; requires session-write scope)
-          </div>
-          <div>
-            <input id="rename-id" placeholder="session id (blank = watched)" />
-            <input
-              id="rename-title"
-              maxlength="200"
-              placeholder="new title for the session"
-            />
-            <button id="rename-set">Set title</button>
-          </div>
-          <div id="rename-result">(no title set)</div>
-        </details>
-        <details id="prompt-queue" class="ops-collapse">
-          <summary>
-            <strong>Prompt queue</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Prompt queue?"
-              aria-expanded="false"
-              aria-controls="help-prompt-queue"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-prompt-queue" hidden>
-            What this session has accepted and not finished running: the one
-            prompt in flight plus anything waiting behind it. This is not the
-            strip above the composer, which is text this browser has not sent
-            at all. Enter the session id (blank means the session you're
-            watching) and tap <b>List queue</b>. Dropping a waiting prompt
-            takes it out of the queue; dropping the one in flight cancels that
-            turn. Needs session-read scope.
-          </div>
-          <div class="ops-note">
-            (prompts the daemon accepted and has not run; requires
-            session-read scope)
-          </div>
-          <div>
-            <input
-              id="prompt-queue-id"
-              placeholder="session id (blank = watched)"
-            />
-            <button id="prompt-queue-list">List queue</button>
-          </div>
-          <div id="prompt-queue-body">(not listed)</div>
-        </details>
-        <details id="mid-turn" class="ops-collapse">
-          <summary>
-            <strong>Mid-turn messages</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Mid-turn messages?"
-              aria-expanded="false"
-              aria-controls="help-mid-turn"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-mid-turn" hidden>
-            Messages the daemon took while a turn was already running, which it
-            holds to deliver into that turn instead of starting a new one. This
-            is what the daemon is holding right now, not what this browser has
-            not sent. Enter the session id (blank means the session you're
-            watching) and tap <b>List messages</b>. Type a message and tap
-            <b>Send into turn</b> to hand it to the turn already running; the
-            daemon holds it until its next tool boundary. Once held, a message
-            is never sent twice, so <b>withdraw</b> is the only way to take one
-            back. <b>Deliver now</b> asks the daemon to stop holding what it has
-            and push it in before that boundary, which cuts a streaming response
-            short; it does nothing when nothing is waiting. Listing needs
-            session-read scope, sending needs session-write.
-          </div>
-          <div class="ops-note">
-            (messages held during a running turn; list with session-read, send
-            with session-write)
-          </div>
-          <div>
-            <input
-              id="mid-turn-id"
-              placeholder="session id (blank = watched)"
-            />
-            <button id="mid-turn-list">List messages</button>
-          </div>
-          <div>
-            <input
-              id="mid-turn-text"
-              placeholder="message for the turn in flight"
-            />
-            <button id="mid-turn-send">Send into turn</button>
-            <button id="mid-turn-now">Deliver now</button>
-          </div>
-          <div id="mid-turn-write">(nothing sent)</div>
-          <div id="mid-turn-body">(not listed)</div>
-        </details>
-        <details id="search" class="ops-collapse">
-          <summary>
-            <strong>Search</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Search?"
-              aria-expanded="false"
-              aria-controls="help-search"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-search" hidden>
-            Full-text search across every recorded session transcript. Type a
-            query (<code>AND</code> works, e.g.
-            <code>oauth refresh AND error</code>), optionally narrow by message
-            kind or date range, then tap <b>Search</b>.
-            <b>rank (BM25)</b> orders results by relevance; it needs the index
-            built with <code>qwen-rc reindex</code> and otherwise falls back to
-            a slower scan. <b>all daemons</b> also searches the other daemons.
-            Shortcut: &#8984;K / Ctrl-K from anywhere. Needs owner scope.
-          </div>
-          <div class="ops-note">
-            (transcripts; requires owner scope)
-            <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
-          </div>
-          <div>
-            <input id="search-q" placeholder="oauth refresh AND error" />
-            <select id="search-kind">
-              <option value="all">all</option>
-              <option value="user">user</option>
-              <option value="assistant">assistant</option>
-              <option value="tool">tool</option>
-            </select>
-            <button id="search-btn">Search</button>
-          </div>
-          <div>
-            <label
-              >since <input id="search-since" type="datetime-local"
-            /></label>
-            <label
-              >until <input id="search-until" type="datetime-local"
-            /></label>
-            <label
-              title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
-              ><input id="search-rank" type="checkbox" /> rank (BM25)</label
-            >
-            <label
-              id="search-all-daemons-label"
-              title="Also search every daemon in the multi-daemon registry (cross-origin; per-daemon rows, no merged ranking)"
-              ><input id="search-all-daemons" type="checkbox" disabled /> all
-              daemons</label
-            >
-          </div>
-          <div id="search-results">(not searched)</div>
-        </details>
-        <details id="llama-swap" class="ops-collapse">
-          <summary>
-            <strong>Models</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Models?"
-              aria-expanded="false"
-              aria-controls="help-llama-swap"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-llama-swap" hidden>
-            Which models llama-swap currently has loaded on lovelace, for
-            reference when picking a model in the Chat tab. Not configured —
-            no <code>--llama-swap-url</code> was passed to the gateway — shows
-            a "not configured" note. Configured but unreachable — llama-swap
-            is stopped, e.g. during a training run — shows a "stopped" note
-            instead of an empty table. Tap <b>Refresh</b> to re-check.
-          </div>
-          <div id="llama-swap-empty" style="color: #888; font-size: 0.85rem">
-            (not fetched)
-          </div>
-          <div id="llama-swap-rows"></div>
-          <div style="margin-top: 6px">
-            <button id="llama-swap-refresh">Refresh</button>
-          </div>
-        </details>
-        <details id="perm-rules" class="ops-collapse" hidden>
-          <summary>
-            <strong>Permission rules</strong
-            ><span
-              id="perm-rules-target"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-            ></span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Permission rules?"
-              aria-expanded="false"
-              aria-controls="help-perm-rules"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-perm-rules" hidden>
-            The allow / ask / deny lists that decide what the agent may do.
-            <b>allow</b> runs without a prompt, <b>ask</b> always prompts you,
-            and <b>deny</b> is blocked. Pick a scope (<b>workspace</b> = this
-            project, <b>user</b> = all your projects), type a rule such as
-            <code>shell(git status:*)</code> or <code>edit(./docs/**)</code>,
-            tap <b>add</b>, then <b>save</b> that list &mdash; nothing is
-            applied until you save. Needs an owner token and a trusted
-            workspace. If saving says a session is required, send a prompt in
-            that workspace and retry.
-          </div>
-          <div
-            id="perm-rules-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-        </details>
-        <details id="perm-decisions" class="ops-collapse" hidden>
-          <summary>
-            <strong>Permission decisions</strong
-            ><span
-              id="perm-decisions-note"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-              >gateway-visible decisions only</span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Permission decisions?"
-              aria-expanded="false"
-              aria-controls="help-perm-decisions"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-perm-decisions" hidden>
-            A read-only log of recent permission decisions the gateway saw:
-            which rule fired for a tool call, and the votes you made on
-            permission prompts. Filter by tool or rule id and tap
-            <b>query</b> to check that a rule you set behaves the way you
-            intended. Decisions the daemon makes locally never reach the
-            gateway, so they don't appear here.
-          </div>
-          <div
-            id="perm-decisions-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-        </details>
-        <details id="perm-overlays" class="ops-collapse" hidden>
-          <summary>
-            <strong>Session overrides</strong
-            ><span
-              id="perm-overlays-note"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-              >ephemeral — lost when the gateway restarts</span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Session overrides?"
-              aria-expanded="false"
-              aria-controls="help-perm-overlays"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-perm-overlays" hidden>
-            Temporary permission rules that expire on their own. Choose a
-            session (blank = all sessions), a tool, an action (allow / deny /
-            prompt) and how long it lasts, then tap <b>set</b>. Tap
-            <b>revoke</b> on a row to remove one early. Overrides live only in
-            the gateway's memory, so restarting the gateway clears them.
-          </div>
-          <div
-            id="perm-overlays-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-        </details>
-      </div>
-      <div class="tab-pane" id="pane-settings">
-        <details id="notif-toggle" class="ops-collapse">
-          <summary>
-            <strong>Notifications</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Notifications?"
-              aria-expanded="false"
-              aria-controls="help-notif-toggle"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-notif-toggle" hidden>
-            Turns on push notifications to this device for permission prompts
-            and finished tasks. Notifications are on by default; tap
-            <b>Enable notifications</b> if this browser hasn't granted push
-            permission yet. The line below shows this device's current
-            subscription state.
-          </div>
-          <div class="ops-note">
-            (push alerts for permission prompts and task completion; on by
-            default — the toggle reflects this device's subscription)
-          </div>
-          <div>
-            <button id="enable">Enable notifications</button>
-          </div>
-          <div id="notif-state" style="font-size: 0.85rem; color: #888"></div>
-        </details>
-        <details id="push-prefs" class="ops-collapse">
-          <summary>
-            <strong>Push preferences</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Push preferences?"
-              aria-expanded="false"
-              aria-controls="help-push-prefs"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-push-prefs" hidden>
-            Lists every device subscribed to push on this gateway (not just this
-            one) and lets you tune each: <b>quiet hours</b> (a from/to time
-            range plus timezone that pauses push during it), a per-hour cap, and
-            which kinds of alerts it receives (all, or a custom pick of
-            permission prompts / task-completed). Tap
-            <b>List subscriptions</b> to load them, edit a row and tap
-            <b>Save</b>, or <b>Unsubscribe</b> to remove it.
-            <b>Send test push</b> fires one push to your own subscriptions right
-            now, to check delivery. Needs owner scope.
-          </div>
-          <div class="ops-note">
-            (quiet hours + rate cap; requires owner scope)
-          </div>
-          <div>
-            <button id="list-subs">List subscriptions</button>
-            <button id="test-push-btn">Send test push</button>
-            <span id="test-push-result"></span>
-          </div>
-          <div id="subs">(not listed)</div>
-        </details>
-        <details id="snooze" class="ops-collapse">
-          <summary>
-            <strong>Snooze notifications</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Snooze notifications?"
-              aria-expanded="false"
-              aria-controls="help-snooze"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-snooze" hidden>
-            Pauses push notifications for a time window, either for everything
-            or for one kind of alert. Enter a duration in seconds, pick a scope,
-            and tap <b>Snooze</b>. <b>Status</b> shows what's currently active.
-            <b>Unsnooze</b> clears every active snooze; a per-row
-            <b>Unsnooze</b> next to a listed scope clears just that one. Needs
-            owner scope.
-          </div>
-          <div class="ops-note">(requires owner scope)</div>
-          <div>
-            <input
-              id="snooze-dur"
-              type="number"
-              placeholder="seconds"
-              value="3600"
-            />
-            <select id="snooze-scope">
-              <option value="all">all</option>
-              <option value="permission.required">permission.required</option>
-              <option value="task.completed">task.completed</option>
-            </select>
-            <button id="snooze-btn">Snooze</button>
-            <button id="unsnooze-btn">Unsnooze</button>
-            <button id="snooze-status-btn">Status</button>
-          </div>
-          <div id="snooze-status">(unknown)</div>
-          <div id="snooze-list"></div>
-        </details>
-        <details id="token-mgmt" class="ops-collapse">
-          <summary>
-            <strong>Tokens</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Tokens?"
-              aria-expanded="false"
-              aria-controls="help-token-mgmt"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-token-mgmt" hidden>
-            Lists every access token this gateway has issued: its label, scopes
-            and id. Tap <b>List tokens</b> to load them, then <b>Revoke</b> to
-            permanently invalidate one — the device holding it loses access
-            immediately. Needs owner scope.
-          </div>
-          <div class="ops-note">(active tokens; requires owner scope)</div>
-          <div><button id="list-tokens">List tokens</button></div>
-          <div id="tokens">(not listed)</div>
-        </details>
-        <details id="share-create" class="ops-collapse">
-          <summary>
-            <strong>Create share link</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Create share link?"
-              aria-expanded="false"
-              aria-controls="help-share-create"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-share-create" hidden>
-            Mints a link that lets someone without a token view (or, with
-            <b>approve</b> scope, also answer permission prompts on) one
-            session, for a limited time. Enter the session id and a time-to-live
-            in seconds, choose the scope, optionally cap how many times it can
-            be used, then tap <b>Create</b>. The link is shown once here — copy
-            it, since the raw token isn't shown again. Needs owner scope.
-          </div>
-          <div class="ops-note">(requires owner scope)</div>
-          <div>
-            <input id="share-session" placeholder="session id" />
-            <input
-              id="share-ttl"
-              type="number"
-              placeholder="ttl (sec)"
-              value="3600"
-            />
-            <select id="share-scope">
-              <option value="view">view</option>
-              <option value="approve">approve</option>
-            </select>
-            <input id="share-max" type="number" placeholder="max uses" />
-            <button id="share-create-btn">Create</button>
-          </div>
-          <div id="share-result"></div>
-        </details>
-        <details id="share-manage" class="ops-collapse">
-          <summary>
-            <strong>Manage shares</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Manage shares?"
-              aria-expanded="false"
-              aria-controls="help-share-manage"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-share-manage" hidden>
-            Lists share links you've created, without exposing their tokens. Tap
-            <b>List shares</b> to load them, then <b>Revoke</b> to invalidate
-            one early. Needs owner scope.
-          </div>
-          <div class="ops-note">(requires owner scope)</div>
-          <div><button id="list-shares">List shares</button></div>
-          <div id="shares-list">(not listed)</div>
-        </details>
-        <details id="fork-session" class="ops-collapse">
-          <summary>
-            <strong>Fork session</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Fork session?"
-              aria-expanded="false"
-              aria-controls="help-fork-session"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-fork-session" hidden>
-            Creates a new session that starts from a copy of an existing one.
-            Enter the parent session id (blank uses the one you're watching), an
-            optional name, and pick <b>include</b> to copy the full transcript
-            or <b>empty</b> for a blank session with just the header —
-            <b>from event</b> copies only up to a specific point. Tap
-            <b>Fork</b>. Needs write scope.
-          </div>
-          <div class="ops-note">(requires write scope)</div>
-          <div>
-            <input id="fork-id" placeholder="parent session id" />
-            <input id="fork-name" placeholder="optional name" />
-            <input
-              id="fork-from"
-              type="number"
-              min="0"
-              placeholder="from event (blank = full)"
-            />
-            <select id="fork-mode" title="transcript mode">
-              <option value="include" selected>include (copy)</option>
-              <option value="empty">empty (header only)</option>
-              <option value="summary" disabled>summary (unavailable)</option>
-            </select>
-            <button id="fork-btn">Fork</button>
-          </div>
-          <div id="fork-result"></div>
-        </details>
-        <details id="ws-target" class="ops-collapse" hidden>
-          <summary>
-            <strong>Workspace</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Workspace?"
-              aria-expanded="false"
-              aria-controls="help-ws-target"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-target" hidden>
-            Selects which workspace (project directory) the Workspace trust, MCP
-            servers and Tools sections below act on. Only shown when more than
-            one workspace is known to this gateway.
-          </div>
-          <div class="ops-note">(target of the workspace controls below)</div>
-          <div style="margin-top: 6px">
-            <select id="ws-target-select"></select>
-          </div>
-          <div
-            id="ws-target-status"
-            style="margin-top: 4px; font-size: 0.8rem; color: #888"
-          ></div>
-        </details>
-        <details id="ws-trust" class="ops-collapse" hidden>
-          <summary>
-            <strong>Workspace trust</strong
-            ><span
-              id="ws-trust-target"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-            ></span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Workspace trust?"
-              aria-expanded="false"
-              aria-controls="help-ws-trust"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-trust" hidden>
-            Shows whether this workspace is trusted — folder trust must be
-            enabled for the workspace controls here to take effect — and lets
-            you change it. Type an optional reason and tap <b>trust</b> or
-            <b>untrust</b>. Reading needs write scope; changing it needs owner
-            scope, and on older daemons a trust change requires a daemon restart
-            to take effect.
-          </div>
-          <div class="ops-note">
-            (reads: write scope · changes: owner scope, applied by the local
-            operator on the daemon host)
-          </div>
-          <div
-            id="ws-trust-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-        </details>
-        <details id="ws-mcp" class="ops-collapse" hidden>
-          <summary>
-            <strong>Workspace MCP servers</strong
-            ><span
-              id="ws-mcp-target"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-            ></span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Workspace MCP servers?"
-              aria-expanded="false"
-              aria-controls="help-ws-mcp"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-mcp" hidden>
-            Lists MCP servers configured for this workspace, with their status
-            and transport. Tap <b>enable</b>/<b>disable</b> to toggle one,
-            <b>add MCP server</b> to configure a new one (workspace-scoped
-            servers also get an <b>edit config</b> button), and
-            <b>reload MCP servers</b> to make the daemon re-read its MCP config.
-            Reading needs write scope; changes need owner scope.
-          </div>
-          <div class="ops-note">
-            (reads: write scope · changes: owner scope)
-          </div>
-          <div
-            id="ws-mcp-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-          <div
-            id="ws-mcp-form"
-            hidden
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 6px;
-            "
-          ></div>
-        </details>
-        <details id="ws-tools" class="ops-collapse" hidden>
-          <summary>
-            <strong>Workspace tools</strong
-            ><span
-              id="ws-tools-target"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-            ></span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Workspace tools?"
-              aria-expanded="false"
-              aria-controls="help-ws-tools"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-tools" hidden>
-            Lists the tools available to the agent in this workspace. Filter by
-            name, and tap <b>enable</b>/<b>disable</b> next to a tool to turn it
-            on or off. Reading needs write scope; changes need owner scope.
-          </div>
-          <div class="ops-note">
-            (reads: write scope · changes: owner scope)
-          </div>
-          <div
-            id="ws-tools-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-        </details>
-        <details id="ws-files" class="ops-collapse" hidden>
-          <summary>
-            <strong>Workspace files</strong
-            ><span
-              id="ws-files-target"
-              style="margin-left: 6px; font-size: 0.8rem; color: #888"
-            ></span
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Workspace files?"
-              aria-expanded="false"
-              aria-controls="help-ws-files"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-files" hidden>
-            Browses the files in the workspace the agent works on. Tap a folder
-            to enter it, or a file to read it. A long file pages in with
-            <b>more</b>; a binary one is offered as raw bytes. Needs write
-            scope.
-          </div>
-          <div class="ops-note">(reads: write scope)</div>
-          <div
-            id="ws-files-body"
-            style="
-              margin-top: 6px;
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            "
-          ></div>
-        </details>
-        <details id="ui-prefs" class="ops-collapse">
-          <summary>
-            <strong>UI preferences</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are UI preferences?"
-              aria-expanded="false"
-              aria-controls="help-ui-prefs"
-            >
-              ?
-            </button>
-          </summary>
-          <!-- #184. The sticky tab bar setting went with the tab bar: the bar
-               that replaced it is always at the top of the screen, so there is
-               nothing left for the box to pin. -->
-          <div class="help-text" id="help-ui-prefs" hidden>
-            Display preferences. <b>Stamp timezone</b> is the zone message
-            times are printed in. It is saved on the gateway, keyed to the
-            paired token you are reading with, so a phone and a laptop can each
-            carry their own.
-          </div>
-          <div>
-            <label for="stamp-zone">Stamp timezone</label>
-            <select
-              id="stamp-zone"
-              title="timezone message times are printed in"
-            ></select>
-          </div>
-        </details>
-        <!-- #98. Seven gateway surfaces shipped their backend before anything
-             drew them, so the owner could not see them at all. They live here
-             rather than in the chat pane because none of them is something you
-             look at every session: this is the part of the page you open to
-             check on something. -->
-        <!-- #124. The daemon's roll-up of ONE conversation. It sits beside
-             Usage rather than inside the chat pane because it is something you
-             open to check on a conversation, not something you watch. The two
-             reads are neighbours on purpose and are still different things:
-             Usage is the gateway's own cost store, absent entirely when no
-             store is wired, and it answers across every session. This is the
-             daemon's accounting of the one conversation you name, and it
-             carries prompt counts, tool calls and lines written, which the
-             gateway store has no field for. Bounded like the panels around it,
-             because an open strip that grows is what pushed the composer under
-             the fold on a phone. -->
-        <details id="session-stats" class="ops-collapse">
-          <summary>
-            <strong>Session report</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Session report?"
-              aria-expanded="false"
-              aria-controls="help-session-stats"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-session-stats" hidden>
-            What the daemon recorded about one conversation: how long it ran,
-            how many prompts it took, what each model spent, which tools were
-            called and how many lines were written. Enter the session id (blank
-            means the session you're watching) and tap <b>Read stats</b>. This
-            is not the Usage panel above it, which reports money across every
-            session from the gateway's own store and says <b>not enabled</b>
-            when that store was never wired. Needs session-read scope.
-          </div>
-          <div class="ops-note">
-            (one conversation's own roll-up; requires session-read scope)
-          </div>
-          <div>
-            <input
-              id="stats-id"
-              placeholder="session id (blank = watched)"
-            />
-            <button id="stats-load">Read stats</button>
-          </div>
-          <div id="stats-body">(not loaded)</div>
-        </details>
-        <!-- #126. The turn index shipped as a relay with a test and no caller
-             anywhere. This is the caller. It is a list rather than a jump, and
-             the reason is on the wire rather than in here: a jump has to say
-             which drawn row is turn N, and nothing on the page can. The daemon
-             stamps a record id onto a stored frame only in three goal-control
-             call sites (packages/acp-bridge/src/transcript-replay.ts:1881,
-             :1894, :2342); the emitter that builds every ordinary frame
-             (createTranscriptMessageUpdate, :521) attaches none, so the
-             recordId field DaemonSessionClient.hydrateEvent reads at :1569 is
-             undefined for every row this panel could draw. The only ids a
-             reader is ever handed are a page's targetRecordId and the opaque
-             cursor, and neither maps a turn to a row. So the panel answers
-             "how long is this conversation, and what did the daemon call each
-             turn" -- including turns never loaded -- and asks for nothing.
-             Bounded like the panels around it: an open list that grows is how
-             the to-do strip pushed the composer under the fold on a phone, and
-             a conversation can hold hundreds of these rows. -->
-        <details id="session-turns" class="ops-collapse">
-          <summary>
-            <strong>Turns</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Turns?"
-              aria-expanded="false"
-              aria-controls="help-session-turns"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-session-turns" hidden>
-            The conversation as the daemon counts it: every turn it recorded, in
-            order, under the label the daemon gave each one. It includes turns
-            this page has never loaded, so it answers how long a conversation is
-            without paging back through it. Enter the session id (blank means
-            the session you're watching) and tap <b>Read turns</b>. It is a
-            list, not a jump: nothing here can land you on a turn in the
-            transcript. Needs session-read scope.
-          </div>
-          <div class="ops-note">
-            (the daemon's own turn list; requires session-read scope)
-          </div>
-          <div>
-            <input
-              id="turns-id"
-              placeholder="session id (blank = watched)"
-            />
-            <button id="turns-load">Read turns</button>
-          </div>
-          <div id="turns-body" style="max-height: 140px; overflow-y: auto">
-            (not loaded)
-          </div>
-        </details>
-        <!-- #123. What this machine can actually run: the daemon's startup
-             checks and its environment cells. Both are host facts, which is
-             why the routes sit at write scope and why the note below says so
-             rather than leaving it to the reader to discover a 403.
-             Nothing here is relabelled. Every row is the daemon's own word for
-             its own state, because DaemonPreflightCell.kind and DaemonStatus
-             are the daemon's vocabulary and it can add members without this
-             page changing (src/routes/workspaceDiagnostics.ts). A switch over
-             the members this page happens to know would draw a check it has
-             never heard of as nothing at all, which is the failure that hides
-             a broken machine.
-             An env_var cell prints presence and never a value. The daemon
-             guarantees a value is always omitted for that kind
-             (packages/sdk-typescript/src/daemon/types.ts:3067), so there is no
-             secret on the wire to print, and the page does not reach for one
-             that is absent: absence draws nothing here too. -->
-        <details id="ws-diagnostics" class="ops-collapse">
-          <summary>
-            <strong>Workspace diagnostics</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Workspace diagnostics?"
-              aria-expanded="false"
-              aria-controls="help-ws-diagnostics"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-diagnostics" hidden>
-            What the daemon says about the machine it runs on. Pick
-            <b>startup checks</b> for the preflight cells (Node, ripgrep, git,
-            credentials, egress) or <b>environment</b> for the runtime cells
-            (versions, platform, proxy, which variables are set), then tap
-            <b>Read diagnostics</b>. Each row is the daemon's own status word,
-            and a failing check stays on the page because it is the row you
-            came for. An environment row for a secret variable says only that
-            it is set; the value never leaves the daemon. Needs write scope,
-            because these are facts about the host rather than about a
-            conversation.
-          </div>
-          <div class="ops-note">
-            (this machine's own state; requires write scope)
-          </div>
-          <div>
-            <label
-              ><input type="radio" name="diag-kind" value="preflight" checked />
-              startup checks</label
-            >
-            <label
-              ><input type="radio" name="diag-kind" value="env" />
-              environment</label
-            >
-            <button id="diag-load">Read diagnostics</button>
-          </div>
-          <div id="diag-body" style="max-height: 140px; overflow-y: auto">
-            (not loaded)
-          </div>
-        </details>
-        <!-- #123. What is installed and configured on this machine: skills,
-             model providers, hooks. Host facts, so the routes behind this sit at
-             write scope and the note below says so.
-             What this panel deliberately does not print, and why that is a
-             readability choice rather than a protection: a skill's
-             `installedPath`, a provider model's `baseUrl` and `envKey`, and a
-             hook's whole `config` block. The gate on these routes is the scope,
-             not this page, so a device that can read the route can read those
-             fields already. What the page adds is not a secret filter, it is
-             rows a person can read on a phone: which skills exist and whether
-             each is on, which provider is current, which events have a hook.
-             On hooks the omission has one more reason worth stating. The daemon
-             masks every `config.env` and `config.headers` VALUE to a constant
-             and leaves the key names, and it never masks `config.command`
-             (packages/cli/src/acp-integration/acpAgent.ts:2549). So a printed
-             env row would show a variable name beside a string that looks like
-             content, which reads as a value to anyone skimming. Printing
-             nothing from that block is the honest rendering.
-             A disabled skill and a disabled hook both stay on the list. They are
-             installed, and the reason one is off is the fact someone came to
-             check. -->
-        <details id="ws-inventory" class="ops-collapse">
-          <summary>
-            <strong>Workspace inventory</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Workspace inventory?"
-              aria-expanded="false"
-              aria-controls="help-ws-inventory"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-inventory" hidden>
-            What this machine has installed and configured. Pick
-            <b>skills</b> for the invocable skills and whether each is on,
-            <b>providers</b> for the model providers and which one is current,
-            or <b>hooks</b> for the events that have a hook attached, then tap
-            <b>Read inventory</b>. Off items are listed with the rest because an
-            installed-but-disabled item is still an item. Needs write scope,
-            because these are facts about the host rather than about a
-            conversation.
-          </div>
-          <div class="ops-note">
-            (this machine's own state; requires write scope)
-          </div>
-          <div>
-            <label
-              ><input type="radio" name="inv-kind" value="skills" checked />
-              skills</label
-            >
-            <label
-              ><input type="radio" name="inv-kind" value="providers" />
-              providers</label
-            >
-            <label
-              ><input type="radio" name="inv-kind" value="hooks" />
-              hooks</label
-            >
-            <button id="inv-load">Read inventory</button>
-          </div>
-          <div id="inv-body" style="max-height: 140px; overflow-y: auto">
-            (not loaded)
-          </div>
-        </details>
-        <details id="ws-context" class="ops-collapse">
-          <summary>
-            <strong>Workspace context</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Workspace context?"
-              aria-expanded="false"
-              aria-controls="help-ws-context"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-ws-context" hidden>
-            What this machine loads to tell the model who it is. Pick
-            <b>context files</b> for the memory files that exist and how big
-            they are, or <b>agents</b> for the subagents defined here and which
-            level each sits at, then tap <b>Read context</b>. This lists the
-            files and their sizes, it does not open them: the text of the global
-            file stays where the file browser already refuses it. Needs write
-            scope, because which files exist on this host is a fact about the
-            host.
-          </div>
-          <div class="ops-note">
-            (this machine's own state; requires write scope)
-          </div>
-          <div>
-            <label
-              ><input type="radio" name="ctx-kind" value="memory" checked />
-              context files</label
-            >
-            <label
-              ><input type="radio" name="ctx-kind" value="agents" />
-              agents</label
-            >
-            <button id="ctx-load">Read context</button>
-          </div>
-          <div id="ctx-body" style="max-height: 140px; overflow-y: auto">
-            (not loaded)
-          </div>
-        </details>
-        <!-- #124. What ONE live conversation has loaded: its skills and the MCP
-             servers its own manager holds. Deliberately not the workspace view.
-             The SDK builds this payload from one session's own Config
-             (DaemonSessionResourcesStatus,
-             packages/sdk-typescript/src/daemon/types.ts:2520), so the MCP half
-             reports that session's manager and its budget rather than the
-             workspace-owned pool. A reader who wants the pool has to ask the
-             workspace, and labelling this as a workspace fact would misstate
-             which budget the numbers describe.
-             This panel also draws no authentication verdict at all. The
-             name-keyed hasOAuthTokens, requiresAuth, authenticationState and
-             authenticationError fields are always absent on this route, and the
-             type says a consumer must not read their absence as a negative
-             authentication state (types.ts:2526-2533). A page printing "not
-             authenticated" for a server that carries no such field would
-             invent a verdict the daemon never gave, in the one direction that
-             sends someone to re-authorise a working server. Absence draws
-             nothing. Bounded like the panels around it: an open list that grows
-             is what pushed the composer under the fold on a phone. -->
-        <details id="session-resources" class="ops-collapse">
-          <summary>
-            <strong>Session resources</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Session resources?"
-              aria-expanded="false"
-              aria-controls="help-session-resources"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-session-resources" hidden>
-            What this one conversation loaded: the skills it can use and the MCP
-            servers its own manager holds, each in the daemon's own words. Enter
-            the session id (blank means the session you're watching) and tap
-            <b>Read resources</b>. This is the conversation's view, not the
-            workspace's, so the server count and budget here describe this
-            session's manager. It says nothing about whether any server is
-            signed in, because this read never reports that. Needs session-read
-            scope.
-          </div>
-          <div class="ops-note">
-            (one conversation's own skills and MCP servers; requires
-            session-read scope)
-          </div>
-          <div>
-            <input
-              id="resources-id"
-              placeholder="session id (blank = watched)"
-            />
-            <button id="resources-load">Read resources</button>
-          </div>
-          <div id="resources-body" style="max-height: 140px; overflow-y: auto">
-            (not loaded)
-          </div>
-        </details>
-        <details id="usage-view" class="ops-collapse">
-          <summary>
-            <strong>Usage</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Usage?"
-              aria-expanded="false"
-              aria-controls="help-usage-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-usage-view" hidden>
-            Cost and token totals the gateway recorded, grouped by session,
-            client, chat user, or model. Pick a window and a grouping, then tap
-            <b>Load usage</b>. An owner token sees every row; a lesser token
-            sees only its own. The gateway only keeps these when cost tracking
-            is turned on, so on a gateway that never wired a usage store this
-            says <b>not enabled</b> instead of showing an empty table.
-          </div>
-          <div class="ops-note">
-            (cost and token totals; needs cost tracking on the gateway)
-          </div>
-          <div>
-            <select id="usage-group" title="group rows by">
-              <option value="session">by session</option>
-              <option value="client">by client</option>
-              <option value="sub_actor">by chat user</option>
-              <option value="model">by model</option>
-            </select>
-            <input
-              id="usage-since"
-              type="text"
-              size="8"
-              value="24h"
-              title="window start: 24h, 7d, or a date"
-            />
-            <button id="load-usage">Load usage</button>
-          </div>
-          <div id="usage-out">(not loaded)</div>
-        </details>
-        <details id="peers-view" class="ops-collapse">
-          <summary>
-            <strong>LAN daemons</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are LAN daemons?"
-              aria-expanded="false"
-              aria-controls="help-peers-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-peers-view" hidden>
-            Asks this gateway to search the local network for other qwen-rc
-            daemons advertising themselves over mDNS. Tap <b>Browse LAN</b> and
-            wait: the search runs for about five seconds before it answers,
-            which is how discovery works rather than a hang. Shows each
-            daemon's name, host, port, version, and workspace. Needs owner
-            scope, and says <b>discovery unavailable</b> when this gateway was
-            installed without the mDNS dependency.
-          </div>
-          <div class="ops-note">(mDNS browse, takes about 5s; requires owner scope)</div>
-          <div><button id="browse-peers">Browse LAN</button></div>
-          <div id="peers-out">(not browsed)</div>
-        </details>
-        <details id="policy-explain-view" class="ops-collapse">
-          <summary>
-            <strong>Policy dry-run</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Policy dry-run?"
-              aria-expanded="false"
-              aria-controls="help-policy-explain-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-policy-explain-view" hidden>
-            Asks the live policy what it <b>would</b> decide about a tool call,
-            without running anything. Enter a tool name, optionally a path and
-            an operation, then tap <b>Explain</b>. The answer is the decision
-            plus the rule trail that produced it, so you can see which rule
-            fired instead of guessing. Nothing is executed and nothing is
-            stored. Needs owner scope, and says <b>no policy loaded</b> when
-            this gateway runs without a policy file.
-          </div>
-          <div class="ops-note">
-            (dry-run against the live policy; requires owner scope)
-          </div>
-          <div>
-            <input
-              id="explain-tool"
-              type="text"
-              size="14"
-              placeholder="tool name"
-            />
-            <input id="explain-path" type="text" size="14" placeholder="path" />
-            <select id="explain-op" title="operation">
-              <option value="">any</option>
-              <option value="read">read</option>
-              <option value="write">write</option>
-              <option value="execute">execute</option>
-            </select>
-            <button id="run-explain">Explain</button>
-          </div>
-          <div id="explain-out">(not asked)</div>
-        </details>
-        <details id="cors-view" class="ops-collapse">
-          <summary>
-            <strong>Browser origins</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Browser origins?"
-              aria-expanded="false"
-              aria-controls="help-cors-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-cors-view" hidden>
-            Which web origins this gateway will accept cross-origin requests
-            from. Most arrive on their own when someone pairs a browser. Tap
-            <b>List origins</b> to see them, <b>Admit</b> to add one by hand,
-            <b>Remove</b> to drop one. A row marked <b>config</b> came from the
-            gateway's config file rather than from pairing, so it cannot be
-            removed here: the refusal says to edit the config instead. Needs
-            owner scope.
-          </div>
-          <div class="ops-note">(CORS allowlist; requires owner scope)</div>
-          <div>
-            <button id="list-cors">List origins</button>
-            <input
-              id="cors-origin"
-              type="text"
-              size="18"
-              placeholder="https://host"
-            />
-            <button id="admit-cors">Admit</button>
-          </div>
-          <div id="cors-out">(not listed)</div>
-        </details>
-        <details id="whoami-view" class="ops-collapse">
-          <summary>
-            <strong>Share identity</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Share identity?"
-              aria-expanded="false"
-              aria-controls="help-whoami-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-whoami-view" hidden>
-            What a shared link sees about itself: which session it is locked
-            to, whether it can only watch or also approve, its label, when it
-            expires, and how many uses are left. Tap <b>Who am I</b>. This
-            answers for a share token only, and an owner token does not carry
-            the share scope, so on this page the honest result is
-            <b>a share token answers this</b> rather than a share. It is here
-            because the route exists for the links you create above, and a
-            paste-able link is worth checking from the receiving side.
-          </div>
-          <div class="ops-note">
-            (a share token's own view; an owner token is refused)
-          </div>
-          <div><button id="whoami-btn">Who am I</button></div>
-          <div id="whoami-out">(not asked)</div>
-        </details>
-        <details id="bridges-view" class="ops-collapse">
-          <summary>
-            <strong>Chat bridges</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Chat bridges?"
-              aria-expanded="false"
-              aria-controls="help-bridges-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-bridges-view" hidden>
-            The chat services currently registered with this gateway: each
-            bridge's name, which token owns it, when it last sent a heartbeat,
-            and what its chat service can actually render (buttons, markdown,
-            threads, message size). Tap <b>List bridges</b> to load them, or
-            <b>List banned</b> for the chat users barred from this gateway. A
-            bridge that misses its heartbeats is dropped automatically, so an
-            absent row means it is not connected rather than that it was
-            deleted. Needs owner scope.
-          </div>
-          <div class="ops-note">(registered bridges and bans; requires owner scope)</div>
-          <div>
-            <button id="list-bridges">List bridges</button>
-            <button id="list-bans">List banned</button>
-          </div>
-          <div id="bridges-out">(not listed)</div>
-        </details>
-        <details id="agents-view" class="ops-collapse">
-          <summary>
-            <strong>Background agents</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Background agents?"
-              aria-expanded="false"
-              aria-controls="help-agents-view"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-agents-view" hidden>
-            Agents this gateway has spawned to work on their own, each backed by
-            a real session. Tap <b>List agents</b> to see them with their
-            status, the task they were given, and their cost so far; filter by
-            status to find the ones still running. <b>Steer</b> sends a further
-            instruction into that agent's session and <b>Stop</b> cancels it.
-            Starting an agent is not offered here on purpose: it opens a real
-            session and starts spending, which is what the chat pane is for.
-            Listing needs read scope; steering and stopping need send scope.
-          </div>
-          <div class="ops-note">
-            (gateway-spawned agents; send scope to steer or stop)
-          </div>
-          <div>
-            <select id="agents-status" title="filter by status">
-              <option value="">any status</option>
-              <option value="running">running</option>
-              <option value="blocked">blocked</option>
-              <option value="completed">completed</option>
-              <option value="failed">failed</option>
-              <option value="cancelled">cancelled</option>
-              <option value="orphaned">orphaned</option>
-            </select>
-            <button id="list-agents">List agents</button>
-          </div>
-          <div id="agents-out">(not listed)</div>
-        </details>
-      </div>
-      <div class="tab-pane" id="pane-diag">
-        <details id="watch-stream" class="ops-collapse">
-          <summary>
-            <strong>Stream</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Stream?"
-              aria-expanded="false"
-              aria-controls="help-watch-stream"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-watch-stream" hidden>
-            Controls the live event connection to the session shown in the
-            status bar and transcript on the Chat tab. <b>Watch</b> (re)attaches
-            and replays from the start; <b>Unwatch</b> stops following and
-            cancels the automatic reconnect retries — the turn keeps running on
-            the host either way. Self-heal normally reattaches on its own after
-            a drop; use this only if it gives up or you want to deliberately
-            detach.
-          </div>
-          <div class="ops-note">
-            (the watched session's event feed; the status bar above shows its
-            live state)
-          </div>
-          <div>
-            <button
-              id="watch"
-              title="Re-attach to the session on screen (full replay). Self-heal does this automatically with backoff when the stream dies."
-            >
-              Watch
-            </button>
-            <button
-              id="stop"
-              disabled
-              title="Stop following this session's event stream and cancel the self-heal retries. The turn keeps running on the host."
-            >
-              Unwatch
-            </button>
-          </div>
-        </details>
-        <details id="owner-events" class="ops-collapse">
-          <summary>
-            <strong>Owner event stream</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Owner event stream?"
-              aria-expanded="false"
-              aria-controls="help-owner-events"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-owner-events" hidden>
-            A live feed of every audit event across this gateway — pairing,
-            tokens, permission votes, policy decisions and more — not just the
-            session you're watching. Tap <b>Watch events</b> to connect,
-            <b>Stop</b> to disconnect. A "resync: dropped N frame(s)" line means
-            the connection missed some events; query the Audit log below for the
-            gap. Needs owner scope.
-          </div>
-          <div class="ops-note">(live audit feed; requires owner scope)</div>
-          <div>
-            <button id="watch-events">Watch events</button>
-            <button id="stop-events" disabled>Stop</button>
-          </div>
-          <pre id="events">(not connected)</pre>
-        </details>
-        <details id="audit-log" class="ops-collapse">
-          <summary>
-            <strong>Audit log</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Audit log?"
-              aria-expanded="false"
-              aria-controls="help-audit-log"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-audit-log" hidden>
-            Queries the gateway's permanent audit history — the same events the
-            live stream above shows, but searchable after the fact. Pick an
-            action to filter by (or any), a row limit, and tap
-            <b>Query</b>. Needs owner scope.
-          </div>
-          <div class="ops-note">(history; requires owner scope)</div>
-          <div>
-            <label
-              >action
-              <select id="audit-action">
-                <option value="">(any)</option>
-                <option>pairing_redeemed</option>
-                <option>token_minted</option>
-                <option>token_revoked</option>
-                <option>auth_failed</option>
-                <option>scope_denied</option>
-                <option>permission_voted</option>
-                <option>prompt_sent</option>
-                <option>push_sent</option>
-                <option>push_suppressed</option>
-                <option>policy_decision</option>
-                <option>session_list_read</option>
-              </select>
-            </label>
-            <label
-              >limit
-              <input
-                id="audit-limit"
-                type="number"
-                value="50"
-                min="1"
-                style="width: 5rem"
-            /></label>
-            <button id="audit-query">Query</button>
-          </div>
-          <pre id="audit">(not queried)</pre>
-        </details>
-        <details id="digest" class="ops-collapse">
-          <summary>
-            <strong>Missed while quiet (digest)</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Missed while quiet?"
-              aria-expanded="false"
-              aria-controls="help-digest"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-digest" hidden>
-            Shows notifications that were suppressed by an active snooze or
-            quiet-hours window, grouped by device subscription and kind, so you
-            can see what you missed. Tap <b>Refresh digest</b> to load it. Needs
-            owner scope.
-          </div>
-          <div class="ops-note">(requires owner scope)</div>
-          <div><button id="digest-btn">Refresh digest</button></div>
-          <div id="digest-list">(not loaded)</div>
-        </details>
-        <details id="commands" class="ops-collapse">
-          <summary>
-            <strong>Commands</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What are Commands?"
-              aria-expanded="false"
-              aria-controls="help-commands"
-            >
-              ?
-            </button>
-            <span id="commands-count" class="cmd-count"></span>
-          </summary>
-          <div class="help-text" id="help-commands" hidden>
-            Lists slash commands from two places: the session you're watching,
-            and command files the gateway itself loads. Each row is tagged
-            <b>session</b> or <b>file</b>, because the two lists mean different
-            things. The session's own list carries no scope, so only file rows
-            show <b>[scope]</b>. Grayed-out rows aren't invocable by you. Tap
-            <b>Invoke</b> on a row to run it against the watched session. Tap
-            <b>List commands</b> to load them.
-          </div>
-          <div class="ops-note">(invoke targets the watched session)</div>
-          <div><button id="list-commands">List commands</button></div>
-          <div id="commands-list">(not listed)</div>
-        </details>
-        <details id="raw-log" class="ops-collapse">
-          <summary>
-            <strong>Raw JSON log</strong
-            ><button
-              type="button"
-              class="help-btn"
-              aria-label="What is Raw JSON log?"
-              aria-expanded="false"
-              aria-controls="help-raw-log"
-            >
-              ?
-            </button>
-          </summary>
-          <div class="help-text" id="help-raw-log" hidden>
-            Toggles a raw JSON view of the gateway's event stream in place of
-            the rendered transcript — useful for debugging what the daemon
-            actually sent. Check <b>raw JSON</b> to switch the Chat tab's
-            transcript panel to this log; uncheck to go back to the normal
-            transcript.
-          </div>
-          <div style="margin-top: 8px">
-            <label style="font-size: 0.8rem; color: #888"
-              ><input type="checkbox" id="raw-toggle" /> raw JSON</label
-            >
-          </div>
-          <pre id="log" style="display: none"></pre>
-        </details>
-      </div>
       <!-- #121. This slot is gone. The sheet's inspector drawer already has a
            home: #session-footer carries the model, the token counts, the cwd, the
            mode picker and its persist checkbox, and it is already on a dark ground
@@ -5234,6 +4632,7 @@
         // after an await, so the list's state further down the script is
         // already initialised.
         renderList();
+        restorePanel(); // #187: the panel screen open before a reload
       }
       function showAuthGate() {
         if (healthPollId) {
@@ -5244,91 +4643,42 @@
         $('app-body').hidden = true;
       }
 
-      // Panes (add-rc-viewer-ui-reorg task 2): #app-body holds four panes
-      // (chat/ops/settings/diag). switchTab shows the matching .tab-pane and
-      // marks the matching .tab; everything else is hidden via CSS
-      // (display:none), so ids stay stable and every handler that finds its
-      // element with `$` keeps working whichever pane is on screen.
-      // #184: the tab bar is gone from the Chat screen. Operations, Settings
-      // and Diagnostics are rows on the More screen (≡), each opening as a
-      // screen of its own whose back button is the Chat tab, until slice 4
-      // folds them into one grouped sheet. The pins went with the bar: a pane
-      // pinned into a 390px Chat column was a desktop move, and the spec
-      // retires it (the laptop derivation may bring back a side pane).
-      const TAB_IDS = ['chat', 'ops', 'settings', 'diag'];
-      const PANE_NAMES = {
-        chat: 'Chat',
-        ops: 'Operations',
-        settings: 'Settings',
-        diag: 'Diagnostics',
-      };
-
-      function switchTab(tabId) {
-        for (const id of TAB_IDS) {
-          const pane = $('pane-' + id);
-          const on = id === tabId;
-          pane.classList.toggle('active', on);
-          for (const btn of document.querySelectorAll(
-            '.tab[data-tab="' + id + '"]',
-          )) {
-            btn.classList.toggle('active', on);
-          }
-        }
-        $('pane-head').hidden = tabId === 'chat';
-        $('pane-head-title').textContent = PANE_NAMES[tabId] || '';
-        // Opening a pane is what the More screen was opened for, so it goes.
-        setMoreOpen(false);
-        saveTab(tabId);
-      }
-
-      document.addEventListener('click', (e) => {
-        const tab = e.target.closest && e.target.closest('.tab[data-tab]');
-        if (!tab) return;
-        switchTab(tab.dataset.tab);
-      });
-
-      // #182. The open pane comes back after a reload. It follows the
-      // conversation pointer's rule (#50): this window's own record first, then
-      // the profile-wide one, so a second window keeps its own pane while a
-      // rebuilt tab still opens where the last one was.
-      const TAB_NAME = 'tab';
-      function saveTab(tabId) {
-        try {
-          sessionStorage.setItem(UI_PREFIX + TAB_NAME, JSON.stringify(tabId));
-        } catch {
-          /* per-window copy is best-effort */
-        }
-        uiWrite(TAB_NAME, tabId);
-      }
-      function loadTab() {
-        const ok = (v) => TAB_IDS.includes(v);
-        try {
-          const own = sessionStorage.getItem(UI_PREFIX + TAB_NAME);
-          if (own !== null) {
-            const v = JSON.parse(own);
-            if (ok(v)) return v;
-          }
-        } catch {
-          /* fall through to the shared record */
-        }
-        return uiRead(TAB_NAME, ok);
+      // #187 (h1). The More screen and its panel screens. The four panes the
+      // tab bar once switched between (add-rc-viewer-ui-reorg task 2) are gone
+      // as panes: the chat is the screen, and every card Operations, Settings
+      // and Diagnostics held is a section of one panel screen, which More
+      // lists as a row in the drawing's four groups. The cards keep their ids,
+      // so every handler that finds its element with `$` works whichever
+      // screen is open, or none. The pins went with the tab bar (#184).
+      const PANEL_KEYS = Array.from(
+        document.querySelectorAll('#panel-body > .panel'),
+        (p) => p.dataset.panel,
+      );
+      let openPanelKey = null;
+      function moreRow(key) {
+        return document.querySelector(
+          '#more-screen .row[data-panel="' + key + '"]',
+        );
       }
 
       // #184. The More screen, the ⋯ menu, the inspector sheet and the
       // conversation list are each one open-or-shut state. Opening one shuts
       // the others that would overlap it, and Escape shuts whichever is on
-      // top and hands focus back to the control that opened it.
-      function setMoreOpen(open) {
+      // top and hands focus back to the control that opened it. A panel
+      // screen is More's child, so it shuts with More.
+      function setMoreOpen(open, quiet) {
         const scr = $('more-screen');
+        if (!open) closePanel(false);
         if (scr.hidden === !open) return;
         scr.hidden = !open;
         $('h1-more').setAttribute('aria-expanded', String(open));
-        if (open) {
-          closeH1Menu(false);
-          setListOpen(false);
-          const first = scr.querySelector('.row');
-          if (first) first.focus({ preventScroll: true });
-        }
+        if (!open) return;
+        closeH1Menu(false);
+        setListOpen(false);
+        renderMoreValues();
+        if (quiet) return;
+        const first = scr.querySelector('.row');
+        if (first) first.focus({ preventScroll: true });
       }
       $('h1-more').addEventListener('click', () =>
         setMoreOpen($('more-screen').hidden),
@@ -5338,33 +4688,266 @@
         $('h1-more').focus({ preventScroll: true });
       });
 
-      // Runs while the script loads, before the auth check reveals the app, so
-      // the first frame the reader sees already has their pane where they left
-      // it. A pin list an older page saved is dropped rather than read: there
-      // is nothing left to pin it to.
-      (function restoreTab() {
-        uiWrite('pins', undefined);
-        const tab = loadTab();
-        if (tab && tab !== 'chat') switchTab(tab);
-      })();
+      // A row opens its panel screen over More, titled with the row's own
+      // name, scrolled to the top, with focus on its way back.
+      function openPanel(key) {
+        const panel = $('panel-' + key);
+        if (!panel || !PANEL_KEYS.includes(key)) return;
+        setMoreOpen(true, true);
+        for (const p of $('panel-body').children) p.hidden = p !== panel;
+        const row = moreRow(key);
+        $('panel-title').textContent = row
+          ? row.querySelector('.lbl').textContent
+          : '';
+        $('panel-screen').hidden = false;
+        $('panel-body').scrollTop = 0;
+        openPanelKey = key;
+        savePanel(key);
+        onPanelOpen(key);
+        $('panel-back').focus({ preventScroll: true });
+      }
+      function closePanel(refocus) {
+        const scr = $('panel-screen');
+        if (scr.hidden) return;
+        scr.hidden = true;
+        const key = openPanelKey;
+        openPanelKey = null;
+        savePanel(null);
+        // What a panel loaded can change a row's value (the token count, the
+        // bridges' names), so More is redrawn before it shows again.
+        renderMoreValues();
+        if (!refocus) return;
+        const row = moreRow(key);
+        if (row) row.focus({ preventScroll: true });
+      }
+      $('more-screen').addEventListener('click', (e) => {
+        const row = e.target.closest('.row[data-panel]');
+        if (row) openPanel(row.dataset.panel);
+      });
+      $('panel-back').addEventListener('click', () => closePanel(true));
+      $('panel-screen').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        closePanel(true);
+      });
+      // What a screen does as it opens. The Models card read llama-swap when
+      // its <details> opened; the screen that holds it is what opens now.
+      function onPanelOpen(key) {
+        if (key === 'daemons') void runLlamaSwapRefresh();
+        if (key === 'install') renderInstall();
+        if (key === 'files') {
+          $('more-files-open').disabled = !watchedSessionId;
+          $('more-artifacts-open').disabled = !watchedSessionId;
+        }
+        if (key === 'share') $('more-export').disabled = !watchedSessionId;
+      }
 
-      // "?" help buttons in Operations section headers. Delegated on document
-      // so it keeps working after the pane's nodes are moved into/out of a pin.
-      // Tapping "?" on a collapsed section opens it and shows the help; on an
-      // open section it toggles the help.
+      // #182 kept the open pane across a reload; what comes back now is the
+      // open panel screen, over More so its back button goes where it would
+      // have. Same rule as the conversation pointer (#50): this window's own
+      // record first, then the profile-wide one. The tab and pins records an
+      // older page saved are dropped rather than read: a tab named a whole
+      // pane, which no single screen is.
+      const PANEL_NAME = 'panel';
+      function savePanel(key) {
+        try {
+          if (key) {
+            sessionStorage.setItem(UI_PREFIX + PANEL_NAME, JSON.stringify(key));
+          } else sessionStorage.removeItem(UI_PREFIX + PANEL_NAME);
+        } catch {
+          /* per-window copy is best-effort */
+        }
+        uiWrite(PANEL_NAME, key || undefined);
+      }
+      function loadPanel() {
+        const ok = (v) => PANEL_KEYS.includes(v);
+        try {
+          const own = sessionStorage.getItem(UI_PREFIX + PANEL_NAME);
+          if (own !== null) {
+            const v = JSON.parse(own);
+            if (ok(v)) return v;
+          }
+        } catch {
+          /* fall through to the shared record */
+        }
+        return uiRead(PANEL_NAME, ok);
+      }
+      uiWrite('pins', undefined);
+      uiWrite('tab', undefined);
+      try {
+        sessionStorage.removeItem(UI_PREFIX + 'tab');
+      } catch {
+        /* nothing to drop */
+      }
+      // Called by showApp, after the auth check: a row's value reads state
+      // further down this script, which is only initialised by then.
+      let panelRestored = false;
+      function restorePanel() {
+        if (panelRestored) return;
+        panelRestored = true;
+        const key = loadPanel();
+        if (key) openPanel(key);
+      }
+
+      // A row's value is a fact the page already holds, read as More opens;
+      // nothing here fetches. A row with no fact to show shows nothing rather
+      // than a placeholder. The facts no other code keeps are noted where the
+      // panel that reads them lands (moreFacts).
+      const moreFacts = {
+        sessions: null,
+        bridges: null,
+        tokens: null,
+        costs: null,
+        costSince: '',
+      };
+      function renderMoreValues() {
+        const v = {};
+        if (storedFiles.length) v.files = String(storedFiles.length);
+        const cost = sessionCostText();
+        if (cost) v.usage = cost;
+        if (permRules) {
+          let n = 0;
+          for (const sc of ['user', 'workspace']) {
+            const rules = (permRules[sc] && permRules[sc].rules) || {};
+            for (const rt of ['allow', 'ask', 'deny']) {
+              if (Array.isArray(rules[rt])) n += rules[rt].length;
+            }
+          }
+          v.perms = String(n);
+        }
+        const mcp = wsLastData.mcp;
+        if (mcp && Array.isArray(mcp.servers)) {
+          v.mcp = mcp.servers.filter((s) => s && !s.disabled).length + ' on';
+        }
+        const trust = wsLastData.trust;
+        if (trust && trust.effective && trust.effective.state) {
+          v.trust = String(trust.effective.state);
+        }
+        const daemons = manifestDaemons();
+        if (daemons.length) {
+          const now = Date.now();
+          const up = daemons.filter((d) => healthDotState(d, now) === 'green');
+          v.daemons = up.length + ' of ' + daemons.length;
+        }
+        if (moreFacts.sessions !== null) v.sessions = String(moreFacts.sessions);
+        if (moreFacts.bridges !== null) {
+          v.bridges = moreFacts.bridges.length
+            ? moreFacts.bridges.join(', ')
+            : 'none';
+        }
+        v.diag = gatewayOk ? 'ok' : 'unreachable';
+        const ns = $('notif-state').textContent || '';
+        if (ns === 'enabled') v.notify = 'on';
+        else if (ns.startsWith('disabled')) v.notify = 'off';
+        else if (ns.startsWith('push unsupported')) v.notify = 'unsupported';
+        v.dictation =
+          ($('dictate-lang').value || 'auto') +
+          ', auto-send ' +
+          ($('dictate-autosend').checked ? 'on' : 'off');
+        if (stampZone) v.zone = stampZone;
+        if (moreFacts.tokens !== null) v.devices = String(moreFacts.tokens);
+        if (appStandalone()) v.install = 'installed';
+        for (const row of document.querySelectorAll(
+          '#more-screen .row[data-panel]',
+        )) {
+          const val = row.querySelector('.val');
+          const text = v[row.dataset.panel] || '';
+          if (val.textContent !== text) val.textContent = text;
+        }
+        // The group heads say where Workspace and Host point, as drawn.
+        const ws = wsTargetCwd || (caps && caps.workspaceCwd) || '';
+        $('more-ws').textContent = ws
+          ? ' \u00b7 ' + ws.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~')
+          : '';
+        const host = listHostLabel();
+        $('more-host').textContent = host ? ' \u00b7 ' + host : '';
+      }
+
+      // #187. The watched conversation's cost, for More's Usage row and the
+      // sheet's context line. It comes from the Usage panel's own read, when
+      // that read was grouped by session and the watched conversation has a
+      // row in its window. Nothing polls for it: until the reader has loaded
+      // Usage the page does not know the number, and says nothing.
+      function sessionCostText() {
+        const costs = moreFacts.costs;
+        if (!costs || !watchedSessionId || !costs.has(watchedSessionId)) {
+          return '';
+        }
+        return '$' + (costs.get(watchedSessionId) / 100).toFixed(2);
+      }
+
+      // #187. Install as app. The manifest asks for display: standalone, and
+      // that is what the page reports once it runs from the home screen; iOS
+      // Safari says so on navigator.standalone rather than the media query.
+      let installPrompt = null;
+      function appStandalone() {
+        try {
+          if (window.matchMedia('(display-mode: standalone)').matches) {
+            return true;
+          }
+        } catch {
+          /* no media queries: read the iOS flag alone */
+        }
+        return navigator.standalone === true;
+      }
+      function renderInstall() {
+        const on = appStandalone();
+        $('install-state').textContent = on
+          ? 'Installed: this page is running as an app from the home screen.'
+          : 'Not installed: this page is open in the browser.';
+        $('install-how').hidden = on;
+        $('install-app').hidden = on || !installPrompt;
+      }
+      // The event is kept and not cancelled, so the browser's own offer (the
+      // install bar Android Chrome shows) still appears; the button is a
+      // second way to the same prompt for a reader who passed that by.
+      window.addEventListener('beforeinstallprompt', (e) => {
+        installPrompt = e;
+        renderInstall();
+      });
+      window.addEventListener('appinstalled', () => {
+        installPrompt = null;
+        renderInstall();
+      });
+      $('install-app').addEventListener('click', async () => {
+        const p = installPrompt;
+        if (!p) return;
+        // A prompt event answers once, whatever the reader picks.
+        installPrompt = null;
+        try {
+          await p.prompt();
+        } catch {
+          /* the browser declined to show it; the steps above still work */
+        }
+        renderInstall();
+      });
+
+      // Files and artifacts: the conversation's own lists are the composer's,
+      // behind its +, so these shut More and open them where they live.
+      function openComposerList(toggleId, boxId) {
+        setMoreOpen(false);
+        setToolsOpen(true);
+        if ($(boxId).hidden) void $(toggleId).onclick();
+      }
+      $('more-files-open').addEventListener('click', () =>
+        openComposerList('stored-toggle', 'stored'),
+      );
+      $('more-artifacts-open').addEventListener('click', () =>
+        openComposerList('artifacts-toggle', 'artifacts'),
+      );
+      $('more-export').addEventListener('click', () => void exportConversation());
+
+      // "?" help buttons. #187 retired the panels' ones for a sentence at the
+      // top of each panel screen; the two left are in the heads of the List
+      // screen's folder and archived screens, where each toggles its own
+      // hidden paragraph. Delegated on document, keyed on aria-controls.
       document.addEventListener('click', (e) => {
         const btn = e.target.closest('.help-btn');
         if (!btn) return;
         e.preventDefault();
         e.stopPropagation();
         const panel = $(btn.getAttribute('aria-controls'));
-        const det = btn.closest('details');
-        // A help button outside a collapsible section (a screen's head) has no
-        // section to open, so it only toggles its own panel. Counting it as
-        // already-open is what makes the first tap show rather than hide.
-        const wasClosed = det ? !det.open : false;
-        if (det) det.open = true;
-        panel.hidden = wasClosed ? false : !panel.hidden;
+        panel.hidden = !panel.hidden;
         btn.setAttribute('aria-expanded', String(!panel.hidden));
       });
 
@@ -6503,12 +6086,26 @@
           f.append(row('Mode', t));
         }
         const fill = fillText();
-        if (fill) {
+        // #187: the conversation's cost beside its fill, once Usage has read
+        // it (sessionCostText); before that the line is the fill alone.
+        const cost = sessionCostText();
+        if (fill || cost) {
           const col = document.createElement('div');
           col.className = 'sh-col';
           const r = row('Context');
           const v = document.createElement('span');
           v.textContent = fill;
+          if (cost) {
+            const c = document.createElement('span');
+            c.id = 'footer-cost';
+            c.textContent = cost;
+            c.title =
+              'cost of this conversation since ' +
+              moreFacts.costSince +
+              ', from Usage';
+            if (fill) v.append(' \u00b7 ');
+            v.append(c);
+          }
           r.append(v);
           col.append(r);
           if (ctxUsage && ctxUsage.window > 0) {
@@ -7149,7 +6746,7 @@
               msg +=
                 ' — start a session in this workspace (send a prompt), then retry';
             } else if (body.code === 'untrusted_workspace') {
-              msg += ' — trust the workspace first (Settings tab)';
+              msg += ': trust the workspace first (More, Trust and policy)';
             } else if (res.status === 401 || res.status === 403) {
               msg = 'not authorized — needs an owner token';
             }
@@ -11041,8 +10638,8 @@
         cb.checked = !!(s && s.enabled);
         if (!s || !s.available) {
           cb.disabled = true;
-          st.textContent =
-            ' — unavailable (no model configured on the workstation)';
+          // #187: a line of its own under the switch now, so no lead-in.
+          st.textContent = 'unavailable (no model configured on the workstation)';
           return;
         }
         if (!s.globalEnabled) {
@@ -11050,7 +10647,7 @@
           // operator how to enable it (the privacy-preserving opt-in).
           cb.disabled = true;
           st.textContent =
-            ' — off globally; set enabled:true in ~/.qwen/rc/idle.yaml' +
+            'off globally; set enabled:true in ~/.qwen/rc/idle.yaml' +
             ' (or QWEN_RC_IDLE_SUGGESTIONS=1)';
           return;
         }
@@ -11061,7 +10658,7 @@
           typeof s.maxSuggestionsPerHour === 'number'
             ? s.maxSuggestionsPerHour
             : '?';
-        st.textContent = ' — ' + rem + '/' + cap + ' left this hour';
+        st.textContent = rem + '/' + cap + ' left this hour';
         // #182: the box shows the gateway's effective state, never the saved
         // one, by the same rule as the approval mode (see renderFooter). The
         // per-session switch lives in the gateway's memory, so a gateway
@@ -12813,7 +12410,6 @@
       // workspace. The list shuts when the new conversation is watched
       // (startWatch), and stays up over a refusal so its toast can say why.
       $('list-new').addEventListener('click', () => {
-        if (!$('pane-chat').classList.contains('active')) switchTab('chat');
         void startConversationIn(
           typeof pastConvosCwd === 'string' ? pastConvosCwd : '',
         );
@@ -13097,13 +12693,13 @@
       const ROW_MORE_SVG =
         '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
 
-      // A row is a switch: the list goes, the Chat pane comes back if ⌘K
-      // opened the list over another one, and the conversation follows
-      // through the one hand-off every past row has used. issue #67: the
-      // host's terminal follows the conversation you picked.
+      // A row is a switch: the list goes, and with it anything ⌘K opened it
+      // over (opening the list shut More and its panel screen), and the
+      // conversation follows through the one hand-off every past row has
+      // used. issue #67: the host's terminal follows the conversation you
+      // picked.
       function pickConversation(s) {
         closeListToChat();
-        if (!$('pane-chat').classList.contains('active')) switchTab('chat');
         void resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''), {
           hostTerminal: true,
         });
@@ -14336,7 +13932,7 @@
         // A new watch starts from the past-conversations list (or the
         // New-conversation button), which runs its own watch hand-off.
         if (!watchedSessionId)
-          return setStatus('pick a conversation from the list in the Chat tab');
+          return setStatus('pick a conversation from the list first');
         lastSeenEventId = null;
         startWatch(watchedSessionId);
       };
@@ -14736,6 +14332,8 @@
             return;
           }
           const list = await res.json();
+          // #187: More's Paired devices and tokens row counts them.
+          moreFacts.tokens = Array.isArray(list) ? list.length : 0;
           out.textContent = '';
           if (!Array.isArray(list) || list.length === 0) {
             out.textContent = '(no tokens)';
@@ -14821,10 +14419,12 @@
             return;
           }
           const body = await res.json();
-          out.textContent = buildSessionTree(
-            Array.isArray(body.sessions) ? body.sessions : [],
-            !!body.truncated,
-          );
+          const sessions = Array.isArray(body.sessions) ? body.sessions : [];
+          // #187: More's All sessions row counts what this read returned.
+          moreFacts.sessions = body.truncated
+            ? sessions.length + '+'
+            : sessions.length;
+          out.textContent = buildSessionTree(sessions, !!body.truncated);
         } catch (e) {
           out.textContent = 'list error: ' + e;
         }
@@ -15502,10 +15102,9 @@
           empty.textContent = 'failed to reach gateway: ' + err.message;
         }
       }
+      // #187: and as the Daemons and workspaces screen opens (onPanelOpen),
+      // the way it once ran as the card's <details> opened.
       $('llama-swap-refresh').onclick = () => void runLlamaSwapRefresh();
-      $('llama-swap').addEventListener('toggle', () => {
-        if ($('llama-swap').open) void runLlamaSwapRefresh();
-      });
 
       // loadDaemonManifest() and the watched-session auto-restore (below)
       // both used to run unconditionally here at script-load. They now run
@@ -15552,6 +15151,9 @@
         // below waits for that answer, bounded so a status read that hangs
         // does not hold the conversation back.
         deepLinkSessionId = id;
+        // #187: the card is on the chat screen, so a panel screen the reload
+        // would have brought back does not cover it.
+        setMoreOpen(false);
         const pinned = Promise.race([
           refreshPendingCards(id, true),
           new Promise((r) => setTimeout(r, 1500)),
@@ -16099,7 +15701,7 @@
       // Command-palette shortcut: ⌘K / Ctrl-K from anywhere on the page.
       // #185 (h1): it opens the List screen with its search field focused,
       // which is where the parity table puts search; the search across
-      // sessions above stays on its panel under More > Operations, and the
+      // sessions above is More's Search across conversations (#187), and the
       // bar's search row (#bar-search) is retired with the tab bar it came
       // from. preventDefault stops the browser's own ⌘K (the address bar),
       // and only once the app is up: the pairing form leaves the key alone.
@@ -18117,6 +17719,18 @@
         );
         if (!body) return;
         const rows = Array.isArray(body.rows) ? body.rows : [];
+        // #187. Grouped by session, a row's key is the session id, so this
+        // read is also each conversation's cost in the window: kept for the
+        // sheet's context line and More's Usage row, and redrawn there now.
+        if ($('usage-group').value === 'session') {
+          moreFacts.costs = new Map(
+            rows
+              .filter((r) => typeof r.costCents === 'number')
+              .map((r) => [String(r.key), r.costCents]),
+          );
+          moreFacts.costSince = $('usage-since').value.trim() || '24h';
+          renderFooter();
+        }
         out.textContent = '';
         if (rows.length === 0) {
           out.textContent = '(no rows in that window)';
@@ -18424,6 +18038,8 @@
         );
         if (!body) return;
         const bridges = Array.isArray(body.bridges) ? body.bridges : [];
+        // #187: More's Chat bridges row names what is registered.
+        moreFacts.bridges = bridges.map((b) => String(b.displayName || b.id));
         out.textContent = '';
         if (bridges.length === 0) {
           out.textContent = '(no bridges registered right now)';
