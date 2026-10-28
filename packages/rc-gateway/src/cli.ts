@@ -37,7 +37,7 @@ import {
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { probeGpuStatus } from './gpu/gpuStatus.js';
 import { probeLlamaSwapStatus } from './llama-swap/llamaSwapStatus.js';
-import { startDaemon } from './daemonSupervisor.js';
+import { startDaemon, type DaemonHandle } from './daemonSupervisor.js';
 import { DaemonPool, type PooledDaemonSpawn } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
@@ -445,6 +445,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       `qwen-rc: attached to existing daemon at ${opts.attachDaemonUrl} (will not stop it on exit)`,
     );
   }
+  // Owned from here, whatever the rest of the boot does. Harmless in attach mode,
+  // where stop() is documented as a no-op on a daemon this process did not start.
+  claimBootDaemon(handle);
   const store = await TokenStore.open(
     join(homedir(), '.qwen', 'rc', 'tokens.json'),
   );
@@ -1631,6 +1634,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // The handlers own teardown from this line on. The entrypoint claim above only
+  // covers a throw that happens before it.
+  releaseBootDaemon();
 }
 
 /** Read all of stdin as UTF-8 (used by `routing test` when no positional). */
@@ -1788,14 +1794,85 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 // Entrypoint: `qwen-rc serve`
-if (process.argv[2] === 'serve') {
-  // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
-  //        --loopback-bind <h> --port <n> --daemon-port <n> --no-mdns
-  //        --mdns-workspace-name <s>
-  //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
-  //        --llama-swap-url <url> --acme-domain <d[,d]> --acme-email <e>
-  //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
-  const argv = process.argv.slice(3);
+/**
+ * The daemon this process spawned and still owns, set the moment it is up.
+ *
+ * `runServe` installs its SIGINT/SIGTERM handlers on its very last lines, so any
+ * throw before that point leaves through the entrypoint catch with no teardown
+ * run at all. A spawned `qwen serve` lives in its own process group and so
+ * outlives its parent, keeping the fixed daemon port and a token the next
+ * gateway never learns: that gateway cannot become healthy until someone kills
+ * the orphan by hand. The entrypoint consults this on the way out, and the
+ * signal handlers clear the claim once they exist.
+ */
+let bootOwnedDaemon: DaemonHandle | undefined;
+
+/** Record the daemon a boot is responsible for. */
+export function claimBootDaemon(handle: DaemonHandle): void {
+  bootOwnedDaemon = handle;
+}
+
+/** Forget it, because the signal handlers now tear it down themselves. */
+export function releaseBootDaemon(): void {
+  bootOwnedDaemon = undefined;
+}
+
+/**
+ * Stop the claimed daemon, bounded, and never rejecting: this runs while the
+ * process is already failing, so a wedged stop must not hold the exit hostage.
+ * Resolves true when there was a daemon to stop.
+ */
+export async function stopBootOwnedDaemon(timeoutMs = 5000): Promise<boolean> {
+  const handle = bootOwnedDaemon;
+  if (handle === undefined) {
+    return false;
+  }
+  bootOwnedDaemon = undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      handle.stop().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+  return true;
+}
+
+/**
+ * Parse one numeric serve flag. 0 stays legal, because that is Node's "pick a
+ * free port" and it worked before; anything that is not a plain port number is
+ * rejected here rather than reaching `listen()` as NaN.
+ */
+function parsePortFlag(
+  name: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(
+      `--${name}: expected a TCP port between 0 and 65535, got "${raw}"`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Build `serve` options from argv. Extracted as a pure function so the numeric
+ * flags are settled before anything is spawned: `--port abc` used to become NaN,
+ * pass straight through the daemon boot, and only die at `listen()`, by which
+ * point the gateway had already spawned a `qwen serve` it would now abandon.
+ */
+export function parseServeFlags(argv: string[]): ServeOptions {
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
     if (i >= 0) return argv[i + 1];
@@ -1805,15 +1882,15 @@ if (process.argv[2] === 'serve') {
   const port = flag('port');
   const daemonPort = flag('daemon-port');
   const acmeDomain = flag('acme-domain');
-  const serveOpts: ServeOptions = {
+  return {
     host: flag('host'),
     loopbackBindHost:
       flag('loopback-bind') ?? process.env.QWEN_RC_LOOPBACK_BIND,
     tlsCert: flag('tls'),
     tlsKey: flag('tls-key'),
     insecureBehindProxy: argv.includes('--insecure-behind-proxy'),
-    gatewayPort: port ? Number(port) : undefined,
-    daemonPort: daemonPort ? Number(daemonPort) : undefined,
+    gatewayPort: parsePortFlag('port', port),
+    daemonPort: parsePortFlag('daemon-port', daemonPort),
     noMdns: argv.includes('--no-mdns'),
     mdnsWorkspaceName: flag('mdns-workspace-name'),
     mdnsInstanceName: flag('mdns-instance-name'),
@@ -1833,13 +1910,40 @@ if (process.argv[2] === 'serve') {
     acmeStaging: argv.includes('--acme-staging'),
     acmeDirectoryUrl: flag('acme-directory'),
   };
-  runServe(serveOpts).catch((err) => {
+}
+
+if (process.argv[2] === 'serve') {
+  // Flags: --host <h> --tls <cert> --tls-key <key> --insecure-behind-proxy
+  //        --loopback-bind <h> --port <n> --daemon-port <n> --no-mdns
+  //        --mdns-workspace-name <s>
+  //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
+  //        --llama-swap-url <url> --acme-domain <d[,d]> --acme-email <e>
+  //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
+  let serveOpts: ServeOptions;
+  try {
+    serveOpts = parseServeFlags(process.argv.slice(3));
+  } catch (err) {
+    // A bad flag is a usage error, and it is caught here precisely so it can
+    // never arrive after the daemon has been spawned.
+    // eslint-disable-next-line no-console
+    console.error(`qwen-rc serve: ${(err as Error).message}`);
+    process.exit(2);
+  }
+  runServe(serveOpts).catch(async (err) => {
     // eslint-disable-next-line no-console
     console.error(
       err instanceof BindSecurityError || err instanceof MdnsConfigError
         ? `qwen-rc serve: ${err.message}`
         : `qwen-rc serve failed: ${err instanceof Error ? (err.stack ?? err.message) : err}`,
     );
+    // Everything after the spawn and before the signal handlers used to exit
+    // right here and abandon the daemon: a bad --port reaching listen(NaN), a
+    // malformed policy.yaml, a failing store open, a Ctrl-C during the Matrix
+    // whoami wait. The orphan keeps the port and its token.
+    if (await stopBootOwnedDaemon()) {
+      // eslint-disable-next-line no-console
+      console.error('qwen-rc serve: stopped the daemon this boot spawned');
+    }
     process.exit(1);
   });
 } else if (process.argv[2] === 'policy' && process.argv[3] === 'lint') {
