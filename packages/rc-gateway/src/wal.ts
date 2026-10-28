@@ -182,7 +182,15 @@ export class SessionWal {
     if (this._earliest === null) {
       this._earliest = frame.id;
     }
-    this._latest = frame.id;
+    // A high-water mark, not the last written id. Markers can legitimately land
+    // below the current end (the fork route anchors `session_forked` to the
+    // client's cursor, `fromEventId + 1`), and every appender now shares one
+    // instance, so letting a low marker move this backwards makes the
+    // id-continuity renumbering re-anchor below ids the relay already handed
+    // out and write a colliding WAL id.
+    if (this._latest === null || frame.id > this._latest) {
+      this._latest = frame.id;
+    }
 
     if (this.activeBytes > this.segmentMaxBytes) {
       this.rotate();
@@ -294,7 +302,12 @@ export class SessionWal {
         if (this._earliest === null) {
           this._earliest = frame.id;
         }
-        this._latest = frame.id;
+        // Same high-water rule as append(): a resync must not report a lower
+        // end than the live instance did, or the renumbering that anchors on it
+        // re-anchors below ids already handed out.
+        if (this._latest === null || frame.id > this._latest) {
+          this._latest = frame.id;
+        }
       }
     }
 
