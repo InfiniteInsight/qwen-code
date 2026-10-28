@@ -12083,88 +12083,171 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P123 the bar names search and the word is what the break drops',
-    // g1 "Top bar", gap 10 option B (#118). The affordance lived only behind a
-    // key you already knew, and the verifier had no bar assertion of any kind,
-    // so nothing could have noticed the label going missing again.
+    name: 'P123 the bar is one row at 390, searches by glyph there, and keeps the phrase and pins at 1280',
+    // g1 "Top bar", gap 10 option B (#118), then #176. The affordance lived only
+    // behind a key you already knew, and the verifier had no bar assertion of
+    // any kind, so nothing could have noticed the label going missing again.
+    // #176 changed what the phone reading is: at 390 the four tabs plus three
+    // "Pin to Chat" boxes wrapped to two rows (72px against the sheet's 53px)
+    // and left \u2318K alone on the second, naming a key a phone does not have. So
+    // the narrow claims are now one row, no pins, and a magnifier that still
+    // opens the search box when tapped, and the wide claims keep the phrase
+    // and prove the pins still pin where they are drawn.
+    // In-page code is a plain string: the transform rewrites a named arrow in
+    // a callback into a __name(...) call the page does not define.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
-      // The harness opens a default-viewport context (lib/viewerHarness.mts:
-      // 305, newContext with no viewport), so the narrow reading has to be
-      // made here rather than assumed from the phone scenarios.
-      await page.setViewportSize({ width: 390, height: 844 });
+      type BarReading = {
+        inBar: boolean;
+        shown: boolean;
+        label: string;
+        name: string;
+        keyShown: boolean;
+        wordShown: boolean;
+        glyphShown: boolean;
+        pinsShown: number;
+        barH: number;
+        barScroll: number;
+        barClient: number;
+        vw: number;
+        rowSpread: number;
+      };
       const read = () =>
-        page.evaluate(() => {
-          const bar = document.getElementById('tab-bar') as HTMLElement;
-          const keys = document.getElementById(
-            'bar-search',
-          ) as HTMLButtonElement;
-          const word = keys.querySelector('.kl') as HTMLElement;
+        page.evaluate(String.raw`(() => {
+          const bar = document.getElementById('tab-bar');
+          const keys = document.getElementById('bar-search');
+          const on = (el) => !!el && el.getClientRects().length > 0;
+          // One row means every item shares a line: the spread of their
+          // vertical centres stays inside one item's height.
+          const mids = Array.from(bar.children)
+            .filter((k) => on(k))
+            .map((k) => { const r = k.getBoundingClientRect(); return r.top + r.height / 2; });
           return {
             inBar: !!keys.closest('#tab-bar'),
-            shown: keys.getClientRects().length > 0,
-            label: (keys.textContent || '').trim(),
-            wordShown: word.getClientRects().length > 0,
+            shown: on(keys),
+            label: (keys.innerText || '').trim(),
+            name: keys.getAttribute('aria-label') || '',
+            keyShown: on(keys.querySelector('.kk')),
+            wordShown: on(keys.querySelector('.kl')),
+            glyphShown: on(keys.querySelector('.kg')),
+            pinsShown: Array.from(bar.querySelectorAll('.pin-cb')).filter((p) => on(p)).length,
+            barH: Math.round(bar.getBoundingClientRect().height),
             barScroll: bar.scrollWidth,
             barClient: bar.clientWidth,
+            vw: window.innerWidth,
+            rowSpread: Math.round(Math.max(...mids) - Math.min(...mids)),
           };
-        });
-      // 390 is the width the break exists for, and the one the sheet measured.
+        })()`) as Promise<BarReading>;
+
+      // The harness opens a default-viewport context (lib/viewerHarness.mts:
+      // 305, newContext with no viewport), so the narrow reading has to be
+      // made here rather than assumed from the phone scenarios. 390 is the
+      // width the break exists for, and the one the sheet measured.
+      await page.setViewportSize({ width: 390, height: 844 });
       const narrow = await read();
       expect(narrow.inBar, 'the search control is not inside the bar');
       expect(narrow.shown, 'the search control is not on screen at 390');
       expect(
-        narrow.label.includes('\u2318K'),
-        'the label lost the glyph at 390, got ' + JSON.stringify(narrow.label),
+        !narrow.keyShown && !narrow.label.includes('\u2318'),
+        'the bar still names \u2318K at 390, a key a phone does not have, got ' +
+          JSON.stringify(narrow.label),
       );
       expect(
-        !narrow.wordShown,
-        'the word is still shown at 390, the one width it does not fit',
+        narrow.glyphShown && narrow.label === '\u{1F50D}',
+        'the search control at 390 is not the magnifier, got ' +
+          JSON.stringify(narrow.label),
       );
       expect(
-        narrow.barScroll <= narrow.barClient,
-        'the bar overflows horizontally at 390, scrollWidth ' +
+        narrow.name === 'Search across sessions',
+        'the glyph has no phrase for a screen reader, aria-label ' +
+          JSON.stringify(narrow.name),
+      );
+      expect(
+        narrow.pinsShown === 0,
+        `${narrow.pinsShown} Pin to Chat boxes are still drawn at 390`,
+      );
+      expect(
+        narrow.barScroll === narrow.vw && narrow.barClient === narrow.vw,
+        'the bar is not exactly the viewport wide at 390, scrollWidth ' +
           narrow.barScroll +
+          ' and clientWidth ' +
+          narrow.barClient +
           ' against ' +
-          narrow.barClient,
+          narrow.vw,
       );
+      expect(
+        narrow.barH <= 53,
+        `the bar is ${narrow.barH}px tall at 390, over the sheet's 53px, so it wrapped`,
+      );
+      expect(
+        narrow.rowSpread <= 4,
+        `the bar items sit ${narrow.rowSpread}px apart vertically at 390, so they are not one row`,
+      );
+      // Naming it is half of it: the control has to do the thing it names, and
+      // the phone is where it changed, so it is tapped at this width.
+      await page.click('#bar-search');
+      const opened = (await page.evaluate(String.raw`({
+        open: document.getElementById('search').open,
+        focused: document.activeElement === document.getElementById('search-q'),
+        ops: document.querySelector('.tab[data-tab="ops"]').classList.contains('active'),
+      })`)) as { open: boolean; focused: boolean; ops: boolean };
+      expect(opened.ops, 'the glyph did not move to the Operations tab at 390');
+      expect(opened.open, 'the glyph did not open the search panel at 390');
+      expect(
+        opened.focused,
+        'the glyph did not focus the search box at 390, so it names a way in it ' +
+          'does not open',
+      );
+      await page.click('.tab[data-tab="chat"]');
+
       await page.setViewportSize({ width: 1280, height: 720 });
       const wide = await read();
       expect(
-        wide.wordShown,
-        'the word did not come back at 1280, where the bar has the room',
+        wide.wordShown && wide.keyShown && !wide.glyphShown,
+        'the phrase did not come back at 1280, where the bar has the room',
       );
       expect(
         wide.label === '\u2318K search',
         'the bar label is ' + JSON.stringify(wide.label) + ', not the phrase',
       );
-      // Naming it is half of it: the control has to do the thing it names.
-      await page.click('#bar-search');
-      const opened = await page.evaluate(() => ({
-        open: (document.getElementById('search') as HTMLDetailsElement).open,
-        focused:
-          document.activeElement === document.getElementById('search-q'),
-        ops: (
-          document.querySelector('.tab[data-tab="ops"]') as HTMLElement
-        ).classList.contains('active'),
-      }));
-      expect(opened.ops, 'the bar control did not move to the Operations tab');
-      expect(opened.open, 'the bar control did not open the search panel');
       expect(
-        opened.focused,
-        'the bar control did not focus the search box, so it names a way in it ' +
-          'does not open',
+        wide.pinsShown === 3,
+        `${wide.pinsShown} of 3 Pin to Chat boxes are drawn at 1280`,
       );
+      // Hidden below the break is only safe if they still work above it.
+      const pinned = async () =>
+        (await page.evaluate(String.raw`Array.from(
+          document.querySelectorAll('#pin-area > details > summary'),
+        ).map((s) => s.textContent)`)) as string[];
+      await page.click('.pin-cb[data-pin="settings"]');
+      const withPin = await pinned();
+      expect(
+        withPin.length === 1,
+        `pinning Settings at 1280 left ${JSON.stringify(withPin)} in the pin area`,
+      );
+      await page.click('.pin-cb[data-pin="settings"]');
+      const unpinned = await pinned();
+      expect(
+        unpinned.length === 0,
+        `unpinning Settings at 1280 left ${JSON.stringify(unpinned)} in the pin area`,
+      );
+      await page.click('#bar-search');
+      const wideOpen = (await page.evaluate(
+        String.raw`document.activeElement === document.getElementById('search-q')`,
+      )) as boolean;
+      expect(wideOpen, 'the phrase at 1280 no longer opens the search box');
       return (
-        '390: glyph alone, word dropped, bar ' +
+        '390: one row ' +
         narrow.barScroll +
         '/' +
-        narrow.barClient +
-        '; 1280: ' +
+        narrow.vw +
+        ' at ' +
+        narrow.barH +
+        'px, magnifier opens search, no pins; 1280: ' +
         wide.label +
-        '; click lands on ops with the box focused'
+        ', 3 pins, Settings pins and unpins'
       );
     },
   },

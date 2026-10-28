@@ -236,9 +236,9 @@
          it is findable without pressing a key you already know. The sheet's
          `.bar .keys`; the live bar is `.tab-bar` and the tabs are its direct
          children, so margin-left auto is what pushes this to the right end of a
-         row that otherwise packs left. A button, not the sheet's bare span: the
-         word is exactly what the break below 860px drops, and a phone has no
-         ⌘K to press, so a label there would name a way in nobody can take. */
+         row that otherwise packs left. A button, not the sheet's bare span: a
+         phone has no ⌘K to press, so a label there would name a way in nobody
+         can take. Below 860px it is a magnifier instead (#176, below). */
       .tab-bar .keys {
         margin-left: auto;
         padding: 0.5rem 1rem;
@@ -249,9 +249,33 @@
         font-size: 0.85rem;
         cursor: pointer;
       }
+      .tab-bar .keys .kg {
+        display: none;
+      }
+      /* #176. Below the break the bar has to be one row at 390. The old rule
+         kept ⌘K and dropped the word, which names a key a phone does not
+         have, and in the capture it read as a stray label alone on a second
+         row. A magnifier replaces both: the word "search" fits the sheet's
+         13px monospace bar but not this one, where the four tab words alone
+         measure 258px at 390, and the button's aria-label carries the phrase.
+         The pins go too: they are 13px targets, pinning a pane into a 390
+         Chat column is a desktop move, and the sheet already hides them at
+         this width. With those gone the tabs' side padding is what is left
+         to give; the vertical padding is untouched, so the active tab's
+         underline still meets the bar's border. */
       @media (max-width: 860px) {
-        .tab-bar .keys .kl {
+        .tab-bar .keys .kk,
+        .tab-bar .keys .kl,
+        .tab-bar .pin-cb {
           display: none;
+        }
+        .tab-bar .keys .kg {
+          display: inline;
+        }
+        .tab-bar .tab,
+        .tab-bar .keys {
+          padding-left: 0.5rem;
+          padding-right: 0.5rem;
         }
       }
       .tab-pane {
@@ -949,8 +973,10 @@
           id="bar-search"
           type="button"
           title="Search across sessions (⌘K)"
+          aria-label="Search across sessions"
         >
-          ⌘K<span class="kl"> search</span></button
+          <span class="kk">⌘K</span><span class="kl"> search</span
+          ><span class="kg" aria-hidden="true">🔍</span></button
         >
       </div>
       <div class="shell-body">
