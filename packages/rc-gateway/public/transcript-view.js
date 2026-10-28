@@ -18,8 +18,8 @@
 //
 // All DOM writes happen in one requestAnimationFrame pass: model events only
 // record what changed. Every piece of UI state a row shows (thought expanded,
-// fork mode, subagent end time) lives on the item, so a row can be dropped
-// and rebuilt at any time.
+// fork mode, a turn's action note, subagent end time) lives on the item, so a
+// row can be dropped and rebuilt at any time.
 (function () {
   'use strict';
 
@@ -393,9 +393,19 @@
       // the row is already on screen when the POST is in flight, and removing
       // it would take everything after it with it.
       m.notSent = null;
+      m.retry = null;
       if (item.kind === 'user') {
         m.notSent = el('span', 'not-sent');
         b.appendChild(m.notSent);
+        // #184: the way to send it again sits where the failure is said. A
+        // sibling of the marker rather than inside it, so the marker still
+        // reads exactly what the daemon refused.
+        m.retry = el('button', 'retry', 'retry');
+        m.retry.type = 'button';
+        m.retry.addEventListener('click', function () {
+          if (opts.onRetry) opts.onRetry(item);
+        });
+        b.appendChild(m.retry);
       }
       if (m.notSent) patchUser(m);
       return b;
@@ -405,6 +415,7 @@
       var note = m.item.notSent ? 'not sent: ' + m.item.notSent : '';
       if (m.notSent.textContent !== note) m.notSent.textContent = note;
       m.notSent.hidden = !note;
+      m.retry.hidden = !note;
     }
 
     // An assistant row renders markdown. Its body is a block container rather
@@ -414,6 +425,50 @@
     // bold` becomes an element only when it closes), so the O(delta) append is
     // not available here. The pass is already batched to one rAF, and the
     // re-render is skipped entirely while the text is unchanged.
+    // #184. A finished turn's actions: Fork here, Rewind to here, Copy. The
+    // latest turn's sit on its fork row (the model's `fork` item); an answer
+    // the page has marked as ending an earlier turn (item.turnEnd) carries the
+    // same strip in its own row, under its bubble. Each button reports the
+    // item it belongs to (onTurnAct) and the page does the work; busy and note
+    // live on that item, so a row scrolled away and rebuilt still shows them.
+    function buildActs(item) {
+      var a = { box: el('div', 'turn-acts') };
+      a.fork = el('button', 'act-fork', 'Fork here');
+      a.rewind = el('button', 'act-rewind', 'Rewind to here');
+      a.copy = el('button', 'act-copy', 'Copy');
+      a.note = el('span', 'note');
+      [
+        ['fork', a.fork],
+        ['rewind', a.rewind],
+        ['copy', a.copy],
+      ].forEach(function (pair) {
+        pair[1].type = 'button';
+        pair[1].addEventListener('click', function () {
+          if (opts.onTurnAct) opts.onTurnAct(pair[0], item);
+        });
+        a.box.appendChild(pair[1]);
+      });
+      a.box.appendChild(a.note);
+      patchActs(a, item);
+      return a;
+    }
+    function patchActs(a, item) {
+      var busy = !!item.busy;
+      if (a.fork.disabled !== busy) a.fork.disabled = busy;
+      setText(a.note, item.note || '');
+    }
+    function syncAsstActs(m) {
+      var want = !!m.item.turnEnd;
+      if (want && !m.acts) {
+        m.acts = buildActs(m.item);
+        m.row.appendChild(m.acts.box);
+      } else if (!want && m.acts) {
+        m.acts.box.remove();
+        m.acts = null;
+      }
+      if (m.acts) patchActs(m.acts, m.item);
+    }
+
     function buildAsst(m) {
       var b = el('div', 'bubble asst');
       b.appendChild(roleLine('asst', m.item, stampZone));
@@ -776,43 +831,21 @@
       setText(b, m.item.text);
     }
 
-    // "Fork from here" under a completed assistant turn. The view stores the
-    // chosen transcript mode on the item (item.mode) and reports the button
-    // click (onFork) and, if the page asks, the mode change (onForkMode);
-    // the page writes busy/note back and touches the item.
+    // The latest completed turn's actions (#184), on the model's fork row.
+    // The include/empty choice the row used to carry as a select is asked on
+    // tap now (the page's onTurnAct), and kept on the item as item.mode.
+    // The page sets item.hideActs when another row sits between the fork row
+    // and its answer; the answer then carries the strip and this draws none.
     function buildFork(m) {
-      var item = m.item;
-      var b = el('div', 'bubble-fork');
-      m.btn = el('button', null, 'Fork from here');
-      m.btn.type = 'button';
-      m.mode = el('select');
-      m.mode.title = 'transcript mode for the fork';
-      ['include', 'empty'].forEach(function (val) {
-        var o = el('option', null, val);
-        o.value = val;
-        m.mode.appendChild(o);
-      });
-      m.note = el('span');
-      m.note.style.cssText = 'color:#9aa0a6;font-size:0.72rem;margin-left:6px';
-      m.btn.addEventListener('click', function () {
-        if (opts.onFork) opts.onFork(item);
-      });
-      m.mode.addEventListener('change', function () {
-        item.mode = m.mode.value;
-        if (opts.onForkMode) opts.onForkMode(item, m.mode.value);
-      });
-      b.appendChild(m.btn);
-      b.appendChild(m.mode);
-      b.appendChild(m.note);
+      m.acts = buildActs(m.item);
+      m.acts.box.className = 'bubble-fork turn-acts';
       patchFork(m);
-      return b;
+      return m.acts.box;
     }
     function patchFork(m) {
-      var item = m.item;
-      var busy = !!item.busy;
-      if (m.btn.disabled !== busy) m.btn.disabled = busy;
-      if (item.mode && m.mode.value !== item.mode) m.mode.value = item.mode;
-      setText(m.note, item.note || '');
+      patchActs(m.acts, m.item);
+      var hide = !!m.item.hideActs;
+      if (m.acts.box.hidden !== hide) m.acts.box.hidden = hide;
     }
 
     function buildImage(m) {
@@ -865,7 +898,8 @@
       var make = BUILD[m.shape] || buildSystem;
       m.bubble = make(m, now);
       if (old) m.row.replaceChild(m.bubble, old);
-      else m.row.appendChild(m.bubble);
+      else m.row.insertBefore(m.bubble, m.row.firstChild);
+      if (m.item.kind === 'asst') syncAsstActs(m);
     }
 
     function patch(m, now) {
@@ -876,7 +910,9 @@
         case 'asst':
           // With no parser the row was built by buildText and holds a text
           // node, so it keeps the tail append.
-          return md ? patchAsst(m) : syncTextNode(m.body, m.item.text);
+          if (md) patchAsst(m);
+          else syncTextNode(m.body, m.item.text);
+          return syncAsstActs(m);
         case 'image':
           // The frame carries the whole image in one go, so there is nothing
           // to write after the build. Falling to the default would run
@@ -973,7 +1009,11 @@
             21 * (lineCount(item, item.text, perLine) + (item.notSent ? 1 : 0))
           );
         case 'asst':
-          return 38 + 21 * lineCount(item, item.text, perLine);
+          return (
+            38 +
+            21 * lineCount(item, item.text, perLine) +
+            (item.turnEnd ? 36 : 0)
+          );
         case 'image':
           // A thumbnail is capped by the page's CSS at 240px of picture plus
           // the bubble's padding; a row saying it cannot be drawn is one line.
@@ -999,7 +1039,7 @@
         case 'plan':
           return 20 + 21 * lineCount(item, planLines(item), perLine);
         case 'fork':
-          return 24;
+          return item.hideActs ? 0 : 30;
         default:
           return 37;
       }
