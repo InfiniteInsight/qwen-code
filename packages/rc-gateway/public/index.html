@@ -902,6 +902,11 @@
         min-height: 40px;
         max-width: 60%;
       }
+      /* #190: the engine tag ends its row like the select does, so the house
+         tag's trailing gap (it was spacing it from the mic) goes. */
+      .ops-card .prow .cmd-kind {
+        margin-right: 0;
+      }
       #idle-suggest .st {
         display: block;
         color: var(--g1-ink-mid);
@@ -984,6 +989,12 @@
       #h1-mode {
         flex: none;
       }
+      /* #190: no model named. Muted so it reads as an absence, and never cut,
+         since `no …` would say nothing at all. */
+      #h1-model.none {
+        flex: none;
+        color: var(--g1-ink-dim);
+      }
       #h1-status .sp {
         flex: 1 1 0;
       }
@@ -1051,6 +1062,10 @@
       }
       #session-footer .sh-lbl {
         font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      /* #190: the Model row's `no model`, muted as the status line's is. */
+      #session-footer .none {
         color: var(--g1-ink-mid);
       }
       #footer-model-name {
@@ -1295,12 +1310,6 @@
       }
       #h1-tools .pill .m {
         margin-right: 6px;
-      }
-      #h1-tools .cmd-kind {
-        flex: none;
-        margin: 0 4px 0 -4px;
-        border-color: var(--g1-edge);
-        color: var(--g1-ink-lo);
       }
       /* #182, #184. The composer: one row on the band, 24px under it for the
          thumb plus whatever the home indicator takes (env() is 0 in a desktop
@@ -3412,6 +3421,21 @@
             <p class="lede">How the composer listens on this phone, and whether it offers a next step when the conversation goes idle.</p>
             <section id="dictation-prefs" class="ops-card">
               <h2>Dictation</h2>
+              <!-- #97. What runs the mic is the browser's Web Speech API, not
+                   the product's voice stack, and the gateway has no transcribe
+                   route to offer instead, so the honest fix is the label.
+                   #190: it sits here beside the language and auto-send it
+                   governs rather than among the + pills, where it read as a
+                   control. -->
+              <div class="prow">
+                <span>Engine</span>
+                <span
+                  class="cmd-kind"
+                  id="dictate-engine"
+                  title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
+                  >browser</span
+                >
+              </div>
               <label class="prow" for="dictate-lang">
                 <span>Language</span>
                 <select id="dictate-lang" title="dictation language">
@@ -4542,8 +4566,10 @@
              with the verbs: Attach still clicks the hidden file input, Dictate
              still runs the browser's recognizer, Files and Artifacts still open
              their bounded lists. 44px tall and in a sideways scroller, so a
-             fifth tool costs no height. The engine tag (#97) stays beside the
-             mic it names. -->
+             fifth tool costs no height. #190: four plain pills; the engine
+             tag (#97) is on More > This phone > Dictation with the other
+             facts about how the phone listens, since a tag among the pills
+             read as a fifth control that did nothing. -->
         <div id="h1-tools" hidden>
           <button
             id="attach"
@@ -4564,16 +4590,6 @@
             <span class="m" aria-hidden="true">🎙</span
             ><span class="w">Dictate</span>
           </button>
-          <!-- #97. The engine is named where the control is drawn. What runs
-               here is the browser's Web Speech API, not the product's voice
-               stack, and the gateway has no transcribe route to offer instead,
-               so the honest fix is the label. -->
-          <span
-            class="cmd-kind"
-            id="dictate-engine"
-            title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
-            >browser</span
-          >
           <button
             id="stored-toggle"
             type="button"
@@ -6510,18 +6526,21 @@
         // The model name is a button (opens the picker dialog) only when
         // there's more than one model to switch to -- same guard the mode
         // control below uses for its buttons vs. plain text.
+        // #190: the status line's words for a model the daemon has not named.
+        const modelText = ctxInfo.modelName || 'no model';
         let model;
         if (hasModels) {
           model = document.createElement('button');
           model.type = 'button';
           model.id = 'footer-model-name';
           model.title = 'Tap to switch model';
-          model.textContent = ctxInfo.modelName + ' ▾';
+          model.textContent = modelText + ' ▾';
           model.addEventListener('click', openModelPicker);
         } else {
           model = document.createElement('span');
-          model.textContent = ctxInfo.modelName;
+          model.textContent = modelText;
         }
+        if (!ctxInfo.modelName) model.classList.add('none');
         f.append(row('Model', model));
         if (hasModes) {
           // #182. The daemon's mode is what the control shows: it is the mode
@@ -6700,7 +6719,12 @@
         }
         if (btn.dataset.state !== state) btn.dataset.state = state;
         h1Text($('h1-state'), word);
-        h1Text($('h1-model'), ctxInfo ? shortModel(ctxInfo.modelName) : '');
+        // #190: a context with no model named prints `no model`, muted, so
+        // the line still has a model field and it reads as an absence.
+        const modelEl = $('h1-model');
+        const modelShort = ctxInfo ? shortModel(ctxInfo.modelName) : '';
+        h1Text(modelEl, ctxInfo ? modelShort || 'no model' : '');
+        modelEl.classList.toggle('none', !!ctxInfo && !modelShort);
         h1Text($('h1-tokens'), fillText());
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
@@ -8834,7 +8858,11 @@
         const currentModelId =
           typeof models.currentModelId === 'string' ? models.currentModelId : '';
         const current = availableModels.find((m) => m.modelId === currentModelId);
-        const modelName = current ? current.name : currentModelId || '(model unknown until switched)';
+        // #190: empty when the daemon names no model. The places that print it
+        // say `no model` themselves, muted, because the old parenthetical
+        // (`model unknown until switched`) cut to `(model …` on a 390px status
+        // line and read as a broken name rather than an absent one.
+        const modelName = current ? current.name : currentModelId;
         const modes = st.modes || {};
         const found = (modes.availableModes || []).find(
           (x) => x && x.id === modes.currentModeId,
@@ -14038,10 +14066,16 @@
       // A caller must therefore render the list exactly as it would without
       // this feature, rather than letting an unreadable snapshot read as
       // "nothing here is open".
-      async function readLiveStates(cwd) {
+      //
+      // #190: `spawn` false reads with spawn=0, which answers only from a
+      // daemon the gateway already runs for that folder and otherwise says
+      // nothing is open there, so asking it about a folder costs no daemon.
+      async function readLiveStates(cwd, spawn) {
         try {
           const res = await fetch(
-            '/rc/sessions/live-state?workspace=' + encodeURIComponent(cwd),
+            '/rc/sessions/live-state?workspace=' +
+              encodeURIComponent(cwd) +
+              (spawn ? '' : '&spawn=0'),
             { headers: { Authorization: 'Bearer ' + token() } },
           );
           if (!res.ok) return null;
@@ -14089,15 +14123,28 @@
         return only.concat(marked);
       }
 
-      // One folder's rows, or null when its listing could not be read.
-      // `live` reads the daemon's snapshot beside it (#89) for the current
-      // folder only: the live-state route resolves its workspace through the
-      // daemon pool, which spawns a daemon for a workspace that has none, so
-      // asking it about every recent folder on every poll would start (and
-      // keep from idling out) a daemon per folder. The listing itself is a
-      // disk scan. So a row from another folder carries no live dot, which
-      // says nothing about whether it is open rather than that it is not.
-      async function readFolderRows(cwd, live) {
+      // #190: whether the gateway honours spawn=0. This page is served from
+      // disk, so it can be newer than the gateway process answering it, and
+      // an older route ignores the switch and starts a daemon per folder
+      // asked about. Without the word, other folders go unread, as before.
+      function liveStateNoSpawn() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.liveStateNoSpawn === true
+        );
+      }
+
+      // One folder's rows, or null when its listing could not be read, with
+      // the daemon's live snapshot read beside it (#89). The current folder
+      // reads it the way it always has, through the daemon pool, which starts
+      // a daemon for a folder that has none (the folder being worked in will
+      // want one). #190: every other folder reads it with spawn=0, which
+      // answers from a daemon already running and starts none, so a row in
+      // another folder gets its live dot, Rename and End session while it is
+      // open without the list starting (and keeping from idling out) a daemon
+      // per recent folder. The listing itself is a disk scan.
+      async function readFolderRows(cwd, spawn) {
         try {
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
@@ -14107,7 +14154,7 @@
             fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
               headers: { Authorization: 'Bearer ' + token() } },
             ),
-            live ? readLiveStates(cwd) : null,
+            spawn || liveStateNoSpawn() ? readLiveStates(cwd, spawn) : null,
           ]);
           if (!res.ok) return null;
           const body = await res.json();

@@ -10,7 +10,11 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
-import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
+import {
+  DaemonPool,
+  WorkspacePoolFullError,
+  type SessionDaemon,
+} from '../daemonPool.js';
 import { createSessionLiveStateRoute } from './sessionLiveState.js';
 
 let gateway: Server | undefined;
@@ -232,6 +236,35 @@ describe('workspace session live-state (#111)', () => {
     expect(body['code']).toBe('daemon_unavailable');
   });
 
+  it('refuses a spawn value other than 0 or 1 before the daemon is touched', async () => {
+    // Guessing 1 for a typo would start the daemon the caller asked not to.
+    const { daemon, calls } = fakeDaemon();
+    const base = await mountGateway(daemon);
+    for (const q of ['spawn=no', 'spawn=0&spawn=0', 'spawn=']) {
+      const { status, body } = await getJson(
+        base,
+        `/rc/sessions/live-state?workspace=%2Fother%2Fproj&${q}`,
+      );
+      expect(status).toBe(400);
+      expect(body['code']).toBe('invalid_spawn');
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('says it cannot read without spawning when no pool is behind it', async () => {
+    // A plain client has no pool to look in, so an empty set from it would
+    // claim nothing is open in a workspace it never asked about.
+    const { daemon, calls } = fakeDaemon();
+    const base = await mountGateway(daemon);
+    const { status, body } = await getJson(
+      base,
+      '/rc/sessions/live-state?workspace=%2Fother%2Fproj&spawn=0',
+    );
+    expect(status).toBe(501);
+    expect(body['code']).toBe('live_state_unpooled');
+    expect(calls).toEqual([]);
+  });
+
   it('answers 503 when a non default workspace cannot be spawned', async () => {
     const { daemon } = fakeDaemon({ thrown: new WorkspacePoolFullError(3) });
     const base = await mountGateway(daemon);
@@ -241,5 +274,150 @@ describe('workspace session live-state (#111)', () => {
     );
     expect(status).toBe(503);
     expect(body['code']).toBe('workspace_pool_full');
+  });
+});
+
+/**
+ * #190: the list reads every recent folder's live state, so it needs a read
+ * that never starts a daemon. These run a real `DaemonPool` (its spawn backed
+ * by the stub, every spawn logged) so "no daemon started" is the pool's own
+ * count rather than a fake's say-so.
+ */
+describe('workspace session live-state without spawning (#190)', () => {
+  let pool: DaemonPool | undefined;
+  afterEach(async () => {
+    if (pool) await pool.stopAll();
+    pool = undefined;
+  });
+
+  async function pooled(
+    opts: { now?: () => number; idleReapMs?: number } = {},
+  ): Promise<{ pool: DaemonPool; spawned: string[] }> {
+    stub = await startStubDaemon();
+    const baseUrl = stub.baseUrl;
+    const spawned: string[] = [];
+    pool = new DaemonPool({
+      defaultDaemon: new DaemonClient({ baseUrl }),
+      defaultWorkspaceCwd: '/default/proj',
+      spawn: async (cwd) => {
+        spawned.push(cwd);
+        return {
+          client: new DaemonClient({ baseUrl }),
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+      },
+      ...opts,
+    });
+    return { pool, spawned };
+  }
+
+  it('answers from a daemon the pool already holds, payload untouched', async () => {
+    const { pool, spawned } = await pooled();
+    await pool.getOrSpawn('/warm/proj');
+    const base = await mountGateway(pool);
+    const { status, body } = await getJson(
+      base,
+      '/rc/sessions/live-state?workspace=%2Fwarm%2Fproj&spawn=0',
+    );
+    expect(status).toBe(200);
+    expect(body['v']).toBe(1);
+    expect(body['catalogVersion']).toEqual({ generation: 'g-1', revision: 7 });
+    const sessions = body['sessions'] as Array<Record<string, unknown>>;
+    expect(sessions.map((s) => s['sessionId'])).toEqual(['s-live']);
+    expect('pooled' in body).toBe(false);
+    expect(stub!.lastLiveStateWorkspace).toBe('/warm/proj');
+    expect(spawned).toEqual(['/warm/proj']);
+  });
+
+  it('answers an empty live set for a workspace with no daemon and starts none', async () => {
+    const { pool, spawned } = await pooled();
+    await pool.getOrSpawn('/warm/proj');
+    const before = pool.workspaces();
+    const base = await mountGateway(pool);
+    for (let i = 0; i < 3; i++) {
+      const { status, body } = await getJson(
+        base,
+        '/rc/sessions/live-state?workspace=%2Fcold%2Fproj&spawn=0',
+      );
+      expect(status).toBe(200);
+      // No daemon, so no `v` or `catalogVersion`: no daemon issued either.
+      expect(body).toEqual({ sessions: [], pooled: false });
+    }
+    expect(pool.size()).toBe(1);
+    expect(pool.workspaces()).toEqual(before);
+    expect(spawned).toEqual(['/warm/proj']);
+    // The daemon was never asked about the cold folder either.
+    expect(stub!.lastLiveStateWorkspace).toBeUndefined();
+  });
+
+  it('still spawns for the plain form, which the current folder keeps using', async () => {
+    const { pool, spawned } = await pooled();
+    const base = await mountGateway(pool);
+    const { status } = await getJson(
+      base,
+      '/rc/sessions/live-state?workspace=%2Fcold%2Fproj',
+    );
+    expect(status).toBe(200);
+    expect(spawned).toEqual(['/cold/proj']);
+    expect(pool.size()).toBe(1);
+  });
+
+  it('answers for the default workspace, whose daemon is always running', async () => {
+    const { pool, spawned } = await pooled();
+    const base = await mountGateway(pool);
+    const { status, body } = await getJson(
+      base,
+      '/rc/sessions/live-state?workspace=%2Fdefault%2Fproj&spawn=0',
+    );
+    expect(status).toBe(200);
+    expect(body['v']).toBe(1);
+    expect(stub!.lastLiveStateWorkspace).toBe('/default/proj');
+    expect(spawned).toEqual([]);
+  });
+
+  it('does not keep an idle daemon from being reaped by reading it', async () => {
+    // The list reads every recent folder on each refresh. A read that counted
+    // as use would keep every one of those daemons alive for good.
+    let t = 0;
+    const { pool } = await pooled({ now: () => t, idleReapMs: 1000 });
+    await pool.getOrSpawn('/warm/proj');
+    const base = await mountGateway(pool);
+    for (t = 400; t <= 1200; t += 400) {
+      const { status } = await getJson(
+        base,
+        '/rc/sessions/live-state?workspace=%2Fwarm%2Fproj&spawn=0',
+      );
+      expect(status).toBe(200);
+    }
+    t = 1001;
+    await pool.reapIdle();
+    expect(pool.workspaces()).toEqual([]);
+  });
+
+  it('relays the per workspace trust refusal from a pooled daemon as itself', async () => {
+    stub = await startStubDaemon({
+      liveStateStatus: 403,
+      liveStateErrorBody: { errorKind: 'workspace_untrusted', error: 'no' },
+    });
+    const baseUrl = stub.baseUrl;
+    pool = new DaemonPool({
+      defaultDaemon: new DaemonClient({ baseUrl }),
+      defaultWorkspaceCwd: '/default/proj',
+      spawn: async (cwd) => ({
+        client: new DaemonClient({ baseUrl }),
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    await pool.getOrSpawn('/warm/proj');
+    const base = await mountGateway(pool);
+    const { status, body } = await getJson(
+      base,
+      '/rc/sessions/live-state?workspace=%2Fwarm%2Fproj&spawn=0',
+    );
+    expect(status).toBe(403);
+    expect(body['code']).toBe('workspace_untrusted');
+    expect(pool.size()).toBe(1);
   });
 });

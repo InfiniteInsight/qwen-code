@@ -165,6 +165,9 @@ describe('GET /rc/capabilities', () => {
       expect(rc.auditEnabled).toBe(true);
       expect(rc.walHorizonSec).toBe(86400);
       expect(rc.walMaxEvents).toBe(10000);
+      // #190: the page reads other folders' live state only when told the
+      // route honours spawn=0.
+      expect(rc.liveStateNoSpawn).toBe(true);
     } finally {
       await close();
     }

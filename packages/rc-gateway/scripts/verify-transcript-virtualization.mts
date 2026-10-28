@@ -2473,6 +2473,12 @@ type PageScenario =
          * routes answer 404, which is the case where the page draws no row.
          */
         hostActions?: boolean;
+        /**
+         * #190. Run the gateway on a real daemon pool whose spawned daemons
+         * answer live-state with `liveState(cwd)` (see bootViewer's `pool`),
+         * so a scenario can count what the pool holds.
+         */
+        pool?: { liveState: (cwd: string) => unknown };
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -2673,6 +2679,18 @@ const RIGHT_PANE = 320;
 /** Back from the List screen where it has a way back; the pane has none. */
 async function closeList(page: Page): Promise<void> {
   if (await page.isVisible('#list-back')) await page.click('#list-back');
+}
+
+/**
+ * #190. With SHOTS naming a directory, a scenario saves the state it has just
+ * checked there as `<name>.png`, so a reviewer can look at what was asserted;
+ * unset, nothing is written and the run is unchanged.
+ */
+async function shot(page: Page, name: string): Promise<void> {
+  const dir = process.env['SHOTS'];
+  if (!dir) return;
+  mkdirSync(dir, { recursive: true });
+  await page.screenshot({ path: join(dir, `${name}.png`) });
 }
 
 /**
@@ -5367,29 +5385,29 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
-    // #184: the mic is the Dictate pill behind the composer's +, and the tag
-    // rides beside it there, so the tools are opened before it is read.
-    await openTools(page);
-    const s = await page.evaluate(() => {
+    // #190: the tag left the + scroller for More > This phone > Dictation,
+    // beside the language and auto-send it governs, so that screen is
+    // opened before it is read.
+    await openPanel(page, 'dictation');
+    const s = (await page.evaluate(String.raw`(() => {
       const tag = document.getElementById('dictate-engine');
-      const mic = document.getElementById('dictate') as HTMLButtonElement;
+      const mic = document.getElementById('dictate');
+      const card = document.getElementById('dictation-prefs');
       return {
         tag: tag ? tag.textContent : null,
         shown: tag ? tag.getClientRects().length > 0 : false,
-        beside: tag
-          ? tag.previousElementSibling === mic
-          : false,
+        beside: !!tag && !!card && card.contains(tag) && card.contains(document.getElementById('dictate-lang')),
         disabled: mic ? mic.disabled : null,
       };
-    });
+    })()`)) as { tag: string | null; shown: boolean; beside: boolean; disabled: boolean | null };
     expect(
       s.tag === 'browser',
       `the tag reads ${JSON.stringify(s.tag)}, expected "browser"`,
     );
     expect(s.shown, 'the engine tag is not on screen, so it labels nothing');
-    expect(s.beside, 'the engine tag is not beside the mic it labels');
+    expect(s.beside, 'the engine tag is not in the Dictation card beside the language');
     expect(!s.disabled, 'the mic is disabled with an engine installed');
-    return 'engine installed: tag "browser" on screen beside a live mic';
+    return 'engine installed: tag "browser" on screen in the Dictation card, the mic live';
   },
 });
 
@@ -5409,21 +5427,18 @@ PAGE_SCENARIOS.push({
   run: async ({ page, viewer }) => {
     await watch(page, viewer.sessionId);
     await page.waitForSelector('#composer', { state: 'visible' });
-    await openTools(page); // #184: the mic and its tag are behind the +
-    const s = await page.evaluate(() => {
+    // #190: the tag is on More > This phone > Dictation, not behind the +.
+    await openPanel(page, 'dictation');
+    const s = (await page.evaluate(String.raw`(() => {
       const tag = document.getElementById('dictate-engine');
-      const mic = document.getElementById('dictate') as HTMLButtonElement;
+      const mic = document.getElementById('dictate');
       return {
         tag: tag ? tag.textContent : null,
         shown: tag ? tag.getClientRects().length > 0 : false,
         disabled: mic ? mic.disabled : null,
-        sr: !!(
-          (window as { SpeechRecognition?: unknown }).SpeechRecognition ||
-          (window as { webkitSpeechRecognition?: unknown })
-            .webkitSpeechRecognition
-        ),
+        sr: !!(window.SpeechRecognition || window.webkitSpeechRecognition),
       };
-    });
+    })()`)) as { tag: string | null; shown: boolean; disabled: boolean | null; sr: boolean };
     expect(!s.sr, 'an engine was present, so this scenario proved nothing');
     expect(
       s.tag === 'no browser engine',
@@ -14814,7 +14829,7 @@ PAGE_SCENARIOS.push({
   // the page does not define.
 
   PAGE_SCENARIOS.push({
-    name: 'P138 the status line names the state, model, fill and mode, and opens the sheet in place, where the mode buttons drive the mode handler',
+    name: 'P138 the status line names the state, model (or no model), fill and mode, and opens the sheet in place, where the mode buttons drive the mode handler',
     // #184. The drawer band and the status strip became one 44px line and a
     // sheet under it. The line is only worth its row if it says what the
     // conversation is doing, and the sheet only if it pushes the transcript
@@ -14890,7 +14905,12 @@ PAGE_SCENARIOS.push({
         rest.state === 'idle' && rest.word === 'idle' && rest.dot === 'rgb(63, 185, 80)',
         `an idle conversation reads ${rest.state} ${JSON.stringify(rest.word)} with a ${rest.dot} dot, not idle in green`,
       );
-      expect(rest.model !== '' && rest.mode !== '', `the line does not name the model (${JSON.stringify(rest.model)}) and the mode (${JSON.stringify(rest.mode)})`);
+      // #190: the model field is a name or the words `no model`, never the old
+      // parenthetical that cut to `(model …` at 390 (P188 holds both states).
+      expect(
+        rest.model !== '' && !rest.model.startsWith('(') && rest.mode !== '',
+        `the line does not name the model (${JSON.stringify(rest.model)}) and the mode (${JSON.stringify(rest.mode)})`,
+      );
       expect(rest.tokens === '65.5k/262.1k', `the line's fill reads ${JSON.stringify(rest.tokens)}, not the daemon's 65.5k/262.1k`);
       expect(!rest.sheet.shown && rest.expanded === 'false', 'the sheet is open at rest');
 
@@ -14939,6 +14959,74 @@ PAGE_SCENARIOS.push({
       const shut = await read();
       expect(!shut.sheet.shown && shut.trTop === rest.trTop, 'the second tap did not shut the sheet and give the transcript its room back');
       return `idle in green, ${rest.model} · ${rest.tokens} · ${rest.mode}; the sheet opens in place (${open.sheet.h}px, transcript pushed down), ${open.modes.length} mode buttons, ${target} posted once and followed; Escape and the line shut it`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P188 a conversation whose daemon names no model reads no model, muted and whole, on the status line at 390 and 360 and in the sheet’s Model row, and a named model reads its name in both',
+    // #190, from slice 1: the line read `(model unknown until switched)`,
+    // which cut to `(model …` at 390 and read as a broken name. The harness
+    // daemon's context carries its model in a shape the page does not read
+    // as a current model id, so the line starts with none named, which is
+    // the state the phone was in; a model_switched frame then names one.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize(PHONE);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.waitForFunction(`document.getElementById('h1-tokens').textContent !== ''`);
+      type Model = { text: string; muted: boolean; color: string; tokColor: string; cut: boolean; right: number; vw: number; row: string | null; rowMuted: boolean; rowColor: string; old: boolean };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const m = document.getElementById('h1-model');
+          const t = document.getElementById('h1-tokens');
+          const row = Array.from(document.querySelectorAll('#session-footer .sh-row')).find((r) => {
+            const l = r.querySelector('.sh-lbl');
+            return !!l && l.textContent === 'Model';
+          });
+          const v = row ? row.querySelector('.sh-lbl + *') : null;
+          const all = document.getElementById('h1-status').textContent + ' ' + document.getElementById('session-footer').textContent;
+          return {
+            text: m.textContent,
+            muted: m.classList.contains('none'),
+            color: getComputedStyle(m).color,
+            tokColor: getComputedStyle(t).color,
+            cut: m.scrollWidth > m.clientWidth,
+            right: Math.round(m.getBoundingClientRect().right),
+            vw: innerWidth,
+            row: v ? v.textContent : null,
+            rowMuted: !!v && v.classList.contains('none'),
+            rowColor: v ? getComputedStyle(v).color : '',
+            old: /until switched|\(model/.test(all),
+          };
+        })()`) as Promise<Model>;
+      const lines: string[] = [];
+      let none: Model | null = null;
+      for (const size of [PHONE, { width: 360, height: 780 }]) {
+        await page.setViewportSize(size);
+        const r = await read();
+        expect(!r.old, `the parenthetical is still on the line or in the sheet at ${size.width}`);
+        expect(r.text === 'no model' && r.muted, `with no model named the line reads ${JSON.stringify(r.text)} (muted ${r.muted}) at ${size.width}, not no model, muted`);
+        expect(!r.cut && r.right <= r.vw, `no model is cut at ${size.width} (cut ${r.cut}, right ${r.right} of ${r.vw})`);
+        expect(r.color !== r.tokColor, `no model is drawn in the fill's ${r.color}, so it does not read as muted`);
+        expect(r.row === 'no model' && r.rowMuted, `the sheet's Model row reads ${JSON.stringify(r.row)} (muted ${r.rowMuted}), not no model, muted`);
+        lines.push(`${size.width}: "${r.text}" in ${r.color} (the fill ${r.tokColor}), whole, ending at ${r.right}px`);
+        if (size.width === 390) await shot(page, 'p188-status-no-model-390');
+        none = r;
+      }
+      await page.setViewportSize(PHONE);
+      await page.evaluate(`renderFrame({ type: 'model_switched', data: { modelId: 'openai/qwen3-coder:30b' } })`);
+      const named = await read();
+      expect(
+        named.text === 'qwen3-coder:30b' && !named.muted && named.color === named.tokColor,
+        `a named model reads ${JSON.stringify(named.text)} (muted ${named.muted}, ${named.color}) on the line, not its name in the line's ink`,
+      );
+      expect(
+        named.row === 'openai/qwen3-coder:30b' && !named.rowMuted && named.rowColor !== none!.rowColor,
+        `the sheet's Model row reads ${JSON.stringify(named.row)} (muted ${named.rowMuted}) once a model is named`,
+      );
+      return `${lines.join('; ')}; the sheet's Model row no model in ${none!.rowColor}; after model_switched the line reads ${named.text} and the row ${named.row} in ${named.rowColor}`;
     },
   });
 
@@ -15262,12 +15350,14 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P142 the + opens the tools as a sideways scroller of 44px pills directly over the composer, and Files counts what the store holds',
+    name: 'P142 the + opens the tools as a sideways scroller of four plain 44px pills directly over the composer, and Files counts what the store holds',
     // #184. Attach, Dictate, Files and Artifacts left the composer row for a
     // 52px scroller the + opens. A scroller that wraps would cost a row per
     // tool on a phone, which is the fold the row was emptied to protect, so
     // the claim is that it scrolls sideways instead, sits on the composer,
     // and names how many files the store holds once it has been asked.
+    // #190: four pills and nothing else; the engine tag that rode beside
+    // Dictate is on the Dictation screen (P187).
     waitView: false,
     stub: {
       attachmentListResult: {
@@ -15288,6 +15378,7 @@ PAGE_SCENARIOS.push({
         composerTop: number;
         composerBottom: number;
         order: string;
+        plain: boolean;
         under44: number;
         scrollW: number;
         clientW: number;
@@ -15308,6 +15399,7 @@ PAGE_SCENARIOS.push({
             composerTop: Math.round(document.getElementById('composer').getBoundingClientRect().top),
             composerBottom: Math.round(document.getElementById('composer').getBoundingClientRect().bottom),
             order: kids.map((k) => k.id).join(','),
+            plain: kids.every((k) => k.tagName === 'BUTTON' && k.classList.contains('pill')),
             under44: kids.filter((k) => k.tagName === 'BUTTON' && k.getBoundingClientRect().height < 44).length,
             scrollW: t.scrollWidth,
             clientW: t.clientWidth,
@@ -15322,10 +15414,11 @@ PAGE_SCENARIOS.push({
       expect(open.shown && open.expanded === 'true', 'the + did not open the tools');
       expect(open.bottom === open.composerTop, `the tools are not directly over the composer (tools bottom ${open.bottom}, composer top ${open.composerTop})`);
       expect(
-        open.order === 'attach,dictate,dictate-engine,stored-toggle,artifacts-toggle',
-        `the tools read ${open.order}, not Attach file, Dictate (with its engine), Files, Artifacts`,
+        open.order === 'attach,dictate,stored-toggle,artifacts-toggle' && open.plain,
+        `the tools read ${open.order}${open.plain ? '' : ' with something not a pill among them'}, not four plain pills Attach file, Dictate, Files, Artifacts`,
       );
       expect(open.under44 === 0, `${open.under44} pills are under 44px`);
+      await shot(page, 'p142-plus-scroller-390');
       expect(open.composerBottom <= 844, `with the tools open the composer bottom is ${open.composerBottom}`);
       expect(open.scrollW > open.clientW, `the pills fit in ${open.clientW}px at 390, so the sideways scroll is not exercised (${open.scrollW})`);
       const moved = (await page.evaluate(
@@ -15345,6 +15438,68 @@ PAGE_SCENARIOS.push({
       const shut = await read();
       expect(!shut.shown && shut.expanded === 'false', 'the + did not shut the tools');
       return `the + opened ${open.h}px of tools on the composer, ${open.order}, all 44px, scrolling ${open.scrollW}/${open.clientW}; Files counted ${counted.files}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P187 the dictation engine is named on More > This phone > Dictation, in its own 48px row above the language and auto-send, in the words the + scroller used to carry, and nowhere behind the +',
+    // #190, found by the user on the phone: the `browser` tag beside Dictate
+    // read as a pill that did nothing. The fact it states (the mic is the
+    // browser's speech engine, not the product's) belongs with the other
+    // facts about how this phone listens, so it moved there, same text and
+    // same title. An engine is installed before the page script runs, the
+    // way P33 does, so the tag reads its present state.
+    waitView: false,
+    before: async (page) => {
+      await page.addInitScript({ content: 'window.SpeechRecognition = function () {};' });
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize(PHONE);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await openTools(page);
+      const inTools = (await page.evaluate(String.raw`(() => {
+        const t = document.getElementById('h1-tools');
+        return { tag: !!t.querySelector('#dictate-engine, .cmd-kind'), kids: Array.from(t.children).filter((k) => k.getClientRects().length > 0).length };
+      })()`)) as { tag: boolean; kids: number };
+      expect(!inTools.tag && inTools.kids === 4, `the + scroller still carries a tag, or holds ${inTools.kids} things rather than four pills`);
+      await page.click('#h1-plus');
+      await openPanel(page, 'dictation');
+      type Row = { text: string; h: number; right: number };
+      const got = (await page.evaluate(String.raw`(() => {
+        const card = document.getElementById('dictation-prefs');
+        const tag = document.getElementById('dictate-engine');
+        const rows = Array.from(card.querySelectorAll(':scope > .prow')).map((r) => ({
+          text: (r.textContent || '').replace(/\s+/g, ' ').trim(),
+          h: Math.round(r.getBoundingClientRect().height),
+          right: Math.round(r.getBoundingClientRect().right),
+        }));
+        const tr = tag.getBoundingClientRect();
+        return {
+          rows,
+          tag: tag.textContent,
+          title: tag.title,
+          tagRight: Math.round(tr.right),
+          tagShown: tr.width > 0 && tr.height > 0,
+          vw: innerWidth,
+          docW: document.documentElement.scrollWidth,
+          inRow: tag.closest('.prow') === card.querySelector(':scope > .prow'),
+        };
+      })()`)) as { rows: Row[]; tag: string; title: string; tagRight: number; tagShown: boolean; vw: number; docW: number; inRow: boolean };
+      expect(
+        got.rows.length === 3 && got.rows[0]!.text === 'Engine browser' && /^Language/.test(got.rows[1]!.text) && /^Send when dictation ends on a pause/.test(got.rows[2]!.text),
+        `the Dictation card's rows read ${JSON.stringify(got.rows.map((r) => r.text))}, not Engine browser, then Language, then the auto-send`,
+      );
+      expect(got.inRow && got.tag === 'browser' && /Web Speech API/.test(got.title), `the engine tag is not the first row's, or does not read "browser" with its title (${JSON.stringify([got.inRow, got.tag, got.title])})`);
+      expect(got.rows.every((r) => r.h >= 48), `a Dictation row is under 48px (${JSON.stringify(got.rows.map((r) => r.h))})`);
+      expect(got.tagShown && got.tagRight <= got.vw && got.docW === got.vw, `the tag is off screen at 390 (right ${got.tagRight}, page ${got.docW})`);
+      const more = (await page.evaluate(String.raw`(() => {
+        document.getElementById('panel-back').click();
+        const r = document.querySelector('#more-screen .row[data-panel="dictation"] .val');
+        return r ? r.textContent : null;
+      })()`)) as string | null;
+      await openPanel(page, 'chat');
+      return `the + scroller holds four pills and no tag; Dictation reads ${got.rows.map((r) => `"${r.text.slice(0, 35)}" ${r.h}px`).join(', ')}, the tag inside 390 at ${got.tagRight}px; More's Dictation row still reads ${JSON.stringify(more)}`;
     },
   });
 
@@ -16902,7 +17057,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P186 a refresh reads at most six folders, all at once, with the live snapshot for the current one only, and the filter, the search, the folder menu and opening the list read nothing',
+    name: 'P186 a refresh reads at most six folders, all at once, each with its live snapshot (spawn=0 for all but the current one), and the filter, the search, the folder menu and opening the list read nothing',
     waitView: false,
     run: async ({ page }) => {
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
@@ -16915,7 +17070,9 @@ PAGE_SCENARIOS.push({
       // so the cap at six reads is the page's and not the store's.
       const recent = Array.from({ length: 7 }, (_, i) => `/home/evan/p186-${i}`);
       const reads: { cwd: string; at: number }[] = [];
-      const live: string[] = [];
+      // #190: every folder's snapshot is read now, the current one by the
+      // read that may start its daemon and the others with spawn=0.
+      const live: { cwd: string; spawn: string | null; at: number }[] = [];
       const archived: string[] = [];
       page.on('request', (r) => {
         const u = new URL(r.url());
@@ -16923,7 +17080,7 @@ PAGE_SCENARIOS.push({
           if (u.searchParams.has('archiveState')) archived.push(u.searchParams.get('cwd') ?? '');
           else reads.push({ cwd: u.searchParams.get('cwd') ?? '', at: Date.now() });
         }
-        if (u.pathname === '/rc/sessions/live-state') live.push(u.searchParams.get('workspace') ?? '');
+        if (u.pathname === '/rc/sessions/live-state') live.push({ cwd: u.searchParams.get('workspace') ?? '', spawn: u.searchParams.get('spawn'), at: Date.now() });
       });
       let firstAnswer = Infinity;
       await page.route(
@@ -16961,12 +17118,34 @@ PAGE_SCENARIOS.push({
         Math.max(...one.map((r) => r.at)) < firstAnswer,
         `the folders were read one after another rather than all at once (last read sent ${Math.max(...one.map((r) => r.at)) - firstAnswer}ms after the first answer)`,
       );
+      const liveRead = (c: string) => live.filter((l) => l.cwd === c);
       expect(
-        JSON.stringify(live) === JSON.stringify([current]),
-        `the live snapshot was read for ${JSON.stringify(live)}, not for the current folder alone`,
+        live.length === 6 && wantRead.every((c) => liveRead(c).length === 1),
+        `the live snapshot was read ${live.length} times (${JSON.stringify(live.map((l) => [l.cwd, l.spawn]))}), not once for each of the six folders`,
+      );
+      expect(
+        liveRead(current)[0]!.spawn === null && wantRead.filter((c) => c !== current).every((c) => liveRead(c)[0]!.spawn === '0'),
+        `the snapshots were not the spawning read for the current folder and spawn=0 for the rest (${JSON.stringify(live.map((l) => [l.cwd, l.spawn]))})`,
+      );
+      expect(
+        Math.max(...live.map((l) => l.at)) < firstAnswer,
+        'the live snapshots were read one after another rather than beside the listings',
       );
       const rows = (await page.evaluate('pastConvos.length')) as number;
       expect(rows === 5, `the five read recent folders' rows are not all listed (${rows})`);
+      // A gateway that does not say it honours spawn=0 would start a daemon
+      // for each folder asked about (the page is served from disk and can be
+      // newer than the process), so without the word only the current
+      // folder's snapshot is read, as before #190.
+      await page.evaluate('caps.remoteControl.liveStateNoSpawn = undefined');
+      live.length = 0;
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const unsaid = live.map((l) => [l.cwd, l.spawn]);
+      await page.evaluate('caps.remoteControl.liveStateNoSpawn = true');
+      expect(
+        JSON.stringify(unsaid) === JSON.stringify([[current, null]]),
+        `with the gateway silent on spawn=0 the snapshots read were ${JSON.stringify(unsaid)}, not the current folder's alone`,
+      );
 
       // The views read from what is kept: opening the list, the folder menu,
       // a pick and All again, a search and putting it away, shutting and
@@ -16998,7 +17177,122 @@ PAGE_SCENARIOS.push({
         `Archived (n) read ${archived.length} archived listings, ${outside.length} of them outside the six folders (${JSON.stringify(outside)})`,
       );
       await closeList(page);
-      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, with the live snapshot for the current folder alone; the five recent folders' rows listed; opening the list, the folder menu, a pick and back, a search and two opens read no folder listing (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
+      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, each beside its live snapshot (the current folder's the spawning read, the five others spawn=0), and the current folder's alone when the gateway does not say it honours spawn=0; the five recent folders' rows listed; opening the list, the folder menu, a pick and back, a search and two opens read no folder listing (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
+    },
+  });
+
+  // #190 (from #193): a row in a folder other than the current one had no
+  // live dot and no Rename, because the only live read started a daemon for
+  // a folder without one. The other folders now read with spawn=0, which a
+  // daemon the gateway already runs answers and a folder with none answers
+  // empty. Run on a real daemon pool (bootViewer's `pool`), each spawned
+  // daemon naming its folder's first planted conversation as open, so what is
+  // counted is the pool's own: what it holds and what it has spawned.
+  const P189_OPEN = (base: string) => ({
+    sessionId: `${base}-4000-8000-000000000001`,
+    clientCount: 1,
+    hasActivePrompt: false,
+    isWaitingForPermission: false,
+    isWaitingForUserQuestion: false,
+    updatedAt: new Date().toISOString(),
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P189 a row in another folder carries the live dot and Rename while a daemon the gateway already runs has it open, a folder with no daemon shows none and gets no daemon, and the pool holds the same daemons after the refresh as before it',
+    waitView: false,
+    stub: {
+      pool: {
+        liveState: (cwd: string) => ({
+          v: 1,
+          catalogVersion: { generation: 'g-p189', revision: 1 },
+          sessions: cwd.endsWith('/p189-alpha')
+            ? [P189_OPEN('a1890000-000a')]
+            : cwd.endsWith('/p189-beta')
+              ? [P189_OPEN('a1890000-000b')]
+              : [],
+        }),
+      },
+    },
+    run: async ({ page, viewer }) => {
+      const pool = viewer.pool!;
+      // Alpha is browsed to (the current folder), beta and gamma are recent.
+      // Beta will have a daemon running before the refresh that is counted,
+      // gamma never does.
+      const a = plantFolder('p189-alpha', ['p189 alpha open', 'p189 alpha past'], 'a1890000-000a');
+      const b = plantFolder('p189-beta', ['p189 beta open', 'p189 beta past'], 'a1890000-000b');
+      const c = plantFolder('p189-gamma', ['p189 gamma past'], 'a1890000-000c');
+      try {
+        await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+        // Held off, as in P186, so the refresh counted below is the only one.
+        await page.evaluate('clearInterval(pastConvosPollId); pastConvosPollId = null;');
+        await spanFolders(page, a.folder, [b.folder, c.folder], 5);
+        // A daemon for beta, started the way the current folder's read starts
+        // one, as working in that folder would have.
+        const seeded = (await page.evaluate(
+          `fetch('/rc/sessions/live-state?workspace=' + encodeURIComponent(${JSON.stringify(b.folder)}), { headers: { Authorization: 'Bearer ' + token() } }).then((r) => r.status)`,
+        )) as number;
+        const before = { held: pool.workspaces().slice().sort(), spawned: pool.spawned.slice() };
+        expect(
+          seeded === 200 && before.held.includes(a.folder) && before.held.includes(b.folder) && !before.held.includes(c.folder),
+          `the pool does not hold alpha and beta and not gamma before the refresh (seed ${seeded}, ${JSON.stringify(before.held)})`,
+        );
+
+        const live: { cwd: string; spawn: string | null }[] = [];
+        page.on('request', (r) => {
+          const u = new URL(r.url());
+          if (u.pathname === '/rc/sessions/live-state') live.push({ cwd: u.searchParams.get('workspace') ?? '', spawn: u.searchParams.get('spawn') });
+        });
+        await page.evaluate('refreshPastConversations(curDirPath)');
+        await page.waitForFunction(`pastConvos.some((s) => s.sessionId === ${JSON.stringify(b.ids[0])} && s.live)`, null, { timeout: 10_000 });
+        const after = { held: pool.workspaces().slice().sort(), spawned: pool.spawned.slice() };
+        expect(
+          JSON.stringify(after) === JSON.stringify(before),
+          `the refresh changed the pool (${JSON.stringify(before)} -> ${JSON.stringify(after)})`,
+        );
+        const reads = (f: string) => live.filter((l) => l.cwd === f).map((l) => l.spawn);
+        expect(
+          JSON.stringify(reads(a.folder)) === '[null]' && JSON.stringify(reads(b.folder)) === '["0"]' && JSON.stringify(reads(c.folder)) === '["0"]',
+          `the refresh's live reads were ${JSON.stringify(live)}, not one each, the spawning one for alpha alone`,
+        );
+
+        await page.setViewportSize(PHONE);
+        await openList(page);
+        type Row = { id: string; title: string; dot: boolean; label: string | null; dir: string | null };
+        const rows = (await page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+          const d = w.querySelector('.s .dot');
+          const dir = w.querySelector('.s .dir');
+          return { id: w.dataset.session, title: (w.querySelector('.tt') || {}).textContent, dot: !!d, label: d ? d.getAttribute('aria-label') : null, dir: dir ? dir.title : null };
+        })`)) as Row[];
+        const dotted = rows.filter((r) => r.dot).map((r) => r.id).sort();
+        expect(
+          rows.length === 5 && JSON.stringify(dotted) === JSON.stringify([a.ids[0], b.ids[0]].sort()),
+          `the dots sit on ${JSON.stringify(rows.filter((r) => r.dot).map((r) => r.title))} of ${rows.length} rows, not on alpha's open one and beta's open one alone`,
+        );
+        expect(
+          rows.filter((r) => r.dot).every((r) => r.label === 'open') && rows.find((r) => r.id === b.ids[0])!.dir === b.folder,
+          `a dot is not named open, or beta's open row is not in beta (${JSON.stringify(rows)})`,
+        );
+        await shot(page, 'p189-list-dots-two-folders-390');
+
+        const menuOf = async (id: string): Promise<string[]> => {
+          await page.click(`#past-list .srow[data-session="${id}"] > .more`);
+          const items = (await page.evaluate(
+            String.raw`Array.from(document.querySelectorAll('#list-menu [role="menuitem"]')).map((b) => b.textContent)`,
+          )) as string[];
+          await page.keyboard.press('Escape');
+          return items;
+        };
+        const openMenu = await menuOf(b.ids[0]!);
+        const pastMenu = await menuOf(b.ids[1]!);
+        const coldMenu = await menuOf(c.ids[0]!);
+        expect(openMenu.includes('Rename'), `beta's open row offers no Rename (${JSON.stringify(openMenu)})`);
+        expect(!pastMenu.includes('Rename') && !coldMenu.includes('Rename'), `a row no daemon has open offers Rename (${JSON.stringify({ pastMenu, coldMenu })})`);
+        await closeList(page);
+        return `the pool held ${JSON.stringify(before.held.map((f) => f.split('/').pop()))} before and after the refresh with ${after.spawned.length} spawns either side, gamma never; the refresh read alpha's snapshot by the spawning read and beta's and gamma's with spawn=0; dots on alpha's and beta's open rows only, beta's open row offering ${JSON.stringify(openMenu)}, its past row and gamma's row no Rename`;
+      } finally {
+        a.cleanup();
+        b.cleanup();
+        c.cleanup();
+      }
     },
   });
 }
@@ -19488,6 +19782,7 @@ async function runPageScenario(
     turnIndexPage: s.stub?.turnIndexPage,
     turnIndexStatusCode: s.stub?.turnIndexStatusCode,
     hostActions: s.stub?.hostActions,
+    pool: s.stub?.pool,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

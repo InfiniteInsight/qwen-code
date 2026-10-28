@@ -1445,7 +1445,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // looser scope than that listing without granting something new. No
   // `recordActivity`: the rail polls this, and marking the device working on
   // every poll would keep a phone that is only watching looking active. No
-  // audit row either, matching the sibling reads in #107 and #109.
+  // audit row either, matching the sibling reads in #107 and #109. #190:
+  // `spawn=0` reads only a daemon the pool already holds, for the list's
+  // other folders; it is the same route under the same scope, because it
+  // names the same sessions.
   app.get(
     '/rc/sessions/live-state',
     requireScope(OWNER, audit),

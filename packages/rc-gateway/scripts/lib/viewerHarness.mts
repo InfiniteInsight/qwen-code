@@ -21,7 +21,11 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { chromium, type Page } from 'playwright';
 import { DaemonClient } from '@qwen-code/sdk';
-import { startStubDaemon } from '../../src/testing/stubDaemon.js';
+import {
+  startStubDaemon,
+  type StubDaemon,
+} from '../../src/testing/stubDaemon.js';
+import { DaemonPool } from '../../src/daemonPool.js';
 import { TokenStore } from '../../src/tokenStore.js';
 import { PairingService } from '../../src/pairing.js';
 import { createGatewayApp } from '../../src/server.js';
@@ -231,6 +235,16 @@ export interface BootViewerOptions {
    * draws no row. Nothing on the host is ever run.
    */
   hostActions?: boolean;
+  /**
+   * #190: run the gateway on a real `DaemonPool` rather than the bare stub
+   * client, so a scenario can count what the pool holds and what it spawned.
+   * The boot stub is the default daemon (workspace `/stub/workspace`, where
+   * the stub's capabilities put it); every workspace the pool spawns for gets
+   * a stub of its own whose live-state answer is `liveState(cwd)`. Session
+   * calls go through the pool too, so a session the pool did not create is
+   * unknown to it: a scenario using this reads the list, not a watch.
+   */
+  pool?: { liveState: (cwd: string) => unknown };
 }
 
 /** The label the harness's one host action carries. */
@@ -271,6 +285,8 @@ export interface Viewer {
   url: string;
   /** A session id the page can `startWatch()` (the stub serves any id). */
   sessionId: string;
+  /** Set when booted with `pool`: what the pool holds and has spawned. */
+  pool?: { workspaces(): string[]; spawned: string[] };
   close(): Promise<void>;
 }
 
@@ -367,8 +383,30 @@ export async function bootViewer(
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
   const { token } = await store.issue(['owner'], 'viewer-harness');
+  const spawned: string[] = [];
+  const spawnedStubs: StubDaemon[] = [];
+  const poolOpt = opts.pool;
+  const daemonPool = poolOpt
+    ? new DaemonPool({
+        defaultDaemon: new DaemonClient({ baseUrl: stub.baseUrl }),
+        defaultWorkspaceCwd: '/stub/workspace',
+        spawn: async (cwd) => {
+          spawned.push(cwd);
+          const own = await startStubDaemon({
+            workspaceCwd: cwd,
+            liveStateResult: poolOpt.liveState(cwd),
+          });
+          spawnedStubs.push(own);
+          return {
+            client: new DaemonClient({ baseUrl: own.baseUrl }),
+            stop: async () => {},
+            workspaceCwd: cwd,
+          };
+        },
+      })
+    : undefined;
   const { app } = createGatewayApp({
-    daemon: new DaemonClient({ baseUrl: stub.baseUrl }),
+    daemon: daemonPool ?? new DaemonClient({ baseUrl: stub.baseUrl }),
     store,
     pairing: new PairingService(),
     auditPath: join(dir, 'audit.log'),
@@ -403,12 +441,17 @@ export async function bootViewer(
     page,
     url,
     sessionId: SESSION_ID,
+    ...(daemonPool
+      ? { pool: { workspaces: () => daemonPool.workspaces(), spawned } }
+      : {}),
     async close() {
       if (closed) return;
       closed = true;
       await browser.close();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (daemonPool) await daemonPool.stopAll();
+      for (const own of spawnedStubs) await own.close();
       await stub.close();
       rmSync(dir, { recursive: true, force: true });
     },

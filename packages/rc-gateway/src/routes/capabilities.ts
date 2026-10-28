@@ -98,6 +98,12 @@ export function createCapabilityRoute(deps: {
         tools: true,
         mcp: true,
       },
+      // #190: /rc/sessions/live-state takes `spawn=0`. The page is served
+      // from public/ on disk, so a new page can meet a gateway still running
+      // the old route, which ignores the switch and starts a daemon for every
+      // folder it is asked about. The page reads other folders only when this
+      // says the switch is honoured.
+      liveStateNoSpawn: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

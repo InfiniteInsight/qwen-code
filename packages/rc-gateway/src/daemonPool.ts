@@ -298,6 +298,15 @@ export interface SessionDaemon {
    * are equality tokens the caller compares, not fields to reinterpret.
    */
   getSessionLiveState(workspaceCwd?: string): Promise<unknown>;
+  /**
+   * The same snapshot, but only from a daemon that is already running for
+   * the workspace: `undefined` when the pool holds none, and never a spawn
+   * (#190). The list reads every recent folder's live state on each refresh,
+   * and the spawning read above would start a daemon per folder to answer.
+   * Optional, like `workspaces()`: a plain `DaemonClient` has no pool to
+   * look in, and the route answers that it cannot read without spawning.
+   */
+  peekSessionLiveState?(workspaceCwd?: string): Promise<unknown | undefined>;
   setSessionApprovalMode(
     sessionId: string,
     mode: DaemonApprovalMode,
@@ -2010,6 +2019,32 @@ export class DaemonPool implements SessionDaemon {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.getWorkspaceSessionLiveState(key),
     );
+  }
+
+  async peekSessionLiveState(workspaceCwd?: string): Promise<unknown> {
+    // The default daemon is always running, so it answers like the spawning
+    // read does.
+    if (this.isDefault(workspaceCwd)) {
+      return this.withDefaultDeathTrigger(() =>
+        this.opts.defaultDaemon.getWorkspaceSessionLiveState(
+          this.defaultWorkspaceCwd,
+        ),
+      );
+    }
+    const key = this.normalizeCwd(workspaceCwd!);
+    // A spawn still in flight is not an entry yet: answering would mean
+    // waiting on it, and this read must cost a folder with no daemon nothing.
+    const entry = this.byWorkspace.get(key);
+    if (!entry || entry.dead) return undefined;
+    // No `touch`: the list asks this of every recent folder on every refresh,
+    // and bumping `lastUsed` would keep each folder's idle daemon from ever
+    // being reaped, which is the cost this read exists to avoid.
+    try {
+      return await entry.client.getWorkspaceSessionLiveState(key);
+    } catch (err) {
+      this.noteTransportDeathByKey(key, err);
+      throw err;
+    }
   }
 
   // -- Workspace control (rc-workspace-permissions, scoped per #28) -----
