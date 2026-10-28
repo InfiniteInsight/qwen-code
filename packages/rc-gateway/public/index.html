@@ -18,6 +18,37 @@
          viewport and grows with the page instead. A definite height here would
          also let the flex items shrink below their content, which is the same
          class of failure that made the bounded conversation column be reverted. */
+      /* #177. The g1 sheet's palette, named once. Every value is the sheet's
+         own (g1-ops-console-drawer-1to1.html), so a rule that uses one of these
+         is drawing the sheet rather than a near miss of it. The page still
+         carries older literal hexes in rules this pass did not need to touch;
+         new and restyled rules use the names.
+         color-scheme is what makes the browser's own parts of a control (the
+         select's open list, the date picker's icon, checkboxes, scrollbars)
+         render for a dark page. Without it those parts stay light whatever the
+         author colours say, which is the mix of white and black this fixes. */
+      :root {
+        color-scheme: dark;
+        /* Grounds, darkest to lightest: the page, a band (rail, drawer,
+           composer, every card), and a control or the bar. */
+        --g1-page: #0d1117;
+        --g1-band: #10151c;
+        --g1-raise: #161b22;
+        /* The rule between bands, and a control's edge. */
+        --g1-line: #21262d;
+        --g1-edge: #30363d;
+        /* Ink, brightest to dimmest. On the band ground, ink, ink-mid and
+           ink-lo all clear 4.5:1 and are fit for body text; ink-dim measures
+           3.99:1 and is for small labels only, which is how the sheet uses it. */
+        --g1-ink-hi: #e6edf3;
+        --g1-ink: #cbd5e1;
+        --g1-ink-mid: #8b949e;
+        --g1-ink-lo: #7d8590;
+        --g1-ink-dim: #6e7681;
+        --g1-accent: #1f6feb;
+        --g1-link: #58a6ff;
+        --g1-warn: #d29922;
+      }
       body {
         font-family: system-ui, sans-serif;
         min-height: 100vh;
@@ -40,7 +71,7 @@
         font-size: 1.2rem;
       }
       section {
-        border: 1px solid #ccc;
+        border: 1px solid var(--g1-line);
         border-radius: 8px;
         padding: 1rem;
         margin-bottom: 1rem;
@@ -61,14 +92,57 @@
         cursor: not-allowed;
         opacity: 0.55;
       }
+      /* #177. Every native control in the app takes the sheet's control look:
+         raised ground, the edge rule, body ink. :where() keeps this at zero
+         specificity on purpose, so any rule that already names a control (the
+         composer's field and verbs, the rail's rows and filter, the bar's
+         search, the fork button) still wins without having to restate itself.
+         Checkboxes and radios are left to color-scheme: an author border or
+         background on one does not restyle the native box, it only risks a
+         half-styled one. */
+      :where(#app-body)
+        :where(
+          button,
+          select,
+          textarea,
+          input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color'])
+        ) {
+        color: var(--g1-ink);
+        background-color: var(--g1-raise);
+        border: 1px solid var(--g1-edge);
+        border-radius: 4px;
+      }
+      /* Chrome's default placeholder grey measured 4.11:1 on the composer's
+         field, under the 4.5:1 floor for text this size. */
+      :where(#app-body) ::placeholder {
+        color: var(--g1-ink-lo);
+      }
+      /* A visible ring on the dark ground. The browser's own ring is a thin
+         dark-and-light pair that disappears against #10151c at a glance. */
+      :where(#app-body)
+        :where(button, select, textarea, input, summary, [tabindex]):focus-visible {
+        outline: 2px solid var(--g1-link);
+        outline-offset: 1px;
+      }
+      /* An unstyled link is #0000ee, which is 1.95:1 on the band ground. */
+      :where(#app-body) a {
+        color: var(--g1-link);
+      }
+      /* The status line, on the page ground in the sheet's status ink (its
+         .status rule). It was #444, written for the white pane. */
       #status {
         min-height: 1.2em;
-        color: #444;
+        color: var(--g1-ink-mid);
+        background: var(--g1-page);
         margin-bottom: 0.5rem;
       }
+      /* Permission and question cards keep the amber edge that says "this
+         needs you", on the band ground. The light yellow fill they had was
+         the last light card on the page, and light ink inherited from the
+         dark pane would have been unreadable on it. */
       .card {
-        border: 1px solid #c80;
-        background: #fffbe6;
+        border: 1px solid var(--g1-warn);
+        background: var(--g1-band);
         border-radius: 8px;
         padding: 0.6rem;
         margin-bottom: 0.5rem;
@@ -85,7 +159,7 @@
         margin-bottom: 0.5rem;
       }
       .ask-q {
-        border: 1px solid #ddd;
+        border: 1px solid var(--g1-edge);
         border-radius: 6px;
         padding: 8px;
       }
@@ -161,7 +235,7 @@
         justify-content: space-between;
         align-items: center;
         gap: 0.5rem;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--g1-raise);
         padding: 0.3rem 0;
         font-size: 0.85rem;
       }
@@ -175,10 +249,10 @@
          browser API must not read as the product's own engine (#97). */
       .cmd-kind {
         font-size: 0.68rem;
-        border: 1px solid #ccc;
+        border: 1px solid var(--g1-edge);
         border-radius: 4px;
         padding: 0 4px;
-        color: #666;
+        color: var(--g1-ink-lo);
         margin-right: 0.4rem;
       }
       .cmd-count {
@@ -191,7 +265,7 @@
         display: flex;
         flex-direction: column;
         gap: 0.15rem;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--g1-raise);
         padding: 0.3rem 0;
         font-size: 0.85rem;
         overflow-wrap: anywhere;
@@ -277,6 +351,21 @@
           padding-left: 0.5rem;
           padding-right: 0.5rem;
         }
+        /* #177. The page title is a row of its own above the bar, about 49px
+           of a phone's height for a name the browser tab already shows. The
+           sheet drops it at this same break (its .bar h1). The bar itself is
+           untouched, so it stays the one row #176 made it. */
+        #app-body > h1 {
+          display: none;
+        }
+      }
+      /* #177. A <dialog> takes the browser's Canvas colours, white on a light
+         scheme, so the model picker opened as a white sheet over the dark page.
+         Its rows are buttons that clear their own ground and border, so they
+         sit on this one. */
+      #model-picker-dialog {
+        background: var(--g1-band);
+        color: var(--g1-ink);
       }
       .tab-pane {
         display: none;
@@ -284,8 +373,14 @@
       .tab-pane.active {
         display: block;
       }
+      /* #177. A pinned pane and every Operations, Settings and Diagnostics
+         card is a band in g1's sense: the band ground under the line rule, the
+         same pair the sheet gives the rail, the drawer and the composer. Only
+         colours change here; padding, radius and margins are what they were, so
+         nothing moves. */
       .pin-area > details {
-        border: 1px solid #ccc;
+        background: var(--g1-band);
+        border: 1px solid var(--g1-line);
         border-radius: 6px;
         margin-bottom: 0.5rem;
         padding: 0.5rem;
@@ -296,7 +391,8 @@
         font-size: 0.9rem;
       }
       details.ops-collapse {
-        border: 1px solid #ccc;
+        background: var(--g1-band);
+        border: 1px solid var(--g1-line);
         border-radius: 8px;
         padding: 0.75rem 1rem;
         margin-bottom: 1rem;
@@ -305,7 +401,7 @@
         cursor: pointer;
       }
       .ops-note {
-        color: #888;
+        color: var(--g1-ink-lo);
         font-size: 0.85rem;
         margin: 0.4rem 0;
       }
@@ -322,7 +418,7 @@
       .help-text {
         margin: 0.5rem 0;
         padding: 0.5rem 0.75rem;
-        border-left: 3px solid #07f;
+        border-left: 3px solid var(--g1-accent);
         border-radius: 4px;
         background: rgba(128, 128, 128, 0.12);
         font-size: 0.85rem;
@@ -555,23 +651,76 @@
       #rail:empty {
         display: none;
       }
-      /* The panes keep the light surface they have today. This one rule is shared
-         by all four panes (chat, ops, settings, diag), so flipping it is the shell
-         task's call across the whole page, not #121's call for the chat regions.
-         .card sets #fffbe6 and #status sets #444, and a light page element on a
-         dark ground is unreadable rather than unfinished.
+      /* #177. The shell task's call: all four panes (chat, ops, settings, diag)
+         share this one rule, and it was the white ground every light island on
+         the page sat on. It is now no ground at all, so a pane shows the page
+         ground behind it and each band inside it paints its own, which is how
+         the sheet builds the column. The ink is the sheet's body ink, so
+         anything that names no colour of its own reads on every band here.
+         The two light cards this pane colour used to excuse, .card at #fffbe6
+         and #status at #444, are restyled above with it.
 
-         #transcript's colour is left unnamed, and the reason is not what an
-         earlier version of this comment claimed. It said the rows compute "#000 on
-         #fff"; measured, they do not. #transcript sets background #111 below, so an
-         unnamed row computes #000 on #111, which is 1.11:1 and unreadable. What
-         actually makes the unnamed value safe is that every row kind names its own
-         colour, and the only elements left inheriting are the virtualizer's own
-         wrappers, which hold no text of their own. P126 measures that per row
-         rather than leaving it as a claim in a comment. */
+         #transcript's rows still name their own colours, and that is what makes
+         them safe, not this inherited value: #transcript sets background #111
+         below, and the old inherited #000 on it was 1.11:1. The only elements
+         that inherit are the virtualizer's own wrappers, which hold no text.
+         P126 measures every text-bearing element per band instead of leaving
+         that as a claim in a comment. */
       .tab-pane {
-        background: #fff;
-        color: #000;
+        background: transparent;
+        color: var(--g1-ink);
+      }
+      /* #177. The composer and the inspector drawer are bands: the band ground
+         under the line rule. The composer is a <section>, so its border and
+         radius come from that rule and only the ground is named here. */
+      #composer {
+        background: var(--g1-band);
+      }
+      /* The sheet's prompt draws no ring of its own (its textarea sets outline
+         none, as this one does below), so the field it sits in takes the ring
+         colour while it holds focus. Without this a keyboard user tabbing into
+         the prompt sees nothing change. */
+      #composer .field:focus-within {
+        border-color: var(--g1-link);
+      }
+      /* #177, the drawer's export at 390. The band is inline content (the model
+         name, a text run, the mode select, persist, export) and at 390 the
+         second line is already full when export arrives, so it wrapped onto a
+         third line of its own, 36px of the fold for one button. A right float
+         at the head of the band reserves a corner beside the model name, and
+         export sits in it. The reserve only exists while there is an export to
+         hold, so a band written with plain text (the verifier's filled band)
+         keeps its full width. The control takes the sheet's drawer-control
+         size here, which is what lets the corner stay one text line tall. */
+      @media (max-width: 860px) {
+        #session-footer {
+          position: relative;
+        }
+        #session-footer:has(> #footer-export)::before {
+          content: '';
+          float: right;
+          width: 62px;
+          height: 1.2em;
+        }
+        #session-footer > #footer-export {
+          position: absolute;
+          top: 6px;
+          right: 8px;
+          width: 54px;
+          height: 1.6em;
+          padding: 0;
+          font-size: 11px;
+        }
+        /* The two answer slots are empty spans with a left margin until a mode
+           change or an export has something to say. At 390 that margin alone
+           was past the end of the full second line, so an empty slot opened a
+           third line on its own: measured on the harness's band, 88px before
+           this pass, 72px with export moved and 52px with this. They show as
+           soon as they hold text. */
+        #session-footer > #footer-mode-note:empty,
+        #session-footer > #footer-export-note:empty {
+          display: none;
+        }
       }
       /* #120. The composer takes the sheet's three rows: the field, the control
          row under it, the idle row under that. Scoped under #composer because the
@@ -1036,7 +1185,7 @@
             style="
               max-height: 30vh;
               overflow: auto;
-              border: 1px solid #ccc;
+              border: 1px solid var(--g1-edge);
               border-radius: 4px;
               margin-bottom: 0.4rem;
             "
@@ -1107,6 +1256,12 @@
              at the bottom. Absolutely positioned on purpose: an in-flow sibling
              above #transcript would take height out of the bounded scroller,
              which is what broke the render-all fallback's scroll pin. */
+          /* #177. Both pills are controls on the transcript, so they take the
+             control ground and edge, with the bright ink so they still read
+             as something to press over the rows they float on. They were white,
+             the brightest thing on the page, painted over the first lines of
+             the conversation. The shadow stays: it is what lifts a dark pill
+             off a dark row. */
           #load-earlier {
             position: absolute;
             top: 8px;
@@ -1114,14 +1269,14 @@
             transform: translateX(-50%);
             z-index: 2;
             border-radius: 999px;
-            background: #fff;
-            color: #111;
-            border: 1px solid #ccc;
+            background: var(--g1-raise);
+            color: var(--g1-ink-hi);
+            border: 1px solid var(--g1-edge);
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
             font-size: 0.85rem;
           }
           #load-earlier[disabled] {
-            color: #666;
+            color: var(--g1-ink-dim);
           }
           #jump-bottom {
             position: absolute;
@@ -1130,9 +1285,9 @@
             transform: translateX(-50%);
             z-index: 2;
             border-radius: 999px;
-            background: #fff;
-            color: #111;
-            border: 1px solid #ccc;
+            background: var(--g1-raise);
+            color: var(--g1-ink-hi);
+            border: 1px solid var(--g1-edge);
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
             font-size: 0.85rem;
           }
@@ -1638,13 +1793,17 @@
           ></div>
           <div id="plan-more" hidden style="color: #8fa0c0; font-size: 0.78rem"></div>
         </div>
+        <!-- #177. The drawer is a band like the composer under it: the band
+             ground, and the line rule drawn as an inset shadow rather than a
+             border so the band keeps the exact box the fold checks measure. -->
         <div
           id="session-footer"
           style="
             display: none;
             margin-top: 8px;
             padding: 6px 8px;
-            background: #14171c;
+            background: var(--g1-band);
+            box-shadow: inset 0 0 0 1px var(--g1-line);
             border-radius: 6px;
             color: #9aa0a6;
             font-family: ui-monospace, monospace;

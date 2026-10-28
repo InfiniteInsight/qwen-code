@@ -12719,6 +12719,155 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  // #177. The dark shell restyled five surfaces, and two scenarios read them:
+  // P126 for the ink on every band, P131 for the grounds themselves. Both open
+  // each surface the same way, so the two readings are about the same page.
+  // The occasional bands are forced on for the reading and put back after: the
+  // load-earlier and jump pills only show with a long or scrolled transcript,
+  // the crash banner only after a daemon crash, the help panels only when
+  // asked for, and the capability-gated cards (permission rules, the workspace
+  // panels) only when the daemon offers them. A band that is not on screen
+  // measures nothing, so reading them as the stub leaves them would pass
+  // without having looked. In-page code is a plain string throughout: the
+  // transform rewrites a named arrow in a callback into a __name(...) call the
+  // page does not define.
+  type ShellSurface = 'chat' | 'picker' | 'ops' | 'settings' | 'diag';
+  const SHELL_SURFACES: ShellSurface[] = ['chat', 'picker', 'ops', 'settings', 'diag'];
+  const SHELL_ROOTS: Record<ShellSurface, string[]> = {
+    chat: [
+      '#tab-bar',
+      '#rail',
+      '#status',
+      '#crash-banner',
+      '#transcript-wrap',
+      '#session-footer',
+      '#composer',
+    ],
+    picker: ['#dir-picker'],
+    ops: ['#pane-ops'],
+    settings: ['#pane-settings'],
+    diag: ['#pane-diag'],
+  };
+  const openShellSurface = async (page: Page, s: ShellSurface): Promise<void> => {
+    if (s === 'chat') {
+      await page.click('.tab[data-tab="chat"]');
+      // The status line is read with a line in it: between turns it can be
+      // empty, and an empty line paints no ink to measure.
+      await page.evaluate(String.raw`(() => {
+        document.getElementById('load-earlier').hidden = false;
+        document.getElementById('jump-bottom').hidden = false;
+        showCrashBanner(false);
+        document.getElementById('help-session-controls').hidden = false;
+        const st = document.getElementById('status');
+        if (!st.textContent.trim()) {
+          st.dataset.shellRead = 'empty';
+          st.textContent = 'status line';
+        }
+      })()`);
+    } else if (s === 'picker') {
+      await page.click('.tab[data-tab="chat"]');
+      await page.click('#rail .plus');
+      await page.waitForFunction(`!document.getElementById('dir-picker').hidden`);
+      await page.evaluate(`document.getElementById('help-dir-picker').hidden = false`);
+    } else {
+      await page.click(`.tab[data-tab="${s}"]`);
+      await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
+        if (d.hidden) {
+          d.dataset.shellRead = 'hidden';
+          d.hidden = false;
+        }
+        d.open = true;
+        d.querySelectorAll('.help-text').forEach((h) => { h.hidden = false; });
+      })`);
+    }
+  };
+  const closeShellSurface = async (page: Page, s: ShellSurface): Promise<void> => {
+    if (s === 'chat') {
+      await page.evaluate(String.raw`(() => {
+        document.getElementById('load-earlier').hidden = true;
+        document.getElementById('jump-bottom').hidden = true;
+        document.getElementById('crash-banner').hidden = true;
+        document.getElementById('help-session-controls').hidden = true;
+        const st = document.getElementById('status');
+        if (st.dataset.shellRead === 'empty') {
+          st.textContent = '';
+          delete st.dataset.shellRead;
+        }
+      })()`);
+    } else if (s === 'picker') {
+      await page.evaluate(`document.getElementById('help-dir-picker').hidden = true`);
+      // Focus is inside the panel (the + moves it there, P128), so Escape
+      // shuts it the way a reader would.
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(`document.getElementById('dir-picker').hidden`);
+      await page.evaluate('window.scrollTo(0, 0)');
+    } else {
+      await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
+        d.querySelectorAll('.help-text').forEach((h) => { h.hidden = true; });
+        d.open = false;
+        if (d.dataset.shellRead === 'hidden') {
+          d.hidden = true;
+          delete d.dataset.shellRead;
+        }
+      })`);
+      await page.click('.tab[data-tab="chat"]');
+    }
+  };
+  // Every visible element under the roots that paints text of its own, with
+  // what it takes to know what it paints: its ink, its size, whether it is a
+  // disabled control, and the ground and opacity of every element from it to
+  // the root. A form control's text is its value, or its placeholder while it
+  // has none. The browser collects; Node does the arithmetic (pgPainted).
+  // Rows carry no text, only tag, id and class: the folder panel lists the
+  // host's $HOME, and a failure line must not print it.
+  const SHELL_TEXT = String.raw`((roots) => {
+    const out = [];
+    const seen = new Set();
+    const skip = ['checkbox', 'radio', 'file', 'hidden', 'range', 'color'];
+    for (const sel of roots) {
+      const root = document.querySelector(sel);
+      if (!root || root.getClientRects().length === 0) continue;
+      for (const e of [root, ...root.querySelectorAll('*')]) {
+        if (seen.has(e)) continue;
+        const tag = e.tagName.toLowerCase();
+        if (tag === 'option' || tag === 'script' || tag === 'style') continue;
+        const ctl = tag === 'select' || tag === 'textarea' || (tag === 'input' && !skip.includes(e.type));
+        const own = Array.from(e.childNodes).some((x) => x.nodeType === 3 && (x.textContent || '').trim() !== '');
+        const val = ctl && ((e.value || '') !== '' || (e.placeholder || '') !== '');
+        if (!own && !val) continue;
+        if (e.getClientRects().length === 0) continue;
+        const cs = getComputedStyle(e);
+        if (cs.visibility === 'hidden') continue;
+        seen.add(e);
+        const chain = [];
+        for (let up = e; up; up = up.parentElement) {
+          const s = getComputedStyle(up);
+          chain.push([s.backgroundColor, s.opacity]);
+        }
+        const cls = typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : '';
+        out.push({
+          root: sel,
+          kind: tag + (e.id ? '#' + e.id : '') + cls,
+          color: ctl && !own && (e.value || '') === '' ? getComputedStyle(e, '::placeholder').color : cs.color,
+          size: parseFloat(cs.fontSize),
+          disabled: !!e.closest(':disabled'),
+          chain,
+        });
+      }
+    }
+    return out;
+  })`;
+  type ShellTextRow = {
+    root: string;
+    kind: string;
+    color: string;
+    size: number;
+    disabled: boolean;
+    chain: [string, string][];
+  };
+  const readShellText = (page: Page, roots: string[]) =>
+    page.evaluate(`${SHELL_TEXT}(${JSON.stringify(roots)})`) as Promise<ShellTextRow[]>;
+
   PAGE_SCENARIOS.push({
     name: 'P126 every row that paints its own text is legible on the ground it sits on',
     // #121, g1 "Session and status regions". The shell leaves #transcript's
@@ -12739,33 +12888,12 @@ PAGE_SCENARIOS.push({
       // The browser collects raw values and nothing else. Every arithmetic
       // happens here in Node, because a named helper declared inside evaluate
       // is rewritten into a __name(...) call that the page does not define.
+      // #177: the transcript's rows are read by the same collector as every
+      // band below, so a row and a band are held to one rule.
+      const painted = await readShellText(page, ['#transcript']);
       const seen = await page.evaluate(() => {
-        const box = document.getElementById('transcript') as HTMLElement;
         return {
           rows: transcriptModel.items.length,
-          painted: Array.from(box.querySelectorAll('*'))
-            .filter(
-              (e) =>
-                Array.from(e.childNodes).some(
-                  (n) => n.nodeType === 3 && (n.textContent || '').trim() !== '',
-                ) && e.getClientRects().length > 0,
-            )
-            .map((e) => {
-              const chain: string[] = [];
-              let up: Element | null = e;
-              for (let i = 0; i < 12 && up !== null; i++) {
-                chain.push(getComputedStyle(up).backgroundColor);
-                if (up === box) break;
-                up = up.parentElement;
-              }
-              return {
-                kind:
-                  e.tagName.toLowerCase() +
-                  (e.className ? '.' + String(e.className).split(' ')[0] : ''),
-                color: getComputedStyle(e).color,
-                chain,
-              };
-            }),
           strip: document.getElementById('status-strip') !== null,
           drawer: document.getElementById('inspector') !== null,
           // The stack order the sheet draws: status, transcript, to-do strip,
@@ -12806,7 +12934,7 @@ PAGE_SCENARIOS.push({
         `the driven turn left ${seen.rows} rows in the model, so there is nothing to measure`,
       );
       expect(
-        seen.painted.length > 0,
+        painted.length > 0,
         'no element in the transcript paints text of its own, so the guard measures nothing',
       );
       expect(
@@ -12824,23 +12952,12 @@ PAGE_SCENARIOS.push({
       );
 
       const worst = { kind: '', ratio: 99 };
-      for (const row of seen.painted) {
-        const ground = row.chain.map(pgParseRgb).find((c) => c !== null && c.a > 0);
-        expect(
-          ground !== undefined,
-          `${row.kind} has no painted ground anywhere up to #transcript`,
-        );
-        const ink = pgParseRgb(row.color);
-        expect(ink !== null, `${row.kind} reports an unparsable colour ${row.color}`);
-        const ratio = pgContrast(ink!, ground!);
+      for (const row of painted) {
+        const ratio = pgShellCheck(row, '1280x720 transcript');
         if (ratio < worst.ratio) {
           worst.kind = row.kind;
           worst.ratio = ratio;
         }
-        expect(
-          ratio >= 3,
-          `${row.kind} is ${row.color} on ${JSON.stringify(ground)} = ${ratio.toFixed(2)}:1, under the 3:1 floor g1 holds for text`,
-        );
       }
 
       // The composer has to clear the fold at both widths, which #121 asks for
@@ -12921,13 +13038,57 @@ PAGE_SCENARIOS.push({
       }
       await page.setViewportSize({ width: 1280, height: 720 });
 
+      // #177. The transcript was the only ground this read, and it was the one
+      // ground that was already dark. Every band the shell pass restyled is
+      // read here at both widths the sheet draws: the bar, the rail, the status
+      // line, the crash banner, the transcript with both pills on it, the
+      // drawer, the composer with its help open, the New conversation panel
+      // open with its help, and every Operations, Settings and Diagnostics card
+      // opened with its help. Last in the scenario on purpose, because it
+      // switches tabs and opens panels, and the fold readings above are about
+      // the resting page.
+      const bands: string[] = [];
+      let bandRows = 0;
+      for (const [w, h] of [
+        [1280, 810],
+        [390, 844],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        for (const s of SHELL_SURFACES) {
+          await openShellSurface(page, s);
+          const rows = await readShellText(page, SHELL_ROOTS[s]);
+          await closeShellSurface(page, s);
+          const at = `${w}x${h} ${s}`;
+          // Each root has to have been read, or a band that failed to open
+          // would pass by contributing nothing.
+          for (const root of SHELL_ROOTS[s]) {
+            expect(
+              rows.some((r) => r.root === root),
+              `nothing under ${root} painted text at ${at}, so the band was not on screen to be read`,
+            );
+          }
+          let low = { kind: '', ratio: 99 };
+          for (const row of rows) {
+            const ratio = pgShellCheck(row, at);
+            if (ratio < low.ratio) low = { kind: row.kind, ratio };
+          }
+          bandRows += rows.length;
+          bands.push(`${at} ${low.kind} ${low.ratio.toFixed(2)}`);
+        }
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+
       return (
-        seen.painted.length +
-        ' text-bearing elements all at 3:1 or better, worst ' +
+        painted.length +
+        ' transcript elements and ' +
+        bandRows +
+        ' band elements all at their floor (4.5:1 for text 14px and up, 3:1 under it or disabled), transcript worst ' +
         worst.kind +
         ' at ' +
         worst.ratio.toFixed(2) +
-        ':1; the retired status strip and inspector stayed retired; composer clears the fold at 1280x720, 1280x810 and 390x844 with the drawer hidden, as the page draws it and filled (' +
+        ':1, worst per band [' +
+        bands.join('; ') +
+        ']; the retired status strip and inspector stayed retired; composer clears the fold at 1280x720, 1280x810 and 390x844 with the drawer hidden, as the page draws it and filled (' +
         fold.map((f) => f.w + 'x' + f.viewH + ': ' + f.hidden + '/' + f.asis + '/' + f.filled).join(', ') +
         ')'
       );
@@ -13672,6 +13833,183 @@ PAGE_SCENARIOS.push({
       );
     },
   });
+
+  // #177. "There's a mix of white and black elements and looks bad." Each band
+  // the shell pass restyled is held to the ground the sheet draws it on, read
+  // as computed rather than out of the CSS, because the failure this guards is
+  // a band that loses its ground to a later rule or an inline style, and the
+  // source would still read as styled. The grounds are the sheet's literal
+  // values (g1-ops-console-drawer-1to1.html): body #0d1117 under the status
+  // line (.status), #10151c under every band (.drawer, .composer, .rail) and
+  // #161b22 under a control (.ic, .mic, select). Comparing against the
+  // literals rather than the page's own variables is the point: a token
+  // quietly changed to white would pass a check that read the token back.
+  // Then the sweep the issue asks for: nothing bigger than 40x40 inside the
+  // app is white, #f8f8f8, or any other light ground. And the two phone
+  // reclaims, which are only safe if they hold: the title is gone below the
+  // break and back above it, and export shares the drawer's first line at 390
+  // without covering any of the band's text.
+  PAGE_SCENARIOS.push({
+    name: 'P131 every restyled band sits on the sheet shell, nothing large is light, and the phone drops the title and keeps export in the drawer row',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(String.raw`__pg.liveTurn('what is the plan', 'here is the plan', 'tc-1')`);
+      await settlePage(page);
+      await page.waitForFunction(`document.getElementById('session-footer').offsetHeight > 0`);
+
+      const G1 = { page: 'rgb(13, 17, 23)', band: 'rgb(16, 21, 28)', raise: 'rgb(22, 27, 34)' };
+      const want: Record<ShellSurface, [string, keyof typeof G1][]> = {
+        chat: [
+          ['#status', 'page'],
+          ['#session-footer', 'band'],
+          ['#composer', 'band'],
+          ['#load-earlier', 'raise'],
+          ['#jump-bottom', 'raise'],
+        ],
+        picker: [['#dir-picker', 'band']],
+        ops: [['#pane-ops details.ops-collapse', 'band']],
+        settings: [['#pane-settings details.ops-collapse', 'band']],
+        diag: [['#pane-diag details.ops-collapse', 'band']],
+      };
+      type Ground = { sel: string; n: number; off: string[] };
+      type Big = { kind: string; bg: string };
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [1280, 810],
+        [390, 844],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        let cards = 0;
+        for (const s of SHELL_SURFACES) {
+          const at = `${w}x${h} ${s}`;
+          await openShellSurface(page, s);
+          const grounds = (await page.evaluate(String.raw`(${JSON.stringify(want[s])}).map(([sel, token]) => {
+            const els = Array.from(document.querySelectorAll(sel)).filter((e) => e.getClientRects().length > 0);
+            return {
+              sel,
+              n: els.length,
+              off: els
+                .map((e) => [e, getComputedStyle(e).backgroundColor])
+                .filter(([, bg]) => bg !== ${JSON.stringify(G1)}[token])
+                .map(([e, bg]) => (e.id || e.tagName.toLowerCase()) + ' ' + bg),
+            };
+          })`)) as Ground[];
+          // Every opaque ground on a box bigger than 40x40. The arithmetic is
+          // in Node, so this only collects.
+          const big = (await page.evaluate(String.raw`Array.from(document.querySelectorAll('#app-body *'))
+            .filter((e) => {
+              const b = e.getBoundingClientRect();
+              return b.width > 40 && b.height > 40 && getComputedStyle(e).backgroundColor !== 'rgba(0, 0, 0, 0)';
+            })
+            .map((e) => ({
+              kind: e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : ''),
+              bg: getComputedStyle(e).backgroundColor,
+            }))`)) as Big[];
+          await closeShellSurface(page, s);
+          for (const g of grounds) {
+            expect(g.n > 0, `nothing matching ${g.sel} is on screen at ${at}, so its ground was never read`);
+            expect(
+              g.off.length === 0,
+              `${g.sel} is not on the sheet's ground at ${at}: ${g.off.slice(0, 4).join(', ')}`,
+            );
+            if (g.sel.includes('ops-collapse')) cards += g.n;
+          }
+          // The two values the issue names, then anything else light: a ground
+          // with a relative luminance over 0.4 is a light card on this page
+          // whatever its hex (the old #fffbe6 card, a browser-default #efefef
+          // button). The lightest ground this page means to draw is the Send
+          // button's #238636, at 0.18.
+          const light = big.filter((b) => {
+            if (b.bg === 'rgb(255, 255, 255)' || b.bg === 'rgb(248, 248, 248)') return true;
+            const c = pgParseRgb(b.bg);
+            return c !== null && c.a >= 0.5 && pgLuminance(c) > 0.4;
+          });
+          expect(
+            light.length === 0,
+            `${light.length} boxes over 40x40 sit on a light ground at ${at}: ${light
+              .slice(0, 5)
+              .map((b) => b.kind + ' ' + b.bg)
+              .join(', ')}`,
+          );
+        }
+
+        // The phone reclaims, read on the resting Chat column.
+        const rest = (await page.evaluate(String.raw`(() => {
+          const title = document.querySelector('#app-body > h1');
+          const foot = document.getElementById('session-footer');
+          const ex = document.getElementById('footer-export');
+          const first = foot.firstElementChild;
+          const fr = foot.getBoundingClientRect();
+          const er = ex.getBoundingClientRect();
+          const mr = first.getBoundingClientRect();
+          // Every run of the band's own text, as laid out, so the check below
+          // sees whether export was painted over any of it. Read twice: as the
+          // page drew it, and with a model name long enough to run the first
+          // line into the corner. The harness's name stops short of the corner
+          // with or without the reserve, so on its own it could not tell a
+          // band that keeps the corner clear from one that only happens to.
+          const covering = () => {
+            const runs = [];
+            const walk = document.createTreeWalker(foot, NodeFilter.SHOW_TEXT);
+            for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+              if (!(t.textContent || '').trim() || ex.contains(t)) continue;
+              const r = document.createRange();
+              r.selectNodeContents(t);
+              for (const b of r.getClientRects()) runs.push([b.left, b.top, b.right, b.bottom]);
+            }
+            const e = ex.getBoundingClientRect();
+            return runs.filter(([l, t, r, b]) => l < e.right && r > e.left && t < e.bottom && b > e.top).length;
+          };
+          const asDrawn = covering();
+          const name = first.textContent;
+          first.textContent = '\u{1F9E0} qwen3-coder-480b-a35b-instruct-awq-int4-long-context-preview';
+          const longName = covering();
+          first.textContent = name;
+          return {
+            titleShown: !!title && title.getClientRects().length > 0,
+            exShown: ex.getClientRects().length > 0,
+            sharesFirstLine: er.top < mr.bottom && er.bottom > mr.top,
+            inside: er.left >= fr.left && er.right <= fr.right && er.top >= fr.top && er.bottom <= fr.bottom,
+            covers: asDrawn + longName,
+            footH: Math.round(fr.height),
+          };
+        })()`)) as {
+          titleShown: boolean;
+          exShown: boolean;
+          sharesFirstLine: boolean;
+          inside: boolean;
+          covers: number;
+          footH: number;
+        };
+        if (w === 390) {
+          expect(!rest.titleShown, 'the page title is still a row above the bar at 390');
+          expect(rest.exShown, 'the drawer has no export at 390');
+          expect(
+            rest.sharesFirstLine,
+            'export is not on the drawer\'s first line at 390, so it took a line of its own',
+          );
+          expect(rest.inside, 'export is drawn outside the drawer band at 390');
+          expect(
+            rest.covers === 0,
+            `export is painted over ${rest.covers} runs of the drawer's text at 390, as drawn or with a long model name`,
+          );
+        } else {
+          expect(rest.titleShown, `the page title is gone at ${w}, where the sheet keeps it`);
+          expect(rest.exShown, `the drawer has no export at ${w}`);
+        }
+        lines.push(
+          `${w}x${h}: status on #0d1117, drawer, composer, panel and ${cards} cards on #10151c, pills on #161b22, no light box; title ${rest.titleShown ? 'shown' : 'hidden'}, drawer ${rest.footH}px`,
+        );
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return (
+        lines.join('; ') +
+        '; export shares the model line at 390 and covers no text, as drawn or with a long model name'
+      );
+    },
+  });
 }
 
 /** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
@@ -13696,6 +14034,67 @@ function pgContrast(
   const a = lum(ink);
   const b = lum(back);
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+type PgRgba = { r: number; g: number; b: number; a: number };
+/** WCAG relative luminance of a colour's channels, alpha ignored. */
+function pgLuminance(c: PgRgba): number {
+  const ch = (v: number): number =>
+    v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4;
+  return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+}
+/** Source-over of one colour on another, non-premultiplied. */
+function pgOver(top: PgRgba, bottom: PgRgba): PgRgba {
+  const a = top.a + bottom.a * (1 - top.a);
+  if (a === 0) return { r: 0, g: 0, b: 0, a: 0 };
+  const mix = (t: number, u: number): number => (t * top.a + u * bottom.a * (1 - top.a)) / a;
+  return { r: mix(top.r, bottom.r), g: mix(top.g, bottom.g), b: mix(top.b, bottom.b), a };
+}
+/**
+ * #177. The pixel a text-bearing element paints and the pixel beside it,
+ * composited the way the browser does: each element's ground goes under what
+ * it holds, each opacity fades its whole layer, and the root lands on a white
+ * canvas. Reading the first painted ground and the raw ink, as P126 did before,
+ * takes a 0.6-opacity caption or a disabled button at full strength, and a
+ * translucent help panel as if it were the band under it.
+ */
+function pgPainted(color: string, chain: [string, string][]): { ink: PgRgba; ground: PgRgba } {
+  const clear: PgRgba = { r: 0, g: 0, b: 0, a: 0 };
+  const paint = (withInk: boolean): PgRgba => {
+    let layer = clear;
+    chain.forEach(([bg, opacity], i) => {
+      const ground = pgParseRgb(bg) ?? clear;
+      layer = i === 0 ? ground : pgOver(layer, ground);
+      if (i === 0 && withInk) layer = pgOver(pgParseRgb(color) ?? clear, layer);
+      layer = { ...layer, a: layer.a * Number(opacity) };
+    });
+    return pgOver(layer, { r: 255, g: 255, b: 255, a: 1 });
+  };
+  return { ink: paint(true), ground: paint(false) };
+}
+/**
+ * #177. The floor a row is held to, then the check. Text 14px and up is body
+ * text here (16px controls and prose, the transcript's 15.2px bubbles) and
+ * takes 4.5:1. Under 14px is the sheet's label tier: it draws its 9 to 12px
+ * labels in #6e7681, 3.99:1 on its band, so 3:1 is the floor it holds there.
+ * A disabled control takes 3:1 at any size: WCAG exempts inactive controls,
+ * but this page dims them with opacity, and a dim one still has to read as a
+ * control rather than as a blank.
+ */
+function pgShellCheck(
+  row: { kind: string; color: string; size: number; disabled: boolean; chain: [string, string][] },
+  at: string,
+): number {
+  expect(pgParseRgb(row.color) !== null, `${row.kind} at ${at} reports an unparsable colour ${row.color}`);
+  const { ink, ground } = pgPainted(row.color, row.chain);
+  const ratio = pgContrast(ink, ground);
+  const floor = row.disabled || row.size < 14 ? 3 : 4.5;
+  const hex = (c: PgRgba): string =>
+    '#' + [c.r, c.g, c.b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+  expect(
+    ratio >= floor,
+    `${row.kind} at ${at} paints ${hex(ink)} on ${hex(ground)} (${row.color}, ${row.size}px${row.disabled ? ', disabled' : ''}) = ${ratio.toFixed(2)}:1, under its ${floor}:1 floor`,
+  );
+  return ratio;
 }
 async function runPageScenario(
   s: Exclude<PageScenario, { standalone: () => Promise<string> }>,
