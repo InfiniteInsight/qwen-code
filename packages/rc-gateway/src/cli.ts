@@ -1756,7 +1756,10 @@ async function loadBonjourFactory(): Promise<BonjourFactory | null> {
   try {
     const mod = await import('bonjour-service');
     const Bonjour = mod.Bonjour;
-    return () => new Bonjour() as unknown as ReturnType<BonjourFactory>;
+    // The constructor's error callback defaults to `throw err` (uncaught); the
+    // advertiser and the browser pass their own (#155).
+    return (onError) =>
+      new Bonjour({}, onError) as unknown as ReturnType<BonjourFactory>;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     const msg = (err as Error).message ?? '';
