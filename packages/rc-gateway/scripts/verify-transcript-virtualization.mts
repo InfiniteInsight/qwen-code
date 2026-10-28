@@ -2503,21 +2503,52 @@ async function watch(page: Page, sessionId: string): Promise<void> {
 /**
  * #184 (h1). The ways to a control that is not on the Chat screen at rest,
  * each taken the way a reader takes it and only when what holds the control
- * is shut, so a scenario can call one twice. Operations, Settings and
- * Diagnostics are rows on the More screen (≡) and open as screens with a back
- * button; the conversation's actions are in the ⋯ menu; the model, mode and
- * folder are in the sheet the status line opens; Attach, Dictate, Files and
- * Artifacts are behind the composer's +; the conversation list is the List
- * screen behind the bar's title at every width (#185).
+ * is shut, so a scenario can call one twice. #187: every card the Operations,
+ * Settings and Diagnostics tabs held is on a panel screen, which a row on the
+ * More screen (≡) opens: two taps, ≡ then the row, and the panel's back
+ * button returns to More. `openPanel(page, 'chat')` backs out of both. The
+ * conversation's actions are in the ⋯ menu; the model, mode and folder are in
+ * the sheet the status line opens; Attach, Dictate, Files and Artifacts are
+ * behind the composer's +; the conversation list is the List screen behind the
+ * bar's title at every width (#185).
  */
-async function openTab(page: Page, id: string): Promise<void> {
-  if (id === 'chat') {
+async function openPanel(page: Page, key: string): Promise<void> {
+  if (key === 'chat') {
+    if (await page.isVisible('#panel-screen')) await page.click('#panel-back');
     if (await page.isVisible('#more-screen')) await page.click('#more-back');
-    if (await page.isVisible('#pane-head')) await page.click('#pane-head .tab[data-tab="chat"]');
     return;
   }
+  if (await page.isVisible(`#panel-${key}`)) return;
+  if (await page.isVisible('#panel-screen')) await page.click('#panel-back');
   if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
-  await page.click(`#more-screen .tab[data-tab="${id}"]`);
+  await page.click(`#more-screen .row[data-panel="${key}"]`);
+}
+
+/**
+ * #187. Where a card sits: the panel screen that holds it (null when none
+ * does), whether it is on the chat screen instead, whether a retired ? button
+ * is still inside it, and the sentence its screen opens with.
+ */
+type Placement = {
+  exists: boolean;
+  panel: string | null;
+  inChat: boolean;
+  helpBtn: boolean;
+  lede: string;
+};
+async function placement(page: Page, id: string): Promise<Placement> {
+  return page.evaluate(String.raw`(() => {
+    const el = document.getElementById(${JSON.stringify(id)});
+    const panel = el ? el.closest('#panel-body > .panel') : null;
+    const lede = panel ? panel.querySelector(':scope > .lede') : null;
+    return {
+      exists: !!el,
+      panel: panel ? panel.dataset.panel : null,
+      inChat: !!el && document.getElementById('pane-chat').contains(el),
+      helpBtn: !!el && !!el.querySelector('.help-btn'),
+      lede: lede ? (lede.textContent || '').trim() : '',
+    };
+  })()`) as Promise<Placement>;
 }
 async function openMenu(page: Page): Promise<void> {
   if (!(await page.isVisible('#h1-menu'))) await page.click('#h1-actions');
@@ -2598,7 +2629,8 @@ async function settlePage(page: Page, minMs = 200): Promise<void> {
 /**
  * A transcript script failed to load: #transcript shows a visible "reload"
  * note, and the page's other UI initialized (app shown after the auth check,
- * the pair button wired, tabs switch, frames are handled without errors).
+ * the pair button wired, a panel screen opens and closes (#187), frames are
+ * handled without errors).
  */
 async function checkTranscriptMissing(
   page: Page,
@@ -2637,18 +2669,18 @@ async function checkTranscriptMissing(
       'function',
   }));
   expect(ui.pairWired, 'pair button not wired');
-  await openTab(page, 'diag');
-  const diag = await page.evaluate(() =>
-    document.getElementById('pane-diag')!.classList.contains('active'),
+  await openPanel(page, 'diag');
+  const diag = await page.evaluate(
+    () => document.getElementById('panel-diag')!.getClientRects().length > 0,
   );
-  expect(diag, 'the Diagnostics tab did not open');
-  await openTab(page, 'chat');
+  expect(diag, 'the Diagnostics screen did not open');
+  await openPanel(page, 'chat');
   await watch(page, viewer.sessionId);
   await waitForFrame(page, 5 * 7, 30_000);
   const n = await note();
   expect(n.shown, '#transcript not shown on the Chat tab');
   expect(/reload/i.test(n.text), 'failure note gone after the watch');
-  return `note ${JSON.stringify(n.text)}; tabs and frames work`;
+  return `note ${JSON.stringify(n.text)}; a panel screen and frames work`;
 }
 
 interface Growth {
@@ -3286,9 +3318,11 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    // Another tab (or the raw-JSON view) hides #transcript with
-    // display:none; every row then measures 0. Coming back must find the
-    // reader where they were, and a pinned transcript at the new end.
+    // The raw-JSON view hides #transcript with display:none; every row then
+    // measures 0. Another tab used to as well; #187 made the panels screens
+    // over the chat, and a screen's round trip is held to the same claim.
+    // Coming back must find the reader where they were, and a pinned
+    // transcript at the new end.
     name: 'P10 hide and show',
     frames: () => replayFrames(40, 2),
     run: async ({ page, viewer }) => {
@@ -3314,14 +3348,16 @@ const PAGE_SCENARIOS: PageScenario[] = [
       await settlePage(page);
       const s0 = await read();
       expect(s0.gap > 200 && !s0.pill, `setup: ${JSON.stringify(s0)}`);
-      await openTab(page, 'diag');
+      // #187: Diagnostics is a panel screen over the chat now, not a pane
+      // swapped for it; the round trip still has to leave the reader put.
+      await openPanel(page, 'diag');
       await page.waitForTimeout(300);
-      await openTab(page, 'chat');
+      await openPanel(page, 'chat');
       await settlePage(page);
       const s1 = await read();
       expect(
         Math.abs(s1.top - s0.top) <= 2 && s1.first === s0.first && !s1.pill,
-        `tab round trip moved the reader: ${JSON.stringify(s0)} -> ${JSON.stringify(s1)}`,
+        `a panel screen round trip moved the reader: ${JSON.stringify(s0)} -> ${JSON.stringify(s1)}`,
       );
       await page.evaluate(() => document.getElementById('raw-toggle')!.click());
       await page.waitForTimeout(300);
@@ -3335,7 +3371,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
       // Pinned, and the answer grows while the transcript is hidden.
       await page.click('#jump-bottom');
       await settlePage(page);
-      await openTab(page, 'diag');
+      await openPanel(page, 'diag');
       await page.evaluate(() =>
         __pg.update({
           sessionUpdate: 'agent_message_chunk',
@@ -3343,7 +3379,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         }),
       );
       await page.waitForTimeout(300);
-      await openTab(page, 'chat');
+      await openPanel(page, 'chat');
       await settlePage(page);
       const s3 = await page.evaluate(() => {
         const asst = transcriptModel.curAsst!;
@@ -3356,7 +3392,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
       });
       expect(
         s3.gap <= 2 && s3.pill,
-        `pinned transcript not at the end after the tab: ${JSON.stringify(s3)}`,
+        `pinned transcript not at the end after the panel screen: ${JSON.stringify(s3)}`,
       );
       expect(
         s3.shown && (s3.text ?? '').endsWith(' tail while hidden'),
@@ -5258,8 +5294,9 @@ PAGE_SCENARIOS.push({
 });
 
 // #98: seven gateway surfaces shipped their backend before anything drew them.
-// They were placed under Settings rather than the main rail, so these two
-// scenarios assert placement and the honest state when a route is absent.
+// They were placed under Settings rather than the main rail (#187: on panel
+// screens under More), so these two scenarios assert placement and the honest
+// state when a route is absent.
 // The absent lines are NOT stubbed: this harness gateway mounts several of
 // these routes conditionally, and a probe run showed which ones answer 404
 // for real (usage, peers, agents, policy-explain) and which answer 200 with
@@ -5309,85 +5346,70 @@ async function press(page: Page, panel: string, button: string): Promise<void> {
 }
 
 PAGE_SCENARIOS.push({
-  name: 'P35 the seven unseen surfaces have screens under Settings',
+  name: 'P35 the seven unseen surfaces have screens under More, each opened by its row with its sentence on show',
+  // #187 (h1), rewritten from the Settings tab. The claims kept: each of the
+  // seven is in the page, off the chat screen, and says what it is for where
+  // it is read. What changed is where and how: each card is a section of the
+  // panel screen its More row opens, and the ? that hid its help is retired
+  // for the one sentence that screen opens with.
   waitView: false,
   run: async ({ page }) => {
-    await openTab(page, 'settings');
-    const s = await page.evaluate((ids) => {
-      const settings = document.getElementById('pane-settings');
-      const chat = document.getElementById('pane-chat');
-      const rows = ids.map((id) => {
-        const det = document.getElementById(id);
-        const btn = det ? det.querySelector('.help-btn') : null;
-        const help = btn
-          ? document.getElementById(btn.getAttribute('aria-controls') || '')
-          : null;
-        return {
-          id,
-          exists: !!det,
-          inSettings: !!det && !!settings?.contains(det),
-          inChat: !!det && !!chat?.contains(det),
-          helpHidden: !!help && help.hidden,
-          helpLabelled: !!btn && !!btn.getAttribute('aria-label'),
-        };
-      });
-      return { rows };
-    }, [...SURFACES]);
-
-    for (const r of s.rows) {
-      expect(r.exists, `#${r.id} is not in the page at all`);
-      expect(r.inSettings, `#${r.id} is not inside #pane-settings`);
-      expect(!r.inChat, `#${r.id} sits in the chat pane, i.e. on the main screen`);
-      expect(r.helpLabelled, `#${r.id} has no labelled ? control`);
-      expect(r.helpHidden, `#${r.id} shows its help before it is asked for`);
-      // The guard above is only worth having if it can actually trip, so move
-      // one panel into the chat pane and re-run the same test on it.
+    const want: Record<string, string> = {
+      'usage-view': 'usage',
+      'peers-view': 'daemons',
+      'policy-explain-view': 'trust',
+      'cors-view': 'devices',
+      'whoami-view': 'share',
+      'bridges-view': 'bridges',
+      'agents-view': 'runs',
+    };
+    for (const id of SURFACES) {
+      const r = await placement(page, id);
+      expect(r.exists, `#${id} is not in the page at all`);
+      expect(
+        r.panel === want[id],
+        `#${id} is on the ${r.panel} screen, not the ${want[id]} screen its row names`,
+      );
+      expect(!r.inChat, `#${id} sits in the chat pane, i.e. on the main screen`);
+      expect(!r.helpBtn, `#${id} still carries a ? button`);
+      expect(
+        r.lede.length > 20 && r.lede.endsWith('.'),
+        `#${id}'s screen does not open with a sentence (${JSON.stringify(r.lede)})`,
+      );
     }
 
     // The inChat assertion above is only worth having if it can trip, so move
-    // one panel into the chat pane, re-run the SAME predicate on it, and put
-    // it back. Without this, an `inChat` that always returned false would pass.
-    const tripped = await page.evaluate(() => {
+    // one panel into the chat pane, re-run the SAME reading on it, and put it
+    // back. Without this, an `inChat` that always returned false would pass.
+    await page.evaluate(String.raw`(() => {
       const det = document.getElementById('usage-view');
-      const chat = document.getElementById('pane-chat');
-      const settings = document.getElementById('pane-settings');
-      if (!det || !chat || !settings) return 'could not move the panel';
-      chat.appendChild(det);
-      const now = {
-        inChat: chat.contains(document.getElementById('usage-view')),
-        inSettings: settings.contains(document.getElementById('usage-view')),
-      };
-      settings.appendChild(det);
-      const back = settings.contains(document.getElementById('usage-view'));
-      return `${now.inChat}/${now.inSettings}/${back}`;
-    });
-    // inChat must flip true, inSettings false, and the restore must take.
+      window.__p35Home = det.parentElement;
+      window.__p35Next = det.nextElementSibling;
+      document.getElementById('pane-chat').appendChild(det);
+    })()`);
+    const moved = await placement(page, 'usage-view');
+    await page.evaluate(String.raw`window.__p35Home.insertBefore(document.getElementById('usage-view'), window.__p35Next)`);
+    const back = await placement(page, 'usage-view');
     expect(
-      tripped === 'true/false/true',
-      `placement guard is vacuous, moving a panel into the chat pane read ${tripped}`,
+      moved.inChat && moved.panel === null && back.panel === 'usage' && !back.inChat,
+      `placement guard is vacuous, moving a panel into the chat pane read ${JSON.stringify(moved)} then ${JSON.stringify(back)}`,
     );
 
-    // The "?" is one delegated listener on document keyed on aria-controls,
-    // so prove it reaches all seven new panels rather than only the old ones.
-    const toggled: string[] = [];
+    // Each is read where it is opened: its row, then the card and its
+    // screen's sentence both on screen with nothing pressed in between.
+    const shown: string[] = [];
     for (const id of SURFACES) {
-      const shown = await page.evaluate((panelId) => {
-        const det = document.getElementById(panelId) as HTMLDetailsElement | null;
-        const btn = det?.querySelector('.help-btn') as HTMLButtonElement | null;
-        if (!btn) return 'no ? button';
-        btn.click();
-        const help = document.getElementById(btn.getAttribute('aria-controls') || '');
-        return help
-          ? `${!help.hidden}/${btn.getAttribute('aria-expanded')}`
-          : 'no help element';
-      }, id);
-      expect(
-        shown === 'true/true',
-        `#${id} ? did not reveal its help where it is read (got ${shown})`,
-      );
-      toggled.push(id);
+      await openPanel(page, want[id]!);
+      const seen = (await page.evaluate(String.raw`(() => {
+        const card = document.getElementById(${JSON.stringify(id)});
+        const lede = card.closest('.panel').querySelector('.lede');
+        return card.getClientRects().length > 0 && lede.getClientRects().length > 0;
+      })()`)) as boolean;
+      expect(seen, `#${id} or its sentence is not on screen when its row opens it`);
+      shown.push(want[id]!);
     }
-    return `${toggled.length} screens under Settings, none on the main screen, each ? reveals its help in place`;
+    await openPanel(page, 'chat');
+    return `seven screens under More (${shown.join(', ')}), none on the main screen, each opened by its row with its sentence on show and no ?`;
   },
 });
 
@@ -5395,7 +5417,9 @@ PAGE_SCENARIOS.push({
   name: 'P36 an unseen surface says why it has nothing rather than showing a blank',
   waitView: false,
   run: async ({ page }) => {
-    await openTab(page, 'settings');
+    // #187: the dry-run's field is filled the way a reader fills it, so its
+    // screen is the one open.
+    await openPanel(page, 'trust');
 
     // Routes the harness gateway genuinely does not mount: the panel must name
     // the absence, not render an empty table that reads as "no data".
@@ -5820,7 +5844,7 @@ PAGE_SCENARIOS.push({
         exists: !!scr,
         hidden: !!scr && scr.hidden,
         inChat: document.getElementById('pane-chat').contains(scr),
-        inPane: !!scr.closest('.tab-pane'),
+        inPane: !!scr.closest('#panel-screen'),
         doorInList: document.getElementById('list-screen').contains(door),
         door: door.textContent.trim(),
       };
@@ -6038,34 +6062,15 @@ PAGE_SCENARIOS.push({
     };
 
     // The placement ruling: a run log is not something to reach for mid-work,
-    // so it lives in Operations and not on the main screen.
-    const placed = await page.evaluate(() => {
-      const det = document.getElementById('runs');
-      return {
-        exists: !!det,
-        inOps: !!document.getElementById('pane-ops')?.contains(det ?? null),
-        inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
-      };
-    });
+    // so it lives off the main screen. #187: on More's Runs and workflows
+    // screen, which opens with the sentence its ? used to hide.
+    const placed = await placement(page, 'runs');
     expect(placed.exists, 'there is no runs section in the page at all');
-    expect(placed.inOps, 'the runs section is not under Operations');
+    expect(placed.panel === 'runs', `the runs section is on the ${placed.panel} screen, not Runs and workflows`);
     expect(!placed.inChat, 'the runs section sits on the main screen');
-
-    // A panel added after P35 is only covered by the one-delegated-listener
-    // rule if it follows it, so check this one rather than inherit it.
-    const help = await page.evaluate(() => {
-      const det = document.getElementById('runs') as HTMLDetailsElement | null;
-      const btn = det?.querySelector('.help-btn') as HTMLButtonElement | null;
-      if (!btn) return 'no ? button';
-      const before = (document.getElementById('help-runs') as HTMLElement)
-        ?.hidden;
-      btn.click();
-      const el = document.getElementById('help-runs') as HTMLElement | null;
-      return `${before === true}/${el ? !el.hidden : 'no help element'}/${btn.getAttribute('aria-expanded')}`;
-    });
     expect(
-      help === 'true/true/true',
-      `the runs section's ? did not behave like the other panels' (got ${help})`,
+      !placed.helpBtn && /running or has finished/.test(placed.lede),
+      `the runs screen does not say what it holds where it is read (${JSON.stringify(placed)})`,
     );
 
     await page.evaluate((id) => {
@@ -7214,15 +7219,14 @@ PAGE_SCENARIOS.push({
 });
 PAGE_SCENARIOS.push({
   name: 'P50 the workspace file browser reaches the daemon and reads through it',
-  // The panel sits in the ops pane, so nothing here needs the transcript view.
+  // The panel sits on a panel screen, so nothing here needs the transcript view.
   waitView: false,
   stub: { capabilitiesFeatures: ['workspace_file_read'] },
   noConsoleErrors: true,
   run: async ({ page }) => {
-    // The panel lives under Settings, not Operations: its ancestor chain is
-    // details#ws-files inside #pane-settings, which is where P35 finds the
-    // other unseen surfaces too.
-    await openTab(page, 'settings');
+    // The panel lives on More's Files and artifacts screen (#187): two taps,
+    // ≡ and the row, the way P35 reaches the other unseen surfaces too.
+    await openPanel(page, 'files');
     const gate = await page.evaluate(() => {
       const sec = document.getElementById('ws-files');
       return {
@@ -7236,21 +7240,13 @@ PAGE_SCENARIOS.push({
       '#ws-files stayed hidden although the daemon advertised workspace_file_read',
     );
 
-    // The section is a <details> and nothing in the page expands it for the
-    // reader (the only .open assignment is the ? handler, which opens a panel
-    // to show its help), so its body is unrendered until tapped. Expand it the
-    // way a tap on the heading does, and check the body actually has geometry
-    // before clicking into it.
-    await page.click('#ws-files > summary');
+    // #187: the section is always open on its screen, so the body has to
+    // have geometry the moment the row opens it, before anything is pressed.
     const opened = await page.evaluate(() => {
-      const det = document.getElementById('ws-files');
       const body = document.getElementById('ws-files-body');
-      return `${det?.open}/${!!body && body.getBoundingClientRect().height > 0}`;
+      return !!body && body.getBoundingClientRect().height > 0;
     });
-    expect(
-      opened === 'true/true',
-      `expanding the heading did not render the body, open/has-height ${JSON.stringify(opened)}`,
-    );
+    expect(opened, 'the screen opened without drawing the section body');
 
     // Open it the way a user does: the section's own Load control.
     await page.click('#ws-files-body button');
@@ -7411,7 +7407,7 @@ PAGE_SCENARIOS.push({
   // proves the same thing without reaching into another panel.
   waitView: false,
   run: async ({ page }) => {
-    await openTab(page, 'settings');
+    await openPanel(page, 'files');
     const state = await page.evaluate(() => {
       const sec = document.getElementById('ws-files');
       return {
@@ -9057,17 +9053,11 @@ PAGE_SCENARIOS.push({
         `${rows.length} prompts were listed and ${drops} drop controls were drawn`,
       );
       // The placement ruling, copied from the runs panel: this is an operator
-      // read, so it lives under Operations and not on the main screen.
-      const placed = await page.evaluate(() => {
-        const det = document.getElementById('prompt-queue');
-        return {
-          exists: !!det,
-          inOps: !!document.getElementById('pane-ops')?.contains(det ?? null),
-          inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
-        };
-      });
+      // read, so it lives off the main screen, on More's Prompt queue screen
+      // (#187).
+      const placed = await placement(page, 'prompt-queue');
       expect(placed.exists, 'there is no prompt queue section in the page');
-      expect(placed.inOps, 'the prompt queue section is not under Operations');
+      expect(placed.panel === 'queue', `the prompt queue section is on the ${placed.panel} screen, not Prompt queue`);
       expect(!placed.inChat, 'the prompt queue section sits on the main screen');
       return `the queue drew ${JSON.stringify(rows)} for ${JSON.stringify(asked.session)} with ${drops} controls`;
     },
@@ -9285,16 +9275,9 @@ PAGE_SCENARIOS.push({
         !/m-old|settled|promoted/i.test(rows.join(' ')),
         `a reconciliation ring leaked into the rows (${JSON.stringify(rows)})`,
       );
-      const placed = await page.evaluate(() => {
-        const det = document.getElementById('mid-turn');
-        return {
-          exists: !!det,
-          inOps: !!document.getElementById('pane-ops')?.contains(det ?? null),
-          inChat: !!document.getElementById('pane-chat')?.contains(det ?? null),
-        };
-      });
+      const placed = await placement(page, 'mid-turn');
       expect(placed.exists, 'there is no mid-turn section in the page');
-      expect(placed.inOps, 'the mid-turn section is not under Operations');
+      expect(placed.panel === 'queue', `the mid-turn section is on the ${placed.panel} screen, not Prompt queue`);
       expect(!placed.inChat, 'the mid-turn section sits on the main screen');
       return `the held messages drew ${JSON.stringify(rows)} for ${JSON.stringify(asked.session)}`;
     },
@@ -9999,8 +9982,8 @@ PAGE_SCENARIOS.push({
     },
   });
 
-  // The permission-rules panel is opened last here, not first. It sits in the
-  // Operations pane behind a gate the gateway answers statically
+  // The permission-rules panel is opened last here, not first. It sits on
+  // More's Permission rules screen (#187) behind a gate the gateway answers statically
   // (src/routes/capabilities.ts:95), and it loads during boot
   // (public/index.html:6646), so the only thing that ever kept a reader from
   // seeing it was the stub's own payload: it sent three flat arrays where
@@ -10017,9 +10000,9 @@ PAGE_SCENARIOS.push({
       ),
     );
 
+  // #187: the rules are on More's Permission rules screen, open as it opens.
   const openPermPanel = async (page: Page): Promise<void> => {
-    await openTab(page, 'ops');
-    await page.click('#perm-rules > summary');
+    await openPanel(page, 'perms');
   };
 
   PAGE_SCENARIOS.push({
@@ -10237,11 +10220,10 @@ PAGE_SCENARIOS.push({
       ),
     );
 
-  // The panel sits under Settings, beside the other workspace surfaces
-  // (ws-target, ws-trust, ws-mcp, ws-tools, ws-files), not under Ops.
+  // The panel is a host fact, so #187 puts it on More's Diagnostics screen
+  // under Host, open as the row opens it.
   const openDiagPanel = async (page: Page): Promise<void> => {
-    await openTab(page, 'settings');
-    await page.click('#ws-diagnostics > summary');
+    await openPanel(page, 'diag');
   };
 
   const readDiag = async (page: Page): Promise<string[]> => {
@@ -10264,8 +10246,7 @@ PAGE_SCENARIOS.push({
     );
 
   const openInvPanel = async (page: Page): Promise<void> => {
-    await openTab(page, 'settings');
-    await page.click('#ws-inventory > summary');
+    await openPanel(page, 'memory');
   };
 
   const readInv = async (page: Page): Promise<string[]> => {
@@ -10286,11 +10267,10 @@ PAGE_SCENARIOS.push({
     );
 
   const openCtxPanel = async (page: Page): Promise<void> => {
-    // The settings tab, not ops: like every other ws-* surface, this panel lives
-    // in the settings pane, and clicking the wrong tab leaves the summary
-    // hidden, which reads as a broken selector rather than a pane boundary (D59).
-    await openTab(page, 'settings');
-    await page.click('#ws-context > summary');
+    // #187: More's Memory and skills screen, beside the inventory. The wrong
+    // screen leaves the button hidden, which reads as a broken selector
+    // rather than a screen boundary (D59).
+    await openPanel(page, 'memory');
   };
 
   const readCtx = async (page: Page): Promise<string[]> => {
@@ -11364,7 +11344,7 @@ PAGE_SCENARIOS.push({
         return {
           hasSend: !!send,
           hasText: !!text,
-          inOps: !!document.getElementById('pane-ops')?.contains(send ?? null),
+          inQueue: !!document.getElementById('panel-queue')?.contains(send ?? null),
           inComposer: !!composer?.contains(send ?? null),
           chatSendLabel: chatSend ? (chatSend.textContent ?? '').trim() : null,
           chatSendDisabled: chatSend ? chatSend.disabled : null,
@@ -11377,8 +11357,8 @@ PAGE_SCENARIOS.push({
         'the mid-turn write control is missing from the page',
       );
       expect(
-        placed.inOps,
-        'the mid-turn write control is not under Operations',
+        placed.inQueue,
+        'the mid-turn write control is not on the Prompt queue screen',
       );
       expect(
         !placed.inComposer,
@@ -12144,7 +12124,8 @@ PAGE_SCENARIOS.push({
             more: box('h1-more'),
             actions: box('h1-actions'),
             titleText: (document.getElementById('h1-title').innerText || '').trim(),
-            tabBar: !!document.getElementById('tab-bar') || !!document.querySelector('.tab-bar'),
+            // #187: the panes and the tabs that switched them are gone too.
+            tabBar: !!document.querySelector('#tab-bar, .tab-bar, .tab[data-tab], .tab-pane'),
             pins: document.querySelectorAll('.pin-cb, #pin-area').length,
             pageTitleShown: on(h1),
             searchInBar: !!bar.querySelector('#list-search, #past-filter, #bar-search'),
@@ -12543,6 +12524,17 @@ PAGE_SCENARIOS.push({
   // on screen; the ⋯ menu, the conversation list (a column at 1280, a screen
   // of its own at 390) and the More screen are read as surfaces of their own,
   // since each covers what is under it while it is open.
+  // #187: the Operations, Settings and Diagnostics panes are gone; their
+  // cards are on the panel screens More's rows open, and each of those
+  // screens is read as a surface of its own, every card on it shown (the
+  // capability-gated ones too), as the panes were.
+  const PANEL_KEYS_ALL = [
+    'rewind', 'fork', 'files', 'share', 'usage', 'queue', 'search',
+    'perms', 'mcp', 'tools', 'trust', 'memory',
+    'daemons', 'sessions', 'runs', 'bridges', 'diag',
+    'notify', 'dictation', 'zone', 'devices', 'install',
+  ] as const;
+  type PanelSurface = `panel:${(typeof PANEL_KEYS_ALL)[number]}`;
   type ShellSurface =
     | 'chat'
     | 'menu'
@@ -12550,9 +12542,8 @@ PAGE_SCENARIOS.push({
     | 'more'
     | 'picker'
     | 'archived'
-    | 'ops'
-    | 'settings'
-    | 'diag';
+    | PanelSurface;
+  const PANEL_SURFACES = PANEL_KEYS_ALL.map((k) => `panel:${k}` as PanelSurface);
   const SHELL_SURFACES: ShellSurface[] = [
     'chat',
     'menu',
@@ -12560,11 +12551,12 @@ PAGE_SCENARIOS.push({
     'more',
     'picker',
     'archived',
-    'ops',
-    'settings',
-    'diag',
+    ...PANEL_SURFACES,
   ];
-  const SHELL_ROOTS: Record<ShellSurface, string[]> = {
+  const panelOf = (s: ShellSurface): string | null =>
+    s.startsWith('panel:') ? s.slice('panel:'.length) : null;
+  const SHELL_ROOTS = {
+    ...(Object.fromEntries(PANEL_SURFACES.map((s) => [s, ['#panel-screen']])) as Record<PanelSurface, string[]>),
     chat: [
       '#h1-bar',
       '#h1-statusline',
@@ -12579,12 +12571,9 @@ PAGE_SCENARIOS.push({
     more: ['#more-screen'],
     picker: ['#dir-picker'],
     archived: ['#archived-view'],
-    ops: ['#pane-ops'],
-    settings: ['#pane-settings'],
-    diag: ['#pane-diag'],
-  };
+  } as Record<ShellSurface, string[]>;
   const openShellSurface = async (page: Page, s: ShellSurface): Promise<void> => {
-    await openTab(page, 'chat');
+    await openPanel(page, 'chat');
     if (s === 'chat') {
       await openSheet(page);
       await openTools(page);
@@ -12618,14 +12607,13 @@ PAGE_SCENARIOS.push({
       await page.waitForFunction(`!document.getElementById('archived-view').hidden`);
       await page.evaluate(`document.getElementById('help-archived-view').hidden = false`);
     } else {
-      await openTab(page, s);
-      await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
+      const key = panelOf(s)!;
+      await openPanel(page, key);
+      await page.evaluate(String.raw`document.querySelectorAll('#panel-${key} .ops-card').forEach((d) => {
         if (d.hidden) {
           d.dataset.shellRead = 'hidden';
           d.hidden = false;
         }
-        d.open = true;
-        d.querySelectorAll('.help-text').forEach((h) => { h.hidden = false; });
       })`);
     }
   };
@@ -12658,15 +12646,13 @@ PAGE_SCENARIOS.push({
       await page.waitForFunction(`document.getElementById('${id}').hidden`);
       await page.click('#list-back');
     } else {
-      await page.evaluate(String.raw`document.querySelectorAll('#pane-${s} details.ops-collapse').forEach((d) => {
-        d.querySelectorAll('.help-text').forEach((h) => { h.hidden = true; });
-        d.open = false;
+      await page.evaluate(String.raw`document.querySelectorAll('#panel-${panelOf(s)} .ops-card').forEach((d) => {
         if (d.dataset.shellRead === 'hidden') {
           d.hidden = true;
           delete d.dataset.shellRead;
         }
       })`);
-      await openTab(page, 'chat');
+      await openPanel(page, 'chat');
     }
   };
   // Every visible element under the roots that paints text of its own, with
@@ -12869,9 +12855,10 @@ PAGE_SCENARIOS.push({
       // line, the crash banner, the transcript with both pills on it, the
       // drawer, the composer with its help open, the New conversation panel
       // open with its help, and every Operations, Settings and Diagnostics card
-      // opened with its help. Last in the scenario on purpose, because it
-      // switches tabs and opens panels, and the fold readings above are about
-      // the resting page.
+      // opened with its help. #187: those cards are read on the panel screens
+      // More's rows open, each screen with its opening sentence. Last in the
+      // scenario on purpose, because it opens screens and panels, and the fold
+      // readings above are about the resting page.
       const bands: string[] = [];
       let bandRows = 0;
       for (const [w, h] of [
@@ -13601,7 +13588,19 @@ PAGE_SCENARIOS.push({
       // composer are bands; the status line sits on the page ground under the
       // bar; the pills, the toast and the ⋯ menu are raised controls; the More
       // screen is the page ground with band rows.
-      const want: Record<ShellSurface, [string, keyof typeof G1][]> = {
+      // #187: a panel screen is drawn as More is, the page ground under a
+      // band head, and each card on it is a band.
+      const want = {
+        ...(Object.fromEntries(
+          PANEL_SURFACES.map((s) => [
+            s,
+            [
+              ['#panel-screen', 'page'],
+              ['#panel-screen .scr-head', 'band'],
+              ['#panel-screen .panel:not([hidden]) .ops-card', 'band'],
+            ],
+          ]),
+        ) as Record<PanelSurface, [string, keyof typeof G1][]>),
         chat: [
           ['#h1-bar', 'band'],
           ['#h1-statusline', 'page'],
@@ -13635,10 +13634,7 @@ PAGE_SCENARIOS.push({
           ['#archived-view', 'page'],
           ['#archived-view .scr-head', 'band'],
         ],
-        ops: [['#pane-ops details.ops-collapse', 'band']],
-        settings: [['#pane-settings details.ops-collapse', 'band']],
-        diag: [['#pane-diag details.ops-collapse', 'band']],
-      };
+      } as Record<ShellSurface, [string, keyof typeof G1][]>;
       type Ground = { sel: string; n: number; off: string[] };
       type Big = { kind: string; bg: string };
       const lines: string[] = [];
@@ -13680,7 +13676,7 @@ PAGE_SCENARIOS.push({
               g.off.length === 0,
               `${g.sel} is not on the sheet's ground at ${at}: ${g.off.slice(0, 4).join(', ')}`,
             );
-            if (g.sel.includes('ops-collapse')) cards += g.n;
+            if (g.sel.includes('ops-card')) cards += g.n;
           }
           // The two values the issue names, then anything else light: a ground
           // with a relative luminance over 0.4 is a light card on this page
@@ -13722,7 +13718,7 @@ PAGE_SCENARIOS.push({
         await page.keyboard.press('Escape');
         expect(exOpen, `opening the ⋯ menu at ${w} did not show export`);
         lines.push(
-          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, the List, folder and archived screens on #0d1117 with #10151c heads and New conversation here on #1f6feb, ${cards} cards on #10151c, no light box; no page title, export in the menu`,
+          `${w}x${h}: bar, sheet, tools and composer on #10151c, status line on #0d1117, pills, toast and menu on #161b22, More on #0d1117 with #10151c rows, the List, folder and archived screens on #0d1117 with #10151c heads and New conversation here on #1f6feb, ${PANEL_SURFACES.length} panel screens on #0d1117 with ${cards} cards on #10151c, no light box; no page title, export in the menu`,
         );
       }
       await page.setViewportSize({ width: 1280, height: 720 });
@@ -14167,9 +14163,9 @@ PAGE_SCENARIOS.push({
           `tapping did not open the rows before the reload (${JSON.stringify(opened)})`,
         );
 
-        // Settings opened, last. #184 retired the pins with the tab bar, so
-        // the pane that comes back is the one claim left here.
-        await openTab(page, 'settings');
+        // A panel screen opened, last. #184 retired the pins with the tab
+        // bar, and #187 the panes, so the open panel screen is what comes back.
+        await openPanel(page, 'usage');
 
         // The gateway forgets the idle switch, as a restart would.
         p133IdleOn = false;
@@ -14183,11 +14179,12 @@ PAGE_SCENARIOS.push({
 
         const got = (await page.evaluate(String.raw`(() => {
           const v = (id) => document.getElementById(id);
-          const active = document.querySelector('.tab.active');
+          const shown = document.querySelector('#panel-body > .panel:not([hidden])');
           return {
-            tab: active ? active.dataset.tab : null,
-            settingsShown: v('pane-settings').classList.contains('active'),
-            paneHead: v('pane-head').getClientRects().length > 0,
+            tab: shown && v('panel-screen').getClientRects().length > 0 ? shown.dataset.panel : null,
+            settingsShown: v('panel-usage').getClientRects().length > 0,
+            paneHead: v('panel-back').getClientRects().length > 0 && v('panel-title').textContent === 'Usage and cost',
+            moreUnder: !v('more-screen').hidden,
             lang: v('dictate-lang').value,
             autosend: v('dictate-autosend').checked,
             mode: v('footer-mode').value,
@@ -14212,8 +14209,8 @@ PAGE_SCENARIOS.push({
           if (!ok) fails.push(what);
         };
         want(
-          got['tab'] === 'settings' && got['settingsShown'] === true && got['paneHead'] === true,
-          `tab ${got['tab']}, shown ${got['settingsShown']}, as a screen with a way back ${got['paneHead']}`,
+          got['tab'] === 'usage' && got['settingsShown'] === true && got['paneHead'] === true && got['moreUnder'] === true,
+          `panel screen ${got['tab']}, shown ${got['settingsShown']}, titled with a way back ${got['paneHead']}, over More ${got['moreUnder']}`,
         );
         want(got['lang'] === 'fr-FR', `dictation language ${got['lang']}`);
         want(got['autosend'] === true, 'auto-send unticked');
@@ -14234,7 +14231,7 @@ PAGE_SCENARIOS.push({
         expect(fails.length === 0, `not restored: ${fails.join('; ')}`);
 
         // And they are open on screen, not only in the model.
-        await openTab(page, 'chat');
+        await openPanel(page, 'chat');
         await settlePage(page);
         const drawn = (await page.evaluate(String.raw`(() => {
           const body = document.querySelector('#transcript .thought-body');
@@ -14244,7 +14241,7 @@ PAGE_SCENARIOS.push({
           };
         })()`)) as { thought: boolean; tool: boolean };
         expect(drawn.thought && drawn.tool, `the restored rows are not drawn open (${JSON.stringify(drawn)})`);
-        return 'the open pane, dictation language and auto-send, persist box, folder, the list’s search text (its field on show) and two opened rows came back; the mode control and the idle box show the daemon and gateway state and name the one last set here';
+        return 'the open panel screen (over More), dictation language and auto-send, persist box, folder, the list’s search text (its field on show) and two opened rows came back; the mode control and the idle box show the daemon and gateway state and name the one last set here';
       } finally {
         rmSync(folder, { recursive: true, force: true });
       }
@@ -16776,6 +16773,670 @@ PAGE_SCENARIOS.push({
       }
       const said = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
       return `three undecodable ?session= values each left the app open on its token, with the link scrubbed; the page said ${JSON.stringify(said)}`;
+    },
+  });
+
+  // ---- #187 (h1): the More screen and its panel screens -----------------
+  // More.dc.html's rows, in its order, under its four groups. Time zone is the
+  // one row the drawing does not have: the stamp zone card is per device and
+  // no drawn row is about time, so it is This phone's fifth row.
+  const MORE_GROUPS: { head: string; rows: [string, string][] }[] = [
+    {
+      head: 'This conversation',
+      rows: [
+        ['rewind', 'Rewind to a turn'],
+        ['fork', 'Fork'],
+        ['files', 'Files and artifacts'],
+        ['share', 'Export or share'],
+        ['usage', 'Usage and cost'],
+        ['queue', 'Prompt queue'],
+        ['search', 'Search across conversations'],
+      ],
+    },
+    {
+      head: 'Workspace',
+      rows: [
+        ['perms', 'Permission rules'],
+        ['mcp', 'MCP servers'],
+        ['tools', 'Tools'],
+        ['trust', 'Trust and policy'],
+        ['memory', 'Memory and skills'],
+      ],
+    },
+    {
+      head: 'Host',
+      rows: [
+        ['daemons', 'Daemons and workspaces'],
+        ['sessions', 'All sessions'],
+        ['runs', 'Runs and workflows'],
+        ['bridges', 'Chat bridges'],
+        ['diag', 'Diagnostics'],
+      ],
+    },
+    {
+      head: 'This phone',
+      rows: [
+        ['notify', 'Notifications'],
+        ['dictation', 'Dictation'],
+        ['zone', 'Time zone'],
+        ['devices', 'Paired devices and tokens'],
+        ['install', 'Install as app'],
+      ],
+    },
+  ];
+  const MORE_ROWS = MORE_GROUPS.flatMap((g) => g.rows);
+
+  // #187. The controls the three old panes held, card by card, measured on the
+  // page as it stood before this slice (3b9574da0e) with every card opened, at
+  // 390x844, on the stub's defaults plus workspace_file_read: each card's own
+  // controls, without the summary that opened it and its ? button, which are
+  // what this slice retires. `n` counts every control a card drew, the ones a
+  // loader adds included; `ids` are the ones a handler finds by id, and a
+  // radio group by name=value. 55 + 58 + 10 = 123.
+  type OldCard = { n: number; ids: string[] };
+  const OLD_PANES: Record<'ops' | 'settings' | 'diag', Record<string, OldCard>> = {
+    ops: {
+      daemons: { n: 2, ids: ['daemons-refresh-sessions', 'daemons-refresh-gpus'] },
+      'session-tree': { n: 1, ids: ['list-sessions'] },
+      rewind: { n: 4, ids: ['rewind-id', 'rewind-turn', 'rewind-files', 'rewind-btn'] },
+      reviews: { n: 2, ids: ['reviews-list', 'reviews-status'] },
+      workflows: { n: 1, ids: ['workflows-list'] },
+      runs: { n: 2, ids: ['runs-id', 'runs-list'] },
+      rename: { n: 3, ids: ['rename-id', 'rename-title', 'rename-set'] },
+      'prompt-queue': { n: 2, ids: ['prompt-queue-id', 'prompt-queue-list'] },
+      'mid-turn': { n: 5, ids: ['mid-turn-id', 'mid-turn-list', 'mid-turn-text', 'mid-turn-send', 'mid-turn-now'] },
+      search: { n: 7, ids: ['search-q', 'search-kind', 'search-btn', 'search-since', 'search-until', 'search-rank', 'search-all-daemons'] },
+      'llama-swap': { n: 1, ids: ['llama-swap-refresh'] },
+      'perm-rules': { n: 15, ids: ['perm-scope=workspace', 'perm-scope=user'] },
+      'perm-decisions': { n: 3, ids: [] },
+      'perm-overlays': { n: 7, ids: [] },
+    },
+    settings: {
+      'notif-toggle': { n: 1, ids: ['enable'] },
+      'push-prefs': { n: 2, ids: ['list-subs', 'test-push-btn'] },
+      snooze: { n: 5, ids: ['snooze-dur', 'snooze-scope', 'snooze-btn', 'unsnooze-btn', 'snooze-status-btn'] },
+      'token-mgmt': { n: 1, ids: ['list-tokens'] },
+      'share-create': { n: 5, ids: ['share-session', 'share-ttl', 'share-scope', 'share-max', 'share-create-btn'] },
+      'share-manage': { n: 1, ids: ['list-shares'] },
+      'fork-session': { n: 5, ids: ['fork-id', 'fork-name', 'fork-from', 'fork-mode', 'fork-btn'] },
+      'ws-target': { n: 1, ids: ['ws-target-select'] },
+      'ws-trust': { n: 1, ids: [] },
+      'ws-mcp': { n: 1, ids: [] },
+      'ws-tools': { n: 1, ids: [] },
+      'ws-files': { n: 1, ids: [] },
+      'ui-prefs': { n: 1, ids: ['stamp-zone'] },
+      'session-stats': { n: 2, ids: ['stats-id', 'stats-load'] },
+      'session-turns': { n: 2, ids: ['turns-id', 'turns-load'] },
+      'ws-diagnostics': { n: 3, ids: ['diag-load', 'diag-kind=preflight', 'diag-kind=env'] },
+      'ws-inventory': { n: 4, ids: ['inv-load', 'inv-kind=skills', 'inv-kind=providers', 'inv-kind=hooks'] },
+      'ws-context': { n: 3, ids: ['ctx-load', 'ctx-kind=memory', 'ctx-kind=agents'] },
+      'session-resources': { n: 2, ids: ['resources-id', 'resources-load'] },
+      'usage-view': { n: 3, ids: ['usage-group', 'usage-since', 'load-usage'] },
+      'peers-view': { n: 1, ids: ['browse-peers'] },
+      'policy-explain-view': { n: 4, ids: ['explain-tool', 'explain-path', 'explain-op', 'run-explain'] },
+      'cors-view': { n: 3, ids: ['list-cors', 'cors-origin', 'admit-cors'] },
+      'whoami-view': { n: 1, ids: ['whoami-btn'] },
+      'bridges-view': { n: 2, ids: ['list-bridges', 'list-bans'] },
+      'agents-view': { n: 2, ids: ['agents-status', 'list-agents'] },
+    },
+    diag: {
+      'watch-stream': { n: 2, ids: ['watch', 'stop'] },
+      'owner-events': { n: 2, ids: ['watch-events', 'stop-events'] },
+      'audit-log': { n: 3, ids: ['audit-action', 'audit-limit', 'audit-query'] },
+      digest: { n: 1, ids: ['digest-btn'] },
+      commands: { n: 1, ids: ['list-commands'] },
+      'raw-log': { n: 1, ids: ['raw-toggle'] },
+    },
+  };
+  // Drawn only once a multi-daemon registry answers, before this slice too.
+  const OLD_HIDDEN = new Set(['daemons-refresh-sessions', 'daemons-refresh-gpus']);
+  // The PR's mapping table, held here so the table cannot drift from the page.
+  const CARD_ROW: Record<string, string> = {
+    rewind: 'rewind', 'session-turns': 'rewind',
+    'fork-session': 'fork',
+    'ws-files': 'files',
+    'share-create': 'share', 'share-manage': 'share', 'whoami-view': 'share',
+    'usage-view': 'usage', 'session-stats': 'usage',
+    'prompt-queue': 'queue', 'mid-turn': 'queue',
+    search: 'search',
+    'perm-rules': 'perms', 'perm-decisions': 'perms', 'perm-overlays': 'perms',
+    'ws-mcp': 'mcp', 'session-resources': 'mcp',
+    'ws-tools': 'tools',
+    'ws-trust': 'trust', 'policy-explain-view': 'trust',
+    'ws-context': 'memory', 'ws-inventory': 'memory',
+    daemons: 'daemons', 'ws-target': 'daemons', 'peers-view': 'daemons', 'llama-swap': 'daemons',
+    'session-tree': 'sessions', rename: 'sessions',
+    runs: 'runs', workflows: 'runs', reviews: 'runs', 'agents-view': 'runs',
+    'bridges-view': 'bridges',
+    'ws-diagnostics': 'diag', 'watch-stream': 'diag', 'owner-events': 'diag', 'audit-log': 'diag', commands: 'diag', 'raw-log': 'diag',
+    'notif-toggle': 'notify', 'push-prefs': 'notify', snooze: 'notify', digest: 'notify',
+    'ui-prefs': 'zone',
+    'token-mgmt': 'devices', 'cors-view': 'devices',
+  };
+  // The phone's own settings slice 1 put on its interim More screen.
+  const PHONE_IDS = ['dictate-lang', 'dictate-autosend', 'idle-suggest-toggle'];
+
+  // Every control in each card on one panel screen, as P166 counts them: the
+  // card's id, how many controls it holds, the ones a handler names (by id,
+  // or a radio by name=value), and which of those the browser would draw.
+  const PANEL_CONTROLS = String.raw`((key) => {
+    const sel = 'button,a[href],input,select,textarea,[tabindex]';
+    return Array.from(document.querySelectorAll('#panel-' + key + ' .ops-card')).map((card) => {
+      const all = Array.from(card.querySelectorAll(sel));
+      const named = (e) => e.id || (e.name ? e.name + '=' + e.value : '');
+      return {
+        card: card.id,
+        n: all.length,
+        ids: all.map(named).filter((x) => x),
+        shown: all.filter((e) => e.checkVisibility()).map(named).filter((x) => x),
+      };
+    });
+  })`;
+  type PanelCard = { card: string; n: number; ids: string[]; shown: string[] };
+
+  PAGE_SCENARIOS.push({
+    name: 'P164 More is drawn as four groups of 48px rows with a value column and a chevron, at 390 and 1280',
+    waitView: false,
+    run: async ({ page }) => {
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [390, 844],
+        [1280, 810],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await openPanel(page, 'chat');
+        await page.click('#h1-more');
+        // The boot read of the permission rules is the one value a fresh page
+        // already holds a number for.
+        await page.waitForFunction(`permRules !== null`);
+        await page.click('#more-back');
+        await page.click('#h1-more');
+        const r = (await page.evaluate(String.raw`(() => {
+          const scr = document.getElementById('more-screen');
+          const head = scr.querySelector('.scr-head');
+          const ttl = document.getElementById('more-title').getBoundingClientRect();
+          const back = document.getElementById('more-back').getBoundingClientRect();
+          const body = document.getElementById('more-body');
+          return {
+            vw: window.innerWidth,
+            headH: Math.round(head.getBoundingClientRect().height),
+            back: [Math.round(back.width), Math.round(back.height)],
+            title: document.getElementById('more-title').textContent,
+            titleMid: Math.round(ttl.left + ttl.width / 2),
+            overflow: body.scrollWidth - body.clientWidth,
+            docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+            groups: Array.from(scr.querySelectorAll('.mgrp')).map((g) => {
+              const head = g.querySelector('.grp');
+              const cs = getComputedStyle(head);
+              return {
+                head: head.textContent,
+                size: cs.fontSize,
+                upper: cs.textTransform,
+                weight: cs.fontWeight,
+                color: cs.color,
+                rows: Array.from(g.querySelectorAll('.row')).map((row) => {
+                  const b = row.getBoundingClientRect();
+                  const chev = row.querySelector('svg.chev');
+                  const cb = chev ? chev.getBoundingClientRect() : null;
+                  const val = row.querySelector('.val');
+                  return {
+                    key: row.dataset.panel,
+                    label: row.querySelector('.lbl').textContent,
+                    value: val ? val.textContent : null,
+                    valSize: val ? getComputedStyle(val).fontSize : '',
+                    h: Math.round(b.height),
+                    w: Math.round(b.width),
+                    chevRight: cb ? Math.round(b.right - cb.right) : -1,
+                  };
+                }),
+              };
+            }),
+          };
+        })()`)) as {
+          vw: number;
+          headH: number;
+          back: number[];
+          title: string;
+          titleMid: number;
+          overflow: number;
+          docOverflow: number;
+          groups: {
+            head: string;
+            size: string;
+            upper: string;
+            weight: string;
+            color: string;
+            rows: { key: string; label: string; value: string | null; valSize: string; h: number; w: number; chevRight: number }[];
+          }[];
+        };
+        const at = `${w}x${h}`;
+        expect(r.headH === 56 && r.back[0] === 44 && r.back[1] === 44, `the head is ${r.headH}px with a ${r.back.join('x')} back at ${at}, not 56 with 44x44`);
+        expect(r.title === 'More' && Math.abs(r.titleMid - r.vw / 2) <= 2, `the title ${JSON.stringify(r.title)} is not centred at ${at} (${r.titleMid} of ${r.vw})`);
+        expect(r.overflow <= 0 && r.docOverflow <= 0, `More scrolls sideways at ${at} (${r.overflow}/${r.docOverflow})`);
+        expect(r.groups.length === 4, `${r.groups.length} groups at ${at}, the drawing has 4`);
+        r.groups.forEach((g, i) => {
+          const want = MORE_GROUPS[i]!;
+          expect(g.head.startsWith(want.head), `group ${i + 1} is headed ${JSON.stringify(g.head)} at ${at}, not ${want.head}`);
+          expect(
+            g.size === '12px' && g.upper === 'uppercase' && g.weight === '600' && g.color === 'rgb(139, 148, 158)',
+            `the ${want.head} head is ${g.size} ${g.upper} ${g.weight} ${g.color} at ${at}, not 12px uppercase 600 muted`,
+          );
+          expect(
+            JSON.stringify(g.rows.map((x) => [x.key, x.label])) === JSON.stringify(want.rows),
+            `the ${want.head} rows are ${JSON.stringify(g.rows.map((x) => x.label))} at ${at}`,
+          );
+          for (const row of g.rows) {
+            expect(row.h === 48 && row.w === r.vw, `${row.label} is ${row.w}x${row.h} at ${at}, not ${r.vw}x48`);
+            expect(row.value !== null && row.valSize === '13px', `${row.label} has no 13px value column at ${at}`);
+            expect(row.chevRight >= 15 && row.chevRight <= 17, `${row.label}'s chevron is ${row.chevRight}px from the right edge at ${at}, not 16`);
+          }
+        });
+        const value = (key: string) => r.groups.flatMap((g) => g.rows).find((x) => x.key === key)!.value;
+        // Live where the page holds the fact, nothing where it does not.
+        expect(value('perms') === '4', `Permission rules reads ${JSON.stringify(value('perms'))}, not the stub's 4 rules`);
+        expect(value('dictation') === 'auto, auto-send off', `Dictation reads ${JSON.stringify(value('dictation'))}`);
+        expect(value('diag') === 'ok', `Diagnostics reads ${JSON.stringify(value('diag'))} while the gateway answers`);
+        for (const key of ['fork', 'usage', 'queue', 'search', 'sessions', 'bridges', 'devices', 'install']) {
+          expect(value(key) === '', `${key} shows ${JSON.stringify(value(key))} with no fact behind it`);
+        }
+        await page.click('#more-back');
+        lines.push(`${at}: 56px head, ${MORE_ROWS.length} rows of 48 in 4 groups, 12px uppercase heads, chevron 16px in`);
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return lines.join('; ') + '; Permission rules 4, Dictation "auto, auto-send off", Diagnostics ok, the rest blank until the page knows';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P165 each More row opens its panel screen, titled with its name and opening with its sentence, and back, Escape and ⌘K come out of it',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.click('#h1-more');
+      for (const [key, label] of MORE_ROWS) {
+        await page.click(`#more-screen .row[data-panel="${key}"]`);
+        const r = (await page.evaluate(String.raw`(() => {
+          const shown = Array.from(document.querySelectorAll('#panel-body > .panel')).filter((p) => !p.hidden);
+          const head = document.querySelector('#panel-screen .scr-head');
+          const lede = shown[0] ? shown[0].querySelector(':scope > .lede') : null;
+          return {
+            screen: document.getElementById('panel-screen').getClientRects().length > 0,
+            shown: shown.map((p) => p.dataset.panel),
+            title: document.getElementById('panel-title').textContent,
+            headH: Math.round(head.getBoundingClientRect().height),
+            lede: lede ? lede.textContent.trim() : '',
+            ledeOn: !!lede && lede.getClientRects().length > 0,
+            scrolls: getComputedStyle(document.getElementById('panel-body')).overflowY,
+            focus: document.activeElement && document.activeElement.id,
+          };
+        })()`)) as { screen: boolean; shown: string[]; title: string; headH: number; lede: string; ledeOn: boolean; scrolls: string; focus: string };
+        expect(r.screen && r.shown.length === 1 && r.shown[0] === key, `${label} opened ${JSON.stringify(r.shown)}, not its own screen alone`);
+        expect(r.title === label && r.headH === 56, `${label}'s screen is titled ${JSON.stringify(r.title)} on a ${r.headH}px head`);
+        expect(
+          r.ledeOn && r.lede.length > 20 && r.lede.endsWith('.') && !/\.\s+\S/.test(r.lede),
+          `${label}'s screen does not open with one sentence (${JSON.stringify(r.lede)})`,
+        );
+        expect(r.scrolls === 'auto', `${label}'s screen does not scroll (${r.scrolls})`);
+        expect(r.focus === 'panel-back', `${label} put focus on ${r.focus}, not its way back`);
+        await page.click('#panel-back');
+        const back = (await page.evaluate(String.raw`({
+          panel: document.getElementById('panel-screen').hidden,
+          more: document.getElementById('more-screen').getClientRects().length > 0,
+          focus: document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.panel : null,
+        })`)) as { panel: boolean; more: boolean; focus: string | null };
+        expect(back.panel && back.more && back.focus === key, `back from ${label} did not land on More at its row (${JSON.stringify(back)})`);
+      }
+      // Escape is back too, a level at a time: the panel to More, More to
+      // the chat, focus handed to what opened each.
+      await page.click('#more-screen .row[data-panel="diag"]');
+      await page.keyboard.press('Escape');
+      const esc1 = (await page.evaluate(`[document.getElementById('panel-screen').hidden, !document.getElementById('more-screen').hidden, document.activeElement.dataset.panel]`)) as [boolean, boolean, string];
+      expect(esc1[0] && esc1[1] && esc1[2] === 'diag', `Escape on a panel screen did not return to More at its row (${JSON.stringify(esc1)})`);
+      await page.keyboard.press('Escape');
+      const esc2 = (await page.evaluate(`[document.getElementById('more-screen').hidden, document.activeElement.id]`)) as [boolean, string];
+      expect(esc2[0] && esc2[1] === 'h1-more', `Escape on More did not return to the chat at ≡ (${JSON.stringify(esc2)})`);
+      // ⌘K over a panel screen puts the list on top and shuts the screen
+      // and More under it, as it does over More (P154).
+      await openPanel(page, 'search');
+      await page.keyboard.press('Control+k');
+      const k = (await page.evaluate(String.raw`({
+        list: !document.getElementById('list-screen').hidden,
+        panel: !document.getElementById('panel-screen').hidden,
+        more: !document.getElementById('more-screen').hidden,
+        saved: localStorage.getItem('qwen-rc:ui:panel'),
+      })`)) as { list: boolean; panel: boolean; more: boolean; saved: string | null };
+      expect(k.list && !k.panel && !k.more && k.saved === null, `Ctrl-K over a panel screen left ${JSON.stringify(k)}`);
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `${MORE_ROWS.length} rows each opened their own screen alone, titled with the row's name over a 56px head, one sentence first, focus on back; back and Escape land on the row, Escape again on ≡; Ctrl-K over a screen shut it and More under the list`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P166 every control the three old panes held is on a panel screen two taps from the chat, card for card, and the chat has no tab bar, pane or pin',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['workspace_file_read'] },
+    run: async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      // The loaders that fill the permission cards at boot have landed, so
+      // their controls are counted as the old panes' were.
+      await page.waitForFunction(String.raw`permRules !== null &&
+        !document.getElementById('perm-rules-body').textContent.includes('loading') &&
+        !!document.querySelector('#perm-decisions-body button') &&
+        !!document.querySelector('#perm-overlays-body button')`);
+      const chat = (await page.evaluate(String.raw`({
+        tabs: document.querySelectorAll('#tab-bar, .tab-bar, .tab[data-tab], .tab-pane, #pane-head').length,
+        pins: document.querySelectorAll('.pin-cb, #pin-area').length,
+        panes: ['pane-ops', 'pane-settings', 'pane-diag'].filter((id) => document.getElementById(id)).length,
+        details: document.querySelectorAll('details.ops-collapse, #panel-screen details, #panel-screen summary').length,
+        helps: document.querySelectorAll('#panel-screen .help-btn, #panel-screen .help-text').length,
+      })`)) as { tabs: number; pins: number; panes: number; details: number; helps: number };
+      expect(
+        chat.tabs === 0 && chat.pins === 0 && chat.panes === 0,
+        `the tab bar, a pane or a pin is still on the page (${JSON.stringify(chat)})`,
+      );
+      expect(chat.details === 0 && chat.helps === 0, `a panel still folds or hides its help (${JSON.stringify(chat)})`);
+
+      const found = new Map<string, { panel: string; card: PanelCard }>();
+      const perPanel: string[] = [];
+      let total = 0;
+      for (const [key] of MORE_ROWS) {
+        // Two taps from the chat: ≡, then the row.
+        await openPanel(page, 'chat');
+        let taps = 0;
+        await page.click('#h1-more');
+        taps++;
+        await page.click(`#more-screen .row[data-panel="${key}"]`);
+        taps++;
+        expect(taps === 2 && (await page.isVisible(`#panel-${key}`)), `${key} took more than two taps`);
+        const cards = (await page.evaluate(`${PANEL_CONTROLS}(${JSON.stringify(key)})`)) as PanelCard[];
+        let n = 0;
+        for (const c of cards) {
+          found.set(c.card, { panel: key, card: c });
+          n += c.n;
+        }
+        total += n;
+        perPanel.push(`${key} ${n}`);
+      }
+      const lost: string[] = [];
+      const counts: string[] = [];
+      for (const [pane, cards] of Object.entries(OLD_PANES)) {
+        let before = 0;
+        let after = 0;
+        for (const [card, old] of Object.entries(cards)) {
+          before += old.n;
+          const now = found.get(card);
+          if (!now) {
+            lost.push(`#${card} is on no panel screen`);
+            continue;
+          }
+          after += now.card.n;
+          if (now.panel !== CARD_ROW[card]) lost.push(`#${card} is under ${now.panel}, not ${CARD_ROW[card]}`);
+          if (now.card.n < old.n) lost.push(`#${card} holds ${now.card.n} controls, it held ${old.n}`);
+          for (const id of old.ids) {
+            if (!now.card.ids.includes(id)) lost.push(`${id} (#${card}) is gone`);
+            else if (!OLD_HIDDEN.has(id) && !now.card.shown.includes(id)) lost.push(`${id} (#${card}) is not drawn when its screen opens`);
+          }
+        }
+        counts.push(`${pane} ${before} -> ${after}`);
+      }
+      const phone = found.get('dictation-prefs')?.card.ids.concat(found.get('idle-suggest')?.card.ids ?? []) ?? [];
+      for (const id of PHONE_IDS) {
+        if (!phone.includes(id)) lost.push(`${id} is not on the Dictation screen`);
+      }
+      expect(lost.length === 0, `controls lost: ${lost.slice(0, 8).join('; ')}`);
+      await openPanel(page, 'chat');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `card for card, old -> new: ${counts.join(', ')}; every named control drawn two taps from the chat; ${PHONE_IDS.length} This phone settings on Dictation; ${total} controls across the ${MORE_ROWS.length} screens (${perPanel.join(', ')}); no tab bar, pane, pin, fold or ?`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P167 More and every panel screen fit 390 and 360 with no sideways overflow, gated cards shown',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['workspace_file_read'] },
+    run: async ({ page }) => {
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [390, 844],
+        [360, 780],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await openPanel(page, 'chat');
+        await page.click('#h1-more');
+        const wide: string[] = [];
+        const more = (await page.evaluate(String.raw`[document.getElementById('more-body').scrollWidth - document.getElementById('more-body').clientWidth, document.documentElement.scrollWidth - window.innerWidth]`)) as number[];
+        if (more[0]! > 0 || more[1]! > 0) wide.push(`More ${more.join('/')}`);
+        for (const [key] of MORE_ROWS) {
+          await openPanel(page, key);
+          // A card the daemon gates is shown for the reading, as P126 reads it.
+          const r = (await page.evaluate(String.raw`(() => {
+            const cards = Array.from(document.querySelectorAll('#panel-${key} .ops-card'));
+            const gated = cards.filter((c) => c.hidden);
+            gated.forEach((c) => { c.hidden = false; });
+            const body = document.getElementById('panel-body');
+            const vw = window.innerWidth;
+            const out = Array.from(document.querySelectorAll('#panel-screen *'))
+              .filter((e) => e.checkVisibility())
+              .filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && (b.right > vw + 0.5 || b.left < -0.5); })
+              .map((e) => e.tagName.toLowerCase() + (e.id ? '#' + e.id : ''));
+            const res = { body: body.scrollWidth - body.clientWidth, doc: document.documentElement.scrollWidth - vw, out: out.slice(0, 4) };
+            gated.forEach((c) => { c.hidden = true; });
+            return res;
+          })()`)) as { body: number; doc: number; out: string[] };
+          if (r.body > 0 || r.doc > 0 || r.out.length) wide.push(`${key} ${r.body}/${r.doc} ${r.out.join(',')}`);
+        }
+        expect(wide.length === 0, `sideways overflow at ${w}x${h}: ${wide.join('; ')}`);
+        lines.push(`${w}x${h}`);
+      }
+      await openPanel(page, 'chat');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `More and all ${MORE_ROWS.length} panel screens, gated cards shown, fit with nothing past either edge at ${lines.join(' and ')}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P168 the sheet carries the session cost once Usage has read it, More shows it on Usage and cost, and nothing polls for it',
+    run: async ({ page, viewer }) => {
+      const sid = viewer.sessionId;
+      let rows: Record<string, unknown>[] = [];
+      let asked = 0;
+      await page.route(
+        (u) => u.pathname === '/rc/usage',
+        (route) => {
+          asked++;
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ rows }),
+          });
+        },
+      );
+      const row = (key: string, cents: number) => ({
+        key,
+        displayLabel: key.slice(0, 8),
+        tokensIn: 1000,
+        tokensOut: 400,
+        tokensCached: 0,
+        costMicrocents: cents * 1_000_000,
+        costCents: cents,
+        efficiency: { costCentsPer1kOutputTokens: 1, tokensPerDollar: 1 },
+      });
+      await watch(page, sid);
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.setViewportSize({ width: 390, height: 844 });
+      const sheet = async () => {
+        await openPanel(page, 'chat');
+        await openSheet(page);
+        const r = (await page.evaluate(String.raw`(() => {
+          const c = document.getElementById('footer-cost');
+          const row = c ? c.closest('.sh-row') : null;
+          return {
+            cost: c ? c.textContent : null,
+            rowLabel: row ? row.querySelector('.sh-lbl').textContent : null,
+            shown: !!c && c.getClientRects().length > 0,
+          };
+        })()`)) as { cost: string | null; rowLabel: string | null; shown: boolean };
+        await page.click('#h1-status');
+        return r;
+      };
+      const moreValue = async () => {
+        await openPanel(page, 'chat');
+        await page.click('#h1-more');
+        const v = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="usage"] .val').textContent`)) as string;
+        await page.click('#more-back');
+        return v;
+      };
+      // A sentinel in the output, so each read is waited for and not only
+      // the first.
+      const load = async (group: string) => {
+        await openPanel(page, 'usage');
+        await page.selectOption('#usage-group', group);
+        await page.evaluate(`document.getElementById('usage-out').textContent = 'p168 waiting'`);
+        await page.click('#load-usage');
+        await page.waitForFunction(String.raw`(() => {
+          const t = document.getElementById('usage-out').textContent;
+          return !t.includes('p168 waiting') && !t.includes('loading');
+        })()`);
+      };
+
+      const fresh = await sheet();
+      expect(fresh.cost === null, `the sheet showed a cost before Usage was read (${JSON.stringify(fresh)})`);
+      expect((await moreValue()) === '', 'More showed a cost before Usage was read');
+
+      rows = [row(sid, 42), row('99999999-0000-0000-0000-000000000000', 7)];
+      await load('session');
+      const served = await sheet();
+      expect(
+        served.cost === '$0.42' && served.rowLabel === 'Context' && served.shown,
+        `the sheet's context line does not carry the session's cost (${JSON.stringify(served)})`,
+      );
+      expect((await moreValue()) === '$0.42', 'More does not show the session cost on Usage and cost');
+
+      // A read grouped by model has no session keys, so it says nothing
+      // about this conversation and leaves the last answer standing.
+      rows = [row('qwen3-coder', 99)];
+      await load('model');
+      expect((await sheet()).cost === '$0.42', 'a by-model read changed the session cost');
+
+      // A by-session read the conversation is absent from takes it away.
+      rows = [row('99999999-0000-0000-0000-000000000000', 7)];
+      await load('session');
+      expect((await sheet()).cost === null, 'a read without this conversation left its old cost on the sheet');
+
+      const presses = asked;
+      await page.waitForTimeout(2500);
+      expect(asked === presses && presses === 3, `/rc/usage was asked ${asked} times for 3 presses, so something polls it`);
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return "no cost before Usage was read; $0.42 on the sheet's Context line and on More's Usage and cost once it was; a by-model read left it, a by-session read without the conversation took it away; 3 reads for 3 presses";
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P169 Install as app reads the browser, the prompt the browser offered, and standalone, each as it is',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const read = () =>
+        page.evaluate(String.raw`({
+          state: document.getElementById('install-state').textContent,
+          how: document.getElementById('install-how').getClientRects().length > 0
+            ? Array.from(document.querySelectorAll('#install-how p')).map((p) => p.textContent.trim())
+            : null,
+          button: document.getElementById('install-app').getClientRects().length > 0,
+        })`) as Promise<{ state: string; how: string[] | null; button: boolean }>;
+      const rowValue = async () => {
+        await openPanel(page, 'chat');
+        await page.click('#h1-more');
+        const v = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="install"] .val').textContent`)) as string;
+        await page.click('#more-back');
+        return v;
+      };
+
+      // In the browser, with nothing offered: the two lines, no button.
+      await openPanel(page, 'install');
+      const plain = await read();
+      expect(plain.state.startsWith('Not installed'), `the browser state reads ${JSON.stringify(plain.state)}`);
+      expect(
+        !!plain.how && plain.how.length === 2 && /Share.*Add to Home Screen/.test(plain.how[0]!) && /menu.*Install app/.test(plain.how[1]!),
+        `the iOS and Android lines are not both on show (${JSON.stringify(plain.how)})`,
+      );
+      expect(!plain.button, 'an install button showed with no prompt to trigger');
+
+      // The browser offers its prompt: the button appears and triggers it once.
+      await page.evaluate(String.raw`(() => {
+        window.__p169 = 0;
+        const e = new Event('beforeinstallprompt');
+        e.prompt = () => { window.__p169++; return Promise.resolve(); };
+        window.dispatchEvent(e);
+      })()`);
+      const offered = await read();
+      expect(offered.button && !!offered.how, `the offered prompt did not put a button beside the lines (${JSON.stringify(offered)})`);
+      await page.click('#install-app');
+      await page.waitForFunction(`document.getElementById('install-app').hidden`);
+      const prompted = (await page.evaluate(`window.__p169`)) as number;
+      expect(prompted === 1, `the button triggered the browser's prompt ${prompted} times`);
+      expect((await rowValue()) === '', 'More said installed in the browser');
+
+      // Standalone, as the home-screen app reports it.
+      await page.evaluate(String.raw`(() => {
+        const real = window.matchMedia.bind(window);
+        window.matchMedia = (q) => q.includes('display-mode: standalone')
+          ? { matches: true, media: q, addEventListener() {}, removeEventListener() {} }
+          : real(q);
+        const e = new Event('beforeinstallprompt');
+        e.prompt = () => Promise.resolve();
+        window.dispatchEvent(e);
+      })()`);
+      await openPanel(page, 'install');
+      const app = await read();
+      expect(app.state.startsWith('Installed'), `standalone reads ${JSON.stringify(app.state)}`);
+      expect(app.how === null && !app.button, `standalone still offers the steps or the button (${JSON.stringify(app)})`);
+      expect((await rowValue()) === 'installed', 'More does not say installed when standalone');
+      await page.setViewportSize({ width: 1280, height: 720 });
+      return `browser: ${JSON.stringify(plain.state)} with the iOS and Android lines and no button; offered: a button that fired the prompt once and went; standalone: ${JSON.stringify(app.state)}, no steps, no button, More reads installed`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P170 the More rows are reached by Tab in reading order, Enter opens one onto its way back, and Escape walks back to ≡',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 720 });
+      const where = () =>
+        page.evaluate(String.raw`(() => {
+          const a = document.activeElement;
+          if (!a) return '';
+          if (a.dataset && a.dataset.panel && a.closest('#more-screen')) return 'row:' + a.dataset.panel;
+          return a.id || a.tagName.toLowerCase();
+        })()`) as Promise<string>;
+      await page.focus('#h1-more');
+      await page.keyboard.press('Enter');
+      const walk = [await where()];
+      for (let i = 1; i < MORE_ROWS.length; i++) {
+        await page.keyboard.press('Tab');
+        walk.push(await where());
+      }
+      const want = MORE_ROWS.map(([k]) => 'row:' + k);
+      expect(JSON.stringify(walk) === JSON.stringify(want), `Tab walked ${JSON.stringify(walk)}`);
+      await page.keyboard.press('Shift+Tab');
+      const up = await where();
+      expect(up === want[want.length - 2], `Shift+Tab went to ${up}`);
+      // Enter on Trust and policy: its screen, focus on its way back, and the
+      // next Tab is inside it.
+      await page.focus('#more-screen .row[data-panel="trust"]');
+      await page.keyboard.press('Enter');
+      const opened = await where();
+      await page.keyboard.press('Tab');
+      const inside = (await page.evaluate(`!!document.activeElement.closest('#panel-trust')`)) as boolean;
+      expect(opened === 'panel-back' && inside, `Enter opened onto ${opened}, and Tab ${inside ? 'stayed' : 'left'} the screen`);
+      await page.keyboard.press('Escape');
+      const atRow = await where();
+      await page.keyboard.press('Escape');
+      const atBar = await where();
+      expect(atRow === 'row:trust' && atBar === 'h1-more', `Escape walked to ${atRow} then ${atBar}`);
+      return `Enter on ≡ landed on the first row; Tab walked all ${MORE_ROWS.length} rows in reading order and Shift+Tab back; Enter on Trust and policy opened onto its back button with the next Tab inside; Escape went to the row, then to ≡`;
     },
   });
 }
