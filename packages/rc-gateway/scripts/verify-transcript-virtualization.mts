@@ -16629,7 +16629,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P184 nothing starts a conversation until a folder is chosen: New conversation, back and Escape send nothing, each Start here sends its own folder once, and the folder started in becomes the list’s filter',
+    name: 'P184 nothing starts a conversation until a folder is chosen: New conversation, back and Escape send nothing, each Start here sends its own folder once, and the list’s filter stays on All folders but moves off another single folder to the folder started in',
     waitView: false,
     run: async ({ page, viewer }) => {
       const t = plantTwo('p184', 'a1840000');
@@ -16641,7 +16641,11 @@ PAGE_SCENARIOS.push({
       });
       // The current folder is refused and the recent one created, so both
       // answers are seen; the created one names the folder it was sent, as
-      // the daemon does, and is the stub's own conversation so it streams.
+      // the daemon does. The first is the stub's own conversation and the
+      // second another id (the stub streams any), so each create is a change
+      // of conversation and shuts the screens.
+      const SECOND = 'a1840000-0000-4000-8000-0000000000c2';
+      const made: string[] = [viewer.sessionId, SECOND];
       const isCreate = (u: URL) => u.pathname === '/session';
       await page.route(isCreate, async (route) => {
         if (route.request().method() !== 'POST') return route.continue();
@@ -16652,7 +16656,7 @@ PAGE_SCENARIOS.push({
         return route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ sessionId: viewer.sessionId, workspaceCwd: cwd, attached: false }),
+          body: JSON.stringify({ sessionId: made.shift() ?? SECOND, workspaceCwd: cwd, attached: false }),
         });
       });
       try {
@@ -16704,36 +16708,56 @@ PAGE_SCENARIOS.push({
           JSON.stringify(posts) === JSON.stringify([t.a.folder, t.b.folder]),
           `the recent folder's Start here, tapped twice, did not send that folder once (${JSON.stringify(posts)})`,
         );
-        const after = (await page.evaluate(String.raw`({
-          saved: localStorage.getItem('qwen-rc:ui:list-folder'),
-          recent: JSON.parse(localStorage.getItem('qwen-rc-workspaces') || '[]'),
-        })`)) as { saved: string | null; recent: string[] };
+        type After = { saved: string | null; recent: string[]; line: string; dirs: string[]; counts: Record<string, string> };
+        const afterCreate = async () => {
+          await openList(page);
+          await page.waitForFunction(`pastConvos.length === 4`, null, { timeout: 5_000 });
+          await page.click('#list-folder');
+          const got = (await page.evaluate(String.raw`({
+            saved: localStorage.getItem('qwen-rc:ui:list-folder'),
+            recent: JSON.parse(localStorage.getItem('qwen-rc-workspaces') || '[]'),
+            line: document.getElementById('list-folder').title,
+            dirs: Array.from(document.querySelectorAll('#past-list .s .dir')).map((d) => d.title),
+            counts: Object.fromEntries(Array.from(document.querySelectorAll('#list-folders [role="menuitemradio"]')).map((b) => [b.dataset.folder, b.querySelector('.n').textContent])),
+          })`)) as After;
+          await page.keyboard.press('Escape');
+          return got;
+        };
+        // From All folders: the filter stays there, since All folders already
+        // shows the new conversation; the folder is first in Recent and in
+        // the menu with its count.
+        const fromAll = await afterCreate();
         expect(
-          after.saved === JSON.stringify(t.b.folder) && after.recent[0] === t.b.folder,
-          `the folder started in is not the list's filter and first in Recent (${JSON.stringify(after)})`,
+          fromAll.saved === null && fromAll.line === 'All folders' && fromAll.dirs.length === 4 && fromAll.recent[0] === t.b.folder && fromAll.counts[t.b.folder] === '2',
+          `a create from All folders moved the filter, or the folder is not first in Recent and in the menu (${JSON.stringify(fromAll)})`,
         );
-        await openList(page);
-        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 5_000 });
-        const shown = (await page.evaluate(String.raw`({
-          line: document.getElementById('list-folder').title,
-          dirs: Array.from(document.querySelectorAll('#past-list .s .dir')).map((d) => d.title),
-        })`)) as { line: string; dirs: string[] };
-        expect(
-          shown.line === t.b.folder && shown.dirs.length === 2 && shown.dirs.every((d) => d === t.b.folder),
-          `the list did not come back filtered to the folder started in (${JSON.stringify(shown)})`,
-        );
-        // The folder the browser was on is still in the set the list spans.
+
+        // From another single folder: the filter moves to the folder started
+        // in, which that filter would otherwise hide.
         await page.click('#list-folder');
-        await page.click('#list-folders [role="menuitemradio"][data-folder=""]');
-        const everyRow = (await page.evaluate(`document.querySelectorAll('#past-list .srow').length`)) as number;
-        expect(everyRow === 4, `All folders after the create shows ${everyRow} rows, not both folders' 4`);
-        expect(posts.length === 2, `the walk sent ${posts.length} creates in all, not 2`);
+        await page.click(`#list-folders [role="menuitemradio"][data-folder="${t.a.folder}"]`);
+        const onA = (await page.evaluate(`document.getElementById('list-folder').title`)) as string;
+        expect(onA === t.a.folder, `the filter could not be set to the current folder first (${onA})`);
+        await page.click('#list-new');
+        await page.waitForFunction(`!document.getElementById('new-session').disabled`, null, { timeout: 5_000 });
+        await page.click(`#dir-recent .rrow[data-folder="${t.b.folder}"] .start`);
+        await page.waitForFunction(`watchedSessionId === ${JSON.stringify(SECOND)}`, null, { timeout: 10_000 });
+        await page.waitForFunction(`document.getElementById('list-screen').hidden`, null, { timeout: 5_000 });
+        const fromOne = await afterCreate();
+        expect(
+          fromOne.saved === JSON.stringify(t.b.folder) && fromOne.line === t.b.folder && fromOne.dirs.length === 2 && fromOne.dirs.every((d) => d === t.b.folder),
+          `a create from a filter on another folder did not move the filter to the folder started in (${JSON.stringify(fromOne)})`,
+        );
+        expect(
+          JSON.stringify(posts) === JSON.stringify([t.a.folder, t.b.folder, t.b.folder]),
+          `the walk sent ${JSON.stringify(posts)}, not the typed path once and the recent folder once per Start here`,
+        );
         await closeList(page);
       } finally {
         await page.unroute(isCreate);
         t.cleanup();
       }
-      return 'New conversation opened the folder screen onto its back; back and Escape shut it onto New conversation; none of it, nor a wait with it open, sent a create; the typed path\'s Start here sent its path once (refused, the screen stayed); the recent folder\'s Start here, tapped twice, sent that folder once and both screens shut; the folder started in became the filter and first in Recent, the list reopened on its two rows, and All folders still shows both folders\' four';
+      return 'New conversation opened the folder screen onto its back; back and Escape shut it onto New conversation; none of it, nor a wait with it open, sent a create; the typed path\'s Start here sent its path once (refused, the screen stayed); the recent folder\'s Start here, tapped twice, sent that folder once and both screens shut; from All folders the filter stayed on All folders (4 rows) with the folder first in Recent and in the menu with its count 2; filtered to the current folder, a Start here in the recent one moved the filter to it (its 2 rows)';
     },
   });
 

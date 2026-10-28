@@ -14579,13 +14579,19 @@
             // Record the RESOLVED workspace (not the raw typed/blank input) so
             // "daemon default" runs still land a real absolute path in Recent.
             if (j.workspaceCwd) {
+              // #193: read before the push, which can move the folder shown
+              // off the recent list.
+              const was = shownFolder();
+              const made = normalizeWorkspacePath(j.workspaceCwd);
               pushRecentWorkspace(j.workspaceCwd);
-              // #193: the folder chosen is where the reader is now, so the
-              // list's filter shows it; the push above is what puts it in the
-              // set the list spans. The folder browser is left where it was:
-              // moving it would drop the folder it was on from the list
-              // whenever that folder is not a recent one.
-              setListFolder(normalizeWorkspacePath(j.workspaceCwd));
+              // The push puts the folder in the set the list spans, so All
+              // folders already shows the new conversation and is left as it
+              // is. A list filtered to one other folder would hide it, so the
+              // filter moves to the folder it was started in. The folder
+              // browser is left where it was: moving it would drop the folder
+              // it was on from the list whenever that folder is not a recent
+              // one.
+              if (was && was !== made) setListFolder(made);
             }
             // rc-workspace-scoping (#28): offer the freshly resolved
             // workspace in the target selector (the pool may now hold it).
