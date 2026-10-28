@@ -537,6 +537,44 @@ describe('gateway app', () => {
     expect(((await res.json()) as { code: string }).code).toBe('invalid_query');
   });
 
+  it('403s the non-spawning live-state read for a share token, as it does the plain one (#190)', async () => {
+    // The `spawn=0` form names the same sessions as the plain read, so it
+    // cannot sit at a looser scope. The plain DaemonClient here has no pool,
+    // so a request that reached the handler would answer 501 unpooled: the
+    // owner's 501 shows the mount is the same one, and the share's 403 that
+    // the scope refused it first.
+    const { url, store, pairing } = await boot();
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 'locked-sess',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    const { code } = pairing.mint([OWNER, SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+    for (const q of ['', '&spawn=0']) {
+      const res = await fetch(
+        `${url}/rc/sessions/live-state?workspace=%2Fother${q}`,
+        { headers: { Authorization: `Bearer ${share.token}` } },
+      );
+      expect(res.status).toBe(403);
+    }
+    const owner = await fetch(
+      `${url}/rc/sessions/live-state?workspace=%2Fother&spawn=0`,
+      { headers: { Authorization: `Bearer ${ownerToken}` } },
+    );
+    expect(owner.status).toBe(501);
+    expect(((await owner.json()) as { code: string }).code).toBe(
+      'live_state_unpooled',
+    );
+  });
+
   it('createGatewayApp returns a notifier when push stores are supplied', async () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });

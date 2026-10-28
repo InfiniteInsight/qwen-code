@@ -47,6 +47,21 @@ import { WorkspacePoolFullError } from '../daemonPool.js';
  * envelope is the daemon answering a question about a workspace and relays as
  * itself.
  *
+ * WHY `spawn=0` EXISTS (#190)
+ *
+ *   GET /rc/sessions/live-state?workspace=<cwd>&spawn=0
+ *
+ * The plain form resolves its workspace through the daemon pool, which starts
+ * a daemon for a workspace that has none. The list reads every recent folder
+ * beside the current one, so asking the plain form about each would start a
+ * daemon per folder on every refresh. `spawn=0` answers from a daemon the
+ * pool already holds and otherwise says nothing is open there:
+ * `{ sessions: [], pooled: false }`. That carries no `v` or `catalogVersion`,
+ * because no daemon issued one and an invented token would compare equal to
+ * nothing a caller holds. A folder with no daemon has no live session this
+ * gateway could reach, so the empty set is a statement, not a guess. Same
+ * scope, same errors, and the same untouched payload when a daemon answers.
+ *
  * WHY THE TRUST REFUSAL IS RELAYED AND NOT FLATTENED
  *
  * The same note says the route stays subject to the per-workspace trust check
@@ -75,6 +90,20 @@ function parseWorkspaceTarget(
     return { ok: true, cwd: undefined };
   }
   if (typeof raw === 'string') return { ok: true, cwd: raw.trim() };
+  return { ok: false };
+}
+
+/**
+ * #190: the optional `spawn` switch. Absent or `1` is the spawning read the
+ * route always was; `0` reads only from a daemon the pool already holds.
+ * Anything else, a repeat included, is a 400 rather than a guess, since
+ * guessing `1` would start the daemon the caller asked not to start.
+ */
+function parseSpawn(
+  raw: unknown,
+): { ok: true; spawn: boolean } | { ok: false } {
+  if (raw === undefined || raw === '1') return { ok: true, spawn: true };
+  if (raw === '0') return { ok: true, spawn: false };
   return { ok: false };
 }
 
@@ -124,7 +153,7 @@ function sendLiveStateError(res: Response, err: unknown): void {
  * polls it.
  */
 export function createSessionLiveStateRoute(
-  daemon: Pick<SessionDaemon, 'getSessionLiveState'>,
+  daemon: Pick<SessionDaemon, 'getSessionLiveState' | 'peekSessionLiveState'>,
 ): RequestHandler {
   return async (req: Request, res: Response) => {
     const target = parseWorkspaceTarget(req.query['workspace']);
@@ -134,8 +163,33 @@ export function createSessionLiveStateRoute(
         .json({ error: 'Invalid workspace target', code: 'invalid_workspace' });
       return;
     }
+    const mode = parseSpawn(req.query['spawn']);
+    if (!mode.ok) {
+      res
+        .status(400)
+        .json({ error: 'spawn must be 0 or 1', code: 'invalid_spawn' });
+      return;
+    }
     try {
-      res.status(200).json(await daemon.getSessionLiveState(target.cwd));
+      if (mode.spawn) {
+        res.status(200).json(await daemon.getSessionLiveState(target.cwd));
+        return;
+      }
+      // A daemon with no pool behind it cannot say which workspaces have a
+      // daemon running, so it does not answer as if none had.
+      if (!daemon.peekSessionLiveState) {
+        res.status(501).json({
+          error: 'This gateway has no daemon pool to read without spawning',
+          code: 'live_state_unpooled',
+        });
+        return;
+      }
+      const snapshot = await daemon.peekSessionLiveState(target.cwd);
+      res
+        .status(200)
+        .json(
+          snapshot === undefined ? { sessions: [], pooled: false } : snapshot,
+        );
     } catch (err) {
       sendLiveStateError(res, err);
     }

@@ -14066,10 +14066,16 @@
       // A caller must therefore render the list exactly as it would without
       // this feature, rather than letting an unreadable snapshot read as
       // "nothing here is open".
-      async function readLiveStates(cwd) {
+      //
+      // #190: `spawn` false reads with spawn=0, which answers only from a
+      // daemon the gateway already runs for that folder and otherwise says
+      // nothing is open there, so asking it about a folder costs no daemon.
+      async function readLiveStates(cwd, spawn) {
         try {
           const res = await fetch(
-            '/rc/sessions/live-state?workspace=' + encodeURIComponent(cwd),
+            '/rc/sessions/live-state?workspace=' +
+              encodeURIComponent(cwd) +
+              (spawn ? '' : '&spawn=0'),
             { headers: { Authorization: 'Bearer ' + token() } },
           );
           if (!res.ok) return null;
@@ -14117,15 +14123,28 @@
         return only.concat(marked);
       }
 
-      // One folder's rows, or null when its listing could not be read.
-      // `live` reads the daemon's snapshot beside it (#89) for the current
-      // folder only: the live-state route resolves its workspace through the
-      // daemon pool, which spawns a daemon for a workspace that has none, so
-      // asking it about every recent folder on every poll would start (and
-      // keep from idling out) a daemon per folder. The listing itself is a
-      // disk scan. So a row from another folder carries no live dot, which
-      // says nothing about whether it is open rather than that it is not.
-      async function readFolderRows(cwd, live) {
+      // #190: whether the gateway honours spawn=0. This page is served from
+      // disk, so it can be newer than the gateway process answering it, and
+      // an older route ignores the switch and starts a daemon per folder
+      // asked about. Without the word, other folders go unread, as before.
+      function liveStateNoSpawn() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.liveStateNoSpawn === true
+        );
+      }
+
+      // One folder's rows, or null when its listing could not be read, with
+      // the daemon's live snapshot read beside it (#89). The current folder
+      // reads it the way it always has, through the daemon pool, which starts
+      // a daemon for a folder that has none (the folder being worked in will
+      // want one). #190: every other folder reads it with spawn=0, which
+      // answers from a daemon already running and starts none, so a row in
+      // another folder gets its live dot, Rename and End session while it is
+      // open without the list starting (and keeping from idling out) a daemon
+      // per recent folder. The listing itself is a disk scan.
+      async function readFolderRows(cwd, spawn) {
         try {
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
@@ -14135,7 +14154,7 @@
             fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
               headers: { Authorization: 'Bearer ' + token() } },
             ),
-            live ? readLiveStates(cwd) : null,
+            spawn || liveStateNoSpawn() ? readLiveStates(cwd, spawn) : null,
           ]);
           if (!res.ok) return null;
           const body = await res.json();

@@ -2473,6 +2473,12 @@ type PageScenario =
          * routes answer 404, which is the case where the page draws no row.
          */
         hostActions?: boolean;
+        /**
+         * #190. Run the gateway on a real daemon pool whose spawned daemons
+         * answer live-state with `liveState(cwd)` (see bootViewer's `pool`),
+         * so a scenario can count what the pool holds.
+         */
+        pool?: { liveState: (cwd: string) => unknown };
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -2673,6 +2679,18 @@ const RIGHT_PANE = 320;
 /** Back from the List screen where it has a way back; the pane has none. */
 async function closeList(page: Page): Promise<void> {
   if (await page.isVisible('#list-back')) await page.click('#list-back');
+}
+
+/**
+ * #190. With SHOTS naming a directory, a scenario saves the state it has just
+ * checked there as `<name>.png`, so a reviewer can look at what was asserted;
+ * unset, nothing is written and the run is unchanged.
+ */
+async function shot(page: Page, name: string): Promise<void> {
+  const dir = process.env['SHOTS'];
+  if (!dir) return;
+  mkdirSync(dir, { recursive: true });
+  await page.screenshot({ path: join(dir, `${name}.png`) });
 }
 
 /**
@@ -14994,6 +15012,7 @@ PAGE_SCENARIOS.push({
         expect(r.color !== r.tokColor, `no model is drawn in the fill's ${r.color}, so it does not read as muted`);
         expect(r.row === 'no model' && r.rowMuted, `the sheet's Model row reads ${JSON.stringify(r.row)} (muted ${r.rowMuted}), not no model, muted`);
         lines.push(`${size.width}: "${r.text}" in ${r.color} (the fill ${r.tokColor}), whole, ending at ${r.right}px`);
+        if (size.width === 390) await shot(page, 'p188-status-no-model-390');
         none = r;
       }
       await page.setViewportSize(PHONE);
@@ -15399,6 +15418,7 @@ PAGE_SCENARIOS.push({
         `the tools read ${open.order}${open.plain ? '' : ' with something not a pill among them'}, not four plain pills Attach file, Dictate, Files, Artifacts`,
       );
       expect(open.under44 === 0, `${open.under44} pills are under 44px`);
+      await shot(page, 'p142-plus-scroller-390');
       expect(open.composerBottom <= 844, `with the tools open the composer bottom is ${open.composerBottom}`);
       expect(open.scrollW > open.clientW, `the pills fit in ${open.clientW}px at 390, so the sideways scroll is not exercised (${open.scrollW})`);
       const moved = (await page.evaluate(
@@ -17037,7 +17057,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P186 a refresh reads at most six folders, all at once, with the live snapshot for the current one only, and the filter, the search, the folder menu and opening the list read nothing',
+    name: 'P186 a refresh reads at most six folders, all at once, each with its live snapshot (spawn=0 for all but the current one), and the filter, the search, the folder menu and opening the list read nothing',
     waitView: false,
     run: async ({ page }) => {
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
@@ -17050,7 +17070,9 @@ PAGE_SCENARIOS.push({
       // so the cap at six reads is the page's and not the store's.
       const recent = Array.from({ length: 7 }, (_, i) => `/home/evan/p186-${i}`);
       const reads: { cwd: string; at: number }[] = [];
-      const live: string[] = [];
+      // #190: every folder's snapshot is read now, the current one by the
+      // read that may start its daemon and the others with spawn=0.
+      const live: { cwd: string; spawn: string | null; at: number }[] = [];
       const archived: string[] = [];
       page.on('request', (r) => {
         const u = new URL(r.url());
@@ -17058,7 +17080,7 @@ PAGE_SCENARIOS.push({
           if (u.searchParams.has('archiveState')) archived.push(u.searchParams.get('cwd') ?? '');
           else reads.push({ cwd: u.searchParams.get('cwd') ?? '', at: Date.now() });
         }
-        if (u.pathname === '/rc/sessions/live-state') live.push(u.searchParams.get('workspace') ?? '');
+        if (u.pathname === '/rc/sessions/live-state') live.push({ cwd: u.searchParams.get('workspace') ?? '', spawn: u.searchParams.get('spawn'), at: Date.now() });
       });
       let firstAnswer = Infinity;
       await page.route(
@@ -17096,12 +17118,34 @@ PAGE_SCENARIOS.push({
         Math.max(...one.map((r) => r.at)) < firstAnswer,
         `the folders were read one after another rather than all at once (last read sent ${Math.max(...one.map((r) => r.at)) - firstAnswer}ms after the first answer)`,
       );
+      const liveRead = (c: string) => live.filter((l) => l.cwd === c);
       expect(
-        JSON.stringify(live) === JSON.stringify([current]),
-        `the live snapshot was read for ${JSON.stringify(live)}, not for the current folder alone`,
+        live.length === 6 && wantRead.every((c) => liveRead(c).length === 1),
+        `the live snapshot was read ${live.length} times (${JSON.stringify(live.map((l) => [l.cwd, l.spawn]))}), not once for each of the six folders`,
+      );
+      expect(
+        liveRead(current)[0]!.spawn === null && wantRead.filter((c) => c !== current).every((c) => liveRead(c)[0]!.spawn === '0'),
+        `the snapshots were not the spawning read for the current folder and spawn=0 for the rest (${JSON.stringify(live.map((l) => [l.cwd, l.spawn]))})`,
+      );
+      expect(
+        Math.max(...live.map((l) => l.at)) < firstAnswer,
+        'the live snapshots were read one after another rather than beside the listings',
       );
       const rows = (await page.evaluate('pastConvos.length')) as number;
       expect(rows === 5, `the five read recent folders' rows are not all listed (${rows})`);
+      // A gateway that does not say it honours spawn=0 would start a daemon
+      // for each folder asked about (the page is served from disk and can be
+      // newer than the process), so without the word only the current
+      // folder's snapshot is read, as before #190.
+      await page.evaluate('caps.remoteControl.liveStateNoSpawn = undefined');
+      live.length = 0;
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const unsaid = live.map((l) => [l.cwd, l.spawn]);
+      await page.evaluate('caps.remoteControl.liveStateNoSpawn = true');
+      expect(
+        JSON.stringify(unsaid) === JSON.stringify([[current, null]]),
+        `with the gateway silent on spawn=0 the snapshots read were ${JSON.stringify(unsaid)}, not the current folder's alone`,
+      );
 
       // The views read from what is kept: opening the list, the folder menu,
       // a pick and All again, a search and putting it away, shutting and
@@ -17133,7 +17177,122 @@ PAGE_SCENARIOS.push({
         `Archived (n) read ${archived.length} archived listings, ${outside.length} of them outside the six folders (${JSON.stringify(outside)})`,
       );
       await closeList(page);
-      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, with the live snapshot for the current folder alone; the five recent folders' rows listed; opening the list, the folder menu, a pick and back, a search and two opens read no folder listing (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
+      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, each beside its live snapshot (the current folder's the spawning read, the five others spawn=0), and the current folder's alone when the gateway does not say it honours spawn=0; the five recent folders' rows listed; opening the list, the folder menu, a pick and back, a search and two opens read no folder listing (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
+    },
+  });
+
+  // #190 (from #193): a row in a folder other than the current one had no
+  // live dot and no Rename, because the only live read started a daemon for
+  // a folder without one. The other folders now read with spawn=0, which a
+  // daemon the gateway already runs answers and a folder with none answers
+  // empty. Run on a real daemon pool (bootViewer's `pool`), each spawned
+  // daemon naming its folder's first planted conversation as open, so what is
+  // counted is the pool's own: what it holds and what it has spawned.
+  const P189_OPEN = (base: string) => ({
+    sessionId: `${base}-4000-8000-000000000001`,
+    clientCount: 1,
+    hasActivePrompt: false,
+    isWaitingForPermission: false,
+    isWaitingForUserQuestion: false,
+    updatedAt: new Date().toISOString(),
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P189 a row in another folder carries the live dot and Rename while a daemon the gateway already runs has it open, a folder with no daemon shows none and gets no daemon, and the pool holds the same daemons after the refresh as before it',
+    waitView: false,
+    stub: {
+      pool: {
+        liveState: (cwd: string) => ({
+          v: 1,
+          catalogVersion: { generation: 'g-p189', revision: 1 },
+          sessions: cwd.endsWith('/p189-alpha')
+            ? [P189_OPEN('a1890000-000a')]
+            : cwd.endsWith('/p189-beta')
+              ? [P189_OPEN('a1890000-000b')]
+              : [],
+        }),
+      },
+    },
+    run: async ({ page, viewer }) => {
+      const pool = viewer.pool!;
+      // Alpha is browsed to (the current folder), beta and gamma are recent.
+      // Beta will have a daemon running before the refresh that is counted,
+      // gamma never does.
+      const a = plantFolder('p189-alpha', ['p189 alpha open', 'p189 alpha past'], 'a1890000-000a');
+      const b = plantFolder('p189-beta', ['p189 beta open', 'p189 beta past'], 'a1890000-000b');
+      const c = plantFolder('p189-gamma', ['p189 gamma past'], 'a1890000-000c');
+      try {
+        await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+        // Held off, as in P186, so the refresh counted below is the only one.
+        await page.evaluate('clearInterval(pastConvosPollId); pastConvosPollId = null;');
+        await spanFolders(page, a.folder, [b.folder, c.folder], 5);
+        // A daemon for beta, started the way the current folder's read starts
+        // one, as working in that folder would have.
+        const seeded = (await page.evaluate(
+          `fetch('/rc/sessions/live-state?workspace=' + encodeURIComponent(${JSON.stringify(b.folder)}), { headers: { Authorization: 'Bearer ' + token() } }).then((r) => r.status)`,
+        )) as number;
+        const before = { held: pool.workspaces().slice().sort(), spawned: pool.spawned.slice() };
+        expect(
+          seeded === 200 && before.held.includes(a.folder) && before.held.includes(b.folder) && !before.held.includes(c.folder),
+          `the pool does not hold alpha and beta and not gamma before the refresh (seed ${seeded}, ${JSON.stringify(before.held)})`,
+        );
+
+        const live: { cwd: string; spawn: string | null }[] = [];
+        page.on('request', (r) => {
+          const u = new URL(r.url());
+          if (u.pathname === '/rc/sessions/live-state') live.push({ cwd: u.searchParams.get('workspace') ?? '', spawn: u.searchParams.get('spawn') });
+        });
+        await page.evaluate('refreshPastConversations(curDirPath)');
+        await page.waitForFunction(`pastConvos.some((s) => s.sessionId === ${JSON.stringify(b.ids[0])} && s.live)`, null, { timeout: 10_000 });
+        const after = { held: pool.workspaces().slice().sort(), spawned: pool.spawned.slice() };
+        expect(
+          JSON.stringify(after) === JSON.stringify(before),
+          `the refresh changed the pool (${JSON.stringify(before)} -> ${JSON.stringify(after)})`,
+        );
+        const reads = (f: string) => live.filter((l) => l.cwd === f).map((l) => l.spawn);
+        expect(
+          JSON.stringify(reads(a.folder)) === '[null]' && JSON.stringify(reads(b.folder)) === '["0"]' && JSON.stringify(reads(c.folder)) === '["0"]',
+          `the refresh's live reads were ${JSON.stringify(live)}, not one each, the spawning one for alpha alone`,
+        );
+
+        await page.setViewportSize(PHONE);
+        await openList(page);
+        type Row = { id: string; title: string; dot: boolean; label: string | null; dir: string | null };
+        const rows = (await page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+          const d = w.querySelector('.s .dot');
+          const dir = w.querySelector('.s .dir');
+          return { id: w.dataset.session, title: (w.querySelector('.tt') || {}).textContent, dot: !!d, label: d ? d.getAttribute('aria-label') : null, dir: dir ? dir.title : null };
+        })`)) as Row[];
+        const dotted = rows.filter((r) => r.dot).map((r) => r.id).sort();
+        expect(
+          rows.length === 5 && JSON.stringify(dotted) === JSON.stringify([a.ids[0], b.ids[0]].sort()),
+          `the dots sit on ${JSON.stringify(rows.filter((r) => r.dot).map((r) => r.title))} of ${rows.length} rows, not on alpha's open one and beta's open one alone`,
+        );
+        expect(
+          rows.filter((r) => r.dot).every((r) => r.label === 'open') && rows.find((r) => r.id === b.ids[0])!.dir === b.folder,
+          `a dot is not named open, or beta's open row is not in beta (${JSON.stringify(rows)})`,
+        );
+        await shot(page, 'p189-list-dots-two-folders-390');
+
+        const menuOf = async (id: string): Promise<string[]> => {
+          await page.click(`#past-list .srow[data-session="${id}"] > .more`);
+          const items = (await page.evaluate(
+            String.raw`Array.from(document.querySelectorAll('#list-menu [role="menuitem"]')).map((b) => b.textContent)`,
+          )) as string[];
+          await page.keyboard.press('Escape');
+          return items;
+        };
+        const openMenu = await menuOf(b.ids[0]!);
+        const pastMenu = await menuOf(b.ids[1]!);
+        const coldMenu = await menuOf(c.ids[0]!);
+        expect(openMenu.includes('Rename'), `beta's open row offers no Rename (${JSON.stringify(openMenu)})`);
+        expect(!pastMenu.includes('Rename') && !coldMenu.includes('Rename'), `a row no daemon has open offers Rename (${JSON.stringify({ pastMenu, coldMenu })})`);
+        await closeList(page);
+        return `the pool held ${JSON.stringify(before.held.map((f) => f.split('/').pop()))} before and after the refresh with ${after.spawned.length} spawns either side, gamma never; the refresh read alpha's snapshot by the spawning read and beta's and gamma's with spawn=0; dots on alpha's and beta's open rows only, beta's open row offering ${JSON.stringify(openMenu)}, its past row and gamma's row no Rename`;
+      } finally {
+        a.cleanup();
+        b.cleanup();
+        c.cleanup();
+      }
     },
   });
 }
@@ -19623,6 +19782,7 @@ async function runPageScenario(
     turnIndexPage: s.stub?.turnIndexPage,
     turnIndexStatusCode: s.stub?.turnIndexStatusCode,
     hostActions: s.stub?.hostActions,
+    pool: s.stub?.pool,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
