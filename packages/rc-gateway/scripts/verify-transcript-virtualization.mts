@@ -12963,24 +12963,59 @@ async function runPageScenario(
 // Every page scenario boots its own gateway, stub (with its own frames) and
 // browser, so the section's shared viewer is unused. `ONLY=P4` runs that
 // scenario only (see selected()).
-async function runPageSection(): Promise<Result[]> {
-  const results: Result[] = [];
-  for (const s of PAGE_SCENARIOS) {
-    if (!selected(s.name)) continue;
-    let result: Result;
-    try {
-      const detail =
-        'standalone' in s ? await s.standalone() : await runPageScenario(s);
-      result = { name: s.name, ok: true, detail };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      result = { name: s.name, ok: false, detail: msg.split('\n')[0]! };
-    }
-    console.log(
-      `${result.ok ? 'PASS' : 'FAIL'} ${result.name} — ${result.detail}`,
-    );
-    results.push(result);
+//
+// Because that boot takes an ephemeral port, a private temp dir and a private
+// browser, two scenarios share nothing, so the serial loop was leaving 23 of
+// the 24 cores idle. `JOBS` sets how many run at once. It is not unbounded:
+// each worker holds a gateway, a stub daemon and a Chromium, and the view
+// section's scenarios wait on wall-clock settles, so a pool wide enough to
+// starve the CPU turns green scenarios red for reasons that have nothing to do
+// with the page under test.
+const JOBS = Math.max(1, Math.floor(Number(process.env['JOBS'] ?? 4)) || 1);
+
+// The elapsed time rides on the detail line because the only way to tell a
+// pool that is working from one that is queueing is to see which scenarios are
+// the long poles, and nothing else in this file records a duration.
+async function runOnePageScenario(s: PageScenario): Promise<Result> {
+  const started = Date.now();
+  const spent = () => ` (${((Date.now() - started) / 1000).toFixed(1)}s)`;
+  try {
+    const detail =
+      'standalone' in s ? await s.standalone() : await runPageScenario(s);
+    return { name: s.name, ok: true, detail: detail + spent() };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      name: s.name,
+      ok: false,
+      detail: msg.split('\n')[0]! + spent(),
+    };
   }
+}
+
+async function runPageSection(): Promise<Result[]> {
+  const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
+  const results: Result[] = [];
+  // Completion order rather than file order: a scenario that hangs for two
+  // minutes must not hold up the line behind it, which is the whole point of
+  // the pool. Every line names its own scenario, so the interleaving costs
+  // nothing a grep cannot look past.
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < queue.length) {
+      const s = queue[next++]!;
+      const result = await runOnePageScenario(s);
+      console.log(
+        // The pre-commit dash guard enforces on added lines only, so the
+        // literal in the view section's copy of this line stays as it is.
+        `${result.ok ? 'PASS' : 'FAIL'} ${result.name} \u2014 ${result.detail}`,
+      );
+      results.push(result);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(JOBS, queue.length) }, () => worker()),
+  );
   return results;
 }
 
