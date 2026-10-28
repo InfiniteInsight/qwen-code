@@ -185,6 +185,10 @@ import {
   gateJsonBody,
   rawAttachmentBody,
 } from './routes/sessionAttachments.js';
+import {
+  installAsyncErrorCapture,
+  jsonErrorBackstop,
+} from './middleware/errorBackstop.js';
 /** #110: the visible queue (pending prompts and mid-turn messages). */
 import {
   createMidTurnMessageEnqueueRoute,
@@ -501,7 +505,15 @@ export interface GatewayApp {
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
+  // #155: Express 4 drops the promise an async handler returns, so a rejection
+  // escaped to the process (and Node 22 exits on it). Forward it to next(err)
+  // instead; jsonErrorBackstop at the end of this function answers it.
+  installAsyncErrorCapture();
   const app = express();
+  // Never render Express's development error page (HTML with a stack trace),
+  // whatever NODE_ENV says. The backstop answers JSON first; this covers the
+  // default handler it hands an already-started response to.
+  app.set('env', 'production');
   // The JSON parser is wrapped rather than mounted bare: an attachment upload
   // carries the file itself as the request body with the file's own media
   // type, and a parser that claimed that body would drain the stream before
@@ -579,16 +591,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   // Actual-request CORS header middleware — runs before auth so browsers
   // receive the CORS headers even on 401/403 responses.
-  app.use((req, res, next) => {
-    if (req.method === 'OPTIONS') {
-      next();
-      return;
-    }
+  const applyActualRequestCors = (
+    req: express.Request,
+    res: express.Response,
+  ): void => {
+    if (req.method === 'OPTIONS') return;
     const cors = corsHeadersForActualRequest(
       req.headers['origin'] as string | undefined,
       corsAllowlist,
     );
     for (const [k, v] of Object.entries(cors.headers)) res.setHeader(k, v);
+  };
+  app.use((req, res, next) => {
+    applyActualRequestCors(req, res);
     next();
   });
   // Process-local activity tracker: feeds the notifier's working-device
@@ -2309,6 +2324,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       createCancelWorkflowRoute(workflowDeps),
     );
   }
+
+  // #155 backstop: LAST, after every route and the CORS middleware. Whatever a
+  // route did not map itself (a rejected await, a body-parser error, a
+  // middleware 4xx) is answered here as JSON with no stack.
+  app.use(jsonErrorBackstop({ applyCors: applyActualRequestCors }));
 
   return {
     app,
