@@ -297,6 +297,72 @@ describe('shared WAL registry', () => {
   // 1), which can sit below the end of the log. Now that every appender shares
   // one handle, a low marker must not drag the anchor backwards: the renumbering
   // would re-anchor below ids already sent and write colliding WAL ids.
+  // The reads matter as much as the write here: four callers compute a new id as
+  // (latestId() ?? 0) + 1, so a handle that answers from a snapshot taken before
+  // another instance started writing the same log does not merely read old, it
+  // aims the next append at an id the WAL already holds.
+  it('an evicted handle reports what the fresh instance appended', () => {
+    const dir = makeTmpDir();
+    const held = getSharedWal(dir, 'evict-read');
+    held.append(makeFrame(1));
+    // The registry dropping this handle is what marks it; a caller can still be
+    // holding it across an open stream.
+    releaseSharedWal(dir, 'evict-read');
+    const fresh = getSharedWal(dir, 'evict-read');
+    fresh.append(makeFrame(2));
+
+    expect(held.latestId()).toBe(2);
+  });
+
+  // replayFrom() decodes its segments from disk on every call, so the EVENTS it
+  // returns are never stale. What can be stale is `_earliest`, which is the only
+  // thing its truncation test reads. A foreign instance that pruned a whole
+  // segment moves that on disk, and a handle that answers from its old value
+  // reports a clean replay across a hole the client can never see.
+  it('a pruned foreign segment makes a stale cursor truncate instead of replaying a gap', () => {
+    const dir = makeTmpDir();
+    const held = getSharedWal(dir, 'evict-prune');
+    held.append(makeFrame(1));
+    releaseSharedWal(dir, 'evict-prune');
+
+    // A foreign writer with a one-frame window: every append rotates and prunes
+    // the segment before it, so by id 3 only id 3 survives on disk.
+    const foreign = new SessionWal({
+      dir,
+      sessionId: 'evict-prune',
+      segmentMaxBytes: 1,
+      maxEvents: 1,
+    });
+    foreign.append(makeFrame(2));
+    foreign.append(makeFrame(3));
+    foreign.close();
+
+    // Disk truth, read through a fresh handle: id 1 and 2 are gone.
+    const truth = getSharedWal(dir, 'evict-prune');
+    expect(truth.earliestId()).toBe(3);
+
+    // The held handle still believes it starts at 1, so a cursor of 1 looks
+    // satisfiable. Resynced it must report truncation, not a silent [3].
+    const replay = held.replayFrom(1);
+    expect(replay.truncated).toBe(true);
+    expect(replay.earliestAvailableId).toBe(3);
+  });
+
+  it('an evicted handle anchors a new id above the foreign write, not on it', () => {
+    const dir = makeTmpDir();
+    const held = getSharedWal(dir, 'evict-anchor');
+    held.append(makeFrame(1));
+    releaseSharedWal(dir, 'evict-anchor');
+    const fresh = getSharedWal(dir, 'evict-anchor');
+    fresh.append(makeFrame(2));
+
+    // This is the arithmetic a marker or a re-anchored epoch actually uses.
+    const nextId = (held.latestId() ?? 0) + 1;
+    expect(nextId).toBe(3);
+    const alreadyWritten = fresh.replayFrom(0).events.map((e) => e.id);
+    expect(alreadyWritten).not.toContain(nextId);
+  });
+
   it('latestId is a high water mark, an out of order marker cannot pull it back', () => {
     const dir = makeTmpDir();
     const wal = getSharedWal(dir, 'high-water');
