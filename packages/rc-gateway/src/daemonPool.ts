@@ -72,6 +72,7 @@ import {
   type DaemonWorkspaceAgentsStatus,
 } from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
+import { isSessionLevelGone } from './daemonHttpError.js';
 
 /**
  * Per-id outcome of `POST /sessions/delete`. Named here because the SDK
@@ -620,6 +621,15 @@ export interface DaemonPoolOptions {
   maxDaemons?: number; // default 3
   idleReapMs?: number; // default 15*60_000
   now?: () => number; // injectable clock (default Date.now)
+  /**
+   * How long the pool waits on a question it asks a daemon for its own
+   * bookkeeping before it stops waiting: the `/health` check after an event
+   * stream drops (#153), and the session checks a create makes before it
+   * refuses a new workspace at the cap (#154). An unanswered question is
+   * never read as an answer: the stream loss stays a stream loss, the session
+   * ids stay counted. Default 5000.
+   */
+  probeTimeoutMs?: number;
   /** Invoked with the affected session ids when a daemon dies
    * (add-mid-turn-recovery). Absent → the sessions are simply dropped
    * (404s, as today); the `daemon_died` audit row is still written. The
@@ -643,10 +653,19 @@ interface Entry {
   dead: boolean;
   /** Captured by `markDead` for the death audit/hook. */
   exit?: DaemonExitInfo & { atMs: number };
+  /** Bumped (see `touch`) by everything that uses the entry or registers a
+   * session on it. `reconcileEntry` compares it across its round trip: an
+   * answer the daemon gave before a use or a registration that landed in
+   * the meantime may already be stale, so it is not applied. */
+  touches: number;
+  /** The in-flight `reconcileEntry` run, so the reaper timer and a create
+   * at the cap share one round of questions instead of stacking them. */
+  reconciling?: Promise<void>;
 }
 
 const DEFAULT_MAX_DAEMONS = 3;
 const DEFAULT_IDLE_REAP_MS = 15 * 60_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 /** Thrown when a session id isn't owned by any known daemon (unrecorded, or
  * its owning daemon was already reaped). Routes map this to a `404
@@ -744,6 +763,7 @@ export class DaemonPool implements SessionDaemon {
   private readonly now: () => number;
   private readonly maxDaemons: number;
   private readonly idleReapMs: number;
+  private readonly probeTimeoutMs: number;
   private readonly reapTimer: ReturnType<typeof setInterval>;
   /** The normalized (see `normalizeCwd`) default workspace cwd — computed
    * once so every `isDefault`/key comparison compares like-for-like. */
@@ -787,8 +807,13 @@ export class DaemonPool implements SessionDaemon {
     this.now = opts.now ?? Date.now;
     this.maxDaemons = opts.maxDaemons ?? DEFAULT_MAX_DAEMONS;
     this.idleReapMs = opts.idleReapMs ?? DEFAULT_IDLE_REAP_MS;
+    this.probeTimeoutMs = opts.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
     this.defaultWorkspaceCwd = this.normalizeCwd(opts.defaultWorkspaceCwd);
-    this.reapTimer = setInterval(() => this.reapIdle(), this.idleReapMs / 3);
+    this.reapTimer = setInterval(() => {
+      // The timer does not wait on the daemon's answers; the next tick, or a
+      // create at the cap, picks up whatever this round settled.
+      this.reapIdle().catch(() => {});
+    }, this.idleReapMs / 3);
     this.reapTimer.unref?.();
   }
 
@@ -806,28 +831,56 @@ export class DaemonPool implements SessionDaemon {
     return !cwd || this.normalizeCwd(cwd) === this.defaultWorkspaceCwd;
   }
 
+  /** Mark `entry` used now. Every `lastUsed` bump goes through here so the
+   * `touches` counter `reconcileEntry` relies on cannot miss one. */
+  private touch(entry: Entry): void {
+    entry.lastUsed = this.now();
+    entry.touches++;
+  }
+
+  /** The live entry's client or the in-flight spawn for `key`, if either. */
+  private lookup(
+    key: string,
+  ): DaemonClient | Promise<DaemonClient> | undefined {
+    const existing = this.byWorkspace.get(key);
+    if (existing) {
+      this.touch(existing);
+      return existing.client;
+    }
+    return this.spawning.get(key);
+  }
+
   /** Reachable daemon for `cwd` (spawn if new). Empty/undefined → default. */
   async getOrSpawn(cwd?: string): Promise<DaemonClient> {
     if (this.isDefault(cwd)) return this.opts.defaultDaemon;
     const key = this.normalizeCwd(cwd!);
-    const existing = this.byWorkspace.get(key);
-    if (existing) {
-      existing.lastUsed = this.now();
-      return existing.client;
-    }
-    const inflight = this.spawning.get(key);
-    if (inflight) return inflight;
+    const known = this.lookup(key);
+    if (known) return known;
 
     // Count LIVE entries and IN-FLIGHT spawns together: a new entry only
     // lands in `byWorkspace` once `spawn()` resolves, so counting
     // `byWorkspace.size` alone lets N concurrent creates for N distinct new
     // cwds all pass the check and all spawn, blowing past `maxDaemons`. At
-    // this point `key` is guaranteed absent from both maps (the `existing`/
-    // `inflight` checks above already returned), so this count never needs
-    // to exclude it.
+    // this point `key` is guaranteed absent from both maps (the `lookup`
+    // above already returned), so this count never needs to exclude it.
     const pooledCount = () => this.byWorkspace.size + this.spawning.size;
     if (pooledCount() >= this.maxDaemons) {
-      this.reapIdle();
+      const checking = this.reapAndReconcile();
+      if (
+        checking !== undefined &&
+        pooledCount() >= this.maxDaemons &&
+        !this.hasIdleEntry()
+      ) {
+        // Every entry still counts a session, and some of those may be ids
+        // the daemon's own reaper closed without anyone hearing (#154). Ask
+        // before refusing, but only for as long as `probeTimeoutMs`: a daemon
+        // that does not answer keeps its ids and the refusal stands.
+        await settleWithin(checking, this.probeTimeoutMs, undefined);
+        // The await let other callers run: one may have spawned this very
+        // key, or filled the slot a reconcile freed. Check both again.
+        const raced = this.lookup(key);
+        if (raced) return raced;
+      }
       if (pooledCount() >= this.maxDaemons) {
         this.evictLruIdle();
       }
@@ -851,6 +904,7 @@ export class DaemonPool implements SessionDaemon {
           lastUsed: this.now(),
           endpoint: s.endpoint,
           dead: false,
+          touches: 0,
         };
         // Identity-guarded exit wiring (see `markDead`'s `expectedEntry`):
         // the callback captures THIS entry so a stale exit of a superseded
@@ -912,19 +966,130 @@ export class DaemonPool implements SessionDaemon {
     this.discardEntry(lruKey, lruEntry);
   }
 
-  /** Reap every non-default entry that is idle (see `isIdle`) and has been
-   * idle longer than `idleReapMs`. Safe to call directly (tests inject a
-   * clock via `now`); also driven from a background timer. */
-  reapIdle(): void {
-    const cutoff = this.now();
+  private hasIdleEntry(): boolean {
     for (const [key, entry] of this.byWorkspace) {
-      if (
-        this.isIdle(key, entry) &&
-        cutoff - entry.lastUsed > this.idleReapMs
-      ) {
+      if (this.isIdle(key, entry)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Reap every non-default entry that is idle (see `isIdle`) and has been
+   * idle longer than `idleReapMs`; that part is synchronous, so a caller that
+   * ignores the returned promise sees it done. An entry past the same cutoff
+   * that still counts sessions is then checked against its daemon (see
+   * `reconcileEntry`), and the returned promise settles once those answers
+   * have been applied. It never rejects. Safe to call directly (tests inject
+   * a clock via `now`); also driven from a background timer.
+   */
+  reapIdle(): Promise<void> {
+    return this.reapAndReconcile() ?? Promise.resolve();
+  }
+
+  /** `reapIdle`'s body. Returns undefined when nothing needed asking, so the
+   * cap path in `getOrSpawn` only yields when there is something to wait
+   * for. */
+  private reapAndReconcile(): Promise<void> | undefined {
+    const cutoff = this.now();
+    const checks: Array<Promise<void>> = [];
+    for (const [key, entry] of this.byWorkspace) {
+      if (cutoff - entry.lastUsed <= this.idleReapMs) continue;
+      if (this.isIdle(key, entry)) {
         this.discardEntry(key, entry);
+      } else if (entry.sessions.size > 0 && !this.pendingCreates.has(key)) {
+        checks.push(this.reconcileEntry(key, entry));
       }
     }
+    return checks.length > 0
+      ? Promise.all(checks).then(
+          () => undefined,
+          () => undefined,
+        )
+      : undefined;
+  }
+
+  /**
+   * Ask the daemon behind `entry` about every session id the pool still
+   * counts for it, and forget the ones it says it does not hold (#154).
+   *
+   * The pool otherwise learns a session ended only from its own
+   * `closeSession` or a relayed `session_closed`/`session_died` frame. The
+   * daemon's reaper closes any session with no SSE subscriber after its idle
+   * TTL (acp-bridge session-control-plane.ts, `startSessionReaper`), and with
+   * no subscriber there is nobody to relay the frame, so without this the
+   * entry counts those ids forever: it is never idle, never reaped, and once
+   * `maxDaemons` entries are in that state every new workspace is refused.
+   *
+   * The question is `GET /session/:id/status` per id, because its 404
+   * `session_not_found` comes from the same in-memory map the reaper deletes
+   * from, and it answers for an untrusted workspace too. The workspace
+   * live-state list was the other candidate and is not used: it refuses an
+   * untrusted workspace outright and leaves agent-host sessions out, so an id
+   * missing from it is not proof the daemon dropped it. Reading the status
+   * does not bump the daemon's idle clock (only prompts, turns and explicit
+   * heartbeats do), so asking cannot keep a reaped-to-be session alive.
+   *
+   * Only that 404 drops an id. Any other outcome (200, another status, a
+   * transport error, no answer) keeps it: a daemon that cannot say is not
+   * saying the session is gone. The answers are thrown away when anything
+   * touched the entry while they were out (see `Entry.touches`), when a
+   * create or resume is registering on it, or when the entry was replaced.
+   */
+  private reconcileEntry(key: string, entry: Entry): Promise<void> {
+    if (entry.reconciling) return entry.reconciling;
+    const run = (async () => {
+      try {
+        const asked = entry.touches;
+        const ids = [...entry.sessions];
+        const dropped = await Promise.all(
+          ids.map((id) => this.daemonDropped(entry.client, id)),
+        );
+        if (
+          this.stopped ||
+          entry.dead ||
+          this.byWorkspace.get(key) !== entry ||
+          entry.touches !== asked ||
+          this.pendingCreates.has(key)
+        ) {
+          return;
+        }
+        ids.forEach((id, i) => {
+          if (dropped[i]) this.forgetSession(key, entry, id);
+        });
+        if (
+          this.isIdle(key, entry) &&
+          this.now() - entry.lastUsed > this.idleReapMs
+        ) {
+          this.discardEntry(key, entry);
+        }
+      } finally {
+        entry.reconciling = undefined;
+      }
+    })();
+    entry.reconciling = run;
+    return run;
+  }
+
+  /** True only when the daemon answered that it does not hold `sessionId`. */
+  private async daemonDropped(
+    client: DaemonClient,
+    sessionId: string,
+  ): Promise<boolean> {
+    try {
+      await client.sessionStatus(sessionId);
+      return false;
+    } catch (err) {
+      return isSessionLevelGone(err);
+    }
+  }
+
+  /** Forget an id the daemon says it no longer holds. Unlike
+   * `removeSession` this leaves `lastUsed` alone: the daemon closed the
+   * session at some earlier moment nobody observed, and the entry has
+   * already gone unused for longer than `idleReapMs`. */
+  private forgetSession(key: string, entry: Entry, id: string): void {
+    entry.sessions.delete(id);
+    if (this.ownerOf.get(id) === key) this.ownerOf.delete(id);
   }
 
   // -- Death detection (add-mid-turn-recovery) -------------------------
@@ -1095,7 +1260,7 @@ export class DaemonPool implements SessionDaemon {
     if (key === this.defaultWorkspaceCwd) return this.opts.defaultDaemon;
     const e = this.byWorkspace.get(key);
     if (!e) throw new UnknownSessionError(id); // daemon was reaped
-    e.lastUsed = this.now();
+    this.touch(e);
     return e.client;
   }
 
@@ -1116,7 +1281,7 @@ export class DaemonPool implements SessionDaemon {
     }
     const e = this.byWorkspace.get(key);
     if (!e) throw new UnknownSessionError(sessionId); // daemon was reaped
-    e.lastUsed = this.now();
+    this.touch(e);
     // The pool's key is the canonicalized cwd, so it wins over whatever the
     // spawner recorded — a terminal must `cd` to the same path the daemon binds.
     return e.endpoint ? { ...e.endpoint, workspaceCwd: key } : undefined;
@@ -1131,7 +1296,19 @@ export class DaemonPool implements SessionDaemon {
     if (!entry) return;
     entry.sessions.delete(id);
     if (entry.sessions.size === 0) {
-      entry.lastUsed = this.now();
+      this.touch(entry);
+    }
+  }
+
+  /** Record that the daemon for `key` owns session `id`. Touches the entry,
+   * so a `reconcileEntry` round that asked about `id` before this
+   * registration landed cannot drop it on a stale answer. */
+  private trackSession(key: string, id: string): void {
+    this.ownerOf.set(id, key);
+    const entry = this.byWorkspace.get(key);
+    if (entry) {
+      entry.sessions.add(id);
+      this.touch(entry);
     }
   }
 
@@ -1162,8 +1339,7 @@ export class DaemonPool implements SessionDaemon {
     try {
       const client = await this.getOrSpawn(req.workspaceCwd);
       const session = await client.createOrAttachSession(req, clientId);
-      this.ownerOf.set(session.sessionId, key);
-      this.byWorkspace.get(key)?.sessions.add(session.sessionId);
+      this.trackSession(key, session.sessionId);
       // The session is live again (add-mid-turn-recovery): clear any stale
       // recovery outcome so the events route attaches normally.
       this.recoveryProvider?.sessionLive?.(session.sessionId);
@@ -1222,8 +1398,7 @@ export class DaemonPool implements SessionDaemon {
       const restored = await client.loadSession(sessionId, {
         workspaceCwd: key,
       });
-      this.ownerOf.set(sessionId, key);
-      this.byWorkspace.get(key)?.sessions.add(sessionId);
+      this.trackSession(key, sessionId);
       // The session is live again (add-mid-turn-recovery): clear any stale
       // recovery outcome so the events route attaches normally.
       this.recoveryProvider?.sessionLive?.(sessionId);
@@ -1258,23 +1433,69 @@ export class DaemonPool implements SessionDaemon {
    * from tracking and let `reapIdle`/`evictLruIdle` reclaim (and `stop()`)
    * a daemon that is still serving a live session out from under those
    * other clients — worse than the wedge this pruning exists to prevent.
+   *
+   * A dropped stream is not, by itself, a dead daemon (#153). The daemon
+   * evicts a slow subscriber by writing `client_evicted` and destroying the
+   * socket (cli/src/serve/routes/sse-events.ts), and undici reports that
+   * teardown as `TypeError: terminated` with an `UND_ERR_SOCKET` cause, the
+   * same shape a crashed daemon produces. Reading it as a death drops the
+   * entry without stopping it and lets recovery `loadSession` the same
+   * sessions into a SECOND daemon on the same workspace while the first still
+   * holds them. So a transport-shaped stream failure marks the daemon dead
+   * only when nothing says it is alive: no `client_evicted` frame arrived
+   * first, and a `/health` probe fails at the transport level too (see
+   * `probeConfirmsDeath`). Either way the error is rethrown unchanged, which
+   * is what makes each consumer re-subscribe from its own cursor with its own
+   * backoff (the events relay, the push pump, the review bridge; the bridge
+   * stops on a clean end, so a loss must not be turned into one).
+   *
+   * A `client_evicted` frame that arrives is relayed like any other. Today
+   * the daemon's own write-then-destroy loses it before it reaches the socket
+   * (Node corks the write until the next tick and the destroy lands first),
+   * so the `/health` probe is what decides in practice.
    */
   async *subscribeEvents(
     sessionId: string,
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     const client = this.daemonForSession(sessionId);
+    let evicted = false;
     try {
       for await (const event of client.subscribeEvents(sessionId, opts)) {
         if (event.type === 'session_died' || event.type === 'session_closed') {
           this.removeSession(sessionId);
         }
+        if (event.type === 'client_evicted') evicted = true;
         yield event;
       }
     } catch (err) {
-      this.noteTransportDeath(sessionId, err);
+      if (
+        !evicted &&
+        !opts.signal?.aborted &&
+        isTransportDeathError(err) &&
+        (await this.probeConfirmsDeath(client))
+      ) {
+        this.noteTransportDeath(sessionId, err);
+      }
       throw err;
     }
+  }
+
+  /**
+   * After an event stream drops, ask the daemon whether it is still there.
+   * Only a probe that itself fails at the transport level confirms a death.
+   * Any HTTP answer, even an error status, means a live process answered; a
+   * probe that does not settle within `probeTimeoutMs` proves nothing either
+   * way. For a daemon that really is gone, its exit event (`onExit`, or
+   * `handleDaemonExit` for the boot daemon) still reports it, and a wrong
+   * "dead" here costs a second daemon on a live workspace.
+   */
+  private probeConfirmsDeath(client: DaemonClient): Promise<boolean> {
+    const probe = (async () => {
+      await client.health();
+      return false;
+    })().catch((err: unknown) => isTransportDeathError(err));
+    return settleWithin(probe, this.probeTimeoutMs, false);
   }
 
   async prompt(
@@ -1376,8 +1597,7 @@ export class DaemonPool implements SessionDaemon {
       replacementId.length > 0 &&
       replacementId !== sessionId
     ) {
-      this.ownerOf.set(replacementId, ownerKey);
-      this.byWorkspace.get(ownerKey)?.sessions.add(replacementId);
+      this.trackSession(ownerKey, replacementId);
     }
     return result;
   }
@@ -1475,9 +1695,18 @@ export class DaemonPool implements SessionDaemon {
   }
 
   async closeSession(sessionId: string, clientId?: string): Promise<void> {
-    await this.withSessionDeathTrigger(sessionId, (client) =>
-      client.closeSession(sessionId, clientId),
-    );
+    try {
+      await this.withSessionDeathTrigger(sessionId, (client) =>
+        client.closeSession(sessionId, clientId),
+      );
+    } catch (err) {
+      // The daemon saying it does not hold the session is the end state a
+      // close asks for, so release the id rather than leave it pinning its
+      // daemon against idle reaping (#154). The SDK's own closeSession
+      // already resolves on that 404; this keeps the pool's answer the same
+      // for a client that surfaces it.
+      if (!isSessionLevelGone(err)) throw err;
+    }
     this.removeSession(sessionId);
   }
 
@@ -2078,6 +2307,26 @@ export class DaemonPool implements SessionDaemon {
     this.ownerOf.clear();
     this.pendingCreates.clear();
   }
+}
+
+/** Resolve with `p`'s value, or with `fallback` if `p` rejects or has not
+ * settled within `ms`. Never rejects. The timer is unref'd so a pending
+ * probe cannot hold the process open. */
+function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    timer.unref?.();
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
 }
 
 // -- Transport-death classification (add-mid-turn-recovery) ------------

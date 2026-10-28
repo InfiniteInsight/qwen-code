@@ -14,6 +14,7 @@ import {
 } from './daemonPool.js';
 import type { AuditEntry } from './auditLog.js';
 import type { DaemonClient, DaemonEvent } from '@qwen-code/sdk';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 
 /** Default no-op event stream: yields nothing. */
 async function* noEvents(): AsyncGenerator<DaemonEvent> {
@@ -1590,5 +1591,329 @@ describe('DaemonPool worktree handover rebind (#134)', () => {
     await expect(
       pool.resetWorktreeSession('never-seen', {}),
     ).rejects.toBeInstanceOf(UnknownSessionError);
+  });
+});
+
+// -- Subscription loss is not daemon death (#153) ----------------------
+// The real-socket cases (the daemon's own write-then-destroy eviction through
+// the real SDK) live in daemonPool.realClient.test.ts. These pin what the pool
+// does when its /health question gets an answer that is not a plain yes/no.
+
+/** A stream that delivers one frame and then dies the way undici reports a
+ * torn-down SSE body. */
+function droppedStream(): () => AsyncGenerator<DaemonEvent> {
+  return async function* () {
+    yield { v: 1, type: 'agent_message_chunk', id: 1, data: {} } as DaemonEvent;
+    throw Object.assign(new TypeError('terminated'), {
+      cause: Object.assign(new Error('other side closed'), {
+        name: 'SocketError',
+        code: 'UND_ERR_SOCKET',
+      }),
+    });
+  };
+}
+
+describe('DaemonPool subscription loss (#153)', () => {
+  function lossPool(health: () => Promise<unknown>) {
+    const h = makeDeathHarness({
+      client: (cwd) => ({
+        ...fakeClient(cwd, `${cwd}-s`, droppedStream()),
+        health,
+      }),
+    });
+    return h;
+  }
+
+  it('a daemon that answers /health with an HTTP error is still alive', async () => {
+    const h = lossPool(async () => {
+      throw new DaemonHttpError(503, { error: 'busy' }, 'GET /health: busy');
+    });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(async () => {
+      for await (const _ev of h.pool.subscribeEvents(s.sessionId)) {
+        /* drain */
+      }
+    }).rejects.toThrow(/terminated/);
+    expect(h.deaths).toEqual([]);
+    expect(h.pool.size()).toBe(1);
+  });
+
+  it('stops waiting on a /health probe that never answers, and does not call that a death', async () => {
+    // The child's exit event is the authoritative death signal; an unanswered
+    // probe is not proof, and a wrong "dead" spawns a second daemon on a
+    // workspace whose first one still holds the sessions.
+    const exits: Array<() => void> = [];
+    const deaths: string[][] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      idleReapMs: 999_999_999,
+      probeTimeoutMs: 20,
+      spawn: async (cwd) => {
+        const out: PooledDaemonSpawn = {
+          client: {
+            ...fakeClient(cwd, `${cwd}-s`, droppedStream()),
+            health: () => new Promise(() => {}),
+          } as unknown as DaemonClient,
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+        exits.push(() => out.onExit?.({ code: 137, signal: null }));
+        return out;
+      },
+      onDaemonDeath: (_key, sessions) => deaths.push(sessions),
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(async () => {
+      for await (const _ev of pool.subscribeEvents(s.sessionId)) {
+        /* drain */
+      }
+    }).rejects.toThrow(/terminated/);
+    expect(deaths).toEqual([]);
+    expect(pool.size()).toBe(1);
+    // If the process really is gone, its exit still reports it.
+    exits[0]!();
+    expect(deaths).toEqual([[s.sessionId]]);
+  });
+});
+
+// -- Reconciling with the daemon's own sessions (#154) -------------------
+
+/** What the SDK throws for an id the daemon no longer holds: its status route
+ * answers 404 `session_not_found` (SessionNotFoundError via sendBridgeError). */
+function sessionGone(id: string): DaemonHttpError {
+  return new DaemonHttpError(
+    404,
+    {
+      error: `No session with id "${id}"`,
+      code: 'session_not_found',
+      sessionId: id,
+    },
+    `GET /session/:id/status: No session with id "${id}"`,
+  );
+}
+
+/** A pooled client whose daemon has reaped every id in `reaped` and holds
+ * every other one. */
+function reapingClient(cwd: string, reaped: Set<string>) {
+  return {
+    ...fakeClient(cwd, `${cwd}-s`),
+    async sessionStatus(id: string) {
+      if (reaped.has(id)) throw sessionGone(id);
+      return { sessionId: id };
+    },
+  } as unknown as DaemonClient;
+}
+
+describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
+  it('the audit probe: two workspaces whose sessions the daemon reaped no longer fill the pool', async () => {
+    // The reviewer's probe, shape for shape: reapIdle() fired and NOT awaited
+    // (what the background timer does), then a create for a third cwd.
+    let t = 0;
+    const stopped: string[] = [];
+    const reaped = new Set<string>();
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 2,
+      idleReapMs: 1000,
+      now: () => t,
+      spawn: async (cwd) => ({
+        client: reapingClient(cwd, reaped),
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+    const a = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    const b = await pool.createOrAttachSession({ workspaceCwd: '/proj/b' });
+    // The daemon's reaper closes both after 30 minutes with no SSE subscriber.
+    // Nobody is subscribed, so no session_closed frame reaches the pool.
+    reaped.add(a.sessionId);
+    reaped.add(b.sessionId);
+    t = 10 * 60 * 60_000;
+    void pool.reapIdle();
+
+    const c = await pool.createOrAttachSession({ workspaceCwd: '/proj/c' });
+    expect(c.sessionId).toBe('/proj/c-s');
+    expect(pool.workspaces()).toEqual(['/proj/c']);
+    expect(stopped.sort()).toEqual(['/proj/a', '/proj/b']);
+    // Forgotten in routing too, not only in the entry.
+    await expect(pool.sessionContext(a.sessionId)).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
+
+  it('keeps ids the daemon still holds and ids it gave no answer for, so the cap stays honest', async () => {
+    let t = 0;
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 2,
+      idleReapMs: 1000,
+      now: () => t,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async sessionStatus(id: string) {
+            if (cwd === '/proj/a') return { sessionId: id };
+            throw new DaemonHttpError(500, { error: 'boom' }, 'boom');
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/b' });
+    t = 10 * 60 * 60_000;
+    await pool.reapIdle();
+
+    expect(pool.size()).toBe(2);
+    await expect(pool.getOrSpawn('/proj/c')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    const ctx = (await pool.sessionContext('/proj/b-s')) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('/proj/b');
+  });
+
+  it('does not drop an id that was registered again while its check was in flight', async () => {
+    let t = 0;
+    let answer: (() => void) | undefined;
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      idleReapMs: 1000,
+      now: () => t,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async sessionStatus(id: string) {
+            // "Not held" was true when the daemon answered, before the resume
+            // below loaded the session again.
+            await new Promise<void>((resolve) => {
+              answer = resolve;
+            });
+            throw sessionGone(id);
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    await pool.resumeSession('s-old', { workspaceCwd: '/proj/a' });
+    t = 10 * 60 * 60_000;
+    const reconciling = pool.reapIdle();
+    // The phone reopens the conversation while the check is out.
+    await pool.resumeSession('s-old', { workspaceCwd: '/proj/a' });
+    answer!();
+    await reconciling;
+
+    expect(pool.size()).toBe(1);
+    const ctx = (await pool.sessionContext('s-old')) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('/proj/a');
+  });
+
+  it('a dropped id is not handed to recovery when the daemon later dies', async () => {
+    let t = 0;
+    const h = makeDeathHarness({
+      now: () => t,
+      idleReapMs: 1000,
+      client: (cwd) => reapingClient(cwd, new Set(['stale'])),
+    });
+    await h.pool.resumeSession('stale', { workspaceCwd: '/proj/a' });
+    const live = await h.pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    t = 10 * 60 * 60_000;
+    await h.pool.reapIdle();
+    expect(h.pool.size()).toBe(1); // still serving `live`
+
+    h.fireExit('/proj/a', { code: 137, signal: null });
+    expect(h.deaths).toHaveLength(1);
+    expect(h.deaths[0].sessions).toEqual([live.sessionId]);
+  });
+
+  it('at the cap, a create stops waiting on a daemon that does not answer and refuses', async () => {
+    let t = 0;
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 1,
+      idleReapMs: 1000,
+      probeTimeoutMs: 20,
+      now: () => t,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          sessionStatus: () => new Promise(() => {}),
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    t = 10 * 60 * 60_000;
+    await expect(pool.getOrSpawn('/proj/b')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    expect(pool.workspaces()).toEqual(['/proj/a']);
+  });
+
+  it('closeSession on an id the daemon already dropped releases it, as the SDK does for its own 404', async () => {
+    let t = 0;
+    const stopped: string[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      idleReapMs: 1000,
+      now: () => t,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async closeSession(id: string) {
+            throw sessionGone(id);
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(pool.closeSession(s.sessionId)).resolves.toBeUndefined();
+    t = 10_000;
+    pool.reapIdle();
+    expect(pool.size()).toBe(0);
+    expect(stopped).toEqual(['/proj/a']);
+  });
+
+  it('closeSession keeps the id when the daemon refuses for any other reason', async () => {
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async closeSession() {
+            throw new DaemonHttpError(409, { code: 'busy' }, 'busy');
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(pool.closeSession(s.sessionId)).rejects.toThrow(/busy/);
+    const ctx = (await pool.sessionContext(s.sessionId)) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('/proj/a');
   });
 });
