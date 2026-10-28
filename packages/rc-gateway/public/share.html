@@ -141,7 +141,7 @@
               ? { outcome: outcome, optionId: optionId }
               : { outcome: outcome };
           fetch(
-            '/rc/session/' +
+            '/session/' +
               encodeURIComponent(sessionId) +
               '/permission/' +
               encodeURIComponent(requestId),
@@ -307,7 +307,7 @@
         // EventSource can't set Authorization). Approve/prompt deferred — this
         // is a view. Event data is rendered via textContent (XSS-safe).
         function watch(sessionId) {
-          authed('/rc/session/' + encodeURIComponent(sessionId) + '/events')
+          authed('/session/' + encodeURIComponent(sessionId) + '/events')
             .then(function (res) {
               if (!res.ok) {
                 setStatus('watch unavailable (' + res.status + ')');
