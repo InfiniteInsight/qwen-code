@@ -40,6 +40,7 @@ import {
 import { startBridge } from './bridges/start.js';
 import { MatrixRestApi } from './bridges/matrix/restApi.js';
 import { parseHealthzPort } from './bridges/matrix/health.js';
+import { installUnhandledRejectionGuard } from './processGuard.js';
 
 /* eslint-disable no-console */
 
@@ -139,6 +140,10 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
+
+// A stray rejection in a bridge dispatch is logged and survived instead of
+// exiting the sidecar (#155). Boot failures still reach the catch below.
+installUnhandledRejectionGuard('qwen-rc-bridge');
 
 main().catch((err) => {
   console.error('qwen-rc-bridge: fatal:', err);
