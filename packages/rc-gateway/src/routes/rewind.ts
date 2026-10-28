@@ -19,7 +19,7 @@ import type { ForkRecord } from '../sessions/forkTranscript.js';
 import { resolveTurn } from '../sessions/turnResolver.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import type { PushNotifier } from '../webpush/notifier.js';
-import { SessionWal } from '../wal.js';
+import { getSharedWal, type SessionWal } from '../wal.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 
 /**
@@ -382,7 +382,13 @@ export function createRewindRoute(
       //    retry on a synchronous write failure.
       let markerId = 1;
       if (walDir) {
-        const wal = new SessionWal({ dir: walDir, sessionId });
+        // The registry handle, never a private instance: `latestId()` is
+        // per-instance in-memory state, and the events-route relay anchors its
+        // renumbering on the same handle. A private instance would read a
+        // snapshot of it, so the marker id it chose could collide with the id
+        // the relay assigns next, and the relay would never learn that the
+        // marker exists.
+        const wal = getSharedWal(walDir, sessionId);
         markerId = (wal.latestId() ?? 0) + 1;
         try {
           appendMarkerWithRetry(wal, markerId, markerData);

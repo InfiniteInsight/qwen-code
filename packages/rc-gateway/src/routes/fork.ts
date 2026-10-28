@@ -30,7 +30,7 @@ import {
 } from '../sessions/forkStore.js';
 import type { ForkRecord } from '../sessions/forkTranscript.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
-import { SessionWal } from '../wal.js';
+import { getSharedWal } from '../wal.js';
 
 /** The daemon surface this route needs: `loadSession` (restore the freshly
  * written fork as a live session) plus `resumeSession` — the pool-ownership
@@ -354,7 +354,9 @@ export function createForkRoute(
     const sessionForkedId = parentEventId + 1;
 
     if (walDir) {
-      const parentWal = new SessionWal({ dir: walDir, sessionId: parentId });
+      // Registry handles for both, so the relay that already streams the
+      // parent learns about this marker's id instead of reusing it.
+      const parentWal = getSharedWal(walDir, parentId);
       parentWal.append({
         id: sessionForkedId,
         v: 1,
@@ -363,7 +365,7 @@ export function createForkRoute(
       });
       parentWal.close();
 
-      const childWal = new SessionWal({ dir: walDir, sessionId: newId });
+      const childWal = getSharedWal(walDir, newId);
       childWal.append({
         id: 1,
         v: 1,

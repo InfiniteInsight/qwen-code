@@ -265,4 +265,50 @@ describe('shared WAL registry', () => {
       .events.map((e) => e.id);
     expect(ids).toEqual([1, 2, 3, 4]);
   });
+
+  // Why the rewind and fork routes must not build their own SessionWal: the
+  // events-route relay holds the registry handle for the whole stream and
+  // anchors its id renumbering on latestId(). A private instance writes the
+  // marker to disk but leaves that handle none the wiser, so the next frame the
+  // relay appends reuses the marker id.
+  it('a private instance hides its marker from the shared handle, and the id collides', () => {
+    const dir = makeTmpDir();
+    const relay = getSharedWal(dir, 'collide');
+    relay.append(makeFrame(1));
+
+    const privateWal = new SessionWal({ dir, sessionId: 'collide' });
+    const markerId = (privateWal.latestId() ?? 0) + 1;
+    privateWal.append(makeFrame(markerId));
+    privateWal.close();
+
+    // The live stream never saw the marker, so it hands the same id out next.
+    expect(relay.latestId()).toBe(1);
+    expect((relay.latestId() ?? 0) + 1).toBe(markerId);
+
+    // Through the registry the same write advances the stream's anchor, so the
+    // next relayed id is past the marker.
+    const seeded = getSharedWal(dir, 'collide');
+    seeded.append(makeFrame(markerId));
+    expect(relay.latestId()).toBe(markerId);
+    expect((relay.latestId() ?? 0) + 1).toBe(markerId + 1);
+  });
+
+  // The fork route anchors session_forked at the client cursor (fromEventId +
+  // 1), which can sit below the end of the log. Now that every appender shares
+  // one handle, a low marker must not drag the anchor backwards: the renumbering
+  // would re-anchor below ids already sent and write colliding WAL ids.
+  it('latestId is a high water mark, an out of order marker cannot pull it back', () => {
+    const dir = makeTmpDir();
+    const wal = getSharedWal(dir, 'high-water');
+    wal.append(makeFrame(7));
+    wal.append(makeFrame(3));
+
+    expect(wal.latestId()).toBe(7);
+    expect((wal.latestId() ?? 0) + 1).toBe(8);
+
+    // A resync (eviction, or a gateway restart re-opening the log) must agree
+    // with the live view rather than reading the out of order tail as the end.
+    releaseSharedWal(dir, 'high-water');
+    expect(getSharedWal(dir, 'high-water').latestId()).toBe(7);
+  });
 });
