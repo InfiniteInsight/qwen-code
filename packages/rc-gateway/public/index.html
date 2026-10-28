@@ -1745,6 +1745,11 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      /* #193: "All folders" is not a path, so it reads in the line's own
+         face rather than the path's. */
+      #list-folder .cwd.all {
+        font-family: inherit;
+      }
       #list-folder .sp {
         flex: 1 1 0;
       }
@@ -1772,9 +1777,12 @@
       #past-list .srow.on {
         background: var(--g1-band);
       }
-      /* 64px: the title, then when and the first prompt. The 3px rule is on
-         every row and only coloured on the conversation on screen, so the
-         text of every row starts at the same x. */
+      /* 64px: the title, the folder it is in (#193), then when and the
+         first prompt. The 3px rule is on every row and only coloured on the
+         conversation on screen, so the text of every row starts at the same
+         x. Three lines fit the drawn 64px with their line heights set
+         (18 + 15 + 15, 2px apart, 6px above and below), so the list did not
+         get taller to say where each conversation is. */
       #past-list .s {
         flex: 1 1 auto;
         min-width: 0;
@@ -1783,8 +1791,8 @@
         display: flex;
         flex-direction: column;
         justify-content: center;
-        gap: 3px;
-        padding: 10px 0 10px 16px;
+        gap: 2px;
+        padding: 6px 0 6px 16px;
         border: 0;
         border-left: 3px solid transparent;
         border-radius: 0;
@@ -1804,10 +1812,37 @@
       #past-list .s .tt {
         min-width: 0;
         font-size: 15px;
+        line-height: 18px;
         font-weight: 600;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+      /* #193. The row's folder, shortened as the folder line shortens it and
+         muted under the title. The path gives way from its start, as the
+         folder line's does, so the last folder (the one that names it) stays
+         in the 280px pane; the host is short and kept. */
+      #past-list .s .dir {
+        display: flex;
+        gap: 6px;
+        min-width: 0;
+        font-size: 12px;
+        line-height: 15px;
+        color: var(--g1-ink-mid);
+      }
+      #past-list .s .dir .cwd {
+        flex: 0 1 auto;
+        min-width: 0;
+        direction: rtl;
+        text-align: left;
+        font-family: ui-monospace, monospace;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #past-list .s .dir .host {
+        flex: none;
+        white-space: nowrap;
       }
       /* Open on the daemon right now (its live-state, #89). */
       #past-list .s .dot {
@@ -1819,6 +1854,7 @@
       }
       #past-list .s .sub {
         font-size: 13px;
+        line-height: 15px;
         color: var(--g1-ink-mid);
         white-space: nowrap;
         overflow: hidden;
@@ -1880,9 +1916,10 @@
         color: var(--g1-ink-mid);
         font-size: 14px;
       }
-      /* The thumb zone: New conversation here, 48px, under the scroller and
-         fixed while the rows move, with the composer's 24px and home-indicator
-         inset under it (#182). */
+      /* The thumb zone: New conversation, 48px, under the scroller and fixed
+         while the rows move, with the composer's 24px and home-indicator
+         inset under it (#182). #193: it opens the folder screen, where the
+         folder is chosen, rather than starting one in the folder shown. */
       #list-foot {
         flex: none;
         padding: 8px 12px calc(24px + env(safe-area-inset-bottom, 0px));
@@ -1931,7 +1968,8 @@
          menu's surface at 200px. Fixed rather than inside the row, so it is
          never clipped by the scroller it opens in, and it flips above the
          button over the thumb zone. */
-      #list-menu {
+      #list-menu,
+      #list-folders {
         position: fixed;
         z-index: 200;
         width: 200px;
@@ -1944,10 +1982,12 @@
         border-radius: 12px;
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
       }
-      #list-menu[hidden] {
+      #list-menu[hidden],
+      #list-folders[hidden] {
         display: none;
       }
-      #list-menu [role='menuitem'] {
+      #list-menu [role='menuitem'],
+      #list-folders [role='menuitemradio'] {
         min-height: 44px;
         padding: 0 14px;
         border: 0;
@@ -1958,11 +1998,51 @@
         text-align: left;
       }
       #list-menu [role='menuitem']:hover,
-      #list-menu [role='menuitem']:focus {
+      #list-menu [role='menuitem']:focus,
+      #list-folders [role='menuitemradio']:hover,
+      #list-folders [role='menuitemradio']:focus {
         background: var(--g1-on);
       }
       #list-menu [role='menuitem'].danger {
         color: #ff7b72;
+      }
+      /* #193. The folder filter the folder line opens: All folders, then
+         each folder the list spans with how many conversations it holds,
+         the one shown ticked. Hung under the line and as wide as it, since a
+         path needs the width; the width (placeFolderMenu) is the line's
+         less 8px a side, so it fits the 280px pane too. */
+      #list-folders [role='menuitemradio'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+      }
+      #list-folders .ck {
+        flex: none;
+        width: 16px;
+        color: var(--g1-link);
+        visibility: hidden;
+      }
+      #list-folders [aria-checked='true'] .ck {
+        visibility: visible;
+      }
+      #list-folders .lbl {
+        flex: 1 1 auto;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #list-folders .lbl.path {
+        direction: rtl;
+        text-align: left;
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+      }
+      #list-folders .n {
+        flex: none;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
       }
       /* The folder screen: the folder browser, the recent folders and the
          typed path the New conversation panel held, each at the tap floor. */
@@ -2028,8 +2108,58 @@
         font-size: 16px;
         border-radius: 10px;
       }
-      #dir-recent button {
+      /* #193. The recent folders, first on the screen because a new
+         conversation most often goes where the last ones did. A row is the
+         folder (a tap browses into it, as before) and its Start here. */
+      #dir-recent {
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+      }
+      #dir-recent > :not(.rrow) {
+        padding: 12px;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+      }
+      #dir-recent .rrow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 52px;
+        padding: 0 4px 0 0;
+        border-bottom: 1px solid var(--g1-line);
+      }
+      #dir-recent .rrow:last-child {
+        border-bottom: 0;
+      }
+      #dir-recent .go {
+        flex: 1 1 auto;
+        min-width: 0;
         min-height: 44px;
+        display: flex;
+        align-items: center;
+        padding: 0 0 0 12px;
+        border: 0;
+        border-radius: 10px 0 0 10px;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        text-align: left;
+      }
+      #dir-recent .go .cwd {
+        min-width: 0;
+        direction: rtl;
+        text-align: left;
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #dir-recent .start {
+        flex: none;
+        min-height: 44px;
+        border-radius: 10px;
+        font-size: 15px;
+        white-space: nowrap;
       }
       /* The archived screen: a row per filed conversation, its title and when,
          and Restore. The row itself is not a button: the daemon refuses to
@@ -2066,6 +2196,18 @@
       #archived-list .arow .sub {
         color: var(--g1-ink-mid);
         font-size: 13px;
+      }
+      /* #193: the filed half spans the same folders as the list, so a row
+         says which one it is in, the same way a list row does. */
+      #archived-list .arow .dir {
+        color: var(--g1-ink-mid);
+        font-size: 12px;
+        font-family: ui-monospace, monospace;
+        direction: rtl;
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       #archived-list .arow button {
         flex: none;
@@ -3373,7 +3515,10 @@
       <!-- #185 (h1). The List screen, drawn to List.dc.html: the bar (back
            to the chat, Conversations, search), the folder line, the rows of
            the folder's conversations with a ⋯ each, Archived (n) at the end,
-           and New conversation here in the thumb zone. It replaces the rail at
+           and New conversation here in the thumb zone. #193: the rows span the
+           current folder and the recent ones, each naming its folder, the
+           folder line filters them, and the thumb-zone button is New
+           conversation, which opens the folder screen. It replaces the rail at
            every width (the 190px column, the phone strip and #184's interim
            full-screen rail) and #dir-picker as a column element: the title
            opens it, a row opens that conversation and comes back to the chat,
@@ -3407,17 +3552,22 @@
             autocomplete="off"
           />
         </div>
+        <!-- #193: the folder line is the list's folder filter, All folders
+             or one of them, and opens the small menu that picks it
+             (#list-folders, built on first use). The folder screen it used to
+             open is behind New conversation now. -->
         <button
           id="list-folder"
           type="button"
-          aria-controls="dir-picker"
+          aria-haspopup="menu"
+          aria-controls="list-folders"
           aria-expanded="false"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
-          <span class="cwd" id="list-cwd">no folder yet</span>
+          <span class="cwd all" id="list-cwd">All folders</span>
           <span class="host" id="list-host"></span>
           <span class="sp"></span>
-          <span class="chg">change</span>
+          <svg class="chg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
         </button>
         <div class="scr-body" id="list-body">
           <!-- issue #36: bounded. #past-pager holds the prev/next controls
@@ -3434,29 +3584,39 @@
           </button>
         </div>
         <div id="list-foot">
-          <button id="list-new" type="button">
+          <!-- #193: chooses where the conversation opens before it starts,
+               so it opens the folder screen and sends nothing itself. -->
+          <button
+            id="list-new"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="dir-picker"
+            aria-expanded="false"
+          >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-            New conversation here
+            New conversation
           </button>
         </div>
       </div>
-      <!-- #185. The folder screen behind the list's `change`: what the New
-           conversation panel (#dir-picker) held apart from its past list,
-           which is the list itself now. Browsing to a folder is what moves the
-           list to it (renderDirList refreshes the rows for the folder it lands
-           on), so back is how a reader goes to look at what is there. Every id
-           is the panel's, because the browse, recent and typed-path handlers
-           all find their nodes by id. -->
-      <div id="dir-picker" role="dialog" aria-label="Folder" hidden>
+      <!-- #185, then #193. The folder screen, which the list's New
+           conversation opens: where the new conversation runs is chosen here
+           and nothing starts until it is. A recent folder and the typed path
+           each have Start here, and the folder browsed to has New
+           conversation in this folder; all three send the one create POST
+           (startConversationIn). Browsing still makes the folder browsed to
+           the current one, which the list spans with the recent ones. Every
+           id is the old panel's, because the browse, recent and typed-path
+           handlers all find their nodes by id. -->
+      <div id="dir-picker" role="dialog" aria-label="New conversation: choose a folder" hidden>
         <div class="scr-head">
           <button id="dir-back" type="button" aria-label="Back to the conversations">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
-          <strong class="ttl">Folder</strong>
+          <strong class="ttl">New conversation</strong>
           <button
             type="button"
             class="help-btn"
-            aria-label="What is the Folder screen?"
+            aria-label="What is this screen?"
             aria-expanded="false"
             aria-controls="help-dir-picker"
           >
@@ -3465,12 +3625,14 @@
         </div>
         <div class="scr-body">
           <div class="help-text" id="help-dir-picker" hidden>
-            Which folder on the host the conversation list shows. Tap a
-            folder to go into it, or a recent one, then go back: the list
-            shows the conversations in that folder, and <b>New conversation
-            here</b> starts one in it. <b>New conversation in this folder</b>
-            and a typed path start one straight away.
+            Choose the folder on the host the new conversation runs in.
+            <b>Start here</b> on a recent folder or beside a typed path starts
+            it there; tap a folder to go into it, and <b>New conversation in
+            this folder</b> starts it in the one you are in. Nothing starts
+            until you choose, and back leaves without starting one.
           </div>
+          <div class="grp">Recent folders</div>
+          <div id="dir-recent">(no recent folders yet)</div>
           <div class="grp">On the host</div>
           <div id="dir-current">(not loaded)</div>
           <div id="dir-list">(loading…)</div>
@@ -3482,10 +3644,7 @@
               placeholder="(daemon workspace)"
               aria-label="Absolute path for a new conversation"
             />
-            <button id="new-session" type="button">New conversation</button>
-          </div>
-          <div id="dir-recent" style="margin-top: 16px; font-size: 0.85rem">
-            (no recent workspaces)
+            <button id="new-session" type="button">Start here</button>
           </div>
         </div>
       </div>
@@ -4783,11 +4942,11 @@
       function showApp() {
         $('auth-gate').hidden = true;
         $('app-body').hidden = false;
-        // #175, #185: the list's folder line and New conversation here are
-        // the way in when a first browse never succeeds, so the list is drawn
-        // with the app rather than waiting on one. Both callers reach here
-        // after an await, so the list's state further down the script is
-        // already initialised.
+        // #175, #185: the list's New conversation (#193: the folder screen
+        // behind it) is the way in when a first browse never succeeds, so
+        // the list is drawn with the app rather than waiting on one. Both
+        // callers reach here after an await, so the list's state further
+        // down the script is already initialised.
         renderList();
         restorePanel(); // #187: the panel screen open before a reload
       }
@@ -12636,7 +12795,13 @@
       });
       $('h1-menu-archive').addEventListener('click', () => {
         if (watchedSessionId) {
-          void archivePastConversation(watchedSessionId, pastConvosCwd);
+          // #193: in the folder its row was read from, which need not be the
+          // current one; else the folder it was opened in.
+          const row = onScreenRow();
+          void archivePastConversation(
+            watchedSessionId,
+            (row && row.cwd) || watchedSessionCwd || pastConvosCwd,
+          );
         }
       });
       $('footer-export').addEventListener('click', () => void exportConversation());
@@ -12672,6 +12837,7 @@
           setDirPickerOpen(false);
           setArchivedOpen(false);
           closeRowMenu(false);
+          setFolderMenuOpen(false);
         }
         if (scr.hidden === !open) return;
         scr.hidden = !open;
@@ -12700,6 +12866,7 @@
       $('list-screen').addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (rowMenuFor) return; // the row menu shuts first, on its own key
+        if (folderMenuShown()) return; // so does the folder filter (#193)
         e.preventDefault();
         // In the search field Escape puts the search away first.
         if (e.target === $('past-filter')) return setListSearch(false);
@@ -12755,40 +12922,62 @@
         if (!h || h.includes(':') || /^[0-9.]+$/.test(h)) return h;
         return h.split('.')[0];
       }
+      // A home directory reads as ~, as drawn; callers keep the full path
+      // for the title. #193: one rule for the folder line, each row's folder
+      // and the folder screen, so a folder reads the same wherever it is.
+      function shortFolder(cwd) {
+        return cwd.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~');
+      }
+      // U+2066..U+2069 isolate the path as a left-to-right run inside the
+      // right-to-left box the start-side ellipsis needs (the CSS above).
+      function isolatedFolder(cwd) {
+        return '\u2066' + shortFolder(cwd) + '\u2069';
+      }
+      // #193: the folder line names the list's filter, All folders or the
+      // one folder picked, and is the way to change it.
       function renderListHead() {
-        const cwd = typeof pastConvosCwd === 'string' ? pastConvosCwd : '';
+        const one = shownFolder();
         const host = listHostLabel();
-        // U+2066..U+2069 isolate the path as a left-to-right run inside the
-        // right-to-left box the start-side ellipsis needs (the CSS above).
-        $('list-cwd').textContent = cwd
-          ? '\u2066' + cwd.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~') + '\u2069'
-          : 'no folder yet';
-        $('list-host').textContent = host ? 'on ' + host : '';
-        $('list-folder').title = cwd;
+        const none = listFolders().length === 0;
+        const cwdBox = $('list-cwd');
+        cwdBox.textContent = one
+          ? isolatedFolder(one)
+          : none
+            ? 'no folder yet'
+            : 'All folders';
+        cwdBox.classList.toggle('all', !one);
+        $('list-host').textContent = one && host ? 'on ' + host : '';
+        $('list-folder').title = one || (none ? '' : 'All folders');
         $('list-folder').setAttribute(
           'aria-label',
-          (cwd ? 'Folder ' + cwd : 'No folder yet') +
-            (host ? ' on ' + host : '') +
-            '. Change',
+          (one
+            ? 'Showing folder ' + one + (host ? ' on ' + host : '')
+            : none
+              ? 'No folder yet'
+              : 'Showing all folders') + '. Change',
         );
       }
 
       // #175, #185. The one way to open or shut the folder screen, which
-      // `change` opens over the list. Opening puts focus on its way back, so
-      // a keyboard reader lands in what they opened; shutting it from inside
-      // hands focus back to `change`.
+      // New conversation opens over the list (#193; it was `change`).
+      // Opening puts focus on its way back, so a keyboard reader lands in
+      // what they opened; shutting it from inside hands focus back to New
+      // conversation.
       function setDirPickerOpen(open, refocus) {
         const picker = $('dir-picker');
         if (picker.hidden === !open) return;
         picker.hidden = !open;
-        $('list-folder').setAttribute('aria-expanded', String(open));
+        $('list-new').setAttribute('aria-expanded', String(open));
         if (open) {
+          setFolderMenuOpen(false);
           $('dir-back').focus({ preventScroll: true });
           return;
         }
-        if (refocus && listShown()) $('list-folder').focus({ preventScroll: true });
+        if (refocus && listShown()) $('list-new').focus({ preventScroll: true });
       }
-      $('list-folder').addEventListener('click', () => setDirPickerOpen(true));
+      $('list-folder').addEventListener('click', () =>
+        setFolderMenuOpen(!folderMenuShown(), true),
+      );
       $('dir-back').addEventListener('click', () => setDirPickerOpen(false, true));
       $('dir-picker').addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
@@ -12827,17 +13016,14 @@
         if (paneLayout()) void refreshArchivedCount();
       });
 
-      // New conversation here: the create POST the panel's button has always
-      // sent, in the folder the list shows. startConversationIn types it into
-      // the same field, so there is still one POST /session path. With no
-      // folder yet the field is left empty, which the daemon reads as its own
-      // workspace. The list shuts when the new conversation is watched
-      // (startWatch), and stays up over a refusal so its toast can say why.
-      $('list-new').addEventListener('click', () => {
-        void startConversationIn(
-          typeof pastConvosCwd === 'string' ? pastConvosCwd : '',
-        );
-      });
+      // #193. New conversation chooses the folder first: it opens the folder
+      // screen and sends nothing, so no conversation starts in a folder the
+      // reader did not pick. The create is Start here on a recent folder or
+      // the typed path, or New conversation in this folder, all through
+      // startConversationIn and its one POST /session. The list shuts when
+      // the new conversation is watched (startWatch), and the folder screen
+      // stays up over a refusal so its toast can say why.
+      $('list-new').addEventListener('click', () => setDirPickerOpen(true));
 
       // ---- Directory picker (browse + type + recent) -----------------------
       // Lets the phone choose which project directory a new conversation runs
@@ -12859,27 +13045,42 @@
         }
       }
 
+      // #193: a row per recent folder, the folder (a tap browses into it, as
+      // it always did) and Start here, which starts the new conversation
+      // there. createElement + textContent only: a path is host data.
       function renderRecentWorkspaces() {
         const box = $('dir-recent');
         if (!box) return;
         box.textContent = '';
         const list = loadRecentWorkspaces();
         if (list.length === 0) {
-          box.textContent = '(no recent workspaces)';
+          const none = document.createElement('div');
+          none.textContent = '(no recent folders yet)';
+          box.appendChild(none);
           return;
         }
-        const label = document.createElement('div');
-        label.textContent = 'Recent:';
-        label.style.cssText = 'color:#888;margin-bottom:0.2rem';
-        box.appendChild(label);
         for (const path of list) {
-          const btn = document.createElement('button');
-          btn.textContent = path;
-          btn.style.cssText =
-            'display:block;width:100%;text-align:left;margin:2px 0;' +
-            'font-size:0.8rem;overflow-wrap:anywhere';
-          btn.onclick = () => browseTo(path);
-          box.appendChild(btn);
+          const row = document.createElement('div');
+          row.className = 'rrow';
+          row.dataset.folder = path;
+          const go = document.createElement('button');
+          go.type = 'button';
+          go.className = 'go';
+          go.title = path;
+          go.setAttribute('aria-label', 'Go into ' + path);
+          const name = document.createElement('span');
+          name.className = 'cwd';
+          name.textContent = isolatedFolder(path);
+          go.appendChild(name);
+          go.onclick = () => browseTo(path);
+          const start = document.createElement('button');
+          start.type = 'button';
+          start.className = 'start';
+          start.textContent = 'Start here';
+          start.setAttribute('aria-label', 'Start here, in ' + path);
+          start.onclick = () => void startConversationIn(path);
+          row.append(go, start);
+          box.appendChild(row);
         }
       }
 
@@ -13007,7 +13208,13 @@
       // Common tail for all three pickers (browse / type / recent): drop the
       // chosen path into the existing free-text field and drive the existing
       // New-conversation button, so there is exactly one POST /session path.
+      // #193: the button is disabled while its create is in flight, which
+      // stops a second tap on it but not a call to its handler, and Start
+      // here and the folder's create call the handler. So a second tap on
+      // any of them before the first answer sends nothing, rather than a
+      // second conversation.
       function startConversationIn(path) {
+        if ($('new-session').disabled) return;
         $('new-session-cwd').value = path;
         return $('new-session').onclick();
       }
@@ -13039,8 +13246,47 @@
       // hand-off ($('new-session').onclick, below) — a direct startWatch
       // call — so a resumed session replays history and opens the composer
       // exactly the same way a fresh one does.
-      let pastConvos = []; // sessions[] from the last successful /rc/sessions fetch
-      let pastConvosCwd = null; // the cwd that list was fetched FOR (closed over per row)
+      // #193: pastConvos is every folder's rows merged (each carrying the
+      // `cwd` it was read from), and pastConvosCwd is the current folder,
+      // the one the folder browser is on, whose read landed last.
+      let pastConvos = []; // the merged rows, newest first
+      let pastConvosCwd = null; // the current folder those rows were read with
+      // #193. The list spans the current folder and the recent ones, each
+      // read through the per-folder /rc/sessions route. The last read of each
+      // is kept here for the page's lifetime: the filter, the search, the
+      // pager, opening the list and the folder menu all draw from it, and
+      // only the refreshes the list always had (the poll, a watch starting
+      // or ending, the tab coming back, an archive, delete or rename) read
+      // again. A folder that leaves the set leaves the cache.
+      const folderRows = new Map(); // cwd -> { sessions, truncated }
+      // The current folder and MAX_RECENT recent ones: at most six reads.
+      const LIST_FOLDERS_MAX = MAX_RECENT + 1;
+      function listFoldersFrom(current) {
+        const out = [];
+        for (const p of [current].concat(loadRecentWorkspaces())) {
+          if (typeof p === 'string' && p && !out.includes(p)) out.push(p);
+        }
+        return out.slice(0, LIST_FOLDERS_MAX);
+      }
+      function listFolders() {
+        return listFoldersFrom(pastConvosCwd);
+      }
+      // The folder filter: null for All folders, else the one folder shown.
+      // Kept across a reload (#182) like the folder and the search.
+      const LIST_FOLDER_NAME = 'list-folder';
+      let listFolder =
+        uiRead(LIST_FOLDER_NAME, (v) => typeof v === 'string' && !!v) || null;
+      // The filter in force: a folder no longer in the set reads as All
+      // folders rather than as an empty list nobody can explain.
+      function shownFolder() {
+        return listFolder && listFolders().includes(listFolder) ? listFolder : null;
+      }
+      // The folders the list shows under the filter, which Archived (n)
+      // counts across.
+      function viewFolders() {
+        const one = shownFolder();
+        return one ? [one] : listFolders();
+      }
 
       // "just now" / "N min ago" / "N h ago" / "N d ago". A skewed clock or a
       // future timestamp must never print a negative count — clamp the raw
@@ -13071,7 +13317,7 @@
       const PAST_PAGE_SIZE = 25;
       let pastPage = 1; // 1-based
       let pastFilter = ''; // issue #44: trimmed, lowercased filter text
-      let pastTruncated = false;
+      // #193: `truncated` is per folder now, kept with its rows (folderRows).
 
       // #185 (h1). The List screen's rows are the folder's conversations from
       // the last poll (pastConvos), through the #44 filter and the #36 pager.
@@ -13085,7 +13331,9 @@
       // is per-folder (renderPastConversations restores it on a folder change)
       // and a filter carried into another folder would hide rows for a reason
       // the reader can no longer see. The storage name is the rail's, so a
-      // filter saved before this screen is read back into it.
+      // filter saved before this screen is read back into it. #193: the
+      // folder is the folder filter's, '' for All folders, so the search is
+      // kept with the view it was typed in and comes back with that view.
       // createElement + textContent only, never innerHTML: titles are model data.
       const LIST_FILTER_NAME = 'rail-filter';
       function savedListFilter(cwd) {
@@ -13098,15 +13346,29 @@
         );
         return saved && saved.cwd === cwd ? saved.text : '';
       }
+      function listViewKey() {
+        return shownFolder() || '';
+      }
+      // Puts back the search kept for the view on screen, and shows the
+      // field when it has text, or it would hide rows for a reason the
+      // reader cannot see.
+      function restoreListSearch() {
+        const kept = savedListFilter(listViewKey());
+        $('past-filter').value = kept;
+        pastFilter = kept.trim().toLowerCase();
+        if (kept) showListSearch(true);
+      }
       // #180. The row-actions menu, built on first use (rowMenu below), and
       // the row it is open for. Declared with the list's other state, ahead
       // of every function that reads it.
       let rowMenuEl = null;
       let rowMenuFor = null; // { anchor, sessionId } while open
-      // The folder's archived conversations, counted for Archived (n), and
-      // the folder that count was read for.
+      // #193. The folder filter's menu, built on first use (folderMenu below).
+      let folderMenuEl = null;
+      // The view's archived conversations, counted for Archived (n), and the
+      // folders that count was read for (#193: every folder in the view).
       let archivedCount = null;
-      let archivedCountCwd = null;
+      let archivedCountKey = null;
 
       function convoTitle(s) {
         return (
@@ -13121,12 +13383,16 @@
       // over (opening the list shut More and its panel screen), and the
       // conversation follows through the one hand-off every past row has
       // used. issue #67: the host's terminal follows the conversation you
-      // picked.
+      // picked. #193: resumed in the folder the row was read from, which is
+      // no longer always the current one.
       function pickConversation(s) {
         closeListToChat();
-        void resumeConversation(s.sessionId, pastConvosCwd, strOr(s.title, ''), {
+        void resumeConversation(s.sessionId, rowFolder(s), strOr(s.title, ''), {
           hostTerminal: true,
         });
+      }
+      function rowFolder(s) {
+        return typeof s.cwd === 'string' && s.cwd ? s.cwd : pastConvosCwd;
       }
 
       // Draws the folder line, the rows, the pager and the bar's title from
@@ -13148,12 +13414,19 @@
           d.textContent = text;
           box.appendChild(d);
         };
-        if (pastConvos.length === 0) {
+        // #193: the folder filter first, then the search over what it left.
+        const one = shownFolder();
+        const inView = one
+          ? pastConvos.filter((s) => s && s.cwd === one)
+          : pastConvos;
+        if (inView.length === 0) {
           closeRowMenu(false);
           none(
-            pastConvosCwd
+            one
               ? 'No conversations in this folder yet.'
-              : 'No folder yet. Use change to pick one.',
+              : listFolders().length
+                ? 'No conversations in these folders yet.'
+                : 'No folder yet. Use New conversation to pick one.',
           );
           return;
         }
@@ -13162,10 +13435,11 @@
         // rows show) case-insensitively. The truncated note below still
         // describes the fetched set, which the filter does not change.
         const shown = pastFilter
-          ? pastConvos.filter(
+          ? inView.filter(
               (s) => s && convoTitle(s).toLowerCase().includes(pastFilter),
             )
-          : pastConvos;
+          : inView;
+        const host = listHostLabel();
         if (pastFilter && shown.length === 0) {
           closeRowMenu(false);
           none('No conversations match "' + $('past-filter').value + '".');
@@ -13203,6 +13477,24 @@
             head.appendChild(dot);
           }
           row.appendChild(head);
+          // #193: which folder it is in, the second line, in the folder
+          // line's own words, since the rows come from more than one.
+          if (typeof s.cwd === 'string' && s.cwd) {
+            const dir = document.createElement('span');
+            dir.className = 'dir';
+            dir.title = s.cwd;
+            const path = document.createElement('span');
+            path.className = 'cwd';
+            path.textContent = isolatedFolder(s.cwd);
+            dir.appendChild(path);
+            if (host) {
+              const on = document.createElement('span');
+              on.className = 'host';
+              on.textContent = 'on ' + host;
+              dir.appendChild(on);
+            }
+            row.appendChild(dir);
+          }
           // when · preview. A live-only row has neither, having no
           // transcript yet, and says so rather than drawing a separator with
           // nothing either side of it.
@@ -13247,13 +13539,21 @@
           wrap.append(row, more);
           box.appendChild(wrap);
         }
-        if (pastTruncated) {
+        // #193: per folder, since each folder's read is capped on its own.
+        const cut = viewFolders().filter(
+          (f) => folderRows.has(f) && folderRows.get(f).truncated,
+        );
+        if (cut.length) {
           const note = document.createElement('div');
           note.className = 'note';
           note.textContent =
             'Showing the ' +
-            pastConvos.length +
-            ' most recent; the folder holds more.';
+            inView.length +
+            ' most recent; ' +
+            (viewFolders().length === 1
+              ? 'the folder holds more.'
+              : cut.map(shortFolder).join(', ') +
+                (cut.length === 1 ? ' holds more.' : ' hold more.'));
           box.appendChild(note);
         }
         if (pageCount > 1) {
@@ -13294,33 +13594,74 @@
         }
       }
 
-      // Archived (n). Read when the list opens and when its folder changes
+      // Archived (n). Read when the list opens and when its folders change
       // under it, not on the poll: it changes only when something is archived
-      // or restored, and both of those re-read it.
+      // or restored, and both of those re-read it. #193: across the folders
+      // the list shows, the same set (and the same filter) as its rows, one
+      // read per folder in parallel.
+      function archivedKey() {
+        return viewFolders().join('\n');
+      }
       function renderArchivedCount() {
         const known =
-          archivedCount !== null && archivedCountCwd === pastConvosCwd;
+          archivedCount !== null && archivedCountKey === archivedKey();
         $('list-archived-open').textContent = known
           ? 'Archived (' + archivedCount + ')'
           : 'Archived';
       }
+      // Each folder's filed rows, each carrying its folder, newest first;
+      // null when any folder could not be read, since a count that left one
+      // out would be a wrong number rather than an unknown one.
+      async function readArchived(folders) {
+        const reads = await Promise.all(
+          folders.map((cwd) =>
+            rcCall(
+              '/rc/sessions?cwd=' +
+                encodeURIComponent(cwd) +
+                '&archiveState=archived',
+            ),
+          ),
+        );
+        const rows = [];
+        const failed = [];
+        reads.forEach((r, i) => {
+          if (!r.ok || !r.body || !Array.isArray(r.body.sessions)) {
+            failed.push(r.code);
+            return;
+          }
+          for (const s of r.body.sessions) {
+            if (s && s.sessionId) rows.push({ ...s, cwd: folders[i] });
+          }
+        });
+        return { rows: newestFirst(rows), failed };
+      }
+      let archivedReading = null; // the key a count read is in flight for
       async function refreshArchivedCount() {
-        const cwd = pastConvosCwd;
-        if (!cwd || !token()) {
+        const key = archivedKey();
+        const folders = viewFolders();
+        if (folders.length === 0 || !token()) {
           archivedCount = null;
+          archivedCountKey = null;
           renderArchivedCount();
           return;
         }
-        const r = await rcCall(
-          '/rc/sessions?cwd=' + encodeURIComponent(cwd) + '&archiveState=archived',
-        );
-        if (cwd !== pastConvosCwd) return; // the list moved on to another folder
-        archivedCountCwd = cwd;
-        archivedCount =
-          r.ok && r.body && Array.isArray(r.body.sessions)
-            ? r.body.sessions.length
-            : null;
+        archivedReading = key;
+        const got = await readArchived(folders);
+        if (archivedReading === key) archivedReading = null;
+        if (key !== archivedKey()) return; // the list moved on to other folders
+        archivedCountKey = key;
+        archivedCount = got.failed.length ? null : got.rows.length;
         renderArchivedCount();
+      }
+      // Re-read when the folders the count is for have changed since it was
+      // read (a browse, a recent folder added, the filter), unless that read
+      // is already on its way: a list redrawn on every poll tick must not
+      // send one per tick.
+      function archivedCountFollows() {
+        const key = archivedKey();
+        if (archivedCountKey === key || archivedReading === key) return;
+        if (listShown()) void refreshArchivedCount();
+        else renderArchivedCount();
       }
 
       // #180. A row's menu: Archive and Delete on a row with a transcript,
@@ -13360,10 +13701,11 @@
         if (s.live) items.push(['Rename', false, () => renameFromList(s)]);
         // A live-only row has no transcript to file away or remove, which is
         // why the past rows never offered it either (issue #111).
+        // #193: in the folder the row was read from.
         if (!s.liveOnly) {
           items.push(
-            ['Archive', false, () => archivePastConversation(s.sessionId, pastConvosCwd)],
-            ['Delete', true, () => deletePastConversation(s.sessionId, title, pastConvosCwd)],
+            ['Archive', false, () => archivePastConversation(s.sessionId, rowFolder(s))],
+            ['Delete', true, () => deletePastConversation(s.sessionId, title, rowFolder(s))],
           );
         }
         // Ending is offered where it means something: the conversation on
@@ -13427,8 +13769,12 @@
       // shuts it back onto the button. Tab shuts it onto the button too rather
       // than out of a menu that has just been hidden, which would drop focus
       // on the page body.
-      function onRowMenuKey(e) {
-        const items = Array.from(rowMenuEl.querySelectorAll('[role="menuitem"]'));
+      // #193: the folder menu takes the same keys, so this is written once
+      // for any menu and the function that shuts it back onto its button.
+      function menuKeys(e, menu, shut) {
+        const items = Array.from(
+          menu.querySelectorAll('[role="menuitem"],[role="menuitemradio"]'),
+        );
         const i = items.indexOf(document.activeElement);
         let next = -1;
         if (e.key === 'ArrowDown') next = (i + 1) % items.length;
@@ -13438,19 +13784,134 @@
         else if (e.key === 'Escape' || e.key === 'Tab') {
           e.preventDefault();
           e.stopPropagation();
-          closeRowMenu(true);
+          shut();
           return;
         }
         if (next < 0) return;
         e.preventDefault();
         items[next].focus({ preventScroll: true });
       }
+      function onRowMenuKey(e) {
+        menuKeys(e, rowMenuEl, () => closeRowMenu(true));
+      }
+
+      // #193. The folder filter, opened from the folder line: All folders,
+      // then every folder the list spans (the current one and the recent
+      // ones, a recent folder with no conversations included, so a folder
+      // just started in can be picked before it holds any), each with how
+      // many conversations it holds, the one shown ticked. Picking one
+      // redraws from what is already read; nothing is fetched for it.
+      function folderMenuShown() {
+        return !!folderMenuEl && !folderMenuEl.hidden;
+      }
+      function folderMenu() {
+        if (folderMenuEl) return folderMenuEl;
+        folderMenuEl = document.createElement('div');
+        folderMenuEl.id = 'list-folders';
+        folderMenuEl.setAttribute('role', 'menu');
+        folderMenuEl.setAttribute('aria-label', 'Show conversations from');
+        folderMenuEl.hidden = true;
+        folderMenuEl.addEventListener('keydown', (e) =>
+          menuKeys(e, folderMenuEl, () => setFolderMenuOpen(false, true)),
+        );
+        // In the app, as the row menu is, for the same reasons.
+        $('app-body').appendChild(folderMenuEl);
+        return folderMenuEl;
+      }
+      function setFolderMenuOpen(open, refocus) {
+        const door = $('list-folder');
+        if (!open) {
+          if (!folderMenuShown()) return;
+          folderMenuEl.hidden = true;
+          door.setAttribute('aria-expanded', 'false');
+          if (refocus && door.isConnected) door.focus({ preventScroll: true });
+          return;
+        }
+        closeRowMenu(false);
+        const menu = folderMenu();
+        menu.textContent = '';
+        const one = shownFolder();
+        const count = (cwd) =>
+          pastConvos.filter((s) => s && (cwd === '' || s.cwd === cwd)).length;
+        const items = [['', 'All folders']].concat(
+          listFolders().map((cwd) => [cwd, isolatedFolder(cwd)]),
+        );
+        for (const [cwd, label] of items) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.setAttribute('role', 'menuitemradio');
+          b.setAttribute('aria-checked', String((one || '') === cwd));
+          b.tabIndex = -1;
+          b.dataset.folder = cwd;
+          if (cwd) b.title = cwd;
+          const ck = document.createElement('span');
+          ck.className = 'ck';
+          ck.setAttribute('aria-hidden', 'true');
+          ck.textContent = '✓';
+          const lbl = document.createElement('span');
+          lbl.className = cwd ? 'lbl path' : 'lbl';
+          lbl.textContent = label;
+          const n = document.createElement('span');
+          n.className = 'n';
+          const held = count(cwd);
+          n.textContent = String(held);
+          b.setAttribute(
+            'aria-label',
+            (cwd ? shortFolder(cwd) : 'All folders') +
+              ', ' +
+              held +
+              (held === 1 ? ' conversation' : ' conversations'),
+          );
+          b.append(ck, lbl, n);
+          b.onclick = () => {
+            setFolderMenuOpen(false, true);
+            setListFolder(cwd || null);
+          };
+          menu.appendChild(b);
+        }
+        menu.hidden = false;
+        door.setAttribute('aria-expanded', 'true');
+        placeFolderMenu();
+        (menu.querySelector('[aria-checked="true"]') || menu.firstChild).focus({
+          preventScroll: true,
+        });
+      }
+      // Hung under the folder line and as wide as it less 8px a side, which
+      // in the pane layout is the pane's width, so it never spills over the
+      // chat beside it.
+      function placeFolderMenu() {
+        if (!folderMenuShown()) return;
+        const r = $('list-folder').getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return setFolderMenuOpen(false);
+        folderMenuEl.style.left = Math.round(r.left + 8) + 'px';
+        folderMenuEl.style.top = Math.round(r.bottom + 4) + 'px';
+        folderMenuEl.style.width = Math.round(r.width - 16) + 'px';
+      }
+      function setListFolder(cwd) {
+        const next = typeof cwd === 'string' && cwd ? cwd : null;
+        if (next === listFolder) return;
+        listFolder = next;
+        uiWrite(LIST_FOLDER_NAME, next || undefined);
+        pastPage = 1;
+        $('list-body').scrollTop = 0;
+        restoreListSearch();
+        renderList();
+        archivedCountFollows();
+      }
 
       // A press anywhere else shuts it, the way a native menu does. The
-      // button is left to its own handler, which toggles.
+      // button is left to its own handler, which toggles. #193: the folder
+      // menu the same way.
       document.addEventListener(
         'pointerdown',
         (e) => {
+          if (
+            folderMenuShown() &&
+            !folderMenuEl.contains(e.target) &&
+            !$('list-folder').contains(e.target)
+          ) {
+            setFolderMenuOpen(false);
+          }
           if (!rowMenuFor) return;
           if (rowMenuEl.contains(e.target) || rowMenuFor.anchor.contains(e.target)) return;
           closeRowMenu(false);
@@ -13458,6 +13919,7 @@
         true,
       );
       window.addEventListener('resize', placeRowMenu);
+      window.addEventListener('resize', placeFolderMenu);
       // The rows scroll under an open menu, so it follows its row.
       $('list-body').addEventListener('scroll', placeRowMenu);
 
@@ -13474,31 +13936,87 @@
         if (title === '' || title === now) return;
         setStatus('renaming…');
         setStatus(await renameSession(s.sessionId, title));
-        void refreshPastConversations(pastConvosCwd);
+        void refreshPastConversations(curDirPath);
       }
 
+      // #193. `sessions` are the current folder's rows, `cwd` that folder.
+      // They are kept with every other folder's last read (folderRows) and
+      // the list is drawn from all of them merged, so a caller handing in
+      // one folder's rows still gets exactly those when no recent folder
+      // holds any.
       function renderPastConversations(sessions, cwd, truncated) {
-        pastConvos = Array.isArray(sessions) ? sessions : [];
+        if (typeof cwd === 'string' && cwd) {
+          folderRows.set(cwd, {
+            sessions: Array.isArray(sessions) ? sessions : [],
+            truncated: Boolean(truncated),
+          });
+        }
         if (cwd !== pastConvosCwd) {
           pastPage = 1; // workspace switch → page 1
+          pastConvosCwd = cwd;
           // issue #44: the filter is per-workspace view state. #182: so the
           // folder being opened gets back the filter last typed in it, if any.
-          const kept = savedListFilter(cwd);
-          $('past-filter').value = kept;
-          pastFilter = kept.trim().toLowerCase();
-          if (kept) showListSearch(true);
+          // #193: per view, which a new current folder leaves as it was
+          // unless it took the filter's folder out of the set.
+          restoreListSearch();
           $('list-body').scrollTop = 0;
-          pastConvosCwd = cwd;
-          // Archived (n) belongs to the folder: read again for this one if
-          // the list is up to show it, else marked unknown until it opens.
-          if (listShown()) void refreshArchivedCount();
-          else renderArchivedCount();
         }
         pastConvosCwd = cwd;
-        pastTruncated = Boolean(truncated);
+        const folders = listFolders();
+        for (const f of Array.from(folderRows.keys())) {
+          if (!folders.includes(f)) folderRows.delete(f);
+        }
+        // A filter whose folder has left the set (it dropped off the recent
+        // list, or was the current folder and the browser moved on) goes
+        // back to All folders for good rather than coming back unasked. Only
+        // once a current folder is known: before the first browse lands the
+        // set is the recent folders alone and says nothing about the filter.
+        if (listFolder && pastConvosCwd !== null && !folders.includes(listFolder)) {
+          listFolder = null;
+          uiWrite(LIST_FOLDER_NAME, undefined);
+          restoreListSearch();
+        }
+        pastConvos = mergeFolderRows(folders);
         // #119: fed from this same poll rather than its own, so the list
         // cannot drift from what the folder holds.
         renderList();
+        // Archived (n) belongs to the folders: read again for these if the
+        // list is up to show it, else marked unknown until it opens.
+        archivedCountFollows();
+      }
+
+      // #193: every folder's rows as one list, each row carrying the folder
+      // it was read from (the resume, archive and delete go there), a
+      // conversation listed by two folders shown once, under the first.
+      function mergeFolderRows(folders) {
+        const seen = new Set();
+        const out = [];
+        for (const cwd of folders) {
+          const got = folderRows.get(cwd);
+          if (!got) continue;
+          for (const s of got.sessions) {
+            if (!s || !s.sessionId || seen.has(s.sessionId)) continue;
+            seen.add(s.sessionId);
+            out.push({ ...s, cwd: cwd });
+          }
+        }
+        return newestFirst(out);
+      }
+      // Newest first by updatedAt across folders. A live-only row, or one
+      // with no time to read, goes first, the place mergeLiveSessions gives
+      // it inside one folder (its comment says why). The sort is stable, so
+      // one folder's rows keep the order the route sent them in.
+      function newestFirst(rows) {
+        const when = (s) => {
+          if (s.liveOnly) return Infinity;
+          const t = Date.parse(s.updatedAt);
+          return Number.isNaN(t) ? Infinity : t;
+        };
+        return rows.sort((a, b) => {
+          const wa = when(a);
+          const wb = when(b);
+          return wa === wb ? 0 : wb > wa ? 1 : -1;
+        });
       }
 
       // GET /rc/sessions?cwd=<cwd> (Bearer/OWNER). Renders only if `cwd` is
@@ -13571,38 +14089,64 @@
         return only.concat(marked);
       }
 
-      async function refreshPastConversations(cwd) {
-        if (!cwd || !token()) {
-          renderPastConversations([], cwd);
-          return;
-        }
+      // One folder's rows, or null when its listing could not be read.
+      // `live` reads the daemon's snapshot beside it (#89) for the current
+      // folder only: the live-state route resolves its workspace through the
+      // daemon pool, which spawns a daemon for a workspace that has none, so
+      // asking it about every recent folder on every poll would start (and
+      // keep from idling out) a daemon per folder. The listing itself is a
+      // disk scan. So a row from another folder carries no live dot, which
+      // says nothing about whether it is open rather than that it is not.
+      async function readFolderRows(cwd, live) {
         try {
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
           // drift apart by a poll interval, and the rail gains a request
           // rather than a second cadence.
-          const [res, live] = await Promise.all([
+          const [res, states] = await Promise.all([
             fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
               headers: { Authorization: 'Bearer ' + token() } },
             ),
-            readLiveStates(cwd),
+            live ? readLiveStates(cwd) : null,
           ]);
-          if (!res.ok) {
-            if (cwd === curDirPath) renderPastConversations([], cwd);
-            return;
-          }
+          if (!res.ok) return null;
           const body = await res.json();
-          if (cwd !== curDirPath) return; // superseded by a newer browse
           // issue #36: pass the server's `truncated` flag through so the
           // 500-file cap is visible in the list.
-          renderPastConversations(
-            mergeLiveSessions(body.sessions, live),
-            cwd,
-            body.truncated,
-          );
+          return {
+            sessions: mergeLiveSessions(body.sessions, states),
+            truncated: Boolean(body.truncated),
+          };
         } catch {
-          if (cwd === curDirPath) renderPastConversations([], cwd);
+          return null;
         }
+      }
+
+      // #193: `cwd` is the current folder; the refresh reads it and every
+      // recent folder (listFoldersFrom: at most six, in parallel) and draws
+      // the merge. The current folder unreadable is drawn empty, as it always
+      // was; another folder unreadable keeps its last read, so a blip on one
+      // folder does not blank its rows until the next tick.
+      async function refreshPastConversations(cwd) {
+        if (!token()) {
+          renderPastConversations([], cwd);
+          return;
+        }
+        const folders = listFoldersFrom(cwd);
+        const reads = await Promise.all(
+          folders.map((f) => readFolderRows(f, f === cwd)),
+        );
+        if (cwd !== curDirPath) return; // superseded by a newer browse
+        let mine = null;
+        folders.forEach((f, i) => {
+          if (f === cwd) mine = reads[i];
+          else if (reads[i]) folderRows.set(f, reads[i]);
+        });
+        renderPastConversations(
+          mine ? mine.sessions : [],
+          cwd,
+          mine ? mine.truncated : false,
+        );
       }
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
@@ -13766,15 +14310,19 @@
         if (!gone.includes(sessionId)) return setStatus('not deleted');
         if (sessionId === watchedSessionId) $('stop').onclick();
         setStatus('deleted');
-        void refreshPastConversations(cwd);
+        // #193: the list is every folder's, so the refresh is the list's
+        // (the current folder's, which reads the others with it) rather than
+        // the row's folder's, which renders nothing when it is not current.
+        void refreshPastConversations(curDirPath);
       }
 
       // The filed-away half of the same data, kept off the main screen: an
       // archived conversation cannot be opened (the daemon answers a read with
       // SessionArchivedError), so it is not something to reach for while
-      // working, only to reach for when putting something back.
+      // working, only to reach for when putting something back. #193: each
+      // row carries the folder it was read from, which Restore names.
       let archivedConvos = [];
-      let archivedCwd = null;
+      let archivedFolders = [];
 
       // issue #111: the at-rest actions the rail can press. Archive is the
       // reversible one, so unlike delete it sends no `confirm` and asks no
@@ -13806,7 +14354,7 @@
         // delete does rather than leave one that only looks alive.
         if (sessionId === watchedSessionId) $('stop').onclick();
         setStatus('archived');
-        void refreshPastConversations(cwd);
+        void refreshPastConversations(curDirPath); // #193: the list's, as delete
         // #185: Archived (n) counts it, and the archived screen, if it is up,
         // lists it.
         if (!$('archived-view').hidden) void refreshArchivedConversations();
@@ -13829,47 +14377,52 @@
           return setStatus(already.includes(sessionId) ? 'already active' : 'not restored');
         setStatus('restored');
         void refreshArchivedConversations();
-        void refreshPastConversations(cwd);
+        void refreshPastConversations(curDirPath); // #193: the list's, as delete
       }
 
 
-      // #185: the folder the list shows, which is the folder Archived (n)
-      // was pressed under.
+      // #185: the folders the list shows, which are the folders Archived (n)
+      // was pressed under. #193: every folder in the view, merged as the
+      // list's rows are, newest first.
       async function refreshArchivedConversations() {
         if (!token()) return setStatus('pair first');
-        const cwd = pastConvosCwd || curDirPath;
-        if (!cwd) return setStatus('pick a folder first');
-        const r = await rcCall(
-          '/rc/sessions?cwd=' +
-            encodeURIComponent(cwd) +
-            '&archiveState=archived',
-        );
-        archivedCwd = cwd;
-        if (!r.ok) {
+        const folders = viewFolders();
+        if (folders.length === 0) return setStatus('pick a folder first');
+        const key = archivedKey();
+        const got = await readArchived(folders);
+        archivedFolders = folders;
+        if (got.failed.length === folders.length) {
           archivedConvos = [];
-          $('archived-note').textContent = 'in ' + cwd;
-          $('archived-list').textContent = '(could not read: ' + r.code + ')';
+          renderArchivedConversations();
+          $('archived-list').textContent = '(could not read: ' + got.failed[0] + ')';
           return;
         }
-        archivedConvos = (r.body && r.body.sessions) || [];
-        if (cwd === pastConvosCwd) {
-          archivedCountCwd = cwd;
-          archivedCount = archivedConvos.length;
+        archivedConvos = got.rows;
+        if (key === archivedKey()) {
+          archivedCountKey = key;
+          archivedCount = got.failed.length ? null : archivedConvos.length;
           renderArchivedCount();
         }
-        renderArchivedConversations();
+        renderArchivedConversations(got.failed.length);
       }
 
       // createElement + textContent only, never innerHTML: titles are model
       // data. A row carries no click handler on purpose -- the list's rows open
       // a conversation and these cannot, so a row that looked pressable would
       // promise a read the daemon refuses. #185: drawn as the list's rows are,
-      // the title over when it was filed, with Restore beside it.
-      function renderArchivedConversations() {
+      // the title over when it was filed, with Restore beside it. #193: and
+      // the folder it is in between them, as on the list.
+      function renderArchivedConversations(unread) {
         const box = $('archived-list');
         const note = $('archived-note');
         box.textContent = '';
-        note.textContent = archivedCwd ? 'in ' + archivedCwd : '';
+        note.textContent =
+          (archivedFolders.length === 1
+            ? 'in ' + archivedFolders[0]
+            : archivedFolders.length
+              ? 'in ' + archivedFolders.length + ' folders'
+              : '') +
+          (unread ? '; ' + unread + ' could not be read' : '');
         if (archivedConvos.length === 0) {
           box.textContent = '(no archived conversations)';
           return;
@@ -13884,6 +14437,11 @@
           tt.className = 'tt';
           tt.textContent = convoTitle(s);
           text.appendChild(tt);
+          const dir = document.createElement('span');
+          dir.className = 'dir';
+          dir.title = s.cwd;
+          dir.textContent = isolatedFolder(s.cwd);
+          text.appendChild(dir);
           const when = relativeTime(s.updatedAt);
           if (when) {
             const sub = document.createElement('span');
@@ -13897,7 +14455,7 @@
           back.textContent = 'Restore';
           back.setAttribute('aria-label', 'Restore ' + convoTitle(s));
           back.onclick = () =>
-            void restoreArchivedConversation(s.sessionId, archivedCwd);
+            void restoreArchivedConversation(s.sessionId, s.cwd);
           row.appendChild(back);
           box.appendChild(row);
         }
@@ -13905,16 +14463,15 @@
 
       // issue #44: filter on input; applying a filter resets the pager to
       // page 1 (page size unchanged), clearing it restores the full list.
-      // #182: what was typed is kept with the folder it was typed in.
+      // #182: what was typed is kept with the folder it was typed in. #193:
+      // with the folder filter's view, '' for All folders (listViewKey).
       $('past-filter').oninput = (e) => {
         const text = e.target.value;
         pastFilter = text.trim().toLowerCase();
         pastPage = 1;
         uiWrite(
           LIST_FILTER_NAME,
-          text.trim() && typeof pastConvosCwd === 'string'
-            ? { cwd: pastConvosCwd, text: text }
-            : undefined,
+          text.trim() ? { cwd: listViewKey(), text: text } : undefined,
         );
         $('list-body').scrollTop = 0;
         renderList();
@@ -14021,7 +14578,21 @@
             const j = await res.json();
             // Record the RESOLVED workspace (not the raw typed/blank input) so
             // "daemon default" runs still land a real absolute path in Recent.
-            if (j.workspaceCwd) pushRecentWorkspace(j.workspaceCwd);
+            if (j.workspaceCwd) {
+              // #193: read before the push, which can move the folder shown
+              // off the recent list.
+              const was = shownFolder();
+              const made = normalizeWorkspacePath(j.workspaceCwd);
+              pushRecentWorkspace(j.workspaceCwd);
+              // The push puts the folder in the set the list spans, so All
+              // folders already shows the new conversation and is left as it
+              // is. A list filtered to one other folder would hide it, so the
+              // filter moves to the folder it was started in. The folder
+              // browser is left where it was: moving it would drop the folder
+              // it was on from the list whenever that folder is not a recent
+              // one.
+              if (was && was !== made) setListFolder(made);
+            }
             // rc-workspace-scoping (#28): offer the freshly resolved
             // workspace in the target selector (the pool may now hold it).
             if (j.workspaceCwd && !wsKnownWorkspaces.includes(j.workspaceCwd)) {
@@ -14065,8 +14636,8 @@
         $('reconnect').style.display = 'none';
         if (id !== watchedSessionId) clearIdleGhost();
         // #175, #185: reaching another conversation is what the list and the
-        // folder screen were opened for (a row, New conversation here, Use
-        // this folder, a typed path), so they shut rather than sit over it.
+        // folder screen were opened for (a row, #193's Start here, New
+        // conversation in this folder), so they shut rather than sit over it.
         // Keyed on a change of conversation so a self-heal re-watch of the
         // same one does not shut them under a reader still browsing folders.
         if (id !== watchedSessionId) setListOpen(false);
