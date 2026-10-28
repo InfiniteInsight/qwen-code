@@ -163,74 +163,276 @@
       :where(#app-body) a {
         color: var(--g1-link);
       }
-      /* Permission and question cards keep the amber edge that says "this
-         needs you", on the band ground. The light yellow fill they had was
-         the last light card on the page, and light ink inherited from the
-         dark pane would have been unreadable on it. */
-      .card {
-        border: 1px solid var(--g1-warn);
-        background: var(--g1-band);
-        border-radius: 8px;
-        padding: 0.6rem;
-        margin-bottom: 0.5rem;
-      }
-      .card pre {
-        white-space: pre-wrap;
-        margin: 0 0 0.4rem;
-        font-size: 0.8rem;
-      }
-      .ask-questions {
+      /* #186. The pinned card: what the agent is waiting on, pinned between
+         the transcript and the composer so it sits in the thumb zone and no
+         scroll of the transcript can carry it off. The amber edge still says
+         "this needs you". The card shrinks before the composer is pushed: its
+         body scrolls and its action rows never do, so Allow and Deny stay on
+         screen however long the command or however tall the keyboard. */
+      /* 4px under the card (the region's padding) and 10px under its last row
+         rather than the drawn 8 and 14: the composer under it is 77px, which
+         leaves 43px of the bottom 120 for a 48px button, and these 8px are
+         what put the centre of Allow and Deny, where a thumb lands, inside
+         that zone. */
+      .pcard {
+        flex: 0 1 auto;
+        min-height: 0;
+        box-sizing: border-box;
         display: flex;
         flex-direction: column;
         gap: 10px;
-        margin-bottom: 0.5rem;
+        padding: 14px 14px 10px;
+        background: var(--g1-raise);
+        border: 1px solid var(--g1-warn);
+        border-radius: 16px;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        line-height: 1.35;
       }
-      .ask-q {
+      .pcard[hidden] {
+        display: none;
+      }
+      .pcard .pc-head {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 20px;
+      }
+      .pcard .pc-head > svg {
+        flex: none;
+      }
+      .pcard .pc-title {
+        min-width: 0;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      .pcard .pc-side {
+        flex: none;
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+        white-space: nowrap;
+      }
+      .pcard .pc-body {
+        flex: 0 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      /* The full command, never a preview: it wraps anywhere and scrolls
+         inside its own box past 120px, as drawn. */
+      .pcard .pc-cmd {
+        flex: none;
+        margin: 0;
+        max-height: 120px;
+        overflow: auto;
+        padding: 10px 12px;
+        background: var(--g1-page);
+        border: 1px solid var(--g1-line);
+        border-radius: 10px;
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--g1-ink-hi);
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .pcard .pc-why {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      .pcard .pc-why:empty,
+      .pcard .pc-note:empty {
+        display: none;
+      }
+      .pcard .pc-note {
+        flex: none;
+        font-size: 13px;
+        color: var(--g1-warn);
+      }
+      .pcard .pc-actions {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      /* The daemon's own further choices (its "Always Allow in project: gh",
+         "for user: gh"), one 44px row that scrolls sideways like the
+         composer's tools, so a second or third choice costs no height. */
+      .pcard .pc-extra {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .pcard .pc-extra:empty {
+        display: none;
+      }
+      .pcard .pc-extra button {
+        flex: none;
+        white-space: nowrap;
+        min-height: 44px;
+        padding: 0 14px;
+        border-radius: 12px;
         border: 1px solid var(--g1-edge);
-        border-radius: 6px;
-        padding: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        text-align: left;
       }
-      .ask-q-head {
-        font-size: 0.7rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        opacity: 0.6;
-        margin-bottom: 4px;
+      /* Quiet, as drawn, in two lines so the rule's reach and its limit are
+         both read before the tap: every request of the kind, this
+         conversation only, for 24 hours. */
+      .pcard .pc-always {
+        min-height: 40px;
+        padding: 2px 8px;
+        border: 0;
+        background: transparent;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        line-height: 1.25;
       }
-      .ask-q-text {
-        font-size: 0.9rem;
-        margin-bottom: 6px;
+      .pcard .pc-always .sub {
+        display: block;
+        font-size: 12px;
       }
-      .ask-q-opts {
+      .pcard .pc-row {
+        display: flex;
+        gap: 8px;
+      }
+      .pcard .pc-row button {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 48px;
+        box-sizing: border-box;
+        padding: 4px 10px;
+        border-radius: 12px;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .pcard .pc-row .pc-deny {
+        border: 1px solid #f85149;
+        background: transparent;
+        color: #f85149;
+      }
+      .pcard .pc-row .pc-cancel {
+        border: 1px solid var(--g1-edge);
+        background: transparent;
+        color: var(--g1-ink-hi);
+        font-weight: 400;
+      }
+      .pcard .pc-row .pc-allow,
+      .pcard .pc-row .pc-answer {
+        flex-grow: 2;
+        border: 0;
+        color: #fff;
+      }
+      .pcard .pc-row .pc-allow {
+        background: #238636;
+      }
+      .pcard .pc-row .pc-answer {
+        background: var(--g1-accent);
+      }
+      /* The question card: one question a page, its options as 48px rows. A
+         short detail (a size, a count) takes the column on the right as drawn;
+         a sentence goes under the label instead, because a sentence squeezed
+         into 40% of a phone's width is a column of three-word lines. */
+      .pcard .pq-opts {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .pcard .pq-opt {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 48px;
+        box-sizing: border-box;
+        padding: 6px 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 12px;
+        background: var(--g1-page);
+        cursor: pointer;
+      }
+      .pcard .pq-opt:has(input:checked) {
+        border-color: #388bfd;
+      }
+      .pcard .pq-opt input {
+        flex: none;
+        width: 20px;
+        height: 20px;
+        margin: 0;
+        accent-color: var(--g1-link);
+      }
+      .pcard .pq-lbl {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .pcard .pq-sub {
+        display: block;
+        margin-top: 2px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      .pcard .pq-detail {
+        flex: none;
+        max-width: 40%;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .pcard .pq-free {
         display: flex;
         flex-direction: column;
         gap: 4px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
       }
-      .ask-opt {
-        display: block;
-        width: 100%;
-        text-align: left;
+      /* 16px, not the drawn 15: iOS zooms the page into any field under 16px
+         when it takes focus. */
+      .pcard .pq-free input {
+        min-height: 44px;
+        box-sizing: border-box;
+        padding: 0 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 16px;
       }
-      .ask-opt .lbl {
-        font-weight: 600;
+      .pcard .pq-back {
+        width: 44px;
+        height: 44px;
+        margin: -12px 0;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--g1-ink-hi);
       }
-      .ask-opt .desc {
-        display: block;
-        font-size: 0.75rem;
-        opacity: 0.7;
+      .pcard .pq-back[hidden] {
+        display: none;
       }
-      .ask-opt.sel,
-      .ask-other-row button.sel {
-        outline: 2px solid #1d4ed8;
-        outline-offset: -2px;
+      /* Answered: the card says how for a few seconds as one quiet line, so
+         the vote is seen to land without the thumb zone staying taken. */
+      .pcard.retiring {
+        border-color: var(--g1-edge);
+        padding: 10px 14px;
+        gap: 4px;
       }
-      .ask-other-row {
-        display: flex;
-        gap: 6px;
-        margin-top: 2px;
-      }
-      .ask-other-row input {
-        flex: 1;
+      .pcard.retiring > .pc-body,
+      .pcard.retiring > .pc-actions,
+      .pcard.retiring .pc-side {
+        display: none;
       }
       #log,
       #events,
@@ -840,18 +1042,37 @@
       #wt-reset-note[hidden] {
         display: none;
       }
-      /* Bands that come and go above the transcript keep the column's gutter
-         now that the column itself has none. */
+      /* #186. The card region, between the transcript and the composer. It
+         is not a scroller itself: the card inside it shrinks and scrolls its
+         own body, which is what keeps the action rows from scrolling away. */
       #pane-chat > #cards {
         flex: 0 1 auto;
         min-height: 0;
-        max-height: 50%;
-        overflow-y: auto;
-        padding: 8px 12px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 12px 4px;
       }
       #pane-chat > #cards:empty {
         display: none;
       }
+      /* While a card is pinned the to-do strip folds away entirely, so the
+         strip's rows are never between the card and the composer: Allow and
+         Deny sit directly on the composer, as drawn. The plan stays in the
+         transcript's own plan row, and the strip comes back with the card's
+         answer. */
+      #pane-chat[data-card] > #plan {
+        display: none;
+      }
+      /* With the keyboard up a tall card can take the transcript's whole box,
+         and the pills and toasts that float over the transcript would then
+         float over the card's header instead. They belong to the transcript,
+         so they are cut off with it. */
+      #pane-chat[data-card] > #transcript-wrap {
+        overflow: hidden;
+      }
+      /* Bands that come and go above the transcript keep the column's gutter
+         now that the column itself has none. */
       #pane-chat > #joined-note,
       #pane-chat > #lineage,
       #pane-chat > #crash-banner {
@@ -1076,6 +1297,13 @@
       }
       #composer textarea:focus {
         outline: none;
+      }
+      /* #186. A one-row field shows a placeholder too long for it wrapped and
+         cut through its second line. One line, always; syncPromptPlaceholder
+         picks words that fit it. */
+      #composer textarea::placeholder {
+        white-space: nowrap;
+        overflow: hidden;
       }
       /* The suggestion, painted inside the field rather than as a pill below it.
          A textarea takes no child elements, so this is a layer behind a
@@ -2104,7 +2332,6 @@
           </button>
           <div id="wt-reset-note" aria-live="polite" hidden></div>
         </div>
-        <div id="cards"></div>
         <style>
           /* The scroll container of the virtualized transcript
              (transcript-view.js). The view positions the rows itself (its
@@ -2858,6 +3085,12 @@
             <span id="footer-export-note"></span>
           </div>
         </div>
+        <!-- #186. The permission and question cards, pinned between the
+             transcript and the composer: Allow and Deny (or Cancel and Answer)
+             are the last thing above the field, in the thumb zone, and no
+             scroll of the transcript can carry them off. One card shows at a
+             time; the rest wait behind it and say how many. -->
+        <div id="cards"></div>
         <!-- The run's to-do list, kept outside the transcript (#65). The
              transcript row is the history; this is "where is the run up to".
              #184: it is the only band between the transcript and the composer,
@@ -5313,7 +5546,8 @@
         const entry = cards.get(requestId);
         if (!entry) return;
         // First word wins: the pending poll also retires cards it no longer
-        // reports, and it must not overwrite "voted: accepted" with "resolved".
+        // reports, and it must not overwrite "Allowed once" with "Answered
+        // elsewhere".
         if (entry.retireTimer !== undefined) return;
         entry.disable();
         entry.note(message);
@@ -5323,17 +5557,113 @@
           // requestId must not be removed by the older card's timer.
           if (cards.get(requestId) === entry) cards.delete(requestId);
           entry.el.remove();
+          syncPinnedCards();
         }, CARD_RETIRE_MS);
+        // #186: an answered card folds to its one confirming line at once, so
+        // the next card (or the to-do strip and the composer's own words) has
+        // the thumb zone back while the confirmation is still on screen. After
+        // the timer is set, which is what marks this card answered.
+        entry.el.classList.add('retiring');
+        syncPinnedCards();
       }
       // Every card belongs to the conversation that raised it, so a switch drops
-      // them at once rather than waiting on each retire timer.
-      function dropAllCards() {
-        for (const entry of cards.values()) {
+      // them at once rather than waiting on each retire timer. #186: except the
+      // cards of the conversation being opened, when the caller names it. A
+      // push deep link pins its card before the transcript is fetched, and the
+      // resume that then clears the transcript must not take that card down
+      // with it; the request it shows is still pending in that conversation.
+      function dropAllCards(keepSessionId) {
+        for (const [requestId, entry] of cards) {
+          if (keepSessionId && entry.sessionId === keepSessionId) continue;
           if (entry.retireTimer !== undefined) clearTimeout(entry.retireTimer);
           entry.el.remove();
+          cards.delete(requestId);
         }
-        cards.clear();
+        syncPinnedCards();
       }
+      // #186. The card the reader is being asked to act on: the oldest one
+      // still waiting. Cards keep the order they were raised in, and the map
+      // keeps insertion order, so the first live entry is it.
+      function pinnedCard() {
+        for (const entry of cards.values()) {
+          if (entry.retireTimer === undefined) return entry;
+        }
+        return null;
+      }
+      // One card at a time: the pinned one shows, every other live card waits
+      // hidden behind it and the pinned card's header counts them. Everything
+      // that reads "is a card pinned" follows from here: the status line's
+      // amber word, the composer's placeholder and the to-do strip's fold.
+      let lastPinnedCard = null;
+      function syncPinnedCards() {
+        const pin = pinnedCard();
+        // A card arriving takes its height out of the transcript's box, which
+        // is not a scroll, so a reader at the end would be left short of the
+        // agent's last words: the message that says why it is asking. They
+        // are kept at the end; a reader scrolled up to read is left alone.
+        if (
+          pin &&
+          pin !== lastPinnedCard &&
+          transcriptView &&
+          transcriptView.isNearBottom()
+        ) {
+          transcriptView.scrollToEnd();
+        }
+        lastPinnedCard = pin;
+        let waiting = 0;
+        for (const entry of cards.values()) {
+          if (entry.retireTimer !== undefined) {
+            entry.el.hidden = false;
+            continue;
+          }
+          entry.el.hidden = entry !== pin;
+          if (entry !== pin) waiting += 1;
+        }
+        if (pin) pin.setWaiting(waiting);
+        const pane = $('pane-chat');
+        if (pin) pane.dataset.card = pin.kind;
+        else delete pane.dataset.card;
+        // The status line's word, and the placeholder with it (it is fitted
+        // after renderRunControls has settled the row's width).
+        renderStatusLine();
+      }
+      // Under a permission card the field reads as the third answer: neither
+      // allow nor deny, but something else. A pending permission keeps the
+      // turn open, so Queue and Stop share the row and the field is narrower
+      // than the sentence; a textarea's placeholder will not end in an
+      // ellipsis, so where the whole sentence does not fit it stops at a word.
+      const CARD_PLACEHOLDER = 'Or tell it what to do instead';
+      const CARD_PLACEHOLDER_SHORT = 'Or tell it what to do';
+      let placeholderCanvas = null;
+      function syncPromptPlaceholder() {
+        const el = $('prompt');
+        const pin = pinnedCard();
+        let ph = 'Message';
+        if (pin && pin.kind === 'permission') {
+          ph = CARD_PLACEHOLDER;
+          const cs = getComputedStyle(el);
+          const room =
+            el.clientWidth -
+            parseFloat(cs.paddingLeft) -
+            parseFloat(cs.paddingRight);
+          if (room > 0) {
+            placeholderCanvas =
+              placeholderCanvas || document.createElement('canvas');
+            const ctx = placeholderCanvas.getContext('2d');
+            ctx.font =
+              cs.fontStyle +
+              ' ' +
+              cs.fontWeight +
+              ' ' +
+              cs.fontSize +
+              ' ' +
+              cs.fontFamily;
+            if (ctx.measureText(ph).width > room) ph = CARD_PLACEHOLDER_SHORT;
+          }
+        }
+        if (el.placeholder !== ph) el.placeholder = ph;
+      }
+      window.addEventListener('resize', () => syncPromptPlaceholder());
 
       // ---- Readable transcript ----------------------------------------------
       // The gateway relays the daemon's raw SSE frames. Rather than dump JSON,
@@ -5829,7 +6159,9 @@
         }
         if (crashBanner) crashBanner.hidden = true;
       }
-      function clearTranscript() {
+      // `openingSessionId` names the conversation the clear is making room for,
+      // so its pending cards stay pinned through it (#186, see dropAllCards).
+      function clearTranscript(openingSessionId) {
         // Every item, the tool/subagent bookkeeping and the turn pointers.
         transcriptModel.clear();
         // The cursor belongs to the conversation, not to the window: a page
@@ -5857,7 +6189,7 @@
         // Same for the question cards: a prompt raised in the previous
         // conversation cannot be answered from this one, and leaving it up
         // would keep the strip occupied by something now unanswerable. (#116)
-        dropAllCards();
+        dropAllCards(openingSessionId);
         clearCrashBanner(); // a new watch starts with no crash banner
         clearUnsent(); // and with no leftover refused-send draft
         // The strip's per-session count goes with the session it counted, so the
@@ -6245,15 +6577,18 @@
         if (!running) runStartedAt = 0;
         let state = 'idle';
         let word = 'idle';
+        // #186: only a card still waiting counts; one folded to its
+        // confirming line has been answered.
+        const pin = pinnedCard();
         if (!gatewayOk) {
           state = 'off';
           word = 'gateway unreachable';
         } else if (!watchedSessionId) {
           state = 'none';
           word = 'no conversation';
-        } else if ($('cards').querySelector('.card')) {
+        } else if (pin) {
           state = 'wait';
-          word = 'waiting for you';
+          word = pin.kind === 'question' ? 'asking you' : 'waiting for you';
         } else if (running) {
           state = 'run';
           const secs = Math.floor((Date.now() - runStartedAt) / 1000);
@@ -6265,6 +6600,7 @@
         h1Text($('h1-tokens'), fillText());
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
+        syncPromptPlaceholder();
         if (running && !runClock) {
           runClock = setInterval(renderStatusLine, 1000);
         } else if (!running && runClock) {
@@ -6289,9 +6625,8 @@
         $('cancel-turn').hidden = !running;
         $('queue').hidden = !running;
       }
-      new MutationObserver(renderStatusLine).observe($('cards'), {
-        childList: true,
-      });
+      // #186: the status line follows the cards through syncPinnedCards, which
+      // every add, retire and drop calls, so it no longer watches #cards.
 
       // #184. The sheet opens in place under the status line and pushes the
       // transcript down rather than covering it.
@@ -7203,9 +7538,10 @@
         }
       }
 
-      async function setPermOverlay(ov) {
-        const st = permOverlaysStatusEl();
-        st.textContent = 'setting…';
+      // The one POST that sets an overlay, shared by Settings and the pinned
+      // card's "Always allow" (#186), so both send the same body for the same
+      // ask. Resolves { ok, message }: the words to show when it did not land.
+      async function postPermOverlay(ov) {
         const payload = { action: ov.action, ttlSeconds: ov.ttlSeconds };
         if (ov.sessionId) payload.sessionId = ov.sessionId;
         if (ov.tool) payload.tool = ov.tool;
@@ -7220,22 +7556,37 @@
             body: JSON.stringify(payload),
           });
           if (res.status === 401 || res.status === 403) {
-            st.textContent = 'not authorized — needs an owner token';
-            return;
+            return {
+              ok: false,
+              denied: true,
+              // The wording every other owner-only section uses.
+              message: 'not authorized \u2014 needs an owner token',
+            };
           }
           const body = await res.json().catch(() => ({}));
           if (!res.ok) {
-            const msg = (body.error || 'set failed') + ' (' + res.status + ')';
-            st.textContent = msg;
-            setStatus(msg);
-            return;
+            return {
+              ok: false,
+              message: (body.error || 'set failed') + ' (' + res.status + ')',
+            };
           }
-          st.textContent = 'set';
-          await loadPermOverlays(false);
+          return { ok: true, message: '' };
         } catch {
-          st.textContent = 'set failed';
-          setStatus('set failed');
+          return { ok: false, message: 'set failed' };
         }
+      }
+
+      async function setPermOverlay(ov) {
+        const st = permOverlaysStatusEl();
+        st.textContent = 'setting…';
+        const r = await postPermOverlay(ov);
+        if (!r.ok) {
+          st.textContent = r.message;
+          if (!r.denied) setStatus(r.message);
+          return;
+        }
+        st.textContent = 'set';
+        await loadPermOverlays(false);
       }
 
       async function revokePermOverlay(id) {
@@ -9541,8 +9892,25 @@
         void doPair(code);
       })();
 
-      async function vote(sessionId, requestId, outcome, optionId, answers) {
+      // #186. The body below is what the old card sent, byte for byte, for
+      // Allow, Deny and an answer: the daemon side is not this page's to
+      // change. `done` is the line the card folds to once the vote lands.
+      async function vote(
+        sessionId,
+        requestId,
+        outcome,
+        optionId,
+        answers,
+        done,
+      ) {
         const entry = cards.get(requestId);
+        // A second tap while the first POST is in flight would vote twice, and
+        // a thumb on a sofa double-taps. The card's controls are held until the
+        // answer is in, and a failure hands them back for the retry.
+        if (entry) {
+          entry.busy(true);
+          entry.note('');
+        }
         try {
           const res = await fetch(
             '/session/' +
@@ -9565,27 +9933,185 @@
             },
           );
           if (entry) {
-            if (res.status === 200) retireCard(requestId, 'voted: ' + outcome);
-            else if (res.status === 404) retireCard(requestId, 'already resolved');
+            if (res.status === 200)
+              retireCard(requestId, done || 'voted: ' + outcome);
+            else if (res.status === 404)
+              retireCard(requestId, 'Already answered');
             else if (res.status === 401 || res.status === 403)
-              retireCard(requestId, 'not authorized');
+              retireCard(requestId, 'Not authorized to answer from here');
             // Anything else leaves the request pending on the daemon, so the
             // card stays pressable: a dead card the user cannot retry is the
             // pile this function is meant to clear. A retry whose first POST
             // did land comes back 404 and retires then.
-            else entry.note('vote failed (' + res.status + ')');
+            else {
+              entry.busy(false);
+              entry.note('vote failed (' + res.status + ')');
+            }
           }
         } catch (e) {
-          if (entry) entry.note('vote error: ' + e);
+          if (entry) {
+            entry.busy(false);
+            entry.note('vote error: ' + e);
+          }
         }
       }
 
+      // #186. What the tool wants, in words, from the ACP kind the frame
+      // carries (the status poll's action.type is the same kind). `noun` names
+      // what "Always allow" would allow, and `overlay` is the kind an overlay
+      // can name for it (loader.ts POLICY_KINDS). Only the kinds whose overlay
+      // grants exactly that kind get one: `other` would also allow every tool
+      // the daemon files under it, which a button naming one tool cannot say.
+      const CARD_KINDS = {
+        execute: { title: 'Wants to run a command', noun: 'commands', overlay: 'execute' },
+        exec: { title: 'Wants to run a command', noun: 'commands', overlay: 'execute' },
+        edit: { title: 'Wants to edit a file', noun: 'file edits', overlay: 'edit' },
+        read: { title: 'Wants to read a file', noun: 'file reads', overlay: 'read' },
+        search: { title: 'Wants to search the files', noun: 'searches', overlay: 'search' },
+        fetch: { title: 'Wants to fetch from the web', noun: 'web fetches', overlay: 'fetch' },
+        delete: { title: 'Wants to delete a file' },
+        move: { title: 'Wants to move a file' },
+        think: { title: 'Wants to think it through' },
+        switch_mode: { title: 'Wants to switch mode' },
+        plan: { title: 'Wants to leave plan mode' },
+        mcp: { title: 'Wants to use an MCP tool' },
+        info: { title: 'Wants to fetch from the web' },
+      };
+      function cardKind(kind) {
+        return typeof kind === 'string' &&
+          Object.prototype.hasOwnProperty.call(CARD_KINDS, kind)
+          ? CARD_KINDS[kind]
+          : { title: 'Wants to use a tool' };
+      }
+      // The overlay "Always allow" writes: scoped to this conversation, for
+      // the longest the overlay route allows (it caps every overlay at 24h, and
+      // there is no workspace-wide form of one).
+      const ALWAYS_ALLOW_TTL_SEC = 86400;
+
+      // #186. The full command or arguments, never a preview. A shell call is
+      // its command as typed; anything else is its arguments one per line, a
+      // string as itself (an edit's new text keeps its line breaks) and
+      // anything else as JSON. The description is left out because the why
+      // line says it. Nothing else is left out: a background flag or a working
+      // directory changes what Allow means.
+      function cardArgText(v) {
+        if (typeof v === 'string') return v;
+        try {
+          return JSON.stringify(v);
+        } catch {
+          return String(v);
+        }
+      }
+      function cardCommandText(toolCall) {
+        const tc = toolCall && typeof toolCall === 'object' ? toolCall : {};
+        const raw = tc.rawInput;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const lines = [];
+          const keys = Object.keys(raw).filter((k) => k !== 'description');
+          const shell = typeof raw.command === 'string';
+          if (shell) lines.push(raw.command);
+          const rest = keys.filter((k) => !(shell && k === 'command'));
+          if (shell && rest.length) lines.push('');
+          for (const k of rest) lines.push(k + ': ' + cardArgText(raw[k]));
+          if (lines.length) return lines.join('\n');
+        }
+        // No arguments to show (an older daemon, a tool that takes none): the
+        // title and whatever text the call carries, which is what the daemon
+        // gave the terminal to ask with.
+        const parts = [];
+        if (typeof tc.title === 'string' && tc.title) parts.push(tc.title);
+        for (const c of Array.isArray(tc.content) ? tc.content : []) {
+          if (c && c.type === 'diff') {
+            parts.push((c.path || '') + '\n' + (c.newText || ''));
+          } else if (c && c.content && typeof c.content.text === 'string') {
+            parts.push(c.content.text);
+          }
+        }
+        for (const l of Array.isArray(tc.locations) ? tc.locations : []) {
+          if (l && typeof l.path === 'string') parts.push(l.path);
+        }
+        return parts.join('\n');
+      }
+
+      // #186. The why line's policy half: what the gateway's policy decided
+      // about this request, read from the decision it recorded. The frame
+      // carries no decision, so the record is the only place it is said. It
+      // exists only where the gateway evaluates requests (push configured), and
+      // only an owner token may read it, so anywhere else the line keeps to the
+      // agent's own description rather than guessing at a policy. undefined
+      // means "no record yet", null means "none to be had".
+      let cardPolicyDenied = false;
+      async function cardPolicyReason(requestId) {
+        if (cardPolicyDenied || !token()) return null;
+        let rows;
+        try {
+          const res = await fetch('/rc/audit?action=policy_decision&limit=50', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 401 || res.status === 403) {
+            cardPolicyDenied = true;
+            return null;
+          }
+          if (!res.ok) return null;
+          rows = await res.json();
+        } catch {
+          return null;
+        }
+        const row = (Array.isArray(rows) ? rows : []).find(
+          (r) => r && r.detail && r.detail.requestId === requestId,
+        );
+        if (!row) return undefined;
+        const d = row.detail;
+        const rule =
+          typeof d.ruleId === 'string' && d.ruleId ? 'rule ' + d.ruleId : 'a rule';
+        if (d.reason === 'eval-error') {
+          return 'Policy: the gateway could not evaluate it, so it asks.';
+        }
+        if (d.action === 'prompt') {
+          return d.decisionSource === 'default'
+            ? 'Policy: no rule matched, so it asks.'
+            : 'Policy: ' + rule + ' asks.';
+        }
+        return (
+          'Policy: ' +
+          rule +
+          ' says ' +
+          d.action +
+          ', but the gateway could not answer for it, so it asks.'
+        );
+      }
+      async function explainCard(entry, requestId, why, desc) {
+        let line = await cardPolicyReason(requestId);
+        // The gateway records its decision as it relays the request, so a card
+        // drawn from the same frame can be a moment ahead of the record.
+        if (line === undefined) {
+          await new Promise((r) => setTimeout(r, 1500));
+          if (cards.get(requestId) !== entry) return;
+          line = await cardPolicyReason(requestId);
+        }
+        if (!line || cards.get(requestId) !== entry) return;
+        why.textContent = desc ? desc + ' ' + line : line;
+      }
+
+      const CARD_ICON_WARN =
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d29922" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4M12 17h.01M10.3 3.9L2.5 17.4A2 2 0 004.2 20.5h15.6a2 2 0 001.7-3.1L13.7 3.9a2 2 0 00-3.4 0z"/></svg>';
+      const CARD_ICON_ASK =
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d29922" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 015 0c0 1.5-2.5 2-2.5 3.5M12 17h.01"/></svg>';
+      function cardEl(tag, cls, text) {
+        const el = document.createElement(tag);
+        if (cls) el.className = cls;
+        if (text !== undefined) el.textContent = text;
+        return el;
+      }
+
+      // #186. A permission or question card, pinned between the transcript
+      // and the composer (syncPinnedCards decides which one shows). Drawn as
+      // the spec's Permission and Question drawings: a header with what it
+      // wants and where, the body, then the action rows last, where the thumb
+      // is.
       function renderPermissionCard(data, sessionId) {
         const requestId = data.requestId;
         if (!requestId || cards.has(requestId)) return;
-        const card = document.createElement('div');
-        card.className = 'card';
-        const note = document.createElement('div');
         const rawInput =
           data.toolCall && typeof data.toolCall === 'object'
             ? data.toolCall.rawInput
@@ -9594,197 +10120,344 @@
           rawInput && Array.isArray(rawInput.questions)
             ? rawInput.questions
             : [];
-        if (questions.length > 0) {
-          // ask_user_question: render the real questions, answerable.
-          card.appendChild(
-            renderQuestionBlock(
-              questions,
-              data.options || [],
-              (optionId, answers) =>
-                vote(sessionId, requestId, 'selected', optionId, answers),
-              note,
-            ),
-          );
-        } else {
-          const summary = document.createElement('pre');
-          summary.textContent =
-            'permission request ' +
-            requestId +
-            '\n' +
-            JSON.stringify(data.toolCall, null, 2);
-          card.appendChild(summary);
-          for (const opt of data.options || []) {
-            const b = document.createElement('button');
-            b.textContent = 'Approve: ' + (opt.name || opt.optionId);
-            b.onclick = () =>
-              vote(sessionId, requestId, 'selected', opt.optionId);
-            card.appendChild(b);
-          }
-        }
-        const deny = document.createElement('button');
-        deny.textContent = questions.length > 0 ? 'Cancel' : 'Deny';
-        deny.onclick = () => vote(sessionId, requestId, 'cancelled');
-        card.appendChild(deny);
-        card.appendChild(note);
-        $('cards').appendChild(card);
-        cards.set(requestId, {
+        const kind = questions.length > 0 ? 'question' : 'permission';
+        const card = cardEl('div', 'pcard');
+        card.dataset.kind = kind;
+        card.dataset.requestId = requestId;
+        card.setAttribute('role', 'group');
+        const head = cardEl('div', 'pc-head');
+        head.insertAdjacentHTML(
+          'afterbegin',
+          kind === 'question' ? CARD_ICON_ASK : CARD_ICON_WARN,
+        );
+        const title = cardEl('span', 'pc-title');
+        const side = cardEl('span', 'pc-side');
+        const more = cardEl('span', 'pc-more');
+        head.append(title, side);
+        const body = cardEl('div', 'pc-body');
+        const note = cardEl('div', 'pc-note');
+        note.setAttribute('aria-live', 'polite');
+        const actions = cardEl('div', 'pc-actions');
+        card.append(head, body, note, actions);
+        // Controls the request itself rules out (no option to submit with)
+        // stay off when a vote hands the card back.
+        const controls = () =>
+          Array.from(card.querySelectorAll('button, input, textarea'));
+        const entry = {
           el: card,
           // issue #46: which session this card belongs to — the pending
           // poll auto-resolves only cards of the session it polled.
           sessionId,
-          disable: () =>
-            card
-              .querySelectorAll('button, input, textarea')
-              .forEach((el) => (el.disabled = true)),
+          kind,
+          disable: () => controls().forEach((el) => (el.disabled = true)),
+          busy: (on) => {
+            if (!on && entry.retireTimer !== undefined) return;
+            controls().forEach((el) => {
+              el.disabled = on || el.dataset.off === '1';
+            });
+          },
           note: (m) => {
             note.textContent = m;
           },
-        });
+          setWaiting: (n) => {
+            more.textContent = n ? '+' + n + ' waiting' : '';
+          },
+        };
+        if (kind === 'question') {
+          // ask_user_question: render the real questions, answerable.
+          renderQuestionBlock(
+            questions,
+            data.options || [],
+            (optionId, answers) =>
+              vote(sessionId, requestId, 'selected', optionId, answers, 'Answered'),
+            { card, title, side, body, actions, note, more, requestId },
+          );
+          const cancel = cardEl('button', 'pc-cancel', 'Cancel');
+          cancel.type = 'button';
+          cancel.onclick = () =>
+            vote(sessionId, requestId, 'cancelled', undefined, undefined, 'Cancelled');
+          actions.querySelector('.pc-row').prepend(cancel);
+        } else {
+          buildPermissionBody(data, sessionId, requestId, entry, {
+            title,
+            side,
+            body,
+            actions,
+            more,
+          });
+        }
+        card.setAttribute('aria-label', title.textContent);
+        $('cards').appendChild(card);
+        cards.set(requestId, entry);
+        syncPinnedCards();
+        if (kind === 'permission') {
+          const why = body.querySelector('.pc-why');
+          void explainCard(entry, requestId, why, why.textContent);
+        }
       }
-      // Answerable body of an ask_user_question card: one section per
-      // question — option buttons (single-select is radio, multi-select
-      // toggles) plus an "Other…" free-text row. Submitting votes the
-      // allow_once option with answers keyed by question index, the keying
-      // the tool's parseAnswerQuestionIndex expects.
-      function renderQuestionBlock(questions, permOptions, submit, note) {
-        const wrap = document.createElement('div');
-        wrap.className = 'ask-questions';
+
+      // The permission card's header, command, why line and buttons. Every
+      // option the daemon offers stays reachable: the first allow_once is
+      // Allow once, a reject_once is Deny (the daemon resolves Deny's
+      // `cancelled` to the same Cancel outcome as that option), and anything
+      // else (an allow_always, a second allow_once, a reject_always) is a
+      // plain button under its own name, voting exactly as the old card's
+      // "Approve: <option>" buttons did.
+      function buildPermissionBody(data, sessionId, requestId, entry, parts) {
+        const tc =
+          data.toolCall && typeof data.toolCall === 'object' ? data.toolCall : {};
+        const raw =
+          tc.rawInput && typeof tc.rawInput === 'object' ? tc.rawInput : {};
+        const kind = cardKind(tc.kind);
+        parts.title.textContent = kind.title;
+        const host = listHostLabel();
+        parts.side.append(parts.more);
+        if (host) parts.side.append(cardEl('span', 'pc-host', 'on ' + host));
+        const cmd = cardEl('pre', 'pc-cmd', cardCommandText(tc));
+        cmd.tabIndex = 0;
+        cmd.setAttribute('aria-label', 'What it wants to run');
+        const desc =
+          typeof raw.description === 'string' ? raw.description.trim() : '';
+        const why = cardEl('div', 'pc-why', desc);
+        parts.body.append(cmd, why);
+
+        const opts = Array.isArray(data.options) ? data.options : [];
+        const onces = opts.filter((o) => o && o.kind === 'allow_once');
+        const primary = onces[0] || null;
+        const extras = opts.filter(
+          (o) => o && o !== primary && o.kind !== 'reject_once',
+        );
+        const extraRow = cardEl('div', 'pc-extra');
+        for (const opt of extras) {
+          const label = String(opt.name || opt.optionId);
+          const b = cardEl('button', 'pc-opt', label);
+          b.type = 'button';
+          b.dataset.optionId = String(opt.optionId);
+          b.onclick = () =>
+            vote(sessionId, requestId, 'selected', opt.optionId, undefined, 'Chose: ' + label);
+          extraRow.append(b);
+        }
+        parts.actions.append(extraRow);
+
+        if (primary && kind.overlay && permRulesGate()) {
+          const always = cardEl(
+            'button',
+            'pc-always',
+            'Always allow ' + kind.noun + ' in this conversation',
+          );
+          // The leading space is for the button's spoken name; on screen the
+          // line starts a block, where it collapses.
+          always.append(cardEl('span', 'sub', ' for 24 hours, on this gateway'));
+          always.type = 'button';
+          always.title =
+            'Sets a 24 hour rule on this gateway allowing every ' +
+            kind.overlay +
+            ' request in this conversation, then allows this one';
+          always.onclick = async () => {
+            entry.busy(true);
+            entry.note('Setting the rule…');
+            const r = await postPermOverlay({
+              sessionId,
+              tool: kind.overlay,
+              action: 'allow',
+              ttlSeconds: ALWAYS_ALLOW_TTL_SEC,
+              reason: 'Always allow, from the permission card',
+            });
+            if (!r.ok) {
+              entry.busy(false);
+              entry.note('Always allow was not set: ' + r.message);
+              return;
+            }
+            // Settings shows the overlays it last loaded; the new one is news.
+            if (permOverlays !== null) void loadPermOverlays(false);
+            await vote(
+              sessionId,
+              requestId,
+              'selected',
+              primary.optionId,
+              undefined,
+              'Allowed. ' +
+                kind.noun.charAt(0).toUpperCase() +
+                kind.noun.slice(1) +
+                ' are allowed in this conversation for 24h',
+            );
+          };
+          parts.actions.append(always);
+        }
+
+        const row = cardEl('div', 'pc-row');
+        const deny = cardEl('button', 'pc-deny', 'Deny');
+        deny.type = 'button';
+        deny.onclick = () =>
+          vote(sessionId, requestId, 'cancelled', undefined, undefined, 'Denied');
+        row.append(deny);
+        if (primary) {
+          // Several allow-once choices differ in what else they do (plan mode's
+          // "restore previous mode" against "manually approve edits"), so the
+          // green button then says which one it is in the daemon's words.
+          const label =
+            onces.length > 1
+              ? String(primary.name || primary.optionId)
+              : 'Allow once';
+          const allow = cardEl('button', 'pc-allow', label);
+          allow.type = 'button';
+          allow.dataset.optionId = String(primary.optionId);
+          allow.onclick = () =>
+            vote(sessionId, requestId, 'selected', primary.optionId, undefined, 'Allowed once');
+          row.append(allow);
+        }
+        parts.actions.append(row);
+      }
+
+      // Answerable body of an ask_user_question card, one question a page:
+      // radios for a single choice, checkboxes for multi-select, and a free
+      // answer under them (the tool always lets the user type their own).
+      // Submitting votes the allow_once option with answers keyed by question
+      // index, the keying the tool's parseAnswerQuestionIndex expects; the
+      // keying and what each answer holds are unchanged from the strip card.
+      function renderQuestionBlock(questions, permOptions, submit, parts) {
+        const { card, title, side, body, actions, note, more, requestId } =
+          parts;
         const selected = {}; // qi -> label (single-select)
         const multi = {}; // qi -> [labels] (multi-select)
         const custom = {}; // qi -> free-text
-        const optBtns = {}; // qi -> [buttons]
-        const otherBtns = {}; // qi -> "Other…" button
-        const otherInputs = {}; // qi -> text input
+        const pages = [];
+        const inputsByQ = {}; // qi -> [radio/checkbox inputs]
+        const freeByQ = {}; // qi -> free-text input
+        let at = 0;
+        const back = cardEl('button', 'pq-back');
+        back.type = 'button';
+        back.setAttribute('aria-label', 'Back to the question before');
+        back.innerHTML =
+          '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
+        const count = cardEl('span', 'pq-count');
+        side.append(more, back, count);
         questions.forEach((q, qi) => {
           const isMulti = Boolean(q.multiSelect);
-          const sec = document.createElement('div');
-          sec.className = 'ask-q';
-          const head = document.createElement('div');
-          head.className = 'ask-q-head';
-          head.textContent =
-            (q.header || 'Question ' + (qi + 1)) +
-            (isMulti ? ' — select any' : '');
-          const text = document.createElement('div');
-          text.className = 'ask-q-text';
-          text.textContent = q.question;
-          const opts = document.createElement('div');
-          opts.className = 'ask-q-opts';
-          sec.appendChild(head);
-          sec.appendChild(text);
-          sec.appendChild(opts);
-          wrap.appendChild(sec);
-          const btns = [];
+          const page = cardEl('div', 'pq-page');
+          const group = cardEl('div', 'pq-opts');
+          group.setAttribute('role', isMulti ? 'group' : 'radiogroup');
+          group.setAttribute('aria-label', String(q.question || q.header || ''));
+          const name = 'pq-' + requestId + '-' + qi;
+          const inputs = [];
           (q.options || []).forEach((opt) => {
-            const b = document.createElement('button');
-            b.className = 'ask-opt';
-            const lbl = document.createElement('span');
-            lbl.className = 'lbl';
-            lbl.textContent = opt.label;
-            b.appendChild(lbl);
-            if (opt.description) {
-              const d = document.createElement('span');
-              d.className = 'desc';
-              d.textContent = opt.description;
-              b.appendChild(d);
-            }
-            b.onclick = () => {
+            const row = cardEl('label', 'pq-opt');
+            const inp = document.createElement('input');
+            inp.type = isMulti ? 'checkbox' : 'radio';
+            inp.name = name;
+            const lbl = cardEl('span', 'pq-lbl', String(opt.label));
+            row.append(inp, lbl);
+            const d = typeof opt.description === 'string' ? opt.description : '';
+            // A short detail (a size, a count) is the column on the right, as
+            // drawn; a sentence goes under the label (see the CSS above).
+            if (d && d.length <= 24) row.append(cardEl('span', 'pq-detail', d));
+            else if (d) lbl.append(cardEl('span', 'pq-sub', d));
+            inp.onchange = () => {
               if (isMulti) {
                 const cur = multi[qi] || [];
                 const i = cur.indexOf(opt.label);
                 if (i >= 0) cur.splice(i, 1);
-                else cur.push(opt.label);
+                if (inp.checked) cur.push(opt.label);
                 multi[qi] = cur;
-              } else {
+              } else if (inp.checked) {
                 selected[qi] = opt.label;
                 custom[qi] = '';
-                const inp = otherInputs[qi];
-                if (inp) inp.value = '';
+                if (freeByQ[qi]) freeByQ[qi].value = '';
               }
-              syncSelection(qi);
             };
-            opts.appendChild(b);
-            btns.push(b);
+            inputs.push(inp);
+            group.append(row);
           });
-          optBtns[qi] = btns;
-          const otherRow = document.createElement('div');
-          otherRow.className = 'ask-other-row';
-          const otherBtn = document.createElement('button');
-          otherBtn.textContent = 'Other…';
-          const inp = document.createElement('input');
-          inp.type = 'text';
-          inp.placeholder = 'type a custom answer';
-          inp.hidden = true;
-          otherBtn.onclick = () => {
-            inp.hidden = !inp.hidden;
-            if (!inp.hidden) inp.focus();
-            syncSelection(qi);
+          inputsByQ[qi] = inputs;
+          const free = cardEl('label', 'pq-free', 'Or type an answer');
+          const fin = document.createElement('input');
+          fin.type = 'text';
+          fin.placeholder = 'Something else';
+          fin.oninput = () => {
+            custom[qi] = fin.value;
+            if (!isMulti && fin.value.trim()) {
+              selected[qi] = '';
+              inputs.forEach((i) => (i.checked = false));
+            }
           };
-          inp.oninput = () => {
-            custom[qi] = inp.value;
-            if (!isMulti && inp.value.trim()) selected[qi] = '';
-            syncSelection(qi);
+          fin.onkeydown = (e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            primary.click();
           };
-          otherBtns[qi] = otherBtn;
-          otherInputs[qi] = inp;
-          otherRow.appendChild(otherBtn);
-          otherRow.appendChild(inp);
-          opts.appendChild(otherRow);
+          freeByQ[qi] = fin;
+          free.append(fin);
+          page.append(group, free);
+          body.append(page);
+          pages.push(page);
           // Default to the first option (the model marks its recommendation
           // first), matching the TUI/web-shell behavior.
           if (!isMulti && (q.options || []).length > 0) {
             selected[qi] = q.options[0].label;
+            inputs[0].checked = true;
           }
         });
-        function syncSelection(qi) {
-          const q = questions[qi];
-          if (!q) return;
-          const isMulti = Boolean(q.multiSelect);
-          (optBtns[qi] || []).forEach((b, bi) => {
-            const label = (q.options || [])[bi] && (q.options || [])[bi].label;
-            const on = isMulti
-              ? (multi[qi] || []).includes(label)
-              : selected[qi] === label;
-            b.classList.toggle('sel', on);
-          });
-          otherBtns[qi] &&
-            otherBtns[qi].classList.toggle(
-              'sel',
-              Boolean((custom[qi] || '').trim()),
-            );
-        }
-        questions.forEach((q, qi) => syncSelection(qi));
-        const submitBtn = document.createElement('button');
-        submitBtn.textContent = 'Submit answers';
+        const row = cardEl('div', 'pc-row');
+        const primary = cardEl('button', 'pc-answer', 'Answer');
+        primary.type = 'button';
+        row.append(primary);
+        actions.append(row);
         const allowOnce = (permOptions || []).find(
           (o) => o.kind === 'allow_once',
         );
-        if (!allowOnce) {
-          submitBtn.disabled = true;
-          note.textContent = 'no submit option in this request';
-        } else {
-          submitBtn.onclick = () => {
-            const out = {};
-            questions.forEach((qq, qi) => {
-              const c = (custom[qi] || '').trim();
-              if (qq.multiSelect) {
-                const parts = [...(multi[qi] || [])];
-                if (c) parts.push(c);
-                out[String(qi)] = parts.join(', ');
-              } else {
-                out[String(qi)] = selected[qi] || c;
-              }
-            });
-            submit(allowOnce.optionId, out);
-          };
+        function showPage(n) {
+          at = n;
+          pages.forEach((p, i) => (p.hidden = i !== at));
+          const q = questions[at] || {};
+          title.textContent = String(q.question || q.header || 'Question');
+          const tags = [];
+          if (q.header) tags.push(String(q.header));
+          if (q.multiSelect) tags.push('pick any');
+          tags.push(at + 1 + ' of ' + questions.length);
+          count.textContent = tags.join(' · ');
+          back.hidden = at === 0;
+          const last = at === questions.length - 1;
+          primary.textContent = last ? 'Answer' : 'Next';
+          // Without a submit option only the last page's Answer is dead; Next
+          // still pages, so every question can be read before Cancel.
+          const off = !allowOnce && last;
+          primary.dataset.off = off ? '1' : '';
+          primary.disabled = off;
+          card.setAttribute('aria-label', title.textContent);
+          body.scrollTop = 0;
         }
-        wrap.appendChild(submitBtn);
-        return wrap;
+        back.onclick = () => {
+          if (at > 0) showPage(at - 1);
+        };
+        primary.onclick = () => {
+          if (at < questions.length - 1) {
+            showPage(at + 1);
+            return;
+          }
+          if (!allowOnce) return;
+          const out = {};
+          questions.forEach((qq, qi) => {
+            const c = (custom[qi] || '').trim();
+            if (qq.multiSelect) {
+              const parts = [...(multi[qi] || [])];
+              if (c) parts.push(c);
+              out[String(qi)] = parts.join(', ');
+            } else {
+              out[String(qi)] = selected[qi] || c;
+            }
+          });
+          submit(allowOnce.optionId, out);
+        };
+        if (!allowOnce) {
+          note.textContent = 'no submit option in this request';
+        }
+        showPage(0);
       }
 
       function resolveCard(requestId) {
         // Answered somewhere else (another window, the terminal). Same exit as
         // a local vote: confirm it, then leave the strip.
-        retireCard(requestId, 'resolved');
+        retireCard(requestId, 'Answered elsewhere');
       }
 
       // issue #46: recovery for question/permission cards the event
@@ -9796,7 +10469,9 @@
       // (answered elsewhere or expired). renderPermissionCard's
       // cards.has(requestId) dedupe makes overlap with live frames
       // harmless.
-      async function refreshPendingCards(sessionId) {
+      // #186: `early` is the push deep link's read, made before anything is
+      // watched so the card is pinned before the transcript arrives.
+      async function refreshPendingCards(sessionId, early) {
         if (!token()) return;
         let res;
         try {
@@ -9807,7 +10482,17 @@
         } catch {
           return; // transport blip — the stream's own reconnect handles it
         }
+        // #186: the answer is about `sessionId`. A reader who has moved to
+        // another conversation since it was asked would otherwise get a card
+        // nobody can answer from here pinned over theirs, and a 404 would
+        // forget the conversation they moved to.
+        if (sessionId !== watchedSessionId && sessionId !== deepLinkSessionId) {
+          return;
+        }
         if (res.status === 404) {
+          // The deep link's read comes before any watch, and the watch it
+          // then opens reports a gone conversation itself.
+          if (early && sessionId !== watchedSessionId) return;
           // Gone, not busy: nothing to redraw now or later (#59).
           forgetGoneSession('session ended on the host — start or resume one');
           return;
@@ -9862,12 +10547,16 @@
           const entry = cards.get(requestId);
           if (!entry || entry.sessionId !== sessionId) continue;
           if (pending.has(requestId)) continue;
-          retireCard(requestId, 'resolved');
+          retireCard(requestId, 'Answered elsewhere');
         }
       }
 
       let controller = null;
       let watchedSessionId = null;
+      // #186: the conversation a push deep link is opening, from the moment
+      // its pending card is asked for until a watch of something else
+      // replaces it; refreshPendingCards draws for it before it is watched.
+      let deepLinkSessionId = null;
       let watchedSessionTitle = null;
       // issue #39: the workspace the watched session runs in, when known —
       // the only cwd the resume route will accept for a state_resync_required
@@ -13052,8 +13741,9 @@
             // Resume is a conversation SWITCH, not a reconnect: startWatch
             // only self-clears when fromEventId is null (which would skip the
             // replay), so wipe the stale transcript here for the replayed
-            // history to render on a clean slate.
-            clearTranscript();
+            // history to render on a clean slate. #186: the cards of the
+            // conversation being resumed stay; they are still answerable in it.
+            clearTranscript(sessionId);
             // issue #39: the daemon's load action returns the transcript in
             // THIS RESPONSE — compactedReplay + liveJournal are DaemonEvent[]
             // (the same shape as SSE frames) — and clears the bus ring after
@@ -13447,6 +14137,7 @@
         // Keyed on a change of conversation so a self-heal re-watch of the
         // same one does not shut them under a reader still browsing folders.
         if (id !== watchedSessionId) setListOpen(false);
+        if (id !== deepLinkSessionId) deepLinkSessionId = null;
         // #182: the draft belongs to the conversation it was typed for, the
         // same rule the outbox (#70) follows, so a switch files the composer's
         // text under the conversation being left and brings back the one being
@@ -13568,7 +14259,7 @@
           watchStreamAlive = true;
           watchRetryAttempt = 0; // healthy connect: reset the self-heal backoff
           $('composer').style.display = '';
-          if (fromEventId == null) clearTranscript();
+          if (fromEventId == null) clearTranscript(id);
           // Drawn on every watch, not only the ones that cleared: a watermark
           // watch keeps the rows it already has (and so keeps the cursor that
           // goes with them), but it still has to show whether more exists.
@@ -14466,6 +15157,11 @@
       // (mobile screen-off kills connections).
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;
+        // #186: what is waiting on the reader is asked for first, ahead of
+        // every other catch-up read, so a request raised while the page was
+        // away is the first answer back and is pinned the moment it lands.
+        // A card the stream delivered while hidden is already in place.
+        if (watchedSessionId) void refreshPendingCards(watchedSessionId);
         void pollDaemonHealths();
         // issue #35: the 30 s tick is paused while hidden — catch up now.
         void refreshPastConversations(curDirPath);
@@ -14476,10 +15172,9 @@
           watchRetryAttempt = 0;
           startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
         }
-        // issue #46: the 5 s tick is paused while hidden — catch up now.
-        // (Duplicates startWatch's own refresh when the stream just
-        // reconnected; the card dedupe makes that harmless.)
-        if (watchedSessionId) void refreshPendingCards(watchedSessionId);
+        // issue #46: the 5 s tick is paused while hidden; the catch-up read
+        // went out first, above. (startWatch's own refresh duplicates it when
+        // the stream just reconnected; the card dedupe makes that harmless.)
         void refreshWorkspaceSections();
       });
 
@@ -14920,10 +15615,34 @@
       function handleSessionDeepLink() {
         const m = /[?&]session=([^&]+)/.exec(location.search);
         if (!m) return false;
-        const id = decodeURIComponent(m[1]);
         // Scrub immediately (like the auto-pair hash scrub, above) so the
-        // session id never lingers in the URL or history.
+        // session id never lingers in the URL or history. #186: before the
+        // decode, so a link that cannot be decoded is scrubbed too.
         history.replaceState(null, '', location.pathname);
+        // #186: a link mangled on its way here (a stray %, an escape cut in
+        // half) makes decodeURIComponent throw, and the throw used to land in
+        // authGate's catch and show the pairing gate over a token that was
+        // fine. A link that cannot be read names no conversation, so the page
+        // carries on as a plain load does and the caller restores the last one.
+        let id = '';
+        try {
+          id = decodeURIComponent(m[1]);
+        } catch {
+          id = '';
+        }
+        if (!id) {
+          setStatus('the link named no conversation this page could read');
+          return false;
+        }
+        // #186: a push is about something waiting, so what is pending is asked
+        // for first and pinned before the transcript is fetched. The watch
+        // below waits for that answer, bounded so a status read that hangs
+        // does not hold the conversation back.
+        deepLinkSessionId = id;
+        const pinned = Promise.race([
+          refreshPendingCards(id, true),
+          new Promise((r) => setTimeout(r, 1500)),
+        ]);
         void (async () => {
           for (const cwd of loadRecentWorkspaces()) {
             try {
@@ -14937,6 +15656,7 @@
                 (x) => x && x.sessionId === id,
               );
               if (s) {
+                await pinned;
                 void resumeConversation(id, cwd, strOr(s.title, ''), {
                   hostTerminal: true,
                 });
@@ -14948,6 +15668,7 @@
           }
           // No recent workspace listed it: replay from 0, like
           // restoreWatchedSession, so a persisted transcript rebuilds.
+          await pinned;
           void startWatch(id, 0);
         })();
         return true;
