@@ -301,15 +301,6 @@ function classifyConditions(
 }
 
 /**
- * Map a proposed tool call to allow/deny/prompt by first match over rules
- * ordered `(priority desc, specificity desc, index asc)`. PURE: no I/O; the
- * clock is injected as `now` (defaults to the real wall-clock) so the result is
- * deterministic under a fixed `now` + fixed timezone. A matched rule whose
- * time/quota conditions are UNEVALUABLE (malformed timeOfDay/expiresAt, or a
- * deferred maxPerWindow) is downgraded to prompt (the safety invariant); a
- * well-formed-but-unsatisfied condition makes the rule not match (fall through).
- */
-/**
  * Rule indices in evaluation order: `priority desc, specificity desc, index
  * asc`. Shared by {@link evaluate} and {@link explainPolicy} so the trace order
  * is provably the evaluation order.
@@ -330,6 +321,48 @@ function orderedRuleIndices(policy: Policy): number[] {
   return order;
 }
 
+/**
+ * {@link orderedRuleIndices} split by layer: the user rules and the workspace
+ * rules (`layer: 'workspace'`, set by `mergePolicies`), each in evaluation
+ * order. Priority orders rules only WITHIN a layer, so a workspace priority can
+ * never outrank a user rule (issue #156).
+ */
+function layeredRuleIndices(policy: Policy): {
+  user: number[];
+  workspace: number[];
+} {
+  const order = orderedRuleIndices(policy);
+  return {
+    user: order.filter((i) => policy.rules[i].layer !== 'workspace'),
+    workspace: order.filter((i) => policy.rules[i].layer === 'workspace'),
+  };
+}
+
+/** How restrictive an action is: a higher number is stricter. */
+const STRICTNESS: Record<PolicyAction, number> = {
+  allow: 0,
+  prompt: 1,
+  deny: 2,
+};
+
+/**
+ * Map a proposed tool call to allow/deny/prompt by first match over rules
+ * ordered `(priority desc, specificity desc, index asc)`. PURE: no I/O; the
+ * clock is injected as `now` (defaults to the real wall-clock) so the result is
+ * deterministic under a fixed `now` + fixed timezone. A matched rule whose
+ * time/quota conditions are UNEVALUABLE (malformed timeOfDay/expiresAt, or a
+ * deferred maxPerWindow) is downgraded to prompt (the safety invariant); a
+ * well-formed-but-unsatisfied condition makes the rule not match (fall through).
+ *
+ * Layers: a user-only policy is first match over its rules, then
+ * `defaults`. A merged policy with a workspace layer is decided per layer: the
+ * user layer (rules, then `defaults`) and the workspace layer (rules only, no
+ * default). The workspace decision wins only when it is STRICTER than the user
+ * one (deny > prompt > allow), so the workspace layer can only narrow: it can
+ * never produce `allow`, or soften a user `deny` to `prompt`, whatever its
+ * priorities (issue #156). This holds even for a workspace `allow` rule that
+ * reached here without going through `mergePolicies`.
+ */
 export function evaluate(
   policy: Policy,
   ctx: ToolCallContext,
@@ -338,8 +371,59 @@ export function evaluate(
 ): PolicyDecision {
   const argString = canonicalArgString(ctx.args);
   const paths = ctx.paths ?? [];
+  const layers = layeredRuleIndices(policy);
 
-  for (const idx of orderedRuleIndices(policy)) {
+  const user =
+    firstMatchDecision(
+      policy,
+      layers.user,
+      ctx,
+      argString,
+      paths,
+      now,
+      quota,
+    ) ?? defaultDecision(policy);
+  if (layers.workspace.length === 0 || user.action === 'deny') return user;
+
+  const workspace = firstMatchDecision(
+    policy,
+    layers.workspace,
+    ctx,
+    argString,
+    paths,
+    now,
+    quota,
+  );
+  return workspace !== null &&
+    STRICTNESS[workspace.action] > STRICTNESS[user.action]
+    ? workspace
+    : user;
+}
+
+/** The no-rule-matched decision: the policy's `defaults`. */
+function defaultDecision(policy: Policy): PolicyDecision {
+  return {
+    action: policy.defaults.action,
+    source: 'default',
+    requireScope: policy.defaults.requireScope,
+    usedDeferredField: false,
+  };
+}
+
+/**
+ * The decision of the first rule in `indices` that matches with satisfied (or
+ * unevaluable) conditions, or `null` when none does.
+ */
+function firstMatchDecision(
+  policy: Policy,
+  indices: number[],
+  ctx: ToolCallContext,
+  argString: string,
+  paths: string[],
+  now: Date,
+  quota?: QuotaOracle,
+): PolicyDecision | null {
+  for (const idx of indices) {
     const rule = policy.rules[idx];
     if (!ruleMatches(rule, ctx, argString, paths)) continue;
 
@@ -370,13 +454,7 @@ export function evaluate(
       usedDeferredField: unevaluable,
     };
   }
-
-  return {
-    action: policy.defaults.action,
-    source: 'default',
-    requireScope: policy.defaults.requireScope,
-    usedDeferredField: false,
-  };
+  return null;
 }
 
 /** One rule's annotation in a {@link PolicyExplanation} trace. */
@@ -408,13 +486,18 @@ export interface RuleTrace {
    * room; skipped once exhausted).
    */
   quotaNotEvaluated?: boolean;
+  /** `'workspace'` for a rule from the workspace layer; absent for a user rule. */
+  layer?: 'workspace';
 }
 
 /** Result of {@link explainPolicy}: the authoritative decision + per-rule trace. */
 export interface PolicyExplanation {
   /** The REAL decision from {@link evaluate} — can never drift from the trace. */
   decision: PolicyDecision;
-  /** Rules in evaluation order (priority desc, specificity desc, index asc). */
+  /**
+   * Rules in evaluation order (priority desc, specificity desc, index asc):
+   * the user layer first, then the workspace layer, each with its own winner.
+   */
   trace: RuleTrace[];
 }
 
@@ -426,7 +509,8 @@ export interface PolicyExplanation {
  * `decision` by CALLING `evaluate` — so the printed decision can never diverge
  * from what the enforcer would do. Without a {@link QuotaOracle} (the
  * daemon-free CLI), a `maxPerWindow` rule is `unevaluable` → prompt; pass an
- * oracle to reflect live quota state.
+ * oracle to reflect live quota state. A merged policy is traced per layer (the
+ * user layer, then the workspace layer), mirroring how {@link evaluate} decides.
  */
 export function explainPolicy(
   policy: Policy,
@@ -436,23 +520,49 @@ export function explainPolicy(
 ): PolicyExplanation {
   const argString = canonicalArgString(ctx.args);
   const paths = ctx.paths ?? [];
+  const layers = layeredRuleIndices(policy);
+  const trace = [
+    ...traceLayer(policy, layers.user, ctx, argString, paths, now, quota),
+    ...traceLayer(policy, layers.workspace, ctx, argString, paths, now, quota),
+  ];
+  return { decision: evaluate(policy, ctx, now, quota), trace };
+}
+
+/** The trace of one layer's rules (`indices`, in evaluation order). */
+function traceLayer(
+  policy: Policy,
+  indices: number[],
+  ctx: ToolCallContext,
+  argString: string,
+  paths: string[],
+  now: Date,
+  quota?: QuotaOracle,
+): RuleTrace[] {
   const trace: RuleTrace[] = [];
   let winnerFound = false;
 
-  for (const idx of orderedRuleIndices(policy)) {
+  for (const idx of indices) {
     const rule = policy.rules[idx];
+    const layer = rule.layer === 'workspace' ? { layer: rule.layer } : {};
     if (winnerFound) {
       trace.push({
         index: idx,
         id: rule.id,
         status: 'not-reached',
         reason: 'earlier-rule-won',
+        ...layer,
       });
       continue;
     }
     const mm = matchReason(rule, ctx, argString, paths);
     if (mm !== null) {
-      trace.push({ index: idx, id: rule.id, status: 'skipped', reason: mm });
+      trace.push({
+        index: idx,
+        id: rule.id,
+        status: 'skipped',
+        reason: mm,
+        ...layer,
+      });
       continue;
     }
     const cc = classifyConditionsDetailed(rule, now, quota);
@@ -462,6 +572,7 @@ export function explainPolicy(
         id: rule.id,
         status: 'skipped',
         reason: cc.reason,
+        ...layer,
       });
       continue;
     }
@@ -485,9 +596,9 @@ export function explainPolicy(
       action: downgraded ? 'prompt' : rule.action,
       downgraded,
       ...(quotaNotEvaluated ? { quotaNotEvaluated: true } : {}),
+      ...layer,
     });
     winnerFound = true;
   }
-
-  return { decision: evaluate(policy, ctx, now, quota), trace };
+  return trace;
 }

@@ -5,7 +5,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 export type PolicyAction = 'allow' | 'deny' | 'prompt';
@@ -39,6 +39,14 @@ export interface PolicyRule {
    * substring-searching the source text.
    */
   aliasedTool?: string;
+  /**
+   * `'workspace'` on a rule that came from `<cwd>/.qwen/policy.yaml`. Set ONLY
+   * by {@link mergePolicies}, never parsed from YAML ({@link loadPolicy} builds
+   * each rule field by field, so a `layer:` key in a file is ignored). The
+   * evaluator decides each layer separately and lets a workspace decision win
+   * only when it is STRICTER than the user one (issue #156).
+   */
+  layer?: 'workspace';
   // Deferred (parsed, not evaluated this cycle):
   expiresAt?: unknown;
 }
@@ -164,6 +172,18 @@ function parseMaxPerWindow(
  * `{ action:'prompt', requireScope:'approve' }` when omitted.
  */
 export function loadPolicy(text: string): Policy {
+  return parsePolicyDocument(text).policy;
+}
+
+/**
+ * {@link loadPolicy}'s validator, also reporting whether the document declared
+ * a `defaults` block (the returned policy always has one, filled in when
+ * omitted), so the workspace bounds check can report an ignored block.
+ */
+function parsePolicyDocument(text: string): {
+  policy: Policy;
+  declaresDefaults: boolean;
+} {
   const doc = parse(text) ?? {};
   if (!isPlainObject(doc)) {
     throw new PolicyError('policy document must be a mapping');
@@ -283,7 +303,17 @@ export function loadPolicy(text: string): Policy {
     rules,
   };
   if (typeof doc['version'] === 'number') policy.version = doc['version'];
-  return policy;
+  return { policy, declaresDefaults: defaultsRaw !== undefined };
+}
+
+/** A policy file's text, or `null` when it is absent (ENOENT). */
+async function readPolicyText(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw err;
+  }
 }
 
 /**
@@ -292,14 +322,67 @@ export function loadPolicy(text: string): Policy {
  * delegates to {@link loadPolicy} (which may throw {@link PolicyError}).
  */
 export async function loadPolicyFile(path: string): Promise<Policy | null> {
-  let text: string;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
-    throw err;
+  const text = await readPolicyText(path);
+  return text === null ? null : loadPolicy(text);
+}
+
+/**
+ * The workspace layer's bounds (issue #156). The workspace file can arrive
+ * with a cloned repo, or the model can write it with its own edit tool and the
+ * gateway hot-reloads it, so it is untrusted: it may only NARROW the user
+ * policy. It may add `deny` and `prompt` rules; it may not `allow` (that could
+ * only widen) and may not set `defaults` (only the user file sets the fallback).
+ * Priority is not a bound: the evaluator orders rules by priority only within
+ * a layer, so a workspace priority cannot outrank a user rule.
+ */
+function isWithinWorkspaceBounds(rule: PolicyRule): boolean {
+  return rule.action !== 'allow';
+}
+
+/** Result of {@link loadWorkspacePolicy}. */
+export interface WorkspacePolicyLoad {
+  /** The file as written (validated, not yet narrowed). */
+  policy: Policy;
+  /**
+   * One line per part of the file that exceeds the workspace bounds and is
+   * ignored at load. Empty when the file is within bounds.
+   */
+  violations: string[];
+}
+
+/**
+ * Parse a workspace policy file with the SAME validator as {@link loadPolicy}
+ * (throws {@link PolicyError} on a malformed file) and report every part that
+ * exceeds the workspace bounds. {@link mergePolicies} drops those parts; this
+ * function only names them, so the load path can log them and `policy lint`
+ * can fail on them, rather than clamping silently.
+ */
+export function loadWorkspacePolicy(text: string): WorkspacePolicyLoad {
+  const { policy, declaresDefaults } = parsePolicyDocument(text);
+  const violations: string[] = [];
+  if (declaresDefaults) {
+    violations.push(
+      `'defaults': only the user policy sets the fallback action`,
+    );
   }
-  return loadPolicy(text);
+  policy.rules.forEach((rule, i) => {
+    if (isWithinWorkspaceBounds(rule)) return;
+    violations.push(
+      `rule '${rule.id ?? `[${i}]`}' (${rule.action}): a workspace policy ` +
+        `may only add deny or prompt rules`,
+    );
+  });
+  return { policy, violations };
+}
+
+/**
+ * `true` when `path` is where the gateway looks for a workspace policy
+ * (`<cwd>/.qwen/policy.yaml`). The user file lives at `~/.qwen/rc/policy.yaml`,
+ * so it never matches.
+ */
+function isWorkspacePolicyPath(path: string): boolean {
+  const abs = resolve(path);
+  return basename(abs) === 'policy.yaml' && basename(dirname(abs)) === '.qwen';
 }
 
 /** The fail-closed fallback when no user policy.yaml exists: prompt everything. */
@@ -309,19 +392,32 @@ const DEFAULT_PROMPT_POLICY: Policy = {
 };
 
 /**
- * Merge a workspace policy over a user policy by PREPENDING the workspace rules
- * (design D1: the evaluator breaks specificity/priority ties by earlier index, so
- * lower-indexed workspace rules win an equal-specificity tie — the spec's
- * workspace-override scenario). `workspace === null` returns `user` UNCHANGED, so
- * a workspace-less boot is byte-identical to today. The user `defaults` are kept;
- * a workspace `defaults` block is intentionally IGNORED (D3) so a workspace file
- * cannot silently flip the global fallback action. Pure.
+ * Merge a workspace policy over a user policy. The workspace layer can only
+ * NARROW (issue #156; it is untrusted, see {@link isWithinWorkspaceBounds}):
+ *
+ * - Workspace `allow` rules are DROPPED. The rest are tagged
+ *   `layer: 'workspace'` and prepended (D1: earlier index still breaks ties
+ *   between workspace rules).
+ * - The evaluator decides the two layers SEPARATELY and the workspace decision
+ *   wins only when it is stricter (deny > prompt > allow), so no workspace
+ *   `priority` can outrank a user rule, a workspace `prompt` cannot soften a
+ *   user `deny`, and a workspace `deny`/`prompt` still tightens a user `allow`
+ *   or the user default.
+ * - The user `defaults` are kept; a workspace `defaults` block is IGNORED (D3),
+ *   so a workspace file cannot flip the fallback action.
+ *
+ * `workspace === null` returns `user` UNCHANGED, so a workspace-less boot is
+ * byte-identical. Pure: callers that read the file use
+ * {@link loadWorkspacePolicy} to name what this drops, and log it.
  */
 export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
   if (!workspace) return user;
+  const workspaceRules = workspace.rules
+    .filter(isWithinWorkspaceBounds)
+    .map((rule): PolicyRule => ({ ...rule, layer: 'workspace' }));
   return {
     defaults: user.defaults,
-    rules: [...workspace.rules, ...user.rules],
+    rules: [...workspaceRules, ...user.rules],
   };
 }
 
@@ -359,7 +455,10 @@ async function checkUserPolicyReadable(
 
 /**
  * Load the user policy and, when a workspace cwd is given, the workspace override
- * `<workspaceCwd>/.qwen/policy.yaml`, then merge (workspace prepended). The user
+ * `<workspaceCwd>/.qwen/policy.yaml`, then merge via {@link mergePolicies} (the
+ * workspace layer can only narrow). Every part of the workspace file that
+ * exceeds its bounds (an `allow` rule, a `defaults` block) is logged via `warn`
+ * on every load, boot and hot-reload alike, and dropped. The user
  * file is loaded with cycle-14 semantics UNCHANGED: absent (ENOENT) → the
  * default-prompt policy; malformed → THROWS {@link PolicyError} (boot fails — a
  * malformed user policy must not be silently downgraded). The WORKSPACE layer is
@@ -401,13 +500,17 @@ export async function loadLayeredPolicy(
     );
   }
   let workspace: Policy | null = null;
+  let violations: string[] = [];
   if (workspaceCwd) {
     try {
-      // loadPolicyFile returns null for ENOENT (absent) and throws only for a
-      // malformed/unreadable file.
-      workspace = await loadPolicyFile(
+      // readPolicyText returns null for ENOENT (absent); loadWorkspacePolicy
+      // throws only for a malformed file.
+      const text = await readPolicyText(
         join(workspaceCwd, '.qwen', 'policy.yaml'),
       );
+      if (text !== null) {
+        ({ policy: workspace, violations } = loadWorkspacePolicy(text));
+      }
     } catch (err) {
       if (opts.strictWorkspace) throw err; // reload: retain the previous ruleset
       warn(
@@ -415,6 +518,11 @@ export async function loadLayeredPolicy(
       );
       workspace = null;
     }
+  }
+  // An out-of-bounds part is dropped, never applied, so even at reload it is
+  // logged rather than thrown: narrowing is already the safe outcome.
+  for (const v of violations) {
+    warn(`[policy] workspace policy.yaml: ignoring ${v}`);
   }
   return mergePolicies(workspace, user);
 }
@@ -438,6 +546,12 @@ export interface PolicyLintResult {
    * Never affects `ok`/load outcome — advisory, not validation.
    */
   warnings?: string[];
+  /**
+   * Workspace files only: each part that exceeds the workspace bounds and that
+   * the gateway ignores at load (see {@link loadWorkspacePolicy}). Non-empty
+   * makes `ok` false: the file would not take effect as written.
+   */
+  violations?: string[];
   /** Human-readable reason (invalid files only). */
   error?: string;
 }
@@ -502,8 +616,16 @@ export function policyAdvisories(policy: Policy): string[] {
  * throws: every failure is reported as `{ ok: false, error }`. A missing file is
  * a lint FAILURE (not the loader's "absent → default" pass) — an explicit
  * `lint <file>` target that does not exist is an error.
+ *
+ * A workspace file (`<dir>/.qwen/policy.yaml`, or any path with
+ * `opts.workspace: true`) is also checked against the workspace bounds: each
+ * `allow` rule and a `defaults` block is listed in `violations` and the result
+ * is NOT ok, since the gateway would ignore those parts (issue #156).
  */
-export async function lintPolicyFile(path: string): Promise<PolicyLintResult> {
+export async function lintPolicyFile(
+  path: string,
+  opts: { workspace?: boolean } = {},
+): Promise<PolicyLintResult> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
@@ -517,11 +639,27 @@ export async function lintPolicyFile(path: string): Promise<PolicyLintResult> {
           : `cannot read ${path}: ${(err as Error).message}`,
     };
   }
+  const workspace = opts.workspace ?? isWorkspacePolicyPath(path);
   let policy: Policy;
+  let violations: string[] = [];
   try {
-    policy = loadPolicy(text);
+    if (workspace) {
+      ({ policy, violations } = loadWorkspacePolicy(text));
+    } else {
+      policy = loadPolicy(text);
+    }
   } catch (err) {
     return { ok: false, error: (err as Error).message };
+  }
+  if (violations.length > 0) {
+    return {
+      ok: false,
+      ruleCount: policy.rules.length,
+      violations,
+      error:
+        `workspace policy exceeds its bounds: the gateway ignores ` +
+        `${violations.length} part(s) of it at load`,
+    };
   }
   // No policy field is currently deferred (maxPerWindow is honored as of cycle 43),
   // so a valid file lints clean. Left as a hook for any future deferred field.
@@ -532,7 +670,12 @@ export async function lintPolicyFile(path: string): Promise<PolicyLintResult> {
 
 /** Render a {@link PolicyLintResult} as a one/two-line human summary. */
 export function formatPolicyLint(path: string, r: PolicyLintResult): string {
-  if (!r.ok) return `✖ ${path}: ${r.error}`;
+  if (!r.ok) {
+    return [
+      `✖ ${path}: ${r.error}`,
+      ...(r.violations ?? []).map((v) => `  ignored: ${v}`),
+    ].join('\n');
+  }
   const lines = [`✓ ${path}: valid (${r.ruleCount} rule(s))`];
   if (r.deferred && r.deferred.length > 0) {
     lines.push(

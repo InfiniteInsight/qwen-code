@@ -11,7 +11,7 @@ import {
   quotaLimitsFromPolicy,
   type QuotaLimit,
 } from './quotas.js';
-import type { Policy } from './loader.js';
+import { mergePolicies, type Policy } from './loader.js';
 
 /** limitsFor over a fixed map; unknown ids → undefined (untracked). */
 const limitsFrom =
@@ -201,6 +201,29 @@ describe('quotaLimitsFromPolicy', () => {
       ]),
     );
     expect(m.get('q')).toEqual({ count: 1, windowSec: 1 });
+  });
+
+  it('a workspace rule cannot set the limit of a USER rule that shares its id (issue #156: the workspace layer can only narrow)', () => {
+    // Merged order puts the workspace rule first; first-id-wins alone would
+    // let the workspace file raise the user's 2/hour cap to a million/second.
+    const user = policy([
+      {
+        id: 'shared',
+        match: { tool: 'fetch' },
+        action: 'allow',
+        maxPerWindow: { count: 2, windowSec: 3600 },
+      },
+    ]);
+    const workspace = policy([
+      {
+        id: 'shared',
+        match: { tool: 'read' },
+        action: 'deny',
+        maxPerWindow: { count: 1_000_000, windowSec: 1 },
+      },
+    ]);
+    const m = quotaLimitsFromPolicy(mergePolicies(workspace, user));
+    expect(m.get('shared')).toEqual({ count: 2, windowSec: 3600 });
   });
 
   it('CONTRACT: a QuotaStore whose limitsFor closes over a Map reflects a later in-place mutation (the cli hot-reload rebuild)', async () => {

@@ -144,16 +144,23 @@ export function formatExplanation(exp: PolicyExplanation): string {
   if (trace.length === 0) lines.push('  (no rules)');
   for (const t of trace) {
     const id = t.id ?? `[${t.index}]`;
+    const tag = t.layer === 'workspace' ? ' [workspace]' : '';
     if (t.status === 'matched') {
       const tail = t.downgraded
         ? `-> ${t.action} (downgraded: ${t.reason})`
         : `-> ${t.action}`;
-      lines.push(`  MATCHED   ${id} ${tail}`);
+      lines.push(`  MATCHED   ${id} ${tail}${tag}`);
     } else if (t.status === 'skipped') {
-      lines.push(`  SKIPPED   ${id} (${t.reason})`);
+      lines.push(`  SKIPPED   ${id} (${t.reason})${tag}`);
     } else {
-      lines.push(`  -         ${id} (not reached: ${t.reason})`);
+      lines.push(`  -         ${id} (not reached: ${t.reason})${tag}`);
     }
+  }
+  if (trace.some((t) => t.layer === 'workspace')) {
+    lines.push(
+      'note: workspace rules can only tighten the user decision (deny > ' +
+        'prompt > allow); each layer has its own winner above.',
+    );
   }
 
   const src =

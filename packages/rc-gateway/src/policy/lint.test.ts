@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lintPolicyFile, formatPolicyLint } from './loader.js';
@@ -89,6 +89,66 @@ describe('lintPolicyFile', () => {
     const r = await lintPolicyFile(p);
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/maxPerWindow must be a mapping/);
+  });
+
+  describe('workspace files (issue #156: the workspace layer can only narrow)', () => {
+    async function writeWorkspace(body: string): Promise<string> {
+      const wsDir = join(dir, 'repo', '.qwen');
+      await mkdir(wsDir, { recursive: true });
+      const p = join(wsDir, 'policy.yaml');
+      await writeFile(p, body);
+      return p;
+    }
+    const PROBE = `defaults: { action: allow }\nrules:\n  - id: ws-allow-all\n    match: {}\n    action: allow\n    priority: 1000\n  - id: ws-deny-fetch\n    match: { tool: fetch }\n    action: deny\n`;
+
+    it('reports a <dir>/.qwen/policy.yaml that allows or sets defaults instead of passing it', async () => {
+      const p = await writeWorkspace(PROBE);
+      const r = await lintPolicyFile(p);
+      expect(r.ok).toBe(false);
+      expect(r.violations).toHaveLength(2);
+      expect(r.violations!.some((v) => v.includes("'ws-allow-all'"))).toBe(
+        true,
+      );
+      expect(r.violations!.some((v) => v.includes('defaults'))).toBe(true);
+      const out = formatPolicyLint(p, r);
+      expect(out).toMatch(/^✖ /);
+      expect(out).toContain('ignored:');
+      expect(out).toContain("'ws-allow-all'");
+    });
+
+    it('a workspace file with only deny/prompt rules lints clean', async () => {
+      const p = await writeWorkspace(
+        `rules:\n  - id: d\n    match: { tool: fetch }\n    action: deny\n  - id: q\n    match: { tool: edit }\n    action: prompt\n`,
+      );
+      const r = await lintPolicyFile(p);
+      expect(r.ok).toBe(true);
+      expect(r.ruleCount).toBe(2);
+      expect(r.violations ?? []).toEqual([]);
+    });
+
+    it('the same allow rule and defaults in a USER file are fine', async () => {
+      await mkdir(join(dir, 'rc'), { recursive: true });
+      const p = join(dir, 'rc', 'policy.yaml');
+      await writeFile(p, PROBE);
+      const r = await lintPolicyFile(p);
+      expect(r.ok).toBe(true);
+      expect(r.violations ?? []).toEqual([]);
+    });
+
+    it('{ workspace: true } applies the workspace bounds to any path', async () => {
+      const p = await write('ws-copy.yaml', PROBE);
+      expect((await lintPolicyFile(p)).ok).toBe(true);
+      const r = await lintPolicyFile(p, { workspace: true });
+      expect(r.ok).toBe(false);
+      expect(r.violations).toHaveLength(2);
+    });
+
+    it('a malformed workspace file still reports the schema error', async () => {
+      const p = await writeWorkspace(`rules: 5\n`);
+      const r = await lintPolicyFile(p);
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/rules must be a sequence/);
+    });
   });
 
   it('surfaces alias-widening + newly-live warnings through formatPolicyLint', async () => {
