@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -377,5 +377,87 @@ describe('POST /session/:id/supported-commands/:name', () => {
     // would both answer a client that has gone and log a turn that is still
     // running as though it had failed.
     expect(audit.entries).toHaveLength(0);
+  });
+
+  it('a disconnect during a 202 turn stops the wait but never cancels the turn', async () => {
+    // The daemon's real shape: POST /prompt answers 202 and the SDK waits for
+    // turn_complete on /events. When the SDK's signal aborts it sends
+    // cancel({cancelReason:'interrupted'}), which kills the running turn AND
+    // every prompt queued behind it. A phone whose screen goes off must not do
+    // that, so the close signal may end this route's await and nothing more.
+    stub = await startStubDaemon({
+      supportedCommands: sessionCommands,
+      promptAccepts: true,
+      frames: [],
+      holdOpenMs: 1_000,
+    });
+    const audit = new FakeAudit();
+    const handler = createSessionCommandInvokeRoute(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+      audit,
+      30_000,
+    );
+    let handlerDone = false;
+    const app = express();
+    app.use(express.json());
+    app.post(
+      '/session/:id/supported-commands/:name',
+      fakeClient([WRITE]),
+      (req, res, next) => {
+        void Promise.resolve(handler(req, res, next)).then(() => {
+          handlerDone = true;
+        });
+      },
+    );
+    const url = await listen(app);
+
+    const controller = new AbortController();
+    const pending = fetch(`${url}/session/${SID}/supported-commands/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(stub!.lastPromptBody).toBeDefined());
+    // Let the SDK open its /events wait so the abort lands mid-turn.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(handlerDone).toBe(false);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+
+    // The route stopped waiting...
+    await vi.waitFor(() => expect(handlerDone).toBe(true));
+    // ...and the SDK's cancel, if it were going to fire, is fire-and-forget
+    // right after the abort; give it time to reach the stub.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(stub!.cancelCount).toBe(0);
+    expect(audit.entries).toHaveLength(0);
+  });
+
+  it('still cancels the turn when the timer fires on the 202 path', async () => {
+    // The other half of the contract: the close signal no longer reaches the
+    // SDK, but the timer's does, because that cancel is what frees a wedged
+    // admission slot.
+    const audit = new FakeAudit();
+    const url = await mountInvoke(
+      {
+        supportedCommands: sessionCommands,
+        promptAccepts: true,
+        frames: [],
+        holdOpenMs: 1_000,
+      },
+      [WRITE],
+      audit,
+      60,
+    );
+
+    const res = await fetch(`${url}/session/${SID}/supported-commands/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(504);
+    await vi.waitFor(() => expect(stub!.cancelCount).toBe(1));
+    expect(audit.entries[0]!.detail).toEqual({ name: 'diff', timedOut: true });
   });
 });

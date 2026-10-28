@@ -200,26 +200,45 @@ export function createInvokeCommandRoute(
 
     // Bounded the same way as the session-command route: a disconnect stops the
     // wait and leaves the turn running (#38), while the timer stops a turn that
-    // never settles from holding a daemon admission slot — and so the session's
-    // whole prompt queue — forever. Full reasoning there.
-    const controller = new AbortController();
+    // never settles from holding a daemon admission slot, and so the session's
+    // whole prompt queue, forever. Only the timer's signal reaches
+    // daemon.prompt(): on the 202 path the SDK answers an aborted signal with a
+    // cancel that kills the running turn and everything queued behind it
+    // (#157), so a disconnect merely wins a race against the prompt promise.
+    // Full reasoning there.
+    const timerAbort = new AbortController();
     let abortSource = '';
     const timer = setTimeout(() => {
-      abortSource = 'timer';
-      controller.abort();
+      if (abortSource === '') abortSource = 'timer';
+      timerAbort.abort();
     }, promptTimeoutMs);
+    let departed!: () => void;
+    const clientGone = new Promise<'gone'>((resolve) => {
+      departed = () => resolve('gone');
+    });
     res.on('close', () => {
       if (abortSource === '') abortSource = 'disconnect';
-      controller.abort();
+      departed();
     });
+
+    const prompting = daemon.prompt(
+      req.params.id,
+      { prompt: [{ type: 'text', text }] },
+      timerAbort.signal,
+    );
+    // The timer outlives the handler after a disconnect, so it is cleared when
+    // the prompt settles, not when this handler returns. The rejection handler
+    // also keeps a late failure of an abandoned prompt from going unhandled.
+    void prompting.then(
+      () => clearTimeout(timer),
+      () => clearTimeout(timer),
+    );
 
     let result;
     try {
-      result = await daemon.prompt(
-        req.params.id,
-        { prompt: [{ type: 'text', text }] },
-        controller.signal,
-      );
+      const winner = await Promise.race([prompting, clientGone]);
+      if (winner === 'gone') return;
+      result = winner;
     } catch {
       if (abortSource === 'timer') {
         void audit?.record({
@@ -235,13 +254,11 @@ export function createInvokeCommandRoute(
         }
         return;
       }
-      if (controller.signal.aborted) return;
+      if (abortSource === 'disconnect') return;
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
-    } finally {
-      clearTimeout(timer);
     }
 
     if (abortSource === 'disconnect') return;

@@ -147,12 +147,18 @@ export function createSessionCommandInvokeRoute(
         ? `/${name} ${body.args}`
         : `/${name}`;
 
-    // Two ways this await can end without a finished turn, and the catch has to
-    // tell them apart.
+    // Two ways this await can end without a finished turn, and the code below
+    // has to tell them apart.
     //
     // A client disconnect stops the WAIT only; the turn itself keeps running,
     // which is routes/prompt.ts's rule (#38) that a backgrounded phone must not
-    // lose its turn. There is nothing left to answer, so return silently.
+    // lose its turn. There is nothing left to answer, so return silently. The
+    // close event therefore never reaches daemon.prompt(): on the daemon's 202
+    // path the SDK's _awaitTurnComplete answers an aborted signal with
+    // cancel(sessionId, {cancelReason:'interrupted'}), and the daemon's cancel
+    // aborts the active turn AND every prompt queued behind it (#157). The
+    // close only wins a race against the prompt promise instead; the abandoned
+    // prompt settles on its own, and its rejection is swallowed below.
     //
     // The timer is what this route was missing. daemon.prompt() resolves at END
     // OF TURN, so a turn that never settles left this await pending forever:
@@ -163,27 +169,45 @@ export function createSessionCommandInvokeRoute(
     // cancel(sessionId, {cancelReason:'interrupted'}) when its signal aborts
     // (DaemonClient.ts:6466-6474), reaching acpAgent.cancel() and the aborts it
     // applies to calls still waiting at admission (acpAgent.ts:7246). A timer
-    // that merely stopped the wait would free nothing.
+    // that merely stopped the wait would free nothing. So the timer's signal,
+    // and only the timer's, is the one handed to daemon.prompt(), and it keeps
+    // running after a disconnect: a stuck turn is freed whether or not anyone
+    // is still watching it.
     //
     // Same knob and same 504 shape as the composer route (routes/prompt.ts:81).
-    const controller = new AbortController();
+    const timerAbort = new AbortController();
     let abortSource = '';
     const timer = setTimeout(() => {
-      abortSource = 'timer';
-      controller.abort();
+      if (abortSource === '') abortSource = 'timer';
+      timerAbort.abort();
     }, promptTimeoutMs);
+    let departed!: () => void;
+    const clientGone = new Promise<'gone'>((resolve) => {
+      departed = () => resolve('gone');
+    });
     res.on('close', () => {
       if (abortSource === '') abortSource = 'disconnect';
-      controller.abort();
+      departed();
     });
+
+    const prompting = daemon.prompt(
+      sessionId,
+      { prompt: [{ type: 'text', text }] },
+      timerAbort.signal,
+    );
+    // The timer outlives the handler after a disconnect, so it is cleared when
+    // the prompt settles, not when this handler returns. The catch also keeps a
+    // late rejection of an abandoned prompt from becoming unhandled.
+    void prompting.then(
+      () => clearTimeout(timer),
+      () => clearTimeout(timer),
+    );
 
     let result;
     try {
-      result = await daemon.prompt(
-        sessionId,
-        { prompt: [{ type: 'text', text }] },
-        controller.signal,
-      );
+      const winner = await Promise.race([prompting, clientGone]);
+      if (winner === 'gone') return;
+      result = winner;
     } catch {
       if (abortSource === 'timer') {
         // The command WAS invoked, then this route cancelled its turn. No
@@ -202,13 +226,11 @@ export function createSessionCommandInvokeRoute(
         }
         return;
       }
-      if (controller.signal.aborted) return;
+      if (abortSource === 'disconnect') return;
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
-    } finally {
-      clearTimeout(timer);
     }
 
     // A timer that fired only after the turn had already resolved is not a

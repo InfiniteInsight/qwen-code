@@ -37,6 +37,8 @@ export interface StubDaemon {
   lastEndedSessionId: string | undefined;
   /** Session id passed to the most recent POST /session/:id/cancel request. */
   lastCancelledSessionId: string | undefined;
+  /** How many POST /session/:id/cancel requests have arrived. */
+  cancelCount: number;
   /** Number of POST /session calls the stub has served. */
   createdSessionCount: number;
   /** Body of the most recent POST /session request. */
@@ -231,6 +233,14 @@ export interface StubDaemonOptions {
   permissionStatus?: number;
   /** Status for POST /session/:id/prompt (default 200). */
   promptStatus?: number;
+  /**
+   * Answer POST /session/:id/prompt with the daemon's non-blocking 202
+   * envelope (`{ promptId, lastEventId }`) instead of the legacy blocking 200.
+   * The SDK's `prompt()` then subscribes to /events and waits for the matching
+   * `turn_complete`, and, when its AbortSignal fires, sends a cancel. Pair with
+   * `frames: []` and `holdOpenMs` so the turn stays open.
+   */
+  promptAccepts?: boolean;
   /** stopReason returned by POST /session/:id/prompt on success (default 'end_turn'). */
   promptStopReason?: string;
   /**
@@ -687,6 +697,7 @@ export async function startStubDaemon(
     eventsAbortedByClient: false,
     lastEndedSessionId: undefined as string | undefined,
     lastCancelledSessionId: undefined as string | undefined,
+    cancelCount: 0,
     createdSessionCount: 0,
     lastCreateSessionBody: undefined as unknown,
     lastResumeSessionBody: undefined as unknown,
@@ -2181,6 +2192,7 @@ export async function startStubDaemon(
 
   app.post('/session/:id/cancel', (req, res) => {
     state.lastCancelledSessionId = req.params.id;
+    state.cancelCount += 1;
     const status = opts.cancelSessionStatus ?? 204;
     if (status === 200 || status === 204) {
       res.status(204).end();
@@ -2534,6 +2546,10 @@ export async function startStubDaemon(
     const status = opts.promptStatus ?? 200;
     state.lastPromptBody = req.body;
     const startedAt = Date.now();
+    if (opts.promptAccepts) {
+      res.status(202).json({ promptId: 'stub-prompt-1', lastEventId: 0 });
+      return;
+    }
     const respond = () => {
       state.promptCallLog.push({
         sessionId: req.params.id,
@@ -2649,6 +2665,9 @@ export async function startStubDaemon(
     },
     get lastCancelledSessionId() {
       return state.lastCancelledSessionId;
+    },
+    get cancelCount() {
+      return state.cancelCount;
     },
     get createdSessionCount() {
       return state.createdSessionCount;
