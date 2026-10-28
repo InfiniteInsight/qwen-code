@@ -4389,7 +4389,8 @@ const PAGE_SCENARIOS: PageScenario[] = [
     // #50, re-pointed at the rail by #119. This region is the visible half of
     // multi-conversation support, and the whole reason it exists as its own
     // region is that the only other route to a conversation lives inside
-    // #dir-picker, which is collapsed by default. So the load-bearing property
+    // #dir-picker, which is shut by default (and since #175 hidden until the
+    // rail's + opens it, which P128 holds). So the load-bearing property
     // is not that it lists conversations, it is that it is reachable WITHOUT
     // opening that panel. An implementation that put it inside the panel would
     // pass a test that only asked "does it list them", which is the assertion
@@ -4902,17 +4903,22 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    // The chat window is sized the way it was before #74 bounded it: the
-    // transcript box carries its own max-height: 75vh cap and the document
-    // scrolls, rather than the column being pinned to calc(100vh - 4rem) with
-    // the box shrinking to whatever its siblings left. Bounding it that way
-    // squeezed the transcript onto its 60px floor at a 720px window, which is
-    // the "chat window is way too small" fault. The to-do strip takes its own
-    // row in normal flow below the chat window: it is not pinned to the foot
-    // of the viewport and it never overlaps the transcript, and it is reached
-    // by scrolling to the end of the document rather than held on screen.
-    // Asserted on pixels because the claim is about pixels.
-    name: 'P31 the chat window keeps its 75vh transcript and the strip sits below it',
+    // The chat window is not bounded the way #74 bounded it: the column is
+    // not pinned to calc(100vh - 4rem) with the box shrinking to whatever its
+    // siblings left, which squeezed the transcript onto its 60px floor at a
+    // 720px window, the "chat window is way too small" fault. The transcript
+    // box carries its own max-height cap and the document scrolls past it.
+    // Until #175 that cap was a flat 75vh; it is now fitted to the room the
+    // bands around it leave (fitTranscript), so the composer can clear the
+    // fold, and held between 30vh and 75vh. The 30vh floor is what keeps the
+    // #74 fault out, so it is asserted here in place of the bare 60px check:
+    // this scenario's to-do strip is the kind of band that drives the fit to
+    // its floor at 720. The to-do strip takes its own row in normal flow below
+    // the chat window: it is not pinned to the foot of the viewport and it
+    // never overlaps the transcript, and it is reached by scrolling to the end
+    // of the document rather than held on screen. Asserted on pixels because
+    // the claim is about pixels.
+    name: 'P31 the chat window keeps a 30vh to 75vh transcript and the strip sits below it',
     frames: () => {
       const f = new Frames();
       const plan = (entries: Array<[string, string]>) =>
@@ -4954,19 +4960,21 @@ const PAGE_SCENARIOS: PageScenario[] = [
           const tb = tr.getBoundingClientRect();
           const pb = box.getBoundingClientRect();
           const cap = Math.round(innerHeight * 0.75);
+          const floor = Math.round(innerHeight * 0.3);
           return {
             inner: innerHeight,
             cap,
+            floor,
             transcript: [Math.round(tb.top), Math.round(tb.bottom)],
             transcriptHeight: tr.clientHeight,
-            // The original sizing: the box is capped at 75vh and scrolls its
-            // own history, so its height comes from the cap and not from
-            // whatever its siblings happened to leave over.
+            // The box scrolls its own history under a cap of at most 75vh, the
+            // ceiling it had before #175 fitted the cap to the room.
             withinCap: tr.clientHeight <= cap + 1,
             scrolls: tr.scrollHeight > tr.clientHeight,
-            // The reported fault was the box collapsing onto its 60px floor, so
-            // the height alone is not enough to pass: it has to be the cap.
-            aboveFloor: tr.clientHeight > 60,
+            // The reported fault was the box collapsing onto its 60px floor.
+            // A fitted cap that followed the bands all the way down would be
+            // that fault again, so the fit's own 30vh floor is what is held.
+            aboveFloor: tr.clientHeight >= floor - 1,
             stripShown: box.offsetHeight > 0,
             strip: [Math.round(pb.top), Math.round(pb.bottom)],
             // The strip is in normal flow below the chat window, so at the top
@@ -5014,9 +5022,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
         );
         expect(
           g.aboveFloor,
-          `the transcript is ${g.transcriptHeight}px at ${height}px, which is ` +
-            'its min-height floor and not its cap: this is the window that read ' +
-            'as too small',
+          `the transcript is ${g.transcriptHeight}px at ${height}px, under ` +
+            `the ${g.floor}px (30vh) floor: this is the window that read as too ` +
+            'small',
         );
         expect(
           g.belowTranscript,
@@ -5049,12 +5057,12 @@ const PAGE_SCENARIOS: PageScenario[] = [
             JSON.stringify(atEnd.strip),
         );
         lines.push(
-          `${height}px: transcript ${g.transcriptHeight}px (cap ${g.cap}), ` +
+          `${height}px: transcript ${g.transcriptHeight}px (${g.floor} to ${g.cap}), ` +
             `strip ${JSON.stringify(g.strip)} below it, ` +
             `${JSON.stringify(atEnd.strip)} at the end`,
         );
       }
-      return `${lines.join('; ')}; the transcript keeps its 75vh box at both heights`;
+      return `${lines.join('; ')}; the transcript stays between 30vh and 75vh at both heights`;
     },
   },
 ];
@@ -12075,88 +12083,171 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P123 the bar names search and the word is what the break drops',
-    // g1 "Top bar", gap 10 option B (#118). The affordance lived only behind a
-    // key you already knew, and the verifier had no bar assertion of any kind,
-    // so nothing could have noticed the label going missing again.
+    name: 'P123 the bar is one row at 390, searches by glyph there, and keeps the phrase and pins at 1280',
+    // g1 "Top bar", gap 10 option B (#118), then #176. The affordance lived only
+    // behind a key you already knew, and the verifier had no bar assertion of
+    // any kind, so nothing could have noticed the label going missing again.
+    // #176 changed what the phone reading is: at 390 the four tabs plus three
+    // "Pin to Chat" boxes wrapped to two rows (72px against the sheet's 53px)
+    // and left \u2318K alone on the second, naming a key a phone does not have. So
+    // the narrow claims are now one row, no pins, and a magnifier that still
+    // opens the search box when tapped, and the wide claims keep the phrase
+    // and prove the pins still pin where they are drawn.
+    // In-page code is a plain string: the transform rewrites a named arrow in
+    // a callback into a __name(...) call the page does not define.
     waitView: false,
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
-      // The harness opens a default-viewport context (lib/viewerHarness.mts:
-      // 305, newContext with no viewport), so the narrow reading has to be
-      // made here rather than assumed from the phone scenarios.
-      await page.setViewportSize({ width: 390, height: 844 });
+      type BarReading = {
+        inBar: boolean;
+        shown: boolean;
+        label: string;
+        name: string;
+        keyShown: boolean;
+        wordShown: boolean;
+        glyphShown: boolean;
+        pinsShown: number;
+        barH: number;
+        barScroll: number;
+        barClient: number;
+        vw: number;
+        rowSpread: number;
+      };
       const read = () =>
-        page.evaluate(() => {
-          const bar = document.getElementById('tab-bar') as HTMLElement;
-          const keys = document.getElementById(
-            'bar-search',
-          ) as HTMLButtonElement;
-          const word = keys.querySelector('.kl') as HTMLElement;
+        page.evaluate(String.raw`(() => {
+          const bar = document.getElementById('tab-bar');
+          const keys = document.getElementById('bar-search');
+          const on = (el) => !!el && el.getClientRects().length > 0;
+          // One row means every item shares a line: the spread of their
+          // vertical centres stays inside one item's height.
+          const mids = Array.from(bar.children)
+            .filter((k) => on(k))
+            .map((k) => { const r = k.getBoundingClientRect(); return r.top + r.height / 2; });
           return {
             inBar: !!keys.closest('#tab-bar'),
-            shown: keys.getClientRects().length > 0,
-            label: (keys.textContent || '').trim(),
-            wordShown: word.getClientRects().length > 0,
+            shown: on(keys),
+            label: (keys.innerText || '').trim(),
+            name: keys.getAttribute('aria-label') || '',
+            keyShown: on(keys.querySelector('.kk')),
+            wordShown: on(keys.querySelector('.kl')),
+            glyphShown: on(keys.querySelector('.kg')),
+            pinsShown: Array.from(bar.querySelectorAll('.pin-cb')).filter((p) => on(p)).length,
+            barH: Math.round(bar.getBoundingClientRect().height),
             barScroll: bar.scrollWidth,
             barClient: bar.clientWidth,
+            vw: window.innerWidth,
+            rowSpread: Math.round(Math.max(...mids) - Math.min(...mids)),
           };
-        });
-      // 390 is the width the break exists for, and the one the sheet measured.
+        })()`) as Promise<BarReading>;
+
+      // The harness opens a default-viewport context (lib/viewerHarness.mts:
+      // 305, newContext with no viewport), so the narrow reading has to be
+      // made here rather than assumed from the phone scenarios. 390 is the
+      // width the break exists for, and the one the sheet measured.
+      await page.setViewportSize({ width: 390, height: 844 });
       const narrow = await read();
       expect(narrow.inBar, 'the search control is not inside the bar');
       expect(narrow.shown, 'the search control is not on screen at 390');
       expect(
-        narrow.label.includes('\u2318K'),
-        'the label lost the glyph at 390, got ' + JSON.stringify(narrow.label),
+        !narrow.keyShown && !narrow.label.includes('\u2318'),
+        'the bar still names \u2318K at 390, a key a phone does not have, got ' +
+          JSON.stringify(narrow.label),
       );
       expect(
-        !narrow.wordShown,
-        'the word is still shown at 390, the one width it does not fit',
+        narrow.glyphShown && narrow.label === '\u{1F50D}',
+        'the search control at 390 is not the magnifier, got ' +
+          JSON.stringify(narrow.label),
       );
       expect(
-        narrow.barScroll <= narrow.barClient,
-        'the bar overflows horizontally at 390, scrollWidth ' +
+        narrow.name === 'Search across sessions',
+        'the glyph has no phrase for a screen reader, aria-label ' +
+          JSON.stringify(narrow.name),
+      );
+      expect(
+        narrow.pinsShown === 0,
+        `${narrow.pinsShown} Pin to Chat boxes are still drawn at 390`,
+      );
+      expect(
+        narrow.barScroll === narrow.vw && narrow.barClient === narrow.vw,
+        'the bar is not exactly the viewport wide at 390, scrollWidth ' +
           narrow.barScroll +
+          ' and clientWidth ' +
+          narrow.barClient +
           ' against ' +
-          narrow.barClient,
+          narrow.vw,
       );
+      expect(
+        narrow.barH <= 53,
+        `the bar is ${narrow.barH}px tall at 390, over the sheet's 53px, so it wrapped`,
+      );
+      expect(
+        narrow.rowSpread <= 4,
+        `the bar items sit ${narrow.rowSpread}px apart vertically at 390, so they are not one row`,
+      );
+      // Naming it is half of it: the control has to do the thing it names, and
+      // the phone is where it changed, so it is tapped at this width.
+      await page.click('#bar-search');
+      const opened = (await page.evaluate(String.raw`({
+        open: document.getElementById('search').open,
+        focused: document.activeElement === document.getElementById('search-q'),
+        ops: document.querySelector('.tab[data-tab="ops"]').classList.contains('active'),
+      })`)) as { open: boolean; focused: boolean; ops: boolean };
+      expect(opened.ops, 'the glyph did not move to the Operations tab at 390');
+      expect(opened.open, 'the glyph did not open the search panel at 390');
+      expect(
+        opened.focused,
+        'the glyph did not focus the search box at 390, so it names a way in it ' +
+          'does not open',
+      );
+      await page.click('.tab[data-tab="chat"]');
+
       await page.setViewportSize({ width: 1280, height: 720 });
       const wide = await read();
       expect(
-        wide.wordShown,
-        'the word did not come back at 1280, where the bar has the room',
+        wide.wordShown && wide.keyShown && !wide.glyphShown,
+        'the phrase did not come back at 1280, where the bar has the room',
       );
       expect(
         wide.label === '\u2318K search',
         'the bar label is ' + JSON.stringify(wide.label) + ', not the phrase',
       );
-      // Naming it is half of it: the control has to do the thing it names.
-      await page.click('#bar-search');
-      const opened = await page.evaluate(() => ({
-        open: (document.getElementById('search') as HTMLDetailsElement).open,
-        focused:
-          document.activeElement === document.getElementById('search-q'),
-        ops: (
-          document.querySelector('.tab[data-tab="ops"]') as HTMLElement
-        ).classList.contains('active'),
-      }));
-      expect(opened.ops, 'the bar control did not move to the Operations tab');
-      expect(opened.open, 'the bar control did not open the search panel');
       expect(
-        opened.focused,
-        'the bar control did not focus the search box, so it names a way in it ' +
-          'does not open',
+        wide.pinsShown === 3,
+        `${wide.pinsShown} of 3 Pin to Chat boxes are drawn at 1280`,
       );
+      // Hidden below the break is only safe if they still work above it.
+      const pinned = async () =>
+        (await page.evaluate(String.raw`Array.from(
+          document.querySelectorAll('#pin-area > details > summary'),
+        ).map((s) => s.textContent)`)) as string[];
+      await page.click('.pin-cb[data-pin="settings"]');
+      const withPin = await pinned();
+      expect(
+        withPin.length === 1,
+        `pinning Settings at 1280 left ${JSON.stringify(withPin)} in the pin area`,
+      );
+      await page.click('.pin-cb[data-pin="settings"]');
+      const unpinned = await pinned();
+      expect(
+        unpinned.length === 0,
+        `unpinning Settings at 1280 left ${JSON.stringify(unpinned)} in the pin area`,
+      );
+      await page.click('#bar-search');
+      const wideOpen = (await page.evaluate(
+        String.raw`document.activeElement === document.getElementById('search-q')`,
+      )) as boolean;
+      expect(wideOpen, 'the phrase at 1280 no longer opens the search box');
       return (
-        '390: glyph alone, word dropped, bar ' +
+        '390: one row ' +
         narrow.barScroll +
         '/' +
-        narrow.barClient +
-        '; 1280: ' +
+        narrow.vw +
+        ' at ' +
+        narrow.barH +
+        'px, magnifier opens search, no pins; 1280: ' +
         wide.label +
-        '; click lands on ops with the box focused'
+        ', 3 pins, Settings pins and unpins'
       );
     },
   },
@@ -12490,9 +12581,14 @@ PAGE_SCENARIOS.push({
         rest.taBg === 'rgba(0, 0, 0, 0)',
         `the textarea is ${rest.taBg}, so a ghost behind it could never show through`,
       );
+      // #175 folds the attachment controls into this row as one group, after
+      // the dictation cluster and before the verbs, which keep their place at
+      // the far end. g1 draws no attachment controls at all; the group sits
+      // where it does not move anything the sheet does draw. P130 holds the
+      // group's own claims.
       expect(
-        rest.rowOrder === 'mic,dictate-engine,dictate-lang,lab,sgroup,send',
-        `the row reads ${rest.rowOrder}, not the order g1 draws`,
+        rest.rowOrder === 'mic,dictate-engine,dictate-lang,lab,agroup,sgroup,send',
+        `the row reads ${rest.rowOrder}, not the order g1 draws plus the #175 group`,
       );
       expect(
         !rest.interimShown,
@@ -12761,18 +12857,17 @@ PAGE_SCENARIOS.push({
       // no to-do tool is registered (#81), so a filled strip is a state this
       // host cannot produce and drawing one here would be a fiction.
       //
-      // Only the hidden band is asserted at both widths. With the band removed
-      // the composer sits at 813 in a 844px viewport at 390 and 606 in a 720px
-      // one at 1280, so there is 31px of headroom on a phone and 114px at
-      // desktop. The band itself spends 97px of that 31px at 390, putting the
-      // composer at 910, which is 66px under the fold. It is not asserted
-      // because the cause is the column budget rather than this band: the column
-      // is unbounded, so a band above the composer lengthens the document
-      // instead of shortening the scroller, which is the 2026-10-21 sizing
-      // decision. It is held in #151 with its measurements rather than shipped
-      // red, because a failing baseline hides every other scenario in the run.
+      // Until #175 only the hidden band was asserted at 390: the band put the
+      // composer 66px under the fold there (910 in 844), held in #151 rather
+      // than shipped red. #175 took the New conversation summary row and the
+      // attachment row out of the column and folded the bar to one row, so on
+      // this short transcript the 390 readings are now 634, 730 and 692, and
+      // every state is asserted at every width, plus 1280x810, the height the
+      // 2026-10-27 audit measured at. This transcript is short, so it never
+      // reaches its cap; P130 holds the same claim with a transcript long
+      // enough to fill it, which is the case the audit actually measured.
       // Note the page's own band costs more than a typed sentence: at 390 the
-      // as-is reading is 910 against 872 for the synthetic fill, because
+      // as-is reading was 910 against 872 for the synthetic fill, because
       // renderFooter lays out model, tokens, cwd, a mode select and a checkbox,
       // which wrap to more lines than one string does. Measuring only a typed
       // string would have understated the overflow by 38px.
@@ -12785,6 +12880,7 @@ PAGE_SCENARIOS.push({
       }[] = [];
       for (const [w, h] of [
         [1280, 720],
+        [1280, 810],
         [390, 844],
       ]) {
         await page.setViewportSize({ width: w, height: h });
@@ -12816,17 +12912,12 @@ PAGE_SCENARIOS.push({
         });
       }
       for (const f of fold) {
-        expect(
-          f.hidden <= f.viewH + 1,
-          `at ${f.w}px the composer bottom is ${f.hidden} with the drawer hidden, in a ${f.viewH}px viewport`,
-        );
-      }
-      const desk = fold.find((f) => f.w === 1280)!;
-      for (const k of ['asis', 'filled'] as const) {
-        expect(
-          desk[k] <= desk.viewH + 1,
-          `with the drawer ${k} the composer bottom is ${desk[k]} at 1280px, in a ${desk.viewH}px viewport`,
-        );
+        for (const k of ['hidden', 'asis', 'filled'] as const) {
+          expect(
+            f[k] <= f.viewH + 1,
+            `with the drawer ${k} the composer bottom is ${f[k]} at ${f.w}px, in a ${f.viewH}px viewport`,
+          );
+        }
       }
       await page.setViewportSize({ width: 1280, height: 720 });
 
@@ -12836,8 +12927,8 @@ PAGE_SCENARIOS.push({
         worst.kind +
         ' at ' +
         worst.ratio.toFixed(2) +
-        ':1; the retired status strip and inspector stayed retired; composer clears the fold at both widths with the drawer hidden, and at 1280 as the page draws it and with it filled (' +
-        fold.map((f) => f.w + ': ' + f.hidden + '/' + f.asis + '/' + f.filled + ' of ' + f.viewH).join(', ') +
+        ':1; the retired status strip and inspector stayed retired; composer clears the fold at 1280x720, 1280x810 and 390x844 with the drawer hidden, as the page draws it and filled (' +
+        fold.map((f) => f.w + 'x' + f.viewH + ': ' + f.hidden + '/' + f.asis + '/' + f.filled).join(', ') +
         ')'
       );
     },
@@ -12935,6 +13026,650 @@ PAGE_SCENARIOS.push({
       }
 
       return `a default load listed nothing for ${JSON.stringify(dir)} rather than the host's conversations, then listed exactly the transcript planted in ${chatsDir.replace(root, '<root>')}`;
+    },
+  });
+
+  // #175 (a). The New conversation panel was a closed <details> heading the
+  // Chat column: a second door beside the rail's +, and about 70px of the fold
+  // every time the page loaded. It is now hidden at rest and the + is its only
+  // way in. The + is pressed with real input here, pointer and keyboard,
+  // rather than .click(), because the claims are that the panel is reachable
+  // and keyboard-reachable, not that a handler exists. In-page code is a plain
+  // string throughout: the transform rewrites a named arrow in a callback into
+  // a __name(...) call the page does not define.
+  type PickerReading = {
+    hidden: boolean;
+    open: boolean;
+    h: number;
+    summaryShown: boolean;
+    firstInColumn: string;
+    expanded: string | null;
+    controls: string | null;
+    focusInPanel: boolean;
+    focusOn: string;
+    missing: string;
+    railShown: boolean;
+    folderShown: boolean;
+    filterShown: boolean;
+    plusShown: boolean;
+    docW: number;
+    vw: number;
+    panelRight: number;
+    summaryOnTop: boolean;
+  };
+  const readPicker = (page: Page) =>
+    page.evaluate(String.raw`(() => {
+      const p = document.getElementById('dir-picker');
+      const rail = document.getElementById('rail');
+      const plus = rail.querySelector('.plus');
+      const on = (el) => !!el && el.getClientRects().length > 0;
+      // The first thing the Chat column actually lays out, which is what a
+      // reader sees heading it.
+      const first = Array.from(document.getElementById('pane-chat').children).find(
+        (k) => on(k) && k.getBoundingClientRect().height > 0,
+      );
+      const a = document.activeElement;
+      // The summary names the panel and shuts it, so it has to be what is
+      // painted at its own spot, not merely laid out somewhere: on a phone
+      // the sticky rail strip can sit on top of it.
+      const sr = p.querySelector('summary').getBoundingClientRect();
+      const hit = sr.height > 0 ? document.elementFromPoint(sr.left + 10, sr.top + sr.height / 2) : null;
+      return {
+        summaryOnTop: !!hit && p.querySelector('summary').contains(hit),
+        hidden: p.hidden,
+        open: p.open,
+        h: Math.round(p.getBoundingClientRect().height),
+        summaryShown: on(p.querySelector('summary')),
+        firstInColumn: first ? first.id || first.className : '',
+        expanded: plus ? plus.getAttribute('aria-expanded') : null,
+        controls: plus ? plus.getAttribute('aria-controls') : null,
+        focusInPanel: p.contains(a),
+        focusOn: a === plus ? 'plus' : a && a.id ? a.id : a ? a.tagName.toLowerCase() : '',
+        // Everything the panel held before the move, which must all still be
+        // drawn once it is open.
+        missing: ['dir-current', 'dir-list', 'dir-use', 'new-session-cwd', 'new-session', 'dir-recent', 'past-filter', 'past-list']
+          .filter((id) => !on(document.getElementById(id)))
+          .join(','),
+        railShown: !rail.hidden && rail.offsetHeight > 0,
+        folderShown: on(rail.querySelector('.ws')),
+        filterShown: on(rail.querySelector('.flt')),
+        plusShown: on(plus),
+        docW: document.documentElement.scrollWidth,
+        vw: window.innerWidth,
+        panelRight: Math.round(p.getBoundingClientRect().right),
+      };
+    })()`) as Promise<PickerReading>;
+
+  PAGE_SCENARIOS.push({
+    name: 'P128 the New conversation panel costs nothing at rest and opens only from the rail +',
+    waitView: false,
+    run: async ({ page }) => {
+      // A fresh load with nothing watched: the state where the panel is most
+      // wanted and where the old summary row cost the fold every time. The
+      // rail is fed by the load's own browse (P28), so wait for the folder.
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.waitForFunction('pastConvosCwd !== null');
+
+      const rest = await readPicker(page);
+      expect(
+        rest.hidden && !rest.open && rest.h === 0 && !rest.summaryShown,
+        `the panel is drawn at rest (hidden ${rest.hidden}, open ${rest.open}, ${rest.h}px, summary shown ${rest.summaryShown})`,
+      );
+      expect(
+        rest.firstInColumn !== 'dir-picker',
+        'the New conversation panel still heads the Chat column at rest',
+      );
+      expect(
+        rest.controls === 'dir-picker' && rest.expanded === 'false',
+        `the + does not say what it opens or that it is shut (aria-controls ${rest.controls}, aria-expanded ${rest.expanded})`,
+      );
+      await page.setViewportSize({ width: 390, height: 844 });
+      const restPhone = await readPicker(page);
+      expect(
+        restPhone.hidden && restPhone.h === 0 && !restPhone.summaryShown,
+        `the panel is drawn at rest at 390 (${restPhone.h}px)`,
+      );
+      await page.setViewportSize({ width: 1280, height: 720 });
+
+      // Pointer: the + opens it, everything it held is drawn, and focus lands
+      // inside it rather than staying at the foot of the rail.
+      await page.click('#rail .plus');
+      const opened = await readPicker(page);
+      expect(
+        !opened.hidden && opened.open && opened.h > 0,
+        `the + did not open the panel (hidden ${opened.hidden}, open ${opened.open}, ${opened.h}px)`,
+      );
+      expect(opened.expanded === 'true', 'the + does not say the panel is open');
+      expect(opened.missing === '', `the open panel is missing ${opened.missing}`);
+      expect(
+        opened.focusInPanel,
+        `opening the panel left focus on ${opened.focusOn}, outside it`,
+      );
+
+      // Keyboard: the summary shuts it and hands focus back to the +, Enter on
+      // the + opens it again, Tab reaches the panel's first control, and
+      // Escape shuts it from inside.
+      await page.keyboard.press('Enter');
+      // The details' toggle event is queued, not dispatched inline, so the
+      // panel hides a task after the key. Waited for rather than read at once;
+      // a panel that never hides falls through to the assertion below.
+      await page
+        .waitForFunction(`document.getElementById('dir-picker').hidden`, null, { timeout: 3_000 })
+        .catch(() => undefined);
+      const shutBySummary = await readPicker(page);
+      expect(
+        shutBySummary.hidden && shutBySummary.h === 0,
+        'shutting the summary left the panel on the page, which is the summary row #175 removed',
+      );
+      expect(
+        shutBySummary.focusOn === 'plus' && shutBySummary.expanded === 'false',
+        `shutting the panel left focus on ${shutBySummary.focusOn} and the + reading ${shutBySummary.expanded}`,
+      );
+      await page.keyboard.press('Enter');
+      const reopened = await readPicker(page);
+      expect(
+        !reopened.hidden && reopened.focusInPanel,
+        `Enter on the + did not open the panel and move into it (focus on ${reopened.focusOn})`,
+      );
+      let reached = '';
+      for (let i = 0; i < 6 && reached !== 'dir-use'; i++) {
+        await page.keyboard.press('Tab');
+        reached = (await readPicker(page)).focusOn;
+      }
+      expect(
+        reached === 'dir-use',
+        `Tab from the panel's summary never reached Use this folder, it stopped on ${reached}`,
+      );
+      await page.keyboard.press('Escape');
+      const shutByEscape = await readPicker(page);
+      expect(
+        shutByEscape.hidden && shutByEscape.focusOn === 'plus',
+        `Escape did not shut the panel back to the + (hidden ${shutByEscape.hidden}, focus on ${shutByEscape.focusOn})`,
+      );
+
+      // The + is a toggle: the same door shuts it.
+      await page.click('#rail .plus');
+      await page.click('#rail .plus');
+      const toggled = await readPicker(page);
+      expect(toggled.hidden, 'pressing the + a second time did not shut the panel');
+
+      // Phone: the + sits in the strip, and the open panel must not push the
+      // page sideways. What pushed it was a past row's preview line (nowrap, so
+      // its full length became the list's min-content), and the harness root
+      // holds no conversations (#178), so rows with long previews are drawn
+      // through the page's own renderer first. Without them the panel has
+      // nothing wide in it and the overflow check below would pass vacuously.
+      await page.evaluate(String.raw`renderPastConversations(
+        [1, 2, 3].map((n) => ({
+          sessionId: '0000000' + n + '-aaaa-bbbb-cccc-dddddddddddd',
+          title: 'planted past row ' + n,
+          updatedAt: new Date().toISOString(),
+          preview: 'a long first prompt that does not wrap, ' + 'so its whole length is the line. '.repeat(12),
+        })),
+        pastConvosCwd,
+        false,
+      )`);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.click('#rail .plus');
+      const previews = (await page.evaluate(
+        String.raw`document.querySelectorAll('#past-list .token-row').length`,
+      )) as number;
+      expect(previews === 3, `the planted past rows did not draw (${previews} rows), so the overflow check below has nothing wide to hold`);
+      const phone = await readPicker(page);
+      expect(!phone.hidden && phone.missing === '', `the + did not open the whole panel at 390 (missing ${phone.missing})`);
+      expect(
+        phone.docW <= phone.vw && phone.panelRight <= phone.vw,
+        `the open panel overflows at 390: document ${phone.docW}px, panel right edge ${phone.panelRight}, viewport ${phone.vw}`,
+      );
+      expect(
+        phone.summaryOnTop,
+        'the open panel\'s summary is not on screen at 390, so the row that names and shuts it is hidden (under the sticky rail strip, or scrolled away)',
+      );
+      // Opened from further down the page, the panel's top is off screen and
+      // has to be brought back without landing under the sticky strip. A
+      // resting 390 page no longer scrolls (that is #175's point), so a spacer
+      // stands in for whatever band made it long, and is removed after.
+      await page.keyboard.press('Escape');
+      await page.evaluate(String.raw`(() => {
+        const s = document.createElement('div');
+        s.id = 'p128-spacer';
+        s.style.height = '2000px';
+        document.getElementById('pane-chat').appendChild(s);
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      })()`);
+      const scrolledTo = (await page.evaluate('Math.round(window.scrollY)')) as number;
+      expect(scrolledTo > 500, `the spacer did not scroll the page (scrollY ${scrolledTo}), so this leg would test nothing`);
+      await page.click('#rail .plus');
+      await page.waitForTimeout(300);
+      const phoneLow = await readPicker(page);
+      expect(
+        !phoneLow.hidden && phoneLow.summaryOnTop,
+        'opened from the foot of the page at 390, the panel\'s summary is not on screen',
+      );
+      await page.keyboard.press('Escape');
+      await page.evaluate(
+        "document.getElementById('p128-spacer').remove(); window.scrollTo(0, 0)",
+      );
+      await page.setViewportSize({ width: 1280, height: 720 });
+
+      // No folder: the rail used to drop out entirely, which would now take
+      // the panel's only door with it, exactly when a failed first browse
+      // makes the typed path the way in.
+      await page.evaluate('renderPastConversations([], null, false)');
+      const bare = await readPicker(page);
+      expect(
+        bare.railShown && bare.plusShown,
+        `with no folder the rail or its + is gone, so the panel has no door (rail ${bare.railShown}, + ${bare.plusShown})`,
+      );
+      expect(
+        !bare.folderShown && !bare.filterShown,
+        `with no folder the rail still draws a folder line (${bare.folderShown}) or a filter (${bare.filterShown}) with nothing behind them`,
+      );
+      await page.click('#rail .plus');
+      const bareOpen = await readPicker(page);
+      expect(
+        !bareOpen.hidden && bareOpen.missing === '',
+        'with no folder the + did not open the panel',
+      );
+
+      return (
+        'hidden at rest at 1280 and 390, + opens it with focus inside, summary, Escape and the + shut it back to the +, Tab reaches Use this folder, ' +
+        `no overflow at 390 (${phone.docW}/${phone.vw}), the + survives a folderless rail`
+      );
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P129 the browse, recent, typed-path and past paths all work from behind the rail +',
+    // #175 (a), the other half of P128. Moving the panel behind the + is only
+    // safe if every way in it held still lands where it did: a recent
+    // workspace browses, a folder row browses, a typed path and Use this folder
+    // both reach the one create POST, and a past row resumes. Each is driven
+    // with real input on the panel the + opened, so a control left hidden or
+    // unwired by the move fails here rather than in a reader's hand. The
+    // create POST is answered 403 by a route, because what is asserted is the
+    // cwd the page sends, and a real create would start a session the stub
+    // cannot stream.
+    // #178: the folders it walks are planted inside the harness root rather
+    // than read off the host, so the run depends on nothing this machine's
+    // $HOME holds and prints none of its paths. The page still lands on $HOME
+    // at load (GET /rc/fs defaults there), and nothing here reads that.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+      // Refused before any write if the root is the real ~/.qwen, the same
+      // guard P127 keeps for its plant: an inherited QWEN_RUNTIME_DIR can name
+      // it, and these folders do not belong in a live home.
+      const root = harnessRuntimeRoot();
+      const realHome = join(homedir(), '.qwen');
+      expect(
+        root !== realHome && !root.startsWith(realHome + '/'),
+        `the harness root ${root} sits inside the real ${realHome}, so planting folders there would write into a live home`,
+      );
+      const top = join(root, 'p129-folders');
+      const inner = join(top, 'inner');
+      const shown = (p: string) => p.split(root).join('<root>');
+      rmSync(top, { recursive: true, force: true });
+      mkdirSync(inner, { recursive: true });
+      try {
+        await page.click('#rail .plus');
+
+        // Recent: the planted folder, seeded through the page's own store and
+        // renderer, then tapped.
+        await page.evaluate(
+          `localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(top)}])); renderRecentWorkspaces();`,
+        );
+        await page.click('#dir-recent button');
+        await page.waitForFunction(`curDirPath === ${JSON.stringify(top)}`);
+
+        // Browse: a real tap on the planted subfolder's row.
+        await page.click('#dir-list .token-row >> text="inner/"');
+        await page.waitForFunction(`curDirPath === ${JSON.stringify(inner)}`);
+        const browsed = (await page.evaluate(
+          String.raw`document.getElementById('dir-current').textContent`,
+        )) as string;
+        expect(
+          browsed === inner,
+          `a folder row did not browse: the panel shows ${JSON.stringify(shown(browsed))}`,
+        );
+
+        // Typed path and Use this folder: both funnel into the one create POST.
+        const isCreate = (u: URL) => u.pathname === '/session';
+        await page.route(isCreate, async (route) => {
+          if (route.request().method() !== 'POST') return route.continue();
+          await route.fulfill({
+            status: 403,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'refused by the scenario' }),
+          });
+        });
+        const createCwd = async (press: () => Promise<void>) => {
+          const req = page.waitForRequest(
+            (r) => new URL(r.url()).pathname === '/session' && r.method() === 'POST',
+          );
+          await press();
+          return (JSON.parse((await req).postData() || '{}') as { cwd?: string }).cwd;
+        };
+        await page.fill('#new-session-cwd', top);
+        const typed = await createCwd(() => page.click('#new-session'));
+        expect(
+          typed === top,
+          `the typed path sent cwd ${JSON.stringify(shown(typed ?? ''))}, not the path typed`,
+        );
+        // Typing and leaving the field browses there (its change handler), so
+        // Use this folder now names whatever the browser landed on.
+        await page.waitForFunction(`curDirPath === ${JSON.stringify(top)}`);
+        const used = await createCwd(() => page.click('#dir-use'));
+        expect(
+          used === top,
+          `Use this folder sent cwd ${JSON.stringify(shown(used ?? ''))}, not the folder on screen`,
+        );
+        // The request leaving is not the answer landing: wait for the page to
+        // say the refusal before asking what it did with the panel.
+        await page.waitForFunction(
+          String.raw`/not authorized/.test(document.getElementById('status').textContent)`,
+          null,
+          { timeout: 5_000 },
+        );
+        const refusedOpen = (await page.evaluate(
+          String.raw`!document.getElementById('dir-picker').hidden`,
+        )) as boolean;
+        expect(
+          refusedOpen,
+          'a refused create shut the panel, so the reader loses the folder they picked',
+        );
+        await page.unroute(isCreate);
+
+        // Past: a row for the stub's own conversation, tapped. Nothing is
+        // watched yet, so arriving in it is a change of conversation, and the
+        // panel that was opened to get there shuts behind it.
+        await page.evaluate(
+          `renderPastConversations([{ sessionId: ${JSON.stringify(viewer.sessionId)}, title: 'resume me from the panel' }], curDirPath, false)`,
+        );
+        // The title, not the row's middle, which can land on its archive or
+        // delete button.
+        await page.click('#past-list .token-row >> text=resume me from the panel');
+        await page.waitForFunction(`watchedSessionId === ${JSON.stringify(viewer.sessionId)}`);
+        // A panel that never shuts falls through to the assertion, which says so.
+        await page
+          .waitForFunction(`document.getElementById('dir-picker').hidden`, null, { timeout: 5_000 })
+          .catch(() => undefined);
+        const arrived = (await page.evaluate(String.raw`({
+          hidden: document.getElementById('dir-picker').hidden,
+          expanded: document.querySelector('#rail .plus').getAttribute('aria-expanded'),
+        })`)) as { hidden: boolean; expanded: string };
+        expect(
+          arrived.hidden && arrived.expanded === 'false',
+          `arriving in a conversation left the panel open (hidden ${arrived.hidden}, + reads ${arrived.expanded})`,
+        );
+      } finally {
+        // The root is shared for the whole process, so the plant goes with
+        // the scenario.
+        rmSync(top, { recursive: true, force: true });
+      }
+      return `recent browsed to ${shown(top)}, its folder row to ${shown(inner)}, typed path and Use this folder both POST ${shown(top)}, a refusal keeps the panel, a past row resumes and shuts it`;
+    },
+  });
+
+  // #175 (b) and the fold. The audit measured the composer 258px under the
+  // fold at 1280x810 and 498px under at 390x844 with a transcript long enough
+  // to fill its box, which is the case P126's short transcript never reaches.
+  // So this scenario carries fourteen turns and an in-progress tool row, and
+  // asserts the issue's own "done when": the composer's bottom on screen at
+  // 1280x720, 1280x810 and 390x844 with the drawer band drawn, nothing
+  // horizontally overflowing, and the attachment controls in the control row.
+  // It also holds the fitted cap's two bounds and the one thing a box that
+  // shrinks under a reader can break: the newest row has to stay on screen.
+  const P130_MARKER = 'newest-row-marker';
+  PAGE_SCENARIOS.push({
+    name: 'P130 the composer is three rows with Attach, Files and Artifacts in its control row, and clears the fold with a full transcript',
+    frames: () => {
+      const f = new Frames().ev('client_joined');
+      for (let k = 0; k < 14; k++) {
+        f.user(`question ${k}: why does the nightly build fail on the arm64 runner?`);
+        f.asst(
+          `answer ${k}: the arm64 job pins an image without the native toolchain, ` +
+            'so the addon build fails there and not on x86.',
+        );
+        f.done();
+      }
+      f.upd({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-newest',
+        title: `read_file ${P130_MARKER}`,
+        status: 'in_progress',
+      });
+      return f.list;
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 44, 30_000);
+      await settlePage(page);
+      // The fit runs a frame after whatever resized the column, so a reading
+      // taken straight after a change would measure the layout before it.
+      const relaid = async () => {
+        await page.waitForTimeout(300);
+        await page.evaluate(
+          'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))))',
+        );
+      };
+
+      type RowReading = {
+        btns: {
+          id: string;
+          inRow: boolean;
+          text: string;
+          title: string;
+          label: string;
+          wordShown: boolean;
+          glyphShown: boolean;
+          h: number;
+        }[];
+        fieldToRow: number;
+        rowToIdle: number;
+      };
+      const readRow = () =>
+        page.evaluate(String.raw`(() => {
+          const comp = document.getElementById('composer');
+          const crow = comp.querySelector('.crow');
+          const on = (el) => !!el && el.getClientRects().length > 0;
+          const fr = comp.querySelector('.field').getBoundingClientRect();
+          const cr = crow.getBoundingClientRect();
+          const ir = comp.querySelector('.idle').getBoundingClientRect();
+          return {
+            btns: ['attach', 'stored-toggle', 'artifacts-toggle'].map((id) => {
+              const b = document.getElementById(id);
+              return {
+                id,
+                inRow: crow.contains(b),
+                text: (b.innerText || '').trim(),
+                title: b.getAttribute('title') || '',
+                label: b.getAttribute('aria-label') || '',
+                wordShown: on(b.querySelector('.w')),
+                glyphShown: on(b.querySelector('.g')),
+                h: Math.round(b.getBoundingClientRect().height),
+              };
+            }),
+            // Three rows means nothing lays out between them but the row's
+            // own 6px top margin: the old attachment row sat in the first gap.
+            fieldToRow: Math.round(cr.top - fr.bottom),
+            rowToIdle: Math.round(ir.top - cr.bottom),
+          };
+        })()`) as Promise<RowReading>;
+
+      const WORDS: Record<string, string> = {
+        attach: 'Attach',
+        'stored-toggle': 'Files',
+        'artifacts-toggle': 'Artifacts',
+      };
+      const wide = await readRow();
+      for (const b of wide.btns) {
+        expect(b.inRow, `#${b.id} is not in the composer's control row`);
+        expect(
+          b.wordShown && !b.glyphShown && b.text === WORDS[b.id],
+          `#${b.id} reads ${JSON.stringify(b.text)} at 1280, not the short word ${WORDS[b.id]}`,
+        );
+        expect(
+          b.title.length > 10 && b.label === b.title && b.label.includes(b.text),
+          `#${b.id} does not carry its phrase in title and aria-label (title ${JSON.stringify(b.title)}, label ${JSON.stringify(b.label)})`,
+        );
+      }
+      expect(
+        wide.fieldToRow <= 7 && wide.rowToIdle <= 7,
+        `the composer is not three rows at 1280: ${wide.fieldToRow}px between the field and the control row, ${wide.rowToIdle}px between that row and the idle row`,
+      );
+
+      // The three controls still do what they did before the move.
+      const chooser = page.waitForEvent('filechooser', { timeout: 5_000 });
+      await page.click('#attach');
+      await chooser;
+      for (const [btn, box] of [
+        ['stored-toggle', 'stored'],
+        ['artifacts-toggle', 'artifacts'],
+      ] as const) {
+        await page.click('#' + btn);
+        await page.waitForSelector('#' + box, { state: 'visible' });
+        const expanded = await page.getAttribute('#' + btn, 'aria-expanded');
+        expect(expanded === 'true', `#${btn} opened its list but reads aria-expanded ${expanded}`);
+        await page.click('#' + btn);
+        await page.waitForSelector('#' + box, { state: 'hidden' });
+      }
+
+      await page.setViewportSize({ width: 390, height: 844 });
+      await relaid();
+      const narrow = await readRow();
+      for (const b of narrow.btns) {
+        expect(
+          b.glyphShown && !b.wordShown && b.text.length > 0 && b.text.length <= 2,
+          `#${b.id} reads ${JSON.stringify(b.text)} at 390, not a glyph`,
+        );
+        expect(b.h >= 44, `#${b.id} is ${b.h}px tall at 390, under the 44px floor`);
+      }
+      expect(
+        narrow.fieldToRow <= 7 && narrow.rowToIdle <= 7,
+        `the composer is not three rows at 390: gaps ${narrow.fieldToRow}px and ${narrow.rowToIdle}px`,
+      );
+      const phoneChooser = page.waitForEvent('filechooser', { timeout: 5_000 });
+      await page.click('#attach');
+      await phoneChooser;
+
+      type FoldReading = {
+        vh: number;
+        vw: number;
+        docW: number;
+        bottom: number;
+        footShown: boolean;
+        footH: number;
+        trH: number;
+        scrolls: boolean;
+        markerSeen: boolean;
+      };
+      const readFold = () =>
+        page.evaluate(String.raw`(() => {
+          const comp = document.getElementById('composer');
+          const foot = document.getElementById('session-footer');
+          const tr = document.getElementById('transcript');
+          const t = tr.getBoundingClientRect();
+          const row = Array.from(tr.querySelectorAll('.bubble')).find((b) =>
+            (b.textContent || '').includes(${JSON.stringify(P130_MARKER)}),
+          );
+          const m = row ? row.getBoundingClientRect() : null;
+          return {
+            vh: window.innerHeight,
+            vw: window.innerWidth,
+            docW: document.documentElement.scrollWidth,
+            bottom: Math.round(comp.getBoundingClientRect().bottom),
+            footShown: foot.getClientRects().length > 0 && foot.offsetHeight > 0,
+            footH: foot.offsetHeight,
+            trH: tr.clientHeight,
+            scrolls: tr.scrollHeight > tr.clientHeight + 1,
+            markerSeen: !!m && m.bottom <= t.bottom + 1 && m.top >= t.top - 1,
+          };
+        })()`) as Promise<FoldReading>;
+      // The band filled taller than the page draws it: a real model name, a
+      // token count, a deep cwd and a mode, one per line, which is what a
+      // configured drawer wraps to on a phone. Taller on purpose, at a fixed
+      // width: that is the one change that shrinks the box under a reader at
+      // the end without a resize or an append, so it is the case the fit's
+      // re-pin exists for. Saved and put back so the next width reads the
+      // page's own band.
+      const fillBand = () =>
+        page.evaluate(String.raw`(() => {
+          const foot = document.getElementById('session-footer');
+          window.__p130Band = {
+            html: foot.innerHTML,
+            display: foot.style.display,
+            ws: foot.style.whiteSpace,
+          };
+          foot.style.display = 'block';
+          foot.style.whiteSpace = 'pre-line';
+          foot.textContent =
+            'model qwen3-coder-480b-a35b-instruct\ntokens 65.5k of 262.1k\n' +
+            'cwd /home/evan/projects/qwen-code-remote/packages/rc-gateway\nmode default';
+        })()`);
+      const restoreBand = () =>
+        page.evaluate(String.raw`(() => {
+          const foot = document.getElementById('session-footer');
+          foot.innerHTML = window.__p130Band.html;
+          foot.style.display = window.__p130Band.display;
+          foot.style.whiteSpace = window.__p130Band.ws;
+        })()`);
+
+      const lines: string[] = [];
+      for (const [w, h] of [
+        [1280, 720],
+        [1280, 810],
+        [390, 844],
+      ] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await page.evaluate('window.scrollTo(0, 0)');
+        await relaid();
+        const asis = await readFold();
+        const at = `${w}x${h}`;
+        // Each premise first, so a pass below cannot be vacuous.
+        expect(asis.footShown, `the drawer band is not drawn at ${at}, so the fold claim would be about a page without it`);
+        expect(asis.scrolls, `the transcript holds less than its box at ${at}, so its cap is not being exercised`);
+        expect(
+          asis.bottom <= asis.vh,
+          `composerUnderFold is ${asis.bottom - asis.vh} at ${at}: the composer bottom is ${asis.bottom} in a ${asis.vh}px viewport`,
+        );
+        expect(asis.docW <= asis.vw, `the page overflows sideways at ${at}: ${asis.docW}px in a ${asis.vw}px viewport`);
+        expect(
+          asis.trH >= Math.round(asis.vh * 0.3) - 1 && asis.trH <= Math.floor(asis.vh * 0.75) + 1,
+          `the transcript is ${asis.trH}px at ${at}, outside its 30vh to 75vh bounds`,
+        );
+        expect(
+          asis.markerSeen,
+          `the newest row is not on screen in the transcript at ${at}, so the fitted box left the reader short of it`,
+        );
+        await fillBand();
+        await relaid();
+        const filled = await readFold();
+        await restoreBand();
+        await relaid();
+        expect(
+          filled.footH > asis.footH,
+          `the filled band is ${filled.footH}px against ${asis.footH}px as drawn at ${at}, so it never shrank the transcript and the re-pin below is untested`,
+        );
+        expect(
+          filled.bottom <= filled.vh,
+          `with the drawer band filled the composer bottom is ${filled.bottom} at ${at}, in a ${filled.vh}px viewport`,
+        );
+        expect(
+          filled.markerSeen,
+          `filling the drawer band shrank the transcript and left the newest row off screen at ${at}`,
+        );
+        lines.push(`${at}: composer ${asis.bottom}/${filled.bottom}, transcript ${asis.trH}px`);
+      }
+      await page.setViewportSize({ width: 1280, height: 720 });
+
+      return (
+        'Attach, Files, Artifacts in the control row as words at 1280 and 44px glyphs at 390, picker, both lists open; three rows at both widths; ' +
+        lines.join('; ') +
+        ' (as drawn / band filled), newest row on screen, no sideways overflow'
+      );
     },
   });
 }
