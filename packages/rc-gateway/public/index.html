@@ -675,6 +675,18 @@
       #composer .ic.end {
         color: #f38ba8;
       }
+      /* #175. The attachment controls, kept together so they wrap as one
+         group. They take .ic for the verbs' look and their 44px floor on a
+         phone. Above the break they read as short words, so the glyph waits
+         for the media block below. */
+      #composer .agroup {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      #composer .agroup .g {
+        display: none;
+      }
       #composer #send {
         font: inherit;
         font-size: 12px;
@@ -834,6 +846,15 @@
         #composer .mic .w {
           display: none;
         }
+        /* #175. Same trade for the attachment controls: the words are what a
+           390 row cannot hold, so the glyph stands in and the phrase stays in
+           title and aria-label. */
+        #composer .agroup .g {
+          display: inline;
+        }
+        #composer .agroup .w {
+          display: none;
+        }
         #composer #send {
           padding: 0 16px;
         }
@@ -851,6 +872,35 @@
          attribute, so a hidden rail would still be painted. */
       #rail[hidden] {
         display: none;
+      }
+      /* #175. With no folder yet the rail is up only for its + (see
+         renderRail), so the folder line and the filter have nothing to show.
+         Named with both classes so it outranks the phone strip's
+         #rail .flt { display: flex }. */
+      #rail.nofolder .ws,
+      #rail.nofolder .flt {
+        display: none;
+      }
+      /* #175. Opening the New conversation panel at 390 pushed the page to
+         940px. Each past row's preview line is nowrap with max-width: 100%,
+         and a percentage max-width counts as none when an intrinsic width is
+         worked out, so the line's full length became the list's min-content.
+         Below 860px the shell is a column whose children are not stretched,
+         so the middle column shrink-wraps to that min-content and grew past
+         the viewport. Containing the list's inline size keeps its width
+         coming from the panel, and the previews ellipsize as they were
+         written to. Measured with the panel open at 390: middle column 940px
+         before, 390px after. */
+      #past-list {
+        contain: inline-size;
+      }
+      /* #175. When opening the panel does scroll it into view (setDirPickerOpen),
+         its top must clear the rail strip, which is sticky at the top of a
+         phone and 57px tall. */
+      @media (max-width: 860px) {
+        #dir-picker {
+          scroll-margin-top: 64px;
+        }
       }
     </style>
   </head>
@@ -913,11 +963,16 @@
              the same four actions. Every id survived the move, including
              #rewind-chat, which a verifier scenario presses, and #reconnect,
              which the self-heal path shows and hides. -->
-        <!-- Collapsed by default, like every other ops-collapse on this page.
-           Its body is a directory form that is only wanted before a
-           conversation exists, and open it measured 947px tall, which pushed
-           the transcript entirely below the fold. -->
-        <details id="dir-picker" class="ops-collapse">
+        <!-- #175. Hidden at rest, not merely collapsed: a closed details still
+           draws its summary row, and that row heading the Chat column was a
+           second door beside the rail's + and about 70px of the fold. The
+           rail's + is now the only way in (setDirPickerOpen), and shutting
+           the summary takes the whole panel off the page again. It stays a
+           details so the summary remains the keyboard way to shut it, and it
+           keeps every id because the browse, recent, typed-path and past-list
+           handlers all find their nodes by id. Open, it is still the 947px
+           form it always was, which is why it only appears on request. -->
+        <details id="dir-picker" class="ops-collapse" hidden>
           <summary>
             <strong>New conversation</strong
             ><button
@@ -1009,11 +1064,14 @@
              (transcript-view.js). The view positions the rows itself (its
              8px gaps and insets replace this box's old flex gap/padding)
              and sets those structural styles inline. */
+          /* #175: the cap is fitted to the room the bands leave (see
+             fitTranscript), within 30vh to 75vh. 75vh is the fallback until
+             the fit has run, and was the whole rule before. */
           #transcript {
             background: #111;
             border-radius: 6px;
             min-height: 60px;
-            max-height: 75vh;
+            max-height: var(--tx-cap, 75vh);
             overflow-y: auto;
           }
           #transcript-wrap {
@@ -1489,7 +1547,7 @@
         <!-- #77. Said by a window that came up on a conversation a live sibling
              is already on. The restore is not withheld in this case, because a
              wrong guess would strand the window on the unwatched page, whose only
-             route onto a conversation is inside the collapsed #dir-picker. So the
+             route onto a conversation is the panel behind the rail's +. So the
              window goes onto the conversation AND says that it joined it, which is
              the one thing the mirroring was actually missing: it was not the
              landing that was wrong for the second-window case, it was the landing
@@ -1672,14 +1730,6 @@
                It is shown only while a send is in flight, because a queue button
                outside a turn is a Send button that does not send. -->
           <button id="queue" type="button" hidden>Queue</button>
-          <!-- #109. Its own control rather than a drop zone over the composer:
-               a phone's browser opens a file picker reliably, and a drop target
-               that is not obviously one goes unused on the device that most
-               wants it. The input itself is hidden because a bare file input
-               renders as a platform-styled button that matches nothing else
-               here; it is still what opens the picker. -->
-          <button id="attach" type="button">Attach</button>
-          <input id="attach-file" type="file" multiple hidden />
           <!-- #125. What the store already holds, which is a different fact
                from what is staged above. The pending strip is this page's
                memory and a reload empties it; these files stayed. Fetched on
@@ -1687,10 +1737,9 @@
                daemon's answer and polling it on every session would pay a
                round trip nobody asked for. Bounded and scrollable on purpose:
                an open list that grows is how the to-do strip pushed the
-               composer under the fold on a phone. -->
-          <button id="stored-toggle" type="button" aria-expanded="false">
-            Files in this session
-          </button>
+               composer under the fold on a phone. Its toggle lives in the
+               control row (#175); the box stays here so it opens between the
+               field and that row. -->
           <div
             id="stored"
             aria-live="polite"
@@ -1727,10 +1776,8 @@
                this same question, keeps artifacts in their own panel too.
                Same bounded shape as the box above, because an open list that
                grows is how the to-do strip pushed the composer under the fold
-               on a phone. Fetched on the first open rather than polled. -->
-          <button id="artifacts-toggle" type="button" aria-expanded="false">
-            Artifacts in this session
-          </button>
+               on a phone. Fetched on the first open rather than polled. Its
+               toggle lives in the control row (#175), like the one above. -->
           <div
             id="artifacts"
             aria-live="polite"
@@ -1905,6 +1952,58 @@
               ><input id="dictate-autosend" type="checkbox" /> auto-send</label
             >
             <span class="interim" id="dictate-interim" aria-live="polite"></span>
+            <!-- #175. The attachment controls, folded in from the row of their
+                 own they had between the field and this one. g1 draws the
+                 composer as three rows (field, this row, idle), and that fourth
+                 row was most of what kept the composer under the fold. Short
+                 words where the row has room and a glyph below 860px, with the
+                 full phrase in title and aria-label at every width, the same
+                 trade the verbs make. The handlers find all three by id, so
+                 nothing else moved with them.
+                 #109: Attach is its own control rather than a drop zone over
+                 the composer, because a phone's browser opens a file picker
+                 reliably and a drop target that is not obviously one goes
+                 unused on the device that most wants it. The file input is
+                 hidden because a bare one renders as a platform-styled button
+                 that matches nothing else here; it is still what opens the
+                 picker. -->
+            <span class="agroup">
+              <button
+                id="attach"
+                type="button"
+                class="ic"
+                title="Attach a file to the next prompt"
+                aria-label="Attach a file to the next prompt"
+              >
+                <span class="g" aria-hidden="true">📎</span
+                ><span class="w">Attach</span>
+              </button>
+              <input id="attach-file" type="file" multiple hidden />
+              <button
+                id="stored-toggle"
+                type="button"
+                class="ic"
+                aria-expanded="false"
+                aria-controls="stored"
+                title="Files in this session"
+                aria-label="Files in this session"
+              >
+                <span class="g" aria-hidden="true">🗂</span
+                ><span class="w">Files</span>
+              </button>
+              <button
+                id="artifacts-toggle"
+                type="button"
+                class="ic"
+                aria-expanded="false"
+                aria-controls="artifacts"
+                title="Artifacts in this session"
+                aria-label="Artifacts in this session"
+              >
+                <span class="g" aria-hidden="true">📦</span
+                ><span class="w">Artifacts</span>
+              </button>
+            </span>
             <!-- #120. The session verbs moved here from their own block above
                  the transcript, which is why that block is gone: the row under
                  the field is where the sheet draws them, and a second copy up
@@ -3809,7 +3908,7 @@
       // it. This does not gate the adopt. The page cannot know which of the two
       // situations the user meant, and a wrong guess that withheld the restore
       // would strand the window on the unwatched page, whose only route onto a
-      // conversation is inside the collapsed #dir-picker. So the restore always
+      // conversation is the panel behind the rail's +. So the restore always
       // runs at full speed and the answer only decides whether the window says
       // out loud that it joined another window's conversation.
       const WINDOW_BUS = 'qwen-rc:window-bus';
@@ -3914,6 +4013,11 @@
       function showApp() {
         $('auth-gate').hidden = true;
         $('app-body').hidden = false;
+        // #175: the rail carries the only door to the New conversation panel,
+        // so it is drawn with the app rather than waiting on a folder browse
+        // that may never succeed. Both callers reach here after an await, so
+        // the rail's state further down the script is already initialised.
+        renderRail();
       }
       function showAuthGate() {
         if (healthPollId) {
@@ -4397,6 +4501,78 @@
       ]).then(([virtualCore, markdownIt]) =>
         attachTranscriptView(virtualCore, markdownIt),
       );
+
+      // #175. The transcript's cap is the room the viewport leaves once every
+      // band above and below it has been laid out, so with a full transcript
+      // the composer's bottom lands on the fold instead of under it. A flat
+      // 75vh could not do that: at 390x844 it alone is 633px, and the bar,
+      // rail strip, drawer band and a three-row composer need about 545px
+      // more.
+      // Still a max-height on a box that sizes to its content, never a flex
+      // basis: a flex-sized box is what broke the render-all scroll pin. When
+      // the cap does shrink the box, the render-all path re-pins a reader at
+      // the end on its own (#74's onBoxResize) and the fit re-pins the
+      // virtualized path below. Two bounds keep the old complaints out:
+      // - at most 75vh, the cap this replaced, so no viewport gets a taller
+      //   transcript than it had;
+      // - at least 30vh, so a tall band (an open panel, a card, a pinned tab)
+      //   pushes the composer down rather than squeezing the transcript
+      //   toward the 60px floor that read as "the chat window is way too
+      //   small" when #74 bounded the whole column.
+      // The room is measured from the transcript's edges, never its height, so
+      // the transcript growing to its new cap cannot feed back into the cap.
+      // The far edge is the Chat pane's own bottom, not the column's: on a
+      // phone the column is stretched to the viewport by the shell's flex, so
+      // its bottom counts the empty space under the composer, and the room
+      // then equals the transcript's current height and can only ever shrink.
+      // The pane is a flex item, so the composer's bottom margin stays inside
+      // it rather than collapsing out.
+      let transcriptFitQueued = false;
+      function fitTranscript() {
+        transcriptFitQueued = false;
+        const tr = $('transcript');
+        const pane = $('pane-chat');
+        // Another tab, or the raw view: nothing to fit, and a hidden box
+        // measures zero, which would read as all the room in the world.
+        if (tr.getClientRects().length === 0) return;
+        const vh = window.innerHeight;
+        const box = tr.getBoundingClientRect();
+        const above = box.top + window.scrollY;
+        const below = pane.getBoundingClientRect().bottom - box.bottom;
+        const room = Math.floor(vh - above - below);
+        const cap = Math.max(
+          Math.round(vh * 0.3),
+          Math.min(Math.floor(vh * 0.75), room),
+        );
+        const want = cap + 'px';
+        if (tr.style.getPropertyValue('--tx-cap') === want) return;
+        tr.style.setProperty('--tx-cap', want);
+        // A box that shrinks under a reader at the end leaves the newest rows
+        // below it, and the virtualized path only re-anchors on an append, so
+        // nothing else would bring them back (measured: at 1280x720 the
+        // in-progress tool row sat hidden under the box after the drawer
+        // arrived). The view still holds the near-bottom reading from before
+        // this write, so a reader who had scrolled up to read is left alone.
+        scrollTranscript(false);
+      }
+      // Batched to a frame: the observer fires for every streamed token that
+      // grows the column, and one read per frame is all the fit needs.
+      function queueFitTranscript() {
+        if (transcriptFitQueued) return;
+        transcriptFitQueued = true;
+        requestAnimationFrame(fitTranscript);
+      }
+      window.addEventListener('resize', queueFitTranscript);
+      if (typeof ResizeObserver === 'function') {
+        // The pane, not the transcript: the bands that change the room
+        // (drawer, cards, strips, the composer's own panels) all resize it.
+        // On a phone the rail strip and the bar sit above the pane, so they
+        // are watched too.
+        const fitWatch = new ResizeObserver(queueFitTranscript);
+        fitWatch.observe($('pane-chat'));
+        fitWatch.observe($('tab-bar'));
+        fitWatch.observe($('rail'));
+      }
 
       $('jump-bottom').addEventListener('click', () => {
         scrollTranscript(true);
@@ -10168,7 +10344,10 @@
           '. Tap one to read it and send to it. To work in another folder, use ',
         );
         const h2b = document.createElement('b');
-        h2b.textContent = 'New conversation';
+        // #175: named as the control reads, because the + is the only way to
+        // the folder picker now and nothing else on the page says New
+        // conversation until it is open.
+        h2b.textContent = '+ new conversation';
         helpText.append(h1, h1b, h2, h2b, document.createTextNode('.'));
 
         const ws = document.createElement('div');
@@ -10205,11 +10384,11 @@
         // Opens the existing picker rather than starting a conversation itself:
         // browse-to-a-folder then New conversation already is that path, and a
         // rail that POSTed on its own would be a second one onto the same thing.
-        plus.onclick = () => {
-          const picker = $('dir-picker');
-          picker.open = true;
-          picker.scrollIntoView({ block: 'start' });
-        };
+        // #175: it is now the picker's only door, so it also shuts it, and says
+        // which state it is in.
+        plus.setAttribute('aria-controls', 'dir-picker');
+        plus.setAttribute('aria-expanded', 'false');
+        plus.onclick = () => setDirPickerOpen($('dir-picker').hidden);
         // The sheet keeps the + inside the list when expanded so it scrolls with
         // the rows, and puts it below the list when collapsed. One live node
         // cannot sit in both places, so it stays inside in both and the collapsed
@@ -10229,13 +10408,56 @@
       function renderRail() {
         if (!railEls) buildRail();
         const cwd = pastConvosCwd;
-        // No folder chosen yet: chrome around nothing to list reads as a broken
-        // panel, so the region stays out until there is a folder to name.
-        $('rail').hidden = !cwd;
-        if (!cwd) return;
-        railEls.ws.textContent = cwd;
+        // #175. The rail stays up without a folder. It used to drop out until
+        // there was a folder to name, but its + is now the only door to the
+        // New conversation panel, and a first browse that failed (a token
+        // without write scope, a default path that is gone) is exactly when
+        // that panel's typed path is the way in. With no folder there is
+        // nothing to name or filter, so those two parts drop and the list
+        // holds only the +.
+        $('rail').hidden = false;
+        $('rail').classList.toggle('nofolder', !cwd);
+        railEls.ws.textContent = cwd || '';
         renderRailRows();
       }
+
+      // #175. The one way to open or shut the New conversation panel. Opening
+      // moves focus onto its summary, so a keyboard reader who pressed + lands
+      // in what it opened instead of back at the top of the rail.
+      // It scrolls only when the panel's top is off screen. The panel is taller
+      // than a phone, so any scroll-into-view puts its top at the viewport
+      // edge, which on a phone is under the sticky rail strip and hides the
+      // summary that names the panel and shuts it; opened from the top of the
+      // page it is already in view. The focus skips the browser's own scroll
+      // for the same reason.
+      function setDirPickerOpen(open) {
+        const picker = $('dir-picker');
+        picker.hidden = !open;
+        picker.open = open;
+        if (railEls) railEls.plus.setAttribute('aria-expanded', String(open));
+        if (!open) return;
+        const top = picker.getBoundingClientRect().top;
+        if (top < 0 || top > window.innerHeight - 48) {
+          picker.scrollIntoView({ block: 'start' });
+        }
+        picker.querySelector('summary').focus({ preventScroll: true });
+      }
+
+      // Shutting it from its own summary takes the panel off the page as well,
+      // since a closed summary row is the second door #175 removed, and focus
+      // goes back to the + it came through. A shut from setDirPickerOpen has
+      // already hidden it by the time this event lands, so it is left alone.
+      $('dir-picker').addEventListener('toggle', () => {
+        const picker = $('dir-picker');
+        if (picker.open || picker.hidden) return;
+        setDirPickerOpen(false);
+        if (railEls) railEls.plus.focus();
+      });
+      $('dir-picker').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        setDirPickerOpen(false);
+        if (railEls) railEls.plus.focus();
+      });
 
       function renderRailRows() {
         const list = railEls.list;
@@ -10978,6 +11200,14 @@
         // only if the budget exhausts again.
         $('reconnect').style.display = 'none';
         if (id !== watchedSessionId) clearIdleGhost();
+        // #175: reaching another conversation is what the New conversation
+        // panel was opened for (Use this folder, a typed path, a past row), so
+        // it shuts rather than holding the transcript down the page. Keyed on a
+        // change of conversation so a self-heal re-watch of the same one does
+        // not shut it under a reader still browsing folders.
+        if (id !== watchedSessionId && !$('dir-picker').hidden) {
+          setDirPickerOpen(false);
+        }
         watchedSessionId = id;
         // The stored list names a conversation, so a switch refetches it rather
         // than leaving the previous session's files under this heading.
