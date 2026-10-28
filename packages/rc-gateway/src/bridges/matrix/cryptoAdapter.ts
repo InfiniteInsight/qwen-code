@@ -177,6 +177,16 @@ export async function createMatrixCryptoAdapter(
       }
     };
 
+    // A dispatch that rejects (BridgeClient rejects when its fetch fails) is
+    // logged and dropped, never left unhandled: the SDK handlers below run it
+    // fire-and-forget, and an unhandled rejection exited the process (#155).
+    // Matches the Telegram poll loop, whose handleUpdate swallows per update.
+    const dispatchFailed = (kind: string) => (err: unknown) => {
+      deps.log?.(
+        `matrix crypto: ${kind} dispatch failed: ${(err as Error)?.message ?? String(err)}`,
+      );
+    };
+
     // @vector-im/matrix-bot-sdk decrypts `m.room.encrypted` events IN PLACE
     // and re-emits the plaintext as `room.message` (MatrixClient processSync:
     // decrypt → fall through to the m.room.message emit), so this one handler
@@ -190,7 +200,7 @@ export async function createMatrixCryptoAdapter(
       void (async () => {
         const powerLevel = await resolvePower(roomId, sender);
         await deps.onMessage({ roomId, sender, body, powerLevel });
-      })();
+      })().catch(dispatchFailed('message'));
     });
 
     // Reactions are plain `m.reaction` timeline events (annotations are not
@@ -211,12 +221,16 @@ export async function createMatrixCryptoAdapter(
         typeof relates?.event_id === 'string' &&
         typeof relates?.key === 'string'
       ) {
-        void deps.onReaction?.({
+        const reaction = {
           roomId,
           sender: e.sender,
           targetEventId: relates.event_id,
           key: relates.key,
-        });
+        };
+        // Wrapped so a synchronous throw from onReaction is caught too.
+        void (async () => {
+          await deps.onReaction?.(reaction);
+        })().catch(dispatchFailed('reaction'));
       }
     });
 

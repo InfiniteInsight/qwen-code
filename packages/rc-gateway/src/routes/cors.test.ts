@@ -324,6 +324,36 @@ describe('DELETE /rc/cors/:origin', () => {
     );
   });
 
+  it('answers a literal % in the origin with 400 instead of throwing', async () => {
+    // Express has already decoded the param (%25 -> %); decoding it a second
+    // time threw URIError, which killed the process (#155).
+    const url = await mount();
+    const res = await fetch(`${url}/rc/cors/%25`, {
+      method: 'DELETE',
+      headers: authHeader(ownerToken),
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('invalid_origin');
+  });
+
+  it('does not decode the origin a second time', async () => {
+    // %2541 is "%41" after Express's decode; a second decode would turn it into
+    // "A" and act on an origin the caller never named.
+    await store.admitOrigin('https://A', 'tok1');
+    const url = await mount();
+    const res = await fetch(`${url}/rc/cors/https%3A%2F%2F%2541`, {
+      method: 'DELETE',
+      headers: authHeader(ownerToken),
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(res.status).toBe(400);
+    expect(store.listOrigins([]).some((o) => o.origin === 'https://A')).toBe(
+      true,
+    );
+  });
+
   it('requires owner scope', async () => {
     const url = await mount();
     await store.admitOrigin('https://app.example.com', 'tok1');

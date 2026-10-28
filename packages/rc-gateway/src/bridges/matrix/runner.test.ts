@@ -42,6 +42,9 @@ function harness(
     park?: boolean;
     runInbound?: (signal: AbortSignal) => Promise<void>;
     health?: MatrixHealthState;
+    /** Replaces the fake gateway prompt call (it records into `prompts`). */
+    sendPrompt?: (sessionId: string, prompt: string) => Promise<unknown>;
+    log?: (msg: string) => void;
   } = {},
 ) {
   const sent: Array<{ roomId: string; content: unknown }> = [];
@@ -78,10 +81,12 @@ function harness(
       return { ok: true, status: 200 };
     },
     heartbeat: async () => ({ ok: true, status: 200 }),
-    sendPrompt: async (_s: string, prompt: string) => {
-      prompts.push(prompt);
-      return { ok: true, status: 200 };
-    },
+    sendPrompt:
+      opts.sendPrompt ??
+      (async (_s: string, prompt: string) => {
+        prompts.push(prompt);
+        return { ok: true, status: 200 };
+      }),
     redeemInvite: async () => ({
       ok: true,
       status: 200,
@@ -120,6 +125,7 @@ function harness(
     },
     ...(opts.runInbound ? { runInbound: opts.runInbound } : {}),
     ...(opts.health ? { health: opts.health } : {}),
+    ...(opts.log ? { log: opts.log } : {}),
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
     setTimer: (_ms, fn) => {
       timers.push(fn);
@@ -455,6 +461,35 @@ describe('MatrixBridge runner — session_update streaming', () => {
       rel_type: 'm.thread',
       event_id: '$evt_1', // the first message's event id
     });
+  });
+});
+
+describe('MatrixBridge runner, a failed dispatch (#155)', () => {
+  it('logs a rejected message dispatch and keeps the sync loop running', async () => {
+    // BridgeClient.postJson rejects when the gateway fetch fails; before #155
+    // that ended the sync loop for good while heartbeat and SSE kept the
+    // bridge looking alive.
+    await rooms.bind('!r:h', 'sess_q');
+    const logs: string[] = [];
+    const prompts: string[] = [];
+    const h = harness(
+      [
+        { next_batch: 's1' }, // initial (skipped)
+        { next_batch: 's2', ...textMsg('!r:h', '@alice:h', 'first') },
+        { next_batch: 's3', ...textMsg('!r:h', '@alice:h', 'second') },
+      ],
+      {
+        sendPrompt: async (_s, prompt) => {
+          if (prompt === 'first') throw new TypeError('fetch failed');
+          prompts.push(prompt);
+          return { ok: true, status: 200 };
+        },
+        log: (m) => logs.push(m),
+      },
+    );
+    await h.bridge.start(h.ac.signal); // resolves: the loop reached the end
+    expect(prompts).toEqual(['second']);
+    expect(logs.some((l) => l.includes('fetch failed'))).toBe(true);
   });
 });
 

@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { createSocket } from 'node:dgram';
 import { browseDaemons, type BonjourBrowserLike } from './browser.js';
 import type { RawBrowseService } from './advert.js';
 
@@ -81,5 +83,73 @@ describe('browseDaemons', () => {
       wait: () => Promise.resolve(),
     });
     expect(records.map((r) => r.name)).toEqual(['ok']);
+  });
+});
+
+// #155: a socket error during a browse (GET /rc/peers, `daemons discover`)
+// was an uncaught exception from bonjour-service's multicast-dns emitter.
+describe('browseDaemons socket errors', () => {
+  it('rejects with the socket error instead of throwing it uncaught, and tears down', async () => {
+    const fb = fakeBonjour([]);
+    const mdns = new EventEmitter();
+    let release: () => void = () => {};
+    const wait = () => new Promise<void>((r) => (release = r));
+    const browse = browseDaemons({
+      factory: () => ({ ...fb.bonjour, server: { mdns } }),
+      timeoutMs: 5000,
+      wait,
+    });
+    const bindFailure = Object.assign(new Error('bind EACCES 0.0.0.0:5353'), {
+      code: 'EACCES',
+    });
+    expect(() => mdns.emit('error', bindFailure)).not.toThrow();
+    await expect(browse).rejects.toThrow('EACCES');
+    expect(fb.calls.destroy).toBe(1);
+    expect(fb.calls.stop).toBe(1);
+    // An error after the browse settled is absorbed too.
+    expect(() => mdns.emit('error', bindFailure)).not.toThrow();
+    release();
+  });
+
+  it('rejects when the constructor error callback fires', async () => {
+    const fb = fakeBonjour([]);
+    let onError: ((err: Error) => void) | undefined;
+    const browse = browseDaemons({
+      factory: (cb) => {
+        onError = cb;
+        return fb.bonjour;
+      },
+      timeoutMs: 5000,
+      wait: () => new Promise<void>(() => {}),
+    });
+    expect(onError).toBeTypeOf('function');
+    onError!(new Error('send EPERM'));
+    await expect(browse).rejects.toThrow('EPERM');
+  });
+});
+
+const RealBonjour = await import('bonjour-service').then(
+  (m) => m.Bonjour,
+  () => undefined,
+);
+
+describe.skipIf(!RealBonjour)('browseDaemons with bonjour-service', () => {
+  it('a real bind failure rejects the browse, never exits', async () => {
+    const blocker = createSocket({ type: 'udp4', reuseAddr: false });
+    await new Promise<void>((r) => blocker.bind(0, '0.0.0.0', () => r()));
+    try {
+      await expect(
+        browseDaemons({
+          factory: (onError) =>
+            new RealBonjour!(
+              { port: blocker.address().port, reuseAddr: false } as never,
+              onError,
+            ) as unknown as BonjourBrowserLike,
+          timeoutMs: 5000,
+        }),
+      ).rejects.toThrow('EADDRINUSE');
+    } finally {
+      await new Promise<void>((r) => blocker.close(() => r()));
+    }
   });
 });

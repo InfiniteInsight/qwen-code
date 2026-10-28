@@ -82,9 +82,12 @@ export function createRemoveCorsOriginRoute(
   deps: CorsRouteDeps,
 ): RequestHandler {
   return async (req, res) => {
-    // The origin arrives percent-encoded in the URL segment; decode it.
-    const origin = decodeURIComponent(req.params['origin'] ?? '');
-    if (!origin) {
+    // Express has already percent-decoded the param, so it is used as is: a
+    // second decode threw URIError on a literal `%` (#155) and turned `%2541`
+    // into a different origin. A serialized origin never contains `%`, so one
+    // that survives Express's decode is refused like an empty one.
+    const origin = req.params['origin'] ?? '';
+    if (!origin || origin.includes('%')) {
       res
         .status(400)
         .json({ error: 'origin required', code: 'invalid_origin' });

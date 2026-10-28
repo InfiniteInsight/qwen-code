@@ -17,7 +17,11 @@ import {
   type RawBrowseService,
   type DaemonRecord,
 } from './advert.js';
-import { QWEN_RC_SERVICE_TYPE } from './advertiser.js';
+import {
+  QWEN_RC_SERVICE_TYPE,
+  guardMdnsErrors,
+  type HasMdnsSocket,
+} from './advertiser.js';
 
 /** A browser handle from `find` — we only need to stop it. */
 export interface BrowserHandleLike {
@@ -26,7 +30,7 @@ export interface BrowserHandleLike {
 }
 
 /** The minimal `bonjour-service` surface the browse path depends on. */
-export interface BonjourBrowserLike {
+export interface BonjourBrowserLike extends HasMdnsSocket {
   find(
     opts: { type: string },
     onUp?: (service: RawBrowseService) => void,
@@ -34,7 +38,10 @@ export interface BonjourBrowserLike {
   destroy(): void;
 }
 
-export type BrowserFactory = () => BonjourBrowserLike;
+/** Build a fresh instance; `onError` is for the constructor's error callback. */
+export type BrowserFactory = (
+  onError?: (err: Error) => void,
+) => BonjourBrowserLike;
 
 export interface BrowseOptions {
   factory: BrowserFactory;
@@ -55,19 +62,33 @@ const realWait = (ms: number): Promise<void> =>
  * Browse `_qwen-rc._tcp.local.` for `timeoutMs`, then return the discovered
  * daemons normalized, deduped by service name, and sorted by host then port.
  * Always tears down the socket. Never throws on an empty LAN (returns []).
+ * A socket error (a UDP 5353 bind failure, say) rejects the browse with that
+ * error rather than escaping as an uncaught exception (#155): an empty list
+ * would wrongly claim that nothing advertises.
  */
 export async function browseDaemons(
   opts: BrowseOptions,
 ): Promise<DaemonRecord[]> {
   const wait = opts.wait ?? realWait;
-  const bonjour = opts.factory();
+  let rejectBrowse: (err: Error) => void = () => {};
+  const socketFailure = new Promise<never>((_resolve, reject) => {
+    rejectBrowse = reject;
+  });
+  // An error after the browse settled has nobody racing it; keep it handled.
+  socketFailure.catch(() => {});
+  const onError = (err: Error) => rejectBrowse(err);
+  const bonjour = opts.factory(onError);
+  guardMdnsErrors(bonjour, onError);
   const raw: RawBrowseService[] = [];
   try {
     const browser = bonjour.find({ type: QWEN_RC_SERVICE_TYPE }, (service) => {
       raw.push(service);
     });
-    await wait(opts.timeoutMs);
-    browser.stop?.();
+    try {
+      await Promise.race([wait(opts.timeoutMs), socketFailure]);
+    } finally {
+      browser.stop?.();
+    }
   } finally {
     bonjour.destroy();
   }

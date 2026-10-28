@@ -190,19 +190,36 @@ export class DiscordBridge {
 
     const gateway = this.cfg.makeGateway({
       onMessage: (m) => {
-        void handleMessage(m, this.dispatchDeps());
+        void handleMessage(m, this.dispatchDeps()).catch((err: unknown) =>
+          this.dispatchFailed('message', err),
+        );
       },
       onSlash: (c) => {
         // A successful /qwen attach binds a new session → subscribe to it.
-        void handleSlashCommand(c, this.dispatchDeps()).finally(() =>
-          this.reconcileSubscriptions(signal),
-        );
+        void handleSlashCommand(c, this.dispatchDeps())
+          .finally(() => this.reconcileSubscriptions(signal))
+          .catch((err: unknown) => this.dispatchFailed('slash command', err));
       },
       onButton: (c) => {
-        void handleComponent(c, this.dispatchDeps());
+        void handleComponent(c, this.dispatchDeps()).catch((err: unknown) =>
+          this.dispatchFailed('button', err),
+        );
       },
     });
     await gateway.start(signal);
+  }
+
+  /**
+   * A dispatch that rejected (BridgeClient rejects when its fetch fails) is
+   * logged and dropped; the gateway loop carries on with the next event
+   * (#155). Before, the `void` left it unhandled, which exited the process,
+   * and in-process that process is the gateway. Matches the Telegram poll loop,
+   * whose handleUpdate swallows per update.
+   */
+  private dispatchFailed(kind: string, err: unknown): void {
+    this.log(
+      `discord bridge: ${kind} dispatch failed: ${(err as Error)?.message ?? String(err)}`,
+    );
   }
 
   /**

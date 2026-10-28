@@ -33,8 +33,18 @@ export interface BonjourServiceLike {
   stop?(cb?: () => void): void;
 }
 
+/** The `multicast-dns` emitter that `bonjour-service` keeps at `server.mdns`. */
+export interface MdnsSocketLike {
+  on(event: 'error', listener: (err: Error) => void): unknown;
+}
+
+/** Where `bonjour-service` keeps its socket (absent on test fakes). */
+export interface HasMdnsSocket {
+  server?: { mdns?: MdnsSocketLike };
+}
+
 /** The minimal `bonjour-service` surface we depend on. */
-export interface BonjourLike {
+export interface BonjourLike extends HasMdnsSocket {
   publish(opts: {
     name: string;
     type: string;
@@ -45,13 +55,36 @@ export interface BonjourLike {
   destroy(): void;
 }
 
-export type BonjourFactory = () => BonjourLike;
+/**
+ * Build a fresh instance. `onError` is for the constructor's error callback:
+ * `bonjour-service` defaults it to `throw err`, which would be uncaught.
+ */
+export type BonjourFactory = (onError?: (err: Error) => void) => BonjourLike;
+
+/**
+ * Attach `onError` to the instance's multicast-dns emitter (#155).
+ * `bonjour-service` attaches no `'error'` listener of its own, so a UDP 5353
+ * bind failure (EADDRINUSE, EACCES) emitted there became an uncaught exception
+ * that exited the process after `start()` had returned normally. Returns
+ * whether a listener was attached (false for an instance without the socket).
+ */
+export function guardMdnsErrors(
+  instance: HasMdnsSocket,
+  onError: (err: Error) => void,
+): boolean {
+  const mdns = instance.server?.mdns;
+  if (!mdns || typeof mdns.on !== 'function') return false;
+  mdns.on('error', onError);
+  return true;
+}
 
 export interface AdvertiserOptions {
   instanceName: string;
   port: number;
   txt: TxtRecord;
   factory: BonjourFactory;
+  /** Where a socket failure is reported (default console.warn). */
+  log?: (msg: string) => void;
 }
 
 export class MdnsAdvertiser {
@@ -71,8 +104,13 @@ export class MdnsAdvertiser {
   /** Register the service. Safe to call once. */
   start(): void {
     if (this.bonjour) return;
-    const bonjour = this.opts.factory();
+    // Bound to THIS instance, so a late error from a socket already torn down
+    // cannot disable a later start(). Socket errors arrive asynchronously, after
+    // `bonjour` is initialised.
+    const onError = (err: Error) => this.fail(bonjour, err);
+    const bonjour = this.opts.factory(onError);
     this.bonjour = bonjour;
+    guardMdnsErrors(bonjour, onError);
     bonjour.publish({
       name: this.opts.instanceName,
       type: QWEN_RC_SERVICE_TYPE,
@@ -80,6 +118,28 @@ export class MdnsAdvertiser {
       txt: { ...this.opts.txt },
     });
     this.published = true;
+  }
+
+  /**
+   * A socket failure turns advertising off and frees the socket; it never stops
+   * the gateway. Later errors from the same socket are absorbed (the listener
+   * stays attached so they cannot become uncaught).
+   */
+  private fail(instance: BonjourLike, err: Error): void {
+    if (this.bonjour !== instance) return;
+    this.bonjour = undefined;
+    this.published = false;
+    // eslint-disable-next-line no-console
+    const log = this.opts.log ?? ((m: string) => console.warn(m));
+    // Node's socket errors name the syscall and code: "bind EADDRINUSE 0.0.0.0:5353".
+    log(
+      `mDNS: advertising disabled after a socket error: ${err?.message ?? String(err)}`,
+    );
+    try {
+      instance.destroy();
+    } catch {
+      // best-effort teardown of a socket that already failed
+    }
   }
 
   /**
