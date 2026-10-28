@@ -286,22 +286,6 @@
         font-size: 14px;
         text-align: left;
       }
-      /* Quiet, as drawn, in two lines so the rule's reach and its limit are
-         both read before the tap: every request of the kind, this
-         conversation only, for 24 hours. */
-      .pcard .pc-always {
-        min-height: 40px;
-        padding: 2px 8px;
-        border: 0;
-        background: transparent;
-        color: var(--g1-ink-mid);
-        font-size: 13px;
-        line-height: 1.25;
-      }
-      .pcard .pc-always .sub {
-        display: block;
-        font-size: 12px;
-      }
       .pcard .pc-row {
         display: flex;
         gap: 8px;
@@ -7538,10 +7522,9 @@
         }
       }
 
-      // The one POST that sets an overlay, shared by Settings and the pinned
-      // card's "Always allow" (#186), so both send the same body for the same
-      // ask. Resolves { ok, message }: the words to show when it did not land.
-      async function postPermOverlay(ov) {
+      async function setPermOverlay(ov) {
+        const st = permOverlaysStatusEl();
+        st.textContent = 'setting…';
         const payload = { action: ov.action, ttlSeconds: ov.ttlSeconds };
         if (ov.sessionId) payload.sessionId = ov.sessionId;
         if (ov.tool) payload.tool = ov.tool;
@@ -7556,37 +7539,22 @@
             body: JSON.stringify(payload),
           });
           if (res.status === 401 || res.status === 403) {
-            return {
-              ok: false,
-              denied: true,
-              // The wording every other owner-only section uses.
-              message: 'not authorized \u2014 needs an owner token',
-            };
+            st.textContent = 'not authorized \u2014 needs an owner token';
+            return;
           }
           const body = await res.json().catch(() => ({}));
           if (!res.ok) {
-            return {
-              ok: false,
-              message: (body.error || 'set failed') + ' (' + res.status + ')',
-            };
+            const msg = (body.error || 'set failed') + ' (' + res.status + ')';
+            st.textContent = msg;
+            setStatus(msg);
+            return;
           }
-          return { ok: true, message: '' };
+          st.textContent = 'set';
+          await loadPermOverlays(false);
         } catch {
-          return { ok: false, message: 'set failed' };
+          st.textContent = 'set failed';
+          setStatus('set failed');
         }
-      }
-
-      async function setPermOverlay(ov) {
-        const st = permOverlaysStatusEl();
-        st.textContent = 'setting…';
-        const r = await postPermOverlay(ov);
-        if (!r.ok) {
-          st.textContent = r.message;
-          if (!r.denied) setStatus(r.message);
-          return;
-        }
-        st.textContent = 'set';
-        await loadPermOverlays(false);
       }
 
       async function revokePermOverlay(id) {
@@ -9957,18 +9925,14 @@
       }
 
       // #186. What the tool wants, in words, from the ACP kind the frame
-      // carries (the status poll's action.type is the same kind). `noun` names
-      // what "Always allow" would allow, and `overlay` is the kind an overlay
-      // can name for it (loader.ts POLICY_KINDS). Only the kinds whose overlay
-      // grants exactly that kind get one: `other` would also allow every tool
-      // the daemon files under it, which a button naming one tool cannot say.
+      // carries (the status poll's action.type is the same kind).
       const CARD_KINDS = {
-        execute: { title: 'Wants to run a command', noun: 'commands', overlay: 'execute' },
-        exec: { title: 'Wants to run a command', noun: 'commands', overlay: 'execute' },
-        edit: { title: 'Wants to edit a file', noun: 'file edits', overlay: 'edit' },
-        read: { title: 'Wants to read a file', noun: 'file reads', overlay: 'read' },
-        search: { title: 'Wants to search the files', noun: 'searches', overlay: 'search' },
-        fetch: { title: 'Wants to fetch from the web', noun: 'web fetches', overlay: 'fetch' },
+        execute: { title: 'Wants to run a command' },
+        exec: { title: 'Wants to run a command' },
+        edit: { title: 'Wants to edit a file' },
+        read: { title: 'Wants to read a file' },
+        search: { title: 'Wants to search the files' },
+        fetch: { title: 'Wants to fetch from the web' },
         delete: { title: 'Wants to delete a file' },
         move: { title: 'Wants to move a file' },
         think: { title: 'Wants to think it through' },
@@ -9983,11 +9947,6 @@
           ? CARD_KINDS[kind]
           : { title: 'Wants to use a tool' };
       }
-      // The overlay "Always allow" writes: scoped to this conversation, for
-      // the longest the overlay route allows (it caps every overlay at 24h, and
-      // there is no workspace-wide form of one).
-      const ALWAYS_ALLOW_TTL_SEC = 86400;
-
       // #186. The full command or arguments, never a preview. A shell call is
       // its command as typed; anything else is its arguments one per line, a
       // string as itself (an edit's new text keeps its line breaks) and
@@ -10238,52 +10197,6 @@
           extraRow.append(b);
         }
         parts.actions.append(extraRow);
-
-        if (primary && kind.overlay && permRulesGate()) {
-          const always = cardEl(
-            'button',
-            'pc-always',
-            'Always allow ' + kind.noun + ' in this conversation',
-          );
-          // The leading space is for the button's spoken name; on screen the
-          // line starts a block, where it collapses.
-          always.append(cardEl('span', 'sub', ' for 24 hours, on this gateway'));
-          always.type = 'button';
-          always.title =
-            'Sets a 24 hour rule on this gateway allowing every ' +
-            kind.overlay +
-            ' request in this conversation, then allows this one';
-          always.onclick = async () => {
-            entry.busy(true);
-            entry.note('Setting the rule…');
-            const r = await postPermOverlay({
-              sessionId,
-              tool: kind.overlay,
-              action: 'allow',
-              ttlSeconds: ALWAYS_ALLOW_TTL_SEC,
-              reason: 'Always allow, from the permission card',
-            });
-            if (!r.ok) {
-              entry.busy(false);
-              entry.note('Always allow was not set: ' + r.message);
-              return;
-            }
-            // Settings shows the overlays it last loaded; the new one is news.
-            if (permOverlays !== null) void loadPermOverlays(false);
-            await vote(
-              sessionId,
-              requestId,
-              'selected',
-              primary.optionId,
-              undefined,
-              'Allowed. ' +
-                kind.noun.charAt(0).toUpperCase() +
-                kind.noun.slice(1) +
-                ' are allowed in this conversation for 24h',
-            );
-          };
-          parts.actions.append(always);
-        }
 
         const row = cardEl('div', 'pc-row');
         const deny = cardEl('button', 'pc-deny', 'Deny');

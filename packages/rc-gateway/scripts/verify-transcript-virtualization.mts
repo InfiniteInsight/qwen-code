@@ -16431,89 +16431,66 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P158 Always allow writes a 24h overlay for this conversation and the tool’s kind before it votes Allow once, a refused overlay votes nothing, and a kind no overlay can name offers none',
+    name: 'P158 the permission card offers no gateway-wide always-allow: the daemon’s own scoped always options are plain buttons, nothing writes an overlay, and the why line names the rule',
+    // #186, the call made on review: a conversation-wide allow of every
+    // command one tap from Allow once is too broad for the thumb zone. The
+    // daemon's own always options are scoped (a command prefix, a project) and
+    // are the granularity the card offers.
     frames: () =>
-      new Frames()
-        .ev('client_joined')
-        .ev('permission_request', permFrame('p158-a', 'gh cache delete --all'))
-        .ev('permission_request', permFrame('p158-b', 'gh cache list'))
-        .ev('permission_request', permFrame('p158-c', 'spawn a helper', 'other', [
-          { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
-          { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
-        ])).list,
+      new Frames().ev('client_joined').ev('permission_request', permFrame('p158', 'gh cache delete --all')).list,
+    stub: { sessionStatus: statusBody([permPending('p158', 'gh cache delete --all')]) },
     run: async ({ page, viewer }) => {
-      const pending = new Map<string, unknown>([
-        ['p158-a', permPending('p158-a', 'gh cache delete --all')],
-        ['p158-b', permPending('p158-b', 'gh cache list')],
-        ['p158-c', permPending('p158-c', 'spawn a helper', 'other')],
-      ]);
-      await serveStatus(page, pending);
-      const votes = recordVotes(page);
-      page.on('requestfinished', (r) => {
-        const m = /\/permission\/([^/?]+)$/.exec(new URL(r.url()).pathname);
-        if (m) pending.delete(decodeURIComponent(m[1]!));
-      });
-      // The harness gateway mounts no overlay store, so the route plays it:
-      // the first write lands (after a pause, so a vote sent without waiting
-      // for it would show), the second is refused as a guest token would be.
-      const overlays: Array<{ body: string; answeredAt: number }> = [];
-      await page.route(/\/rc\/permission-overlays$/, async (route) => {
-        if (route.request().method() !== 'POST') return route.continue();
-        const n = overlays.length;
-        overlays.push({ body: route.request().postData() ?? '', answeredAt: 0 });
-        if (n === 0) {
-          await new Promise((r) => setTimeout(r, 400));
-          overlays[n]!.answeredAt = Date.now();
-          await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ overlay: { id: 'ov-1', action: 'allow' } }) });
-        } else {
-          overlays[n]!.answeredAt = Date.now();
-          await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'forbidden' }) });
+      const overlayWrites: string[] = [];
+      page.on('request', (r) => {
+        if (new URL(r.url()).pathname.startsWith('/rc/permission-overlays') && r.method() !== 'GET') {
+          overlayWrites.push(r.method() + ' ' + (r.postData() ?? ''));
         }
       });
-      await serveDecision(page, [{ requestId: 'p158-a', decisionSource: 'policy', ruleId: 'ask-gh-cache' }]);
+      const votes = recordVotes(page);
+      await serveDecision(page, [{ requestId: 'p158', decisionSource: 'policy', ruleId: 'ask-gh-cache' }]);
       await page.setViewportSize({ width: 390, height: 844 });
       await watch(page, viewer.sessionId);
-      await waitPinned(page, 'p158-a');
+      await waitPinned(page, 'p158');
       await page.waitForFunction(`/Policy:/.test(document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-why').textContent)`, null, { timeout: 10_000 });
-      const why = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-why').textContent`)) as string;
-      expect(why === DESC + ' Policy: rule ask-gh-cache asks.', `the why line reads ${JSON.stringify(why)}`);
-      const label = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-always').textContent`)) as string;
+      const card = (await page.evaluate(String.raw`(() => {
+        const c = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+        return {
+          why: c.querySelector('.pc-why').textContent,
+          gateway: !!c.querySelector('.pc-always'),
+          buttons: Array.from(c.querySelectorAll('button')).map((b) => {
+            const cs = getComputedStyle(b);
+            return { cls: b.className, text: b.textContent.trim(), id: b.dataset.optionId || '', h: b.getBoundingClientRect().height, bg: cs.backgroundColor };
+          }),
+        };
+      })()`)) as { why: string; gateway: boolean; buttons: Array<{ cls: string; text: string; id: string; h: number; bg: string }> };
+      expect(card.why === DESC + ' Policy: rule ask-gh-cache asks.', `the why line reads ${JSON.stringify(card.why)}`);
+      // No control of the gateway's own: only the daemon's options, Deny and
+      // Allow once, and nothing that speaks of the whole conversation or a TTL.
+      const broad = card.buttons.filter((b) => /in this conversation|24 ?h|24 hours|on this gateway/i.test(b.text));
+      expect(!card.gateway && broad.length === 0, `the card carries a gateway-wide always-allow (${JSON.stringify(broad)})`);
+      const cls = card.buttons.map((b) => b.cls).sort();
       expect(
-        label === 'Always allow commands in this conversation for 24 hours, on this gateway',
-        `the button reads ${JSON.stringify(label)}`,
+        JSON.stringify(cls) === JSON.stringify(['pc-allow', 'pc-deny', 'pc-opt', 'pc-opt']),
+        `the card's buttons are ${JSON.stringify(card.buttons.map((b) => b.cls + ':' + b.text))}, not the daemon's two always options, Deny and Allow once`,
       );
-      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-always');
-      await waitVote(votes, 'p158-a', page);
-      expect(overlays.length === 1, `${overlays.length} overlay writes for one press`);
-      const sent = JSON.parse(overlays[0]!.body) as Record<string, unknown>;
-      const wantOverlay = { action: 'allow', ttlSeconds: 86400, sessionId: viewer.sessionId, tool: 'execute', reason: 'Always allow, from the permission card' };
-      expect(JSON.stringify(sent) === JSON.stringify(wantOverlay), `the overlay sent ${overlays[0]!.body}, not ${JSON.stringify(wantOverlay)}`);
-      const vote = votes.find((v) => v.requestId === 'p158-a')!;
-      expect(vote.at >= overlays[0]!.answeredAt, `the vote went out ${overlays[0]!.answeredAt - vote.at}ms before the overlay was answered`);
-      expect(vote.body === '{"outcome":"selected","optionId":"proceed_once"}', `Always allow voted ${vote.body}, not Allow once's body`);
-      // The vote has left; the card folds once its answer is back.
-      await page
-        .waitForFunction(`document.querySelector('#cards .pcard.retiring[data-request-id="p158-a"]') !== null`, null, { timeout: 10_000 })
-        .catch(() => {});
-      const done = (await page.evaluate(`(document.querySelector('#cards .pcard[data-request-id="p158-a"] .pc-note') || {}).textContent || ''`)) as string;
-      expect(/24h/.test(done), `the card folded to ${JSON.stringify(done)}, which does not say how long`);
-
-      // Refused: nothing is voted, the card says so and stays answerable.
-      await waitPinned(page, 'p158-b', NEXT_PIN_MS);
-      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-always');
-      await page.waitForFunction(`/Always allow was not set/.test(document.querySelector('#cards .pcard[data-request-id="p158-b"] .pc-note').textContent)`, null, { timeout: 10_000 });
+      // The daemon's always options, under the daemon's own words, as plain
+      // buttons: 44px, on the page ground rather than Allow's green.
+      const opts = card.buttons.filter((b) => b.cls === 'pc-opt');
+      expect(
+        opts[0]!.id === 'proceed_always_project' && opts[0]!.text === 'Always Allow in project: gh api' &&
+          opts[1]!.id === 'proceed_always_user' && opts[1]!.text === 'Always Allow for user: gh api',
+        `the daemon's always options read ${JSON.stringify(opts)}`,
+      );
+      const allow = card.buttons.find((b) => b.cls === 'pc-allow')!;
+      expect(opts.every((o) => o.h >= 44 && o.bg !== allow.bg), `the daemon's options are not plain 44px buttons (${JSON.stringify(opts)})`);
+      // Pressed, one sends its own option and nothing else is written.
+      await page.click('#cards .pcard:not([hidden]):not(.retiring) button[data-option-id="proceed_always_project"]');
+      await waitVote(votes, 'p158', page);
       await page.waitForTimeout(300);
-      expect(!votes.some((v) => v.requestId === 'p158-b'), 'a refused overlay still voted');
-      const live = (await page.evaluate(`!document.querySelector('#cards .pcard[data-request-id="p158-b"] .pc-allow').disabled`)) as boolean;
-      expect(live, 'after a refused overlay Allow once is disabled');
-      await page.click('#cards .pcard:not([hidden]):not(.retiring) .pc-deny');
-      await waitVote(votes, 'p158-b', page);
-
-      // A kind an overlay cannot name exactly ('other') gets no Always allow.
-      await waitPinned(page, 'p158-c', NEXT_PIN_MS);
-      const none = (await page.evaluate(`document.querySelector('#cards .pcard:not([hidden]):not(.retiring) .pc-always') === null`)) as boolean;
-      expect(none, 'a card of kind other offers Always allow');
-      return `why ${JSON.stringify(why)}; the overlay ${overlays[0]!.body} was answered ${vote.at - overlays[0]!.answeredAt}ms before the vote ${vote.body}; the card folded to ${JSON.stringify(done)}; a 403 voted nothing and left Allow once pressable; kind other offers no Always allow`;
+      const body = votes.find((v) => v.requestId === 'p158')!.body;
+      expect(body === '{"outcome":"selected","optionId":"proceed_always_project"}', `the daemon's always option sent ${body}`);
+      expect(overlayWrites.length === 0, `the card wrote an overlay: ${JSON.stringify(overlayWrites)}`);
+      return `why ${JSON.stringify(card.why)}; no gateway-wide control, buttons ${card.buttons.map((b) => JSON.stringify(b.text)).join(', ')}; the daemon's "${opts[0]!.text}" (${Math.round(opts[0]!.h)}px, plain) sent ${body} and no overlay was written`;
     },
   });
 
