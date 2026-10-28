@@ -54,6 +54,7 @@ import {
 } from './terminals.js';
 import { PushStore } from './pushStore.js';
 import { UiPrefsStore } from './uiPrefsStore.js';
+import { HostActions } from './hostActions.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
 import { ApnsJwtSigner } from './nativePush/apnsJwt.js';
 import { apnsHost } from './nativePush/apnsSender.js';
@@ -300,6 +301,12 @@ export interface ServeOptions {
    */
   llamaSwapUrl?: string;
   /**
+   * `--host-actions <path>`: the owner's host-actions file (#192). Defaults to
+   * `~/.qwen/rc/host-actions.json`. Read once at boot; a missing file leaves
+   * the routes unmounted, and so does an unusable one, with one log line.
+   */
+  hostActionsPath?: string;
+  /**
    * `--acme-domain` values: bind with native TLS using an auto-obtained (and
    * auto-renewed) Let's Encrypt cert via DNS-01. Requires {@link acmeEmail} and
    * {@link acmeDnsProvider}; DNS-provider creds come from env. See
@@ -471,6 +478,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // not. Keyed per token because the zone describes the device reading.
   const uiPrefs = await UiPrefsStore.open(
     join(homedir(), '.qwen', 'rc', 'ui-prefs.json'),
+  );
+  // Host actions (#192): programs on this host the page can probe and start,
+  // the Windows tray launcher first among them. Opened only when the file is
+  // there, so a host that never wrote one gets no routes and no row.
+  const hostActions = await HostActions.load(
+    opts.hostActionsPath ?? join(homedir(), '.qwen', 'rc', 'host-actions.json'),
+    // eslint-disable-next-line no-console
+    (line) => console.log(line),
   );
   // Host-terminal requests (issue #49): the gateway is the only writer; the
   // Windows-side launcher app reads it and keeps its own cursor. Requests carry
@@ -804,6 +819,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     vapid,
     pushStore,
     uiPrefs,
+    hostActions,
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
@@ -1898,6 +1914,7 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     attachDaemonUrl: flag('attach-daemon') ?? process.env.QWEN_RC_DAEMON_URL,
     attachDaemonToken: flag('daemon-token') ?? process.env.QWEN_RC_DAEMON_TOKEN,
     llamaSwapUrl: flag('llama-swap-url') ?? process.env.QWEN_RC_LLAMA_SWAP_URL,
+    hostActionsPath: flag('host-actions'),
     // Auto TLS (Let's Encrypt, DNS-01). Provider creds come from env.
     acmeDomains: acmeDomain
       ? acmeDomain
@@ -1917,7 +1934,7 @@ if (process.argv[2] === 'serve') {
   //        --loopback-bind <h> --port <n> --daemon-port <n> --no-mdns
   //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
-  //        --llama-swap-url <url> --acme-domain <d[,d]> --acme-email <e>
+  //        --llama-swap-url <url> --host-actions <path> --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
   try {

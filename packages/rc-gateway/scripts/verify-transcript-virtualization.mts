@@ -36,7 +36,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page } from 'playwright';
-import { bootViewer, harnessRuntimeRoot, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, harnessRuntimeRoot, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 
 const execFileAsync = promisify(execFile);
@@ -2467,6 +2467,12 @@ type PageScenario =
         turnIndexPage?: unknown;
         /** Status the stub answers the turn index read with. */
         turnIndexStatusCode?: number;
+        /**
+         * #192. Mount the harness's host-actions store: one action, the
+         * launcher, not running until one start has run. Left unset the
+         * routes answer 404, which is the case where the page draws no row.
+         */
+        hostActions?: boolean;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -18380,6 +18386,235 @@ PAGE_SCENARIOS.push({
       return `keys up over ${KEYBOARD_OPEN.width}x${KEYBOARD_OPEN.height}: field ${Math.round(up.field!.top)}-${Math.round(up.field!.bottom)}, Send ${Math.round(up.send!.top)}-${Math.round(up.send!.bottom)}, composer ends ${Math.round(up.composer!.bottom)}, transcript ${up.transcriptH}px, nothing over either; grown to ${Math.round(grown.field!.h)}px the field spans ${Math.round(grown.field!.top)}-${Math.round(grown.field!.bottom)} and Send ends ${Math.round(grown.send!.bottom)}; keys down, the composer back at ${Math.round(down.composer!.bottom)}`;
     },
   });
+
+  // ---- #192: host actions ------------------------------------------------
+  // The launcher is a program on the laptop, and when it is down a
+  // conversation started from the phone never gets its terminal tab. The
+  // harness's fake reads not running until one start has run, so each claim
+  // below is about what the page drew from the gateway's own answers.
+
+  PAGE_SCENARIOS.push({
+    name: 'P178 the sheet carries the host action under Folder on host: not running with a 36px Start, which shows starting, posts once, and reads running in muted ink',
+    // #192. Read as the sheet opens and not before (no poll), drawn as the
+    // row after the folder, and Start walks the whole round trip: busy while
+    // the gateway runs the start, one POST, then the row says running.
+    waitView: false,
+    stub: { hostActions: true },
+    run: async ({ page, viewer }) => {
+      const posts: string[] = [];
+      let reads = 0;
+      page.on('request', (r) => {
+        const path = new URL(r.url()).pathname;
+        if (r.method() === 'POST' && path.startsWith('/rc/host/actions/')) posts.push(path);
+        if (r.method() === 'GET' && path === '/rc/host/actions') reads += 1;
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.waitForTimeout(300);
+      expect(reads === 0, `the page read the host actions ${reads} times before anything opened`);
+
+      type Row = {
+        shown: boolean;
+        labels: string[];
+        state: string;
+        stateInk: string;
+        mutedInk: string;
+        btnShown: boolean;
+        btnText: string;
+        btnH: number;
+        busy: boolean;
+      };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const box = document.getElementById('h1-host-acts');
+          const st = box.querySelector('.ha-state');
+          const btn = box.querySelector('button');
+          const b = btn ? btn.getBoundingClientRect() : { height: 0 };
+          return {
+            shown: box.getClientRects().length > 0,
+            labels: Array.from(document.querySelectorAll('#session-footer .sh-lbl')).map((l) => l.textContent),
+            state: st ? st.textContent : '',
+            stateInk: st ? getComputedStyle(st).color : '',
+            mutedInk: getComputedStyle(document.querySelector('#session-footer .sh-lbl')).color,
+            btnShown: !!btn && btn.getClientRects().length > 0,
+            btnText: btn ? btn.textContent : '',
+            btnH: Math.round(b.height),
+            busy: !!btn && btn.disabled,
+          };
+        })()`) as Promise<Row>;
+
+      await page.click('#h1-status');
+      await page.waitForFunction(`(document.querySelector('#h1-host-acts .ha-state') || {}).textContent === 'not running'`);
+      const off = await read();
+      expect(reads === 1, `opening the sheet read the list ${reads} times, not once`);
+      const at = off.labels.indexOf('Folder on host');
+      expect(
+        off.shown && at >= 0 && off.labels[at + 1] === HOST_ACTION_LABEL,
+        `the host action is not the row under Folder on host (${JSON.stringify(off.labels)})`,
+      );
+      expect(
+        off.btnShown && off.btnText === 'Start' && off.btnH === 36 && !off.busy,
+        `not running shows ${JSON.stringify({ text: off.btnText, h: off.btnH, busy: off.busy })}, not a 36px Start`,
+      );
+      expect(off.stateInk !== off.mutedInk, `"not running" is drawn muted (${off.stateInk}), the same as a label`);
+
+      await page.click('#h1-host-acts button');
+      const busy = await read();
+      expect(
+        busy.busy && busy.btnText === 'starting…',
+        `pressing Start shows ${JSON.stringify(busy.btnText)} (disabled ${busy.busy}), not starting…`,
+      );
+      await page.waitForFunction(`(document.querySelector('#h1-host-acts .ha-state') || {}).textContent === 'running'`);
+      const on = await read();
+      expect(
+        posts.length === 1 && posts[0] === '/rc/host/actions/launcher/start',
+        `Start posted ${JSON.stringify(posts)}, not one start for the launcher`,
+      );
+      expect(!on.btnShown, 'Start is still offered for a program that is running');
+      expect(on.stateInk === on.mutedInk, `"running" is ${on.stateInk}, not the muted ${on.mutedInk}`);
+      // The page re-reads after the start, so what stays drawn is the list's
+      // word and not only the POST's.
+      await page.waitForTimeout(300);
+      expect(reads === 2, `the list was read ${reads} times, not once on open and once after the start`);
+      return `read once as the sheet opened; ${HOST_ACTION_LABEL} under Folder on host, not running with a ${off.btnH}px Start; starting… while it ran, one POST, then running in the label ink and re-read once`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P179 More > Host carries the host action as a 48px row whose value says not running and which starts it, then reads running and does nothing more',
+    // #192. The same action from More: the row is the Start while the program
+    // is down, and a statement once it is up, so a second press sends nothing.
+    waitView: false,
+    stub: { hostActions: true },
+    run: async ({ page }) => {
+      const posts: string[] = [];
+      page.on('request', (r) => {
+        const path = new URL(r.url()).pathname;
+        if (r.method() === 'POST' && path.startsWith('/rc/host/actions/')) posts.push(path);
+      });
+      await page.waitForSelector('#h1-more', { state: 'visible' });
+      await page.click('#h1-more');
+      const sel = '#more-screen .row[data-host-act="launcher"]';
+      await page.waitForFunction(`(document.querySelector('${sel} .val') || {}).textContent === 'not running'`);
+      type More = { group: string; last: boolean; label: string; value: string; h: number; valSize: string; disabled: string | null; valRight: number; refRight: number };
+      const read = () =>
+        page.evaluate(String.raw`(() => {
+          const row = document.querySelector('${sel}');
+          const grp = row.closest('.mgrp');
+          const ref = grp.querySelector('.row[data-panel] .val');
+          const val = row.querySelector('.val');
+          return {
+            group: grp.querySelector('.grp').firstChild.textContent,
+            last: grp.lastElementChild === row,
+            label: row.querySelector('.lbl').textContent,
+            value: val.textContent,
+            h: Math.round(row.getBoundingClientRect().height),
+            valSize: getComputedStyle(val).fontSize,
+            disabled: row.getAttribute('aria-disabled'),
+            valRight: Math.round(row.getBoundingClientRect().right - val.getBoundingClientRect().right),
+            refRight: Math.round(ref.closest('.row').getBoundingClientRect().right - ref.getBoundingClientRect().right),
+          };
+        })()`) as Promise<More>;
+      const off = await read();
+      expect(off.group === 'Host' && off.last, `the row is in ${JSON.stringify(off.group)} (last ${off.last}), not at the foot of Host`);
+      expect(
+        off.label === HOST_ACTION_LABEL && off.h === 48 && off.valSize === '13px' && off.disabled === 'false',
+        `the row reads ${JSON.stringify(off)}, not a 48px pressable row with a 13px value`,
+      );
+      expect(off.valRight === off.refRight, `the value sits ${off.valRight}px from the edge, the other rows' ${off.refRight}px`);
+
+      await page.click(sel);
+      expect((await read()).value === 'starting…', 'pressing the row did not show starting…');
+      await page.waitForFunction(`document.querySelector('${sel} .val').textContent === 'running'`);
+      const on = await read();
+      expect(posts.length === 1, `the row posted ${posts.length} starts, not one`);
+      expect(on.disabled === 'true', `a running program's row is still offered as a Start (aria-disabled ${on.disabled})`);
+      // Forced: Playwright will not press an aria-disabled control, and a
+      // thumb will, which is the press this checks sends nothing.
+      await page.click(sel, { force: true });
+      await page.waitForTimeout(300);
+      expect(posts.length === 1, `pressing the row of a running program posted again (${posts.length})`);
+      expect(await page.isVisible('#more-screen'), 'pressing the row left More');
+      return `the last row of Host, ${off.h}px, ${HOST_ACTION_LABEL} · not running; pressed, starting… then running after one POST; a press on it then sends nothing`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P180 with no host-actions file the sheet and More draw no host action row, after one 404 each',
+    // #192. A gateway with no file answers 404, and the page offers nothing
+    // rather than a row that can only fail.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const answers: number[] = [];
+      page.on('response', (r) => {
+        if (new URL(r.url()).pathname === '/rc/host/actions') answers.push(r.status());
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.click('#h1-status');
+      await page.waitForFunction(`document.getElementById('h1-sheet').getClientRects().length > 0`);
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-screen', { state: 'visible' });
+      await page.waitForTimeout(500);
+      const r = (await page.evaluate(String.raw`(() => ({
+        sheetBox: document.getElementById('h1-host-acts') ? document.getElementById('h1-host-acts').getClientRects().length : -1,
+        sheetRows: document.querySelectorAll('#h1-host-acts .sh-row').length,
+        moreRows: document.querySelectorAll('#more-screen [data-host-act]').length,
+        host: Array.from(document.getElementById('more-g-host').parentElement.querySelectorAll('.row')).map((x) => x.dataset.panel || x.dataset.hostAct),
+      }))()`)) as { sheetBox: number; sheetRows: number; moreRows: number; host: string[] };
+      expect(answers.length === 2 && answers.every((s) => s === 404), `the reads were answered ${JSON.stringify(answers)}, not one 404 for the sheet and one for More`);
+      expect(r.sheetBox === 0 && r.sheetRows === 0, `the sheet draws a host action box (${r.sheetBox} boxes, ${r.sheetRows} rows) on a gateway that has none`);
+      expect(r.moreRows === 0, `More draws ${r.moreRows} host action rows on a gateway that has none`);
+      expect(
+        JSON.stringify(r.host) === JSON.stringify(['daemons', 'sessions', 'runs', 'bridges', 'diag']),
+        `Host holds ${JSON.stringify(r.host)}, not its five panel rows`,
+      );
+      return `GET /rc/host/actions answered ${answers.join(', ')}; no row in the sheet or under Host, which keeps its five`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P181 a start the gateway refuses puts the row back to not running and says so in a toast with the code and exit status',
+    // #192. The harness's fake never fails, so the refusal is the gateway's
+    // own 502 shape served in its place: the reader is told what came back,
+    // and the row offers Start again rather than sticking at starting.
+    waitView: false,
+    stub: { hostActions: true },
+    before: async (page) => {
+      await page.route('**/rc/host/actions/launcher/start', (route) =>
+        route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'The start command exited 1', code: 'host_action_failed', exitCode: 1 }),
+        }),
+      );
+    },
+    run: async ({ page }) => {
+      await page.waitForSelector('#h1-more', { state: 'visible' });
+      await page.click('#h1-more');
+      const sel = '#more-screen .row[data-host-act="launcher"]';
+      await page.waitForFunction(`(document.querySelector('${sel} .val') || {}).textContent === 'not running'`);
+      await page.click(sel);
+      await page.waitForFunction(`/did not start/.test(document.getElementById('status').textContent)`);
+      const r = (await page.evaluate(String.raw`(() => {
+        const st = document.getElementById('status');
+        return {
+          toast: st.textContent,
+          shown: st.classList.contains('fresh') && st.getClientRects().length > 0,
+          value: document.querySelector('${sel} .val').textContent,
+          disabled: document.querySelector('${sel}').getAttribute('aria-disabled'),
+        };
+      })()`)) as { toast: string; shown: boolean; value: string; disabled: string };
+      expect(
+        r.toast === `${HOST_ACTION_LABEL} did not start: host_action_failed (exit 1)` && r.shown,
+        `the refusal toast reads ${JSON.stringify(r.toast)} (shown ${r.shown})`,
+      );
+      expect(r.value === 'not running' && r.disabled === 'false', `after the refusal the row reads ${JSON.stringify(r.value)} (aria-disabled ${r.disabled}), not a Start again`);
+      return `toast: ${r.toast}; the row back to not running and pressable`;
+    },
+  });
 }
 
 /** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
@@ -18510,6 +18745,7 @@ async function runPageScenario(
     artifactContentStatus: s.stub?.artifactContentStatus,
     turnIndexPage: s.stub?.turnIndexPage,
     turnIndexStatusCode: s.stub?.turnIndexStatusCode,
+    hostActions: s.stub?.hostActions,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];

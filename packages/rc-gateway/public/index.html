@@ -861,6 +861,12 @@
         flex: none;
         color: var(--g1-ink-mid);
       }
+      /* #192. A host action's row starts it rather than opening a screen, so
+         it draws no chevron; the empty box holds the chevron's place so its
+         value lines up with the rows above it. */
+      #more-screen .row span.chev {
+        width: 16px;
+      }
       /* A panel screen: the sentence that says what it is for, then its
          cards, on the page ground with a 12px gutter. */
       #panel-body {
@@ -1114,6 +1120,33 @@
         width: 20px;
         height: 20px;
         accent-color: var(--g1-link);
+      }
+      /* #192. A host action under the folder: its label, then "running"
+         muted, or "not running" with a 36px Start beside it. */
+      #h1-host-acts {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      #h1-host-acts[hidden] {
+        display: none;
+      }
+      #h1-host-acts .ha-go {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-left: auto;
+      }
+      #h1-host-acts .ha-state[data-running='true'] {
+        color: var(--g1-ink-mid);
+      }
+      #h1-host-acts button {
+        min-height: 36px;
+        padding: 0 14px;
+        border-radius: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
       }
       #wt-reset {
         align-self: flex-start;
@@ -4811,6 +4844,7 @@
         if (paneLayout()) setSheetOpen(false);
         else setListOpen(false);
         renderMoreValues();
+        void readHostActions(); // #192: the Host rows, read as More opens
         if (quiet) return;
         const first = scr.querySelector('.row');
         if (first) first.focus({ preventScroll: true });
@@ -6114,6 +6148,172 @@
         return '';
       }
 
+      // #192. Host actions: programs on the gateway's host that the owner
+      // listed in ~/.qwen/rc/host-actions.json, the Windows tray launcher
+      // first among them. When the launcher is down, a conversation started
+      // here never gets its terminal tab and nothing else on the page says
+      // why, so each action is a row saying whether it is running, with a way
+      // to start it: under Folder on host in the sheet, and under More > Host.
+      //
+      // The list is read as the sheet or More opens, never on a timer: every
+      // read runs each action's status program on the host. A 404 (no file on
+      // this gateway) or a 403 (a token that may not run them) draws nothing.
+      const hostActs = {
+        list: null, // [{ name, label, running }] from the last read, or null
+        busy: new Set(), // names whose Start is in flight
+        seq: 0, // a read that a later one overtook is dropped
+        els: new Map(), // name -> its nodes in the sheet and in More
+      };
+      // One node for the life of the page: renderFooter rebuilds the sheet's
+      // rows on every change, and re-appends this rather than redrawing it,
+      // so a Start in flight keeps its "starting…" across those redraws.
+      const hostActsSheet = document.createElement('div');
+      hostActsSheet.id = 'h1-host-acts';
+      hostActsSheet.hidden = true;
+      hostActsSheet.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-host-act]');
+        if (b) void startHostAction(b.dataset.hostAct);
+      });
+      async function readHostActions() {
+        if (!token()) return;
+        const seq = ++hostActs.seq;
+        let res;
+        try {
+          res = await fetch('/rc/host/actions', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+        } catch {
+          return; // a blip keeps what is drawn
+        }
+        if (seq !== hostActs.seq) return;
+        if (res.status === 404 || res.status === 403 || res.status === 401) {
+          hostActs.list = null;
+          renderHostActions();
+          return;
+        }
+        if (!res.ok) return;
+        const body = await res.json().catch(() => null);
+        if (seq !== hostActs.seq) return;
+        if (!body || !Array.isArray(body.actions)) return;
+        hostActs.list = body.actions.filter(
+          (a) =>
+            a &&
+            typeof a.name === 'string' &&
+            typeof a.label === 'string' &&
+            typeof a.running === 'boolean',
+        );
+        renderHostActions();
+      }
+      // Start shows "starting…" for as long as the gateway takes (its start
+      // program, then a probe), takes the answer's state at once, then reads
+      // the list again. A refusal, or a start that left the program down, is
+      // said in a toast with the code the gateway gave.
+      async function startHostAction(name) {
+        const a = (hostActs.list || []).find((x) => x.name === name);
+        if (!a || a.running || hostActs.busy.has(name)) return;
+        hostActs.busy.add(name);
+        renderHostActions();
+        let failed = '';
+        try {
+          const res = await fetch(
+            '/rc/host/actions/' + encodeURIComponent(name) + '/start',
+            {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + token() },
+            },
+          );
+          const body = await res.json().catch(() => null);
+          if (!res.ok) {
+            failed =
+              body && typeof body.code === 'string'
+                ? body.code
+                : 'http ' + res.status;
+            if (body && typeof body.exitCode === 'number') {
+              failed += ' (exit ' + body.exitCode + ')';
+            }
+          } else if (body && typeof body.running === 'boolean') {
+            a.running = body.running;
+            if (!a.running) failed = 'still not running';
+          }
+        } catch {
+          failed = 'gateway unreachable';
+        }
+        hostActs.busy.delete(name);
+        renderHostActions();
+        if (failed) setStatus(a.label + ' did not start: ' + failed);
+        await readHostActions();
+      }
+      function hostActNodes(name) {
+        const sheet = document.createElement('div');
+        sheet.className = 'sh-row';
+        const lbl = document.createElement('span');
+        lbl.className = 'sh-lbl';
+        const go = document.createElement('span');
+        go.className = 'ha-go';
+        const state = document.createElement('span');
+        state.className = 'ha-state';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.hostAct = name;
+        go.append(state, btn);
+        sheet.append(lbl, go);
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'row';
+        more.dataset.hostAct = name;
+        const mLbl = document.createElement('span');
+        mLbl.className = 'lbl';
+        const mVal = document.createElement('span');
+        mVal.className = 'val';
+        const spacer = document.createElement('span');
+        spacer.className = 'chev';
+        spacer.setAttribute('aria-hidden', 'true');
+        more.append(mLbl, mVal, spacer);
+        more.addEventListener('click', () => void startHostAction(name));
+        return { sheet, lbl, state, btn, more, mLbl, mVal };
+      }
+      function renderHostActions() {
+        const list = hostActs.list || [];
+        const hostGroup = $('more-g-host').parentElement;
+        const seen = new Set();
+        for (const a of list) {
+          seen.add(a.name);
+          let el = hostActs.els.get(a.name);
+          if (!el) {
+            el = hostActNodes(a.name);
+            hostActs.els.set(a.name, el);
+            hostActsSheet.append(el.sheet);
+            hostGroup.append(el.more);
+          }
+          const busy = hostActs.busy.has(a.name);
+          const state = a.running ? 'running' : 'not running';
+          h1Text(el.lbl, a.label);
+          h1Text(el.state, state);
+          el.state.dataset.running = String(a.running);
+          el.btn.hidden = a.running;
+          el.btn.disabled = busy;
+          h1Text(el.btn, busy ? 'starting…' : 'Start');
+          el.btn.setAttribute('aria-label', 'Start ' + a.label);
+          h1Text(el.mLbl, a.label);
+          h1Text(el.mVal, busy ? 'starting…' : state);
+          // Not running, the row is the Start; running or starting, it is a
+          // statement, and says so rather than looking pressable to no end.
+          const can = !a.running && !busy;
+          el.more.setAttribute('aria-disabled', String(!can));
+          el.more.setAttribute(
+            'aria-label',
+            a.label + ', ' + (busy ? 'starting' : state) + (can ? ', start it' : ''),
+          );
+        }
+        for (const [name, el] of hostActs.els) {
+          if (seen.has(name)) continue;
+          el.sheet.remove();
+          el.more.remove();
+          hostActs.els.delete(name);
+        }
+        hostActsSheet.hidden = list.length === 0;
+      }
+
       // #184. The inspector sheet's rows, in #session-footer, the drawer
       // band's old box: the model (a button opening the picker when there is
       // more than one), the approval mode as a segmented control, the context
@@ -6290,6 +6490,8 @@
           c.textContent = ctxInfo.cwd;
           f.append(row('Folder on host', c));
         }
+        // #192: the host actions under the folder, the same node each time.
+        f.append(hostActsSheet);
         if (keep) f.append(keep);
         f.style.display = '';
       }
@@ -6383,6 +6585,7 @@
         if (!open) return;
         closeH1Menu(false);
         if (paneLayout()) setMoreOpen(false);
+        void readHostActions(); // #192: read as it opens, not on a timer
       }
       $('h1-status').addEventListener('click', () =>
         setSheetOpen($('h1-sheet').hidden),
