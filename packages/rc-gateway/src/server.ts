@@ -226,6 +226,8 @@ import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createUiPrefsRouter } from './routes/uiPrefs.js';
 import type { UiPrefsStore } from './uiPrefsStore.js';
+import { createHostActionRoutes } from './routes/hostActions.js';
+import type { HostActions } from './hostActions.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute, type RankedSearch } from './routes/search.js';
 import { versionCheckMiddleware } from './middleware/versionCheck.js';
@@ -281,6 +283,13 @@ export interface GatewayDeps {
    * record being read.
    */
   uiPrefs?: UiPrefsStore;
+  /**
+   * Owner-configured host actions (#192): programs on this host the page can
+   * probe and start, such as the Windows tray launcher. The routes mount only
+   * when this is set; the store carries its own runner, so a test or the page
+   * harness hands in one built over a fake.
+   */
+  hostActions?: HostActions;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
   /** Compiled routing matcher; notifier drop-gating wires only when set. */
@@ -1868,6 +1877,27 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/llama-swap',
       requireScope(OWNER, audit),
       createLlamaSwapRoute(deps.llamaSwapProbe),
+    );
+  }
+
+  // GET /rc/host/actions and POST /rc/host/actions/:name/start (#192):
+  // gateway-global, OWNER-scoped, no session lock and no daemon call, like
+  // the /rc/gpu and /rc/llama-swap mounts above. Absent store (no
+  // host-actions.json, or one that did not load) -> not mounted at all, so
+  // the page reads a 404 and draws no row.
+  if (deps.hostActions) {
+    const hostActionRoutes = createHostActionRoutes(deps.hostActions, {
+      audit,
+    });
+    app.get(
+      '/rc/host/actions',
+      requireScope(OWNER, audit),
+      hostActionRoutes.list,
+    );
+    app.post(
+      '/rc/host/actions/:name/start',
+      requireScope(OWNER, audit),
+      hostActionRoutes.start,
     );
   }
 

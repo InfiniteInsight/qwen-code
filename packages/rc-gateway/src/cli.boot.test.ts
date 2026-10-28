@@ -48,6 +48,16 @@ describe('parseServeFlags', () => {
     expect(opts.noMdns).toBe(true);
   });
 
+  it('reads --host-actions in both forms, and leaves it unset so the default path stands', () => {
+    expect(parseServeFlags(['--host-actions', '/x/a.json'])).toMatchObject({
+      hostActionsPath: '/x/a.json',
+    });
+    expect(parseServeFlags(['--host-actions=/x/b.json'])).toMatchObject({
+      hostActionsPath: '/x/b.json',
+    });
+    expect(parseServeFlags([]).hostActionsPath).toBeUndefined();
+  });
+
   it('keeps 0 legal, because that is the pick a free port request', () => {
     expect(parseServeFlags(['--port', '0'])).toMatchObject({ gatewayPort: 0 });
   });
