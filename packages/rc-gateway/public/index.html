@@ -21,6 +21,11 @@
     <meta name="apple-mobile-web-app-title" content="qwen-rc" />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <!-- #184. iOS ignores an SVG icon for the home screen and draws a
+         screenshot of the page instead, so it gets icon.svg rendered at the
+         180px it asks for, full-bleed on the icon's own ground (iOS rounds
+         the corners itself). -->
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <title>qwen-rc viewer</title>
     <style>
       /* The g1 shell (#117): a dark, full-bleed application frame instead of the
@@ -158,14 +163,6 @@
       :where(#app-body) a {
         color: var(--g1-link);
       }
-      /* The status line, on the page ground in the sheet's status ink (its
-         .status rule). It was #444, written for the white pane. */
-      #status {
-        min-height: 1.2em;
-        color: var(--g1-ink-mid);
-        background: var(--g1-page);
-        margin-bottom: 0.5rem;
-      }
       /* Permission and question cards keep the amber edge that says "this
          needs you", on the band ground. The light yellow fill they had was
          the last light card on the page, and light ink inherited from the
@@ -300,95 +297,6 @@
         font-size: 0.85rem;
         overflow-wrap: anywhere;
       }
-      .tab-bar {
-        display: flex;
-        align-items: center;
-        gap: 0;
-        border-bottom: 2px solid #21262d;
-        background: #161b22;
-        color: #7d8590;
-        margin-bottom: 1rem;
-        flex-wrap: wrap;
-      }
-      .tab-bar .tab {
-        padding: 0.5rem 1rem;
-        cursor: pointer;
-        border: none;
-        border-bottom: 2px solid transparent;
-        background: none;
-        font-size: 0.9rem;
-        margin-bottom: -2px;
-        user-select: none;
-      }
-      .tab-bar .tab.active {
-        border-bottom-color: #07f;
-        font-weight: 600;
-      }
-      .tab-bar .pin-cb {
-        margin-left: 4px;
-        vertical-align: middle;
-      }
-      .tab-bar .status-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        display: inline-block;
-        margin: 0 8px;
-        background: #888;
-      }
-      /* g1 "Top bar", gap 10 option B: the bar names the search affordance, so
-         it is findable without pressing a key you already know. The sheet's
-         `.bar .keys`; the live bar is `.tab-bar` and the tabs are its direct
-         children, so margin-left auto is what pushes this to the right end of a
-         row that otherwise packs left. A button, not the sheet's bare span: a
-         phone has no ⌘K to press, so a label there would name a way in nobody
-         can take. Below 860px it is a magnifier instead (#176, below). */
-      .tab-bar .keys {
-        margin-left: auto;
-        padding: 0.5rem 1rem;
-        border: none;
-        background: none;
-        color: #6e7681;
-        font: inherit;
-        font-size: 0.85rem;
-        cursor: pointer;
-      }
-      .tab-bar .keys .kg {
-        display: none;
-      }
-      /* #176. Below the break the bar has to be one row at 390. The old rule
-         kept ⌘K and dropped the word, which names a key a phone does not
-         have, and in the capture it read as a stray label alone on a second
-         row. A magnifier replaces both: the word "search" fits the sheet's
-         13px monospace bar but not this one, where the four tab words alone
-         measure 258px at 390, and the button's aria-label carries the phrase.
-         The pins go too: they are 13px targets, pinning a pane into a 390
-         Chat column is a desktop move, and the sheet already hides them at
-         this width. With those gone the tabs' side padding is what is left
-         to give; the vertical padding is untouched, so the active tab's
-         underline still meets the bar's border. */
-      @media (max-width: 860px) {
-        .tab-bar .keys .kk,
-        .tab-bar .keys .kl,
-        .tab-bar .pin-cb {
-          display: none;
-        }
-        .tab-bar .keys .kg {
-          display: inline;
-        }
-        .tab-bar .tab,
-        .tab-bar .keys {
-          padding-left: 0.5rem;
-          padding-right: 0.5rem;
-        }
-        /* #177. The page title is a row of its own above the bar, about 49px
-           of a phone's height for a name the browser tab already shows. The
-           sheet drops it at this same break (its .bar h1). The bar itself is
-           untouched, so it stays the one row #176 made it. */
-        #app-body > h1 {
-          display: none;
-        }
-      }
       /* #177. A <dialog> takes the browser's Canvas colours, white on a light
          scheme, so the model picker opened as a white sheet over the dark page.
          Its rows are buttons that clear their own ground and border, so they
@@ -403,23 +311,8 @@
       .tab-pane.active {
         display: block;
       }
-      /* #177. A pinned pane and every Operations, Settings and Diagnostics
-         card is a band in g1's sense: the band ground under the line rule, the
-         same pair the sheet gives the rail, the drawer and the composer. Only
-         colours change here; padding, radius and margins are what they were, so
-         nothing moves. */
-      .pin-area > details {
-        background: var(--g1-band);
-        border: 1px solid var(--g1-line);
-        border-radius: 6px;
-        margin-bottom: 0.5rem;
-        padding: 0.5rem;
-      }
-      .pin-area > details > summary {
-        cursor: pointer;
-        font-weight: 600;
-        font-size: 0.9rem;
-      }
+      /* #177. Every Operations, Settings and Diagnostics card is a band in
+         g1's sense: the band ground under the line rule. */
       details.ops-collapse {
         background: var(--g1-band);
         border: 1px solid var(--g1-line);
@@ -454,13 +347,6 @@
         font-size: 0.85rem;
         line-height: 1.45;
       }
-      .tab-bar.sticky {
-        position: sticky;
-        /* #182: below the status bar the installed app draws under. */
-        top: env(safe-area-inset-top, 0px);
-        z-index: 100;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
-      }
       /* The shell grid: the bar sits over a row of the rail and the middle
          column, and the column stacks the status strip, the panes and the
          inspector. The three named containers are empty until their region task
@@ -469,7 +355,8 @@
       #app-body {
         display: flex;
         flex-direction: column;
-        flex: 1 1 auto;
+        flex: 1 1 0;
+        min-height: 0;
       }
       /* The author display above would beat the UA rule for [hidden], so the app
          would show before pairing. This is the same guard the sheet carries for
@@ -477,13 +364,11 @@
       #app-body[hidden] {
         display: none;
       }
-      #app-body > .tab-bar {
-        flex: none;
-      }
       .shell-body {
         display: flex;
-        align-items: flex-start;
-        flex: 1 1 auto;
+        align-items: stretch;
+        flex: 1 1 0;
+        min-height: 0;
       }
       /* #119. The rail is the folder's conversation list. The scroller moved off
          #rail and onto its own .list, because the header and the folder line have
@@ -491,13 +376,11 @@
          scrolls them away with it.
          Every rule below is scoped under #rail on purpose: the sheet's names are
          short (.s, .list, .plus) and the ops panel already uses rows of its own. */
+      /* #184: a column of the frame, as tall as the frame is, so it needs no
+         sticky offset of its own any more; its list scrolls inside it. */
       #rail {
         flex: 0 0 190px;
         align-self: stretch;
-        position: sticky;
-        /* #182: below the status bar the installed app draws under. */
-        top: env(safe-area-inset-top, 0px);
-        max-height: 100vh;
         display: flex;
         flex-direction: column;
         min-height: 0;
@@ -515,6 +398,7 @@
       #rail .rh {
         display: flex;
         align-items: center;
+        background: var(--g1-band);
         padding: 6px 10px;
         font-size: 10px;
         letter-spacing: 0.1em;
@@ -765,15 +649,16 @@
       #rail.collapsed .more {
         display: none;
       }
+      /* #184: the column has no gutter of its own now. The Chat screen's
+         bands run edge to edge as drawn and keep their own insets, and the
+         other panes take the gutter on their scroller (.tab-pane.active). */
       .mid {
+        position: relative;
         display: flex;
         flex-direction: column;
-        flex: 1 1 auto;
+        flex: 1 1 0;
         min-width: 0;
-        /* The gutter the page had as body { padding: 0 1rem }. It moved here
-           because the shell is full-bleed, and content flush to the window edge
-           reads as a layout failure rather than as a wide column. */
-        padding: 0 1rem;
+        min-height: 0;
       }
       #rail:empty {
         display: none;
@@ -797,109 +682,680 @@
         background: transparent;
         color: var(--g1-ink);
       }
-      /* #177. The composer and the inspector drawer are bands: the band ground
-         under the line rule. The composer is a <section>, so its border and
-         radius come from that rule and only the ground is named here. */
-      #composer {
+      /* #184 (h1). The Chat screen is a frame the height of the screen: the
+         bar, the status line, the sheet, the to-do strip, the tools and the
+         composer each take what they draw, and the transcript takes the rest
+         (its rule is with the transcript's own styles). The other panes scroll
+         inside the frame rather than with the document, which is what lets
+         the document stop scrolling at all. While the keyboard is up the
+         frame is the height it leaves (--app-h, #182). */
+      body:has(> #app-body:not([hidden])) {
+        height: 100vh;
+        min-height: 0;
+        overflow: hidden;
+      }
+      @supports (height: 100dvh) {
+        body:has(> #app-body:not([hidden])) {
+          height: 100dvh;
+        }
+      }
+      :root.kb-open body:has(> #app-body:not([hidden])) {
+        height: var(--app-h, 100dvh);
+      }
+      .tab-pane.active {
+        flex: 1 1 0;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 1rem;
+      }
+      #pane-chat.tab-pane.active {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 0;
+      }
+      /* The bar: ≡ and ⋯ at 44px either side of the title, on the band. */
+      #h1-bar {
+        flex: none;
+        height: 56px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px;
         background: var(--g1-band);
-        /* #182. The section's own 1rem, plus whatever the home indicator
-           takes. env() is 0 on a desktop and in a browser tab with a toolbar
-           under the page, so this only grows on a phone that draws the page to
-           its bottom edge (viewport-fit=cover, or the installed app). */
-        padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+        border-bottom: 1px solid var(--g1-line);
       }
-      /* #182. While the on-screen keyboard is up, the shell is the height the
-         keyboard leaves (the visual viewport) rather than the layout viewport
-         it covers, so nothing lays the composer out underneath it. Set and
-         cleared by syncKeyboardViewport. */
-      :root.kb-open body {
-        min-height: var(--app-h, 100vh);
+      #h1-bar > button {
+        height: 44px;
+        padding: 0;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--g1-ink-hi);
       }
-      /* The sheet's prompt draws no ring of its own (its textarea sets outline
-         none, as this one does below), so the field it sits in takes the ring
-         colour while it holds focus. Without this a keyboard user tabbing into
-         the prompt sees nothing change. */
+      #h1-bar > button:hover,
+      #h1-bar > button[aria-expanded='true'] {
+        background: var(--g1-raise);
+      }
+      #h1-more,
+      #h1-actions {
+        width: 44px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #h1-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      #h1-title > svg {
+        flex: none;
+      }
+      #h1-title-text {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* The ⋯ menu, under the button at the bar's right edge. */
+      #h1-menu {
+        position: fixed;
+        top: calc(58px + env(safe-area-inset-top, 0px));
+        right: 8px;
+        z-index: 80;
+        width: 240px;
+        max-width: calc(100vw - 16px);
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        padding: 6px;
+        background: var(--g1-raise);
+        border: 1px solid var(--g1-edge);
+        border-radius: 12px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+      }
+      #h1-menu[hidden],
+      #h1-menu > [hidden],
+      #h1-menu > .h1-off {
+        display: none;
+      }
+      #h1-menu [role='menuitem'] {
+        min-height: 44px;
+        padding: 0 14px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        text-align: left;
+      }
+      #h1-menu [role='menuitem']:hover,
+      #h1-menu [role='menuitem']:focus {
+        background: var(--g1-on);
+      }
+      #h1-menu [role='menuitem'].danger {
+        color: #ff7b72;
+      }
+      /* A screen over the chat: More now, and the shape slice 4's sheet and
+         its panels take. Its own scroller, its own way back. */
+      #more-screen {
+        position: fixed;
+        top: env(safe-area-inset-top, 0px);
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 70;
+        display: flex;
+        flex-direction: column;
+        background: var(--g1-page);
+      }
+      #more-screen[hidden] {
+        display: none;
+      }
+      .scr-head,
+      #pane-head {
+        flex: none;
+        height: 56px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px;
+        background: var(--g1-band);
+        border-bottom: 1px solid var(--g1-line);
+        color: var(--g1-ink-hi);
+        font-size: 16px;
+      }
+      #pane-head[hidden] {
+        display: none;
+      }
+      .scr-head > button,
+      #pane-head > button {
+        width: 44px;
+        height: 44px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: inherit;
+      }
+      .scr-body {
+        flex: 1 1 0;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 8px 0 24px;
+      }
+      #more-screen .grp {
+        padding: 16px 16px 6px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      #more-screen .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 48px;
+        padding: 6px 16px;
+        border: 0;
+        border-bottom: 1px solid var(--g1-line);
+        border-radius: 0;
+        background: var(--g1-band);
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        text-align: left;
+      }
+      #more-screen .row .chev {
+        color: var(--g1-ink-mid);
+        font-size: 20px;
+      }
+      #more-screen select {
+        min-height: 40px;
+        max-width: 55%;
+        font-size: 15px;
+      }
+      #more-screen input[type='checkbox'] {
+        width: 20px;
+        height: 20px;
+        vertical-align: middle;
+        accent-color: var(--g1-link);
+      }
+      #more-screen .idle .st {
+        flex-basis: 100%;
+        color: var(--g1-ink-mid);
+        font-size: 12px;
+      }
+      #more-screen .idle .st:empty {
+        display: none;
+      }
+      /* The status line: what the conversation is doing, in one row. */
+      #h1-statusline {
+        flex: none;
+        display: flex;
+        align-items: stretch;
+        background: var(--g1-page);
+        border-bottom: 1px solid var(--g1-line);
+      }
+      #h1-status {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 16px;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        text-align: left;
+      }
+      #h1-status .dot {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--g1-ink-dim);
+      }
+      #h1-status[data-state='idle'] .dot {
+        background: #3fb950;
+      }
+      #h1-status[data-state='run'] .dot {
+        background: var(--g1-link);
+      }
+      #h1-status[data-state='wait'] .dot {
+        background: var(--g1-warn);
+      }
+      #h1-status[data-state='off'] .dot {
+        background: #f85149;
+      }
+      #h1-state {
+        flex: none;
+        color: var(--g1-ink-hi);
+        white-space: nowrap;
+      }
+      #h1-status .f {
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #h1-status .f:empty {
+        display: none;
+      }
+      #h1-status .f::before {
+        content: '\00b7';
+        margin-right: 8px;
+      }
+      #h1-tokens,
+      #h1-mode {
+        flex: none;
+      }
+      #h1-status .sp {
+        flex: 1 1 0;
+      }
+      #h1-status > svg {
+        flex: none;
+      }
+      #h1-status[aria-expanded='true'] > svg {
+        transform: rotate(180deg);
+      }
+      #reconnect {
+        flex: none;
+        width: 44px;
+        border: 0;
+        border-left: 1px solid var(--g1-line);
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-warn);
+        font-size: 18px;
+      }
+      /* The inspector sheet, in place under the status line. Bounded, so it
+         can never push the composer off the screen however much it holds, and
+         the one band that gives way when the frame runs out (the keyboard up
+         with the sheet and the tools open): it shrinks and scrolls inside
+         itself before the composer would leave the screen. */
+      #h1-sheet {
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: 55%;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 12px 16px;
+        background: var(--g1-band);
+        border-bottom: 1px solid var(--g1-line);
+        color: var(--g1-ink-hi);
+        font-size: 13px;
+      }
+      #h1-sheet[hidden] {
+        display: none;
+      }
+      #h1-sheet-empty {
+        color: var(--g1-ink-mid);
+      }
+      #h1-sheet-empty[hidden] {
+        display: none;
+      }
+      #session-footer {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      #session-footer .sh-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        min-height: 36px;
+      }
+      #session-footer .sh-col {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #session-footer .sh-lbl {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #footer-model-name {
+        min-height: 36px;
+        max-width: 70%;
+        padding: 0 12px;
+        border-radius: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #session-footer .seg {
+        display: flex;
+        border: 1px solid var(--g1-edge);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      #session-footer .seg button {
+        flex: 1 1 0;
+        min-height: 36px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 0;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+      }
+      #session-footer .seg button + button {
+        border-left: 1px solid var(--g1-edge);
+      }
+      #session-footer .seg button[aria-pressed='true'] {
+        background: var(--g1-accent);
+        color: #fff;
+      }
+      #footer-mode-note:empty {
+        display: none;
+      }
+      #footer-mode-note {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #session-footer .ctx-bar {
+        height: 6px;
+        border-radius: 3px;
+        background: var(--g1-line);
+        overflow: hidden;
+      }
+      #session-footer .ctx-bar > div {
+        height: 6px;
+        background: var(--g1-link);
+      }
+      #session-footer .cwd {
+        font-family: ui-monospace, monospace;
+        overflow-wrap: anywhere;
+        text-align: right;
+      }
+      #session-footer .keep {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 36px;
+      }
+      #session-footer .keep input {
+        width: 20px;
+        height: 20px;
+        accent-color: var(--g1-link);
+      }
+      #wt-reset {
+        align-self: flex-start;
+        min-height: 40px;
+        border-radius: 8px;
+      }
+      #wt-reset-note {
+        padding: 6px 8px;
+        background: #1f2630;
+        border-left: 2px solid #a3be8c;
+        border-radius: 6px;
+        font-size: 0.82rem;
+        color: #c8d2e0;
+        max-height: 140px;
+        overflow-y: auto;
+      }
+      #wt-reset-note[hidden] {
+        display: none;
+      }
+      /* Bands that come and go above the transcript keep the column's gutter
+         now that the column itself has none. */
+      #pane-chat > #cards {
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: 50%;
+        overflow-y: auto;
+        padding: 8px 12px 0;
+      }
+      #pane-chat > #cards:empty {
+        display: none;
+      }
+      #pane-chat > #joined-note,
+      #pane-chat > #lineage,
+      #pane-chat > #crash-banner {
+        flex: none;
+        margin: 6px 12px 0;
+      }
+      /* The title is the bar's now. The element stays, because every route
+         that names a conversation writes it. */
+      #pane-chat > #session-title {
+        display: none;
+      }
+      /* The to-do strip: the only band between the transcript and the
+         composer. Its count line is all it costs when folded. */
+      #plan {
+        flex: none;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-height: 36px;
+        padding: 8px 16px;
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-line);
+        color: #c7d3ea;
+        font-size: 13px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #plan[hidden] {
+        display: none;
+      }
+      #plan .plan-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 20px;
+      }
+      #plan .plan-name {
+        font-weight: 600;
+      }
+      #plan-count,
+      #plan .plan-mark,
+      #plan-more {
+        color: var(--g1-ink-mid);
+      }
+      #plan .sp {
+        flex: 1 1 0;
+      }
+      #plan-rows {
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--g1-ink-hi);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #plan-more {
+        font-size: 12px;
+      }
+      #plan-rows[hidden],
+      #plan-more[hidden],
+      #plan[aria-expanded='false'] > #plan-rows,
+      #plan[aria-expanded='false'] > #plan-more {
+        display: none;
+      }
+      /* The composer's tools, opened by its +: 44px pills in a sideways
+         scroller, 52px of the column while open and nothing while shut. */
+      #h1-tools {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px 0;
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-line);
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      #h1-tools[hidden] {
+        display: none;
+      }
+      #h1-tools .pill {
+        flex: none;
+        box-sizing: border-box;
+        min-height: 44px;
+        padding: 0 14px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 22px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        white-space: nowrap;
+      }
+      #h1-tools .pill[aria-expanded='true'] {
+        border-color: var(--g1-link);
+      }
+      #h1-tools .pill .m {
+        margin-right: 6px;
+      }
+      #h1-tools .cmd-kind {
+        flex: none;
+        margin: 0 4px 0 -4px;
+        border-color: var(--g1-edge);
+        color: var(--g1-ink-lo);
+      }
+      /* #182, #184. The composer: one row on the band, 24px under it for the
+         thumb plus whatever the home indicator takes (env() is 0 in a desktop
+         browser and in a phone's browser tab). While the keyboard is up the
+         indicator is under the keys, so the 24px goes too. */
+      #composer {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin: 0;
+        padding: 8px 12px calc(24px + env(safe-area-inset-bottom, 0px));
+        background: var(--g1-band);
+        border: 0;
+        border-top: 1px solid var(--g1-line);
+        border-radius: 0;
+      }
+      :root.kb-open #composer {
+        padding-bottom: 8px;
+      }
+      #composer .crow {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+      }
+      #h1-plus,
+      #send,
+      #cancel-turn,
+      #queue {
+        width: 44px;
+        height: 44px;
+        flex: none;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border-radius: 22px;
+      }
+      #h1-plus {
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        border: 1px solid var(--g1-edge);
+      }
+      #h1-plus > svg {
+        transition: transform 0.15s;
+      }
+      #h1-plus[aria-expanded='true'] > svg {
+        transform: rotate(45deg);
+      }
+      #send {
+        background: #238636;
+        color: #fff;
+        border: 0;
+      }
+      #cancel-turn {
+        background: var(--g1-page);
+        color: #f85149;
+        border: 2px solid #f85149;
+      }
+      #queue {
+        background: var(--g1-page);
+        color: var(--g1-link);
+        border: 1px solid var(--g1-link);
+      }
+      #send[hidden],
+      #cancel-turn[hidden],
+      #queue[hidden] {
+        display: none;
+      }
+      /* The word each icon button carries for a screen reader and for the
+         held-Send state (#70), kept off the screen. */
+      #send .lbl,
+      #cancel-turn .lbl {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+      #composer .field {
+        position: relative;
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        background: var(--g1-page);
+        border: 1px solid var(--g1-edge);
+        border-radius: 22px;
+      }
+      /* The sheet's prompt draws no ring of its own, so the field it sits in
+         takes the ring colour while it holds focus. */
       #composer .field:focus-within {
         border-color: var(--g1-link);
       }
-      /* #177, the drawer's export at 390. The band is inline content (the model
-         name, a text run, the mode select, persist, export) and at 390 the
-         second line is already full when export arrives, so it wrapped onto a
-         third line of its own, 36px of the fold for one button. A right float
-         at the head of the band reserves a corner beside the model name, and
-         export sits in it. The reserve only exists while there is an export to
-         hold, so a band written with plain text (the verifier's filled band)
-         keeps its full width. The control takes the sheet's drawer-control
-         size here, which is what lets the corner stay one text line tall. */
-      @media (max-width: 860px) {
-        #session-footer {
-          position: relative;
-        }
-        #session-footer:has(> #footer-export)::before {
-          content: '';
-          float: right;
-          width: 62px;
-          height: 1.2em;
-        }
-        #session-footer > #footer-export {
-          position: absolute;
-          top: 6px;
-          right: 8px;
-          width: 54px;
-          height: 1.6em;
-          padding: 0;
-          font-size: 11px;
-        }
-        /* The two answer slots are empty spans with a left margin until a mode
-           change or an export has something to say. At 390 that margin alone
-           was past the end of the full second line, so an empty slot opened a
-           third line on its own: measured on the harness's band, 88px before
-           this pass, 72px with export moved and 52px with this. They show as
-           soon as they hold text. */
-        #session-footer > #footer-mode-note:empty,
-        #session-footer > #footer-export-note:empty {
-          display: none;
-        }
-      }
-      /* #120. The composer takes the sheet's three rows: the field, the control
-         row under it, the idle row under that. Scoped under #composer because the
-         sheet's names (.field, .crow, .idle, .ic) are short and the page has rows
-         of its own elsewhere.
-         The caret bar is drawn on .field, not on the textarea. A native textarea
-         is a replaced element, and a ::before on one computes without ever
-         painting: measured on a 300x60 field with a 1x14 red bar, 0 pixels of it
-         reached the screen. The sheet draws it on the wrapper for the same
-         reason. */
-      #composer .field {
-        position: relative;
-        min-height: 52px;
-        background: #0d1117;
-        border: 1px solid #30363d;
-      }
-      /* Only while the field is unfocused. A focused field already has the
-         browser's own caret, and a drawn bar beside it reads as two carets. The
-         sheet can only ever draw the unfocused state, so this is that drawing
-         standing in for the real caret rather than sitting beside it. */
-      #composer .field:not(:focus-within)::before {
-        content: "";
-        position: absolute;
-        left: 8px;
-        top: 6px;
-        width: 1px;
-        height: 14px;
-        background: #e6edf3;
-      }
+      /* 16px, because a smaller field makes iOS zoom the page on focus. The
+         field grows with what is typed to 132px (autoGrowPrompt) and then
+         scrolls. */
       #composer textarea {
         position: relative;
         display: block;
+        flex: 1 1 auto;
         width: 100%;
-        min-height: 52px;
-        background: transparent;
+        min-width: 0;
+        box-sizing: border-box;
+        min-height: 42px;
+        max-height: 130px;
+        padding: 10px 14px;
         border: 0;
-        padding: 5px 8px 5px 10px;
+        border-radius: 22px;
+        background: transparent;
+        color: var(--g1-ink-hi);
         font: inherit;
-        color: #e6edf3;
+        font-size: 16px;
+        line-height: 1.3;
         resize: none;
+        overflow-y: auto;
       }
       #composer textarea:focus {
         outline: none;
@@ -912,50 +1368,130 @@
          start typing into an accept. */
       #composer .ghost {
         position: absolute;
-        left: 10px;
-        top: 5px;
+        left: 14px;
+        top: 0;
         z-index: 0;
-        max-width: calc(100% - 20px);
+        height: 42px;
+        max-width: calc(100% - 22px);
+        display: flex;
+        align-items: center;
+        gap: 8px;
         color: #5b6470;
+        font-size: 15px;
         font-style: italic;
         pointer-events: none;
         white-space: nowrap;
         overflow: hidden;
+      }
+      #composer .ghost[hidden] {
+        display: none;
+      }
+      #composer .ghost .gt {
+        min-width: 0;
+        overflow: hidden;
         text-overflow: ellipsis;
       }
       #composer .ghost .use {
+        flex: none;
         font-style: normal;
-        color: #4d5560;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
       }
-      #composer .crow {
+      /* What the composer stacks above its row, each only while it has
+         something to say. */
+      #unsent {
+        padding: 6px 8px;
+        background: #2a1f24;
+        border-left: 2px solid #f38ba8;
+        border-radius: 6px;
+        font-size: 0.82rem;
+        color: #f0c4cf;
+      }
+      #unsent-text {
+        display: block;
+        margin-top: 4px;
+        max-height: 4.5em;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #e6e6e6;
+      }
+      /* The bubble is held to the user bubble's 86%; the line under it takes
+         the row, so send now and drop stay on one line with what it says. */
+      #queued {
+        align-self: stretch;
         display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 6px;
-        margin-top: 6px;
-      }
-      /* The engine tag keeps its own class (the page uses .cmd-kind everywhere)
-         and takes the sheet's palette here, because #ccc on the composer's dark
-         ground is a light-page colour left behind. */
-      #composer .crow .cmd-kind {
-        border-color: #30363d;
-        color: #7d8590;
-        margin-right: 0;
-      }
-      #composer .crow select {
-        font: inherit;
-        font-size: 11px;
-        color: #cbd5e1;
-        background: #161b22;
-        border: 1px solid #30363d;
-        padding: 1px 3px;
-      }
-      #composer .crow .lab {
-        display: inline-flex;
-        align-items: center;
+        flex-direction: column;
+        align-items: flex-end;
         gap: 4px;
-        color: #7d8590;
-        font-size: 11px;
+      }
+      #queued[hidden] {
+        display: none;
+      }
+      #queued-text {
+        max-width: 86%;
+        box-sizing: border-box;
+        max-height: 6.5em;
+        overflow-y: auto;
+        padding: 10px 14px;
+        background: #1a3b7a;
+        color: #c9d1d9;
+        border: 1px dashed #388bfd;
+        border-radius: 16px 16px 4px 16px;
+        font-size: 15px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #queued .qmeta {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 6px 10px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #queued .qmeta button {
+        min-height: 28px;
+        padding: 0 10px;
+        border-radius: 14px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 12px;
+      }
+      #queued .qmeta #queued-discard {
+        color: #ff7b72;
+      }
+      #pending,
+      #composer .cpanel {
+        padding: 6px 8px;
+        background: #1f2630;
+        border-radius: 6px;
+        font-size: 0.82rem;
+        color: #c8d2e0;
+      }
+      #pending {
+        border-left: 2px solid #a3be8c;
+      }
+      #composer .cpanel {
+        border-left: 2px solid #88c0d0;
+        max-height: 140px;
+        overflow-y: auto;
+      }
+      #rewind-pick {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+      }
+      #rewind-turn-pick {
+        max-width: 100%;
+        min-height: 36px;
+      }
+      #rewind-pick-result {
+        color: var(--g1-ink-mid);
       }
       /* Empty at rest: it carries text only while a recognition session is open. */
       #composer .interim:empty {
@@ -964,238 +1500,163 @@
       #composer .interim {
         color: #8a8f98;
         font-style: italic;
-        font-size: 11px;
-      }
-      /* The verbs go right: they are the row's far end in the sheet, and pushed
-         by margin-left auto because everything before them packs left. */
-      #composer .sgroup {
-        margin-left: auto;
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-      }
-      #composer .ic {
-        font: inherit;
         font-size: 13px;
-        line-height: 1;
-        color: #cbd5e1;
-        background: #161b22;
-        border: 1px solid #30363d;
-        padding: 2px 6px;
-        min-width: 24px;
       }
-      #composer .ic.end {
-        color: #f38ba8;
-      }
-      /* #175. The attachment controls, kept together so they wrap as one
-         group. They take .ic for the verbs' look and their 44px floor on a
-         phone. Above the break they read as short words, so the glyph waits
-         for the media block below. */
-      #composer .agroup {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-      }
-      #composer .agroup .g {
-        display: none;
-      }
-      #composer #send {
-        font: inherit;
-        font-size: 12px;
-        color: #0d1117;
-        background: #238636;
-        border: 1px solid #2ea043;
-        padding: 2px 14px;
-      }
-      #composer .idle {
+      /* The two-option sheet a turn's Fork asks with: include the
+         conversation so far, or start empty. At the foot of the screen, in the
+         thumb zone, over a scrim that shuts it. */
+      #h1-ask {
+        position: fixed;
+        inset: 0;
+        z-index: 90;
         display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-top: 6px;
-        color: #7d8590;
-        font-size: 11px;
+        flex-direction: column;
+        justify-content: flex-end;
+        background: rgba(1, 4, 9, 0.6);
       }
-      #composer .idle .st {
-        color: #6e7681;
-      }
-      /* The composer's help panel sits under the row it explains rather than
-         inside a collapsible, so it has no summary to hide behind and starts
-         hidden on its own. */
-      #composer .help-text {
-        margin-top: 6px;
-        font-size: 11px;
-      }
-      #composer .help-text[hidden] {
+      #h1-ask[hidden] {
         display: none;
       }
+      #h1-ask .ask-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 16px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-edge);
+        border-radius: 16px 16px 0 0;
+      }
+      #h1-ask .ask-title {
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        font-weight: 600;
+      }
+      #h1-ask .ask-sub {
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+      }
+      #h1-ask button {
+        min-height: 48px;
+        border-radius: 10px;
+        font-size: 15px;
+        text-align: left;
+        padding: 0 16px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+      }
+      #h1-ask button.cancel {
+        text-align: center;
+        background: transparent;
+      }
+      /* At phone width the rail is not a column or a strip any more: the bar's
+         title opens it as a screen of its own (slice 2 makes it the List
+         screen). Every row and control in it keeps the 44px floor, and the ⋯
+         on each row is always shown, since there is no hover on a phone. */
       @media (max-width: 860px) {
-        /* The rail is the sheet's own column at 190px; below the break the sheet
-           turns it into a horizontal strip. Measured the same way the bar's break
-           was: the column is what does not fit a 390 viewport. */
-        .shell-body {
-          flex-direction: column;
+        #rail,
+        #rail.collapsed {
+          display: none;
         }
-        #rail {
-          flex: none;
-          width: 100%;
+        #rail.panel-open,
+        #rail.panel-open.collapsed {
+          position: fixed;
+          top: env(safe-area-inset-top, 0px);
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 60;
+          display: flex;
+          flex-direction: column;
+          width: auto;
           max-height: none;
           border-right: 0;
-          border-bottom: 1px solid #21262d;
-          /* The strip: the column's parts sit side by side and the rows scroll
-             sideways. No height here -- the 57px the sheet measures falls out of
-             the 44px floor below plus the header's own padding. */
-          flex-direction: row;
-          align-items: stretch;
-        }
-        /* Named separately because #rail.collapsed outranks #rail: without this a
-           collapsed rail would stay a 40px column on a phone, which is the one
-           state the sheet says must go full width. */
-        #rail.collapsed {
-          flex: none;
-          width: 100%;
+          background: var(--g1-page);
         }
         #rail .rh {
-          border-bottom: 0;
-          border-right: 1px solid #161b22;
-          align-items: center;
+          min-height: 56px;
+          box-sizing: border-box;
+          gap: 4px;
+          padding: 0 8px;
+          background: var(--g1-band);
+          border-bottom: 1px solid var(--g1-line);
+          color: var(--g1-ink-hi);
+          font-size: 16px;
+          font-weight: 600;
+          letter-spacing: 0;
+          text-transform: capitalize;
         }
-        /* The word and the folder path are what does not fit a 390 viewport; the
-           rows carry the titles, so nothing is lost by hiding them. */
         #rail .rh .lbl {
+          flex: 1 1 auto;
+        }
+        #rail .rh button.back {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 44px;
+          height: 44px;
+          margin: 0;
+          padding: 0;
+          border: 0;
+          background: transparent;
+          color: inherit;
+        }
+        #rail .rh .help-btn {
+          width: 44px;
+          height: 44px;
+          margin-left: auto;
+        }
+        #rail .rh .ctl {
           display: none;
         }
         #rail .ws {
-          display: none;
+          padding: 8px 16px;
+          font-family: ui-monospace, monospace;
+          font-size: 13px;
+          color: var(--g1-ink-mid);
         }
-        /* The filter leads the strip rather than dropping. It is the one control
-           that cannot be a 44px cell beside the rows, and dropping it leaves a
-           phone unable to reach a conversation past the first page, which is the
-           exact failure the control exists to prevent. */
         #rail .flt {
-          flex: none;
-          display: flex;
-          align-items: center;
-          padding: 0 8px;
-          border-bottom: 0;
-          border-right: 1px solid #161b22;
+          padding: 8px 16px;
         }
         #rail .flt input {
-          width: 120px;
           min-height: 44px;
+          font-size: 16px;
         }
-        #rail .list {
-          flex: 1 1 auto;
-          display: flex;
-          flex-direction: row;
-          overflow-x: auto;
-          overflow-y: hidden;
+        #rail .srow {
+          border-bottom: 1px solid var(--g1-line);
         }
         #rail .s {
-          flex: none;
-          border-bottom: 0;
-          border-right: 1px solid #161b22;
-          padding: 11px 12px;
-          min-height: 44px;
-          max-width: 42vw;
-        }
-        #rail .s b {
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
+          min-height: 56px;
+          padding: 10px 16px;
+          font-size: 15px;
+          color: var(--g1-ink);
         }
         #rail .s.on {
-          border-left: 0;
-          border-bottom: 2px solid #1f6feb;
-          padding-left: 12px;
+          padding-left: 14px;
         }
         #rail .s span {
-          display: none;
-        }
-        /* #180. On the strip the wrapper is the cell and carries the separator,
-           and the actions button is always shown at the 44px floor: there is
-           no hover on a phone to bring it up. */
-        #rail .srow {
-          flex: none;
-          border-bottom: 0;
-          border-right: 1px solid #161b22;
-        }
-        #rail .srow > .s {
-          border-right: 0;
+          display: block;
+          margin-top: 2px;
+          font-size: 12px;
         }
         #rail .more {
           opacity: 1;
           width: 44px;
           min-height: 44px;
+          font-size: 18px;
         }
         #rail-menu [role='menuitem'] {
           min-height: 44px;
         }
         #rail .plus {
-          flex: none;
-          border-bottom: 0;
-          border-right: 1px solid #161b22;
-          padding: 0 12px;
-          min-height: 44px;
-          white-space: nowrap;
-        }
-        /* The 44px floor, applied by hand. measure.mjs counts only
-           button,a,[tabindex], so an input is invisible to its under44px metric:
-           the sheet reports 0 under 44px at 390 with or without this rule. */
-        #rail .rh button,
-        #rail .plus {
-          min-height: 44px;
-        }
-        /* Collapsed on a phone the header goes back to a row and the glyph hides,
-           and the + takes a left border instead of a top one. */
-        #rail.collapsed .rh {
-          flex-direction: row;
-          justify-content: center;
-          padding: 6px 8px;
-        }
-        #rail.collapsed .rh .gl {
-          display: none;
-        }
-        #rail.collapsed .plus {
-          border-top: 0;
-          border-left: 1px solid #161b22;
-          min-width: 40px;
-        }
-        /* The 44px floor, by hand. measure.mjs counts only button,a,[tabindex],
-           so the language select is invisible to its under44px metric and the
-           sheet applies the floor to the row's controls itself. */
-        #composer .mic,
-        #composer #send,
-        #composer .ic,
-        #composer .help-btn,
-        #composer .crow select {
-          min-height: 44px;
-        }
-        /* The word is what does not fit a 390 strip; the glyph is the control.
-           The button's text lives in these two spans so this can drop one of
-           them, which is also why the running label is written into .w rather
-           than into the button's textContent. */
-        #composer .mic .w {
-          display: none;
-        }
-        /* #175. Same trade for the attachment controls: the words are what a
-           390 row cannot hold, so the glyph stands in and the phrase stays in
-           title and aria-label. */
-        #composer .agroup .g {
-          display: inline;
-        }
-        #composer .agroup .w {
-          display: none;
-        }
-        #composer #send {
+          min-height: 48px;
           padding: 0 16px;
+          font-size: 15px;
+          color: var(--g1-link);
         }
-        /* #dictate-interim carries text only while a recognition session is
-           open, so at rest it costs the transcript nothing here. */
-        #composer .interim {
+      }
+      @media (min-width: 861px) {
+        #rail .rh button.back {
           display: none;
-        }
-        #composer .idle {
-          flex-wrap: wrap;
         }
       }
       /* Last on purpose: #rail, #rail.collapsed and the media overrides all set
@@ -1225,12 +1686,24 @@
       #past-list {
         contain: inline-size;
       }
-      /* #175. When opening the panel does scroll it into view (setDirPickerOpen),
-         its top must clear the rail strip, which is sticky at the top of a
-         phone and 57px tall. */
+      /* #184. The New conversation panel opens over the chat column rather
+         than in it: in a frame the height of the screen, a 947px form in the
+         column would take every pixel from the transcript. On a phone it is a
+         screen of its own over the list it was opened from, which is what
+         keeps its summary (the row that names it and shuts it) on top. */
+      #dir-picker:not([hidden]) {
+        position: absolute;
+        inset: 0;
+        z-index: 30;
+        margin: 0;
+        border-radius: 0;
+        overflow-y: auto;
+      }
       @media (max-width: 860px) {
-        #dir-picker {
-          scroll-margin-top: 64px;
+        #dir-picker:not([hidden]) {
+          position: fixed;
+          top: env(safe-area-inset-top, 0px);
+          z-index: 65;
         }
       }
     </style>
@@ -1245,57 +1718,247 @@
       </section>
     </div>
     <div id="app-body" hidden>
-      <h1>qwen-rc viewer</h1>
-      <div class="tab-bar" id="tab-bar">
-        <span class="status-dot" id="status-dot" title="checking…"></span>
-        <span class="tab active" data-tab="chat" role="tab" tabindex="0"
-          >Chat</span
-        >
-        <span class="tab" data-tab="ops" role="tab" tabindex="0"
-          >Operations
-          <input
-            type="checkbox"
-            class="pin-cb"
-            data-pin="ops"
-            title="Pin to Chat"
-        /></span>
-        <span class="tab" data-tab="settings" role="tab" tabindex="0"
-          >Settings
-          <input
-            type="checkbox"
-            class="pin-cb"
-            data-pin="settings"
-            title="Pin to Chat"
-        /></span>
-        <span class="tab" data-tab="diag" role="tab" tabindex="0"
-          >Diagnostics
-          <input
-            type="checkbox"
-            class="pin-cb"
-            data-pin="diag"
-            title="Pin to Chat"
-        /></span>
+      <!-- #184 (h1). The bar is the whole of the navigation: the page title,
+           the tab bar, its pins and its search control are gone from the Chat
+           screen, because on a phone they were two rows of the fold for things
+           used a few times a day. ≡ opens More (the three panes, until slice 4
+           folds them into one sheet), the title opens the conversation list,
+           and ⋯ holds what acts on the conversation on screen. Nothing used on
+           every turn lives up here: that is the thumb zone's job. -->
+      <header id="h1-bar">
         <button
-          class="keys"
-          id="bar-search"
+          id="h1-more"
           type="button"
-          title="Search across sessions (⌘K)"
-          aria-label="Search across sessions"
+          aria-label="More"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="more-screen"
         >
-          <span class="kk">⌘K</span><span class="kl"> search</span
-          ><span class="kg" aria-hidden="true">🔍</span></button
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+        </button>
+        <button
+          id="h1-title"
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="rail"
+          title="Conversations"
         >
+          <span id="h1-title-text">No conversation</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+        </button>
+        <button
+          id="h1-actions"
+          type="button"
+          aria-label="Conversation actions"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          aria-controls="h1-menu"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="19" cy="12" r="2" /></svg>
+        </button>
+      </header>
+      <!-- #184. What acts on the conversation on screen. Each item is the
+           control that already did the job, moved rather than copied, so its
+           handler and its id are the ones the page always had: #rewind-chat
+           opens the turn picker, #footer-export saves the markdown, #btw-toggle
+           opens the side question, #end-session asks before it ends anything.
+           Items that cannot act on what is on screen are taken out (.h1-off)
+           each time the menu opens, rather than drawn as buttons that can only
+           fail. -->
+      <div id="h1-menu" role="menu" aria-label="Conversation actions" hidden>
+        <button type="button" role="menuitem" tabindex="-1" id="h1-menu-recap">
+          Where did I leave off?
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          id="btw-toggle"
+          aria-expanded="false"
+          aria-controls="btw-panel"
+          hidden
+        >
+          Ask a side question
+        </button>
+        <button type="button" role="menuitem" tabindex="-1" id="h1-menu-rename">
+          Rename
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          id="rewind-chat"
+          title="Roll this session back to an earlier turn (POST /session/:id/rewind)"
+        >
+          Rewind to a turn
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          id="footer-export"
+          title="Download this conversation as markdown, or hand it to the phone's share sheet"
+        >
+          Export or share
+        </button>
+        <button type="button" role="menuitem" tabindex="-1" id="h1-menu-archive">
+          Archive
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          id="end-session"
+          class="danger"
+          title="Terminate the session on the host (POST /session/:id/end)"
+        >
+          End session
+        </button>
+      </div>
+      <!-- #184. The interim More screen. Slice 4 replaces it with the grouped
+           sheet; until then it lists the three panes the tab bar held, each of
+           which opens as its own screen with a back button, and the phone's own
+           settings the composer row used to carry (dictation language and
+           auto-send, idle suggestions), which the spec files under This phone.
+           The rows keep the .tab class and data-tab the tab bar's spans had, so
+           switchTab and the saved tab (#182) work unchanged. -->
+      <div id="more-screen" role="dialog" aria-label="More" hidden>
+        <div class="scr-head">
+          <button id="more-back" type="button" aria-label="Back to chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+          </button>
+          <strong>More</strong>
+        </div>
+        <div class="scr-body">
+          <div class="grp">Panels</div>
+          <button type="button" class="tab row" data-tab="ops">
+            <span>Operations</span><span class="chev" aria-hidden="true">›</span>
+          </button>
+          <button type="button" class="tab row" data-tab="settings">
+            <span>Settings</span><span class="chev" aria-hidden="true">›</span>
+          </button>
+          <button type="button" class="tab row" data-tab="diag">
+            <span>Diagnostics</span><span class="chev" aria-hidden="true">›</span>
+          </button>
+          <button
+            type="button"
+            class="row"
+            id="bar-search"
+            title="Search across sessions (⌘K)"
+            aria-label="Search across sessions"
+          >
+            <span>Search across sessions</span><span class="chev" aria-hidden="true">›</span>
+          </button>
+          <div class="grp">This phone</div>
+          <label class="row" for="dictate-lang">
+            <span>Dictation language</span>
+            <select id="dictate-lang" title="dictation language">
+              <option value="">auto</option>
+              <option value="en-US">English (US)</option>
+              <option value="en-GB">English (UK)</option>
+              <option value="es-ES">Spanish</option>
+              <option value="fr-FR">French</option>
+              <option value="de-DE">German</option>
+              <option value="pt-BR">Portuguese (BR)</option>
+              <option value="hi-IN">Hindi</option>
+              <option value="zh-CN">Chinese</option>
+              <option value="ja-JP">Japanese</option>
+            </select>
+          </label>
+          <label
+            class="row"
+            title="when dictation ends on a pause, send the prompt automatically"
+            ><span
+              ><input id="dictate-autosend" type="checkbox" /> Send when
+              dictation ends on a pause</span
+            ></label
+          >
+          <div class="row idle" id="idle-suggest">
+            <label title="next-step suggestions when this session goes idle"
+              ><input id="idle-suggest-toggle" type="checkbox" disabled /> Idle
+              suggestions</label
+            >
+            <span class="st" id="idle-suggest-status"></span>
+          </div>
+        </div>
       </div>
       <div class="shell-body">
         <div id="rail"></div>
         <div class="mid">
+          <!-- #184. A pane other than Chat opens as a screen of its own with a
+               way back. The back button is the Chat tab, so switchTab marks it
+               like any other tab. -->
+          <div id="pane-head" hidden>
+            <button type="button" class="tab" data-tab="chat" aria-label="Back to chat">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+            </button>
+            <strong id="pane-head-title"></strong>
+          </div>
           <div class="tab-pane active" id="pane-chat">
-        <!-- #120. This block is gone. Its four verbs and its help sentence now
-             live in the composer's control row, under the field, where the
-             sheet draws them; keeping them up here too would put two doors on
-             the same four actions. Every id survived the move, including
-             #rewind-chat, which a verifier scenario presses, and #reconnect,
-             which the self-heal path shows and hides. -->
+        <!-- #184. The status line replaces the strip that said "streaming"
+             above the transcript and the drawer band under it: one 44px row
+             that says what the conversation is doing, on what model, how full,
+             in what mode, and opens the inspector sheet in place when tapped.
+             #reconnect rides at its end, because the self-heal's give-up is a
+             fact about this same connection. -->
+        <div id="h1-statusline">
+          <button
+            id="h1-status"
+            type="button"
+            aria-expanded="false"
+            aria-controls="h1-sheet"
+            aria-label="Conversation status and settings"
+          >
+            <span class="dot" id="h1-dot" aria-hidden="true"></span>
+            <span id="h1-state">no conversation</span>
+            <span class="f" id="h1-model"></span>
+            <span class="f" id="h1-tokens"></span>
+            <span class="f" id="h1-mode"></span>
+            <span class="sp"></span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <!-- issue #48: hidden by default; self-heal shows it when the retry
+               budget is exhausted, and any fresh watch / Unwatch hides it -->
+          <button
+            class="ic"
+            id="reconnect"
+            type="button"
+            style="display: none"
+            title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now."
+            aria-label="Reconnect to this conversation"
+          >
+            ↻
+          </button>
+        </div>
+        <!-- #184. The inspector sheet, opened in place under the status line.
+             #session-footer is the drawer band's old box and renderFooter still
+             fills it, now as the sheet's rows: the model (tap to switch), the
+             mode as a segmented control over the same select and handler, the
+             context fill, the folder, and the keep-this-mode box. The checkout
+             handover (#134) sits under the folder it moves. -->
+        <div id="h1-sheet" hidden>
+          <div id="h1-sheet-empty">
+            Nothing to show until a conversation is open.
+          </div>
+          <div id="session-footer" style="display: none"></div>
+          <!-- #134. A checkout handover is the one conversation control that
+               changes WHICH conversation owns the work: the daemon moves the
+               git checkout's ownership to a fresh session and links the pair,
+               so the conversation on screen stops being the thing that owns
+               it. That is why this is a named button that has to be pressed
+               twice rather than a chip that fires on one tap, and why the answer
+               says out loud
+               that the conversation now on screen is the replacement: an
+               operator who is not told keeps typing into a conversation that
+               no longer has a checkout. Gated on the daemon's own capability,
+               because an older daemon answers this route with a 404 that would
+               read as a broken button rather than an unsupported one. -->
+          <button id="wt-reset" type="button" hidden>
+            Hand over the checkout
+          </button>
+          <div id="wt-reset-note" aria-live="polite" hidden></div>
+        </div>
         <!-- #175. Hidden at rest, not merely collapsed: a closed details still
            draws its summary row, and that row heading the Chat column was a
            second door beside the rail's + and about 70px of the fold. The
@@ -1389,52 +2052,79 @@
             ></div>
           </div>
         </details>
-        <div class="pin-area" id="pin-area"></div>
-        <div id="status"></div>
         <div id="cards"></div>
         <style>
           /* The scroll container of the virtualized transcript
              (transcript-view.js). The view positions the rows itself (its
              8px gaps and insets replace this box's old flex gap/padding)
              and sets those structural styles inline. */
-          /* #175: the cap is fitted to the room the bands leave (see
-             fitTranscript), within 30vh to 75vh. 75vh is the fallback until
-             the fit has run, and was the whole rule before. */
-          #transcript {
-            background: #111;
-            border-radius: 6px;
-            min-height: 60px;
-            max-height: var(--tx-cap, 75vh);
-            overflow-y: auto;
-          }
+          /* #184. The transcript is the column's one flexible region: the bar,
+             the status line, the sheet, the to-do strip, the tools and the
+             composer all take what they draw and the transcript takes the
+             rest, so the composer sits on the fold by construction rather than
+             by a fitted cap (#175's fitTranscript, retired). The box gets a
+             definite height from its wrapper, never from its content, so a
+             streaming row cannot resize it; that content-sized flex box is what
+             broke the render-all scroll pin before. */
           #transcript-wrap {
             position: relative;
+            flex: 1 1 0;
+            min-height: 0;
           }
-          /* Paging back lives at the top of the window, mirroring #jump-bottom
-             at the bottom. Absolutely positioned on purpose: an in-flow sibling
-             above #transcript would take height out of the bounded scroller,
-             which is what broke the render-all fallback's scroll pin. */
-          /* #177. Both pills are controls on the transcript, so they take the
+          #transcript {
+            position: absolute;
+            inset: 0;
+            background: var(--g1-page);
+            overflow-y: auto;
+          }
+          /* #177. The pills are controls on the transcript, so they take the
              control ground and edge, with the bright ink so they still read
-             as something to press over the rows they float on. They were white,
-             the brightest thing on the page, painted over the first lines of
-             the conversation. The shadow stays: it is what lifts a dark pill
-             off a dark row. */
-          #load-earlier {
+             as something to press over the rows they float on. The shadow is
+             what lifts a dark pill off a dark row. #184: 36px, the drawn size,
+             and the pair sits side by side at the top. */
+          #tx-top {
             position: absolute;
             top: 8px;
-            left: 50%;
-            transform: translateX(-50%);
+            left: 12px;
+            right: 12px;
             z-index: 2;
-            border-radius: 999px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            pointer-events: none;
+          }
+          #tx-top > * {
+            pointer-events: auto;
+          }
+          #tx-top .pills {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            max-width: 100%;
+          }
+          #tx-top .pills:not(:has(> :not([hidden]))) {
+            display: none;
+          }
+          #load-earlier,
+          #recap-toggle,
+          #jump-bottom {
+            box-sizing: border-box;
+            min-height: 36px;
+            padding: 0 14px;
+            border-radius: 18px;
             background: var(--g1-raise);
             color: var(--g1-ink-hi);
             border: 1px solid var(--g1-edge);
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-            font-size: 0.85rem;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+            font-size: 13px;
+            white-space: nowrap;
           }
           #load-earlier[disabled] {
             color: var(--g1-ink-dim);
+          }
+          #recap-toggle[aria-expanded='true'] {
+            border-color: var(--g1-link);
           }
           #jump-bottom {
             position: absolute;
@@ -1442,12 +2132,96 @@
             left: 50%;
             transform: translateX(-50%);
             z-index: 2;
-            border-radius: 999px;
+          }
+          /* The recap and the side question open under the pills, bounded so
+             an answer of any length scrolls inside its card. */
+          #recap,
+          #btw-panel {
+            align-self: stretch;
+            flex: 0 1 auto;
+            min-height: 0;
+            overflow-y: auto;
             background: var(--g1-raise);
-            color: var(--g1-ink-hi);
             border: 1px solid var(--g1-edge);
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-            font-size: 0.85rem;
+            border-radius: 12px;
+            padding: 10px 14px;
+            font-size: 14px;
+            line-height: 1.45;
+            color: var(--g1-ink-hi);
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+          }
+          /* Open, the column gets a definite height so the card can shrink
+             to it and scroll: the top 60% of the transcript, which leaves the
+             newest rows readable under it. */
+          #tx-top:has(> #recap:not([hidden])),
+          #tx-top:has(> #btw-panel:not([hidden])) {
+            bottom: 40%;
+          }
+          #recap[hidden],
+          #btw-panel[hidden] {
+            display: none;
+          }
+          #btw-panel .btw-row {
+            display: flex;
+            gap: 8px;
+          }
+          #btw-question {
+            flex: 1 1 auto;
+            min-width: 0;
+            min-height: 44px;
+            padding: 0 12px;
+            font: inherit;
+            font-size: 16px;
+            border-radius: 10px;
+            background: var(--g1-page);
+            color: var(--g1-ink-hi);
+          }
+          #btw-ask {
+            min-height: 44px;
+            min-width: 64px;
+            border-radius: 10px;
+          }
+          #btw {
+            margin-top: 8px;
+            padding-left: 8px;
+            border-left: 2px solid #88c0d0;
+            white-space: pre-wrap;
+          }
+          #btw[hidden] {
+            display: none;
+          }
+          /* #184. What the page says about what it just did, over the foot of
+             the transcript for a few seconds after it changes (see
+             initToasts). Fresh lines only: one at rest would cover rows. */
+          #h1-toasts {
+            position: absolute;
+            left: 12px;
+            right: 12px;
+            bottom: 52px;
+            z-index: 3;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            pointer-events: none;
+          }
+          #h1-toasts > * {
+            display: none;
+            max-width: 100%;
+            padding: 8px 14px;
+            border-radius: 12px;
+            background: var(--g1-raise);
+            border: 1px solid var(--g1-edge);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+            color: var(--g1-ink-hi);
+            font-size: 13px;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+            pointer-events: auto;
+            cursor: pointer;
+          }
+          #h1-toasts > .fresh:not(:empty) {
+            display: block;
           }
           #transcript .bubble {
             max-width: 92%;
@@ -1474,28 +2248,55 @@
             font-weight: 400;
             opacity: 0.75;
           }
+          /* #184. The spec's user bubble: the accent blue, 86% wide at most,
+             the tail corner at the bottom right. The role line is held at 0.85
+             here because 0.6 white on this blue measures under 3:1. */
           #transcript .user {
             align-self: flex-end;
-            background: #1d4ed8;
+            max-width: 86%;
+            background: var(--g1-accent);
             color: #fff;
+            border-radius: 16px 16px 4px 16px;
+            padding: 10px 14px;
+          }
+          #transcript .user .role {
+            opacity: 0.85;
           }
           /* A user message the daemon never accepted (#62): the echo stays so
-             the turn keeps its shape, but it says it did not go through. */
+             the turn keeps its shape, but it says it did not go through, and
+             #184 puts retry where it is said. */
           #transcript .user .not-sent {
-            display: block;
-            margin-top: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 6px;
             font-size: 0.72rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
-            opacity: 0.9;
           }
           #transcript .user .not-sent[hidden] {
             display: none;
           }
+          #transcript .user .not-sent button {
+            min-height: 28px;
+            padding: 0 10px;
+            border-radius: 14px;
+            border: 1px solid #fff;
+            background: transparent;
+            color: #fff;
+            font-size: 12px;
+            text-transform: none;
+            letter-spacing: 0;
+          }
+          /* #184. The answer is the band bubble across the column, the way the
+             spec draws it, so the turn's actions line up under it. */
           #transcript .asst {
-            align-self: flex-start;
-            background: #26292e;
-            color: #e6e6e6;
+            align-self: stretch;
+            max-width: none;
+            background: var(--g1-raise);
+            color: var(--g1-ink-hi);
+            border-radius: 16px;
+            padding: 12px 14px;
           }
           /* Assistant text is markdown (#93). The bubble's pre-wrap suits the
              plain-text fallback and code; rendered prose reflows instead, and
@@ -1667,10 +2468,15 @@
               opacity: 1;
             }
           }
+          /* #184. A tool row is one line on the raised ground with the rule
+             round it, as drawn; it stretches so a long title ellipsizes in
+             place of wrapping the column. */
           #transcript .tool {
-            align-self: flex-start;
-            background: #17203a;
-            color: #cdd6f4;
+            align-self: stretch;
+            max-width: none;
+            background: var(--g1-raise);
+            border: 1px solid var(--g1-line);
+            color: var(--g1-ink-hi);
             font-family: ui-monospace, monospace;
             font-size: 0.85rem;
           }
@@ -1713,9 +2519,14 @@
           /* The session's to-do row (#65): one row, rewritten by each plan
              frame, so it reads as a list rather than a log. */
           #transcript .bubble.plan {
-            background: #101728;
+            align-self: stretch;
+            max-width: none;
+            background: var(--g1-raise);
             border-left: 2px solid #4a6fb0;
+            border-radius: 16px;
             color: #c7d3ea;
+            font-family: ui-monospace, monospace;
+            font-size: 13px;
           }
           #transcript .plan .plan-list {
             white-space: pre-wrap;
@@ -1745,22 +2556,44 @@
           }
           /* Per-message "Fork from here" (add-session-forking web gap): a small
          action under a COMPLETED assistant turn. */
-          #transcript .bubble-fork {
-            align-self: flex-start;
-            margin-top: -4px;
+          /* #184. A turn's actions, under its last answer: Fork here, Rewind
+             to here, Copy. Not a row of their own in the drawing, so the strip
+             is pulled up against the answer it belongs to (the row above ends
+             8px higher, at the view's gap), and an answer that ends an earlier
+             turn carries the same strip inside its row. Text buttons in the
+             muted ink, 36px so a thumb lands on them. */
+          #transcript .turn-acts {
+            align-self: stretch;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px 14px;
+            padding: 0 14px;
           }
-          #transcript .bubble-fork button {
+          #transcript .bubble-fork.turn-acts {
+            margin-top: -6px;
+          }
+          #transcript .turn-acts[hidden] {
+            display: none;
+          }
+          #transcript .turn-acts button {
+            min-height: 36px;
+            padding: 0;
+            border: 0;
             background: transparent;
-            border: 1px solid #3a3f47;
-            border-radius: 6px;
-            color: #8a8f98;
-            font-size: 0.72rem;
-            padding: 2px 8px;
+            color: var(--g1-ink-mid);
+            font-size: 13px;
             cursor: pointer;
           }
-          #transcript .bubble-fork button:hover {
-            color: #e6e6e6;
-            border-color: #8a8f98;
+          #transcript .turn-acts button:hover {
+            color: var(--g1-ink-hi);
+          }
+          #transcript .turn-acts .note {
+            color: var(--g1-ink-mid);
+            font-size: 12px;
+          }
+          #transcript .turn-acts .note:empty {
+            display: none;
           }
           /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
           #lineage {
@@ -1910,524 +2743,266 @@
         <div id="lineage" hidden></div>
         <div id="transcript-wrap">
           <div id="transcript"></div>
-          <button id="load-earlier" hidden>↑ load earlier messages</button>
-          <button id="jump-bottom" hidden>↓ jump to bottom</button>
+          <!-- #184. The pills at the top of the transcript, and what the recap
+               pill and the side question open, in place under them. They float
+               over the rows rather than sitting above the scroller for the
+               reason the load-earlier pill always did: an in-flow sibling takes
+               height out of the bounded scroller, which is what broke the
+               render-all fallback's scroll pin. Both panels are bounded and
+               scroll, because an open panel that grows is how a band once
+               pushed the composer under the fold on a phone. -->
+          <div id="tx-top">
+            <div class="pills">
+              <button id="load-earlier" type="button" hidden>
+                ↑ load earlier
+              </button>
+              <!-- #124. "Where did I leave off", asked of the daemon that was
+                   watching. Its own control rather than a line in the
+                   transcript: the summary is a sentence ABOUT the
+                   conversation, not a turn IN it. Hidden until the daemon says
+                   it can answer, so an old daemon shows no button that could
+                   only fail. -->
+              <button
+                id="recap-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="recap"
+                hidden
+              >
+                Where did I leave off?
+              </button>
+            </div>
+            <div id="recap" aria-live="polite" hidden></div>
+            <!-- #133. A side question about this conversation, answered
+                 without joining its turn order, opened from the ⋯ menu. It is
+                 not the composer: the composer's Send is guarded so a held
+                 prompt cannot be doubled (#70), and a question that must NOT
+                 take a turn has no business sharing the button that does. -->
+            <div id="btw-panel" hidden>
+              <div class="btw-row">
+                <input
+                  id="btw-question"
+                  type="text"
+                  maxlength="4096"
+                  placeholder="a question about this conversation"
+                  aria-label="A side question about this conversation"
+                />
+                <button id="btw-ask" type="button">Ask</button>
+              </div>
+              <div id="btw" aria-live="polite" hidden></div>
+            </div>
+          </div>
+          <button id="jump-bottom" type="button" hidden>↓ jump to bottom</button>
+          <!-- #184. What the page has to say about what it just did. These were
+               a line of their own above the transcript (#status) and two spans
+               under the composer's row; on a phone each was a row of the fold
+               for a sentence read once. They now surface over the foot of the
+               transcript for a few seconds after they change, keep their ids
+               (every setStatus call and the verb and export handlers write
+               them as before), and a tap puts one away early. -->
+          <div id="h1-toasts" aria-live="polite">
+            <div id="status"></div>
+            <span id="session-verb-result"></span>
+            <span id="footer-export-note"></span>
+          </div>
         </div>
         <!-- The run's to-do list, kept outside the transcript (#65). The
              transcript row is the history; this is "where is the run up to".
-             It takes its own row in normal flow below the chat window rather
-             than a position: sticky pin, which floated the strip over
-             transcript pixels and covered text the reader was on. With no
-             to-do list it does not go quiet: it
-             says that in words (#72), because a strip hidden by default and a
-             strip hidden by a fault look identical and the reader has no way
-             to tell a working feature from a missing one. -->
+             #184: it is the only band between the transcript and the composer,
+             on the band ground, and a tap folds it to its count line, which is
+             what the transcript's 600px at rest is measured with. The fold is
+             the reader's and is kept across a reload. -->
         <div
           id="plan"
+          role="button"
+          tabindex="0"
+          aria-expanded="true"
+          aria-controls="plan-rows"
           hidden
-          style="
-            margin-top: 8px;
-            padding: 6px 8px;
-            background: #101728;
-            border: 1px solid #26344d;
-            border-left: 2px solid #4a6fb0;
-            border-radius: 6px;
-            font-size: 0.82rem;
-            color: #c7d3ea;
-          "
         >
-          <div>
-            <span style="font-weight: 600">to-do</span>
-            <span id="plan-count" aria-live="polite" style="margin-left: 6px"></span>
+          <div class="plan-head">
+            <span class="plan-name">to-do</span>
+            <span id="plan-count" aria-live="polite"></span>
+            <span class="sp"></span>
+            <span class="plan-mark" id="plan-mark">hide</span>
           </div>
-          <div
-            id="plan-rows"
-            style="
-              margin-top: 4px;
-              white-space: pre-wrap;
-              word-break: break-word;
-              color: #e6e6e6;
-            "
-          ></div>
-          <div id="plan-more" hidden style="color: #8fa0c0; font-size: 0.78rem"></div>
+          <div id="plan-rows"></div>
+          <div id="plan-more" hidden></div>
         </div>
-        <!-- #177. The drawer is a band like the composer under it: the band
-             ground, and the line rule drawn as an inset shadow rather than a
-             border so the band keeps the exact box the fold checks measure. -->
-        <div
-          id="session-footer"
-          style="
-            display: none;
-            margin-top: 8px;
-            padding: 6px 8px;
-            background: var(--g1-band);
-            box-shadow: inset 0 0 0 1px var(--g1-line);
-            border-radius: 6px;
-            color: #9aa0a6;
-            font-family: ui-monospace, monospace;
-            font-size: 0.8rem;
-            line-height: 1.5;
-            word-break: break-word;
-          "
-        ></div>
+        <!-- #184. The composer's tools, opened by its +. Each pill is the
+             control that already did the job, moved out of the row it shared
+             with the verbs: Attach still clicks the hidden file input, Dictate
+             still runs the browser's recognizer, Files and Artifacts still open
+             their bounded lists. 44px tall and in a sideways scroller, so a
+             fifth tool costs no height. The engine tag (#97) stays beside the
+             mic it names. -->
+        <div id="h1-tools" hidden>
+          <button
+            id="attach"
+            type="button"
+            class="pill"
+            title="Attach a file to the next prompt"
+            aria-label="Attach a file to the next prompt"
+          >
+            Attach file
+          </button>
+          <input id="attach-file" type="file" multiple hidden />
+          <button
+            id="dictate"
+            type="button"
+            class="pill mic"
+            title="dictate the prompt with this browser's speech engine"
+          >
+            <span class="m" aria-hidden="true">🎙</span
+            ><span class="w">Dictate</span>
+          </button>
+          <!-- #97. The engine is named where the control is drawn. What runs
+               here is the browser's Web Speech API, not the product's voice
+               stack, and the gateway has no transcribe route to offer instead,
+               so the honest fix is the label. -->
+          <span
+            class="cmd-kind"
+            id="dictate-engine"
+            title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
+            >browser</span
+          >
+          <button
+            id="stored-toggle"
+            type="button"
+            class="pill"
+            aria-expanded="false"
+            aria-controls="stored"
+            title="Files in this session"
+            aria-label="Files in this session"
+          >
+            Files<span id="stored-count"></span>
+          </button>
+          <button
+            id="artifacts-toggle"
+            type="button"
+            class="pill"
+            aria-expanded="false"
+            aria-controls="artifacts"
+            title="Artifacts in this session"
+            aria-label="Artifacts in this session"
+          >
+            Artifacts
+          </button>
+        </div>
         <section id="composer" style="display: none">
           <div
             id="unsent"
             aria-live="polite"
             hidden
-            style="
-              margin-bottom: 6px;
-              padding: 6px 8px;
-              background: #2a1f24;
-              border-left: 2px solid #f38ba8;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #f0c4cf;
-            "
           >
             <span id="unsent-note"></span>
-            <span
-              id="unsent-text"
-              style="
-                display: block;
-                margin-top: 4px;
-                white-space: pre-wrap;
-                word-break: break-word;
-                color: #e6e6e6;
-              "
-            ></span>
+            <span id="unsent-text"></span>
             <button id="unsent-restore" type="button">Edit again</button>
             <button id="unsent-dismiss" type="button">Discard</button>
           </div>
           <!-- #70. What is waiting to go, always on screen while it waits. A
                queued message that is only held in a variable is invisible and
                reads as lost, which is the failure mode this must not ship with.
-               Discard is here because a queued message the reader no longer
-               wants has to be removable from where it is shown. -->
-          <div
-            id="queued"
-            aria-live="polite"
-            hidden
-            style="
-              margin-bottom: 6px;
-              padding: 6px 8px;
-              background: #1f2630;
-              border-left: 2px solid #8fa0c0;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #c8d2e0;
-            "
-          >
-            <span id="queued-note"></span>
-            <span
-              id="queued-text"
-              style="
-                display: block;
-                margin-top: 4px;
-                white-space: pre-wrap;
-                word-break: break-word;
-                color: #e6e6e6;
-              "
-            ></span>
-            <button id="queued-discard" type="button">Discard</button>
+               #184: drawn as the outbox bubble, the last thing in the
+               conversation as the reader sees it. Send now hands it to the
+               turn that is running (the same mid-turn route Operations uses),
+               and drop is the old Discard. -->
+          <div id="queued" aria-live="polite" hidden>
+            <div id="queued-text"></div>
+            <div class="qmeta">
+              <span id="queued-note"></span>
+              <button id="queued-now" type="button">send now</button>
+              <button id="queued-discard" type="button">drop</button>
+            </div>
           </div>
           <!-- #109. What is riding along with the next prompt. The file is
                uploaded when it is picked rather than when Send is pressed,
                because the daemon's answer IS the thing the prompt has to carry,
                so a refusal has to surface while the typed text is still on
-               screen to keep. It is named here instead of only in the status
-               line, because a strip that hides which file is attached leaves
-               the reader guessing what is about to be sent, which is the
-               failure #70 records for a queued message. -->
-          <div
-            id="pending"
-            aria-live="polite"
-            hidden
-            style="
-              margin-bottom: 6px;
-              padding: 6px 8px;
-              background: #1f2630;
-              border-left: 2px solid #a3be8c;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #c8d2e0;
-            "
-          >
+               screen to keep. -->
+          <div id="pending" aria-live="polite" hidden>
             <span id="pending-note"></span>
             <span id="pending-list"></span>
           </div>
-          <div class="field">
-            <span class="ghost" id="idle-ghost" hidden></span>
-            <textarea
-              id="prompt"
-              rows="3"
-              placeholder="type a prompt to send to the watched session"
-            ></textarea>
-          </div>
-          <!-- #70. A separate control rather than making Send queue. Send is
-               held for the whole turn on purpose: it is the fix for the report
-               that Send looked pressable while doing nothing, and two verifier
-               scenarios press during a turn and assert it is disabled. Inverting
-               it would risk that complaint coming back, so the ability to queue
-               arrives as its own button and Send means what it always meant.
-               It is shown only while a send is in flight, because a queue button
-               outside a turn is a Send button that does not send. -->
-          <button id="queue" type="button" hidden>Queue</button>
           <!-- #125. What the store already holds, which is a different fact
-               from what is staged above. The pending strip is this page's
-               memory and a reload empties it; these files stayed. Fetched on
-               the first open rather than on watch, because the names are the
-               daemon's answer and polling it on every session would pay a
-               round trip nobody asked for. Bounded and scrollable on purpose:
-               an open list that grows is how the to-do strip pushed the
-               composer under the fold on a phone. Its toggle lives in the
-               control row (#175); the box stays here so it opens between the
-               field and that row. -->
-          <div
-            id="stored"
-            aria-live="polite"
-            hidden
-            style="
-              margin-top: 6px;
-              padding: 6px 8px;
-              background: #1f2630;
-              border-left: 2px solid #88c0d0;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #c8d2e0;
-              max-height: 140px;
-              overflow-y: auto;
-            "
-          >
+               from what is staged above. Fetched on the first open rather than
+               on watch. Bounded and scrollable on purpose: an open list that
+               grows is how the to-do strip pushed the composer under the fold
+               on a phone. Its toggle is the Files pill under the +. -->
+          <div id="stored" class="cpanel" aria-live="polite" hidden>
             <span id="stored-note"></span>
             <span id="stored-list"></span>
             <!-- #125: the content read's answer. Deliberately inside the box
-                 above rather than beside it: that box is bounded and scrolls,
-                 and an open file that grew its own box is how the to-do strip
-                 pushed the composer under the fold on a phone. -->
+                 above rather than beside it: that box is bounded and scrolls. -->
             <span id="stored-preview" hidden></span>
           </div>
           <!-- #127. What the session PRODUCED, which is a different fact from
-               the box above it (what someone sent in). Its own control rather
-               than rows added to that panel: that panel's Open rule is one
-               line, "only an image is drawn, anything else is offered as a
-               file", and a saved webpage is the one content type that must
-               never be drawn here. The body is HTML fetched off the open web,
+               the box above it (what someone sent in). A row here only ever
+               offers a download: the body is HTML fetched off the open web,
                served from an origin that holds the operator's token, and this
-               page sets no Content-Security-Policy at all, so a row here only
-               ever offers a download. The web-shell, which already answered
-               this same question, keeps artifacts in their own panel too.
-               Same bounded shape as the box above, because an open list that
-               grows is how the to-do strip pushed the composer under the fold
-               on a phone. Fetched on the first open rather than polled. Its
-               toggle lives in the control row (#175), like the one above. -->
-          <div
-            id="artifacts"
-            aria-live="polite"
-            hidden
-            style="
-              margin-top: 6px;
-              padding: 6px 8px;
-              background: #1f2630;
-              border-left: 2px solid #88c0d0;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #c8d2e0;
-              max-height: 140px;
-              overflow-y: auto;
-            "
-          >
+               page sets no Content-Security-Policy. Its toggle is the
+               Artifacts pill under the +. -->
+          <div id="artifacts" class="cpanel" aria-live="polite" hidden>
             <span id="artifacts-note"></span>
             <span id="artifacts-list"></span>
           </div>
-          <!-- #124. "Where did I leave off", asked of the daemon that was
-               watching. Its own button rather than a line in the transcript:
-               the summary is a sentence ABOUT the conversation, not a turn IN
-               it, and text nobody sent has no business inside the history the
-               operator reads. Same bounded shape as the panel above it, because
-               an open strip that grows is what pushed the composer under the
-               fold on a phone. Hidden until the daemon says it can answer, so
-               an old daemon shows no button that could only fail. -->
-          <button
-            id="recap-toggle"
-            type="button"
-            aria-expanded="false"
-            hidden
-          >
-            Where did I leave off?
-          </button>
-          <div
-            id="recap"
-            aria-live="polite"
-            hidden
-            style="
-              margin-top: 6px;
-              padding: 6px 8px;
-              background: #1f2630;
-              border-left: 2px solid #88c0d0;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #c8d2e0;
-              max-height: 140px;
-              overflow-y: auto;
-            "
-          ></div>
-          <!-- #133. A side question about this conversation, answered without
-               joining its turn order. Its own control rather than a line in the
-               composer: the composer's Send is guarded so a held prompt cannot
-               be doubled (#70), and a question that must NOT take a turn has no
-                 business sharing the button that does. It needs a field, which
-               is why the recap slot above cannot answer this one -- recap asks
-               a fixed question, this one is the operator's words.
-               Collapsed until pressed, for the same reason as recap: an open
-               strip that grows is what pushed the composer under the fold on a
-               phone, and a field plus an answer is taller than either alone. -->
-          <button id="btw-toggle" type="button" aria-expanded="false" hidden>
-            Ask a side question
-          </button>
-          <div id="btw-panel" hidden style="margin-top: 6px">
-            <input
-              id="btw-question"
-              type="text"
-              maxlength="4096"
-              placeholder="a question about this conversation"
-              style="
-                width: 100%;
-                box-sizing: border-box;
-                padding: 6px 8px;
-                font: inherit;
-                font-size: 0.82rem;
-                border-radius: 6px;
-                border: 1px solid #3a4452;
-                background: #1f2630;
-                color: #c8d2e0;
-              "
-            />
-            <button id="btw-ask" type="button" style="margin-top: 6px">
-              Ask
-            </button>
-            <div
-              id="btw"
-              aria-live="polite"
-              hidden
-              style="
-                margin-top: 6px;
-                padding: 6px 8px;
-                background: #1f2630;
-                border-left: 2px solid #88c0d0;
-                border-radius: 6px;
-                font-size: 0.82rem;
-                color: #c8d2e0;
-                max-height: 140px;
-                overflow-y: auto;
-              "
-            ></div>
-          </div>
-          <!-- #134. A checkout handover is the one conversation control that
-               changes WHICH conversation owns the work: the daemon moves the
-               git checkout's ownership to a fresh session and links the pair,
-               so the conversation on screen stops being the thing that owns
-               it. That is why this is a named button that has to be pressed
-               twice rather than a chip that fires on one tap, and why the answer
-               says out loud
-               that the conversation now on screen is the replacement: an
-               operator who is not told keeps typing into a conversation that
-               no longer has a checkout. Gated on the daemon's own capability,
-               because an older daemon answers this route with a 404 that would
-               read as a broken button rather than an unsupported one. -->
-          <button id="wt-reset" type="button" hidden>
-            Hand over the checkout
-          </button>
-          <div
-            id="wt-reset-note"
-            aria-live="polite"
-            hidden
-            style="
-              margin-top: 6px;
-              padding: 6px 8px;
-              background: #1f2630;
-              border-left: 2px solid #a3be8c;
-              border-radius: 6px;
-              font-size: 0.82rem;
-              color: #c8d2e0;
-              max-height: 140px;
-              overflow-y: auto;
-            "
-          ></div>
-          <div class="crow">
-            <button
-              id="dictate"
-              class="mic"
-              title="dictate the prompt with this browser's speech engine"
-            >
-              <span class="m">🎙</span><span class="w">Dictate</span>
-            </button>
-            <!-- #97. The engine is named where the control is drawn. A mic icon
-                 alone reads as the product's voice stack; what runs here is the
-                 browser's Web Speech API, a different engine with different
-                 accuracy and language coverage that is simply absent in some
-                 browsers. The gateway has no transcribe route to offer instead,
-                 so the honest fix is the label. It is a sibling of the button,
-                 not part of its text, because the running label is rewritten to
-                 "Stop" while a session is open (into the .w span, so the glyph
-                 beside it survives). -->
-            <span
-              class="cmd-kind"
-              id="dictate-engine"
-              title="dictation is transcribed by this browser's Web Speech API, not by the gateway: the product's voice stack is not wired here"
-              >browser</span
-            >
-            <select id="dictate-lang" title="dictation language">
-              <option value="">auto</option>
-              <option value="en-US">English (US)</option>
-              <option value="en-GB">English (UK)</option>
-              <option value="es-ES">Spanish</option>
-              <option value="fr-FR">French</option>
-              <option value="de-DE">German</option>
-              <option value="pt-BR">Portuguese (BR)</option>
-              <option value="hi-IN">Hindi</option>
-              <option value="zh-CN">Chinese</option>
-              <option value="ja-JP">Japanese</option>
-            </select>
-            <label
-              class="lab"
-              title="when dictation ends on a pause, send the prompt automatically"
-              ><input id="dictate-autosend" type="checkbox" /> auto-send</label
-            >
-            <span class="interim" id="dictate-interim" aria-live="polite"></span>
-            <!-- #175. The attachment controls, folded in from the row of their
-                 own they had between the field and this one. g1 draws the
-                 composer as three rows (field, this row, idle), and that fourth
-                 row was most of what kept the composer under the fold. Short
-                 words where the row has room and a glyph below 860px, with the
-                 full phrase in title and aria-label at every width, the same
-                 trade the verbs make. The handlers find all three by id, so
-                 nothing else moved with them.
-                 #109: Attach is its own control rather than a drop zone over
-                 the composer, because a phone's browser opens a file picker
-                 reliably and a drop target that is not obviously one goes
-                 unused on the device that most wants it. The file input is
-                 hidden because a bare one renders as a platform-styled button
-                 that matches nothing else here; it is still what opens the
-                 picker. -->
-            <span class="agroup">
-              <button
-                id="attach"
-                type="button"
-                class="ic"
-                title="Attach a file to the next prompt"
-                aria-label="Attach a file to the next prompt"
-              >
-                <span class="g" aria-hidden="true">📎</span
-                ><span class="w">Attach</span>
-              </button>
-              <input id="attach-file" type="file" multiple hidden />
-              <button
-                id="stored-toggle"
-                type="button"
-                class="ic"
-                aria-expanded="false"
-                aria-controls="stored"
-                title="Files in this session"
-                aria-label="Files in this session"
-              >
-                <span class="g" aria-hidden="true">🗂</span
-                ><span class="w">Files</span>
-              </button>
-              <button
-                id="artifacts-toggle"
-                type="button"
-                class="ic"
-                aria-expanded="false"
-                aria-controls="artifacts"
-                title="Artifacts in this session"
-                aria-label="Artifacts in this session"
-              >
-                <span class="g" aria-hidden="true">📦</span
-                ><span class="w">Artifacts</span>
-              </button>
-            </span>
-            <!-- #120. The session verbs moved here from their own block above
-                 the transcript, which is why that block is gone: the row under
-                 the field is where the sheet draws them, and a second copy up
-                 top is the same second-door problem #119 retired the switcher
-                 for. Symbols because the row has to stay short; the full phrase
-                 is in each title. -->
-            <span class="sgroup">
-              <button
-                class="ic"
-                id="cancel-turn"
-                title="Abort the turn running on the host (POST /session/:id/cancel)"
-              >
-                ⊘
-              </button>
-              <button
-                class="ic end"
-                id="end-session"
-                title="Terminate the session on the host (POST /session/:id/end)"
-              >
-                ✕
-              </button>
-              <button
-                class="ic"
-                id="rewind-chat"
-                title="Roll this session back to an earlier turn (POST /session/:id/rewind)"
-              >
-                ⏪︎
-              </button>
-              <!-- issue #48: hidden by default; self-heal shows it when the retry
-                   budget is exhausted, and any fresh watch / Unwatch hides it -->
-              <button
-                class="ic"
-                id="reconnect"
-                style="display: none"
-                title="Self-heal gave up after repeated retries. Re-attach to this session's event stream now."
-              >
-                ↻
-              </button>
-              <button
-                type="button"
-                class="help-btn"
-                aria-label="What are these controls?"
-                aria-expanded="false"
-                aria-controls="help-session-controls"
-              >
-                ?
-              </button>
-            </span>
-            <button id="send">Send</button>
-          </div>
-          <div class="help-text" id="help-session-controls" hidden>
-            The symbols at the right of this row act on the session you are
-            watching. <b>⊘</b> aborts the turn running right now without ending
-            the session. <b>✕</b> ends the session entirely. <b>⏪︎</b> rolls it
-            back to an earlier turn (a turn picker appears once you choose one).
-            <b>↻</b> only appears after the automatic self-heal gives up after
-            repeated retries, to re-attach the event stream by hand. Each one
-            carries its full phrase in its tooltip.
-          </div>
-          <span
-            id="session-verb-result"
-            style="color: #888; font-size: 0.85rem"
-          ></span>
-          <div id="rewind-pick" style="display: none; margin-top: 0.6rem">
+          <div id="rewind-pick" style="display: none">
             <label
               >Rewind to
-              <select id="rewind-turn-pick" style="max-width: 28rem"></select>
+              <select id="rewind-turn-pick"></select>
             </label>
-            <button id="rewind-pick-btn">Rewind</button>
+            <button id="rewind-pick-btn" type="button">Rewind</button>
             <button id="rewind-pick-close" type="button">Cancel</button>
-            <span
-              id="rewind-pick-result"
-              style="color: #888; font-size: 0.85rem"
-            ></span>
+            <span id="rewind-pick-result"></span>
           </div>
-          <div class="idle" id="idle-suggest">
-            <label title="next-step suggestions when this session goes idle"
-              ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
-              suggestions</label
+          <span class="interim" id="dictate-interim" aria-live="polite"></span>
+          <!-- #184. One row: the + that opens the tools, the field, and Send.
+               While a turn runs Stop takes Send's place (#cancel-turn, the
+               handler the ⊘ verb had), and Queue (#70) sits beside it, since
+               Send is held for the whole turn on purpose and queueing is its
+               own control rather than a Send that does not send. -->
+          <div class="crow">
+            <button
+              id="h1-plus"
+              type="button"
+              aria-label="More composer options"
+              aria-expanded="false"
+              aria-controls="h1-tools"
             >
-            <span class="st" id="idle-suggest-status"></span>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            </button>
+            <div class="field">
+              <span class="ghost" id="idle-ghost" hidden></span>
+              <textarea
+                id="prompt"
+                rows="1"
+                aria-label="Message"
+                placeholder="Message"
+              ></textarea>
+            </div>
+            <button
+              id="queue"
+              type="button"
+              hidden
+              title="Queue this message to send when the turn ends"
+              aria-label="Queue this message to send when the turn ends"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8" /></svg>
+            </button>
+            <button id="send" type="button" aria-label="Send">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg
+              ><span class="lbl">Send</span>
+            </button>
+            <button
+              id="cancel-turn"
+              type="button"
+              hidden
+              title="Abort the turn running on the host (POST /session/:id/cancel)"
+              aria-label="Stop the turn"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg
+              ><span class="lbl">Stop</span>
+            </button>
           </div>
         </section>
       </div>
@@ -3367,18 +3942,14 @@
               ?
             </button>
           </summary>
+          <!-- #184. The sticky tab bar setting went with the tab bar: the bar
+               that replaced it is always at the top of the screen, so there is
+               nothing left for the box to pin. -->
           <div class="help-text" id="help-ui-prefs" hidden>
-            Display preferences. <b>Sticky tab bar</b> keeps the tab row pinned
-            to the top of the page while you scroll; it is tab-local and resets
-            on reload. <b>Stamp timezone</b> is the zone message times are
-            printed in, and unlike the tab bar it IS saved — on the gateway,
-            keyed to the paired token you are reading with, so a phone and a
-            laptop can each carry their own.
-          </div>
-          <div>
-            <label
-              ><input type="checkbox" id="sticky-tabs" /> Sticky tab bar</label
-            >
+            Display preferences. <b>Stamp timezone</b> is the zone message
+            times are printed in. It is saved on the gateway, keyed to the
+            paired token you are reading with, so a phone and a laptop can each
+            carry their own.
           </div>
           <div>
             <label for="stamp-zone">Stamp timezone</label>
@@ -4430,129 +5001,54 @@
         $('app-body').hidden = true;
       }
 
-      // Tab bar (add-rc-viewer-ui-reorg task 2): #app-body is split into four
-      // panes (chat/ops/settings/diag). switchTab shows the matching
-      // .tab-pane and highlights the matching .tab button; everything else
-      // is hidden via CSS (display:none), so ids stay stable and existing
-      // event handlers (which reference elements by id via `$`) keep working
-      // regardless of which pane is currently visible.
+      // Panes (add-rc-viewer-ui-reorg task 2): #app-body holds four panes
+      // (chat/ops/settings/diag). switchTab shows the matching .tab-pane and
+      // marks the matching .tab; everything else is hidden via CSS
+      // (display:none), so ids stay stable and every handler that finds its
+      // element with `$` keeps working whichever pane is on screen.
+      // #184: the tab bar is gone from the Chat screen. Operations, Settings
+      // and Diagnostics are rows on the More screen (≡), each opening as a
+      // screen of its own whose back button is the Chat tab, until slice 4
+      // folds them into one grouped sheet. The pins went with the bar: a pane
+      // pinned into a 390px Chat column was a desktop move, and the spec
+      // retires it (the laptop derivation may bring back a side pane).
       const TAB_IDS = ['chat', 'ops', 'settings', 'diag'];
-
-      // Pin/collapse mechanics (task 3): a pinned tab's content lives as a
-      // collapsible <details> section inside #pin-area on the Chat tab.
-      // DOM nodes are MOVED (never cloned) between the tab pane and the
-      // pinned <details> body so event listeners, SSE connections, and form
-      // state all survive the move. pinState[tabId] holds the <details>
-      // element while pinned (null when not pinned). Pin order is fixed —
-      // Operations above Settings above Diagnostics — regardless of the
-      // order tabs were pinned in.
-      function moveChildren(source, target) {
-        while (source.firstChild) target.appendChild(source.firstChild);
-      }
-
-      const PIN_ORDER = ['ops', 'settings', 'diag'];
-      const PIN_LABELS = {
+      const PANE_NAMES = {
+        chat: 'Chat',
         ops: 'Operations',
         settings: 'Settings',
         diag: 'Diagnostics',
       };
-      const pinState = { ops: null, settings: null, diag: null };
 
       function switchTab(tabId) {
-        // Leaving a pinned tab: move its content back into the pin area and
-        // reveal the (previously hidden) <details> wrapper.
-        for (const id of TAB_IDS) {
-          if ($('pane-' + id).classList.contains('active') && pinState[id]) {
-            const body = pinState[id].querySelector('div');
-            moveChildren($('pane-' + id), body);
-            pinState[id].hidden = false;
-          }
-        }
-
-        // Entering a pinned tab: pull its content out of the pin area back
-        // into the tab pane for the duration of the visit, hiding the
-        // (now-empty) <details> wrapper so it isn't shown twice.
-        if (pinState[tabId]) {
-          const body = pinState[tabId].querySelector('div');
-          moveChildren(body, $('pane-' + tabId));
-          pinState[tabId].hidden = true;
-        }
-
         for (const id of TAB_IDS) {
           const pane = $('pane-' + id);
-          const btn = document.querySelector('.tab[data-tab="' + id + '"]');
-          if (id === tabId) {
-            pane.classList.add('active');
-            btn.classList.add('active');
-          } else {
-            pane.classList.remove('active');
-            btn.classList.remove('active');
+          const on = id === tabId;
+          pane.classList.toggle('active', on);
+          for (const btn of document.querySelectorAll(
+            '.tab[data-tab="' + id + '"]',
+          )) {
+            btn.classList.toggle('active', on);
           }
         }
+        $('pane-head').hidden = tabId === 'chat';
+        $('pane-head-title').textContent = PANE_NAMES[tabId] || '';
+        // Opening a pane is what the More screen was opened for, so it goes.
+        setMoreOpen(false);
         saveTab(tabId);
       }
 
-      document.getElementById('tab-bar').addEventListener('click', (e) => {
-        const tab = e.target.closest('.tab');
+      document.addEventListener('click', (e) => {
+        const tab = e.target.closest && e.target.closest('.tab[data-tab]');
         if (!tab) return;
-        // Don't switch tab when clicking the pin checkbox.
-        if (e.target.classList.contains('pin-cb')) return;
         switchTab(tab.dataset.tab);
       });
 
-      document.getElementById('tab-bar').addEventListener('change', (e) => {
-        if (!e.target.classList.contains('pin-cb')) return;
-        const tabId = e.target.dataset.pin;
-        const pinArea = $('pin-area');
-
-        if (e.target.checked) {
-          // Pin: wrap the pane's content in a <details>, move it into the
-          // pin area, and insert it in fixed pin order (not pin-click order).
-          const details = document.createElement('details');
-          const summary = document.createElement('summary');
-          summary.textContent = PIN_LABELS[tabId];
-          details.appendChild(summary);
-          const body = document.createElement('div');
-          moveChildren($('pane-' + tabId), body);
-          details.appendChild(body);
-          pinState[tabId] = details;
-
-          let insertBefore = null;
-          const myIdx = PIN_ORDER.indexOf(tabId);
-          for (let i = myIdx + 1; i < PIN_ORDER.length; i++) {
-            if (pinState[PIN_ORDER[i]]) {
-              insertBefore = pinState[PIN_ORDER[i]];
-              break;
-            }
-          }
-          if (insertBefore) pinArea.insertBefore(details, insertBefore);
-          else pinArea.appendChild(details);
-
-          // Pinning the tab currently being viewed would leave its pane
-          // active but empty — send the user back to Chat instead.
-          if ($('pane-' + tabId).classList.contains('active'))
-            switchTab('chat');
-        } else {
-          // Unpin: move content back to its tab pane (a no-op if the pane is
-          // already showing it, i.e. the user is currently viewing this
-          // pinned tab) and drop the <details> wrapper.
-          const details = pinState[tabId];
-          if (details) {
-            const body = details.querySelector('div');
-            moveChildren(body, $('pane-' + tabId));
-            details.remove();
-            pinState[tabId] = null;
-          }
-        }
-        savePins();
-      });
-
-      // #182. The open tab and the pinned panes come back after a reload. The
-      // tab follows the conversation pointer's rule (#50): this window's own
-      // record first, then the profile-wide one, so a second window keeps its
-      // own tab while a rebuilt tab still opens where the last one was.
+      // #182. The open pane comes back after a reload. It follows the
+      // conversation pointer's rule (#50): this window's own record first, then
+      // the profile-wide one, so a second window keeps its own pane while a
+      // rebuilt tab still opens where the last one was.
       const TAB_NAME = 'tab';
-      const PINS_NAME = 'pins';
       function saveTab(tabId) {
         try {
           sessionStorage.setItem(UI_PREFIX + TAB_NAME, JSON.stringify(tabId));
@@ -4574,27 +5070,37 @@
         }
         return uiRead(TAB_NAME, ok);
       }
-      function savePins() {
-        const pinned = PIN_ORDER.filter((id) => pinState[id]);
-        uiWrite(PINS_NAME, pinned.length ? pinned : undefined);
-      }
-      // Runs while the script loads, before the auth check reveals the app, so
-      // the first frame the reader sees already has their panes where they left
-      // them. Pins go first: pinning the tab that is open sends the page back to
-      // Chat, so the tab is applied after. Driven through the checkboxes' own
-      // change handler so a restored pin is built exactly the way a tapped one
-      // is.
-      (function restoreTabsAndPins() {
-        const pins = uiRead(
-          PINS_NAME,
-          (v) => Array.isArray(v) && v.every((id) => PIN_ORDER.includes(id)),
-        );
-        for (const id of pins || []) {
-          const cb = document.querySelector('.pin-cb[data-pin="' + id + '"]');
-          if (!cb || cb.checked) continue;
-          cb.checked = true;
-          cb.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // #184. The More screen, the ⋯ menu, the inspector sheet and the
+      // conversation list are each one open-or-shut state. Opening one shuts
+      // the others that would overlap it, and Escape shuts whichever is on
+      // top and hands focus back to the control that opened it.
+      function setMoreOpen(open) {
+        const scr = $('more-screen');
+        if (scr.hidden === !open) return;
+        scr.hidden = !open;
+        $('h1-more').setAttribute('aria-expanded', String(open));
+        if (open) {
+          closeH1Menu(false);
+          setListOpen(false);
+          const first = scr.querySelector('.row');
+          if (first) first.focus({ preventScroll: true });
         }
+      }
+      $('h1-more').addEventListener('click', () =>
+        setMoreOpen($('more-screen').hidden),
+      );
+      $('more-back').addEventListener('click', () => {
+        setMoreOpen(false);
+        $('h1-more').focus({ preventScroll: true });
+      });
+
+      // Runs while the script loads, before the auth check reveals the app, so
+      // the first frame the reader sees already has their pane where they left
+      // it. A pin list an older page saved is dropped rather than read: there
+      // is nothing left to pin it to.
+      (function restoreTab() {
+        uiWrite('pins', undefined);
         const tab = loadTab();
         if (tab && tab !== 'chat') switchTab(tab);
       })();
@@ -4618,13 +5124,6 @@
         panel.hidden = wasClosed ? false : !panel.hidden;
         btn.setAttribute('aria-expanded', String(!panel.hidden));
       });
-
-      // Sticky tab bar (Settings > UI preferences). Resets on reload: it was
-      // written under a no-localStorage-for-UI-state rule that #182 lifted for
-      // the controls it names (see UI_PREFIX), and this one was not among them.
-      $('sticky-tabs').onchange = () => {
-        $('tab-bar').classList.toggle('sticky', $('sticky-tabs').checked);
-      };
 
       // Stamp timezone (Settings > UI preferences). Issue #80: a viewer session
       // is often read somewhere other than the machine it watches, so the zone
@@ -4939,7 +5438,11 @@
           onNearBottomChange: (near) => {
             $('jump-bottom').hidden = near;
           },
-          onFork: (item) => void doForkHere(watchedSessionId, item),
+          // #184: a finished turn's Fork here, Rewind to here and Copy, from
+          // the fork row and from every answer marked as ending a turn.
+          onTurnAct: (act, item) => void turnAct(act, item),
+          // #184: retry on a refused message's marker.
+          onRetry: (item) => retryNotSent(item),
           onCancelSubagent: (item) =>
             void doCancelSubagent(watchedSessionId, item),
           onCostSubagent: (item) =>
@@ -4960,94 +5463,46 @@
         attachTranscriptView(virtualCore, markdownIt),
       );
 
-      // #175. The transcript's cap is the room the viewport leaves once every
-      // band above and below it has been laid out, so with a full transcript
-      // the composer's bottom lands on the fold instead of under it. A flat
-      // 75vh could not do that: at 390x844 it alone is 633px, and the bar,
-      // rail strip, drawer band and a three-row composer need about 545px
-      // more.
-      // Still a max-height on a box that sizes to its content, never a flex
-      // basis: a flex-sized box is what broke the render-all scroll pin. When
-      // the cap does shrink the box, the render-all path re-pins a reader at
-      // the end on its own (#74's onBoxResize) and the fit re-pins the
-      // virtualized path below. Two bounds keep the old complaints out:
-      // - at most 75vh, the cap this replaced, so no viewport gets a taller
-      //   transcript than it had;
-      // - at least 30vh, so a tall band (an open panel, a card, a pinned tab)
-      //   pushes the composer down rather than squeezing the transcript
-      //   toward the 60px floor that read as "the chat window is way too
-      //   small" when #74 bounded the whole column.
-      // The room is measured from the transcript's edges, never its height, so
-      // the transcript growing to its new cap cannot feed back into the cap.
-      // The far edge is the Chat pane's own bottom, not the column's: on a
-      // phone the column is stretched to the viewport by the shell's flex, so
-      // its bottom counts the empty space under the composer, and the room
-      // then equals the transcript's current height and can only ever shrink.
-      // The pane is a flex item, so the composer's bottom margin stays inside
-      // it rather than collapsing out.
-      let transcriptFitQueued = false;
-      function fitTranscript() {
-        transcriptFitQueued = false;
+      // #184. The transcript is the frame's flexible region, so the composer
+      // is on the fold by construction and #175's fitted cap (fitTranscript,
+      // with its 30vh and 75vh bounds) is gone. What the fit also did is kept:
+      // a box that shrinks under a reader at the end (the sheet opening, the
+      // keyboard coming up, a card arriving) leaves the newest rows below it,
+      // and the virtualized path only re-anchors on an append, so nothing else
+      // would bring them back. The test is #74's arithmetic: a pure height
+      // change moves the gap by exactly the height lost, so a gap no larger
+      // than the loss is a reader who was at the end. So is one the view
+      // still counts as near the end: this observer was created before the
+      // view's, so it runs before a scroll the shrink causes can update that
+      // reading, and a reader a few pixels short of the end is still
+      // following it. A larger gap is a reader who had scrolled up to read,
+      // and they are left where they are.
+      let transcriptBoxH = 0;
+      function onTranscriptBox() {
         const tr = $('transcript');
-        const pane = $('pane-chat');
-        // Another tab, or the raw view: nothing to fit, and a hidden box
-        // measures zero, which would read as all the room in the world.
-        if (tr.getClientRects().length === 0) return;
-        // #182: the height the keyboard leaves while it is up, so the fit
-        // that keeps the composer on the fold keeps it above the keyboard.
-        const vh = appViewportHeight();
-        const box = tr.getBoundingClientRect();
-        const above = box.top + window.scrollY;
-        const below = pane.getBoundingClientRect().bottom - box.bottom;
-        const room = Math.floor(vh - above - below);
-        // #182: while the keyboard is up the 30% floor is dropped and the
-        // transcript takes only the room left, however little. The reader is
-        // typing, and the bands around the transcript already take most of a
-        // phone's visible height (measured at 390x844: about 460px), so a floor
-        // there would be the thing that puts the composer's Send under the
-        // keys. It comes back the moment the keyboard goes.
-        const floor = keyboardCovers > 0 ? 0 : Math.round(vh * 0.3);
-        const cap = Math.max(floor, Math.min(Math.floor(vh * 0.75), room));
-        const want = cap + 'px';
-        if (tr.style.getPropertyValue('--tx-cap') === want) return;
-        tr.style.setProperty('--tx-cap', want);
-        // A box that shrinks under a reader at the end leaves the newest rows
-        // below it, and the virtualized path only re-anchors on an append, so
-        // nothing else would bring them back (measured: at 1280x720 the
-        // in-progress tool row sat hidden under the box after the drawer
-        // arrived). The view still holds the near-bottom reading from before
-        // this write, so a reader who had scrolled up to read is left alone.
-        scrollTranscript(false);
+        const h = tr.clientHeight;
+        const lost = transcriptBoxH - h;
+        transcriptBoxH = h;
+        if (lost <= 0 || !transcriptView) return;
+        const gap = tr.scrollHeight - tr.scrollTop - h;
+        if (gap > 1 && (gap <= lost + 1 || transcriptView.isNearBottom())) {
+          transcriptView.scrollToEnd();
+        }
       }
-      // Batched to a frame: the observer fires for every streamed token that
-      // grows the column, and one read per frame is all the fit needs.
-      function queueFitTranscript() {
-        if (transcriptFitQueued) return;
-        transcriptFitQueued = true;
-        requestAnimationFrame(fitTranscript);
-      }
-      window.addEventListener('resize', queueFitTranscript);
       if (typeof ResizeObserver === 'function') {
-        // The pane, not the transcript: the bands that change the room
-        // (drawer, cards, strips, the composer's own panels) all resize it.
-        // On a phone the rail strip and the bar sit above the pane, so they
-        // are watched too.
-        const fitWatch = new ResizeObserver(queueFitTranscript);
-        fitWatch.observe($('pane-chat'));
-        fitWatch.observe($('tab-bar'));
-        fitWatch.observe($('rail'));
+        new ResizeObserver(onTranscriptBox).observe($('transcript'));
       }
 
       // #182. The on-screen keyboard. Neither phone browser shrinks the layout
       // viewport for it any more: iOS Safari never did, and Chrome on Android
       // has resized only the visual viewport by default since 108. So
       // innerHeight, and every vh unit, still counts the screen the keyboard
-      // covers, the fit above sizes the transcript for that whole height, and
-      // the composer the reader is typing into lands under the keys. The visual
-      // viewport is the part still on screen. While it is shorter than the
-      // layout viewport by more than KEYBOARD_MIN_PX, the shell takes its
-      // height (--app-h, read by the :root.kb-open rule), the fit measures
-      // against it, and the page is scrolled just far enough that the
+      // covers, a frame sized by it runs the whole height, and the composer
+      // the reader is typing into lands under the keys. The visual viewport is
+      // the part still on screen. While it is shorter than the layout viewport
+      // by more than KEYBOARD_MIN_PX, the frame takes its height (--app-h, read
+      // by the :root.kb-open rule; #184 makes that the whole frame rather than
+      // a floor under it), and the page is scrolled just far enough that the
       // composer's bottom edge is on screen.
       // The floor keeps out what is not a keyboard: a rounding remainder, a
       // browser toolbar sliding in or out, and a desktop's horizontal scrollbar
@@ -5056,9 +5511,6 @@
       // keyboard, is taller than this.
       const KEYBOARD_MIN_PX = 40;
       let keyboardCovers = 0; // px of the layout viewport under the keyboard
-      function appViewportHeight() {
-        return window.innerHeight - keyboardCovers;
-      }
       function syncKeyboardViewport() {
         const vv = window.visualViewport;
         if (!vv) return;
@@ -5078,7 +5530,6 @@
           root.style.removeProperty('--app-h');
           root.classList.remove('kb-open');
         }
-        queueFitTranscript();
       }
       // Lines the composer's bottom edge up with the keyboard's top edge. Only
       // while the reader is typing in the composer: a keyboard raised for the
@@ -5102,8 +5553,8 @@
       if (window.visualViewport) {
         const onViewport = () => {
           syncKeyboardViewport();
-          // Queued after the fit (syncKeyboardViewport queues it first), so the
-          // composer is measured where the new transcript cap puts it.
+          // A frame later, so the composer is measured where the frame's new
+          // height puts it.
           requestAnimationFrame(keepComposerInView);
         };
         window.visualViewport.addEventListener('resize', onViewport);
@@ -5139,9 +5590,7 @@
         const btn = $('load-earlier');
         btn.hidden = !watchedSessionId || transcriptExhausted;
         btn.disabled = transcriptPaging;
-        btn.textContent = transcriptPaging
-          ? '↑ loading…'
-          : '↑ load earlier messages';
+        btn.textContent = transcriptPaging ? '↑ loading…' : '↑ load earlier';
       }
 
       async function loadEarlierMessages() {
@@ -5165,6 +5614,7 @@
           }
           const page = await res.json();
           const rows = TranscriptModel.replayStoredPage(page.events);
+          markStoredTurnEnds(rows); // #184: their finished turns get actions
           transcriptCursor = strOr(page.nextCursor, '') || null;
           // Continuing needs the cursor as much as the daemon saying there is
           // more: without one a second tap would re-read the same newest page
@@ -5272,6 +5722,7 @@
         runningToolIds.clear();
         stopQuietWatch();
         setProcessing(false);
+        renderStatusLine(); // #184: Send comes back in Stop's place
       }
       // A running tool row is itself proof of work, and a better one than a
       // spinner, so it holds the indicator back while it lasts. Terminal
@@ -5293,6 +5744,7 @@
         turnOpen = true;
         stopQuietWatch();
         setProcessing(true);
+        renderStatusLine(); // #184: Stop takes Send's place
       }
       // ---- Crash-recovery banner (add-mid-turn-recovery §7) ---------------
       // `session_interrupted` / `session_recovered` are WAL-persisted markers,
@@ -5312,8 +5764,10 @@
           crashBanner = document.createElement('div');
           crashBanner.id = 'crash-banner';
           crashBanner.hidden = true;
-          const t = $('transcript');
-          t.parentNode.insertBefore(crashBanner, t);
+          // #184: above the transcript's wrapper, which is a positioned box
+          // the transcript fills; inside it the banner would sit under the rows.
+          const w = $('transcript-wrap');
+          w.parentNode.insertBefore(crashBanner, w);
         }
         return crashBanner;
       }
@@ -5388,6 +5842,7 @@
         renderFooter();
       }
       function addUser(text, time) {
+        markPrevTurnEnd(); // #184: the turn before this one is finished
         const item = transcriptModel.addUser(text, time);
         scrollTranscript(true);
         return item;
@@ -5493,13 +5948,38 @@
         $('plan-count').textContent =
           p.done > 0 ? p.done + ' of ' + p.total + ' done' : p.total + ' open';
         const shown = open.slice(0, PLAN_STRIP_ROWS);
-        $('plan-rows').textContent = shown.map((e) => e.text).join('\n');
+        // #184: the drawn marks, \u25b8 for the one in hand and \u25ab for
+        // the ones waiting, ahead of each row's own words.
+        $('plan-rows').textContent = shown
+          .map((e) => (e.status === 'in_progress' ? '\u25b8 ' : '\u25ab ') + e.text)
+          .join('\n');
         $('plan-rows').hidden = shown.length === 0;
         const off = open.length - shown.length;
-        $('plan-more').textContent = off > 0 ? '+' + off + ' more' : '';
+        $('plan-more').textContent = off > 0 ? off + ' more open' : '';
         $('plan-more').hidden = off <= 0;
         box.hidden = false;
+        renderPlanFold();
       }
+      // #184. A tap on the strip folds it to its count line and back. The
+      // fold is the reader's, so it is kept across a reload (#182's store).
+      const PLAN_FOLD_NAME = 'plan-folded';
+      let planFolded = uiRead(PLAN_FOLD_NAME, (v) => v === true) === true;
+      function renderPlanFold() {
+        const box = $('plan');
+        box.setAttribute('aria-expanded', String(!planFolded));
+        $('plan-mark').textContent = planFolded ? 'show' : 'hide';
+      }
+      function togglePlanFold() {
+        planFolded = !planFolded;
+        uiWrite(PLAN_FOLD_NAME, planFolded ? true : undefined);
+        renderPlanFold();
+      }
+      $('plan').addEventListener('click', togglePlanFold);
+      $('plan').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        togglePlanFold();
+      });
       // ---- Session status footer (model · tokens · mode · cwd) --------------
       // Model / approval mode / cwd come from GET /session/:id/context; the
       // context FILL comes from GET /session/:id/context-usage, which is a
@@ -5527,13 +6007,43 @@
           ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
           : String(typeof n === 'number' && n > 0 ? n : 0);
 
+      // The fill as the status line and the sheet both print it: the daemon's
+      // usage read when there is one, else the stream's last in/out counts.
+      function fillText() {
+        if (ctxUsage) {
+          // The daemon's own marker for "I estimated this, no provider count",
+          // shown rather than dropped: a fill is a much stronger claim when it
+          // is measured than when it is counted locally.
+          return (
+            (ctxUsage.estimated ? '~' : '') +
+            fmtK(ctxUsage.total) +
+            '/' +
+            fmtK(ctxUsage.window)
+          );
+        }
+        if (liveIn > 0 || liveOut > 0) {
+          return fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out';
+        }
+        return '';
+      }
+
+      // #184. The inspector sheet's rows, in #session-footer, the drawer
+      // band's old box: the model (a button opening the picker when there is
+      // more than one), the approval mode as a segmented control, the context
+      // fill with its bar, the folder, and the keep-this-mode box. The mode
+      // buttons drive the same select and the same changeApprovalMode the
+      // drawer's select did; the select stays in the box, unshown, as that
+      // handler's input. Export moved to the ⋯ menu.
       function renderFooter() {
         const f = $('session-footer');
+        renderStatusLine();
         if (!ctxInfo) {
           f.style.display = 'none';
           f.innerHTML = '';
+          $('h1-sheet-empty').hidden = false;
           return;
         }
+        $('h1-sheet-empty').hidden = true;
         const hasModes =
           Array.isArray(ctxInfo.availableModes) &&
           ctxInfo.availableModes.length > 1;
@@ -5541,57 +6051,41 @@
           Array.isArray(ctxInfo.availableModels) &&
           ctxInfo.availableModels.length > 1;
         f.innerHTML = '';
-        // The model name is tappable (opens the picker dialog) only when
-        // there's more than one model to switch to — same guard the mode
-        // picker below uses for its own select vs. plain text.
-        const modelSpan = document.createElement('span');
-        modelSpan.textContent = '🧠 ' + ctxInfo.modelName;
+        let keep = null; // the keep-this-mode box, drawn after the folder
+        const row = (label, ...kids) => {
+          const r = document.createElement('div');
+          r.className = 'sh-row';
+          const l = document.createElement('span');
+          l.className = 'sh-lbl';
+          l.textContent = label;
+          r.append(l, ...kids);
+          return r;
+        };
+        // The model name is a button (opens the picker dialog) only when
+        // there's more than one model to switch to -- same guard the mode
+        // control below uses for its buttons vs. plain text.
+        let model;
         if (hasModels) {
-          modelSpan.id = 'footer-model-name';
-          modelSpan.style.cursor = 'pointer';
-          modelSpan.style.textDecoration = 'underline dotted';
-          modelSpan.title = 'Tap to switch model';
-          modelSpan.setAttribute('role', 'button');
-          modelSpan.tabIndex = 0;
-          modelSpan.addEventListener('click', openModelPicker);
-          modelSpan.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              openModelPicker();
-            }
-          });
+          model = document.createElement('button');
+          model.type = 'button';
+          model.id = 'footer-model-name';
+          model.title = 'Tap to switch model';
+          model.textContent = ctxInfo.modelName + ' ▾';
+          model.addEventListener('click', openModelPicker);
+        } else {
+          model = document.createElement('span');
+          model.textContent = ctxInfo.modelName;
         }
-        f.append(modelSpan);
-        const rest = [];
-        if (ctxUsage) {
-          // The daemon's own marker for "I estimated this, no provider count",
-          // shown rather than dropped: a fill is a much stronger claim when it
-          // is measured than when it is counted locally.
-          rest.push(
-            (ctxUsage.estimated ? '~' : '') +
-              fmtK(ctxUsage.total) +
-              '/' +
-              fmtK(ctxUsage.window),
-          );
-        } else if (liveIn > 0 || liveOut > 0) {
-          rest.push(fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out');
-        }
-        // The mode name renders as text only when there is no picker (a single
-        // available mode); otherwise the select below carries it.
-        if (!hasModes && ctxInfo.modeName) rest.push(ctxInfo.modeName);
-        if (ctxInfo.cwd) rest.push(ctxInfo.cwd);
-        if (rest.length) {
-          f.append(document.createTextNode('   ·   ' + rest.join('   ·   ')));
-        }
+        f.append(row('Model', model));
         if (hasModes) {
-          // #182. The daemon's mode is what the select shows: it is the mode
+          // #182. The daemon's mode is what the control shows: it is the mode
           // the session is actually in, and the page never sends one on the
           // reader's behalf. What the page keeps is the last mode the reader
-          // set here and the daemon confirmed. It fills the select only when
-          // the daemon names no mode it also lists (the select would otherwise
-          // claim its first option), and when the daemon reports a different
-          // one, which is what a session resumed after a daemon restart does,
-          // the note says what was set before so it is one tap to put back.
+          // set here and the daemon confirmed. It fills the control only when
+          // the daemon names no mode it also lists, and when the daemon reports
+          // a different one, which is what a session resumed after a daemon
+          // restart does, the note says what was set before so it is one tap
+          // to put back.
           const known = (id) => ctxInfo.availableModes.find((m) => m.id === id);
           const chosen = uiSessionRead(
             MODE_NAME,
@@ -5603,56 +6097,194 @@
             : chosen;
           const sel = document.createElement('select');
           sel.id = 'footer-mode';
-          sel.style.marginLeft = '10px';
+          sel.hidden = true;
+          sel.setAttribute('aria-hidden', 'true');
+          sel.tabIndex = -1;
+          const seg = document.createElement('div');
+          seg.className = 'seg';
+          seg.setAttribute('role', 'group');
+          seg.setAttribute('aria-label', 'Approval mode');
           for (const m of ctxInfo.availableModes) {
             const o = document.createElement('option');
             o.value = m.id;
             o.textContent = m.name;
             if (m.id === shown) o.selected = true;
             sel.appendChild(o);
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.dataset.mode = m.id;
+            b.textContent = m.name;
+            b.setAttribute('aria-pressed', String(m.id === shown));
+            b.addEventListener('click', () => {
+              if (m.id === sel.value) return;
+              sel.value = m.id;
+              void changeApprovalMode(sel, cb);
+            });
+            seg.appendChild(b);
           }
           const cb = document.createElement('input');
           cb.type = 'checkbox';
           cb.id = 'footer-mode-persist';
           cb.title = 'persist this mode for future sessions in this workspace';
-          // #182: the box is rebuilt with the band on every render, so its
+          // #182: the box is rebuilt with the sheet on every render, so its
           // state has to come from somewhere other than the old node.
           cb.checked = uiRead(MODE_PERSIST_NAME, (v) => v === true) === true;
           cb.addEventListener('change', () =>
             uiWrite(MODE_PERSIST_NAME, cb.checked ? true : undefined),
           );
-          const cbl = document.createElement('label');
-          cbl.style.marginLeft = '6px';
-          cbl.appendChild(cb);
-          cbl.appendChild(document.createTextNode(' persist'));
           const note = document.createElement('span');
           note.id = 'footer-mode-note';
-          note.style.marginLeft = '8px';
-          note.style.fontSize = '12px';
           if (chosen && known(ctxInfo.currentModeId) && chosen !== shown) {
             note.textContent = 'last set here: ' + known(chosen).name;
           }
+          // Kept as the select's own change path too, so anything that sets
+          // the select the old way still reaches the same handler.
           sel.addEventListener('change', () => changeApprovalMode(sel, cb));
-          f.append(sel, cbl, note);
+          const col = document.createElement('div');
+          col.className = 'sh-col';
+          const l = document.createElement('span');
+          l.className = 'sh-lbl';
+          l.textContent = 'Mode';
+          col.append(l, seg, note, sel);
+          f.append(col);
+          keep = document.createElement('label');
+          keep.className = 'keep';
+          keep.append(
+            cb,
+            document.createTextNode(' Keep this mode for new conversations here'),
+          );
+        } else if (ctxInfo.modeName) {
+          // The mode name renders as text only when there is no control (a
+          // single available mode).
+          const t = document.createElement('span');
+          t.textContent = ctxInfo.modeName;
+          f.append(row('Mode', t));
         }
-        // Export (issue #108): a remote holds a token but no disk, so the only
-        // way to get a conversation out of here is to ask the gateway for it.
-        // The route takes any format the daemon supports; this is one button
-        // for markdown, the form a person pastes somewhere else.
-        const ex = document.createElement('button');
-        ex.id = 'footer-export';
-        ex.type = 'button';
-        ex.textContent = 'export';
-        ex.title = 'Download this conversation as markdown';
-        ex.style.marginLeft = '10px';
-        ex.addEventListener('click', () => void exportConversation());
-        const exNote = document.createElement('span');
-        exNote.id = 'footer-export-note';
-        exNote.style.marginLeft = '6px';
-        exNote.style.fontSize = '12px';
-        f.append(ex, exNote);
+        const fill = fillText();
+        if (fill) {
+          const col = document.createElement('div');
+          col.className = 'sh-col';
+          const r = row('Context');
+          const v = document.createElement('span');
+          v.textContent = fill;
+          r.append(v);
+          col.append(r);
+          if (ctxUsage && ctxUsage.window > 0) {
+            const bar = document.createElement('div');
+            bar.className = 'ctx-bar';
+            const inner = document.createElement('div');
+            const pct = Math.max(
+              0,
+              Math.min(100, (100 * ctxUsage.total) / ctxUsage.window),
+            );
+            inner.style.width = pct.toFixed(1) + '%';
+            bar.appendChild(inner);
+            col.append(bar);
+          }
+          f.append(col);
+        }
+        if (ctxInfo.cwd) {
+          const c = document.createElement('span');
+          c.className = 'cwd';
+          c.textContent = ctxInfo.cwd;
+          f.append(row('Folder on host', c));
+        }
+        if (keep) f.append(keep);
         f.style.display = '';
       }
+
+      // #184. The status line: a dot and a word for what the conversation is
+      // doing, then the model, the fill and the mode. Green idle, blue running
+      // (with how long), amber while a card waits on the reader, red when the
+      // gateway does not answer. Called from every place that changes one of
+      // those facts, and once a second while a turn runs for the clock.
+      let gatewayOk = true;
+      let runStartedAt = 0;
+      let runClock = null;
+      function turnRunning() {
+        return !!watchedSessionId && (turnOpen || abandonPendingSend !== null);
+      }
+      function shortModel(name) {
+        // A provider path or a route hash is the model's id, not its name; the
+        // last segment is what a reader recognises on a 390px line.
+        const n = String(name || '');
+        const tail = n.split('/').pop();
+        return tail || n;
+      }
+      function renderStatusLine() {
+        const btn = $('h1-status');
+        if (!btn) return;
+        const running = turnRunning();
+        if (running && !runStartedAt) runStartedAt = Date.now();
+        if (!running) runStartedAt = 0;
+        let state = 'idle';
+        let word = 'idle';
+        if (!gatewayOk) {
+          state = 'off';
+          word = 'gateway unreachable';
+        } else if (!watchedSessionId) {
+          state = 'none';
+          word = 'no conversation';
+        } else if ($('cards').querySelector('.card')) {
+          state = 'wait';
+          word = 'waiting for you';
+        } else if (running) {
+          state = 'run';
+          const secs = Math.floor((Date.now() - runStartedAt) / 1000);
+          word = 'running ' + h1Clock(secs);
+        }
+        if (btn.dataset.state !== state) btn.dataset.state = state;
+        h1Text($('h1-state'), word);
+        h1Text($('h1-model'), ctxInfo ? shortModel(ctxInfo.modelName) : '');
+        h1Text($('h1-tokens'), fillText());
+        h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
+        renderRunControls(running);
+        if (running && !runClock) {
+          runClock = setInterval(renderStatusLine, 1000);
+        } else if (!running && runClock) {
+          clearInterval(runClock);
+          runClock = null;
+        }
+      }
+      function h1Text(el, text) {
+        if (el && el.textContent !== text) el.textContent = text;
+      }
+      function h1Clock(secs) {
+        return secs < 60
+          ? secs + 's'
+          : Math.floor(secs / 60) + 'm' + String(secs % 60).padStart(2, '0') + 's';
+      }
+      // #184. Stop takes Send's place while a turn runs, and Queue (#70) sits
+      // beside it, since Send is held for the whole turn on purpose. A turn
+      // started somewhere else (another window, the laptop) counts too: Send
+      // would only be refused there, so the reader is offered the queue.
+      function renderRunControls(running) {
+        $('send').hidden = running;
+        $('cancel-turn').hidden = !running;
+        $('queue').hidden = !running;
+      }
+      new MutationObserver(renderStatusLine).observe($('cards'), {
+        childList: true,
+      });
+
+      // #184. The sheet opens in place under the status line and pushes the
+      // transcript down rather than covering it.
+      function setSheetOpen(open) {
+        const sheet = $('h1-sheet');
+        if (sheet.hidden === !open) return;
+        sheet.hidden = !open;
+        $('h1-status').setAttribute('aria-expanded', String(open));
+        if (open) closeH1Menu(false);
+      }
+      $('h1-status').addEventListener('click', () =>
+        setSheetOpen($('h1-sheet').hidden),
+      );
+      $('h1-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        setSheetOpen(false);
+        $('h1-status').focus({ preventScroll: true });
+      });
 
       // Model picker (footer model name, issue #52): tapping the name opens
       // a <dialog> listing ctxInfo.availableModels, current one marked.
@@ -7810,10 +8442,32 @@
           const blob = new Blob([String(body.content)], {
             type: String(body.mimeType || 'text/markdown'),
           });
+          const name = String(body.filename || 'conversation.md');
+          // #184, Export or share. On a phone the share sheet is where a file
+          // goes next (Notes, a chat, Files), so it is offered first where the
+          // browser can hand it a file. A laptop browser can too, and there a
+          // sheet in place of the download would be a surprise, so this asks
+          // only on a touch screen. A dismissed sheet is the reader's answer
+          // and saves nothing; a sheet that fails falls back to the download.
+          if (
+            window.matchMedia('(pointer: coarse)').matches &&
+            typeof navigator.canShare === 'function' &&
+            typeof File === 'function'
+          ) {
+            const file = new File([blob], name, { type: blob.type });
+            if (navigator.canShare({ files: [file] })) {
+              try {
+                await navigator.share({ files: [file], title: name });
+                return;
+              } catch (e) {
+                if (e && e.name === 'AbortError') return;
+              }
+            }
+          }
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = String(body.filename || 'conversation.md');
+          a.download = name;
           document.body.appendChild(a);
           a.click();
           a.remove();
@@ -8123,11 +8777,13 @@
         }
       }
 
-      // ---- Per-message "Fork from here" (add-session-forking web gap) ------
-      // A small action under the last assistant bubble of a completed turn:
-      // the model's `fork` item (turn, mode, note, busy), which the view
-      // renders as a button + transcript-mode select + note. The view keeps
-      // the selected mode on the item and reports the click (onFork).
+      // ---- Per-turn "Fork here" (add-session-forking web gap) --------------
+      // An action under the last assistant bubble of a completed turn: the
+      // model's `fork` item (turn, mode, note, busy) for the latest turn, and
+      // an answer marked turnEnd for an earlier one (#184). The view renders
+      // Fork here, Rewind to here and Copy and reports the tap (onTurnAct);
+      // the include/empty mode is asked on tap (askChoice) and kept on the
+      // item.
       // Clicking POSTs /session/:id/fork { fromTurn, transcript, name? }
       // where fromTurn = the number of user turns answered so far (the
       // daemon's turnResolver reads it as "keep the first N user turns").
@@ -8137,9 +8793,249 @@
 
       // Idempotent: re-calls for the same turn only re-position the button
       // (a late agent chunk may have started a newer assistant bubble).
+      // #184: the fork row is the latest turn's actions. When it moves on to a
+      // newer turn, the answer it was under keeps the same actions in its own
+      // row (item.turnEnd), so every finished turn has them, not only the last.
       function placeForkButton() {
+        const was = transcriptModel.forkItem;
+        const wasUnder = was ? asstBefore(was) : null;
         transcriptModel.placeFork(forkTurnCount);
+        const now = transcriptModel.forkItem;
+        if (was && now !== was && wasUnder) markTurnEnd(wasUnder, true);
+        if (now) {
+          // The row joins the end of the list, so a row that arrived after the
+          // answer (the to-do row a plan frame adds) can sit between them. Then
+          // the answer carries the actions in its own row, where the reader
+          // looks for them, and the fork row draws nothing.
+          const under = asstBefore(now);
+          const items = transcriptModel.items;
+          const next = items[items.lastIndexOf(now) - 1] === under;
+          markTurnEnd(under, !next);
+          if (!!now.hideActs !== !next) {
+            now.hideActs = !next;
+            transcriptModel.touch(now);
+          }
+        }
         scrollTranscript();
+      }
+
+      // The answer a fork row sits under: the nearest asst item before it.
+      function asstBefore(item) {
+        const items = transcriptModel.items;
+        for (let i = items.lastIndexOf(item) - 1; i >= 0; i--) {
+          if (items[i].kind === 'asst') return items[i];
+          if (items[i].kind === 'user') return null;
+        }
+        return null;
+      }
+      function markTurnEnd(item, on) {
+        if (!item || !!item.turnEnd === on) return;
+        item.turnEnd = on;
+        transcriptModel.touch(item);
+      }
+      // A new user message closes the turn before it. A turn that ended on a
+      // turn_complete already has the fork row under its answer; one that did
+      // not (a replay that carried none, a turn cut short) gets its answer
+      // marked here, so it has the same actions. Bounded, because a turn is a
+      // few dozen rows and this runs on every user row of a replay.
+      function markPrevTurnEnd() {
+        const items = transcriptModel.items;
+        for (let i = items.length - 1, n = 0; i >= 0 && n < 400; i--, n++) {
+          const k = items[i].kind;
+          if (k === 'fork' || k === 'user') return;
+          if (k === 'asst') return markTurnEnd(items[i], true);
+        }
+      }
+      // A stored page arrives whole, so its turns are closed by the rows that
+      // follow them: an answer followed by a user row, in the page or as the
+      // first row already on screen, ended its turn.
+      function markStoredTurnEnds(rows) {
+        const first = transcriptModel.items[0];
+        let closed = !!first && first.kind === 'user';
+        for (let i = rows.length - 1; i >= 0; i--) {
+          const k = rows[i].kind;
+          if (k === 'user') closed = true;
+          else if (k === 'asst') {
+            if (closed) rows[i].turnEnd = true;
+            closed = false;
+          }
+        }
+      }
+
+      // #184. One finished turn's actions. `src` is the fork row (the latest
+      // turn) or an answer marked as ending an earlier one. The turn number is
+      // the count of user rows up to it, the numbering the rewind picker uses
+      // ("Turn K" keeps the first K); the fork row keeps the count it was
+      // placed with, which is what Fork from here always posted.
+      async function turnAct(act, src) {
+        const asst = src.kind === 'fork' ? asstBefore(src) : src;
+        const turn = turnNumberOf(src);
+        const say = (note) => {
+          src.note = note;
+          transcriptModel.touch(src);
+        };
+        if (act === 'copy') {
+          const ok = await copyText(turnText(asst));
+          say(ok ? 'copied' : 'copy failed: select the text instead');
+          setTimeout(() => {
+            if (src.note === 'copied' || /^copy failed/.test(src.note)) say('');
+          }, 3000);
+          return;
+        }
+        if (act === 'rewind') {
+          if (turn >= rewindUserTurns().length) {
+            return say('this is the latest turn: nothing after it to rewind');
+          }
+          say('');
+          return rewindToTurn(turn);
+        }
+        if (act === 'fork') {
+          const mode = await askChoice(
+            'Fork from turn ' + turn,
+            'A new conversation that starts from here.',
+            [
+              ['include', 'Fork with the conversation so far'],
+              ['empty', 'Fork empty'],
+            ],
+          );
+          if (!mode) return;
+          src.mode = mode;
+          if (src.kind !== 'fork') src.turn = turn;
+          return doForkHere(watchedSessionId, src);
+        }
+      }
+      function turnNumberOf(src) {
+        if (src.kind === 'fork' && Number.isInteger(src.turn)) return src.turn;
+        const items = transcriptModel.items;
+        const at = items.lastIndexOf(src);
+        let n = 0;
+        for (let i = 0; i < at; i++) if (items[i].kind === 'user') n++;
+        return n;
+      }
+      // The whole answer of the turn the asst row ends: every answer row since
+      // the turn's user row, in order, which is what a reader means by "copy
+      // the reply" when tool calls split it into bubbles.
+      function turnText(asst) {
+        const items = transcriptModel.items;
+        const parts = [];
+        for (let i = items.lastIndexOf(asst); i >= 0; i--) {
+          if (items[i].kind === 'user') break;
+          if (items[i].kind === 'asst' && items[i].text) parts.unshift(items[i].text);
+        }
+        return parts.join('\n\n');
+      }
+      // The async clipboard needs a secure context, and a gateway reached
+      // over a tailnet by plain http is not one, so the old selection copy is
+      // the fallback rather than a failure.
+      async function copyText(text) {
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return true;
+          }
+        } catch {
+          /* fall through to the selection copy */
+        }
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try {
+          ok = document.execCommand('copy');
+        } catch {
+          ok = false;
+        }
+        ta.remove();
+        return ok;
+      }
+
+      // #184. A choice of two or three, asked as a sheet at the foot of the
+      // screen rather than with window.confirm, whose OK and Cancel cannot
+      // name two different forks. Resolves with the chosen value, or null for
+      // Cancel, Escape or a tap on the scrim.
+      function askChoice(title, sub, options) {
+        let box = $('h1-ask');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'h1-ask';
+          box.setAttribute('role', 'dialog');
+          box.setAttribute('aria-modal', 'true');
+          box.hidden = true;
+          $('app-body').appendChild(box);
+        }
+        const back = document.activeElement;
+        return new Promise((resolve) => {
+          box.textContent = '';
+          const card = document.createElement('div');
+          card.className = 'ask-card';
+          const t = document.createElement('div');
+          t.className = 'ask-title';
+          t.id = 'h1-ask-title';
+          t.textContent = title;
+          card.appendChild(t);
+          if (sub) {
+            const d = document.createElement('div');
+            d.className = 'ask-sub';
+            d.textContent = sub;
+            card.appendChild(d);
+          }
+          box.setAttribute('aria-labelledby', 'h1-ask-title');
+          const done = (v) => {
+            box.hidden = true;
+            box.textContent = '';
+            box.onkeydown = null;
+            box.onclick = null;
+            if (back && back.isConnected) back.focus({ preventScroll: true });
+            resolve(v);
+          };
+          for (const [value, label] of options) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.dataset.value = value;
+            b.textContent = label;
+            b.onclick = () => done(value);
+            card.appendChild(b);
+          }
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.className = 'cancel';
+          cancel.textContent = 'Cancel';
+          cancel.onclick = () => done(null);
+          card.appendChild(cancel);
+          box.appendChild(card);
+          box.onclick = (e) => {
+            if (e.target === box) done(null);
+          };
+          box.onkeydown = (e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              done(null);
+            }
+          };
+          box.hidden = false;
+          card.querySelector('button').focus({ preventScroll: true });
+        });
+      }
+
+      // #184. Retry on a refused message's marker: the same text, through the
+      // same Send. Never over a draft, by the rule the queue's drain keeps,
+      // and never while a send is held. The refused echo keeps its marker,
+      // because it is still the record that that send did not go.
+      function retryNotSent(item) {
+        if (!item || !item.notSent || !item.text) return;
+        if ($('prompt').value.trim()) {
+          return setStatus('the composer has a draft: clear it to retry');
+        }
+        if ($('send').disabled) {
+          return setStatus('a send is still in flight: retry when it ends');
+        }
+        if (unsent && unsent.text === item.text) clearUnsent();
+        $('prompt').value = item.text;
+        void $('send').onclick();
       }
 
       async function doForkHere(sessionId, item) {
@@ -8327,14 +9223,15 @@
       // ok=false → red/"unreachable". Driven by the auth gate's initial
       // capabilities check and, thereafter, by the standalone /rc/health probe
       // in startHealthPoll().
+      // #184: the gateway's dot lived in the tab bar. Its fact now colours
+      // the status line, which says so in words, and names when it was read.
       function setStatusDot(ok) {
-        const dot = $('status-dot');
-        if (!dot) return;
-        dot.style.background = ok ? '#2a2' : '#c33';
-        dot.title =
+        gatewayOk = !!ok;
+        $('h1-status').title =
           (ok ? 'Gateway reachable' : 'Gateway unreachable') +
           ' · ' +
           new Date().toLocaleTimeString();
+        renderStatusLine();
       }
 
       // Keep the dot live independent of the Daemons section (which only
@@ -9338,6 +10235,7 @@
         );
       }
       function saveDraft() {
+        autoGrowPrompt(); // #184: every write the page makes passes here
         if (!watchedSessionId) return;
         const text = $('prompt').value;
         uiSessionWrite(DRAFTS_NAME, watchedSessionId, text.trim() ? text : undefined);
@@ -9470,11 +10368,16 @@
         const first = list.find((s) => typeof s === 'string' && s);
         if (!first) return;
         g.dataset.suggestion = first;
-        g.textContent = first;
+        // #184: the suggestion in a span of its own, so a long one ellipsizes
+        // and the accept mark stays on screen beside it.
+        g.textContent = '';
+        const gt = document.createElement('span');
+        gt.className = 'gt';
+        gt.textContent = first;
         const use = document.createElement('span');
         use.className = 'use';
         use.textContent = ' \u21a9 use';
-        g.appendChild(use);
+        g.append(gt, use);
         syncIdleGhost();
         // Auto-expire so a stale suggestion does not linger after you move on.
         idleGhostTimer = setTimeout(clearIdleGhost, 60000);
@@ -9707,21 +10610,21 @@
         }
         $('queued-note').textContent =
           outbox.length === 1
-            ? 'queued, sends when this turn ends'
-            : 'queued: ' + outbox.length + ', send in order as turns end';
+            ? 'queued \u00b7 sends after this turn'
+            : 'queued: ' + outbox.length + ' \u00b7 send in order as turns end';
         // Shown, not summarised. A reader who cannot see what is waiting cannot
         // tell a queued message from a wrong one.
         $('queued-text').textContent = outbox.join('\n');
         box.hidden = false;
       }
 
-      // The control only means something while a send is in flight, and that is
-      // exactly when Send is held. abandonPendingSend is set at the top of the
-      // send handler and cleared in its finally, so it is the send's own record
-      // of being in flight rather than a second flag that can drift from it.
+      // The control only means something while a turn holds Send, which is
+      // exactly when a send is in flight (abandonPendingSend, set at the top of
+      // the send handler and cleared in its finally) or, since #184, while a
+      // turn started elsewhere runs (turnOpen). Its place is decided with
+      // Send's and Stop's (renderRunControls), so this redraws that.
       function renderQueueControl() {
-        const btn = $('queue');
-        if (btn) btn.hidden = abandonPendingSend === null;
+        renderStatusLine();
         renderQueued();
       }
 
@@ -9737,6 +10640,46 @@
         saveOutbox();
         renderQueued();
         setStatus('queued, sends when this turn ends');
+      };
+
+      // #184: send now. The turn that is running takes the queued text as a
+      // mid-turn message (the route Operations > Mid-turn messages writes),
+      // which is what "now" can mean while Send is held for the turn. With no
+      // turn running there is nothing to hand it to, so it goes the ordinary
+      // way, through the drain. Each message leaves the queue only when the
+      // daemon says it holds it; a refusal leaves it queued and says why.
+      $('queued-now').onclick = async () => {
+        if (!watchedSessionId || outbox.length === 0) return;
+        if (!turnRunning()) return drainOutbox(0);
+        const id = watchedSessionId;
+        const btn = $('queued-now');
+        btn.disabled = true;
+        try {
+          while (outbox.length && watchedSessionId === id) {
+            const r = await rcCall(
+              '/session/' + encodeURIComponent(id) + '/mid-turn-message',
+              { method: 'POST', body: JSON.stringify({ message: outbox[0] }) },
+            );
+            if (!r.ok) {
+              setStatus('send now failed: ' + r.code + '; it still sends after this turn');
+              return;
+            }
+            if (r.body.accepted === false) {
+              setStatus(
+                'the turn already ended' +
+                  (r.body.reason ? ' (' + r.body.reason + ')' : '') +
+                  '; it sends as the next prompt',
+              );
+              return drainOutbox(0);
+            }
+            outbox = outbox.slice(1);
+            saveOutbox();
+            renderQueued();
+            setStatus('handed to the running turn');
+          }
+        } finally {
+          btn.disabled = false;
+        }
       };
 
       $('queued-discard').onclick = () => {
@@ -9924,6 +10867,10 @@
         const box = $('stored');
         const list = $('stored-list');
         if (!box || !list) return;
+        // #184: Files (n) under the +, once the store has been asked.
+        $('stored-count').textContent = storedFiles.length
+          ? ' (' + storedFiles.length + ')'
+          : '';
         list.textContent = '';
         for (const entry of storedFiles) {
           const row = document.createElement('span');
@@ -10742,10 +11689,13 @@
         if (!prompt) return setStatus('empty prompt');
         if (!watchedSessionId) return setStatus('watch a session first');
         $('send').disabled = true;
-        // The reason line goes to #status at the top of the page, which is off
-        // screen from the composer, so the held button carries it too.
-        const sendLabel = $('send').textContent;
-        $('send').textContent = 'waiting…';
+        // The reason line goes to #status, which is not where the reader is
+        // looking, so the held button carries it too. #184: in its label,
+        // because the button is an icon and writing its textContent would
+        // take the icon with it.
+        const sendLbl = $('send').querySelector('.lbl');
+        const sendLabel = sendLbl.textContent;
+        sendLbl.textContent = 'waiting…';
         const sendAbort = new AbortController();
         let sendAbandoned = null;
         const abandon = (why) => {
@@ -10874,7 +11824,7 @@
           if (abandonPendingSend === abandon) {
             abandonPendingSend = null;
             $('send').disabled = false;
-            $('send').textContent = sendLabel;
+            sendLbl.textContent = sendLabel;
             // #70: the hold is gone, so the reason to queue rather than send is
             // gone with it. Redrawn here rather than in the drain, because a send
             // that ends with nothing queued still has to take the control off.
@@ -10891,6 +11841,222 @@
           offerUnsent(prompt, refused);
         }
       };
+
+      // ---- #184 (h1): the bar, the ⋯ menu, the tools, the list ----------------
+
+      // The field grows with what is in it, one line at a time, to 132px,
+      // then scrolls. Run on every write the page makes (saveDraft is called
+      // after each) as well as on typing, since a programmatic write fires no
+      // input event.
+      function autoGrowPrompt() {
+        const ta = $('prompt');
+        if (!ta) return;
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, 130) + 'px';
+      }
+      window.addEventListener('resize', autoGrowPrompt);
+
+      // The bar's title: the conversation on screen as the list names it,
+      // which follows a rename, else the title it was opened with, else its id.
+      function renderBarTitle() {
+        const id = watchedSessionId;
+        let title = 'No conversation';
+        if (id) {
+          const row = pastConvos.find((s) => s && s.sessionId === id);
+          title = row
+            ? railTitle(row)
+            : watchedSessionTitle || 'session ' + String(id).slice(0, 8);
+        }
+        h1Text($('h1-title-text'), title);
+      }
+
+      // What #status, the verb result and the export note say surfaces over
+      // the foot of the transcript for a few seconds after it changes. The
+      // routine words of a connection that is working (connecting, streaming,
+      // sending, a send that went) are still written, because the status line
+      // and the raw log read them, but they do not pop: said on every turn
+      // they would cover the newest row every turn.
+      const TOAST_MS = 5000;
+      const QUIET_STATUS = /^(connecting…|streaming|sending…|sent: .*)$/;
+      (function initToasts() {
+        const timers = new Map();
+        for (const el of $('h1-toasts').children) {
+          const show = () => {
+            const text = (el.textContent || '').trim();
+            clearTimeout(timers.get(el));
+            if (!text || QUIET_STATUS.test(text)) {
+              el.classList.remove('fresh');
+              return;
+            }
+            el.classList.add('fresh');
+            timers.set(
+              el,
+              setTimeout(() => el.classList.remove('fresh'), TOAST_MS),
+            );
+          };
+          new MutationObserver(show).observe(el, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+          });
+          el.addEventListener('click', () => el.classList.remove('fresh'));
+        }
+      })();
+
+      // The ⋯ menu. Opened with what can act on the conversation on screen:
+      // Rename and End session only while the daemon has it open (the rail
+      // menu's rule, from the folder's live-state), Archive only for one with
+      // a transcript to file, the recap and the side question only where the
+      // daemon offers them (their own gates keep `hidden`; .h1-off is this
+      // menu's own "not now").
+      let h1MenuOpen = false;
+      function onScreenRow() {
+        const id = watchedSessionId;
+        return id ? pastConvos.find((s) => s && s.sessionId === id) || null : null;
+      }
+      function h1MenuItems() {
+        return Array.from(
+          $('h1-menu').querySelectorAll('[role="menuitem"]'),
+        ).filter((b) => !b.hidden && !b.classList.contains('h1-off'));
+      }
+      function openH1Menu() {
+        const id = watchedSessionId;
+        const row = onScreenRow();
+        const open = !!id && (row ? !!row.live : true);
+        const off = (el, yes) => el.classList.toggle('h1-off', !!yes);
+        off($('h1-menu-recap'), !id || $('recap-toggle').hidden);
+        off($('btw-toggle'), !id);
+        off($('h1-menu-rename'), !open);
+        off($('rewind-chat'), !id);
+        off($('footer-export'), !id);
+        off($('h1-menu-archive'), !row || !!row.liveOnly);
+        off($('end-session'), !open);
+        const items = h1MenuItems();
+        if (items.length === 0) {
+          setStatus('open a conversation first');
+          return;
+        }
+        setMoreOpen(false);
+        setListOpen(false);
+        $('h1-menu').hidden = false;
+        h1MenuOpen = true;
+        $('h1-actions').setAttribute('aria-expanded', 'true');
+        items[0].focus({ preventScroll: true });
+      }
+      function closeH1Menu(refocus) {
+        if (!h1MenuOpen) return;
+        h1MenuOpen = false;
+        $('h1-menu').hidden = true;
+        $('h1-actions').setAttribute('aria-expanded', 'false');
+        if (refocus) $('h1-actions').focus({ preventScroll: true });
+      }
+      $('h1-actions').addEventListener('click', () => {
+        if (h1MenuOpen) closeH1Menu(true);
+        else openH1Menu();
+      });
+      // An item does its own job (its handler is the one it always had), and
+      // the menu shuts behind it. The handover's two presses are not here:
+      // it lives in the sheet, where a second press needs no reopening.
+      $('h1-menu').addEventListener('click', (e) => {
+        if (e.target.closest('[role="menuitem"]')) closeH1Menu(false);
+      });
+      // The menu-button keys, as the rail's row menu has them: arrows move
+      // and wrap, Home and End jump, Escape and Tab shut it onto ⋯.
+      $('h1-menu').addEventListener('keydown', (e) => {
+        const items = h1MenuItems();
+        const i = items.indexOf(document.activeElement);
+        let next = -1;
+        if (e.key === 'ArrowDown') next = (i + 1) % items.length;
+        else if (e.key === 'ArrowUp') next = (i - 1 + items.length) % items.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = items.length - 1;
+        else if (e.key === 'Escape' || e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          closeH1Menu(true);
+          return;
+        }
+        if (next < 0) return;
+        e.preventDefault();
+        items[next].focus({ preventScroll: true });
+      });
+      document.addEventListener(
+        'pointerdown',
+        (e) => {
+          if (!h1MenuOpen) return;
+          if ($('h1-menu').contains(e.target) || $('h1-actions').contains(e.target))
+            return;
+          closeH1Menu(false);
+        },
+        true,
+      );
+      $('h1-menu-recap').addEventListener('click', () => {
+        if ($('recap').hidden) void $('recap-toggle').onclick();
+      });
+      $('h1-menu-rename').addEventListener('click', () => {
+        const row = onScreenRow();
+        void renameFromRail(
+          row || {
+            sessionId: watchedSessionId,
+            title: watchedSessionTitle || '',
+          },
+        );
+      });
+      $('h1-menu-archive').addEventListener('click', () => {
+        if (watchedSessionId) {
+          void archivePastConversation(watchedSessionId, pastConvosCwd);
+        }
+      });
+      $('footer-export').addEventListener('click', () => void exportConversation());
+
+      // The composer's tools, opened by its +.
+      function setToolsOpen(open) {
+        $('h1-tools').hidden = !open;
+        $('h1-plus').setAttribute('aria-expanded', String(open));
+      }
+      $('h1-plus').addEventListener('click', () =>
+        setToolsOpen($('h1-tools').hidden),
+      );
+
+      // The conversation list. On a phone the title opens the rail as a
+      // screen of its own (slice 2 makes it the List screen); above the break
+      // the rail is already a column beside the chat, so the title brings it
+      // back if it was collapsed and puts the reader in its filter.
+      const phoneWidth = () => window.matchMedia('(max-width: 860px)').matches;
+      function setListOpen(open) {
+        const rail = $('rail');
+        if (!railEls || rail.classList.contains('panel-open') === open) return;
+        rail.classList.toggle('panel-open', open);
+        $('h1-title').setAttribute('aria-expanded', String(open));
+        if (!open) return;
+        closeH1Menu(false);
+        setMoreOpen(false);
+        // A collapsed column is numbers without titles, which is no list.
+        if (railCollapsed) railEls.toggle.onclick();
+        railEls.back.focus({ preventScroll: true });
+      }
+      $('h1-title').addEventListener('click', () => {
+        if (!railEls) return;
+        if (phoneWidth()) {
+          setListOpen(!$('rail').classList.contains('panel-open'));
+          return;
+        }
+        if (railCollapsed) railEls.toggle.onclick();
+        railEls.input.focus({ preventScroll: true });
+      });
+      $('rail').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || !$('rail').classList.contains('panel-open')) return;
+        if (railMenuFor) return; // the row menu shuts first, on its own key
+        e.preventDefault();
+        setListOpen(false);
+        $('h1-title').focus({ preventScroll: true });
+      });
+      $('more-screen').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        setMoreOpen(false);
+        $('h1-more').focus({ preventScroll: true });
+      });
 
       // ---- Directory picker (browse + type + recent) -----------------------
       // Lets the phone choose which project directory a new conversation runs
@@ -11190,8 +12356,21 @@
         help.setAttribute('aria-label', 'What is this list?');
         help.setAttribute('aria-expanded', 'false');
         help.setAttribute('aria-controls', 'help-rail');
+        // #184: the way back to the chat when the list is a screen of its
+        // own on a phone. Hidden above the break, where the rail is a column.
+        const back = document.createElement('button');
+        back.type = 'button';
+        back.className = 'back';
+        back.setAttribute('aria-label', 'Back to chat');
+        back.innerHTML =
+          '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
+        back.onclick = () => {
+          setListOpen(false);
+          $('h1-title').focus({ preventScroll: true });
+        };
         const toggle = document.createElement('button');
         toggle.type = 'button';
+        toggle.className = 'ctl';
         toggle.textContent = '\u00ab';
         toggle.setAttribute('aria-label', 'Collapse the conversation list');
         toggle.onclick = () => {
@@ -11205,7 +12384,7 @@
               : 'Collapse the conversation list',
           );
         };
-        head.append(lbl, gl, help, toggle);
+        head.append(back, lbl, gl, help, toggle);
 
         const helpText = document.createElement('div');
         helpText.className = 'help-text';
@@ -11302,6 +12481,7 @@
           list: list,
           plus: plus,
           toggle: toggle,
+          back: back,
         };
       }
 
@@ -11319,6 +12499,7 @@
         $('rail').classList.toggle('nofolder', !cwd);
         railEls.ws.textContent = cwd || '';
         renderRailRows();
+        renderBarTitle(); // #184: a rename or a new list can change the title
       }
 
       // #175. The one way to open or shut the New conversation panel. Opening
@@ -11390,7 +12571,9 @@
             row.setAttribute('aria-current', 'true');
           }
           row.onclick = () => {
-            if (s.sessionId === watchedSessionId) return;
+            // #184: on a phone the list is a screen over the chat, so the row
+            // you are on is the way back to it.
+            if (s.sessionId === watchedSessionId) return setListOpen(false);
             // The same hand-off the Past conversations rows use, so the rail adds
             // no second path onto a conversation. issue #67: the tab follows the
             // conversation you picked, so the host mirrors what is on screen.
@@ -12311,7 +13494,12 @@
           cancelPlaceRestore();
         }
         watchedSessionId = id;
-        if (switching) $('prompt').value = loadDraft(id);
+        if (switching) {
+          $('prompt').value = loadDraft(id);
+          autoGrowPrompt();
+          // #184: arriving in a conversation is what the list was opened for.
+          setListOpen(false);
+        }
         // The stored list names a conversation, so a switch refetches it rather
         // than leaving the previous session's files under this heading.
         syncStoredForSession();
@@ -15128,6 +16316,17 @@
         // truncation (startWatch clears and replays the shortened history).
         void startWatch(id);
       };
+
+      // #184: Rewind to here, under a turn's answer. The same picker and the
+      // same Rewind press, with that turn already chosen, so the confirm and
+      // the POST are the ones the picker always made.
+      function rewindToTurn(keep) {
+        $('rewind-chat').onclick();
+        if (rewindPick.style.display === 'none') return;
+        rewindTurnPick.value = String(keep);
+        if (rewindTurnPick.value !== String(keep)) return;
+        void $('rewind-pick-btn').onclick();
+      }
 
       $('rewind-btn').onclick = async () => {
         if (!token()) return setStatus('pair first');
