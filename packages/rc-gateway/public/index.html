@@ -48,6 +48,10 @@
         --g1-accent: #1f6feb;
         --g1-link: #58a6ff;
         --g1-warn: #d29922;
+        /* #180. The rail's selected-row ground, and the tint the sheet gives
+           the one verb that destroys something (its .ic.end). */
+        --g1-on: #1f2937;
+        --g1-danger: #f38ba8;
       }
       body {
         font-family: system-ui, sans-serif;
@@ -575,6 +579,95 @@
         width: 100%;
         cursor: pointer;
       }
+      /* #180. A row is the conversation button plus its actions button, side
+         by side in one wrapper: a button cannot hold another button, and the
+         row's own button keeps everything P27 and P124 read off it (its text,
+         aria-current, data-session). The separator moves to the wrapper so it
+         runs under both. */
+      #rail .srow {
+        display: flex;
+        align-items: stretch;
+        border-bottom: 1px solid #161b22;
+      }
+      #rail .srow > .s {
+        flex: 1 1 auto;
+        min-width: 0;
+        border-bottom: 0;
+      }
+      #rail .srow:has(> .s.on) {
+        background: var(--g1-on);
+      }
+      /* Faded out rather than hidden at rest: an invisible-but-present button
+         stays in the tab order, so Tab still reaches it from its row, and a
+         hidden one would be skipped. Hover, focus on the row or the button, or
+         an open menu bring it up. A device that cannot hover gets it always,
+         or a tablet wider than the break would have no way to find it. */
+      #rail .more {
+        flex: none;
+        width: 24px;
+        padding: 0;
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        color: var(--g1-ink-lo);
+        background: none;
+        border: 0;
+        border-radius: 0;
+        cursor: pointer;
+        opacity: 0;
+      }
+      #rail .srow:hover > .more,
+      #rail .srow:focus-within > .more,
+      #rail .more[aria-expanded='true'] {
+        opacity: 1;
+      }
+      #rail .more:hover {
+        color: var(--g1-ink-hi);
+      }
+      @media (hover: none) {
+        #rail .more {
+          opacity: 1;
+        }
+      }
+      /* The menu the actions button opens. One element for every row, placed
+         beside whichever row asked; fixed rather than inside the rail, because
+         the phone strip scrolls sideways and clips anything that hangs out of
+         it. The control ground and edge, so it reads as a raised surface over
+         the band it opens on. */
+      #rail-menu {
+        position: fixed;
+        z-index: 200;
+        display: flex;
+        flex-direction: column;
+        min-width: 9rem;
+        padding: 4px 0;
+        background: var(--g1-raise);
+        border: 1px solid var(--g1-edge);
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      }
+      #rail-menu[hidden] {
+        display: none;
+      }
+      #rail-menu [role='menuitem'] {
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        color: var(--g1-ink);
+        background: none;
+        border: 0;
+        border-radius: 0;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+      #rail-menu [role='menuitem']:hover,
+      #rail-menu [role='menuitem']:focus {
+        background: var(--g1-on);
+        color: var(--g1-ink-hi);
+      }
+      #rail-menu [role='menuitem'].danger {
+        color: var(--g1-danger);
+      }
       /* Collapsed, g1b. The column is 40px, so the header stacks and keeps only
          the glyph. Both halves matter: the word "conversations" sets a
          min-content width well past the flex basis, which is what let the column
@@ -636,6 +729,12 @@
          proves, so it stays. */
       #rail.collapsed .s b,
       #rail.collapsed .s span {
+        display: none;
+      }
+      /* #180. The collapsed rail is a column of numbers at 40px, or a strip of
+         them on a phone; there is no room for a second control per row, and
+         expanding brings the actions back with the titles they act on. */
+      #rail.collapsed .more {
         display: none;
       }
       .mid {
@@ -971,6 +1070,25 @@
         }
         #rail .s span {
           display: none;
+        }
+        /* #180. On the strip the wrapper is the cell and carries the separator,
+           and the actions button is always shown at the 44px floor: there is
+           no hover on a phone to bring it up. */
+        #rail .srow {
+          flex: none;
+          border-bottom: 0;
+          border-right: 1px solid #161b22;
+        }
+        #rail .srow > .s {
+          border-right: 0;
+        }
+        #rail .more {
+          opacity: 1;
+          width: 44px;
+          min-height: 44px;
+        }
+        #rail-menu [role='menuitem'] {
+          min-height: 44px;
         }
         #rail .plus {
           flex: none;
@@ -10472,6 +10590,11 @@
       let railFilter = '';
       let railCollapsed = false;
       let railEls = null;
+      // #180. The row-actions menu, built on first use (railMenu below), and
+      // the row it is open for. Declared with the rail's other state, ahead of
+      // every function that reads it.
+      let railMenuEl = null;
+      let railMenuFor = null; // { anchor, sessionId } while open
 
       function railTitle(s) {
         return (
@@ -10533,7 +10656,16 @@
         // the folder picker now and nothing else on the page says New
         // conversation until it is open.
         h2b.textContent = '+ new conversation';
-        helpText.append(h1, h1b, h2, h2b, document.createTextNode('.'));
+        // #180: the help names the row actions where it names the rows.
+        helpText.append(
+          h1,
+          h1b,
+          h2,
+          h2b,
+          document.createTextNode(
+            '. The ⋯ on a row renames, archives or deletes that conversation, and ends the one on screen while it is running.',
+          ),
+        );
 
         const ws = document.createElement('div');
         ws.className = 'ws';
@@ -10552,6 +10684,9 @@
 
         const list = document.createElement('div');
         list.className = 'list';
+        // #180: the phone strip scrolls sideways, so an open row menu follows
+        // its row rather than staying where the row was.
+        list.addEventListener('scroll', placeRailMenu);
 
         const plus = document.createElement('button');
         plus.type = 'button';
@@ -10686,9 +10821,188 @@
               { hostTerminal: true },
             );
           };
-          list.appendChild(row);
+          // #180. The row's actions, beside it rather than in it. Named for the
+          // conversation, because a list of identical "more" buttons tells a
+          // screen reader nothing about which row each one acts on, and titled
+          // with the same phrase so a pointer gets it as a tooltip.
+          const more = document.createElement('button');
+          more.type = 'button';
+          more.className = 'more';
+          more.textContent = '⋯';
+          more.title = 'Actions for ' + title;
+          more.setAttribute('aria-label', 'Actions for ' + title);
+          more.setAttribute('aria-haspopup', 'menu');
+          more.setAttribute('aria-expanded', 'false');
+          more.setAttribute('aria-controls', 'rail-menu');
+          more.onclick = () => toggleRailMenu(more, s);
+          const wrap = document.createElement('div');
+          wrap.className = 'srow';
+          wrap.dataset.session = String(s.sessionId);
+          wrap.append(row, more);
+          list.appendChild(wrap);
         }
         list.appendChild(plus);
+        // The 30 s poll rebuilds these rows. A menu open on one of them stays
+        // open on its replacement rather than closing under the reader's
+        // pointer, and closes only if the conversation it was for is gone.
+        if (railMenuFor) {
+          const again = Array.from(list.querySelectorAll('.srow')).find(
+            (w) => w.dataset.session === railMenuFor.sessionId,
+          );
+          if (again) {
+            railMenuFor.anchor = again.querySelector('.more');
+            railMenuFor.anchor.setAttribute('aria-expanded', 'true');
+            placeRailMenu();
+          } else {
+            closeRailMenu(false);
+          }
+        }
+      }
+
+      // #180. The rail's per-row menu: Rename, Archive, Delete, and End
+      // session on the conversation on screen while it is live. Every item
+      // calls the handler that already does that job, so there is one fetch
+      // per action on the page and the rail adds none:
+      // archivePastConversation and deletePastConversation (the New
+      // conversation panel's past rows, which also stop the watch when the
+      // removed one is on screen and refresh the list the rail is drawn
+      // from), renameSession (Operations > Rename session), and the composer's
+      // end-session handler with its own confirm.
+      function railMenu() {
+        if (railMenuEl) return railMenuEl;
+        railMenuEl = document.createElement('div');
+        railMenuEl.id = 'rail-menu';
+        railMenuEl.setAttribute('role', 'menu');
+        railMenuEl.hidden = true;
+        railMenuEl.addEventListener('keydown', onRailMenuKey);
+        // Inside the app rather than on body, so the app's [hidden] before
+        // pairing hides it too and its controls take the app's control rules.
+        $('app-body').appendChild(railMenuEl);
+        return railMenuEl;
+      }
+
+      function toggleRailMenu(anchor, s) {
+        if (railMenuFor && railMenuFor.sessionId === s.sessionId) {
+          closeRailMenu(true);
+          return;
+        }
+        closeRailMenu(false);
+        const menu = railMenu();
+        const title = railTitle(s);
+        const items = [['Rename', false, () => renameFromRail(s)]];
+        // A live-only row has no transcript to file away or remove, which is
+        // why the past rows offer it neither (issue #111); the rail follows
+        // the same rule rather than offering two actions that can only fail.
+        if (!s.liveOnly) {
+          items.push(
+            ['Archive', false, () => archivePastConversation(s.sessionId, pastConvosCwd)],
+            ['Delete', true, () => deletePastConversation(s.sessionId, title, pastConvosCwd)],
+          );
+        }
+        // Ending is offered where it means something: the conversation on
+        // screen, and only while the daemon's live-state says it is running.
+        // The handler acts on the watched session and asks its own confirm.
+        if (s.sessionId === watchedSessionId && s.live) {
+          items.push(['End session', true, () => $('end-session').onclick()]);
+        }
+        menu.textContent = '';
+        menu.setAttribute('aria-label', 'Actions for ' + title);
+        for (const [label, danger, act] of items) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.setAttribute('role', 'menuitem');
+          b.tabIndex = -1;
+          b.textContent = label;
+          if (danger) b.className = 'danger';
+          b.onclick = () => {
+            closeRailMenu(true);
+            void act();
+          };
+          menu.appendChild(b);
+        }
+        railMenuFor = { anchor: anchor, sessionId: s.sessionId };
+        anchor.setAttribute('aria-expanded', 'true');
+        menu.hidden = false;
+        placeRailMenu();
+        menu.querySelector('[role="menuitem"]').focus({ preventScroll: true });
+      }
+
+      function closeRailMenu(refocus) {
+        if (!railMenuFor) return;
+        const anchor = railMenuFor.anchor;
+        railMenuFor = null;
+        railMenuEl.hidden = true;
+        anchor.setAttribute('aria-expanded', 'false');
+        if (refocus && anchor.isConnected) anchor.focus({ preventScroll: true });
+      }
+
+      // Under the button, right edges together, kept on screen: flipped above
+      // the button when there is no room below, and pulled in from either side.
+      function placeRailMenu() {
+        if (!railMenuFor) return;
+        const r = railMenuFor.anchor.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return closeRailMenu(false);
+        const m = railMenuEl;
+        const w = m.offsetWidth;
+        const h = m.offsetHeight;
+        const left = Math.min(Math.max(4, r.right - w), window.innerWidth - 4 - w);
+        let top = r.bottom + 2;
+        if (top + h > window.innerHeight - 4) top = Math.max(4, r.top - 2 - h);
+        m.style.left = Math.round(left) + 'px';
+        m.style.top = Math.round(top) + 'px';
+      }
+
+      // The menu-button keys: arrows move and wrap, Home and End jump, Escape
+      // shuts it back onto the button. Tab shuts it onto the button too rather
+      // than out of a menu that has just been hidden, which would drop focus
+      // on the page body.
+      function onRailMenuKey(e) {
+        const items = Array.from(railMenuEl.querySelectorAll('[role="menuitem"]'));
+        const i = items.indexOf(document.activeElement);
+        let next = -1;
+        if (e.key === 'ArrowDown') next = (i + 1) % items.length;
+        else if (e.key === 'ArrowUp') next = (i - 1 + items.length) % items.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = items.length - 1;
+        else if (e.key === 'Escape' || e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          closeRailMenu(true);
+          return;
+        }
+        if (next < 0) return;
+        e.preventDefault();
+        items[next].focus({ preventScroll: true });
+      }
+
+      // A press anywhere else shuts it, the way a native menu does. The
+      // button is left to its own handler, which toggles.
+      document.addEventListener(
+        'pointerdown',
+        (e) => {
+          if (!railMenuFor) return;
+          if (railMenuEl.contains(e.target) || railMenuFor.anchor.contains(e.target)) return;
+          closeRailMenu(false);
+        },
+        true,
+      );
+      window.addEventListener('resize', placeRailMenu);
+      window.addEventListener('scroll', placeRailMenu);
+
+      // Rename from the rail: the page's own prompt idiom (window.confirm
+      // guards End session and Delete; nothing on the page edits inline), then
+      // the same rename Operations > Rename session sends. Its answer goes to
+      // the status line, since the panel's own result line is on another tab.
+      async function renameFromRail(s) {
+        if (!token()) return setStatus('pair first');
+        const now = strOr(s.title, '');
+        const next = window.prompt('Rename "' + railTitle(s) + '" to:', now);
+        if (next === null) return;
+        const title = next.trim();
+        if (title === '' || title === now) return;
+        setStatus('renaming…');
+        setStatus(await renameSession(s.sessionId, title));
+        void refreshPastConversations(pastConvosCwd);
       }
 
       function renderPastConversations(sessions, cwd, truncated) {
@@ -14450,6 +14764,25 @@
       // { sessionId, ...effective }, so the body carries the title it says it
       // now holds. A handler that read only r.ok would print the typed name
       // over a daemon that stored something else.
+      // #180: the request and the reading of its answer, shared by this panel
+      // and the rail's row menu so the two cannot drift. Answers the line to
+      // print.
+      async function renameSession(id, title) {
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/metadata',
+          { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
+        );
+        if (!r.ok) {
+          // display_name_too_long and invalid_metadata are both about the name
+          // and both come back as 400, so the code is what tells the reader
+          // which one they hit.
+          return 'rename failed: ' + r.code;
+        }
+        const stored = r.body && r.body.displayName;
+        return typeof stored === 'string' && stored !== ''
+          ? 'title set: ' + stored
+          : 'the daemon accepted the rename but returned no name';
+      }
       $('rename-set').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('rename-result');
@@ -14464,22 +14797,7 @@
           return;
         }
         out.textContent = 'saving\u2026';
-        const r = await rcCall(
-          '/session/' + encodeURIComponent(id) + '/metadata',
-          { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
-        );
-        if (!r.ok) {
-          // display_name_too_long and invalid_metadata are both about the name
-          // and both come back as 400, so the code is what tells the reader
-          // which one they hit.
-          out.textContent = 'rename failed: ' + r.code;
-          return;
-        }
-        const stored = r.body && r.body.displayName;
-        out.textContent =
-          typeof stored === 'string' && stored !== ''
-            ? 'title set: ' + stored
-            : 'the daemon accepted the rename but returned no name';
+        out.textContent = await renameSession(id, title);
       };
 
       // The daemon's own queue for one session. This is not the outbox strip

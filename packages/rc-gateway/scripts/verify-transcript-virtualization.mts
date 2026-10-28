@@ -14010,6 +14010,304 @@ PAGE_SCENARIOS.push({
       );
     },
   });
+
+  // #180. Archive and delete lived only on the New conversation panel's past
+  // rows, behind the rail's +, and nothing on the rail itself could rename,
+  // file away or remove a conversation. Every rail row now carries a ⋯ menu.
+  // Driven with real input at both widths the sheet draws, by pointer and by
+  // keyboard, because the claims are that it is reachable and operable, not
+  // that a handler exists. The conversations are transcripts planted under
+  // the harness root, in a folder of the scenario's own: P127 holds that the
+  // folder the page lands on lists nothing, and the pool runs scenarios side
+  // by side in one root. The daemon's half of archive is answered here (the
+  // stub daemon has no archive), and it does what the daemon does to the
+  // listing: the transcript leaves the folder's chats dir. Everything on the
+  // page's side is real, including the refresh that redraws the rail from
+  // disk. Delete is only ever dismissed, so no delete request may leave.
+  PAGE_SCENARIOS.push({
+    name: 'P132 every rail row has a menu that renames, archives and deletes it, by pointer and by keyboard, at 1280 and 390',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+      const root = harnessRuntimeRoot();
+      const realHome = join(homedir(), '.qwen');
+      expect(
+        root !== realHome && !root.startsWith(realHome + '/'),
+        `the harness root ${root} sits inside the real ${realHome}, so planting transcripts there would write into a live history`,
+      );
+      const folder = join(root, 'p132-folder');
+      const chatsDir = resolveChatsDir(folder);
+      expect(
+        chatsDir === root || chatsDir.startsWith(root + '/'),
+        `the chats dir for the planted folder is ${chatsDir}, outside the harness root ${root}`,
+      );
+      const HERE = viewer.sessionId;
+      const ARC = ['aaaaaaaa-1320-4000-8000-000000000001', 'aaaaaaaa-1320-4000-8000-000000000002'];
+      const DEL = 'dddddddd-1320-4000-8000-000000000003';
+      const TITLE: Record<string, string> = {
+        [HERE]: 'p132 the one on screen',
+        [ARC[0]!]: 'p132 filed away at 1280',
+        [ARC[1]!]: 'p132 filed away at 390',
+        [DEL]: 'p132 asked before it goes',
+      };
+      const planted = Object.keys(TITLE).map((id) => join(chatsDir, `${id}.jsonl`));
+      rmSync(folder, { recursive: true, force: true });
+      mkdirSync(folder, { recursive: true });
+      mkdirSync(chatsDir, { recursive: true });
+      for (const [id, title] of Object.entries(TITLE)) {
+        writeFileSync(
+          join(chatsDir, `${id}.jsonl`),
+          JSON.stringify({
+            type: 'system',
+            subtype: 'custom_title',
+            systemPayload: { customTitle: title, titleSource: 'manual' },
+          }) + '\n',
+        );
+      }
+      try {
+        // The daemon's live-state names the watched conversation as running,
+        // which is what earns its row the fourth item.
+        await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              v: 1,
+              catalogVersion: { generation: 'g-1', revision: 1 },
+              sessions: [
+                {
+                  sessionId: HERE,
+                  clientCount: 1,
+                  hasActivePrompt: false,
+                  isWaitingForPermission: false,
+                  isWaitingForUserQuestion: false,
+                },
+              ],
+            }),
+          }),
+        );
+        const archived: string[] = [];
+        await page.route(/\/rc\/sessions\/archive$/, async (route) => {
+          const ids =
+            (JSON.parse(route.request().postData() ?? '{}') as { sessionIds?: string[] })
+              .sessionIds ?? [];
+          archived.push(...ids);
+          for (const id of ids) rmSync(join(chatsDir, `${id}.jsonl`), { force: true });
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ action: 'archive', requested: ids.length, archived: ids }),
+          });
+        });
+        const sent: string[] = [];
+        page.on('request', (r) => {
+          const p = new URL(r.url()).pathname;
+          if (p === '/rc/sessions/delete' || p.endsWith('/metadata')) sent.push(r.method() + ' ' + p);
+        });
+        // The harness dismisses every dialog; this only records what was asked.
+        const asked: { type: string; message: string }[] = [];
+        page.on('dialog', (d) => asked.push({ type: d.type(), message: d.message() }));
+
+        await page.evaluate(
+          `curDirPath = ${JSON.stringify(folder)}; refreshPastConversations(${JSON.stringify(folder)})`,
+        );
+        await page.waitForFunction(`document.querySelectorAll('#rail .srow').length === 4`);
+
+        type MenuReading = {
+          open: boolean;
+          items: string[];
+          focus: string;
+          label: string;
+          bg: string;
+          inView: boolean;
+        };
+        const readMenu = () =>
+          page.evaluate(String.raw`(() => {
+            const m = document.getElementById('rail-menu');
+            if (!m) return { open: false, items: [], focus: '', label: '', bg: '', inView: false };
+            const r = m.getBoundingClientRect();
+            const a = document.activeElement;
+            return {
+              open: !m.hidden && m.getClientRects().length > 0,
+              items: Array.from(m.querySelectorAll('[role="menuitem"]')).map((b) => b.textContent),
+              focus: m.contains(a) ? a.textContent : '',
+              label: m.getAttribute('aria-label') || '',
+              bg: getComputedStyle(m).backgroundColor,
+              inView: r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+            };
+          })()`) as Promise<MenuReading>;
+        type MoreReading = {
+          opacity: string;
+          w: number;
+          h: number;
+          label: string;
+          popup: string;
+          expanded: string;
+          focused: boolean;
+        };
+        const readMore = (id: string) =>
+          page.evaluate(String.raw`(() => {
+            const w = Array.from(document.querySelectorAll('#rail .srow')).find((x) => x.dataset.session === ${JSON.stringify(id)});
+            const b = w ? w.querySelector('.more') : null;
+            if (!b) return null;
+            const r = b.getBoundingClientRect();
+            return {
+              opacity: getComputedStyle(b).opacity,
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+              label: b.getAttribute('aria-label') || '',
+              popup: b.getAttribute('aria-haspopup') || '',
+              expanded: b.getAttribute('aria-expanded') || '',
+              focused: document.activeElement === b,
+            };
+          })()`) as Promise<MoreReading | null>;
+        const rowSel = (id: string) => `#rail .srow[data-session="${id}"]`;
+        const THREE = 'Rename,Archive,Delete';
+        const FOUR = 'Rename,Archive,Delete,End session';
+        const lines: string[] = [];
+
+        for (const [w, h, i] of [
+          [1280, 810, 0],
+          [390, 844, 1],
+        ] as const) {
+          const at = `${w}x${h}`;
+          await page.setViewportSize({ width: w, height: h });
+          await page.mouse.move(w - 2, h - 2);
+          const phone = w < 860;
+
+          // At rest: named for its row and announced as a menu button; faded
+          // out on a desktop row nobody is pointing at, and a 44px cell on the
+          // phone strip, where there is no hover to bring it up.
+          const rest = await readMore(DEL);
+          expect(rest !== null, `the row for a planted conversation has no actions button at ${at}`);
+          expect(
+            rest!.label === `Actions for ${TITLE[DEL]}` && rest!.popup === 'menu' && rest!.expanded === 'false',
+            `the actions button does not name its row or say it opens a menu at ${at} (${JSON.stringify(rest)})`,
+          );
+          if (phone) {
+            expect(
+              rest!.opacity === '1' && rest!.w >= 44 && rest!.h >= 44,
+              `the actions button on the phone strip is ${rest!.w}x${rest!.h} at opacity ${rest!.opacity}, not an always-shown 44px cell`,
+            );
+          } else {
+            expect(rest!.opacity === '0', `the actions button shows at rest at ${at} (opacity ${rest!.opacity})`);
+            await page.hover(`${rowSel(DEL)} > .s`);
+            const hovered = await readMore(DEL);
+            expect(hovered!.opacity === '1', `hovering the row did not bring up its actions at ${at}`);
+          }
+
+          // Pointer: the menu opens on the row, on the shell, inside the
+          // viewport, with focus on its first item, and Escape puts focus
+          // back on the button.
+          await page.click(`${rowSel(DEL)} > .more`);
+          const byClick = await readMenu();
+          expect(byClick.open, `clicking the actions button opened no menu at ${at}`);
+          expect(
+            byClick.items.join(',') === THREE,
+            `a planted row's menu reads ${JSON.stringify(byClick.items)} at ${at}, not ${THREE}`,
+          );
+          expect(byClick.label === `Actions for ${TITLE[DEL]}`, `the menu is labelled ${JSON.stringify(byClick.label)}`);
+          expect(byClick.focus === 'Rename', `opening the menu left focus on ${JSON.stringify(byClick.focus)}, not its first item`);
+          expect((await readMore(DEL))!.expanded === 'true', `the button does not say its menu is open at ${at}`);
+          expect(byClick.bg === 'rgb(22, 27, 34)', `the menu is ${byClick.bg}, not the sheet's control ground`);
+          expect(byClick.inView, `the menu hangs outside the viewport at ${at}`);
+          for (const row of await readShellText(page, ['#rail-menu'])) pgShellCheck(row, `${at} rail menu`);
+          await page.keyboard.press('Escape');
+          const shut = await readMenu();
+          const back = await readMore(DEL);
+          expect(
+            !shut.open && back!.focused && back!.expanded === 'false',
+            `Escape left the menu open (${shut.open}) or focus off its button (${back!.focused}) at ${at}`,
+          );
+
+          // Keyboard: Tab from the row reaches its button, Enter (1280) or
+          // Space (390) opens it, the arrows wrap, Home and End jump. The row
+          // on screen is live, so it carries End session as a fourth item.
+          await page.focus(`${rowSel(HERE)} > .s`);
+          await page.keyboard.press('Tab');
+          const tabbed = await readMore(HERE);
+          expect(tabbed!.focused, `Tab from the row on screen did not reach its actions button at ${at}`);
+          if (!phone) expect(tabbed!.opacity === '1', `focus did not bring up the actions button at ${at}`);
+          await page.keyboard.press(phone ? 'Space' : 'Enter');
+          const byKey = await readMenu();
+          expect(byKey.open, `${phone ? 'Space' : 'Enter'} on the actions button opened no menu at ${at}`);
+          expect(
+            byKey.items.join(',') === FOUR,
+            `the live row on screen offers ${JSON.stringify(byKey.items)} at ${at}, not ${FOUR}`,
+          );
+          const walk: string[] = [byKey.focus];
+          // Both ends wrap: up from the first item and down from the last.
+          for (const key of ['ArrowDown', 'ArrowUp', 'ArrowUp', 'Home', 'End', 'ArrowDown']) {
+            await page.keyboard.press(key);
+            walk.push((await readMenu()).focus);
+          }
+          expect(
+            walk.join(',') === 'Rename,Archive,Rename,End session,Rename,End session,Rename',
+            `the menu keys walked ${JSON.stringify(walk)} at ${at}`,
+          );
+          await page.keyboard.press('Escape');
+          expect((await readMore(HERE))!.focused, `Escape did not return focus to the live row's button at ${at}`);
+
+          // Delete asks first, naming the conversation, and a dismissed ask
+          // sends nothing and keeps the row. Rename asks for the new name the
+          // same way, and a dismissed one sends nothing either.
+          const before = asked.length;
+          await page.click(`${rowSel(DEL)} > .more`);
+          await page.click('#rail-menu [role="menuitem"]:text-is("Delete")');
+          await page.click(`${rowSel(DEL)} > .more`);
+          await page.click('#rail-menu [role="menuitem"]:text-is("Rename")');
+          await page.waitForTimeout(300);
+          const asks = asked.slice(before);
+          expect(
+            asks.length === 2 &&
+              asks[0]!.type === 'confirm' &&
+              asks[0]!.message.includes(TITLE[DEL]!) &&
+              asks[1]!.type === 'prompt' &&
+              asks[1]!.message.includes(TITLE[DEL]!),
+            `Delete and Rename did not each ask, naming the conversation, at ${at} (${JSON.stringify(asks)})`,
+          );
+          expect(sent.length === 0, `a dismissed ask still sent ${JSON.stringify(sent)} at ${at}`);
+          expect((await readMore(DEL)) !== null, `dismissing Delete still took the row off the rail at ${at}`);
+
+          // Archive, from the keyboard on the phone and the pointer on the
+          // desktop: the request names the row, and the row leaves the rail
+          // through the page's own refresh.
+          const target = ARC[i]!;
+          if (phone) {
+            await page.focus(`${rowSel(target)} > .s`);
+            await page.keyboard.press('Tab');
+            await page.keyboard.press('Space');
+            await page.keyboard.press('ArrowDown');
+            await page.keyboard.press('Enter');
+          } else {
+            await page.click(`${rowSel(target)} > .more`);
+            await page.click('#rail-menu [role="menuitem"]:text-is("Archive")');
+          }
+          await page
+            .waitForFunction(`!document.querySelector('${rowSel(target)}')`, null, { timeout: 5_000 })
+            .catch(() => undefined);
+          expect(archived.includes(target), `Archive at ${at} sent nothing for the row (${JSON.stringify(archived)})`);
+          const left = (await page.evaluate(
+            String.raw`Array.from(document.querySelectorAll('#rail .srow')).map((x) => x.dataset.session)`,
+          )) as string[];
+          expect(!left.includes(target), `the archived row is still on the rail at ${at}`);
+          expect(
+            left.includes(HERE) && left.includes(DEL),
+            `archiving one row took others with it at ${at} (${JSON.stringify(left)})`,
+          );
+          lines.push(
+            `${at}: ${phone ? '44px button always shown' : 'button fades in on hover and focus'}, click and ${phone ? 'Space' : 'Enter'} open it, ${THREE} (+End session on the live row), Escape returns focus, Delete and Rename ask and send nothing when dismissed, Archive by ${phone ? 'keyboard' : 'pointer'} took the row off`,
+          );
+        }
+        return lines.join('; ');
+      } finally {
+        for (const p of planted) rmSync(p, { force: true });
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+  });
 }
 
 /** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
