@@ -21,6 +21,11 @@
     <meta name="apple-mobile-web-app-title" content="qwen-rc" />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <!-- #184. iOS ignores an SVG icon for the home screen and draws a
+         screenshot of the page instead, so it gets icon.svg rendered at the
+         180px it asks for, full-bleed on the icon's own ground (iOS rounds
+         the corners itself). -->
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <title>qwen-rc viewer</title>
     <style>
       /* The g1 shell (#117): a dark, full-bleed application frame instead of the
