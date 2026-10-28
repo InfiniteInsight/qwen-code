@@ -2303,6 +2303,18 @@ export class DaemonPool implements SessionDaemon {
     clearInterval(this.reapTimer);
     const entries = [...this.byWorkspace.values()];
     await Promise.allSettled(entries.map((e) => e.stop()));
+    // Drain the spawns that were in flight when shutdown began. Each one stops
+    // the daemon it just created once it sees `stopped`, but that cleanup only
+    // runs if the process is still alive to run it, and the gateway calls this
+    // immediately before `process.exit(0)`. Without the wait the exit wins the
+    // race and the detached daemon keeps its port and its token. Bounded by the
+    // probe knob: a wedged spawn must not hang shutdown.
+    const inFlight = [...this.spawning.values()];
+    if (inFlight.length > 0) {
+      await Promise.allSettled(
+        inFlight.map((p) => settleWithin(p, this.probeTimeoutMs, undefined)),
+      );
+    }
     this.byWorkspace.clear();
     this.ownerOf.clear();
     this.pendingCreates.clear();

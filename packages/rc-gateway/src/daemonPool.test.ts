@@ -776,6 +776,10 @@ describe('DaemonPool', () => {
     const pool = new DaemonPool({
       defaultDaemon: fakeClient('default'),
       defaultWorkspaceCwd: '/home/evan',
+      // stopAll() now waits on the in-flight spawn, and this test only lets it
+      // settle after stopAll has returned, so the drain runs out its bound here.
+      // Kept short; the bound itself is the next test's business.
+      probeTimeoutMs: 40,
       spawn: async (cwd) => {
         await gate;
         return {
@@ -799,6 +803,67 @@ describe('DaemonPool', () => {
     expect(stopped).toEqual(['/proj/late']); // stop() was invoked on it
     expect(pool.size()).toBe(0); // never registered into the cleared pool
     expect(pool.workspaces()).toEqual([]);
+  });
+
+  // The gateway's shutdown is `await daemonPool.stopAll()` and then
+  // `process.exit(0)`, with nothing between them, so a self-stop that lands
+  // after stopAll resolves is a stop that never runs. The daemon it belongs to
+  // was spawned detached and keeps its port and its token.
+  it('stopAll() waits for an in-flight spawn, so its self-stop runs before the exit', async () => {
+    let releaseSpawn: (() => void) | undefined;
+    const stopped: string[] = [];
+    const gate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      // Long on purpose: the only way this resolves early is by genuinely
+      // waiting for the spawn rather than running out a bound.
+      probeTimeoutMs: 5_000,
+      spawn: async (cwd) => {
+        await gate;
+        // A later macrotask, so stopAll cannot reach the self-stop by draining
+        // the microtask queue on its way out.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return {
+          client: fakeClient(cwd),
+          stop: async () => {
+            stopped.push(cwd);
+          },
+          workspaceCwd: cwd,
+        };
+      },
+    });
+
+    const spawnPromise = pool.getOrSpawn('/proj/draining');
+    const stopping = pool.stopAll();
+    releaseSpawn!();
+    await stopping;
+
+    expect(stopped).toEqual(['/proj/draining']);
+    await spawnPromise;
+  });
+
+  it('stopAll() gives up on a spawn that never settles instead of hanging shutdown', async () => {
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      probeTimeoutMs: 40,
+      spawn: async (cwd) => {
+        await new Promise<void>(() => {});
+        return {
+          client: fakeClient(cwd),
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+      },
+    });
+
+    pool.getOrSpawn('/proj/wedged').catch(() => {});
+    const started = Date.now();
+    await pool.stopAll();
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });
 
