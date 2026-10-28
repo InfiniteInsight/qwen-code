@@ -30,11 +30,14 @@
  *   ONLY=V9,V10 npx tsx scripts/verify-transcript-virtualization.mts view
  */
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page } from 'playwright';
-import { bootViewer, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, harnessRuntimeRoot, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -12837,6 +12840,101 @@ PAGE_SCENARIOS.push({
         fold.map((f) => f.w + ': ' + f.hidden + '/' + f.asis + '/' + f.filled + ' of ' + f.viewH).join(', ') +
         ')'
       );
+    },
+  });
+
+  // #178. The harness booted the gateway without naming a runtime root, so
+  // runtimeBaseDir() fell back to the host's ~/.qwen and the rail listed this
+  // machine's own conversations (16 rows on the box this was written on, real
+  // session titles in the run output). An empty-rail assertion is not a guard,
+  // because it also passes on a host that has nothing to list. So plant a
+  // transcript inside the harness root and require the rail to list exactly that
+  // row: were the root the host's again, the plant would land where the route no
+  // longer looks and the rows on screen would be the machine's own, which fails
+  // both halves at once.
+  PAGE_SCENARIOS.push({
+    name: 'P127 the rail reads the harness chats dir and not the host directory',
+    run: async ({ page }) => {
+      // The chain that makes this observable without anything being driven:
+      // GET /rc/fs with no path defaults to $HOME, the folder browser renders
+      // that, and renderDirList asks for that folder's conversations.
+      await page.waitForFunction(() => curDirPath !== null);
+      const landed = await page.evaluate(() => curDirPath);
+      expect(
+        typeof landed === 'string' && landed.length > 0,
+        `the load path landed on no folder (${JSON.stringify(landed)}), so there is no folder to list conversations for and nothing below proves anything`,
+      );
+      const dir = landed as string;
+
+      // Load-bearing on its own, and it runs before any write. The plant has to
+      // go where the route will actually look, so if the harness ever stops
+      // isolating this refuses rather than leaving a throwaway conversation in a
+      // real person's history.
+      const root = harnessRuntimeRoot();
+      const chatsDir = resolveChatsDir(dir);
+      expect(
+        chatsDir === root || chatsDir.startsWith(root + '/'),
+        `the chats dir the route scans for ${JSON.stringify(dir)} is ${chatsDir}, outside the harness root ${root}, so the harness is reading the host again`,
+      );
+      // Its own assertion, because the one above cannot carry this. An inherited
+      // QWEN_RUNTIME_DIR that names the real ~/.qwen satisfies the containment
+      // check above, and mutation-tested that is exactly where the plant landed.
+      // So keeping a throwaway transcript out of a live history is a separate
+      // claim and it runs before any write.
+      const realHome = join(homedir(), '.qwen');
+      expect(
+        chatsDir !== realHome && !chatsDir.startsWith(realHome + '/'),
+        `the chats dir ${chatsDir} sits inside the real user home ${realHome}, so planting a transcript here would write into a live history`,
+      );
+
+      const rows = () =>
+        page.evaluate(() =>
+          Array.from(
+            (document.getElementById('past-list') as HTMLElement).querySelectorAll('.token-row'),
+          ).map((row) => row.textContent ?? ''),
+        );
+
+      const CANARY = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const TITLE = 'planted by P127';
+      const planted = join(chatsDir, `${CANARY}.jsonl`);
+      // Wait for the chain's own signal that a list landed. Reading the box
+      // before that measures an empty box rather than an empty scan, which is
+      // how the count below was found passing while the host was being read.
+      await page.waitForFunction(() => pastConvosCwd !== null);
+      const before = await rows();
+      try {
+        expect(
+          before.length === 0,
+          `a default load listed ${before.length} conversations for ${JSON.stringify(dir)} (${JSON.stringify(before.slice(0, 3))}), so the rail is reading somewhere other than the harness root`,
+        );
+
+        mkdirSync(chatsDir, { recursive: true });
+        writeFileSync(
+          planted,
+          JSON.stringify({
+            type: 'system',
+            subtype: 'custom_title',
+            systemPayload: { customTitle: TITLE, titleSource: 'manual' },
+          }) + '\n',
+        );
+
+        // The page's own read, not a private path into the renderer.
+        await page.evaluate(([cwd]) => {
+          curDirPath = cwd;
+          return refreshPastConversations(cwd);
+        }, [dir]);
+        const after = await rows();
+        expect(
+          after.length === 1 && after[0].includes(TITLE),
+          `a transcript planted in the harness root did not reach the rail on its own (${JSON.stringify(after)})`,
+        );
+      } finally {
+        // The root is shared for the whole process, so the plant must not
+        // outlive the scenario or a later one lists a row it never asked for.
+        rmSync(planted, { force: true });
+      }
+
+      return `a default load listed nothing for ${JSON.stringify(dir)} rather than the host's conversations, then listed exactly the transcript planted in ${chatsDir.replace(root, '<root>')}`;
     },
   });
 }
