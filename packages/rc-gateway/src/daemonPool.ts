@@ -54,6 +54,7 @@ import {
   type DaemonSessionTranscriptPageOptions,
   type DaemonSessionTurnIndexPage,
   type DaemonSessionTurnIndexPageOptions,
+  type DaemonSessionTurnStatus,
   type DaemonSessionRecapResult,
   type DaemonSessionBtwResult,
   type WorktreeResetSessionRequest,
@@ -338,6 +339,12 @@ export interface SessionDaemon {
     sessionId: string,
     opts?: DaemonSessionTurnIndexPageOptions,
   ): Promise<DaemonSessionTurnIndexPage>;
+  // The SDK's own name (#131), because a bare `DaemonClient` also implements
+  // this interface and a gateway-invented name would be undefined on it.
+  getCurrentSessionTurn(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSessionTurnStatus>;
   recapSession(
     sessionId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
@@ -1856,6 +1863,15 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionTurnIndexPage> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.getSessionTurnIndexPage(sessionId, opts),
+    );
+  }
+
+  async getCurrentSessionTurn(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSessionTurnStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.getCurrentSessionTurn(sessionId, opts),
     );
   }
 

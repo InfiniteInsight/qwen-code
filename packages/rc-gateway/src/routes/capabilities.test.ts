@@ -185,6 +185,8 @@ describe('GET /rc/capabilities', () => {
       expect(rc.hostTerminalAlreadyMirrored).toBe(true);
       // #130: the resumable attachment-uploads routes are mounted.
       expect(rc.resumableAttachmentUploads).toBe(true);
+      // #131: the current-turn route is mounted.
+      expect(rc.currentTurn).toBe(true);
     } finally {
       await close();
     }

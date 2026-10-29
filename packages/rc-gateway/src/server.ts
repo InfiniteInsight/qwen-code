@@ -163,6 +163,7 @@ import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js'
 import { createSessionExportRoute } from './routes/sessionExport.js';
 import { createSessionTranscriptRoute } from './routes/sessionTranscript.js';
 import { createSessionTurnIndexRoute } from './routes/sessionTurnIndex.js';
+import { createSessionTurnCurrentRoute } from './routes/sessionTurnCurrent.js';
 import { createSessionRecapRoute } from './routes/sessionRecap.js';
 import { createSessionBtwRoute } from './routes/sessionBtw.js';
 import {
@@ -1007,6 +1008,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionTurnIndexRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/turns/current — read-scope (#131). The daemon's record of
+  // the turn a conversation is on: running, queued or the last one ended. The
+  // status line's sheet polls it while open and a turn is live. Relayed
+  // untouched and not audited (a poll). Bare namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/turns/current',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionTurnCurrentRoute(deps.daemon),
   );
   // POST /session/:id/recap — asks the daemon for its one-sentence
   // 'where did I leave off' summary of one conversation. It is a POST
