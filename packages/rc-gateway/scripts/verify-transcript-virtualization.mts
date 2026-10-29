@@ -22675,6 +22675,26 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  PAGE_SCENARIOS.push({
+    name: 'P304 the bar is one 56px row at 360x780, and the page does not scroll at 1280x720 (the sticky rail that added 100px is gone)',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      await page.setViewportSize({ width: 360, height: 780 });
+      await g177Settle(page);
+      const bar = (await page.evaluate(`document.getElementById('h1-bar').getBoundingClientRect().height`)) as number;
+      const wide = (await page.evaluate(`document.documentElement.scrollWidth`)) as number;
+      await shot(page, 'p304-bar-360');
+      expect(bar === 56 && wide <= 360, `the bar is ${bar}px tall and the document ${wide}px wide at 360`);
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await g177Settle(page);
+      const doc = (await page.evaluate(`({ h: document.documentElement.scrollHeight, v: window.innerHeight })`)) as { h: number; v: number };
+      await shot(page, 'p304-page-1280');
+      expect(doc.h <= doc.v, `the document is ${doc.h}px in a ${doc.v}px window at 1280x720`);
+      return `bar ${bar}px at 360; document ${doc.h}px in ${doc.v}px at 1280x720`;
+    },
+  });
+
 }
 
 
