@@ -45,8 +45,9 @@ export interface SessionListResult {
 /**
  * Hard cap on how many transcripts a single listing scan opens. Bounds an
  * OWNER endpoint a UI may poll: a workspace can accumulate arbitrarily many
- * dormant transcripts, and we open + first-line-read each one. Filenames are
- * sorted before the cap so it is STABLE across calls (the same prefix wins).
+ * dormant transcripts, and we open + first-line-read each one. The cap keeps
+ * the MOST RECENTLY MODIFIED transcripts (ties broken by id), so it is stable
+ * across calls and the newest session is never the one dropped.
  */
 export const MAX_LIST_SESSIONS = 500;
 
@@ -222,13 +223,46 @@ export async function readSessionTitleInfo(
 }
 
 const PREVIEW_MAX_CHARS = 120;
-const PREVIEW_MAX_LINES = 20;
+/** Lines inspected for the first user message (the user turn can sit behind
+ * several system/context records). */
+const PREVIEW_MAX_LINES = 200;
+/** Bytes inspected before giving up; bounds the cost of a listing row. */
+const PREVIEW_MAX_BYTES = 1024 * 1024;
+
+/** The preview text of one parsed line, or null when it is not a user message. */
+function previewOfLine(line: string): string | null {
+  if (!line || line.indexOf('"user"') === -1) return null;
+  try {
+    const rec = JSON.parse(line) as {
+      type?: unknown;
+      message?: { parts?: Array<{ text?: unknown }> };
+    };
+    if (rec.type !== 'user') return null;
+    const parts = rec.message?.parts;
+    if (!Array.isArray(parts)) return null;
+    for (const p of parts) {
+      if (typeof p.text === 'string' && p.text.trim().length > 0) {
+        const cleaned = p.text.trim().replace(/\s+/g, ' ');
+        return cleaned.length > PREVIEW_MAX_CHARS
+          ? cleaned.slice(0, PREVIEW_MAX_CHARS) + '…'
+          : cleaned;
+      }
+    }
+  } catch {
+    // not a complete JSON line: not a candidate
+  }
+  return null;
+}
 
 /**
  * Reads the first user message from a transcript for a list preview.
- * Scans up to {@link PREVIEW_MAX_LINES} JSONL lines looking for a
- * `type === 'user'` record with `message.parts[].text`. Returns
- * the first ~{@link PREVIEW_MAX_CHARS} chars or `null`. Never throws.
+ * Streams the file in chunks, line by line, looking for a `type === 'user'`
+ * record with `message.parts[].text`, and stops at the first one found, at
+ * {@link PREVIEW_MAX_LINES} lines or at {@link PREVIEW_MAX_BYTES} bytes. Lines
+ * are assembled from raw bytes and decoded once, so a multibyte char split
+ * across two reads is never corrupted and a record larger than one chunk is
+ * still seen whole. Returns the first ~{@link PREVIEW_MAX_CHARS} chars or
+ * `null`. Never throws.
  */
 export async function readFirstUserMessage(
   chatsDir: string,
@@ -242,33 +276,43 @@ export async function readFirstUserMessage(
   }
   try {
     const buf = Buffer.allocUnsafe(64 * 1024);
-    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
-    if (bytesRead === 0) return null;
-    const text = buf.subarray(0, bytesRead).toString('utf8');
-    const lines = text.split('\n');
-    const limit = Math.min(lines.length, PREVIEW_MAX_LINES);
-    for (let i = 0; i < limit; i++) {
-      const line = lines[i].trim();
-      if (!line || line.indexOf('"user"') === -1) continue;
-      try {
-        const rec = JSON.parse(line) as {
-          type?: unknown;
-          message?: { parts?: Array<{ text?: unknown }> };
-        };
-        if (rec.type !== 'user') continue;
-        const parts = rec.message?.parts;
-        if (!Array.isArray(parts)) continue;
-        for (const p of parts) {
-          if (typeof p.text === 'string' && p.text.trim().length > 0) {
-            const cleaned = p.text.trim().replace(/\s+/g, ' ');
-            return cleaned.length > PREVIEW_MAX_CHARS
-              ? cleaned.slice(0, PREVIEW_MAX_CHARS) + '…'
-              : cleaned;
-          }
-        }
-      } catch {
-        continue;
+    let pending: Buffer[] = [];
+    let total = 0;
+    let lineNo = 0;
+    let eof = false;
+    while (!eof && total < PREVIEW_MAX_BYTES && lineNo < PREVIEW_MAX_LINES) {
+      const { bytesRead } = await handle.read(
+        buf,
+        0,
+        Math.min(buf.length, PREVIEW_MAX_BYTES - total),
+        null,
+      );
+      if (bytesRead === 0) {
+        eof = true;
+      } else {
+        total += bytesRead;
       }
+      let start = 0;
+      const slice = buf.subarray(0, bytesRead);
+      while (start <= slice.length && lineNo < PREVIEW_MAX_LINES) {
+        const nl = slice.indexOf(0x0a, start);
+        if (nl === -1) {
+          if (start < slice.length)
+            pending.push(Buffer.from(slice.subarray(start)));
+          break;
+        }
+        pending.push(Buffer.from(slice.subarray(start, nl)));
+        const line = Buffer.concat(pending).toString('utf8').trim();
+        pending = [];
+        lineNo++;
+        const hit = previewOfLine(line);
+        if (hit !== null) return hit;
+        start = nl + 1;
+      }
+    }
+    if (eof && pending.length > 0 && lineNo < PREVIEW_MAX_LINES) {
+      // Final line without a trailing newline.
+      return previewOfLine(Buffer.concat(pending).toString('utf8').trim());
     }
     return null;
   } catch {
@@ -361,22 +405,17 @@ async function scanValidIds(chatsDir: string): Promise<string[] | null> {
 }
 
 /**
- * Reads one transcript's listing entry. Returns `null` ONLY when the file
- * cannot be stat'd: the mtime drives the most-recent-first sort, so a
- * fabricated timestamp would corrupt it (the "can't read → omit" contract). An
- * unreadable first line still lists the session as a root rather than drop it.
+ * Reads one transcript's listing entry. The caller has already stat'd the file
+ * (the mtime drives both the cap and the most-recent-first sort, so a
+ * fabricated timestamp would corrupt them: a file that cannot be stat'd is
+ * omitted before this point). An unreadable first line still lists the session
+ * as a root rather than drop it.
  */
 async function readEntry(
   chatsDir: string,
   id: string,
-): Promise<SessionEntry | null> {
-  let updatedAt: string;
-  try {
-    const stats = await stat(join(chatsDir, `${id}.jsonl`));
-    updatedAt = stats.mtime.toISOString();
-  } catch {
-    return null;
-  }
+  updatedAt: string,
+): Promise<SessionEntry> {
   let parent: string | null;
   try {
     const first = await readFirstRecord(chatsDir, id);
@@ -452,15 +491,28 @@ export async function listSessionsAcross(
     for (const id of ids) if (!homeOf.has(id)) homeOf.set(id, dir);
   }
 
-  const ids = [...homeOf.keys()].sort(cmp);
-  const truncated = ids.length > max;
-  const capped = truncated ? ids.slice(0, max) : ids;
+  // Cap by RECENCY, not by id. Ids are random UUIDs, so a lexical prefix is an
+  // arbitrary subset and could leave the newest session out of every listing.
+  // The mtime is read here for every candidate (a stat is cheap next to the
+  // three file opens a row costs); the newest `max` win, ties broken by id so
+  // the cap stays deterministic. A file that cannot be stat'd is omitted.
+  const stamped: Array<{ id: string; dir: string; mtimeMs: number }> = [];
+  for (const id of [...homeOf.keys()].sort(cmp)) {
+    const dir = homeOf.get(id) as string;
+    try {
+      const stats = await stat(join(dir, `${id}.jsonl`));
+      stamped.push({ id, dir, mtimeMs: stats.mtimeMs });
+    } catch {
+      // vanished or unreadable: omitted, never given a made-up mtime
+    }
+  }
+  stamped.sort((a, b) => b.mtimeMs - a.mtimeMs || cmp(a.id, b.id));
+  const truncated = stamped.length > max;
+  const capped = truncated ? stamped.slice(0, max) : stamped;
 
   const entries: SessionEntry[] = [];
-  for (const id of capped) {
-    const dir = homeOf.get(id) as string;
-    const entry = await readEntry(dir, id);
-    if (!entry) continue;
+  for (const { id, dir, mtimeMs } of capped) {
+    const entry = await readEntry(dir, id, new Date(mtimeMs).toISOString());
     if (archivedSet.has(dir)) entry.archived = true;
     entries.push(entry);
   }
@@ -475,8 +527,8 @@ export async function listSessionsAcross(
  * agree. A missing chats dir (ENOENT) is an empty listing, not an error.
  *
  * Filenames are filtered to syntactically valid `<id>.jsonl` (the same
- * path-traversal guard lineage uses), sorted lexically, then capped at
- * `opts.max` (`truncated` reports the overflow). An unreadable first line lists
+ * path-traversal guard lineage uses), then the newest `opts.max` by mtime are
+ * kept (`truncated` reports the overflow). An unreadable first line lists
  * the session as a root rather than dropping it.
  *
  * Defined as the single-dir case of {@link listSessionsAcross} so the two paths

@@ -7144,6 +7144,181 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #171. The first "load earlier" sends no cursor, so the daemon answers with the
+// NEWEST page, which a resume has usually drawn already. Two stored pages are
+// served here in the shape the real daemon sends (the clock on data._meta, the
+// update flat on data): the newest holds the two turns on screen, the one
+// behind it a turn older. One tap has to end with that older turn drawn once
+// above the live ones, not the newest page drawn a second time, and without a
+// second tap spent on the page that added nothing.
+PAGE_SCENARIOS.push({
+  name: 'P220 the first load earlier on a transcript that already holds the newest page draws no record twice and reads on to the older page in the same tap, stamped from data._meta.timestamp',
+  frames: () => {
+    const f = new Frames();
+    f.user('q1').asst('a1').done().user('q2').asst('a2').done();
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    const flatEvent = (id: number, sessionUpdate: string, text: string, ts: number) => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: { sessionUpdate, content: { type: 'text', text }, _meta: { timestamp: ts } },
+    });
+    const asked: string[] = [];
+    await page.route(
+      (u) => /^\/session\/[^/]+\/transcript$/.test(u.pathname),
+      (route) => {
+        const u = new URL(route.request().url());
+        asked.push(u.search);
+        const body = u.searchParams.get('cursor')
+          ? {
+              v: 1,
+              events: [
+                flatEvent(1, 'user_message_chunk', 'q0', 1_700_000_000_000),
+                flatEvent(2, 'agent_message_chunk', 'a0', 1_700_000_001_000),
+              ],
+              hasMore: false,
+            }
+          : {
+              v: 1,
+              events: [
+                flatEvent(3, 'user_message_chunk', 'q1', 1_700_000_010_000),
+                flatEvent(4, 'agent_message_chunk', 'a1', 1_700_000_011_000),
+                flatEvent(5, 'user_message_chunk', 'q2', 1_700_000_020_000),
+                flatEvent(6, 'agent_message_chunk', 'a2', 1_700_000_021_000),
+              ],
+              nextCursor: 'p220-cursor',
+              hasMore: true,
+            };
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(body),
+        });
+      },
+    );
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 30_000);
+    await settlePage(page);
+
+    const rows = () =>
+      page.evaluate(() =>
+        transcriptModel.items
+          .filter((i) => i.kind === 'user' || i.kind === 'asst')
+          .map((i) => `${i.kind}:${i.text}:${i.time ?? ''}`),
+      );
+    const before = await rows();
+    expect(before.length === 4, `setup: ${JSON.stringify(before)}`);
+
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      () => transcriptModel.items.some((i) => i.text === 'q0'),
+      null,
+      { timeout: 10_000 },
+    );
+    await settlePage(page);
+    const after = await rows();
+    expect(
+      after.length === 6 &&
+        after.slice(0, 2).join('|') === 'user:q0:1700000000000|asst:a0:1700000001000',
+      `after one tap the rows read ${JSON.stringify(after)}`,
+    );
+    expect(
+      after.slice(2).join('|') === before.join('|'),
+      `the live rows moved: ${JSON.stringify(after.slice(2))} against ${JSON.stringify(before)}`,
+    );
+    expect(asked.length === 2, `${asked.length} reads for one tap: ${JSON.stringify(asked)}`);
+    expect(
+      !asked[0]!.includes('cursor=') && asked[1]!.includes('cursor=p220-cursor'),
+      `the reads were ${JSON.stringify(asked)}`,
+    );
+    const hidden = await page.evaluate(
+      () => (document.getElementById('load-earlier') as HTMLElement).hidden,
+    );
+    expect(hidden, 'the control stayed after the last page');
+    return `one tap read ${asked.length} pages (${JSON.stringify(asked)}), dropped the newest page's four records already on screen, and drew q0 and a0 once above them with the daemon's own times; the control retired`;
+  },
+});
+
+// #171. One prompt is several user_message_chunk frames, one per block. A
+// picture sent before its caption, a block of a kind the viewer has no picture
+// for, and a frame that carries nothing used to leave a second bubble, an empty
+// bubble and a miscounted turn, so a rewind cut inside a message it meant to
+// keep.
+PAGE_SCENARIOS.push({
+  name: 'P221 a message sent as picture then caption is one bubble, an audio block is a chip and an empty frame is nothing: three messages, three turns, and a rewind to turn 1 keeps exactly the first',
+  frames: () => {
+    const f = new Frames();
+    const chunk = (content: unknown) => f.upd({ sessionUpdate: 'user_message_chunk', content });
+    chunk({ type: 'image', attachmentId: 'IMG_0001.png', mimeType: 'image/png', size: 900 });
+    chunk({ type: 'text', text: 'what is this?' });
+    f.asst('A gradient.').done();
+    chunk({ type: 'text', text: 'listen' });
+    chunk({ type: 'audio', mimeType: 'audio/wav' });
+    f.asst('Heard it.').done();
+    chunk({ type: 'text', text: '' });
+    chunk({ type: 'text', text: 'third' });
+    f.asst('Third reply.').done();
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    const png = solidPng(40, 40);
+    await page.route('**/session/*/attachments/*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: png.toString('base64'), mimeType: 'image/png' }),
+      }),
+    );
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 12, 30_000);
+    await settlePage(page);
+    const state = () =>
+      page.evaluate(() => ({
+        users: transcriptModel.items
+          .filter((i) => i.kind === 'user')
+          .map((i) => `${i.text}|${(i.parts ?? []).map((p) => p.name).join(',')}`),
+        turns: userTurnsSeen,
+        bubbles: Array.from(document.querySelectorAll<HTMLElement>('#transcript .bubble.user')).map((b) => ({
+          text: (b.textContent ?? '').replace(/^\s*you\b/, '').trim(),
+          media: b.querySelectorAll('img,.att-chip').length,
+        })),
+      }));
+    const s = await state();
+    expect(
+      JSON.stringify(s.users) ===
+        JSON.stringify(['what is this?|IMG_0001.png', 'listen|audio block', 'third|']),
+      `the user rows read ${JSON.stringify(s.users)}`,
+    );
+    expect(s.turns === 3, `${s.turns} turns counted for three messages`);
+    expect(
+      s.bubbles.length === 3 && s.bubbles.every((b) => b.text !== '' || b.media > 0),
+      `the bubbles read ${JSON.stringify(s.bubbles)}`,
+    );
+
+    // The rewind marker the daemon sends keeps the first message and drops the rest.
+    await page.evaluate(() =>
+      renderFrame({ id: 99, type: 'session_rewound', data: { targetTurnIndex: 1 } }),
+    );
+    await settlePage(page);
+    const r = await page.evaluate(() => ({
+      users: transcriptModel.items.filter((i) => i.kind === 'user').map((i) => i.text),
+      asst: transcriptModel.items.filter((i) => i.kind === 'asst').map((i) => i.text),
+      parts: transcriptModel.items.filter((i) => i.kind === 'user').map((i) => (i.parts ?? []).length),
+      turns: userTurnsSeen,
+    }));
+    expect(
+      JSON.stringify(r.users) === '["what is this?"]' &&
+        JSON.stringify(r.asst) === '["A gradient."]' &&
+        r.parts[0] === 1 &&
+        r.turns === 1,
+      `the rewind left ${JSON.stringify(r)}`,
+    );
+    return `three messages drew ${JSON.stringify(s.users)} (turn count ${s.turns}, no blank bubble), and a rewind to turn 1 kept the picture-and-caption message whole with its reply and nothing after it`;
+  },
+});
+
 // issue #114. The send path echoes what you typed at the moment you sent it,
 // and the viewer used to drop every `user_message_chunk` on that account. That
 // was only ever true of the window that typed it: a second window, a reload, or
@@ -20777,6 +20952,107 @@ function solidPng(w: number, h: number): Buffer {
       await page.waitForTimeout(300);
       expect(fork.asked === 1, `the fork sheet left over from A forked ${fork.asked - 1} more time(s)`);
       return 'a late end of A and a late fork of A both left B watched, and the open fork sheet was cancelled by the switch';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P230 files uploaded but not yet sent belong to the conversation they were uploaded to: a switch hides A\'s strip, a send on B carries nothing, A\'s strip comes back with A and sends it, and an upload that lands after the switch is filed under A, not B',
+    // #201. The pending list was one array for the whole page, so a file picked
+    // on A rode along on the next send on B (with an attachment id the daemon
+    // issued for A) and the strip stayed on screen through a switch.
+    waitView: false,
+    noConsoleErrors: true,
+    frames: frames172,
+    run: async ({ page }) => {
+      const late = new Held();
+      let lateTaken = false;
+      const prompts: { id: string; body: Record<string, unknown> }[] = [];
+      // The name rides in the query, so the pattern ends at the question mark.
+      await page.route(/\/session\/[^/]+\/attachments\?/, async (route) => {
+        const req = route.request();
+        if (req.method() !== 'POST') return route.fallback();
+        const name = new URL(req.url()).searchParams.get('name') ?? '';
+        const answer = {
+          attachment: {
+            type: 'resource',
+            attachmentId: `${sidOf(route)}-${name}`,
+            mimeType: 'text/plain',
+            size: 10,
+          },
+        };
+        // The second file picked on A is the one held on the wire.
+        if (name === 'late.txt' && !lateTaken) {
+          lateTaken = true;
+          return late.serve(route, 200, answer);
+        }
+        return json(route, answer);
+      });
+      await page.route(/\/session\/[^/]+\/prompt$/, async (route) => {
+        prompts.push({
+          id: sidOf(route),
+          body: JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>,
+        });
+        return json(route, { stopReason: 'end_turn' });
+      });
+      const strip = (): Promise<{ hidden: boolean; text: string }> =>
+        page.evaluate(() => ({
+          hidden: (document.getElementById('pending') as HTMLElement).hidden,
+          text: document.getElementById('pending-list')?.textContent ?? '',
+        }));
+      const pick = (name: string): Promise<void> =>
+        page.setInputFiles('#attach-file', { name, mimeType: 'text/plain', buffer: Buffer.from('0123456789') });
+      const sendOn = async (text: string): Promise<Record<string, unknown>> => {
+        const before = prompts.length;
+        await page.fill('#prompt', text);
+        await page.click('#send');
+        await poll(() => prompts.length > before, `the send of ${text} never reached the wire`);
+        return prompts[prompts.length - 1]!.body;
+      };
+
+      // 1. Upload on A, switch to B: A's strip is gone and B's send is bare.
+      await go(page, A);
+      await pick('a-notes.txt');
+      await page.waitForFunction(() => (document.getElementById('pending-list')?.textContent ?? '').includes('a-notes.txt'), null, { timeout: 10_000 });
+      await go(page, B);
+      const onB = await strip();
+      expect(onB.hidden && onB.text === '', `A's strip stayed up on B (${JSON.stringify(onB)})`);
+      const bBody = await sendOn('p230 sent on B');
+      expect(
+        'prompt' in bBody && !('blocks' in bBody) && JSON.stringify(bBody).includes('a-notes') === false,
+        `B's send carried A's file: ${JSON.stringify(bBody)}`,
+      );
+
+      // 2. Back on A: the strip is there again, and the send carries the file.
+      await go(page, A);
+      const backOnA = await strip();
+      expect(!backOnA.hidden && backOnA.text.includes('a-notes.txt'), `A's strip did not come back (${JSON.stringify(backOnA)})`);
+      const aBody = await sendOn('p230 sent on A');
+      const aBlocks = (aBody['blocks'] ?? []) as { attachmentId?: string }[];
+      expect(
+        aBlocks.length === 2 && aBlocks[1]!.attachmentId === `${A}-a-notes.txt`,
+        `A's send carried ${JSON.stringify(aBody)}, not its own file`,
+      );
+      expect((await strip()).hidden, 'the strip stayed up after A sent');
+
+      // 3. An upload for A that lands after the switch is filed under A.
+      await pick('late.txt');
+      await asked(late, 'the upload of late.txt');
+      await go(page, B);
+      await land(page, late, 'the upload of late.txt');
+      const lateB = await strip();
+      expect(lateB.hidden && lateB.text === '', `A's late upload appeared on B (${JSON.stringify(lateB)})`);
+      const b2Body = await sendOn('p230 sent on B again');
+      expect(!('blocks' in b2Body), `B's send carried A's late upload: ${JSON.stringify(b2Body)}`);
+      await go(page, A);
+      const lateA = await strip();
+      expect(!lateA.hidden && lateA.text.includes('late.txt'), `the late upload was not filed under A (${JSON.stringify(lateA)})`);
+      const a2Body = await sendOn('p230 sent on A again');
+      const a2Blocks = (a2Body['blocks'] ?? []) as { attachmentId?: string }[];
+      expect(
+        a2Blocks.length === 2 && a2Blocks[1]!.attachmentId === `${A}-late.txt`,
+        `A's second send carried ${JSON.stringify(a2Body)}`,
+      );
+      return `upload on A, B's send bare, A's strip back and its send carried ${A}-a-notes.txt; a late upload for A stayed off B and rode A's next send (${prompts.length} prompts)`;
     },
   });
 }

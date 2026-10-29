@@ -232,31 +232,46 @@ const prefixRegexes = new WeakMap<QueryTerm, RegExp>();
 function prefixRegex(t: QueryTerm): RegExp {
   let re = prefixRegexes.get(t);
   if (re === undefined) {
-    // Word-boundary prefix: a token starting with the stem. The stem is escaped
-    // and followed by no quantifier → a linear, ReDoS-safe literal match.
-    re = new RegExp('\\b' + escapeRegExp(t.value));
+    // Token-start prefix: the stem not preceded by a letter, digit or `_`. This
+    // is `\b` for ASCII, but `\b` is ASCII-only in JS: before `é` or `日` it
+    // matches only after an ASCII word char, i.e. exactly backwards. The
+    // lookbehind uses Unicode properties instead. The stem is escaped and has no
+    // quantifier -> a linear, ReDoS-safe literal match.
+    re = new RegExp('(?<![\\p{L}\\p{N}_])' + escapeRegExp(t.value), 'u');
     prefixRegexes.set(t, re);
   }
   return re;
 }
 
-/** Does a single atom term match the (already lowercased) haystack? */
-function termMatch(t: QueryTerm, hayLower: string): boolean {
-  if (t.kind === 'prefix') return prefixRegex(t).test(hayLower);
-  // plain and phrase are both substring matches.
-  return hayLower.includes(t.value);
+/** The haystack plus its whitespace-collapsed twin, built lazily and once. */
+interface Hay {
+  lower: string;
+  collapsed?: string;
 }
 
-function evalNode(node: QueryNode, hayLower: string): boolean {
+/** Does a single atom term match the (already lowercased) haystack? */
+function termMatch(t: QueryTerm, hay: Hay): boolean {
+  if (t.kind === 'prefix') return prefixRegex(t).test(hay.lower);
+  if (t.kind === 'phrase') {
+    // The phrase value is whitespace-normalised at parse time, so it must meet
+    // an equally normalised haystack or `"foo bar"` would miss `foo\nbar`.
+    hay.collapsed ??= hay.lower.replace(/\s+/g, ' ');
+    return hay.collapsed.includes(t.value);
+  }
+  // plain terms contain no whitespace: a raw substring match.
+  return hay.lower.includes(t.value);
+}
+
+function evalNode(node: QueryNode, hay: Hay): boolean {
   switch (node.t) {
     case 'atom':
-      return termMatch(node.term, hayLower);
+      return termMatch(node.term, hay);
     case 'not':
-      return !evalNode(node.kid, hayLower);
+      return !evalNode(node.kid, hay);
     case 'and':
-      return node.kids.every((k) => evalNode(k, hayLower));
+      return node.kids.every((k) => evalNode(k, hay));
     case 'or':
-      return node.kids.some((k) => evalNode(k, hayLower));
+      return node.kids.some((k) => evalNode(k, hay));
     default:
       return false; // unreachable: the union above is exhaustive.
   }
@@ -268,5 +283,5 @@ function evalNode(node: QueryNode, hayLower: string): boolean {
  */
 export function matchesQuery(plan: QueryPlan, hayLower: string): boolean {
   if (plan.node === null) return false;
-  return evalNode(plan.node, hayLower);
+  return evalNode(plan.node, { lower: hayLower });
 }

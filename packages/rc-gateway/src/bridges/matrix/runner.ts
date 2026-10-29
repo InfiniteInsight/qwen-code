@@ -17,6 +17,7 @@ import {
   ENCRYPTED_ROOM_NOTICE,
   type MatrixDispatchDeps,
   type MatrixResponder,
+  type NormalizedMatrixMessage,
   type NormalizedMatrixReaction,
   type TrackedEvent,
 } from './dispatch.js';
@@ -162,6 +163,14 @@ export class MatrixBridge {
   /** Bounds room-invite auto-joins per rolling window (DoS/probing guard). */
   private readonly inviteLimiter = new SubActorRateLimiter();
   private readonly ctx: RoomStateCtx;
+  /**
+   * roomId → tail of that room's in-flight message dispatch (#159). A prompt
+   * POST answers only when the whole turn ends, so messages run OFF the sync
+   * loop (otherwise the reaction that approves a tool call is never read).
+   * Chaining per room keeps one room's messages in order: a second message
+   * queues behind the running turn. Entries delete themselves when drained.
+   */
+  private readonly roomChains = new Map<string, Promise<void>>();
   private readonly log: (msg: string) => void;
   /** The run signal, stored so decrypted-path dispatch can reconcile subscriptions. */
   private signal?: AbortSignal;
@@ -231,21 +240,43 @@ export class MatrixBridge {
     m: { roomId: string; sender: string; body: string },
     powerLevel = 0,
   ): Promise<void> {
-    await handleMessage(
-      {
-        roomId: m.roomId,
-        sender: m.sender,
-        isBot: m.sender === this.cfg.botUserId,
-        body: m.body,
-        powerLevel,
-      },
-      this.dispatchDeps(),
-    );
-    // A `!qwen attach` this message may have bound a new session. The crypto
-    // path has no per-batch reconcile (the fetch syncLoop is subsumed by the
-    // SDK client), so reconcile here — mirroring syncLoop — or the freshly bound
-    // session never gets its outbound SSE echo loop. Idempotent (subscribed set).
-    if (this.signal) this.reconcileSubscriptions(this.signal);
+    // Resolves when this message's dispatch (the whole turn, for a prompt) is
+    // done; the crypto adapter's caller must not await it (see startBridge),
+    // or a turn waiting on an approval blocks the sync that carries the vote.
+    await this.dispatchMessage({
+      roomId: m.roomId,
+      sender: m.sender,
+      isBot: m.sender === this.cfg.botUserId,
+      body: m.body,
+      powerLevel,
+    });
+  }
+
+  /**
+   * Queue one message behind its room's earlier ones and run it (#159). Never
+   * rejects (dispatchSafely logs). A `!qwen attach` in the message may have
+   * bound a new session. The crypto path has no per-batch reconcile (the fetch
+   * syncLoop is subsumed by the SDK client), so reconcile once it finishes, or
+   * the freshly bound session never gets its outbound SSE echo loop.
+   * Idempotent (subscribed set).
+   */
+  private dispatchMessage(msg: NormalizedMatrixMessage): Promise<void> {
+    const prev = this.roomChains.get(msg.roomId) ?? Promise.resolve();
+    const next = prev
+      .then(() =>
+        this.dispatchSafely('message', () =>
+          handleMessage(msg, this.dispatchDeps()),
+        ),
+      )
+      .then(() => {
+        if (this.signal) this.reconcileSubscriptions(this.signal);
+      });
+    this.roomChains.set(msg.roomId, next);
+    void next.then(() => {
+      if (this.roomChains.get(msg.roomId) === next)
+        this.roomChains.delete(msg.roomId);
+    });
+    return next;
   }
 
   /**
@@ -366,10 +397,9 @@ export class MatrixBridge {
       // Skip replaying timeline history on the initial full sync — state
       // (power levels, encryption, invites) is applied above regardless.
       if (!initial) {
-        for (const msg of ex.messages)
-          await this.dispatchSafely('message', () =>
-            handleMessage(msg, this.dispatchDeps()),
-          );
+        // Off the loop: a prompt holds its POST open for the whole turn, and
+        // the reactions below (and later syncs) carry the approvals it awaits.
+        for (const msg of ex.messages) void this.dispatchMessage(msg);
         for (const reaction of ex.reactions)
           await this.dispatchSafely('reaction', () =>
             handleReaction(reaction, this.dispatchDeps()),

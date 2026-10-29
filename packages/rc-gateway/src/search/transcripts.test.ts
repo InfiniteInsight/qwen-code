@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -497,5 +497,41 @@ describe('searchTranscripts since/until time filter (cycle 79)', () => {
       (h) => h.eventId,
     );
     expect(unfiltered).toContain('notime');
+  });
+});
+
+describe('searchTranscripts: archived transcripts (#170)', () => {
+  it('searches chats/archive/ and flags those hits archived', () => {
+    return (async () => {
+      mkdirSync(join(dir, 'archive'));
+      writeJsonl('live.jsonl', [
+        textRec({ uuid: 'l1', sessionId: 'live', type: 'user' }, 'widget live'),
+      ]);
+      writeFileSync(
+        join(dir, 'archive', 'old.jsonl'),
+        JSON.stringify(
+          textRec({ uuid: 'o1', sessionId: 'old', type: 'user' }, 'widget old'),
+        ) + '\n',
+      );
+      const hits = await searchTranscripts(dir, 'widget');
+      expect(hits.map((h) => h.eventId).sort()).toEqual(['l1', 'o1']);
+      expect(hits.find((h) => h.eventId === 'o1')?.archived).toBe(true);
+      expect(hits.find((h) => h.eventId === 'l1')?.archived).toBeUndefined();
+    })();
+  });
+
+  it('a live transcript wins over an archived one of the same name', async () => {
+    mkdirSync(join(dir, 'archive'));
+    writeJsonl('same.jsonl', [
+      textRec({ uuid: 'live', sessionId: 's', type: 'user' }, 'widget live'),
+    ]);
+    writeFileSync(
+      join(dir, 'archive', 'same.jsonl'),
+      JSON.stringify(
+        textRec({ uuid: 'arch', sessionId: 's', type: 'user' }, 'widget arch'),
+      ) + '\n',
+    );
+    const hits = await searchTranscripts(dir, 'widget');
+    expect(hits.map((h) => h.eventId)).toEqual(['live']);
   });
 });

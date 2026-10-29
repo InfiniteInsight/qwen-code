@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, stat, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SearchIndex, toFtsMatch } from './searchIndex.js';
@@ -295,6 +295,105 @@ describe('SearchIndex', () => {
     // 2-char word 令牌) can't match via the index — documented, hinted by the CLI.
     expect(idx.query('令牌').hits).toHaveLength(0);
     expect(idx.query('ok').hits).toHaveLength(0);
+  });
+
+  it('refreshes on query when a transcript is added, changed or removed (no manual reindex)', async () => {
+    const fileA = join(chatsDir, `${ID(1)}.jsonl`);
+    await writeFile(fileA, rec({ uuid: 'a1', text: 'alpha widget' }) + '\n');
+    idx = SearchIndex.open(dbPath);
+    idx.reindex(chatsDir);
+    expect(idx.query('widget').hits.map((h) => h.eventId)).toEqual(['a1']);
+
+    // New transcript.
+    await writeFile(
+      join(chatsDir, `${ID(2)}.jsonl`),
+      rec({ uuid: 'b1', sessionId: ID(2), text: 'beta gadget' }) + '\n',
+    );
+    expect(idx.query('gadget').hits.map((h) => h.eventId)).toEqual(['b1']);
+
+    // Changed transcript (explicit newer mtime: coarse clocks).
+    await writeFile(fileA, rec({ uuid: 'a2', text: 'alpha sprocket' }) + '\n');
+    const future = new Date(Date.now() + 10_000);
+    await utimes(fileA, future, future);
+    expect(idx.query('sprocket').hits.map((h) => h.eventId)).toEqual(['a2']);
+    expect(idx.query('widget').hits).toHaveLength(0);
+
+    // Removed transcript.
+    await rm(join(chatsDir, `${ID(2)}.jsonl`));
+    expect(idx.query('gadget').hits).toHaveLength(0);
+  });
+
+  it('a REOPENED index (as the gateway does per query) also refreshes', async () => {
+    await writeFile(
+      join(chatsDir, `${ID(1)}.jsonl`),
+      rec({ uuid: 'a1', text: 'alpha widget' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    idx.reindex(chatsDir);
+    idx.close();
+    await writeFile(
+      join(chatsDir, `${ID(2)}.jsonl`),
+      rec({ uuid: 'b1', sessionId: ID(2), text: 'beta gadget' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    expect(idx.query('gadget').hits.map((h) => h.eventId)).toEqual(['b1']);
+  });
+
+  it('an index that was never built is left alone (no source dir to refresh from)', async () => {
+    await writeFile(
+      join(chatsDir, `${ID(1)}.jsonl`),
+      rec({ uuid: 'a1', text: 'alpha widget' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    expect(idx.query('widget').hits).toHaveLength(0);
+    expect(idx.count()).toBe(0);
+  });
+
+  it('indexes chats/archive/ transcripts and flags those hits archived', async () => {
+    await mkdir(join(chatsDir, 'archive'));
+    await writeFile(
+      join(chatsDir, `${ID(1)}.jsonl`),
+      rec({ uuid: 'live', text: 'live widget' }) + '\n',
+    );
+    await writeFile(
+      join(chatsDir, 'archive', `${ID(2)}.jsonl`),
+      rec({ uuid: 'old', sessionId: ID(2), text: 'archived widget' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    idx.reindex(chatsDir);
+    const hits = idx.query('widget').hits;
+    expect(hits.map((h) => h.eventId).sort()).toEqual(['live', 'old']);
+    expect(hits.find((h) => h.eventId === 'old')?.archived).toBe(true);
+    expect(hits.find((h) => h.eventId === 'live')?.archived).toBeUndefined();
+  });
+
+  it('a live copy wins over an archived copy of the same transcript name', async () => {
+    await mkdir(join(chatsDir, 'archive'));
+    await writeFile(
+      join(chatsDir, `${ID(1)}.jsonl`),
+      rec({ uuid: 'live', text: 'shared widget live' }) + '\n',
+    );
+    await writeFile(
+      join(chatsDir, 'archive', `${ID(1)}.jsonl`),
+      rec({ uuid: 'dup', text: 'shared widget archived' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    idx.reindexIncremental(chatsDir);
+    expect(idx.query('widget').hits.map((h) => h.eventId)).toEqual(['live']);
+  });
+
+  it('prunes an archived transcript that was restored or deleted', async () => {
+    await mkdir(join(chatsDir, 'archive'));
+    const arch = join(chatsDir, 'archive', `${ID(2)}.jsonl`);
+    await writeFile(
+      arch,
+      rec({ uuid: 'old', sessionId: ID(2), text: 'archived widget' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    idx.reindexIncremental(chatsDir);
+    expect(idx.query('widget').hits).toHaveLength(1);
+    await rm(arch);
+    expect(idx.query('widget').hits).toHaveLength(0);
   });
 
   it('a missing chats dir yields an empty index, not an error', async () => {

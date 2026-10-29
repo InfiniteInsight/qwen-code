@@ -154,13 +154,29 @@ describe('SearchDb.upsertDocument', () => {
     expect(hits[0].eventId).toBe('evt-1');
   });
 
-  it('is idempotent on (session_id, event_id)', () => {
+  it('is keyed on (session_id, event_id): a second upsert replaces, not duplicates', () => {
     db.upsertDocument(doc({ body: 'first body' }));
     db.upsertDocument(doc({ body: 'second body — same key' }));
     expect(db.count()).toBe(1);
-    // The first insert wins (ON CONFLICT DO NOTHING)
-    const { hits } = db.query('first');
+    // The latest write wins (ON CONFLICT DO UPDATE): the body is replaced and
+    // the old text is no longer findable through the FTS table.
+    expect(db.query('first').hits).toHaveLength(0);
+    const { hits } = db.query('second');
     expect(hits).toHaveLength(1);
+  });
+
+  it('replaces kind and ts as well as body on a re-upsert (#170)', () => {
+    db.upsertDocument(
+      doc({ kind: 'user', ts: '2026-01-01T00:00:00Z', body: 'alpha' }),
+    );
+    db.upsertDocument(
+      doc({ kind: 'assistant', ts: '2026-02-02T00:00:00Z', body: 'beta' }),
+    );
+    expect(db.count()).toBe(1);
+    const { hits } = db.query('beta');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].kind).toBe('assistant');
+    expect(hits[0].ts).toBe('2026-02-02T00:00:00Z');
   });
 
   it('indexes multiple documents', () => {

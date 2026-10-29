@@ -72,6 +72,31 @@ async function mount(
   return `http://127.0.0.1:${port}`;
 }
 
+describe('search route: lineage (#170)', () => {
+  it('rejects ?lineage= with 400 instead of silently ignoring it', async () => {
+    const ranked = vi.fn();
+    const url = await mount(async () => dir, { ranked });
+    const res = await fetch(`${url}/rc/search?q=oauth&lineage=sess-1`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('lineage_unsupported');
+    expect(ranked).not.toHaveBeenCalled();
+  });
+
+  it('an empty ?lineage= is treated as absent', async () => {
+    const url = await mount(async () => dir);
+    const res = await fetch(`${url}/rc/search?q=oauth&lineage=`);
+    expect(res.status).toBe(200);
+  });
+
+  it('an unauthorized caller gets 403, not the lineage 400', async () => {
+    client = { id: 'tok', scopes: [SESSION_READ] };
+    const url = await mount(async () => dir);
+    const res = await fetch(`${url}/rc/search?q=oauth&lineage=sess-1`);
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('search route', () => {
   it('returns 200 {hits} for a matching query and audits count only', async () => {
     const url = await mount(async () => dir);
