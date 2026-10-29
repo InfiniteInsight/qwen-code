@@ -23,15 +23,18 @@
  * spelling this file used to lead with belongs to a DIFFERENT payload
  * (protocol.ts), so leading with it left `tokensCached` at 0 on every live frame.
  *
- * The model id is not in `_meta` at all. `buildUpdateMeta` emits only `usage`,
- * `timestamp` and `qwenTranscript`, so `modelId` falls back to `''` on every real
- * turn and `lookupRate` misses every time (306 of 306 live rows unpriced). That
- * needs a per-session model source, not a defensive read, and is tracked as
- * Qwen-Code-Remote#181; the pricing math below is correct with or without it.
+ * The model id is not in `_meta` at all: `buildUpdateMeta` emits only `usage`,
+ * `timestamp` and `qwenTranscript`, and the live usage object is exactly
+ * `{inputTokens, outputTokens, totalTokens, cachedReadTokens}`. So the id comes
+ * from OUTSIDE the frame: the caller passes it via `ingest(..., { modelId })`,
+ * resolved per session by `SessionModelCache` and handed over by `UsageFeeder`
+ * (see usageFeeder.ts for why the ingester itself stays synchronous and pure).
+ * A model id the frame does carry still wins, so a daemon that starts emitting
+ * one is believed over the cache. Qwen-Code-Remote#160 / #181.
  */
 
 import type { RateTableHolder } from './rateTable.js';
-import { computeCostMicrocents } from './rateTable.js';
+import { priceUsage } from './rateTable.js';
 import type { UsageStore } from './usageStore.js';
 
 /** What `extractUsage` pulls from a usage-bearing `session_update`. */
@@ -190,7 +193,25 @@ export interface UsageIngesterDeps {
   /** Monotonic-ish wall clock (injected for tests). */
   now: () => number;
   /** Audit hook for a rate-table lookup miss (`rate_table_miss`). */
-  onRateMiss?: (modelServiceId: string | undefined, modelId: string) => void;
+  onRateMiss?: (
+    modelServiceId: string | undefined,
+    modelId: string,
+    sessionId: string,
+  ) => void;
+  /**
+   * Collapse window for `onRateMiss`: one report per (session, modelId) per
+   * window (default one hour). The unpriced ROWS are still written every time;
+   * only the audit noise is collapsed (632 identical rows in the live log).
+   */
+  rateMissWindowMs?: number;
+}
+
+/** Optional per-call context for {@link UsageIngester.ingest}. */
+export interface IngestOptions {
+  /** The session's model id, from outside the frame (the frame has none). */
+  modelId?: string;
+  /** When the frame was observed, if earlier than now (a queued event). */
+  ts?: number;
 }
 
 /**
@@ -202,6 +223,8 @@ export class UsageIngester {
   private readonly deps: UsageIngesterDeps;
   /** sessionId → cost microcents accumulated since the last prompt boundary. */
   private readonly promptTotals = new Map<string, number>();
+  /** `sessionId\0modelId` → when a rate miss was last reported. */
+  private readonly missReportedAt = new Map<string, number>();
 
   constructor(deps: UsageIngesterDeps) {
     this.deps = deps;
@@ -221,43 +244,31 @@ export class UsageIngester {
     sessionId: string,
     data: unknown,
     attribution: UsageAttribution,
+    opts: IngestOptions = {},
   ): number | null | undefined {
     const usage = extractUsage(data);
     if (!usage) return undefined;
+    const modelId = usage.modelId || opts.modelId || '';
     const table = this.deps.rates.current();
-    // The daemon's `inputTokens` IS `promptTokenCount`, which already CONTAINS the
-    // cached subset: the emitter's own upstream fixture states it (promptTokenCount
-    // 9 == input 2 + cached 7, anthropicContentGenerator.test). Pricing the full
-    // input AND the cached read charges the cached tokens twice, so the PRICED
-    // input is the uncached remainder. The stored row keeps the reported totals and
-    // only the price is net. Clamped because a malformed frame could report more
-    // cached than input, and a negative bill is worse than a zero one.
-    const pricedIn = Math.max(0, usage.tokensIn - usage.tokensCached);
-    const costMicrocents = computeCostMicrocents(
-      table,
-      usage.modelServiceId,
-      usage.modelId,
-      {
-        in: pricedIn,
-        out: usage.tokensOut,
-        cached: usage.tokensCached,
-      },
-    );
-    if (costMicrocents === null) {
-      this.deps.onRateMiss?.(usage.modelServiceId, usage.modelId);
-    }
+    // The stored row keeps the reported totals; `priceUsage` splits the cached
+    // subset out of the input before pricing (see its comment).
+    const priced = priceUsage(table, usage.modelServiceId, modelId, usage);
+    const costMicrocents = priced ? priced.costMicrocents : null;
+    if (costMicrocents === null) this.reportRateMiss(sessionId, usage, modelId);
     this.deps.store.record({
       sessionId,
-      ts: this.deps.now(),
+      ts: opts.ts ?? this.deps.now(),
       tokensIn: usage.tokensIn,
       tokensOut: usage.tokensOut,
       tokensCached: usage.tokensCached,
       costMicrocents,
       modelServiceId: usage.modelServiceId ?? table.defaultModelServiceId ?? '',
-      modelId: usage.modelId,
+      modelId,
       attributionTokenId: attribution.attributionTokenId,
       subActor: attribution.subActor,
       stage: usage.stage,
+      rateKey: priced?.rateKey ?? null,
+      rateMatch: priced?.rateMatch ?? null,
     });
     const promptTotal =
       (this.promptTotals.get(sessionId) ?? 0) + (costMicrocents ?? 0);
@@ -271,5 +282,27 @@ export class UsageIngester {
       tokensOutTotal: totals.tokensOutTotal,
     });
     return costMicrocents;
+  }
+
+  private reportRateMiss(
+    sessionId: string,
+    usage: ExtractedUsage,
+    modelId: string,
+  ): void {
+    const hook = this.deps.onRateMiss;
+    if (!hook) return;
+    const now = this.deps.now();
+    const window = this.deps.rateMissWindowMs ?? 3_600_000;
+    const key = `${sessionId}\0${modelId}`;
+    const last = this.missReportedAt.get(key);
+    if (last !== undefined && now - last < window) return;
+    if (this.missReportedAt.size >= 4096) {
+      for (const [k, at] of this.missReportedAt) {
+        if (now - at >= window) this.missReportedAt.delete(k);
+      }
+      if (this.missReportedAt.size >= 4096) this.missReportedAt.clear();
+    }
+    this.missReportedAt.set(key, now);
+    hook(usage.modelServiceId, modelId, sessionId);
   }
 }

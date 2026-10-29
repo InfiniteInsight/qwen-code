@@ -38,6 +38,22 @@ export interface UsageRowInput {
   attributionTokenId: string;
   subActor: string | null;
   stage: string | null;
+  /** `<service>/<modelId>` of the rate-table entry that priced the row, if any. */
+  rateKey?: string | null;
+  /** Whether that entry matched the id as given or with its `(provider)` suffix stripped. */
+  rateMatch?: 'exact' | 'stripped' | null;
+}
+
+/** A stored row `qwen-rc usage reprice` may want to fix. */
+export interface RepriceCandidate {
+  id: number;
+  sessionId: string;
+  tokensIn: number;
+  tokensOut: number;
+  tokensCached: number;
+  modelServiceId: string;
+  modelId: string;
+  costMicrocents: number | null;
 }
 
 /** Running totals for a session (the `usage_tick` payload's source). */
@@ -109,6 +125,24 @@ export function migrateCostColumn(db: Database.Database): void {
   );
 }
 
+/**
+ * Add the `rate_key` / `rate_match` columns (which table entry priced a row, and
+ * by which pass) to a db that predates them. Idempotent.
+ */
+export function migrateRateKeyColumns(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{
+    name: string;
+  }>;
+  const names = new Set(cols.map((c) => c.name));
+  if (names.size === 0) return;
+  if (!names.has('rate_key')) {
+    db.exec(`ALTER TABLE usage_events ADD COLUMN rate_key TEXT`);
+  }
+  if (!names.has('rate_match')) {
+    db.exec(`ALTER TABLE usage_events ADD COLUMN rate_match TEXT`);
+  }
+}
+
 export class UsageStore {
   private constructor(private readonly db: Database.Database) {}
 
@@ -144,6 +178,7 @@ export class UsageStore {
        )`,
     );
     migrateCostColumn(db);
+    migrateRateKeyColumns(db);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events (ts)`);
     db.exec(
       `CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events (session_id, ts)`,
@@ -160,8 +195,9 @@ export class UsageStore {
       .prepare(
         `INSERT INTO usage_events (
            session_id, ts, tokens_in, tokens_out, tokens_cached, cost_microcents,
-           model_service_id, model_id, attribution_token_id, sub_actor, stage
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           model_service_id, model_id, attribution_token_id, sub_actor, stage,
+           rate_key, rate_match
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.sessionId,
@@ -175,7 +211,75 @@ export class UsageStore {
         row.attributionTokenId,
         row.subActor,
         row.stage,
+        row.rateKey ?? null,
+        row.rateMatch ?? null,
       );
+  }
+
+  /**
+   * Rows that carry no model id or no cost: the ones the pre-#181 ingester wrote
+   * (`model_id = ''`, `cost_microcents NULL`) plus any later rate-table miss.
+   * Oldest first, so a report is stable.
+   */
+  repriceCandidates(): RepriceCandidate[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, session_id, tokens_in, tokens_out, tokens_cached,
+                model_service_id, model_id, cost_microcents
+           FROM usage_events
+          WHERE model_id = '' OR cost_microcents IS NULL
+          ORDER BY id`,
+      )
+      .all() as Array<{
+      id: number;
+      session_id: string;
+      tokens_in: number;
+      tokens_out: number;
+      tokens_cached: number;
+      model_service_id: string;
+      model_id: string;
+      cost_microcents: number | null;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      tokensIn: r.tokens_in,
+      tokensOut: r.tokens_out,
+      tokensCached: r.tokens_cached,
+      modelServiceId: r.model_service_id,
+      modelId: r.model_id,
+      costMicrocents: r.cost_microcents,
+    }));
+  }
+
+  /** Apply a repricing to one row, inside the caller's transaction if any. */
+  applyReprice(
+    id: number,
+    fix: {
+      modelId: string;
+      costMicrocents: number | null;
+      rateKey: string | null;
+      rateMatch: 'exact' | 'stripped' | null;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE usage_events
+            SET model_id = ?, cost_microcents = ?, rate_key = ?, rate_match = ?
+          WHERE id = ?`,
+      )
+      .run(
+        fix.modelId,
+        fix.costMicrocents !== null ? Math.round(fix.costMicrocents) : null,
+        fix.rateKey,
+        fix.rateMatch,
+        id,
+      );
+  }
+
+  /** Run `fn` in one transaction (all-or-nothing batch updates). */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
   }
 
   /** Cumulative totals for a session (NULL costs count as 0). */

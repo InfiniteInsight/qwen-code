@@ -126,4 +126,21 @@ describe('UsageStore legacy cost_cents migration', () => {
     expect(cols).not.toContain('cost_cents');
     expect(store.sessionTotals('sess-2').costMicrocentsSesTotal).toBe(500);
   });
+
+  it('adds the rate_key / rate_match columns to a db that predates them', () => {
+    const path = join(dir, 'usage.db');
+    writeLegacyDb(path, [{ cents: 1 }]);
+    UsageStore.open(path).close();
+    UsageStore.open(path).close(); // idempotent
+
+    const db = new Database(path);
+    const cols = (
+      db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    db.close();
+    expect(cols).toContain('rate_key');
+    expect(cols).toContain('rate_match');
+  });
 });
