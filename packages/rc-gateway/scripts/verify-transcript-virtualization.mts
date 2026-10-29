@@ -21893,6 +21893,31 @@ function solidPng(w: number, h: number): Buffer {
       return 'the mode buttons and the box are the same nodes after a redraw, focus kept, fill updated';
     },
   });
+
+  // #173. A fork opened with startWatch(id) and no cursor, which clears the
+  // transcript and sends no Last-Event-ID, so the daemon replayed nothing and a
+  // fork of a long conversation opened blank. The fork route returns no cursor,
+  // so the fork is opened the way a rewind is: cleared, then replayed from 0.
+  PAGE_SCENARIOS.push({
+    name: 'P261 a fork opens with its transcript: the new conversation is watched with a replay from event 0, not bare onto a stream that replays nothing',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const FORK = '77777777-8888-9999-aaaa-bbbbbbbbbbbb';
+      await page.route(`**/session/${A}/fork`, (route) => json(route, { sessionId: FORK }));
+      const sent = lastEventIds(page, FORK);
+      await page.evaluate(`window.confirm = () => true; window.prompt = () => ''`);
+      await go(page, A);
+      const forkRow = `transcriptModel.items.find((i) => i.kind === 'fork')`;
+      await page.evaluate(`void turnAct('fork', ${forkRow})`);
+      await page.waitForFunction(`!document.getElementById('h1-ask').hidden`, null, { timeout: 10_000 });
+      await page.evaluate(`document.querySelector('#h1-ask button[data-value="include"]').click()`);
+      await poll(() => sent.length >= 1, 'the fork was never watched');
+      expect(sent[0] === '0', `the fork connected with Last-Event-ID ${JSON.stringify(sent[0])}, wanted 0 (a replay)`);
+      await onAir(page, FORK);
+      return 'the fork was watched with Last-Event-ID 0 and its rows drew';
+    },
+  });
 }
 
 // #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD

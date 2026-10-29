@@ -10027,8 +10027,12 @@
           // then run the standard watch hand-off (no freeform id field
           // anymore, so the hand-off is a direct startWatch call).
           if ($('watch').disabled) $('stop').onclick();
+          // #173: the fork route returns no cursor, so this is the rewind's
+          // move: clear, then replay from 0. With no cursor startWatch sent no
+          // Last-Event-ID and the fork opened blank.
           lastSeenEventId = null;
-          startWatch(data.sessionId);
+          clearTranscript(data.sessionId);
+          startWatch(data.sessionId, 0);
         } catch (e) {
           if (gen !== switchGen) return show(false, '');
           show(false, 'fork error: ' + e);
