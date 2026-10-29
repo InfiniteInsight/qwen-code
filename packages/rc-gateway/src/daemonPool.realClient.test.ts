@@ -292,6 +292,54 @@ describe('DaemonPool subscription loss vs daemon death (#153)', () => {
   });
 });
 
+describe('DaemonPool and the keep-alive race on request/response calls (#203)', () => {
+  it('a call whose reused socket the daemon closes, with no response, is not a daemon death', async () => {
+    let statusHits = 0;
+    let healthHits = 0;
+    const daemon = await startFakeDaemon((req, res) => {
+      if (req.url === '/health') {
+        healthHits++;
+        return json(res, 200, { status: 'ok' });
+      }
+      if (req.url === '/session/s1/status') {
+        statusHits++;
+        if (statusHits === 2) {
+          // The keep-alive race as the client sees it: the request went out
+          // on an idle socket the daemon was closing, and no response comes
+          // back on it. The daemon itself is fine.
+          req.socket.destroy();
+          return;
+        }
+        return json(res, 200, { sessionId: 's1', workspaceCwd: '/proj/a' });
+      }
+      json(res, 404, { error: 'not found' });
+    });
+    const { pool, deaths, stopped, spawned } = poolOn(daemon);
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+
+    await pool.sessionStatus('s1'); // leaves an idle keep-alive socket
+    const err = await pool.sessionStatus('s1').then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    // The SDK hands the pool undici's own shape, not a daemon answer.
+    expect(err).toBeInstanceOf(TypeError);
+    expect(((err as { cause?: { code?: unknown } }).cause ?? {}).code).toBe(
+      'UND_ERR_SOCKET',
+    );
+
+    expect(healthHits).toBe(1); // the one confirming probe
+    expect(deaths).toEqual([]);
+    expect(pool.size()).toBe(1);
+    expect(stopped).toEqual([]);
+    // The next call reaches the same daemon; nothing was respawned.
+    await expect(pool.sessionStatus('s1')).resolves.toMatchObject({
+      sessionId: 's1',
+    });
+    expect(spawned).toEqual(['/proj/a']);
+  });
+});
+
 describe('DaemonPool reconciles against sessions the daemon reaped (#154)', () => {
   it('drops an id the daemon answers 404 session_not_found for, keeps one it holds or will not say, and reclaims the idle daemon', async () => {
     const daemon = await startFakeDaemon((req, res) => {
