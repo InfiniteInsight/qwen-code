@@ -24199,6 +24199,83 @@ PAGE_SCENARIOS.push({
 });
 
 
+// #141. The tools toggle shows three states, and an opt-in tool says it is
+// switched by a setting and reaches new conversations only.
+PAGE_SCENARIOS.push({
+  name: 'P340 the tools toggle shows on, disabled and opt-in apart: an opt-in tool names its setting and says new conversations, and its enable and disable write through the route',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    let todoOn = false;
+    const posts: Array<{ name: string; body: Record<string, unknown> }> = [];
+    const catalog = () => ({
+      v: 1,
+      tools: [
+        { name: 'todo_write', displayName: 'TodoList', disabled: false, source: 'builtin', state: todoOn ? 'on' : 'optIn', optIn: { setting: 'tools.todoWrite.enabled', enabled: todoOn } },
+        { name: 'web_fetch', displayName: 'Web Fetch', disabled: false, source: 'builtin', state: 'on' },
+        { name: 'write_file', displayName: 'Write File', disabled: true, source: 'builtin', state: 'disabled' },
+      ],
+    });
+    const reply = (route: Route, body: unknown): Promise<void> =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    await page.route(/\/rc\/workspace\/tools(\?.*)?$/, (route) => reply(route, catalog()));
+    await page.route(/\/rc\/workspace\/tools\/[^/]+\/enable$/, (route) => {
+      const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[4] ?? '');
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>;
+      posts.push({ name, body });
+      if (name === 'todo_write') todoOn = body['enabled'] === true;
+      return reply(route, name === 'todo_write'
+        ? { toolName: name, enabled: body['enabled'], optIn: { setting: 'tools.todoWrite.enabled', appliesTo: 'new_sessions', daemonReloadRequired: false, note: 'Saved. P340 reaches new conversations.' } }
+        : { toolName: name, enabled: body['enabled'] });
+    });
+    const rows = (): Promise<Record<string, { state: string; button: string; text: string }>> =>
+      page.evaluate(`(() => {
+        const out = {};
+        for (const row of document.querySelectorAll('#ws-tools-body [data-state]')) {
+          out[row.querySelector('strong').textContent] = {
+            state: row.dataset.state,
+            button: row.querySelector('button').textContent,
+            text: row.textContent,
+          };
+        }
+        return out;
+      })()`) as Promise<Record<string, { state: string; button: string; text: string }>>;
+    await page.evaluate('void loadWorkspaceTools(false)');
+    await page.waitForFunction(`document.querySelectorAll('#ws-tools-body [data-state]').length === 3`, null, { timeout: 10_000 });
+    const a = await rows();
+    expect(
+      a['todo_write']?.state === 'optIn' && a['web_fetch']?.state === 'on' && a['write_file']?.state === 'disabled',
+      `the three states read ${JSON.stringify(Object.fromEntries(Object.entries(a).map(([k, v]) => [k, v.state])))}`,
+    );
+    expect(
+      a['todo_write']!.text.includes('opt-in') && a['todo_write']!.text.includes('tools.todoWrite.enabled') && a['todo_write']!.text.includes('new conversations'),
+      `the opt-in row reads ${JSON.stringify(a['todo_write']!.text)}`,
+    );
+    expect(!a['web_fetch']!.text.includes('new conversations'), 'a plain tool carries the new-conversations note');
+    expect(
+      a['todo_write']!.button === 'enable' && a['web_fetch']!.button === 'disable' && a['write_file']!.button === 'enable',
+      `the buttons read ${JSON.stringify(Object.fromEntries(Object.entries(a).map(([k, v]) => [k, v.button])))}`,
+    );
+    await shot(page, 'p340-tools-390');
+    const click = (tool: string): Promise<void> =>
+      page.evaluate(`Array.from(document.querySelectorAll('#ws-tools-body [data-state]')).find((r) => r.querySelector('strong').textContent === ${JSON.stringify(tool)}).querySelector('button').click()`) as Promise<void>;
+    await click('todo_write');
+    await page.waitForFunction(`document.querySelector('#ws-tools-body [data-state="on"] strong') && Array.from(document.querySelectorAll('#ws-tools-body [data-state="on"] strong')).some((e) => e.textContent === 'todo_write')`, null, { timeout: 10_000 });
+    const b = await rows();
+    expect(b['todo_write']!.state === 'on' && b['todo_write']!.button === 'disable', `after enable todo_write reads ${JSON.stringify(b['todo_write'])}`);
+    const said = (await page.evaluate(`document.getElementById('ws-tools-status').textContent`)) as string;
+    expect(said.includes('P340 reaches new conversations'), `the status after enable read ${JSON.stringify(said)}`);
+    await click('todo_write');
+    await page.waitForFunction(`Array.from(document.querySelectorAll('#ws-tools-body [data-state="optIn"] strong')).some((e) => e.textContent === 'todo_write')`, null, { timeout: 10_000 });
+    expect(
+      posts.length === 2 && posts[0]!.name === 'todo_write' && posts[0]!.body['enabled'] === true && posts[1]!.body['enabled'] === false,
+      `the writes were ${JSON.stringify(posts)}`,
+    );
+    return 'on, disabled and opt-in told apart; opt-in names tools.todoWrite.enabled and new conversations; enable then disable wrote true then false';
+  },
+});
+
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];
