@@ -7,6 +7,9 @@
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { UnknownSessionError } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface this route needs: just `setSessionModel`. */
 export type ModelSwitchDaemon = Pick<DaemonClient, 'setSessionModel'>;
@@ -16,8 +19,11 @@ export type ModelSwitchDaemon = Pick<DaemonClient, 'setSessionModel'>;
  * Proxies to the daemon's `setSessionModel`. WRITE is the mount floor —
  * see server.ts — enforced at the mount, not in this handler.
  *
- * Error mapping: 404 from the daemon → 502 `model_switch_unsupported`;
- * any other daemon failure → 502 `daemon_unavailable`.
+ * Error mapping: a session the pool or daemon does not know → 404
+ * `session_not_found`; any other 404 from the daemon → 502
+ * `model_switch_unsupported`; a daemon 401 → 502 `daemon_auth_failed`; a
+ * daemon 4xx → its own status as `model_switch_failed`; any other daemon
+ * failure → 502 `daemon_unavailable`.
  * A malformed id (path-traversal-shaped) → 404 `session_not_found`.
  * No audit row: model changes are informational, not policy actions.
  */
@@ -72,7 +78,14 @@ async function handleModelSwitch(
     res.status(200).json({ modelId, result });
     return;
   } catch (err) {
+    if (relayDaemonAuthFailure(res, err, 'model_switch')) return;
     const status = (err as { status?: unknown }).status;
+    if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+      res
+        .status(404)
+        .json({ error: 'Session not found', code: 'session_not_found' });
+      return;
+    }
     if (status === 404) {
       res.status(502).json({
         error: 'Daemon does not support model switching',

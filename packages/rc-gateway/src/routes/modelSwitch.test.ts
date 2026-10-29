@@ -151,4 +151,57 @@ describe('createModelSwitchRoute', () => {
     expect(captured.status).toBe(422);
     expect(captured.body.error).toBe('unknown model id');
   });
+
+  it('the pool holding no record of the session is 404 session_not_found', async () => {
+    const { UnknownSessionError } = await import('../daemonPool.js');
+    const gone: ModelSwitchDaemon = {
+      setSessionModel: async () => {
+        throw new UnknownSessionError('abcdef1234567890abcdef1234567890');
+      },
+    };
+    const req = {
+      params: { id: 'abcdef1234567890abcdef1234567890' },
+      body: { modelId: 'gpt-4' },
+      rcClient: { id: 'test-token', scopes: ['write'] },
+    } as unknown as Express.Request;
+    await createModelSwitchRoute(gone)(req, makeResponder(), vi.fn());
+    expect(captured.status).toBe(404);
+    expect(captured.body.code).toBe('session_not_found');
+  });
+
+  it('a daemon 404 that names the session is 404 session_not_found, not unsupported', async () => {
+    const gone: ModelSwitchDaemon = {
+      setSessionModel: async () => {
+        throw Object.assign(new Error('gone'), {
+          name: 'DaemonHttpError',
+          status: 404,
+          body: { code: 'session_not_found' },
+        });
+      },
+    };
+    const req = {
+      params: { id: 'abcdef1234567890abcdef1234567890' },
+      body: { modelId: 'gpt-4' },
+      rcClient: { id: 'test-token', scopes: ['write'] },
+    } as unknown as Express.Request;
+    await createModelSwitchRoute(gone)(req, makeResponder(), vi.fn());
+    expect(captured.status).toBe(404);
+    expect(captured.body.code).toBe('session_not_found');
+  });
+
+  it('a daemon 401 is the gateway credential, not the caller: 502 daemon_auth_failed', async () => {
+    const unauth: ModelSwitchDaemon = {
+      setSessionModel: async () => {
+        throw Object.assign(new Error('nope'), { status: 401 });
+      },
+    };
+    const req = {
+      params: { id: 'abcdef1234567890abcdef1234567890' },
+      body: { modelId: 'gpt-4' },
+      rcClient: { id: 'test-token', scopes: ['write'] },
+    } as unknown as Express.Request;
+    await createModelSwitchRoute(unauth)(req, makeResponder(), vi.fn());
+    expect(captured.status).toBe(502);
+    expect(captured.body.code).toBe('daemon_auth_failed');
+  });
 });
