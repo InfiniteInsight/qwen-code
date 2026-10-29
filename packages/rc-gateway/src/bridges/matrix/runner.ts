@@ -220,6 +220,7 @@ export class MatrixBridge {
       deeplinkGuidanceSent: this.deeplinkGuidanceSent,
       commandPrefix: this.commandPrefix,
       onTurnBoundary: (sessionId) => this.stream.bumpTurn(sessionId),
+      log: this.log,
     };
   }
 
@@ -526,6 +527,7 @@ export class MatrixBridge {
         this.tracked.set(r.eventId, {
           requestId,
           sessionId,
+          roomId, // a reaction votes only from this room (#168)
           surface: isDeeplink ? 'deeplink' : 'inline',
         });
       }

@@ -251,12 +251,90 @@ describe('matrix dispatch — !qwen commands + power-level gate', () => {
 });
 
 describe('matrix dispatch — reaction → vote', () => {
+  // The request below was posted to !abc, which is bound to its session.
+  beforeEach(async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+  });
+
   const react = (over: Record<string, unknown> = {}) => ({
     roomId: '!abc:home.example.com',
     sender: '@alice:home.example.com',
     targetEventId: '$m_42',
     key: '\u{1F44D}',
     ...over,
+  });
+
+  const trackedInline = () =>
+    new Map<string, TrackedEvent>([
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
+          surface: 'inline',
+        },
+      ],
+    ]);
+
+  it('refuses and audits a 👍 sent from another room on a known event id (#168)', async () => {
+    const logs: string[] = [];
+    const f = deps({ tracked: trackedInline(), log: (m) => logs.push(m) });
+    // The attacker invites the bot to their own room and reacts there, pointing
+    // the annotation at the permission event id they learned.
+    await handleReaction(
+      react({
+        roomId: '!evil:attacker.org',
+        sender: '@mallory:attacker.org',
+      }),
+      f.deps,
+    );
+    expect(f.votes).toHaveLength(0);
+    expect(f.sent).toHaveLength(0);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('refused');
+    expect(logs[0]).toContain('@mallory:attacker.org');
+    expect(logs[0]).toContain('!evil:attacker.org');
+    expect(logs[0]).toContain('req_xyz');
+  });
+
+  it('refuses a cross-room vote even when the other room is bound to a session', async () => {
+    await rooms.bind('!other:home.example.com', 'sess_other');
+    const logs: string[] = [];
+    const f = deps({ tracked: trackedInline(), log: (m) => logs.push(m) });
+    await handleReaction(react({ roomId: '!other:home.example.com' }), f.deps);
+    expect(f.votes).toHaveLength(0);
+    expect(logs[0]).toContain('refused');
+  });
+
+  it('refuses a vote once the room is no longer bound to the request session', async () => {
+    const logs: string[] = [];
+    const f = deps({ tracked: trackedInline(), log: (m) => logs.push(m) });
+    await rooms.unbind('!abc:home.example.com');
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toHaveLength(0);
+    expect(logs[0]).toContain('no longer bound');
+
+    await rooms.bind('!abc:home.example.com', 'sess_rebound');
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toHaveLength(0);
+  });
+
+  it('sends no deeplink guidance into a foreign room', async () => {
+    const tracked = new Map<string, TrackedEvent>([
+      [
+        '$m_42',
+        {
+          requestId: 'req_xyz',
+          sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
+          surface: 'deeplink',
+        },
+      ],
+    ]);
+    const f = deps({ tracked, log: () => {} });
+    await handleReaction(react({ roomId: '!evil:attacker.org' }), f.deps);
+    expect(f.sent).toHaveLength(0);
   });
 
   it('casts approve for a 👍 on a tracked inline event with the MXID sub-actor', async () => {
@@ -266,6 +344,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'inline' as const,
         },
       ],
@@ -289,6 +368,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'inline' as const,
         },
       ],
@@ -311,6 +391,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'inline' as const,
         },
       ],
@@ -327,6 +408,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'inline' as const,
         },
       ],
@@ -347,6 +429,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'inline' as const,
         },
       ],
@@ -364,6 +447,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'deeplink' as const,
         },
       ],
@@ -388,6 +472,7 @@ describe('matrix dispatch — reaction → vote', () => {
         {
           requestId: 'req_xyz',
           sessionId: 'sess_xyz',
+          roomId: '!abc:home.example.com',
           surface: 'deeplink' as const,
         },
       ],

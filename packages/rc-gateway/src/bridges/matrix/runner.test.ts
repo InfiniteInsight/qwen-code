@@ -579,6 +579,32 @@ describe('MatrixBridge.dispatchReaction (E2EE vote routing seam)', () => {
     ]);
   });
 
+  it('refuses and logs a 👍 on a tracked event sent from another room (#168)', async () => {
+    await rooms.bind('!enc:h', 'sess_e2ee');
+    const logs: string[] = [];
+    const h = harness([], { log: (m) => logs.push(m) });
+    h.bridge.deliverEvent('sess_e2ee', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req1',
+        bridgeHints: {
+          argsSummaryShort: 'run ls',
+          recommendedSurface: 'inline',
+        },
+      },
+    } as never);
+    await waitFor(() => h.sent.length === 1);
+
+    await h.bridge.dispatchReaction({
+      roomId: '!evil:attacker.org',
+      sender: '@mallory:attacker.org',
+      targetEventId: '$evt_1',
+      key: '👍',
+    });
+    expect(h.votes).toEqual([]);
+    expect(logs.some((l) => l.includes('refused'))).toBe(true);
+  });
+
   it('ignores a reaction on an untracked event (no vote)', async () => {
     await rooms.bind('!enc:h', 'sess_e2ee');
     const h = harness([]);
