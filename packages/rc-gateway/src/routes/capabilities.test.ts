@@ -14,11 +14,13 @@ import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
 async function mount(
   deps: Parameters<typeof createCapabilityRoute>[0],
   authed = true,
+  // An owner by default: the pre-#165 tests describe the full shape.
+  client: Record<string, unknown> = { id: 't', scopes: ['owner'] },
 ) {
   const app = express();
   app.use((req, _res, next) => {
     if (authed) {
-      (req as { rcClient?: unknown }).rcClient = { tokenId: 't' };
+      (req as { rcClient?: unknown }).rcClient = client;
     }
     next();
   });
@@ -322,6 +324,165 @@ describe('maxAttachmentBytes (#196)', () => {
     try {
       const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
       expect(body.remoteControl.maxAttachmentBytes).toBe(31 * 1024 * 1024);
+    } finally {
+      await m.close();
+    }
+  });
+});
+
+describe('#165 the response is scoped by token', () => {
+  const SSH = { host: 'build.internal', port: 2222, directory: '/srv/repo' };
+  const DAEMON: DaemonCapabilities = {
+    v: 1,
+    mode: 'http-bridge',
+    features: ['session_btw', 'workspace_file_reads'],
+    modelServices: ['openai'],
+    qwenCodeVersion: '0.25.3',
+    limits: { maxSessionAttachmentItemBytes: 1024 },
+    workspaceCwd: '/home/evan/projects/secret-repo',
+    workspaces: [
+      {
+        id: 'w1',
+        cwd: '/home/evan/projects/secret-repo',
+        displayName: 'secret-repo',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'w2',
+        cwd: '/remote/x',
+        ssh: SSH,
+        primary: false,
+        trusted: false,
+      },
+    ],
+  };
+  const DEPS: Parameters<typeof createCapabilityRoute>[0] = {
+    daemonStatus: async () => DAEMON,
+    daemonQwenBin: '/opt/qwen/dist/cli.js',
+    costTracking: { currencyLabel: () => 'USD' },
+    mdnsStatus: () => ({ advertising: true, instanceName: 'evan-laptop' }),
+    maxAttachmentBytes: 4096,
+  };
+
+  async function capsAs(client: Record<string, unknown>) {
+    const m = await mount(DEPS, true, client);
+    try {
+      const res = await fetch(`${m.base}/rc/capabilities`);
+      const text = await res.text();
+      return {
+        text,
+        rc: (JSON.parse(text) as { remoteControl: Record<string, unknown> })
+          .remoteControl,
+      };
+    } finally {
+      await m.close();
+    }
+  }
+
+  /** Every field public/index.html reads from this route (read-only check). */
+  function expectPageFields(rc: Record<string, unknown>) {
+    const daemon = rc.daemon as Record<string, unknown>;
+    expect(daemon.available).toBe(true);
+    expect(daemon.features).toEqual(DAEMON.features);
+    expect(rc.workspaceControl).toBeDefined();
+    expect(rc.maxAttachmentBytes).toBe(4096);
+    expect(rc.liveStateNoSpawn).toBe(true);
+  }
+
+  it.each([
+    ['owner', { id: 'o', scopes: ['owner'] }],
+    ['write', { id: 'w', scopes: ['write', 'session:read'] }],
+    [
+      'bridge',
+      { id: 'b', scopes: ['bridge', 'session:read', 'approve', 'write'] },
+    ],
+  ])('%s keeps the full shape', async (_name, client) => {
+    const { rc } = await capsAs(client);
+    const daemon = rc.daemon as Record<string, unknown>;
+    expect(daemon.workspaceCwd).toBe(DAEMON.workspaceCwd);
+    expect(daemon.workspaces).toEqual(DAEMON.workspaces);
+    expect(rc.daemonQwenBin).toBe('/opt/qwen/dist/cli.js');
+    expect(rc.costTracking).toMatchObject({
+      rateTablePath: '~/.qwen/rc/model-rates.yaml',
+    });
+    expect(rc.mdns).toEqual({ advertising: true, instanceName: 'evan-laptop' });
+    expectPageFields(rc);
+  });
+
+  it.each([
+    ['read-only', { id: 'r', scopes: ['session:read'] }],
+    ['approve-only', { id: 'a', scopes: ['approve'] }],
+  ])('%s gets no paths and no ssh details', async (_name, client) => {
+    const { rc, text } = await capsAs(client);
+    expect(text).not.toContain('/home/evan');
+    expect(text).not.toContain('/remote/x');
+    expect(text).not.toContain('build.internal');
+    expect(text).not.toContain('/srv/repo');
+    expect(text).not.toContain('/opt/qwen');
+    expect(text).not.toContain('model-rates.yaml');
+    const daemon = rc.daemon as Record<string, unknown>;
+    expect('workspaceCwd' in daemon).toBe(false);
+    expect(daemon.workspaces).toEqual([
+      { id: 'w1', displayName: 'secret-repo', primary: true, trusted: true },
+      { id: 'w2', primary: false, trusted: false },
+    ]);
+    expect('daemonQwenBin' in rc).toBe(false);
+    expectPageFields(rc);
+  });
+
+  it('a share guest gets only what the page needs for its one session', async () => {
+    const { rc, text } = await capsAs({
+      id: 's',
+      scopes: ['session:read', 'share'],
+      sessionLockId: 'sess-1',
+    });
+    for (const leak of [
+      '/home/evan',
+      'secret-repo',
+      'build.internal',
+      '/opt/qwen',
+      'evan-laptop',
+      '0.25.3',
+      'model-rates.yaml',
+    ]) {
+      expect(text).not.toContain(leak);
+    }
+    const daemon = rc.daemon as Record<string, unknown>;
+    expect('workspaces' in daemon).toBe(false);
+    expect('workspaceCwd' in daemon).toBe(false);
+    expect(rc.mdns).toEqual({ advertising: true });
+    expectPageFields(rc);
+  });
+
+  it('a share with write in its scopes is still a guest (the lock decides)', async () => {
+    const { text } = await capsAs({
+      id: 's2',
+      scopes: ['session:read', 'write', 'share'],
+      sessionLockId: 'sess-1',
+    });
+    expect(text).not.toContain('/home/evan');
+    expect(text).not.toContain('build.internal');
+  });
+
+  it('fails closed for a client with no scopes array', async () => {
+    const { text } = await capsAs({ id: 'x' });
+    expect(text).not.toContain('/home/evan');
+    expect(text).not.toContain('build.internal');
+  });
+
+  it('a future daemon field does not reach a guest or a reader', async () => {
+    const m = await mount(
+      {
+        daemonStatus: async () =>
+          ({ ...DAEMON, hostHome: '/home/evan' }) as DaemonCapabilities,
+      },
+      true,
+      { id: 'r', scopes: ['session:read'] },
+    );
+    try {
+      const text = await (await fetch(`${m.base}/rc/capabilities`)).text();
+      expect(text).not.toContain('hostHome');
     } finally {
       await m.close();
     }
