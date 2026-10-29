@@ -38,6 +38,15 @@ import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { probeGpuStatus } from './gpu/gpuStatus.js';
 import { probeLlamaSwapStatus } from './llama-swap/llamaSwapStatus.js';
 import { startDaemon, type DaemonHandle } from './daemonSupervisor.js';
+import {
+  DaemonBinError,
+  detectBuildDrift,
+  formatDaemonBinLine,
+  formatDriftWarning,
+  readDaemonVersion,
+  resolveDaemonBin,
+  validateQwenBinPath,
+} from './daemonBin.js';
 import { DaemonPool, type PooledDaemonSpawn } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
@@ -328,6 +337,13 @@ export interface ServeOptions {
    */
   maxAttachmentBytes?: number;
   /**
+   * `--qwen-bin <path>` (env `QWEN_RC_QWEN_BIN`): the one executable every
+   * daemon is spawned as (the boot daemon and the pool's). A path is checked at
+   * parse time and absolute here; a bare name is resolved on PATH at boot.
+   * Unset means `qwen` from PATH, as before.
+   */
+  qwenBin?: string;
+  /**
    * `--acme-domain` values: bind with native TLS using an auto-obtained (and
    * auto-renewed) Let's Encrypt cert via DNS-01. Requires {@link acmeEmail} and
    * {@link acmeDnsProvider}; DNS-provider creds come from env. See
@@ -451,6 +467,37 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   if (opts.mdnsInstanceName !== undefined) {
     validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
   }
+  // Which `qwen` every daemon runs, settled and logged before anything is
+  // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
+  // and the daemons used to run whatever `qwen` PATH held, so say which one
+  // this is, and warn when the two are different files.
+  const daemonBin = resolveDaemonBin(opts.qwenBin, process.env.PATH);
+  if (!daemonBin.found && daemonBin.explicit) {
+    throw new DaemonBinError(
+      `--qwen-bin / QWEN_RC_QWEN_BIN: "${daemonBin.path}" is not an executable file on PATH`,
+    );
+  }
+  if (!daemonBin.found) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      'qwen-rc serve: no `qwen` on PATH and no --qwen-bin; the daemon spawn will fail',
+    );
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    formatDaemonBinLine(
+      daemonBin.path,
+      await readDaemonVersion(daemonBin.path),
+    ),
+  );
+  const terminalArgv = terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN);
+  const buildDrift = daemonBin.found
+    ? detectBuildDrift(daemonBin.path, terminalArgv, process.env.PATH)
+    : undefined;
+  if (buildDrift) {
+    // eslint-disable-next-line no-console
+    console.warn(formatDriftWarning(buildDrift));
+  }
   // Attach to an existing daemon (handoff Phase 1) when a URL is given, else spawn
   // our own. Attach requires the daemon's token so the gateway can authenticate
   // against its `--require-auth` surface.
@@ -467,6 +514,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         },
       })
     : await startDaemon({
+        qwenBin: daemonBin.path,
         port: opts.daemonPort ?? 4180,
         // #196: the gateway's own limit becomes the daemon's per-attachment
         // cap, so one flag controls the whole upload path.
@@ -655,6 +703,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     spawn: async (cwd) => {
       const port = await getFreePort();
       const spawned = await startDaemon({
+        qwenBin: daemonBin.path,
         port,
         workspaceCwd: cwd,
         ...(opts.maxAttachmentBytes !== undefined
@@ -881,7 +930,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     store,
     pairing,
     terminalRequests,
-    terminalQwenArgv: terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN),
+    terminalQwenArgv: terminalArgv,
     // A phone-opened tab runs this very entry point's `attach`, so it
     // re-attaches after a restart. Absent a script path (an embedded run), the
     // plan falls back to `qwen-rc` on PATH.
@@ -895,6 +944,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     ...(opts.maxAttachmentBytes !== undefined
       ? { maxAttachmentBytes: opts.maxAttachmentBytes }
       : {}),
+    daemonQwenBin: daemonBin.path,
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
@@ -1980,6 +2030,12 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const daemonPort = flag('daemon-port');
   const acmeDomain = flag('acme-domain');
   const maxAttachmentFlag = flag('max-attachment-bytes');
+  const qwenBinFromFlag =
+    argv.includes('--qwen-bin') ||
+    argv.some((a) => a.startsWith('--qwen-bin='));
+  const qwenBinRaw = qwenBinFromFlag
+    ? (flag('qwen-bin') ?? '')
+    : process.env.QWEN_RC_QWEN_BIN;
   return {
     host: flag('host'),
     loopbackBindHost:
@@ -2003,6 +2059,13 @@ export function parseServeFlags(argv: string[]): ServeOptions {
         : 'QWEN_RC_MAX_ATTACHMENT_BYTES',
       maxAttachmentFlag ?? process.env.QWEN_RC_MAX_ATTACHMENT_BYTES,
     ),
+    qwenBin:
+      qwenBinRaw === undefined || (!qwenBinFromFlag && qwenBinRaw === '')
+        ? undefined
+        : validateQwenBinPath(
+            qwenBinRaw,
+            qwenBinFromFlag ? '--qwen-bin' : 'QWEN_RC_QWEN_BIN',
+          ),
     // Auto TLS (Let's Encrypt, DNS-01). Provider creds come from env.
     acmeDomains: acmeDomain
       ? acmeDomain
@@ -2023,7 +2086,7 @@ if (process.argv[2] === 'serve') {
   //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --host-actions <path>
-  //        --max-attachment-bytes <n> --acme-domain <d[,d]> --acme-email <e>
+  //        --max-attachment-bytes <n> --qwen-bin <path> --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
   try {
@@ -2038,7 +2101,9 @@ if (process.argv[2] === 'serve') {
   runServe(serveOpts).catch(async (err) => {
     // eslint-disable-next-line no-console
     console.error(
-      err instanceof BindSecurityError || err instanceof MdnsConfigError
+      err instanceof BindSecurityError ||
+        err instanceof MdnsConfigError ||
+        err instanceof DaemonBinError
         ? `qwen-rc serve: ${err.message}`
         : `qwen-rc serve failed: ${err instanceof Error ? (err.stack ?? err.message) : err}`,
     );

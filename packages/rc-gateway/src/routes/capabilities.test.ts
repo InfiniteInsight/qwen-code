@@ -274,6 +274,28 @@ describe('GET /rc/capabilities', () => {
   });
 });
 
+describe('daemonQwenBin', () => {
+  it('reports the resolved path of the binary the daemons run', async () => {
+    const m = await mount({ daemonQwenBin: '/opt/qwen/dist/cli.js' });
+    try {
+      const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+      expect(body.remoteControl.daemonQwenBin).toBe('/opt/qwen/dist/cli.js');
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('leaves it out when not wired', async () => {
+    const m = await mount({});
+    try {
+      const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+      expect('daemonQwenBin' in body.remoteControl).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+});
+
 describe('maxAttachmentBytes (#196)', () => {
   it('reports the limit the upload route enforces', async () => {
     const m = await mount({ maxAttachmentBytes: 12345 });

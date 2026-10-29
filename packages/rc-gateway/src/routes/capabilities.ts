@@ -83,6 +83,11 @@ export function createCapabilityRoute(deps: {
    * the enforced number follows the cap the daemon advertises.
    */
   maxAttachmentBytes?: number | (() => Promise<number>);
+  /**
+   * The resolved path of the `qwen` the daemons are spawned as (`--qwen-bin`),
+   * never its version. Omitted when not wired.
+   */
+  daemonQwenBin?: string;
   /** Read of the daemon's own `/capabilities` envelope (see #96). */
   daemonStatus?: () => Promise<DaemonCapabilities>;
   /** Test seam for the daemon read's bound. */
@@ -131,6 +136,9 @@ export function createCapabilityRoute(deps: {
                 ? deps.maxAttachmentBytes
                 : await deps.maxAttachmentBytes(),
           }
+        : {}),
+      ...(deps.daemonQwenBin !== undefined
+        ? { daemonQwenBin: deps.daemonQwenBin }
         : {}),
     };
     if (deps.costTracking) {

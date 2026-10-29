@@ -58,6 +58,62 @@ describe('parseServeFlags', () => {
     expect(parseServeFlags([]).hostActionsPath).toBeUndefined();
   });
 
+  it('reads --qwen-bin in both forms and from QWEN_RC_QWEN_BIN, flag over env (daemon binary)', () => {
+    expect(parseServeFlags([]).qwenBin).toBeUndefined();
+    expect(parseServeFlags(['--qwen-bin', process.execPath]).qwenBin).toBe(
+      process.execPath,
+    );
+    expect(parseServeFlags([`--qwen-bin=${process.execPath}`]).qwenBin).toBe(
+      process.execPath,
+    );
+    const prior = process.env['QWEN_RC_QWEN_BIN'];
+    try {
+      process.env['QWEN_RC_QWEN_BIN'] = '/bin/sh';
+      expect(parseServeFlags([]).qwenBin).toBe('/bin/sh');
+      expect(parseServeFlags(['--qwen-bin', process.execPath]).qwenBin).toBe(
+        process.execPath,
+      );
+      // An empty env value is the same as unset.
+      process.env['QWEN_RC_QWEN_BIN'] = '';
+      expect(parseServeFlags([]).qwenBin).toBeUndefined();
+    } finally {
+      if (prior === undefined) delete process.env['QWEN_RC_QWEN_BIN'];
+      else process.env['QWEN_RC_QWEN_BIN'] = prior;
+    }
+  });
+
+  it('keeps a bare --qwen-bin name for PATH resolution at boot', () => {
+    expect(parseServeFlags(['--qwen-bin', 'qwen-dev']).qwenBin).toBe(
+      'qwen-dev',
+    );
+  });
+
+  it('fails fast on a --qwen-bin path that is missing or not executable', () => {
+    expect(() => parseServeFlags(['--qwen-bin', '/nonexistent/qwen'])).toThrow(
+      /--qwen-bin: "\/nonexistent\/qwen" does not exist/,
+    );
+    expect(() => parseServeFlags(['--qwen-bin', '/etc/hostname'])).toThrow(
+      /--qwen-bin: .* is not executable/,
+    );
+    expect(() => parseServeFlags(['--qwen-bin'])).toThrow(/needs a path/);
+    expect(() => parseServeFlags(['--qwen-bin', '--no-mdns'])).toThrow(
+      /needs a path/,
+    );
+  });
+
+  it('names the environment variable when the bad value came from it', () => {
+    const prior = process.env['QWEN_RC_QWEN_BIN'];
+    try {
+      process.env['QWEN_RC_QWEN_BIN'] = '/nonexistent/qwen';
+      expect(() => parseServeFlags([])).toThrow(
+        /QWEN_RC_QWEN_BIN: "\/nonexistent\/qwen" does not exist/,
+      );
+    } finally {
+      if (prior === undefined) delete process.env['QWEN_RC_QWEN_BIN'];
+      else process.env['QWEN_RC_QWEN_BIN'] = prior;
+    }
+  });
+
   it('reads --max-attachment-bytes in both forms and from the environment (#196)', () => {
     expect(parseServeFlags(['--max-attachment-bytes', '1000'])).toMatchObject({
       maxAttachmentBytes: 1000,

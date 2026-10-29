@@ -304,6 +304,11 @@ export interface GatewayDeps {
    * actually enforced and reported is {@link effectiveAttachmentLimit} of it.
    */
   maxAttachmentBytes?: number;
+  /**
+   * The resolved path of the `qwen` the gateway spawns its daemons as
+   * (`--qwen-bin`), reported as `daemonQwenBin` on `/rc/capabilities`.
+   */
+  daemonQwenBin?: string;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
   /** Compiled routing matcher; notifier drop-gating wires only when set. */
@@ -1344,6 +1349,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       nativeShells: deps.nativeShellsCapability,
       hostAttach: deps.hostAttach !== undefined,
       maxAttachmentBytes: attachmentLimit,
+      daemonQwenBin: deps.daemonQwenBin,
       // #96: the daemon's own flag list, read per request. The gateway block
       // above stays whatever the gateway itself promises; this is the daemon's
       // answer, so the UI can finally tell the two apart.
