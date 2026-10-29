@@ -16,6 +16,7 @@ import {
 } from './ingester.js';
 import { UsageStore } from './usageStore.js';
 import { RateTableHolder, parseRateTable } from './rateTable.js';
+import Database from 'better-sqlite3';
 
 const RATES = `
 currencyLabel: USD
@@ -26,6 +27,11 @@ models:
     inputPerMTok: 200
     outputPerMTok: 800
     cachedReadPerMTok: 20
+  - modelServiceId: qwen
+    modelId: flint
+    inputPerMTok: 100
+    outputPerMTok: 400
+    cachedReadPerMTok: 10
 `;
 
 // The runtime session_update frame shape: data.update._meta.usage.
@@ -187,7 +193,16 @@ describe('UsageIngester', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function makeIngester(over: { onRateMiss?: () => void } = {}) {
+  function makeIngester(
+    over: {
+      onRateMiss?: (
+        service: string | undefined,
+        model: string,
+        sid: string,
+      ) => void;
+      now?: () => number;
+    } = {},
+  ) {
     const ticks: UsageTick[] = [];
     const coalescer = new UsageTickCoalescer({
       emit: (x) => ticks.push(x),
@@ -201,7 +216,7 @@ describe('UsageIngester', () => {
       rates: new RateTableHolder(parseRateTable(RATES)),
       store,
       coalescer,
-      now: () => 1234,
+      now: over.now ?? (() => 1234),
       onRateMiss: over.onRateMiss,
     });
     return { ingester, ticks };
@@ -312,5 +327,142 @@ describe('UsageIngester', () => {
     const last = ticks[ticks.length - 1];
     expect(last.costMicrocentsPromptTotal).toBe(Math.round(0.6 * MICRO)); // reset, just this prompt
     expect(last.costMicrocentsSesTotal).toBe(Math.round(1.2 * MICRO)); // both prompts
+  });
+
+  // The shape the live daemon really emits: usage only, NO model id in _meta.
+  const liveFrame = (usage: Record<string, unknown>) => ({
+    sessionId: 'sess_1',
+    update: {
+      sessionUpdate: 'agent_message_chunk',
+      content: { text: 'hi' },
+      _meta: { usage, timestamp: 1 },
+    },
+  });
+  const ATTR = { attributionTokenId: 't', subActor: null };
+
+  function rawRows() {
+    const db = new Database(join(dir, 'usage.db'), { readonly: true });
+    const rows = db
+      .prepare(
+        `SELECT model_id, tokens_cached, cost_microcents, rate_key, rate_match, ts
+           FROM usage_events ORDER BY id`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    db.close();
+    return rows;
+  }
+
+  describe('model id supplied by the session cache (#181)', () => {
+    it('prices a live-shaped frame with the supplied id and stores it', () => {
+      const { ingester } = makeIngester();
+      const cost = ingester.ingest(
+        'sess_1',
+        liveFrame({ inputTokens: 1000, outputTokens: 500 }),
+        ATTR,
+        { modelId: 'qwen3-coder-plus' },
+      );
+      expect(cost).toBe(600_000);
+      expect(rawRows()[0]).toMatchObject({
+        model_id: 'qwen3-coder-plus',
+        cost_microcents: 600_000,
+        rate_key: 'qwen/qwen3-coder-plus',
+        rate_match: 'exact',
+      });
+    });
+
+    it('without any id the row is unpriced, as before', () => {
+      const { ingester } = makeIngester();
+      const cost = ingester.ingest(
+        'sess_1',
+        liveFrame({ inputTokens: 10 }),
+        ATTR,
+      );
+      expect(cost).toBeNull();
+      expect(rawRows()[0]).toMatchObject({
+        model_id: '',
+        cost_microcents: null,
+      });
+    });
+
+    it('a model id carried by the frame itself wins over the supplied one', () => {
+      const { ingester } = makeIngester();
+      ingester.ingest('sess_1', frame({ inputTokens: 1000 }), ATTR, {
+        modelId: 'flint',
+      });
+      expect(rawRows()[0]?.model_id).toBe('qwen3-coder-plus');
+    });
+
+    it('honours a ts captured when the frame arrived (queued events)', () => {
+      const { ingester } = makeIngester({ now: () => 9_999 });
+      ingester.ingest('sess_1', liveFrame({ inputTokens: 10 }), ATTR, {
+        modelId: 'flint',
+        ts: 42,
+      });
+      expect(rawRows()[0]?.ts).toBe(42);
+    });
+  });
+
+  describe('cached tokens and the (provider) suffix, end to end', () => {
+    it('stores cachedReadTokens and bills input minus cached at the input rate', () => {
+      const { ingester } = makeIngester();
+      // flint: in 100, out 400, cached 10. (1000-600)*100 + 100*400 + 600*10
+      const cost = ingester.ingest(
+        'sess_1',
+        liveFrame({
+          inputTokens: 1000,
+          outputTokens: 100,
+          totalTokens: 1100,
+          cachedReadTokens: 600,
+        }),
+        ATTR,
+        { modelId: 'flint(openai)' },
+      );
+      expect(cost).toBe(40_000 + 40_000 + 6_000);
+      expect(rawRows()[0]).toMatchObject({
+        tokens_cached: 600,
+        model_id: 'flint(openai)',
+        rate_key: 'qwen/flint',
+        rate_match: 'stripped',
+      });
+    });
+  });
+
+  describe('rate_table_miss audit collapse', () => {
+    it('reports once per (session, model) per hour', () => {
+      let t = 0;
+      const misses: Array<[string | undefined, string, string]> = [];
+      const { ingester } = makeIngester({
+        now: () => t,
+        onRateMiss: (svc, m, sid) => misses.push([svc, m, sid]),
+      });
+      const go = (sid: string, model: string) =>
+        ingester.ingest(sid, liveFrame({ inputTokens: 1 }), ATTR, {
+          modelId: model,
+        });
+      go('a', 'ghost(openai)');
+      go('a', 'ghost(openai)');
+      go('a', 'ghost(openai)');
+      expect(misses).toHaveLength(1);
+      expect(misses[0]).toEqual([undefined, 'ghost(openai)', 'a']);
+      go('b', 'ghost(openai)'); // other session
+      go('a', 'other(openai)'); // other model
+      expect(misses).toHaveLength(3);
+      t = 59 * 60_000;
+      go('a', 'ghost(openai)');
+      expect(misses).toHaveLength(3);
+      t = 61 * 60_000;
+      go('a', 'ghost(openai)');
+      expect(misses).toHaveLength(4);
+    });
+
+    it('still writes the unpriced row every time', () => {
+      const { ingester } = makeIngester({ onRateMiss: () => {} });
+      for (let i = 0; i < 3; i++) {
+        ingester.ingest('a', liveFrame({ inputTokens: 1 }), ATTR, {
+          modelId: 'ghost',
+        });
+      }
+      expect(rawRows()).toHaveLength(3);
+    });
   });
 });

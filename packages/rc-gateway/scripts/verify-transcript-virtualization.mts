@@ -36,7 +36,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import type { Page } from 'playwright';
+import type { Page, Route } from 'playwright';
 import { bootViewer, harnessRuntimeRoot, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 
@@ -2207,6 +2207,10 @@ declare let planFramesSeen: number;
 declare const logLines: string[];
 declare const appendSubagentText: (parentId: string, text: string) => void;
 declare const userTurnsSeen: number;
+// #199. Whether the page still counts a turn as running, and the one-second
+// clock that redraws the status line while it does.
+declare let turnOpen: boolean;
+declare let runClock: unknown;
 declare const forkTurnCount: number;
 declare const __pg: {
   view(): VtView | null | undefined;
@@ -20089,6 +20093,841 @@ function solidPng(w: number, h: number): Buffer {
       await tab.close();
       expect(tabUrl.startsWith('blob:'), `the tap opened ${tabUrl}`);
       return `3 user bubbles, 0 blank; thumbnails ${JSON.stringify(s.thumbHeights)}px; chip ${JSON.stringify(s.chip)}; gaps ${JSON.stringify(s.gaps)}; tap -> ${tabUrl.slice(0, 20)}...`;
+    },
+  });
+}
+
+{
+  // #172. The page moves between conversations by replacing watchedSessionId
+  // and the stream controller, and neither recalls a request already sent.
+  // Each scenario below holds one answer for A on the wire, moves the page to
+  // B, then lets the answer land and asserts that B is as it was and nothing of
+  // A was drawn. The stub serves the same frames to every session id, so B's
+  // rows are these frames, and A's answers are the routes, each carrying text
+  // no frame does.
+  const A = '44444444-5555-6666-7777-888888888888';
+  const B = '55555555-6666-7777-8888-999999999999';
+  const ON_SCREEN = 'p172 the conversation on screen';
+  const frames172 = (): Frame[] =>
+    new Frames().user(ON_SCREEN).asst('p172 its answer').done().list;
+
+  /** One answer that waits until the scenario lets it go. */
+  class Held {
+    asked = 0;
+    answered = 0;
+    private open: () => void = () => {};
+    private readonly gate = new Promise<void>((r) => {
+      this.open = r;
+    });
+    async serve(route: Route, status: number, body: unknown): Promise<void> {
+      this.asked += 1;
+      await this.gate;
+      await route.fulfill({
+        status,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+      this.answered += 1;
+    }
+    release(): void {
+      this.open();
+    }
+  }
+  const poll = async (cond: () => boolean, what: string): Promise<void> => {
+    const deadline = Date.now() + 10_000;
+    while (!cond() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(cond(), what);
+  };
+  /** The switch is made only once the request for A is on the wire. */
+  const asked = (h: Held, what: string): Promise<void> =>
+    poll(() => h.asked > 0, `the page never asked for ${what}`);
+  /** Lets the answer go, then gives the page the turn it needs to act on it. */
+  const land = async (page: Page, h: Held, what: string): Promise<void> => {
+    h.release();
+    await poll(() => h.answered >= h.asked, `${what} was never answered`);
+    await page.waitForTimeout(400);
+  };
+  /** Watched, its stream live, and its replay drawn. */
+  const onAir = (page: Page, id: string): Promise<unknown> =>
+    page.waitForFunction(
+      `watchedSessionId === ${JSON.stringify(id)} && watchStreamAlive && ` +
+        `transcriptModel.items.some((i) => (i.text || '').includes(${JSON.stringify(ON_SCREEN)}))`,
+      null,
+      { timeout: 15_000 },
+    );
+  const go = async (page: Page, id: string): Promise<void> => {
+    await watch(page, id);
+    await onAir(page, id);
+  };
+  type State = {
+    watched: string | null;
+    alive: boolean;
+    aborted: boolean | null;
+    status: string;
+    rows: string;
+    title: string;
+  };
+  const state = (page: Page): Promise<State> =>
+    page.evaluate(String.raw`({
+      watched: watchedSessionId,
+      alive: watchStreamAlive,
+      aborted: controller ? controller.signal.aborted : null,
+      status: document.getElementById('status').textContent || '',
+      rows: transcriptModel.items.map((i) => i.text || '').join(' | '),
+      title: document.getElementById('h1-title-text').textContent || '',
+    })`) as Promise<State>;
+  /** B still watched, its stream live, its own rows on screen. */
+  const stillOnB = async (page: Page, what: string): Promise<State> => {
+    const s = await state(page);
+    expect(s.watched === B, `${what}: the page moved off B to ${s.watched}`);
+    expect(
+      s.alive && s.aborted === false,
+      `${what}: B's watch was ended (alive ${s.alive}, aborted ${s.aborted}, status ${JSON.stringify(s.status)})`,
+    );
+    expect(s.rows.includes(ON_SCREEN), `${what}: B lost its own rows (${JSON.stringify(s.rows)})`);
+    return s;
+  };
+  /** Every events stream the page opens for `id` from now on. */
+  const streamsOf = (page: Page, id: string): string[] => {
+    const seen: string[] = [];
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname === `/session/${id}/events`) seen.push(r.url());
+    });
+    return seen;
+  };
+  const json = (route: Route, body: unknown, status = 200): Promise<void> =>
+    route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+  const sidOf = (route: Route): string =>
+    new URL(route.request().url()).pathname.split('/')[2] ?? '';
+  /** A context in the shape parseContext reads, its model named after `tag`. */
+  const context = (tag: string): unknown => ({
+    workspaceCwd: `/p172/${tag}`,
+    state: {
+      models: {
+        currentModelId: `model-${tag}`,
+        availableModels: [
+          { modelId: `model-${tag}`, name: `Model ${tag}` },
+          { modelId: `model-${tag}-2`, name: `Model ${tag} two` },
+        ],
+      },
+      modes: {
+        currentModeId: 'default',
+        availableModes: [
+          { id: 'default', name: 'Default' },
+          { id: 'yolo', name: 'YOLO' },
+        ],
+      },
+    },
+  });
+  const contextRoute = (u: URL): boolean => /^\/session\/[^/]+\/context$/.test(u.pathname);
+
+  PAGE_SCENARIOS.push({
+    name: 'P198 a cold resume of A answered after a warm switch to B is dropped: B keeps its rows, title and live stream, nothing of A is drawn and no stream for A opens',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page, viewer }) => {
+      const resume = new Held();
+      await page.route(`**/session/${A}/resume`, (route) =>
+        resume.serve(route, 200, {
+          sessionId: A,
+          lastEventId: 9,
+          compactedReplay: [
+            {
+              id: 9,
+              type: 'session_update',
+              data: { update: { sessionUpdate: 'user_message_chunk', content: { text: 'p198 replayed from A' } } },
+            },
+          ],
+          liveJournal: [],
+        }),
+      );
+      const streamsA = streamsOf(page, A);
+      await go(page, viewer.sessionId);
+      await page.evaluate(`void resumeConversation(${JSON.stringify(A)}, '/p198/a', 'p198 A')`);
+      await asked(resume, 'the resume of A');
+      await go(page, B);
+      await land(page, resume, 'the resume of A');
+      const s = await stillOnB(page, 'after the resume of A was answered');
+      expect(!s.rows.includes('p198 replayed from A'), `A's replay was drawn into B (${JSON.stringify(s.rows)})`);
+      expect(s.title !== 'p198 A', `the bar names A (${JSON.stringify(s.title)})`);
+      expect(streamsA.length === 0, `a stream for A was opened ${streamsA.length} time(s)`);
+      return `A's resume landed after B was on screen and was dropped: still on B (${JSON.stringify(s.title)}, ${JSON.stringify(s.status)}), no A rows, no A stream`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P199 a push deep link to A whose folder probe answers after the reader opened B leaves the page on B: no resume and no stream for A',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page, viewer }) => {
+      const RECENT = '/p199/recent';
+      const probe = new Held();
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === RECENT && !u.searchParams.has('archiveState'),
+        (route) => probe.serve(route, 200, { sessions: [{ sessionId: A, title: 'p199 A' }], truncated: false }),
+      );
+      const resumes: string[] = [];
+      await page.route(`**/session/${A}/resume`, (route) => {
+        resumes.push(route.request().url());
+        return json(route, { sessionId: A, lastEventId: 0 });
+      });
+      const streamsA = streamsOf(page, A);
+      await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify([${JSON.stringify(RECENT)}]))`);
+      await page.goto(`${viewer.url}/ui/?session=${A}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(
+        `typeof startWatch === 'function' && deepLinkSessionId === ${JSON.stringify(A)}`,
+        null,
+        { timeout: 15_000 },
+      );
+      await asked(probe, "the deep link's folder probe");
+      await go(page, B);
+      await land(page, probe, "the deep link's folder probe");
+      // The probe then waits on the pending-card read, bounded at 1.5 s.
+      await page.waitForTimeout(1_800);
+      const s = await stillOnB(page, 'after the probe answered');
+      expect(resumes.length === 0, `the probe resumed A ${resumes.length} time(s) over B`);
+      expect(streamsA.length === 0, `a stream for A was opened ${streamsA.length} time(s)`);
+      return `the probe found A in ${RECENT} after B was opened and stood down: still on B (${JSON.stringify(s.status)}), no resume, no A stream`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P200 A's pending-card read answered after the switch to B neither forgets B on a 404 nor pins A's question over B on a 200",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      let held = new Held();
+      let answer: { code: number; body: unknown } = { code: 404, body: { error: 'session not found' } };
+      await page.route(`**/session/${A}/status`, (route) => held.serve(route, answer.code, answer.body));
+
+      await go(page, A);
+      await asked(held, "A's pending-card read");
+      await go(page, B);
+      await land(page, held, "A's pending-card read");
+      const gone = await stillOnB(page, 'after A answered 404');
+      expect(!/session ended on the host/.test(gone.status), `B was forgotten as gone (${JSON.stringify(gone.status)})`);
+
+      held = new Held();
+      answer = {
+        code: 200,
+        body: {
+          pendingInteractions: [
+            {
+              requestId: 'p200-asked-in-a',
+              kind: 'user_question',
+              questions: [{ question: 'p200 a question asked in A', header: 'A', options: [{ label: 'yes' }], multiSelect: false }],
+              options: [{ optionId: 'submit', label: 'Submit', kind: 'allow_once' }],
+            },
+          ],
+        },
+      };
+      await go(page, A);
+      await asked(held, "A's second pending-card read");
+      await go(page, B);
+      await land(page, held, "A's second pending-card read");
+      await stillOnB(page, 'after A answered with a question');
+      const c = (await page.evaluate(String.raw`({
+        text: document.getElementById('cards').textContent || '',
+        held: cards.has('p200-asked-in-a'),
+      })`)) as { text: string; held: boolean };
+      expect(!c.held && !c.text.includes('p200 a question asked in A'), `A's question was pinned over B (${JSON.stringify(c)})`);
+      return `a 404 for A left B watched (${JSON.stringify(gone.status)}), and A's pending question drew no card on B`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P201 a page of earlier messages for A that lands after the switch is dropped (not prepended into B, its cursor not kept, the control not left loading), and one asked on a first visit to A does not land in a second',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      let earlier = new Held();
+      await page.route(
+        (u) => u.pathname === `/session/${A}/transcript`,
+        (route) =>
+          earlier.serve(route, 200, {
+            v: 1,
+            events: [storedEvent(1, 'user_message_chunk', { content: { text: 'p201 paged from A' } }, 1_700_000_000_000)],
+            nextCursor: 'p201-cursor-of-a',
+            hasMore: true,
+          }),
+      );
+      type Paging = { cursor: string | null; paging: boolean; btn: string; disabled: boolean };
+      const paging = (): Promise<Paging> =>
+        page.evaluate(String.raw`({
+          cursor: transcriptCursor,
+          paging: transcriptPaging,
+          btn: document.getElementById('load-earlier').textContent,
+          disabled: document.getElementById('load-earlier').disabled,
+        })`) as Promise<Paging>;
+      const tap = (): Promise<unknown> => page.evaluate(`document.getElementById('load-earlier').click()`);
+
+      await go(page, A);
+      await tap();
+      await asked(earlier, "A's earlier page");
+      await go(page, B);
+      await land(page, earlier, "A's earlier page");
+      const s1 = await stillOnB(page, "after A's page landed");
+      expect(!s1.rows.includes('p201 paged from A'), `A's page was prepended into B (${JSON.stringify(s1.rows)})`);
+      const p1 = await paging();
+      expect(p1.cursor !== 'p201-cursor-of-a', `B kept A's cursor (${JSON.stringify(p1)})`);
+      expect(!p1.paging && !p1.disabled && !/loading/.test(p1.btn), `the control was left loading on B (${JSON.stringify(p1)})`);
+
+      // A, then B, then A again: the same conversation, a later visit, whose
+      // transcript was cleared and replayed since the page was asked for.
+      earlier = new Held();
+      await go(page, A);
+      await tap();
+      await asked(earlier, "A's earlier page on the first visit");
+      await go(page, B);
+      await go(page, A);
+      await land(page, earlier, "A's earlier page on the first visit");
+      const s2 = await state(page);
+      expect(s2.watched === A && s2.alive, `the second visit to A was ended (${JSON.stringify(s2)})`);
+      expect(!s2.rows.includes('p201 paged from A'), `the first visit's page landed in the second (${JSON.stringify(s2.rows)})`);
+      const p2 = await paging();
+      expect(p2.cursor === null && !p2.paging, `the second visit took the first one's cursor (${JSON.stringify(p2)})`);
+      return `A's page landing on B was dropped (cursor ${JSON.stringify(p1.cursor)}, button ${JSON.stringify(p1.btn)}), and the first visit's page did not land in the second visit to A`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P202 A's context answered after the switch leaves B's model, modes and folder in the footer",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const ctxA = new Held();
+      await page.route(contextRoute, (route) =>
+        sidOf(route) === A ? ctxA.serve(route, 200, context('A')) : json(route, context('B')),
+      );
+      await go(page, A);
+      await asked(ctxA, "A's context");
+      await go(page, B);
+      await page.waitForFunction(`ctxInfo && ctxInfo.modelName === 'Model B'`, null, { timeout: 10_000 });
+      await land(page, ctxA, "A's context");
+      await stillOnB(page, "after A's context landed");
+      type Foot = { model: string; current: string; cwd: string; line: string };
+      const f = (await page.evaluate(String.raw`({
+        model: ctxInfo && ctxInfo.modelName,
+        current: ctxInfo && ctxInfo.currentModelId,
+        cwd: ctxInfo && ctxInfo.cwd,
+        line: document.getElementById('h1-model').textContent,
+      })`)) as Foot;
+      expect(
+        f.model === 'Model B' && f.current === 'model-B' && f.cwd === '/p172/B' && f.line === 'Model B',
+        `A's context reached B's footer (${JSON.stringify(f)})`,
+      );
+      return `the footer still reads B's context after A's landed: ${JSON.stringify(f)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P203 A's context fill answered after the switch leaves B's fill on the status line",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const usageA = new Held();
+      await page.route(
+        (u) => /^\/session\/[^/]+\/context-usage$/.test(u.pathname),
+        (route) =>
+          sidOf(route) === A
+            ? usageA.serve(route, 200, { usage: { totalTokens: 1_000, contextWindowSize: 10_000 } })
+            : json(route, { usage: { totalTokens: 2_000, contextWindowSize: 20_000 } }),
+      );
+      await go(page, A);
+      await asked(usageA, "A's context fill");
+      await go(page, B);
+      await page.waitForFunction(`ctxUsage && ctxUsage.window === 20000`, null, { timeout: 10_000 });
+      await land(page, usageA, "A's context fill");
+      await stillOnB(page, "after A's fill landed");
+      const u = (await page.evaluate(`({ total: ctxUsage && ctxUsage.total, window: ctxUsage && ctxUsage.window })`)) as {
+        total: number;
+        window: number;
+      };
+      expect(u.total === 2_000 && u.window === 20_000, `A's fill replaced B's (${JSON.stringify(u)})`);
+      return `the fill is still B's ${u.total}/${u.window} after A's ${usageA.asked} late read(s) landed`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P204 A's idle-suggestion state answered after the switch leaves B's switch and its count",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const idleA = new Held();
+      await page.route(
+        (u) => /^\/session\/[^/]+\/idle-suggest-toggle$/.test(u.pathname),
+        (route) => {
+          if (route.request().method() !== 'GET') return route.continue();
+          return sidOf(route) === A
+            ? idleA.serve(route, 200, { available: true, globalEnabled: true, enabled: true, remainingThisHour: 1, maxSuggestionsPerHour: 9 })
+            : json(route, { available: true, globalEnabled: true, enabled: false, remainingThisHour: 5, maxSuggestionsPerHour: 7 });
+        },
+      );
+      await go(page, A);
+      await asked(idleA, "A's idle-suggestion state");
+      await go(page, B);
+      await page.waitForFunction(
+        `(document.getElementById('idle-suggest-status').textContent || '').startsWith('5/7')`,
+        null,
+        { timeout: 10_000 },
+      );
+      await land(page, idleA, "A's idle-suggestion state");
+      await stillOnB(page, "after A's idle state landed");
+      const t = (await page.evaluate(String.raw`({
+        text: document.getElementById('idle-suggest-status').textContent || '',
+        checked: document.getElementById('idle-suggest-toggle').checked,
+        disabled: document.getElementById('idle-suggest-toggle').disabled,
+      })`)) as { text: string; checked: boolean; disabled: boolean };
+      expect(t.text.startsWith('5/7 left this hour') && !t.checked && !t.disabled, `A's state reached B's switch (${JSON.stringify(t)})`);
+      return `B's switch still reads ${JSON.stringify(t.text)}, unticked, after A's ticked state landed`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P205 the rewind picker filled from A is put away by the switch to B, and a rewind of A answered after the switch does not take the page back to A',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      type Pick = { shown: boolean; options: string[]; busy: boolean };
+      const pick = (): Promise<Pick> =>
+        page.evaluate(String.raw`({
+          shown: document.getElementById('rewind-pick').style.display !== 'none',
+          options: Array.from(document.getElementById('rewind-turn-pick').options).map((o) => o.textContent),
+          busy: document.getElementById('rewind-pick-btn').disabled,
+        })`) as Promise<Pick>;
+      await go(page, A);
+      await page.evaluate(`document.getElementById('rewind-chat').onclick()`);
+      const open = await pick();
+      expect(open.shown && open.options.length === 2, `the picker did not open on A's one turn (${JSON.stringify(open)})`);
+      await watch(page, B);
+      const moved = await pick();
+      expect(!moved.shown, `the picker filled from A stayed up once the page moved to B (${JSON.stringify(moved)})`);
+      await onAir(page, B);
+
+      const rewind = new Held();
+      await page.route(`**/session/${A}/rewind`, (route) => rewind.serve(route, 200, { toTurn: 1 }));
+      await go(page, A);
+      await page.evaluate(
+        `window.confirm = () => true; document.getElementById('rewind-chat').onclick(); void document.getElementById('rewind-pick-btn').onclick()`,
+      );
+      await asked(rewind, 'the rewind of A');
+      await go(page, B);
+      // Counted from here: A's own two watches above opened streams of their own.
+      const streamsA = streamsOf(page, A);
+      await land(page, rewind, 'the rewind of A');
+      await stillOnB(page, 'after the rewind of A was answered');
+      expect(streamsA.length === 0, `the late rewind re-watched A ${streamsA.length} time(s)`);
+      const after = await pick();
+      expect(!after.shown && !after.busy, `the picker is ${JSON.stringify(after)} on B`);
+      return `the picker came down with the switch (${open.options.length} options from A), and a late rewind of A left B watched with no stream for A`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P206 the model picker listing A's models shuts on the switch to B, and A's model switch answered after it leaves B's model in the footer",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(contextRoute, (route) => json(route, context(sidOf(route) === A ? 'A' : 'B')));
+      const dialogOpen = (): Promise<boolean> =>
+        page.evaluate(`document.getElementById('model-picker-dialog').open`) as Promise<boolean>;
+      await go(page, A);
+      await page.waitForFunction(`ctxInfo && ctxInfo.modelName === 'Model A'`, null, { timeout: 10_000 });
+      await page.evaluate(`openModelPicker()`);
+      expect(await dialogOpen(), 'the model picker did not open on A');
+      await watch(page, B);
+      expect(!(await dialogOpen()), "the model picker listing A's models stayed open once the page moved to B");
+      await onAir(page, B);
+
+      const model = new Held();
+      await page.route(`**/session/${A}/model`, (route) => model.serve(route, 200, {}));
+      await go(page, A);
+      await page.waitForFunction(`ctxInfo && ctxInfo.modelName === 'Model A'`, null, { timeout: 10_000 });
+      await page.evaluate(`void switchModel('model-A-2')`);
+      await asked(model, "A's model switch");
+      await go(page, B);
+      await page.waitForFunction(`ctxInfo && ctxInfo.modelName === 'Model B'`, null, { timeout: 10_000 });
+      await land(page, model, "A's model switch");
+      await stillOnB(page, "after A's model switch was answered");
+      const f = (await page.evaluate(String.raw`({
+        current: ctxInfo.currentModelId,
+        name: ctxInfo.modelName,
+        line: document.getElementById('h1-model').textContent,
+      })`)) as { current: string; name: string; line: string };
+      expect(f.current === 'model-B' && f.name === 'Model B' && f.line === 'Model B', `A's model reached B's footer (${JSON.stringify(f)})`);
+      return `the picker shut with the switch, and B's footer still reads ${JSON.stringify(f)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P207 A's approval-mode change answered after the switch leaves B's mode, note and transcript alone, and is still remembered for A",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(contextRoute, (route) => json(route, context(sidOf(route) === A ? 'A' : 'B')));
+      const mode = new Held();
+      await page.route(`**/session/${A}/approval-mode`, (route) =>
+        mode.serve(route, 200, { mode: 'yolo', persisted: true, planExitedOutOfBand: true }),
+      );
+      await go(page, A);
+      await page.waitForFunction(`ctxInfo && ctxInfo.modelName === 'Model A'`, null, { timeout: 10_000 });
+      await openSheet(page);
+      await page.click('#session-footer .seg button[data-mode="yolo"]');
+      await asked(mode, "A's mode change");
+      await go(page, B);
+      await page.waitForFunction(`ctxInfo && ctxInfo.modelName === 'Model B'`, null, { timeout: 10_000 });
+      await land(page, mode, "A's mode change");
+      const s = await stillOnB(page, "after A's mode change was answered");
+      type Mode = { mode: string; line: string; note: string; pressed: string[]; keptForA: string | null; keptForB: string | null };
+      const m = (await page.evaluate(String.raw`({
+        mode: ctxInfo.currentModeId,
+        line: document.getElementById('h1-mode').textContent,
+        note: (document.getElementById('footer-mode-note') || {}).textContent || '',
+        pressed: Array.from(document.querySelectorAll('#session-footer .seg button[aria-pressed="true"]')).map((b) => b.dataset.mode),
+        keptForA: uiSessionRead(MODE_NAME, ${JSON.stringify(A)}, (v) => typeof v === 'string') || null,
+        keptForB: uiSessionRead(MODE_NAME, ${JSON.stringify(B)}, (v) => typeof v === 'string') || null,
+      })`)) as Mode;
+      expect(
+        m.mode === 'default' && m.line === 'Default' && m.pressed.join() === 'default',
+        `A's mode reached B (${JSON.stringify(m)})`,
+      );
+      expect(!/YOLO/.test(m.note), `B's mode note names A's mode (${JSON.stringify(m.note)})`);
+      expect(!s.rows.includes('approval mode left plan'), `A's plan note was added to B's transcript (${JSON.stringify(s.rows)})`);
+      expect(m.keptForA === 'yolo' && m.keptForB === null, `the mode was not filed under A's own id (${JSON.stringify(m)})`);
+      return `B still reads ${m.line} with ${JSON.stringify(m.pressed)} pressed and no plan note, and A's yolo is kept under A`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P208 the workspace file view shows only the file opened last when an earlier one answers after it, and a double tap on more reads the next window once',
+    waitView: false,
+    stub: { capabilitiesFeatures: ['workspace_file_read'] },
+    run: async ({ page }) => {
+      const first = new Held();
+      const next = new Held();
+      await page.route(
+        (u) => u.pathname === '/rc/workspace/file',
+        (route) => {
+          const q = new URL(route.request().url()).searchParams;
+          if (q.get('path') === 'p208-x.txt') {
+            return first.serve(route, 200, { content: 'p208 bytes of x\n', sizeBytes: 16, hasMore: false });
+          }
+          if (q.get('cursor') === 'y-2') {
+            return next.serve(route, 200, { content: 'p208 y window two\n', sizeBytes: 36, hasMore: false });
+          }
+          return json(route, { content: 'p208 y window one\n', sizeBytes: 36, hasMore: true, nextCursor: 'y-2', truncated: true });
+        },
+      );
+      await openPanel(page, 'files');
+      type View = { title: string; pres: number; text: string; more: number };
+      const view = (): Promise<View> =>
+        page.evaluate(String.raw`(() => {
+          const v = document.getElementById('ws-files-view');
+          const pre = v ? v.querySelector('pre') : null;
+          return {
+            title: v && v.querySelector('strong') ? v.querySelector('strong').textContent : '',
+            pres: v ? v.querySelectorAll('pre').length : 0,
+            text: pre ? pre.textContent : '',
+            more: v ? v.querySelectorAll('[data-role=more]').length : 0,
+          };
+        })()`) as Promise<View>;
+      await page.evaluate(`void openWorkspaceFile('p208-x.txt')`);
+      await asked(first, 'the first file');
+      await page.evaluate(`void openWorkspaceFile('p208-y.txt')`);
+      await page.waitForFunction(
+        `((document.querySelector('#ws-files-view pre') || {}).textContent || '').includes('p208 y window one')`,
+        null,
+        { timeout: 10_000 },
+      );
+      await land(page, first, 'the first file');
+      const v1 = await view();
+      expect(
+        v1.title === 'p208-y.txt' && v1.pres === 1 && v1.text === 'p208 y window one\n' && v1.more === 1,
+        `the first file's bytes reached the second file's view (${JSON.stringify(v1)})`,
+      );
+      await page.dblclick('#ws-files-view [data-role=more]');
+      await page.waitForTimeout(300);
+      expect(next.asked === 1, `a double tap on more read the next window ${next.asked} times`);
+      await land(page, next, 'the next window');
+      const v2 = await view();
+      expect(
+        v2.text === 'p208 y window one\np208 y window two\n' && v2.more === 0,
+        `the next window was not appended exactly once (${JSON.stringify(v2)})`,
+      );
+      return `the view reads only ${v1.title} after the earlier file landed, and a double tap read window two once (${JSON.stringify(v2.text)})`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P209 a new conversation created after the reader tapped B does not take the page off B, and its folder is still recorded',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const MADE = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+      const FOLDER = '/p209/made';
+      const create = new Held();
+      await page.route(
+        (u) => u.pathname === '/session',
+        (route) =>
+          route.request().method() === 'POST'
+            ? create.serve(route, 200, { sessionId: MADE, workspaceCwd: FOLDER })
+            : route.continue(),
+      );
+      const streamsMade = streamsOf(page, MADE);
+      await go(page, A);
+      await page.evaluate(`void startConversationIn(${JSON.stringify(FOLDER)})`);
+      await asked(create, 'the new conversation');
+      await go(page, B);
+      await land(page, create, 'the new conversation');
+      await stillOnB(page, 'after the new conversation was answered');
+      const after = (await page.evaluate(`({ recent: loadRecentWorkspaces(), busy: document.getElementById('new-session').disabled })`)) as {
+        recent: string[];
+        busy: boolean;
+      };
+      expect(streamsMade.length === 0, `the late create opened the new conversation ${streamsMade.length} time(s)`);
+      expect(after.recent.includes(FOLDER), `the new conversation's folder was not recorded (${JSON.stringify(after.recent)})`);
+      expect(!after.busy, 'New conversation was left disabled');
+      return `the late create left B on screen, opened nothing, and recorded ${FOLDER} in ${JSON.stringify(after.recent)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P212 Unwatch and a gone conversation both drop A's context answered after them, so no model is named with nothing watched",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      let ctxA = new Held();
+      let gone = false;
+      let goneServed = 0;
+      await page.route(contextRoute, (route) =>
+        sidOf(route) === A ? ctxA.serve(route, 200, context('A')) : json(route, context('B')),
+      );
+      await page.route(`**/session/${A}/status`, async (route) => {
+        if (!gone) return route.continue();
+        await json(route, { error: 'session not found' }, 404);
+        goneServed += 1;
+      });
+      type Foot = { ctx: string | null; line: string; watched: string | null };
+      const footer = (): Promise<Foot> =>
+        page.evaluate(`({ ctx: ctxInfo ? ctxInfo.modelName : null, line: document.getElementById('h1-model').textContent, watched: watchedSessionId })`) as Promise<Foot>;
+
+      await go(page, A);
+      await asked(ctxA, "A's context");
+      await page.evaluate(`document.getElementById('stop').onclick()`);
+      await land(page, ctxA, "A's context");
+      const f1 = await footer();
+      expect(f1.watched === null && f1.ctx === null && f1.line === '', `A's context landed after Unwatch (${JSON.stringify(f1)})`);
+
+      ctxA = new Held();
+      gone = true;
+      await watch(page, A);
+      // The aborted stream then writes its own 'stopped' over the message, so
+      // the forget is read off the 404 being served and the watch being let go.
+      await poll(() => goneServed > 0, "A's status read was never answered 404");
+      await page.waitForFunction(`watchedSessionId === null`, null, { timeout: 15_000 });
+      await asked(ctxA, "A's context while it was found gone");
+      await land(page, ctxA, "A's context while it was found gone");
+      const f2 = await footer();
+      expect(f2.watched === null && f2.ctx === null && f2.line === '', `A's context landed after A was forgotten (${JSON.stringify(f2)})`);
+      return `after Unwatch ${JSON.stringify(f1)}, after the 404 ${JSON.stringify(f2)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P213 an end session or a fork of A answered after the switch to B leaves B watched, and a fork sheet still open on A is cancelled by the switch',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const FORK = '77777777-8888-9999-aaaa-bbbbbbbbbbbb';
+      const end = new Held();
+      await page.route(`**/session/${A}/end`, (route) => end.serve(route, 200, {}));
+      const fork = new Held();
+      await page.route(`**/session/${A}/fork`, (route) => fork.serve(route, 200, { sessionId: FORK }));
+      const streamsFork = streamsOf(page, FORK);
+      await page.evaluate(`window.confirm = () => true; window.prompt = () => ''`);
+
+      await go(page, A);
+      await page.evaluate(`void document.getElementById('end-session').onclick()`);
+      await asked(end, 'the end of A');
+      await go(page, B);
+      await land(page, end, 'the end of A');
+      await stillOnB(page, 'after the end of A was answered');
+
+      const forkRow = `transcriptModel.items.find((i) => i.kind === 'fork')`;
+      await go(page, A);
+      expect((await page.evaluate(`!!${forkRow}`)) === true, 'A has no fork row to fork from');
+      await page.evaluate(`void turnAct('fork', ${forkRow})`);
+      await page.waitForFunction(`!document.getElementById('h1-ask').hidden`, null, { timeout: 10_000 });
+      await page.evaluate(`document.querySelector('#h1-ask button[data-value="include"]').click()`);
+      await asked(fork, 'the fork of A');
+      await go(page, B);
+      await land(page, fork, 'the fork of A');
+      await stillOnB(page, 'after the fork of A was answered');
+      expect(streamsFork.length === 0, `the late fork opened the fork ${streamsFork.length} time(s)`);
+
+      await go(page, A);
+      await page.evaluate(`void turnAct('fork', ${forkRow})`);
+      await page.waitForFunction(`!document.getElementById('h1-ask').hidden`, null, { timeout: 10_000 });
+      await watch(page, B);
+      const sheet = await page.evaluate(`document.getElementById('h1-ask').hidden`);
+      expect(sheet === true, 'the fork sheet naming a turn of A stayed open once the page moved to B');
+      await onAir(page, B);
+      await page.waitForTimeout(300);
+      expect(fork.asked === 1, `the fork sheet left over from A forked ${fork.asked - 1} more time(s)`);
+      return 'a late end of A and a late fork of A both left B watched, and the open fork sheet was cancelled by the switch';
+    },
+  });
+}
+
+// #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD
+// of turn_complete, and the page had no case for it: the thinking row, the
+// timer and Stop stayed on a turn that had stopped. The frame is the shape the
+// fork's fixture captured (two-client-turn.fixture.ts, turnError()).
+{
+  const TURN_ERROR = {
+    type: 'turn_error',
+    id: 900,
+    data: {
+      sessionId: 'stub',
+      message: 'terminated',
+      errorKind: 'model_stream_interrupted',
+      promptId: 'prompt-199',
+    },
+    originatorClientId: 'someone-else',
+  };
+  const ERROR_TEXT =
+    'The reply stopped: the connection to the model was lost (terminated).';
+  const turnState = (page: Page) =>
+    page.evaluate(() => {
+      const items = transcriptModel.items as Array<{ kind: string; text?: string; err?: boolean }>;
+      const stop = document.getElementById('cancel-turn') as HTMLElement;
+      const send = document.getElementById('send') as HTMLElement;
+      return {
+        processing: items.filter((i) => i.kind === 'processing').length,
+        errors: items.filter((i) => i.kind === 'system' && i.err).map((i) => i.text),
+        asst: items.filter((i) => i.kind === 'asst').map((i) => i.text),
+        running: turnOpen,
+        clock: runClock !== null,
+        stopShown: !stop.hidden && stop.getClientRects().length > 0,
+        sendShown: !send.hidden && send.getClientRects().length > 0,
+        sendDisabled: (document.getElementById('send') as HTMLButtonElement).disabled,
+        state: document.getElementById('h1-status')?.getAttribute('data-state') ?? '',
+        word: document.getElementById('h1-state')?.textContent ?? '',
+        domErrors: Array.from(document.querySelectorAll('#transcript .system.err')).map((e) => e.textContent),
+      };
+    });
+  PAGE_SCENARIOS.push({
+    name: 'P210 a turn this window only watches that ends in turn_error keeps its reply, adds one error row saying why, and drops the thinking row, the timer and Stop for Send',
+    noConsoleErrors: true,
+    frames: () =>
+      new Frames()
+        .user('write me a long story')
+        .thought('planning the story. ')
+        .asst('Once upon a time there was').list,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 3, 30_000);
+      const beat = await page.evaluate(() => PROCESSING_QUIET_MS);
+      // The turn is running and quiet: the thinking row is back and Stop has
+      // taken Send's place. That is the state the missing case left behind.
+      await page.waitForFunction(
+        () => (transcriptModel.items as Array<{ kind: string }>).some((i) => i.kind === 'processing'),
+        null,
+        { timeout: beat + 5_000 },
+      );
+      const before = await turnState(page);
+      expect(
+        before.processing === 1 && before.running && before.clock && before.stopShown && !before.sendShown && before.state === 'run',
+        `the watched turn is not in the running state this scenario starts from: ${JSON.stringify(before)}`,
+      );
+
+      await page.evaluate((f) => renderFrame(f), TURN_ERROR);
+      await settlePage(page);
+      // Past one quiet beat, so a thinking row that came back would be seen.
+      await page.waitForTimeout(beat + 600);
+      const after = await turnState(page);
+      expect(after.processing === 0, `${after.processing} thinking rows after the turn failed`);
+      expect(
+        after.errors.length === 1 && after.errors[0] === ERROR_TEXT && after.domErrors.length === 1,
+        `error rows ${JSON.stringify(after.errors)}, on screen ${JSON.stringify(after.domErrors)}`,
+      );
+      expect(
+        after.asst.length === 1 && after.asst[0] === 'Once upon a time there was',
+        `the reply so far is ${JSON.stringify(after.asst)}`,
+      );
+      expect(!after.running && !after.clock, `the turn still counts as running (turnOpen ${after.running}, clock ${after.clock})`);
+      expect(
+        after.sendShown && !after.stopShown && !after.sendDisabled,
+        `Stop ${after.stopShown} Send ${after.sendShown} disabled ${after.sendDisabled}`,
+      );
+      expect(after.state === 'idle' && after.word === 'idle', `the status line reads ${after.state} / ${JSON.stringify(after.word)}`);
+
+      // The same frame again (a replay that overlaps the live stream) adds no
+      // second row.
+      await page.evaluate((f) => renderFrame(f), TURN_ERROR);
+      await settlePage(page);
+      const again = await turnState(page);
+      expect(again.errors.length === 1 && again.processing === 0, `a repeat of the frame left ${again.errors.length} error rows`);
+      return `reply kept, 1 error row (${JSON.stringify(ERROR_TEXT)}), thinking row 1 -> 0, Stop -> Send, status run -> idle, repeat frame adds none`;
+    },
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P211 a prompt this window sent that ends in turn_error frees Send and the status line, shows one error row, and the refused request that follows adds no second row',
+    noConsoleErrors: true,
+    // The request is held for 1.5 s and then answered 500, as a daemon that
+    // failed the turn answers it. The frame arrives while Send is still held.
+    stub: { promptDelayMs: 1_500, promptStatus: 500 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value = 'tell me a story';
+        (document.getElementById('send') as HTMLButtonElement).click();
+      });
+      await page.waitForFunction(() => abandonPendingSend !== null);
+      const held = await turnState(page);
+      expect(
+        held.running && held.stopShown && held.processing === 1,
+        `the sent turn is not running when the failure arrives: ${JSON.stringify(held)}`,
+      );
+
+      // The daemon echoes the prompt, streams a little, then fails the turn.
+      await page.evaluate((f) => {
+        renderFrame({
+          type: 'session_update',
+          data: { update: { sessionUpdate: 'user_message_chunk', content: { text: 'tell me a story' } } },
+        });
+        renderFrame({
+          type: 'session_update',
+          data: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'It began' } } },
+        });
+        renderFrame(f);
+      }, { ...TURN_ERROR, originatorClientId: 'this-window' });
+      await page.waitForFunction(() => abandonPendingSend === null, null, { timeout: 5_000 });
+      await settlePage(page);
+      const freed = await turnState(page);
+      expect(
+        freed.sendShown && !freed.sendDisabled && !freed.stopShown,
+        `Send is still held after the failure: Stop ${freed.stopShown} Send ${freed.sendShown} disabled ${freed.sendDisabled}`,
+      );
+      expect(freed.processing === 0 && !freed.running && !freed.clock, `thinking ${freed.processing}, running ${freed.running}, clock ${freed.clock}`);
+      expect(freed.state === 'idle', `the status line reads ${freed.state}`);
+      expect(
+        freed.errors.length === 1 && freed.errors[0] === ERROR_TEXT && freed.asst.join() === 'It began',
+        `rows after the failure: errors ${JSON.stringify(freed.errors)}, reply ${JSON.stringify(freed.asst)}`,
+      );
+
+      // Let the held request come back refused, then repeat the frame: the
+      // failure was drawn once and stays drawn once.
+      await page.waitForTimeout(2_000);
+      await page.evaluate((f) => renderFrame(f), TURN_ERROR);
+      await settlePage(page);
+      const end = await turnState(page);
+      expect(end.errors.length === 1 && end.domErrors.length === 1, `after the request settled: ${JSON.stringify(end.errors)}`);
+      expect(end.sendShown && !end.sendDisabled && end.state === 'idle', `Send/status after the request settled: ${JSON.stringify({ s: end.sendShown, d: end.sendDisabled, st: end.state })}`);
+      return `own prompt held (Stop, 1 thinking row) -> turn_error -> Send free, status idle, 1 error row; refused request and repeat frame add none`;
     },
   });
 }
