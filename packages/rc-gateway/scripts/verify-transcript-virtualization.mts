@@ -100,17 +100,56 @@ const HELPERS_JS = String.raw`
     return Object.keys(core).sort().join(',');
   }
 
-  function setup(virtual) {
+  // #190. withHead hands the view a header row (a plain block whose height
+  // setHead changes), and every onNearBottomChange call is kept in state.nb.
+  var head = null;
+  function setup(virtual, withHead) {
     if (state.view) state.view.destroy();
     state.view = null;
     scroller.textContent = '';
     scroller.scrollTop = 0;
+    state.nb = [];
+    head = null;
+    if (withHead) {
+      head = document.createElement('div');
+      head.id = 'vt-head';
+      head.style.background = '#234';
+      head.style.height = '60px';
+    }
     state.model = TranscriptModel.createTranscriptModel();
     state.view = TranscriptView.createTranscriptView({
       model: state.model,
       scroller: scroller,
       virtualCore: virtual ? core : null,
+      header: head || undefined,
+      onNearBottomChange: function (nb) {
+        state.nb.push(nb);
+      },
     });
+  }
+  // 0 hides the header (display:none), as the page's pills row does when no
+  // pill is showing.
+  function setHead(px) {
+    if (!head) return;
+    if (px <= 0) {
+      head.style.display = 'none';
+    } else {
+      head.style.display = '';
+      head.style.height = px + 'px';
+    }
+  }
+  // The header's box relative to the scroller's top edge, and whether the
+  // view put it inside the scroller at all.
+  function headBox() {
+    if (!head) return null;
+    var edge = scroller.getBoundingClientRect().top;
+    var b = head.getBoundingClientRect();
+    return {
+      top: b.top - edge,
+      bottom: b.bottom - edge,
+      height: b.height,
+      inside: scroller.contains(head),
+    };
   }
 
   // n user/assistant pairs (2n items) of ~chars characters each.
@@ -284,6 +323,11 @@ const HELPERS_JS = String.raw`
     },
     loadCore: loadCore,
     setup: setup,
+    setHead: setHead,
+    headBox: headBox,
+    get nb() {
+      return state.nb || [];
+    },
     addTurns: addTurns,
     addMdTurns: addMdTurns,
     addLineTurns: addLineTurns,
@@ -367,6 +411,7 @@ interface VtView {
   followIfPinned(): void;
   isNearBottom(): boolean;
   mountedCount(): number;
+  revealHeader(): void;
   destroy(): void;
 }
 declare const __vt: {
@@ -374,7 +419,10 @@ declare const __vt: {
   model: VtModel;
   view: VtView;
   loadCore(): Promise<string>;
-  setup(virtual: boolean): void;
+  setup(virtual: boolean, withHead?: boolean): void;
+  setHead(px: number): void;
+  headBox(): { top: number; bottom: number; height: number; inside: boolean } | null;
+  nb: boolean[];
   addTurns(n: number, chars: number, seed: number): void;
   addMdTurns(n: number, seed: number): void;
   addLineTurns(n: number, lines: number): void;
@@ -1961,6 +2009,233 @@ const VIEW_SCENARIOS: Scenario[] = [
       return details.join('; ');
     },
   },
+  // #190. The header row (the page's load-earlier and recap pills): a block
+  // the view keeps above the first row, inside the list, so it scrolls away
+  // with the rows instead of floating over whichever row is at the top.
+  {
+    name: 'V15 header row sits above the first row and scrolls with the list',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(60, 300, 0);
+          await __vt.settle(300);
+          __vt.scroller.scrollTop = 0;
+          await __vt.settle(200);
+          const top = __vt.headBox();
+          const first = __vt.rowBox(__vt.model.items[0]!.id);
+          __vt.scroller.scrollTop = 800;
+          await __vt.settle(200);
+          return { top, first, away: __vt.headBox(), scrolled: __vt.scroller.scrollTop };
+        }, virtual);
+        expect(!!r.top && r.top.inside, `${mode}: the header is not inside the scroller`);
+        expect(Math.abs(r.top!.top - 8) <= 1, `${mode}: the header starts ${r.top!.top}px below the top, not 8`);
+        expect(
+          !!r.first && r.first.top >= r.top!.bottom + 7 && r.first.top <= r.top!.bottom + 9,
+          `${mode}: the first row starts at ${r.first && r.first.top}, not 8px under the header's bottom ${r.top!.bottom}`,
+        );
+        expect(
+          !!r.away && Math.abs(r.top!.top - r.away.top - r.scrolled) <= 1 && r.away.bottom <= 0,
+          `${mode}: after a scroll of ${r.scrolled}px the header is at ${r.away && r.away.top} (was ${r.top!.top}): it did not scroll with the rows`,
+        );
+        out.push(`${mode}: header 8-${Math.round(r.top!.bottom)}, first row ${Math.round(r.first!.top)}, scrolled away to ${Math.round(r.away!.top)}`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V16 a header that grows, shrinks, appears or goes above a reader mid-list moves no row, and waits for a finger to lift',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      const run = async (p: Page, what: string, virtual: boolean, finger: boolean) => {
+        const r = await p.evaluate(
+          async ({ v, finger: f }) => {
+            __vt.setup(v, true);
+            __vt.setHead(60);
+            __vt.addTurns(80, 300, 0);
+            await __vt.settle(300);
+            __vt.scroller.scrollTop = 1500;
+            await __vt.settle(300);
+            const steps: Array<[string, number]> = [
+              ['grow', 260],
+              ['shrink', 40],
+              ['gone', 0],
+              ['back', 120],
+            ];
+            const moves: string[] = [];
+            let worst = 0;
+            const heights: number[] = [];
+            for (const [name, px] of steps) {
+              const a = __vt.topRow();
+              if (!a) return { setup: 'no row at the top edge' };
+              __vt.setHead(px);
+              // The next two frames are what the reader sees first.
+              await __vt.frame();
+              await __vt.frame();
+              const soon = __vt.rowBox(a.id);
+              await __vt.settle(250);
+              const late = __vt.rowBox(a.id);
+              if (!soon || !late) return { setup: `the reader's row went (${name})` };
+              const m1 = Math.round(soon.top - a.y);
+              const m2 = Math.round(late.top - a.y);
+              worst = Math.max(worst, Math.abs(m1), Math.abs(m2));
+              moves.push(`${name} ${m1}/${m2}`);
+              heights.push(Math.round(__vt.headBox()!.height));
+            }
+            let during = 0;
+            let after = 0;
+            let wrote = 0;
+            if (f) {
+              // A finger on the transcript: nothing moves while it is down,
+              // and the change lands with the reader's row held once it lifts.
+              const a = __vt.topRow()!;
+              const t0 = __vt.scroller.scrollTop;
+              __vt.touch('touchstart');
+              __vt.setHead(300);
+              await __vt.frame();
+              await __vt.frame();
+              await __vt.frame();
+              during = Math.round(__vt.rowBox(a.id)!.top - a.y);
+              wrote = Math.round(__vt.scroller.scrollTop - t0);
+              __vt.touch('touchend');
+              await __vt.settle(400);
+              after = Math.round(__vt.rowBox(a.id)!.top - a.y);
+            }
+            return {
+              inside: !!__vt.headBox() && __vt.headBox()!.inside,
+              moves,
+              worst,
+              heights,
+              during,
+              after,
+              wrote,
+              top: Math.round(__vt.scroller.scrollTop),
+            };
+          },
+          { v: virtual, finger },
+        );
+        if ('setup' in r) {
+          problems.push(`${what}: setup failed (${r.setup})`);
+          return;
+        }
+        if (!r.inside) problems.push(`${what}: the header is not inside the scroller`);
+        if (r.heights.join(',') !== '260,40,0,120')
+          problems.push(`${what}: the header measured ${r.heights.join(',')}, not 260,40,0,120`);
+        if (r.worst > 1) problems.push(`${what}: the reader's row moved (${r.moves.join(', ')})`);
+        if (Math.abs(r.during) > 1 || Math.abs(r.after) > 1 || r.wrote !== 0)
+          problems.push(`${what}: with a finger down the row moved ${r.during}px (scrollTop written ${r.wrote}px), and ${r.after}px once it lifted`);
+        details.push(`${what}: ${r.moves.join(', ')}${finger ? `, finger ${r.during}/${r.after}` : ''}`);
+      };
+      await run(page, 'desktop', true, false);
+      await run(page, 'fallback', false, false);
+      for (const [os, ua] of Object.entries(MOBILE_UA)) {
+        await onPhone(page, ua, async (p) => run(p, os, true, true));
+      }
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
+  },
+  {
+    name: 'V17 a reader at the top sees the header change: the rows make room, and revealHeader brings it back from mid-list',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(60, 300, 0);
+          await __vt.settle(300);
+          __vt.scroller.scrollTop = 0;
+          await __vt.settle(200);
+          const id = __vt.model.items[0]!.id;
+          const y0 = __vt.rowBox(id)!.top;
+          __vt.setHead(200);
+          await __vt.settle(200);
+          const grown = { row: __vt.rowBox(id)!.top, top: __vt.scroller.scrollTop, head: __vt.headBox()!.top };
+          __vt.setHead(0);
+          await __vt.settle(200);
+          const gone = { row: __vt.rowBox(id)!.top, top: __vt.scroller.scrollTop };
+          __vt.setHead(90);
+          __vt.scroller.scrollTop = 2000;
+          await __vt.settle(250);
+          __vt.view.revealHeader();
+          await __vt.settle(250);
+          return { y0, grown, gone, revealed: { top: __vt.scroller.scrollTop, head: __vt.headBox()! } };
+        }, virtual);
+        expect(
+          r.grown.top === 0 && Math.abs(r.grown.row - r.y0 - 140) <= 1 && Math.abs(r.grown.head - 8) <= 1,
+          `${mode}: at the top a 140px taller header left scrollTop ${r.grown.top} and moved the first row ${r.grown.row - r.y0}px`,
+        );
+        expect(
+          r.gone.top === 0 && Math.abs(r.gone.row - 8) <= 1,
+          `${mode}: with the header gone the first row is at ${r.gone.row} (scrollTop ${r.gone.top}), not 8`,
+        );
+        expect(
+          r.revealed.top === 0 && Math.abs(r.revealed.head.top - 8) <= 1 && r.revealed.head.height === 90,
+          `${mode}: revealHeader left scrollTop ${r.revealed.top} and the header at ${r.revealed.head.top}`,
+        );
+        out.push(`${mode}: row ${Math.round(r.y0)} -> ${Math.round(r.grown.row)} -> ${Math.round(r.gone.row)}; revealed at ${Math.round(r.revealed.head.top)}`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V18 a reader at the end stays at the end as the header changes, and jump-to-bottom lands on the end after one',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(60, 300, 0);
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          const nb0 = __vt.nb.length;
+          const gaps: number[] = [];
+          for (const px of [240, 30, 0, 150]) {
+            __vt.setHead(px);
+            await __vt.frame();
+            await __vt.frame();
+            gaps.push(Math.round(__vt.gap()));
+            await __vt.settle(200);
+            gaps.push(Math.round(__vt.gap()));
+          }
+          const leftEnd = __vt.nb.slice(nb0).some((x) => x === false);
+          const near = __vt.view.isNearBottom();
+          // Jump to the bottom after the header changed under a reader mid-list.
+          __vt.scroller.scrollTop = 1200;
+          await __vt.settle(250);
+          __vt.setHead(320);
+          await __vt.settle(250);
+          __vt.view.scrollToEnd();
+          await __vt.settle(250);
+          const jumped = Math.round(__vt.gap());
+          // And in the same frame as the change.
+          __vt.scroller.scrollTop = 1200;
+          await __vt.settle(250);
+          __vt.setHead(20);
+          __vt.view.scrollToEnd();
+          await __vt.settle(250);
+          const hb = __vt.headBox();
+          return { gaps, leftEnd, near, jumped, same: Math.round(__vt.gap()), nearAfter: __vt.view.isNearBottom(), inside: !!hb && hb.inside && hb.height === 20 };
+        }, virtual);
+        expect(r.inside, `${mode}: the header is not a 20px block inside the scroller`);
+        expect(
+          r.gaps.every((g) => g <= 1) && !r.leftEnd && r.near,
+          `${mode}: at the end the gap went ${r.gaps.join(',')} (left the end: ${r.leftEnd}, near ${r.near})`,
+        );
+        expect(r.jumped <= 1 && r.same <= 1 && r.nearAfter, `${mode}: jump-to-bottom left a gap of ${r.jumped}px (${r.same}px in the same frame)`);
+        out.push(`${mode}: gaps ${r.gaps.join(',')}; jumps ${r.jumped}/${r.same}`);
+      }
+      return out.join('; ');
+    },
+  },
 ];
 
 async function runViewSection(viewer: Viewer): Promise<Result[]> {
@@ -3069,7 +3344,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    name: 'P4 fork row',
+    // #190: named for what it checks since #184 turned the fork row into
+    // the turn-actions row (Fork here, Rewind to here, Copy).
+    name: 'P4 the turn-actions row follows the newest answer, and Fork here asks include or empty',
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 1, 10_000);
@@ -6154,17 +6431,16 @@ PAGE_SCENARIOS.push({
       `an archived row is pressable, promising a read the daemon refuses (${JSON.stringify(filed.rows[0]!)})`,
     );
 
-    // The ? is one delegated listener on document keyed on aria-controls (the
-    // rule P35 proves for the seven surfaces), so this screen's follows it.
+    // #190: the screen says what it is in one sentence, as every panel screen
+    // does, rather than behind a ?.
     const help = (await page.evaluate(String.raw`(() => {
-      const btn = document.querySelector('#archived-view .help-btn');
-      if (!btn) return 'no ? button';
       const el = document.getElementById('help-archived-view');
-      const before = el.hidden;
-      btn.click();
-      return String(before === true) + '/' + String(!el.hidden) + '/' + btn.getAttribute('aria-expanded');
-    })()`)) as string;
-    expect(help === 'true/true/true', `the archived screen's ? did not behave like the other panels' (got ${help})`);
+      return {
+        q: !!document.querySelector('#archived-view .help-btn'),
+        lede: !!el && el.classList.contains('lede') && !el.hidden && el.getClientRects().length > 0,
+      };
+    })()`)) as { q: boolean; lede: boolean };
+    expect(!help.q && help.lede, `the archived screen keeps a ? or shows no lede (${JSON.stringify(help)})`);
 
     await page.click('#archived-list .arow button');
     await page.waitForFunction(
@@ -6983,11 +7259,12 @@ PAGE_SCENARIOS.push({
         return { id: -1, top: 0 };
       });
 
-    // Mid-transcript, not at the end: at the end the view follows, which is a
-    // different path and would make the anchor claim vacuous.
+    // Not at the end: at the end the view follows, which is a different path
+    // and would make the anchor claim vacuous. #190: at the top of the list,
+    // because the pill is the list's header row now, and a reader can only
+    // tap it where it is; the page still lands above the row they are on.
     await page.evaluate(() => {
-      const s = document.getElementById('transcript')!;
-      s.scrollTop = Math.floor(s.scrollHeight / 2);
+      document.getElementById('transcript')!.scrollTop = 0;
     });
     await settlePage(page);
 
@@ -12744,7 +13021,12 @@ PAGE_SCENARIOS.push({
         await page.focus('#prompt');
         const rest = await measure();
         expect(!rest.rail, `the rail element is still on the page at ${at}`);
-        expect(rest.expanded === 'false', `the title does not say the list is shut at ${at} (aria-expanded ${rest.expanded})`);
+        // #190: in the pane layout the title focuses the search of a list
+        // that is always up, so it carries no open-or-shut state there.
+        expect(
+          pane ? rest.expanded === null : rest.expanded === 'false',
+          `the title does not say the list is shut at ${at} (aria-expanded ${rest.expanded})`,
+        );
         if (!pane) {
           // At rest: no rail, no strip, no column. The transcript has the width.
           expect(!rest.shown, `the list is over the chat at rest at ${at}`);
@@ -13687,8 +13969,9 @@ PAGE_SCENARIOS.push({
         // Keyboard: Tab from the back button reaches the folder's create,
         // Escape shuts it back onto New conversation, Enter on that opens it
         // again, and the back button shuts it onto New conversation too.
+        // #190: the folder rows are buttons now, one Tab stop for the list.
         let reached = '';
-        for (let i = 0; i < 8 && reached !== 'dir-use'; i++) {
+        for (let i = 0; i < 10 && reached !== 'dir-use'; i++) {
           await page.keyboard.press('Tab');
           reached = (await readPicker(page)).focusOn;
         }
@@ -13712,7 +13995,9 @@ PAGE_SCENARIOS.push({
       // No folder: a first browse that failed is exactly when the typed path
       // is the way in, so the door has to survive it.
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.evaluate('renderPastConversations([], null, false)');
+      // #190: opening the list reads the browser's folder at once, so the
+      // failed browse is the browser's state too, not only the list's.
+      await page.evaluate('curDirPath = null; renderPastConversations([], null, false)');
       await openList(page);
       await page.click('#list-new');
       const bare = await readPicker(page);
@@ -13769,6 +14054,7 @@ PAGE_SCENARIOS.push({
       rmSync(top, { recursive: true, force: true });
       mkdirSync(inner, { recursive: true });
       try {
+        const home = (await page.evaluate('curDirPath')) as string;
         await openList(page);
         await page.click('#list-new');
 
@@ -13867,6 +14153,10 @@ PAGE_SCENARIOS.push({
         // Nothing is watched yet, so arriving in it is a change of
         // conversation, and the screens opened to get there shut behind it.
         await page.click('#dir-back');
+        // #190: backing out puts the list back on the folder it was on, so
+        // the rows are planted once that has landed.
+        await page.waitForFunction(`curDirPath === ${JSON.stringify(home)} && pastConvosCwd === ${JSON.stringify(home)}`, null, { timeout: 5_000 });
+        await page.waitForTimeout(300);
         await page.evaluate(
           `renderPastConversations([{ sessionId: ${JSON.stringify(viewer.sessionId)}, title: 'resume me from the list' }], curDirPath, false)`,
         );
@@ -17204,7 +17494,8 @@ PAGE_SCENARIOS.push({
               const host = dir.querySelector('.host');
               return Object.assign(ends(dir.querySelector('.cwd'), dir.title), {
                 dirIn: inBox(dir.getBoundingClientRect(), sb),
-                hostIn: inBox(host.getBoundingClientRect(), sb),
+                // #190: the host is on the folder line only, so a row has none.
+                hostIn: !host,
                 subIn: inBox(s.querySelector('.sub').getBoundingClientRect(), sb),
                 rowIn: inBox(sb, scr),
                 h: Math.round(sb.height),
@@ -18890,22 +19181,14 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P168 the sheet carries the session cost once Usage has read it, More shows it on Usage and cost, and nothing polls for it',
+    // #190: the figure is the page's own read of the conversation (P312, P313)
+    // rather than the Usage panel's window, so what is left of #187's claim is
+    // that the panel's reads, whatever they are grouped by, do not move it.
+    name: 'P168 the sheet carries the session cost from the page own read, and the Usage panel reads by session or by model leave it as it is',
     run: async ({ page, viewer }) => {
       const sid = viewer.sessionId;
       let rows: Record<string, unknown>[] = [];
-      let asked = 0;
-      await page.route(
-        (u) => u.pathname === '/rc/usage',
-        (route) => {
-          asked++;
-          return route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ rows }),
-          });
-        },
-      );
+      const asked: string[] = [];
       const row = (key: string, cents: number) => ({
         key,
         displayLabel: key.slice(0, 8),
@@ -18914,8 +19197,24 @@ PAGE_SCENARIOS.push({
         tokensCached: 0,
         costMicrocents: cents * 1_000_000,
         costCents: cents,
+        events: 1,
+        unpricedEvents: 0,
         efficiency: { costCentsPer1kOutputTokens: 1, tokensPerDollar: 1 },
       });
+      await page.route(
+        (u) => u.pathname === '/rc/usage',
+        (route) => {
+          const q = new URL(route.request().url()).searchParams;
+          asked.push(q.toString());
+          // The page's own read names the session; the panel's does not.
+          const body = q.get('session') ? { rows: [row(sid, 42)] } : { rows };
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(body),
+          });
+        },
+      );
       await watch(page, sid);
       await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
       await page.setViewportSize({ width: 390, height: 844 });
@@ -18934,13 +19233,6 @@ PAGE_SCENARIOS.push({
         await page.click('#h1-status');
         return r;
       };
-      const moreValue = async () => {
-        await openPanel(page, 'chat');
-        await page.click('#h1-more');
-        const v = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="usage"] .val').textContent`)) as string;
-        await page.click('#more-back');
-        return v;
-      };
       // A sentinel in the output, so each read is waited for and not only
       // the first.
       const load = async (group: string) => {
@@ -18953,35 +19245,25 @@ PAGE_SCENARIOS.push({
           return !t.includes('p168 waiting') && !t.includes('loading');
         })()`);
       };
-
-      const fresh = await sheet();
-      expect(fresh.cost === null, `the sheet showed a cost before Usage was read (${JSON.stringify(fresh)})`);
-      expect((await moreValue()) === '', 'More showed a cost before Usage was read');
-
-      rows = [row(sid, 42), row('99999999-0000-0000-0000-000000000000', 7)];
-      await load('session');
-      const served = await sheet();
+      const want = 'spent 1.4k tokens, $0.42';
+      const own = await sheet();
       expect(
-        served.cost === '$0.42' && served.rowLabel === 'Context' && served.shown,
-        `the sheet's context line does not carry the session's cost (${JSON.stringify(served)})`,
+        own.cost === want && own.rowLabel === 'Context' && own.shown,
+        `the sheet's context line does not carry the conversation's own figure (${JSON.stringify(own)})`,
       );
-      expect((await moreValue()) === '$0.42', 'More does not show the session cost on Usage and cost');
-
-      // A read grouped by model has no session keys, so it says nothing
-      // about this conversation and leaves the last answer standing.
+      rows = [row(sid, 7), row('99999999-0000-0000-0000-000000000000', 9)];
+      await load('session');
+      expect((await sheet()).cost === want, 'a by-session read of the Usage panel changed the figure');
       rows = [row('qwen3-coder', 99)];
       await load('model');
-      expect((await sheet()).cost === '$0.42', 'a by-model read changed the session cost');
-
-      // A by-session read the conversation is absent from takes it away.
-      rows = [row('99999999-0000-0000-0000-000000000000', 7)];
+      expect((await sheet()).cost === want, 'a by-model read of the Usage panel changed the figure');
+      rows = [];
       await load('session');
-      expect((await sheet()).cost === null, 'a read without this conversation left its old cost on the sheet');
-
-      const presses = asked;
+      expect((await sheet()).cost === want, 'a by-session read without this conversation took the figure away');
+      const presses = asked.length;
       await page.waitForTimeout(2500);
-      expect(asked === presses && presses === 3, `/rc/usage was asked ${asked} times for 3 presses, so something polls it`);
-      return "no cost before Usage was read; $0.42 on the sheet's Context line and on More's Usage and cost once it was; a by-model read left it, a by-session read without the conversation took it away; 3 reads for 3 presses";
+      expect(asked.length === presses && presses === 4, `/rc/usage was asked ${asked.length} times for one open and 3 presses, so something polls it`);
+      return `"${want}" from the page's own read; three Usage panel reads (by session, by model, by session without it) left it; ${presses} reads in all`;
     },
   });
 
@@ -19087,6 +19369,140 @@ PAGE_SCENARIOS.push({
       const atBar = await where();
       expect(atRow === 'row:trust' && atBar === 'h1-more', `Escape walked to ${atRow} then ${atBar}`);
       return `Enter on ≡ landed on the first row; Tab walked all ${MORE_ROWS.length} rows in reading order and Shift+Tab back; Enter on Trust and policy opened onto its back button with the next Tab inside; Escape went to the row, then to ≡`;
+    },
+  });
+
+  // #190: Unwatch takes the conversation's cards with it, as a switch does.
+  PAGE_SCENARIOS.push({
+    name: 'P326 Unwatch takes a pinned card down with the conversation it belonged to',
+    frames: () => new Frames().ev('client_joined').user('clean up').ev('permission_request', permFrame('p326', 'rm -rf ./build')).list,
+    stub: { sessionStatus: statusBody([permPending('p326', 'rm -rf ./build')]) },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p326');
+      await page.evaluate(`document.getElementById('stop').click()`);
+      await frames3(page);
+      await page.waitForTimeout(300);
+      const r = (await page.evaluate(`({
+        cards: document.querySelectorAll('#cards .pcard').length,
+        pinned: !!pinnedCard(),
+        state: document.getElementById('h1-status').dataset.state,
+        watched: watchedSessionId,
+      })`)) as { cards: number; pinned: boolean; state: string; watched: string | null };
+      expect(r.watched === null && r.cards === 0 && !r.pinned && r.state !== 'wait', `after Unwatch: ${JSON.stringify(r)}`);
+      return `after Unwatch no card is left (${JSON.stringify(r)})`;
+    },
+  });
+
+  // #190: with the keys up and a 2 KB command pinned, the transcript keeps
+  // room for the agent's last words (P177 measured none), and the card still
+  // shows its buttons and two lines of the command.
+  const h190KeysUpRoom = async (page: Page, size: { width: number; height: number }, keys: number) => {
+    await page.setViewportSize(size);
+    await frames3(page);
+    const visible = await keyboardUp(page, keys);
+    const r = (await page.evaluate(String.raw`(() => {
+      const tr = document.getElementById('transcript').getBoundingClientRect();
+      const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+      const allow = card.querySelector('.pc-allow').getBoundingClientRect();
+      const deny = card.querySelector('.pc-deny').getBoundingClientRect();
+      const cmd = card.querySelector('.pc-cmd');
+      const cs = getComputedStyle(cmd);
+      const lh = parseFloat(cs.lineHeight) || 18;
+      const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const vv = window.visualViewport.offsetTop + window.visualViewport.height;
+      // What of the box shows: inside the card body that scrolls it, and
+      // above the keys.
+      const ob = cmd.getBoundingClientRect();
+      const body = card.querySelector('.pc-body').getBoundingClientRect();
+      const cb = { top: Math.max(ob.top, body.top), bottom: Math.min(ob.bottom, body.bottom) };
+      const mid = document.elementFromPoint((ob.left + ob.right) / 2, (cb.top + Math.min(cb.bottom, vv)) / 2);
+      const field = document.getElementById('prompt').getBoundingClientRect();
+      const send = document.getElementById('h1-plus').getBoundingClientRect();
+      return {
+        tr: Math.round(tr.height),
+        allow: allow.bottom <= vv + 0.5 && allow.height >= 48,
+        deny: deny.bottom <= vv + 0.5 && deny.height >= 48,
+        lines: Math.floor((Math.min(cb.bottom, vv) - cb.top - pad) / lh),
+        cmdMine: !!mid && (mid === cmd || cmd.contains(mid)),
+        field: field.bottom <= vv + 0.5 && send.bottom <= vv + 0.5,
+        vv: Math.round(vv),
+      };
+    })()`)) as { tr: number; allow: boolean; deny: boolean; lines: number; cmdMine: boolean; field: boolean; vv: number };
+    return { visible, ...r };
+  };
+  PAGE_SCENARIOS.push({
+    name: 'P331 with the keys up at 390x480 and a 2 KB command pinned, the transcript keeps room for the last words, and the card its buttons and two lines of the command',
+    keyboard: true,
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('clear the stale alpine caches');
+      f.asst('The old alpine entries are dead weight; I can clear them.');
+      return f.ev('permission_request', permFrame('p331', BIG_CMD)).list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p331', BIG_CMD)]) },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p331');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const r = await h190KeysUpRoom(page, PHONE, KEYBOARD_KEYS);
+      expect(r.tr >= 60, `the transcript is ${r.tr}px with the keys up and the card pinned`);
+      expect(r.allow && r.deny && r.lines >= 2 && r.cmdMine && r.field, `the card or the composer lost out: ${JSON.stringify(r)}`);
+      await shot(page, 'p331-keys-card-390x480');
+      await keyboardDown(page);
+      return `transcript ${r.tr}px, Allow and Deny whole above the keys at ${r.vv}, ${r.lines} lines of the command`;
+    },
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P332 at 360x780 with the keys up the field and Send stay above them, and a pinned card keeps its buttons over a transcript with room',
+    keyboard: true,
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('clear the stale alpine caches');
+      f.asst('The old alpine entries are dead weight; I can clear them.');
+      return f.ev('permission_request', permFrame('p332', BIG_CMD)).list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p332', BIG_CMD)]) },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p332');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // A 360x780 phone's keys cover about 290px, leaving 490.
+      const r = await h190KeysUpRoom(page, { width: 360, height: 780 }, 290);
+      expect(r.visible === 490, `the keys left ${r.visible}px visible`);
+      expect(r.field && r.allow && r.deny && r.lines >= 2 && r.cmdMine && r.tr >= 60, `at 360x780 with the keys up: ${JSON.stringify(r)}`);
+      await shot(page, 'p332-keys-360x780');
+      await keyboardDown(page);
+      return `360x780, keys up to ${r.vv}: field and Send on screen, Allow and Deny whole, transcript ${r.tr}px, ${r.lines} lines of the command`;
+    },
+  });
+
+  // #190: a push tells a page left in the background, which asks for the
+  // request at once instead of waiting to be shown again.
+  PAGE_SCENARIOS.push({
+    name: 'P333 a push the service worker passes to a hidden page has it ask for the request at once, so the card is up when the reader returns',
+    frames: () => new Frames().ev('client_joined').user('clean up').asst('on it').list,
+    stub: { sessionStatus: statusBody([permPending('p333', 'rm -rf ./build')]) },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 2, 15_000);
+      // Hidden from here on: the 5 s poll stands down, as on a phone with the
+      // page in the background. Any card the first reads drew is taken down.
+      await page.evaluate(`Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); dropAllCards();`);
+      await page.waitForTimeout(300);
+      const asked: number[] = [];
+      page.on('request', (r) => {
+        if (/\/session\/[^/]+\/status$/.test(new URL(r.url()).pathname)) asked.push(Date.now());
+      });
+      const t0 = Date.now();
+      await page.evaluate(
+        (sid) => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'rc-push', kind: 'permission.required', sessionId: sid, requestId: 'p333' } })),
+        viewer.sessionId,
+      );
+      await page.waitForFunction(`!!document.querySelector('#cards .pcard[data-request-id="p333"]')`, null, { timeout: 2_500 }).catch(() => undefined);
+      const r = (await page.evaluate(`({ card: !!document.querySelector('#cards .pcard[data-request-id="p333"]') })`)) as { card: boolean };
+      expect(asked.length > 0 && asked[0]! - t0 < 1_500 && r.card, `the page asked ${asked.length} times (first after ${asked.length ? asked[0]! - t0 : '-'}ms) and drew the card: ${r.card}`);
+      return `asked ${asked[0]! - t0}ms after the worker's message, card p333 drawn while hidden`;
     },
   });
 }
@@ -22612,7 +23028,10 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P303 the load-earlier pill does not cover the first transcript line or the crash banner: the list top reserves the pills row, at 390 and 1100',
+    // #190: the pills are the list's header row now, not a float over a
+    // reserved inset (setTopInset is gone); the same three claims hold, and
+    // the pill has to be inside the list for them to hold for that reason.
+    name: 'P303 the load-earlier pill does not cover the first transcript line or the crash banner: it is the list\'s header row, at 390 and 1100',
     frames: g177Frames,
     run: async ({ page, viewer }) => {
       await g177Ready(page, viewer);
@@ -22634,6 +23053,10 @@ PAGE_SCENARIOS.push({
             };
           })()`) as never;
         const r = await read();
+        expect(
+          (await page.evaluate(`document.getElementById('transcript').contains(document.getElementById('load-earlier'))`)) === true,
+          `${size.width}: the pill is not inside the transcript list`,
+        );
         const hit = (a: { t: number; b: number; l: number; r: number }, c: { t: number; b: number; l: number; r: number }) =>
           !(a.b <= c.t || c.b <= a.t || a.r <= c.l || c.r <= a.l);
         const covered = r.rows.filter((row) => row.b > 0 && hit(r.pill, row));
@@ -22731,6 +23154,1049 @@ PAGE_SCENARIOS.push({
     },
   });
 }
+
+// #190 (H1 adjustments, batch two). Each scenario names the adjustment, runs at
+// 390x844 and, where the layout differs, at 1100x810, and saves a shot when
+// SHOTS names a directory.
+const H190_SIZES = [
+  { width: 390, height: 844 },
+  { width: 1100, height: 810 },
+] as const;
+const h190Frames = (): Frame[] => {
+  const f = new Frames();
+  for (let i = 1; i <= 14; i++) {
+    f.user(`p310 question ${i}`).asst(
+      `p310 answer ${i} ` + 'lorem ipsum dolor sit amet consectetur '.repeat(6),
+    ).done();
+  }
+  return f.list;
+};
+const h190Settle = async (page: Page): Promise<void> => {
+  await page.waitForTimeout(250);
+  await frames3(page);
+};
+const h190Ready = async (page: Page, viewer: Viewer): Promise<void> => {
+  await watch(page, viewer.sessionId);
+  await waitForFrame(page, 14 * 3, 30_000);
+  await settlePage(page);
+};
+type H190Box = { t: number; b: number; l: number; r: number };
+// The pills, the transcript's box, its scroll offset and every mounted row.
+const h190Read = (page: Page): Promise<{
+  inList: boolean;
+  earlier: H190Box;
+  recap: H190Box;
+  tr: H190Box;
+  top: number;
+  rows: (H190Box & { text: string })[];
+}> =>
+  page.evaluate(`(() => {
+    const rc = (el) => { const b = el.getBoundingClientRect(); return { t: b.top, b: b.bottom, l: b.left, r: b.right }; };
+    const tr = document.getElementById('transcript');
+    return {
+      inList: tr.contains(document.getElementById('load-earlier')) && tr.contains(document.getElementById('recap-toggle')),
+      earlier: rc(document.getElementById('load-earlier')),
+      recap: rc(document.getElementById('recap-toggle')),
+      tr: rc(tr),
+      top: tr.scrollTop,
+      rows: Array.from(tr.querySelectorAll('.vrow')).map((r) => Object.assign(rc(r), { text: (r.textContent || '').slice(0, 30) })),
+    };
+  })()`) as never;
+const h190Hit = (a: H190Box, c: H190Box): boolean =>
+  !(a.b <= c.t || c.b <= a.t || a.r <= c.l || c.r <= a.l);
+// The first row whose bottom is below the transcript's top edge, by its top.
+const h190Mark = (page: Page): Promise<{ text: string; y: number }> =>
+  page.evaluate(`(() => {
+    const edge = document.getElementById('transcript').getBoundingClientRect().top;
+    const first = Array.from(document.querySelectorAll('#transcript .vrow')).filter((r) => r.getBoundingClientRect().bottom > edge + 4).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
+    return first ? { text: first.getAttribute('data-id'), y: first.getBoundingClientRect().top } : { text: '', y: -1 };
+  })()`) as never;
+
+PAGE_SCENARIOS.push({
+  name: 'P310 the load-earlier and recap pills are a row at the top of the transcript list, not floating: above the first row at the top, scrolled away with the rows mid-list, at 390 and 1100',
+  frames: h190Frames,
+  stub: { capabilitiesFeatures: ['session_recap'] },
+  run: async ({ page, viewer }) => {
+    await h190Ready(page, viewer);
+    await page.waitForSelector('#recap-toggle', { state: 'visible' });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 0`);
+      await h190Settle(page);
+      const at = await h190Read(page);
+      expect(at.inList, `${size.width}: the pills are not inside the transcript list`);
+      const firstTop = Math.min(...at.rows.map((x) => x.t));
+      const pillsBottom = Math.max(at.earlier.b, at.recap.b);
+      expect(
+        Math.abs(firstTop - pillsBottom - 8) <= 1.5,
+        `${size.width}: the first row starts at ${firstTop}, not 8px under the pills' bottom ${pillsBottom}`,
+      );
+      expect(
+        at.earlier.t - at.tr.t >= 4 && at.earlier.t - at.tr.t <= 16 && Math.abs(at.earlier.t - at.recap.t) < 1,
+        `${size.width}: the pills sit ${at.earlier.t - at.tr.t}px and ${at.recap.t - at.tr.t}px into the transcript, not side by side at its top`,
+      );
+      await shot(page, `p310-top-${size.width}`);
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 600`);
+      await h190Settle(page);
+      const mid = await h190Read(page);
+      const scrolled = mid.top - at.top;
+      expect(scrolled > 300, `${size.width}: the transcript only scrolled ${scrolled}px`);
+      expect(
+        Math.abs(at.earlier.t - mid.earlier.t - scrolled) <= 1.5,
+        `${size.width}: after a ${scrolled}px scroll the pill moved ${at.earlier.t - mid.earlier.t}px: it floats instead of scrolling with the rows`,
+      );
+      const covered = mid.rows.filter(
+        (row) => row.b > mid.tr.t && (h190Hit(mid.earlier, row) || h190Hit(mid.recap, row)),
+      );
+      expect(covered.length === 0, `${size.width}: mid-list the pills cover ${covered.length} row(s): ${JSON.stringify(covered[0])}`);
+      await shot(page, `p310-mid-${size.width}`);
+      lines.push(`${size.width}: pills ${Math.round(at.earlier.t - at.tr.t)}px into the list, first row ${Math.round(firstTop - pillsBottom)}px under them; ${Math.round(scrolled)}px down the pills are at ${Math.round(mid.earlier.t - mid.tr.t)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P311 the pills row changing height moves no row under a reader: the recap answering late mid-list, the recap shut mid-list, and at the end; the ⋯ menu brings the row into view with the recap open, at 390 and 1100',
+  frames: h190Frames,
+  stub: { capabilitiesFeatures: ['session_recap'] },
+  run: async ({ page, viewer }) => {
+    const LONG = 'p311 ' + 'moved the nightly to bookworm-slim and opened a pull request for it, '.repeat(5);
+    let held: Promise<void> | null = null;
+    let release: () => void = () => {};
+    await page.route(/\/session\/[^/]+\/recap$/, async (route) => {
+      if (held) await held;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sessionId: viewer.sessionId, recap: LONG }),
+      });
+    });
+    await h190Ready(page, viewer);
+    await page.waitForSelector('#recap-toggle', { state: 'visible' });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await h190Settle(page);
+      held = new Promise<void>((r) => {
+        release = r;
+      });
+      // Open the recap at the top; the answer is held while the reader goes
+      // on down the list.
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 0`);
+      await h190Settle(page);
+      await page.click('#recap-toggle');
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('asking')`);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 600`);
+      await h190Settle(page);
+      const before = await h190Mark(page);
+      release();
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('p311')`);
+      await h190Settle(page);
+      const answered = await h190Mark(page);
+      const recapH = (await page.evaluate(`document.getElementById('recap').getBoundingClientRect().height`)) as number;
+      expect(recapH > 40, `${size.width}: the recap answer is only ${recapH}px tall, too short to test with`);
+      expect(
+        answered.text === before.text && Math.abs(answered.y - before.y) <= 1.5,
+        `${size.width}: the recap answering moved the reader's row ${before.text} from ${before.y} to ${answered.text}@${answered.y}`,
+      );
+      // Shut from elsewhere (the pill is scrolled away): the row stays.
+      await page.evaluate(`document.getElementById('recap-toggle').click()`);
+      await h190Settle(page);
+      const shut = await h190Mark(page);
+      expect(
+        shut.text === before.text && Math.abs(shut.y - before.y) <= 1.5,
+        `${size.width}: the recap shutting moved the reader's row ${before.text} from ${before.y} to ${shut.text}@${shut.y}`,
+      );
+      // ⋯ > Where did I leave off? from mid-list brings the row into view.
+      await openMenu(page);
+      await page.click('#h1-menu-recap');
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('p311')`);
+      await h190Settle(page);
+      const shown = (await page.evaluate(`(() => {
+        const tr = document.getElementById('transcript');
+        const t = tr.getBoundingClientRect();
+        const r = document.getElementById('recap').getBoundingClientRect();
+        const p = document.getElementById('recap-toggle').getBoundingClientRect();
+        return { top: tr.scrollTop, rTop: r.top - t.top, rBottom: r.bottom - t.top, pill: p.top - t.top, h: t.height };
+      })()`)) as { top: number; rTop: number; rBottom: number; pill: number; h: number };
+      expect(
+        shown.top === 0 && shown.pill >= 0 && shown.rTop > shown.pill && shown.rBottom <= shown.h,
+        `${size.width}: the ⋯ menu opened the recap off screen (scrollTop ${shown.top}, pill at ${shown.pill}, recap ${shown.rTop}-${shown.rBottom} in ${shown.h})`,
+      );
+      await shot(page, `p311-recap-${size.width}`);
+      // At the end: the recap and the recap pill going keep the end, and the
+      // jump pill stays away.
+      await page.evaluate(`transcriptView.scrollToEnd()`);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('recap-toggle').click()`);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('recap-toggle').hidden = true`);
+      await h190Settle(page);
+      const end = (await page.evaluate(`(() => {
+        const tr = document.getElementById('transcript');
+        return { gap: tr.scrollHeight - tr.scrollTop - tr.clientHeight, jump: !document.getElementById('jump-bottom').hidden };
+      })()`)) as { gap: number; jump: boolean };
+      expect(end.gap <= 1 && !end.jump, `${size.width}: at the end the pills row going left a ${end.gap}px gap (jump pill shown: ${end.jump})`);
+      await page.evaluate(`document.getElementById('recap-toggle').hidden = false`);
+      await h190Settle(page);
+      lines.push(`${size.width}: recap ${Math.round(recapH)}px answered and shut under row ${before.text} without moving it; ⋯ opened it at ${Math.round(shown.rTop)}px; end gap ${end.gap}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+// #190. The conversation's own usage on the sheet's context line and on More's
+// Usage and cost row: its tokens, and the cost when the rate table priced it.
+// The page reads it once as the conversation opens (`/rc/usage` narrowed to
+// the session, all time) and keeps it current from the stream's usage_tick
+// frames; nothing polls.
+const h190UsageRow = (sid: string, over: Record<string, unknown> = {}) => ({
+  key: sid,
+  displayLabel: sid.slice(0, 8),
+  tokensIn: 9000,
+  tokensOut: 3300,
+  tokensCached: 0,
+  costMicrocents: 42 * 1_000_000,
+  costCents: 42,
+  events: 3,
+  unpricedEvents: 0,
+  efficiency: { costCentsPer1kOutputTokens: 1, tokensPerDollar: 1 },
+  ...over,
+});
+// The sheet's cost span (and the Context row it sits in) and More's Usage value.
+const h190UsageRead = async (page: Page): Promise<{ sheet: string | null; row: string | null; more: string }> => {
+  await openPanel(page, 'chat');
+  await openSheet(page);
+  await h190Settle(page);
+  const s = (await page.evaluate(`(() => {
+    const c = document.getElementById('footer-cost');
+    const row = c ? c.closest('.sh-row') : null;
+    return { sheet: c && c.getClientRects().length ? c.textContent : null, row: row ? row.querySelector('.sh-lbl').textContent : null };
+  })()`)) as { sheet: string | null; row: string | null };
+  await page.click('#h1-status');
+  await page.click('#h1-more');
+  await h190Settle(page);
+  const more = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="usage"] .val').textContent`)) as string;
+  await page.click('#more-back');
+  return { ...s, more };
+};
+
+PAGE_SCENARIOS.push({
+  name: 'P312 the sheet context line and More Usage and cost carry the conversation tokens and cost from one read as it opens, at 390 and 1100',
+  frames: h190Frames,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const asked: string[] = [];
+    await page.route(
+      (u) => u.pathname === '/rc/usage',
+      (route) => {
+        asked.push(new URL(route.request().url()).search);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ rows: [h190UsageRow(sid)] }),
+        });
+      },
+    );
+    await h190Ready(page, viewer);
+    await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await h190Settle(page);
+      const r = await h190UsageRead(page);
+      expect(
+        r.sheet === 'spent 12.3k tokens, $0.42' && r.row === 'Context',
+        `${size.width}: the sheet's context line reads ${JSON.stringify(r)}`,
+      );
+      expect(r.more === '12.3k tokens · $0.42', `${size.width}: More's Usage and cost reads ${JSON.stringify(r.more)}`);
+      await openPanel(page, 'chat');
+      await openSheet(page);
+      await h190Settle(page);
+      await shot(page, `p312-sheet-${size.width}`);
+      await page.click('#h1-status');
+      await page.click('#h1-more');
+      await h190Settle(page);
+      await shot(page, `p312-more-${size.width}`);
+      await page.click('#more-back');
+      lines.push(`${size.width}: sheet "${r.sheet}", More "${r.more}"`);
+    }
+    const q = new URLSearchParams(asked[0] ?? '');
+    expect(
+      asked.length === 1 && q.get('group_by') === 'session' && q.get('session') === sid && !!q.get('since'),
+      `the page read /rc/usage ${asked.length} times (${JSON.stringify(asked)}), not once for this conversation`,
+    );
+    return `${lines.join('; ')}; one read ${asked[0]}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P313 a usage_tick updates the figure in place with no read: no price when the rate table priced nothing, a + when it priced part, and another conversation tick changes nothing',
+  frames: h190Frames,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    let asked = 0;
+    await page.route(
+      (u) => u.pathname === '/rc/usage',
+      (route) => {
+        asked++;
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ rows: [] }) });
+      },
+    );
+    await h190Ready(page, viewer);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+    const none = await h190UsageRead(page);
+    expect(none.sheet === null && none.more === '', `with no usage yet the page shows ${JSON.stringify(none)}`);
+    const tick = (data: Record<string, unknown>) =>
+      page.evaluate(`renderFrame(${JSON.stringify({ type: 'usage_tick', data })})`);
+    await tick({ sessionId: sid, costMicrocentsSesTotal: 0, costMicrocentsPromptTotal: 0, tokensInTotal: 1000, tokensOutTotal: 200, eventsTotal: 1, unpricedEventsTotal: 1 });
+    const unpriced = await h190UsageRead(page);
+    expect(
+      unpriced.sheet === 'spent 1.2k tokens, no price' && unpriced.more === '1.2k tokens · no price',
+      `an unpriced tick reads ${JSON.stringify(unpriced)}`,
+    );
+    await openPanel(page, 'chat');
+    await openSheet(page);
+    await h190Settle(page);
+    await shot(page, 'p313-noprice-sheet-390');
+    await page.click('#h1-status');
+    await tick({ sessionId: sid, costMicrocentsSesTotal: 5_000_000, costMicrocentsPromptTotal: 5_000_000, tokensInTotal: 3000, tokensOutTotal: 600, eventsTotal: 2, unpricedEventsTotal: 1 });
+    const part = await h190UsageRead(page);
+    expect(part.sheet === 'spent 3.6k tokens, $0.05+' && part.more === '3.6k tokens · $0.05+', `a part-priced tick reads ${JSON.stringify(part)}`);
+    await tick({ sessionId: '99999999-0000-0000-0000-000000000000', costMicrocentsSesTotal: 9_000_000, costMicrocentsPromptTotal: 0, tokensInTotal: 1, tokensOutTotal: 1, eventsTotal: 1, unpricedEventsTotal: 0 });
+    await tick({ sessionId: sid, costMicrocentsSesTotal: 7_000_000, costMicrocentsPromptTotal: 2_000_000, tokensInTotal: 4000, tokensOutTotal: 900, eventsTotal: 3, unpricedEventsTotal: 0 });
+    const priced = await h190UsageRead(page);
+    expect(priced.sheet === 'spent 4.9k tokens, $0.07' && priced.more === '4.9k tokens · $0.07', `a priced tick after another conversation's reads ${JSON.stringify(priced)}`);
+    await page.waitForTimeout(2500);
+    expect(asked === 1, `/rc/usage was read ${asked} times: once as the conversation opened is all`);
+    return `none at first; "${unpriced.sheet}", "${part.sheet}", "${priced.sheet}" from ticks; ${asked} read`;
+  },
+});
+
+// #190. `send now` on a queued message: the meaning slice 1 (#184) settled and
+// the issue keeps is that it joins the running turn through the mid-turn
+// message route, never stops it. The daemon's only echo for such a
+// message is its `mid_turn_message_injected` frame (no user_message_chunk is
+// sent for it live), so that frame is where the message has to appear.
+PAGE_SCENARIOS.push({
+  name: 'P314 send now hands a queued message to the running turn through the mid-turn route without stopping it, and the message is drawn where the daemon says the turn took it',
+  stub: { promptDelayMs: 12_000 },
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    await page.setViewportSize({ width: 390, height: 844 });
+    const handed: string[] = [];
+    const other: string[] = [];
+    await page.route(/\/session\/[^/]+\/mid-turn-message$/, async (route) => {
+      handed.push((JSON.parse(route.request().postData() || '{}') as { message?: string }).message ?? '');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ accepted: true, messageId: 'p314-1' }) });
+    });
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (/\/(cancel|prompt)$/.test(u.pathname) || u.pathname.endsWith('/mid-turn-messages/send-now')) other.push(r.method() + ' ' + u.pathname);
+    });
+    await watch(page, sid);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    await page.fill('#prompt', 'the turn is running');
+    await page.click('#send');
+    await page.waitForFunction('turnRunning()');
+    await page.fill('#prompt', 'queued while busy');
+    await page.click('#queue');
+    const sent = other.length; // the first prompt itself
+    await page.click('#queued-now');
+    await page.waitForFunction(`document.getElementById('queued').hidden`);
+    await settlePage(page);
+    const mid = (await page.evaluate(`({ running: turnRunning(), stop: document.getElementById('cancel-turn').getClientRects().length > 0, users: userTurnsSeen })`)) as { running: boolean; stop: boolean; users: number };
+    expect(handed.length === 1 && handed[0] === 'queued while busy', `send now handed ${JSON.stringify(handed)}`);
+    expect(other.length === sent, `send now also sent ${JSON.stringify(other.slice(sent))}`);
+    expect(mid.running && mid.stop, `after send now the turn is not running with Stop on screen (${JSON.stringify(mid)})`);
+    const inject = (sessionId: string, text: string) =>
+      page.evaluate(`renderFrame(${JSON.stringify({ type: 'mid_turn_message_injected', data: { sessionId, messages: [text], messageIds: ['p314-1'] } })})`);
+    await inject('99999999-0000-0000-0000-000000000000', 'another conversation');
+    await inject(sid, 'queued while busy');
+    await settlePage(page);
+    const rows = (await page.evaluate(`transcriptModel.items.filter((i) => i.kind === 'user').map((i) => i.text)`)) as string[];
+    const after = (await page.evaluate('userTurnsSeen')) as number;
+    expect(
+      rows.join('|') === 'the turn is running|queued while busy',
+      `the user rows read ${JSON.stringify(rows)}: the message the turn took is not drawn (or another conversation's is)`,
+    );
+    expect(after === mid.users, `the injected message counted as a new turn (${mid.users} -> ${after})`);
+    // Rewind and fork number turns from the user rows, and the daemon does not
+    // count a mid-turn message as one, so neither may the page.
+    const turns = (await page.evaluate('transcriptModel.userTurns().map((i) => i.text)')) as string[];
+    expect(turns.join('|') === 'the turn is running', `the rewind picker would count ${JSON.stringify(turns)} as turns`);
+    const still = (await page.evaluate('turnRunning()')) as boolean;
+    expect(still, 'drawing the injected message ended the turn');
+    await shot(page, 'p314-injected-390');
+    return `send now posted the text once to /mid-turn-message and nothing else; the turn kept running with Stop; the injection frame drew "${rows[1]}" as a row of the same turn`;
+  },
+});
+
+// #150 (the gateway side is #174's). A watch whose cursor is older than the
+// WAL keeps answers 412, and a gateway that can recover says
+// `recovery: 'reload'`: the page resumes the conversation, which draws its
+// whole history from the resume's frames and watches from the resume's
+// watermark. Once per conversation, so a resumed watch that 412s again takes
+// the retry rather than looping. The stub serves frames whatever the cursor,
+// so every claim here is read off the requests on the wire.
+const h150Truncated = (over: Record<string, unknown> = {}) => ({
+  type: 'replay_truncated',
+  data: { reason: 'older_than_wal_horizon', earliestAvailableId: 500, recovery: 'reload', lastEventId: 742, ...over },
+});
+const h150Frame = (id: number, sessionUpdate: string, text: string) => ({
+  id,
+  v: 1,
+  type: 'session_update',
+  data: { update: { sessionUpdate, content: { type: 'text', text } } },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P315 a 412 that says recovery reload resumes the conversation, draws its history and watches from the resume watermark; a second 412 takes the retry instead of looping, and an older daemon is watched from the 412 lastEventId, never 0',
+  waitView: false,
+  frames: () => new Frames().user('p315 live').asst('p315 live answer').done().list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const cursors: Array<string | null> = [];
+    const resumes: Array<Record<string, unknown>> = [];
+    let older = false; // phase two: the resume answers as an older daemon would
+    await page.route(/\/session\/[^/]+\/events$/, async (route) => {
+      const cur = route.request().headers()['last-event-id'] ?? null;
+      cursors.push(cur);
+      if (cur === '5' || cur === '742' || cur === '6') {
+        await route.fulfill({ status: 412, contentType: 'application/json', body: JSON.stringify(h150Truncated()) });
+        return;
+      }
+      if (cur === '499') {
+        await route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"gone"}' });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route(/\/session\/[^/]+\/resume$/, async (route) => {
+      resumes.push(JSON.parse(route.request().postData() || '{}') as Record<string, unknown>);
+      const body = older
+        ? { sessionId: sid }
+        : {
+            sessionId: sid,
+            compactedReplay: [
+              h150Frame(1, 'user_message_chunk', 'p315 from the very start'),
+              h150Frame(2, 'agent_message_chunk', 'p315 the first answer'),
+            ],
+            liveJournal: [],
+            lastEventId: 742,
+          };
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    await page.waitForFunction('caps && caps.remoteControl', null, { timeout: 15_000 });
+    const writes = (await page.evaluate('caps.remoteControl.writeScope')) as unknown;
+    expect(writes === true, `the owner token's capabilities say writeScope ${JSON.stringify(writes)}`);
+    await page.evaluate((id) => {
+      watchedSessionId = id;
+      watchedSessionCwd = '/p315/proj';
+      lastSeenEventId = 5;
+      void startWatch(id, 5, 'p315');
+    }, sid);
+    const until = async (pred: () => boolean, ms: number) => {
+      const end = Date.now() + ms;
+      while (!pred() && Date.now() < end) await page.waitForTimeout(100);
+    };
+    // The resume, then the watch from its watermark, which 412s again.
+    await until(() => cursors.includes('742'), 10_000);
+    expect(resumes.length === 1 && resumes[0]!.cwd === '/p315/proj', `the 412 resumed ${resumes.length} times (${JSON.stringify(resumes)})`);
+    expect(cursors.indexOf('742') === cursors.indexOf('5') + 1, `the resumed watch asked for ${JSON.stringify(cursors)}, not 742 next`);
+    const rows = (await page.evaluate(`transcriptModel.items.filter((i) => i.kind === 'user' || i.kind === 'asst').map((i) => i.text)`)) as string[];
+    expect(rows[0] === 'p315 from the very start' && rows[1] === 'p315 the first answer', `the resume's history is not drawn: ${JSON.stringify(rows)}`);
+    // The second 412 takes the retry from 500 - 1, with no second resume.
+    await until(() => cursors.includes('499'), 10_000);
+    const status = (await page.evaluate(`document.getElementById('status').textContent || ''`)) as string;
+    expect(resumes.length === 1 && cursors.includes('499'), `after a second 412 the page resumed ${resumes.length} times and asked ${JSON.stringify(cursors)}`);
+    // Phase two: an older daemon (no watermark, no frames) on another visit.
+    older = true;
+    const n0 = cursors.length;
+    await page.evaluate((id) => {
+      walReloaded.clear();
+      watchedSessionId = id;
+      watchedSessionCwd = '/p315/proj';
+      lastSeenEventId = 6;
+      void startWatch(id, 6, 'p315');
+    }, sid);
+    await until(() => resumes.length === 2 && cursors.length >= n0 + 2, 10_000);
+    const after = cursors.slice(n0);
+    expect(resumes.length === 2 && after[0] === '6' && after[1] === '742', `an older daemon's resume was watched from ${JSON.stringify(after[1])}, not the 412's 742 (${JSON.stringify(after)})`);
+    expect(!cursors.includes('0'), `a watch asked for cursor 0 (${JSON.stringify(cursors)})`);
+    return `412 at 5 resumed once (cwd /p315/proj), drew the history and watched from 742; its 412 retried from 499 (${JSON.stringify(status)}); an older daemon's resume watched from 742; cursors ${JSON.stringify(cursors)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P316 a 412 the page cannot reload from (no reload, no folder, or a read-only token) retries from the oldest id the WAL keeps and says earlier history is not displayed',
+  waitView: false,
+  frames: () => new Frames().asst('p316 on disk').done().list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const cursors: Array<string | null> = [];
+    let resumed = 0;
+    let body: unknown = h150Truncated({ recovery: undefined });
+    await page.route(/\/session\/[^/]+\/events$/, async (route) => {
+      const cur = route.request().headers()['last-event-id'] ?? null;
+      cursors.push(cur);
+      if (cur === '5') {
+        await route.fulfill({ status: 412, contentType: 'application/json', body: JSON.stringify(body) });
+        return;
+      }
+      await route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"gone"}' });
+    });
+    await page.route(/\/session\/[^/]+\/resume$/, async (route) => {
+      resumed++;
+      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' });
+    });
+    await page.waitForFunction('caps && caps.remoteControl', null, { timeout: 15_000 });
+    const cases: Array<[string, unknown, string | null, boolean]> = [
+      ['no recovery word', h150Truncated({ recovery: undefined }), '/p316', true],
+      ['no folder', h150Truncated(), null, true],
+      ['a read-only token', h150Truncated(), '/p316', false],
+    ];
+    const lines: string[] = [];
+    for (const [what, b, cwd, writes] of cases) {
+      body = b;
+      cursors.length = 0;
+      await page.evaluate(
+        ({ id, cwd: c, writes: w }) => {
+          walReloaded.clear();
+          caps.remoteControl.writeScope = w;
+          watchedSessionId = id;
+          watchedSessionCwd = c;
+          lastSeenEventId = 5;
+          void startWatch(id, 5, 'p316');
+        },
+        { id: sid, cwd, writes },
+      );
+      const end = Date.now() + 10_000;
+      while (!cursors.includes('499') && Date.now() < end) await page.waitForTimeout(100);
+      const status = (await page.evaluate(`document.getElementById('status').textContent || ''`)) as string;
+      expect(resumed === 0, `${what}: the page resumed (${resumed})`);
+      expect(cursors[1] === '499', `${what}: the retry asked for ${JSON.stringify(cursors)}, not 499`);
+      lines.push(`${what}: retried at 499 (${JSON.stringify(status.slice(0, 40))})`);
+    }
+    // The status line names the gap at the 412 itself.
+    body = h150Truncated({ recovery: undefined });
+    cursors.length = 0;
+    await page.evaluate((id) => {
+      walReloaded.clear();
+      watchedSessionId = id;
+      lastSeenEventId = 5;
+      void startWatch(id, 5, 'p316');
+    }, sid);
+    await page.waitForFunction(`(document.getElementById('status').textContent || '').includes('earlier history is not displayed')`, null, { timeout: 5_000 });
+    await shot(page, 'p316-status-390');
+    return lines.join('; ') + '; the status line says earlier history is not displayed';
+  },
+});
+
+// #190, item 4: the List screen's adjustments. Every one runs on routed
+// listings: /rc/sessions per folder, an empty live-state, and /rc/fs per path,
+// so the rows and folders are the scenario's own and not the harness host's.
+type H190Row = { sessionId: string; title?: string; preview?: string; updatedAt?: string };
+const h190ListFixture = async (
+  page: Page,
+  rows: Record<string, H190Row[]>,
+  fs: Record<string, { parent: string | null; entries: string[] }> = {},
+): Promise<{ reads: string[] }> => {
+  const reads: string[] = [];
+  await page.route(/\/rc\/sessions\?cwd=/, (route) => {
+    const u = new URL(route.request().url());
+    const cwd = u.searchParams.get('cwd') || '';
+    if (u.searchParams.get('archiveState') === 'archived') {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: [], truncated: false }) });
+    }
+    reads.push(cwd);
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ sessions: rows[cwd] ?? [], truncated: false }),
+    });
+  });
+  await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ v: 1, sessions: [] }) }),
+  );
+  await page.route(/\/rc\/fs(\?|$)/, (route) => {
+    const path = new URL(route.request().url()).searchParams.get('path') || '/p190';
+    const f = fs[path];
+    if (!f) return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"no such folder"}' });
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ path, parent: f.parent, entries: f.entries.map((name) => ({ name })) }),
+    });
+  });
+  return { reads };
+};
+const h190At = (cwd: string) =>
+  `(() => { localStorage.setItem('qwen-rc-workspaces', '[]'); renderRecentWorkspaces(); return browseTo(${JSON.stringify(cwd)}, true); })()`;
+const h190Now = new Date().toISOString();
+
+PAGE_SCENARIOS.push({
+  name: 'P317 the folder screen folder rows are buttons, one Tab stop moved through with the arrows, and Enter goes in, at 390 and 1100',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {}, {
+      '/p317': { parent: '/', entries: ['alpha', 'beta'] },
+      '/p317/alpha': { parent: '/p317', entries: [] },
+      '/': { parent: null, entries: ['p317'] },
+    });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await page.evaluate(h190At('/p317'));
+      await openList(page);
+      await page.click('#list-new');
+      await page.waitForFunction(`document.getElementById('dir-current').textContent === '/p317'`);
+      const kinds = (await page.evaluate(`Array.from(document.querySelectorAll('#dir-list > *')).map((e) => e.tagName + ':' + (e.textContent || '').trim())`)) as string[];
+      expect(kinds.join('|') === 'BUTTON:.. (/)|BUTTON:alpha/|BUTTON:beta/', `${size.width}: the folder rows are ${JSON.stringify(kinds)}, not buttons`);
+      // Tab from the screen's back button until a folder row has focus: the
+      // list is one Tab stop, and ArrowDown moves to the next row.
+      await page.focus('#dir-back');
+      const focusedRow = () =>
+        page.evaluate(`(() => { const a = document.activeElement; return a && a.closest('#dir-list') ? (a.textContent || '').trim() : ''; })()`) as Promise<string>;
+      let on = '';
+      for (let i = 0; i < 20 && !on; i++) {
+        await page.keyboard.press('Tab');
+        on = await focusedRow();
+      }
+      const stops = (await page.evaluate(`Array.from(document.querySelectorAll('#dir-list button')).filter((b) => b.tabIndex === 0).length`)) as number;
+      expect(on === '.. (/)' && stops === 1, `${size.width}: Tab reached ${JSON.stringify(on)} with ${stops} tab stops in the list`);
+      await page.keyboard.press('ArrowDown');
+      on = await focusedRow();
+      expect(on === 'alpha/', `${size.width}: ArrowDown moved to ${JSON.stringify(on)}, not alpha/`);
+      await shot(page, `p317-folders-${size.width}`);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(`document.getElementById('dir-current').textContent === '/p317/alpha'`, null, { timeout: 5_000 });
+      await page.click('#dir-back');
+      lines.push(`${size.width}: rows are buttons, one Tab stop, ArrowDown to alpha/, Enter went in`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P318 the list search matches the preview line as well as the title',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190ListFixture(page, {
+      '/p318': [
+        { sessionId: '31800000-0000-0000-0000-000000000001', title: 'nightly build', preview: 'moved to bookworm', updatedAt: h190Now },
+        { sessionId: '31800000-0000-0000-0000-000000000002', title: 'cache keys', preview: 'the zebra cache', updatedAt: h190Now },
+      ],
+    }, { '/p318': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p318'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`);
+    await openList(page);
+    await page.click('#list-search');
+    await page.fill('#past-filter', 'zebra');
+    const shown = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
+    expect(shown.join('|') === 'cache keys', `searching a word only in a preview shows ${JSON.stringify(shown)}`);
+    await page.fill('#past-filter', 'nightly');
+    const byTitle = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
+    expect(byTitle.join('|') === 'nightly build', `searching a title shows ${JSON.stringify(byTitle)}`);
+    const hint = (await page.getAttribute('#past-filter', 'placeholder')) || '';
+    await page.fill('#past-filter', '');
+    return `"zebra" found the row by its preview, "nightly" by its title; the field reads "${hint}"`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P319 the host is named once on the folder line, for All folders too, and not on every row, at 390 and 1100',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {
+      '/p319': [
+        { sessionId: '31900000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now },
+        { sessionId: '31900000-0000-0000-0000-000000000002', title: 'two', updatedAt: h190Now },
+      ],
+    }, { '/p319': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p319'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`);
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await h190Settle(page);
+      const r = (await page.evaluate(`({
+        head: document.getElementById('list-host').textContent,
+        cwd: document.getElementById('list-cwd').textContent,
+        rowHosts: document.querySelectorAll('#past-list .host').length,
+        host: listHostLabel(),
+      })`)) as { head: string; cwd: string; rowHosts: number; host: string };
+      expect(r.cwd.includes('All folders') || r.cwd.includes('p319'), `${size.width}: the folder line reads ${JSON.stringify(r.cwd)}`);
+      expect(r.head === 'on ' + r.host && r.rowHosts === 0, `${size.width}: the folder line says ${JSON.stringify(r.head)} and ${r.rowHosts} rows repeat the host`);
+      await shot(page, `p319-list-${size.width}`);
+      lines.push(`${size.width}: "${r.cwd.replace(/[⁦-⁩]/g, '')} ${r.head}", no host on the rows`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P320 the folder filter counts move while its menu is open, without shutting it or moving focus',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const rows: Record<string, H190Row[]> = {
+      '/p320': [{ sessionId: '32000000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now }],
+    };
+    await h190ListFixture(page, rows, { '/p320': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p320'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await openList(page);
+    await page.click('#list-folder');
+    const read = () =>
+      page.evaluate(`({
+        open: !document.getElementById('list-folders').hidden,
+        counts: Array.from(document.querySelectorAll('#list-folders .n')).map((e) => e.textContent),
+        focus: document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.folder : null,
+      })`) as Promise<{ open: boolean; counts: string[]; focus: string | null }>;
+    const before = await read();
+    rows['/p320'] = rows['/p320']!.concat([{ sessionId: '32000000-0000-0000-0000-000000000002', title: 'two', updatedAt: h190Now }]);
+    await page.evaluate(`refreshPastConversations('/p320')`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`);
+    const after = await read();
+    expect(before.open && after.open, `the menu shut (${JSON.stringify({ before, after })})`);
+    expect(before.counts.join(',') === '1,1' && after.counts.join(',') === '2,2', `the counts read ${before.counts} then ${after.counts}`);
+    expect(after.focus === before.focus, `focus moved from ${before.focus} to ${after.focus}`);
+    await page.keyboard.press('Escape');
+    return `counts ${before.counts} became ${after.counts} with the menu open and focus kept`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P321 the typed-path field has room in the 280px pane (its own line there) and keeps one line with Start here at 390',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {}, { '/p321': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p321'));
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await page.click('#list-new');
+      await page.waitForFunction(`!document.getElementById('dir-picker').hidden`);
+      await h190Settle(page);
+      const r = (await page.evaluate(`(() => {
+        const f = document.getElementById('new-session-cwd').getBoundingClientRect();
+        const b = document.getElementById('new-session').getBoundingClientRect();
+        return { w: Math.round(f.width), fTop: Math.round(f.top), bTop: Math.round(b.top) };
+      })()`)) as { w: number; fTop: number; bTop: number };
+      if (size.width >= 1100) {
+        expect(r.w >= 220, `1100: the field is ${r.w}px wide in the pane`);
+      } else {
+        expect(r.fTop === r.bTop && r.w >= 200, `390: the field (${r.w}px at ${r.fTop}) and Start here (at ${r.bTop}) are not one line`);
+      }
+      await page.evaluate(`document.getElementById('dir-picker').querySelector('.scr-body').scrollTop = 1e6`);
+      await shot(page, `p321-typed-${size.width}`);
+      await page.click('#dir-back');
+      lines.push(`${size.width}: field ${r.w}px${r.fTop === r.bTop ? ', beside Start here' : ', on its own line'}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P322 in the pane layout the title is not a dialog opener and the list is not a dialog; under 1100 both are again',
+  waitView: false,
+  run: async ({ page }) => {
+    const read = () =>
+      page.evaluate(`({
+        popup: document.getElementById('h1-title').getAttribute('aria-haspopup'),
+        controls: document.getElementById('h1-title').getAttribute('aria-controls'),
+        role: document.getElementById('list-screen').getAttribute('role'),
+      })`) as Promise<{ popup: string | null; controls: string | null; role: string | null }>;
+    await page.setViewportSize({ width: 1100, height: 810 });
+    await h190Settle(page);
+    const wide = await read();
+    expect(wide.popup === null && wide.controls === 'past-filter' && wide.role === 'region', `1100: ${JSON.stringify(wide)}`);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190Settle(page);
+    const phone = await read();
+    expect(phone.popup === 'dialog' && phone.controls === 'list-screen' && phone.role === 'dialog', `390: ${JSON.stringify(phone)}`);
+    return `1100 ${JSON.stringify(wide)}; 390 ${JSON.stringify(phone)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P323 the folder and archived screens say what they are in one sentence, with no ? left, at 390 and 1100',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {}, { '/p323': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p323'));
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      for (const [door, scr, back] of [['#list-new', 'dir-picker', '#dir-back'], ['#list-archived-open', 'archived-view', '#archived-back']] as const) {
+        await openList(page);
+        await page.click(door);
+        await page.waitForFunction(`!document.getElementById(${JSON.stringify(scr)}).hidden`);
+        const r = (await page.evaluate(`(() => {
+          const s = document.getElementById(${JSON.stringify(scr)});
+          const l = s.querySelector('.lede');
+          const t = l ? l.textContent.replace(/\\s+/g, ' ').trim() : '';
+          return { q: s.querySelectorAll('.help-btn').length, lede: t, shown: !!l && l.getClientRects().length > 0, stops: (t.match(/[.]/g) || []).length };
+        })()`)) as { q: number; lede: string; shown: boolean; stops: number };
+        expect(r.q === 0 && r.shown && r.stops === 1 && r.lede.endsWith('.'), `${size.width} ${scr}: ${JSON.stringify(r)}`);
+        await shot(page, `p323-${scr}-${size.width}`);
+        await page.click(back);
+        lines.push(`${size.width} ${scr}: "${r.lede}"`);
+      }
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P324 browsing in the folder screen and backing out puts the list back on its folder, so that folder stays in All folders',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190ListFixture(page, {
+      '/p324/home': [{ sessionId: '32400000-0000-0000-0000-000000000001', title: 'kept', updatedAt: h190Now }],
+    }, {
+      '/p324/home': { parent: '/p324', entries: [] },
+      '/p324': { parent: null, entries: ['home', 'other'] },
+      '/p324/other': { parent: '/p324', entries: [] },
+    });
+    await page.evaluate(h190At('/p324/home'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await openList(page);
+    await page.click('#list-new');
+    await page.evaluate(`browseTo('/p324/other')`);
+    await page.waitForFunction(`curDirPath === '/p324/other'`);
+    await page.click('#dir-back');
+    await page.waitForFunction(`curDirPath === '/p324/home'`, null, { timeout: 5_000 });
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`, null, { timeout: 5_000 });
+    const titles = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
+    expect(titles.join('|') === 'kept', `after backing out the list shows ${JSON.stringify(titles)}`);
+    return `browsed to /p324/other and back out: the list is on /p324/home again with its row`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P325 opening the list reads its folders at once, so a live dot does not wait for the 30 s tick',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { reads } = await h190ListFixture(page, {
+      '/p325': [{ sessionId: '32500000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now }],
+    }, { '/p325': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p325'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await h190Settle(page);
+    const before = reads.length;
+    await openList(page);
+    const end = Date.now() + 3_000;
+    while (reads.length === before && Date.now() < end) await page.waitForTimeout(50);
+    expect(reads.length > before, `opening the list read nothing (${reads.length} reads before and after)`);
+    return `opening the list read ${reads.slice(before).join(', ')} at once`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P327 a button a panel draws once its data has loaded is 40px, as tall as the card controls',
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openPanel(page, 'devices');
+    await page.click('#list-tokens');
+    await page.waitForFunction(`!!document.querySelector('#tokens .token-row button')`, null, { timeout: 10_000 });
+    // A row the way the page draws one, with a short label: a long one wraps
+    // and the row is tall anyway, which is how the real rows hid the size.
+    await page.evaluate(`(() => {
+      const row = document.createElement('div');
+      row.className = 'token-row';
+      const info = document.createElement('span');
+      info.textContent = 'p327';
+      const btn = document.createElement('button');
+      btn.textContent = 'Revoke';
+      row.append(info, btn);
+      document.getElementById('tokens').appendChild(row);
+    })()`);
+    const hs = (await page.evaluate(`Array.from(document.querySelectorAll('#tokens button')).map((b) => Math.round(b.getBoundingClientRect().height))`)) as number[];
+    expect(hs.length > 0 && hs.every((h) => h >= 40), `the drawn Revoke buttons are ${JSON.stringify(hs)}px`);
+    await shot(page, 'p327-tokens-390');
+    await openPanel(page, 'chat');
+    return `${hs.length} drawn Revoke button(s) at ${JSON.stringify(hs)}px`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P328 More shows how many turns Rewind to a turn can reach and how many messages are queued here, from what the page holds',
+  frames: () => new Frames().user('p328 one').asst('a1').done().user('p328 two').asst('a2').done().list,
+  run: async ({ page, viewer }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 30_000);
+    await settlePage(page);
+    const read = async () => {
+      await openPanel(page, 'chat');
+      await page.click('#h1-more');
+      const v = (await page.evaluate(`({
+        rewind: document.querySelector('#more-screen .row[data-panel="rewind"] .val').textContent,
+        queue: document.querySelector('#more-screen .row[data-panel="queue"] .val').textContent,
+      })`)) as { rewind: string; queue: string };
+      await page.click('#more-back');
+      return v;
+    };
+    const a = await read();
+    expect(a.rewind === '2 turns' && a.queue === '', `More reads ${JSON.stringify(a)}`);
+    await page.evaluate(`outbox = ['p328 later']; renderQueued();`);
+    const b = await read();
+    expect(b.queue === '1 queued', `with one message queued More reads ${JSON.stringify(b)}`);
+    await page.evaluate(`outbox = []; renderQueued();`);
+    await page.click('#h1-more');
+    await shot(page, 'p328-more-390');
+    await page.click('#more-back');
+    return `Rewind to a turn "${a.rewind}", Prompt queue "${b.queue}" with one queued`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P329 the Time zone and Daemons and workspaces screens head their cards with what the card is, not a second name for the screen',
+  waitView: false,
+  run: async ({ page }) => {
+    const heads = (await page.evaluate(`({
+      zone: document.querySelector('#ui-prefs h2').textContent,
+      target: document.querySelector('#ws-target h2').textContent,
+    })`)) as { zone: string; target: string };
+    expect(heads.zone === 'Message times' && heads.target === 'Target workspace', `the card heads read ${JSON.stringify(heads)}`);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openPanel(page, 'zone');
+    await shot(page, 'p329-zone-390');
+    await openPanel(page, 'chat');
+    return `Time zone > "${heads.zone}", Daemons and workspaces > "${heads.target}"`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P330 at 1100 and over the Fork include/empty sheet and its scrim cover the chat column, not the panes beside it; at 390 the whole screen',
+  frames: () => new Frames().user('p330 one').asst('the first answer').done().user('p330 two').asst('the second answer').done().list,
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 30_000);
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await settlePage(page);
+      await page.evaluate(`void askChoice('Fork here', 'p330', [['include', 'Fork with the conversation so far'], ['empty', 'Fork empty']])`);
+      await page.waitForFunction(`!document.getElementById('h1-ask').hidden`);
+      const r = (await page.evaluate(`(() => {
+        const a = document.getElementById('h1-ask').getBoundingClientRect();
+        const c = document.querySelector('#h1-ask .ask-card').getBoundingClientRect();
+        const col = document.getElementById('pane-chat').getBoundingClientRect();
+        const list = document.getElementById('list-screen').getBoundingClientRect();
+        return { aL: a.left, aR: a.right, cL: c.left, cR: c.right, colL: col.left, colR: col.right, listR: list.right, vw: window.innerWidth };
+      })()`)) as { aL: number; aR: number; cL: number; cR: number; colL: number; colR: number; listR: number; vw: number };
+      if (size.width >= 1100) {
+        expect(r.aL >= r.listR - 0.5 && r.cL >= r.colL - 0.5 && r.cR <= r.colR + 0.5, `1100: the sheet spans ${Math.round(r.aL)}-${Math.round(r.aR)} (card ${Math.round(r.cL)}-${Math.round(r.cR)}) over a column ${Math.round(r.colL)}-${Math.round(r.colR)} beside the list ending ${Math.round(r.listR)}`);
+      } else {
+        expect(r.aL === 0 && Math.round(r.aR) === r.vw, `390: the sheet spans ${r.aL}-${r.aR}`);
+      }
+      await shot(page, `p330-ask-${size.width}`);
+      await page.click('#h1-ask .cancel');
+      lines.push(`${size.width}: scrim ${Math.round(r.aL)}-${Math.round(r.aR)}, card ${Math.round(r.cL)}-${Math.round(r.cR)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P334 the folder line names the host the gateway reports and the list reads its real $HOME as ~, not any /home/<user>, at 390 and 1100',
+  waitView: false,
+  before: async (page) => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { remoteControl: Record<string, unknown> };
+      body.remoteControl.hostName = 'lovelace.tail1234.ts.net';
+      body.remoteControl.homeDir = '/srv/me';
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    await page.waitForFunction(`caps && caps.remoteControl && caps.remoteControl.homeDir === '/srv/me'`, null, { timeout: 10_000 });
+    await h190ListFixture(page, {
+      '/srv/me/proj': [{ sessionId: '33400000-0000-0000-0000-000000000001', title: 'mine', updatedAt: h190Now }],
+      '/home/other/x': [{ sessionId: '33400000-0000-0000-0000-000000000002', title: 'theirs', updatedAt: h190Now }],
+    }, { '/srv/me/proj': { parent: null, entries: [] } });
+    await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify(['/home/other/x'])); renderRecentWorkspaces(); browseTo('/srv/me/proj', true)`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 10_000 });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await h190Settle(page);
+      const r = (await page.evaluate(`({
+        host: document.getElementById('list-host').textContent,
+        dirs: Array.from(document.querySelectorAll('#past-list .s .dir .cwd')).map((e) => e.textContent.replace(/[\\u2066-\\u2069]/g, '')),
+      })`)) as { host: string; dirs: string[] };
+      expect(r.host === 'on lovelace', `${size.width}: the folder line names ${JSON.stringify(r.host)}`);
+      expect(
+        r.dirs.includes('~/proj') && r.dirs.includes('/home/other/x'),
+        `${size.width}: the rows' folders read ${JSON.stringify(r.dirs)}`,
+      );
+      await shot(page, `p334-list-${size.width}`);
+      lines.push(`${size.width}: "${r.host}", folders ${JSON.stringify(r.dirs)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P335 Archived (n) is read when the list opens only once the last read is 30 s old, and at once after an archive here',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190ListFixture(page, {
+      '/p335': [{ sessionId: '33500000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now }],
+    }, { '/p335': { parent: null, entries: [] } });
+    const archivedReads: number[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('archiveState=archived')) archivedReads.push(Date.now());
+    });
+    await page.route(/\/rc\/sessions\/archive$/, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ archived: ['33500000-0000-0000-0000-000000000001'] }) }),
+    );
+    await page.evaluate(h190At('/p335'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await openList(page);
+    await page.waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (0)'`, null, { timeout: 5_000 });
+    const first = archivedReads.length;
+    await page.click('#list-back');
+    await openList(page);
+    await page.click('#list-back');
+    await openList(page);
+    await page.waitForTimeout(400);
+    const reopened = archivedReads.length - first;
+    // An archive here reads it again at once.
+    await page.evaluate(`archivePastConversation('33500000-0000-0000-0000-000000000001', '/p335')`);
+    const end = Date.now() + 3_000;
+    while (archivedReads.length - first === reopened && Date.now() < end) await page.waitForTimeout(50);
+    const afterArchive = archivedReads.length - first - reopened;
+    // An old read is read again on the next open (once the archive's own
+    // reads have landed, so none of them restamps the clock).
+    await page.waitForTimeout(800);
+    await page.evaluate(`archivedReadAt = Date.now() - 31000`);
+    await page.click('#list-back');
+    const before = archivedReads.length;
+    await openList(page);
+    await page.waitForTimeout(400);
+    expect(first >= 1 && reopened === 0, `opening the list again within 30 s read the count ${reopened} more times`);
+    expect(afterArchive >= 1, 'an archive here did not read the count again');
+    expect(archivedReads.length > before, 'a 31 s old count was not read again as the list opened');
+    return `first open read it (${first}), two more opens within 30 s read nothing, an archive read it again, and an open after 31 s read it`;
+  },
+});
 
 
 async function runPageSection(): Promise<Result[]> {

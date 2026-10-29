@@ -169,6 +169,50 @@ describe('GET /rc/usage', () => {
     );
   });
 
+  // #190: the page's own figure for the conversation on screen.
+  it('session= narrows the read to one conversation, and rows count the unpriced', async () => {
+    const owner = await tokenWith([OWNER]);
+    usage.record(row({ sessionId: 's1', ts: 4000, costMicrocents: 5 * MICRO }));
+    usage.record(row({ sessionId: 's1', ts: 4100, costMicrocents: null }));
+    usage.record(row({ sessionId: 's2', ts: 4000, costMicrocents: 3 * MICRO }));
+    const base = await mount();
+    const r = await fetch(`${base}/rc/usage?group_by=session&session=s1&since=1970-01-01T00:00:00Z`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as {
+      rows: Array<{ key: string; tokensIn: number; costMicrocents: number; events: number; unpricedEvents: number }>;
+    };
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0]).toMatchObject({
+      key: 's1',
+      tokensIn: 2000,
+      costMicrocents: 5 * MICRO,
+      events: 2,
+      unpricedEvents: 1,
+    });
+  });
+
+  it('session= still applies the scope filter for a lesser token', async () => {
+    const writer = await tokenWith([WRITE]);
+    usage.record(row({ sessionId: 's1', ts: 4000, attributionTokenId: 'someone-else' }));
+    const base = await mount();
+    const r = await fetch(`${base}/rc/usage?group_by=session&session=s1`, {
+      headers: { Authorization: `Bearer ${writer.token}` },
+    });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { rows: unknown[] }).rows).toEqual([]);
+  });
+
+  it('400s an empty session', async () => {
+    const owner = await tokenWith([OWNER]);
+    const base = await mount();
+    const r = await fetch(`${base}/rc/usage?group_by=session&session=`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(r.status).toBe(400);
+  });
+
   it('400s an invalid group_by', async () => {
     const owner = await tokenWith([OWNER]);
     const base = await mount();

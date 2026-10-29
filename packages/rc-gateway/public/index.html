@@ -529,6 +529,13 @@
         max-width: 100%;
         box-sizing: border-box;
       }
+      /* #190: a button a panel draws once its data has loaded (a row's
+         Revoke, Remove, Withdraw, ...) is as tall as the card's own controls,
+         not the ~30px the old pane's rows were. */
+      #panel-body .ops-card button {
+        min-height: 40px;
+        box-sizing: border-box;
+      }
       /* 16px: iOS zooms the page into any field under 16px when it takes
          focus, and these are the fields a phone types into. */
       #panel-screen :where(input, select, textarea) {
@@ -871,6 +878,13 @@
          cards, on the page ground with a 12px gutter. */
       #panel-body {
         padding: 12px 12px 24px;
+      }
+      #dir-picker .lede,
+      #archived-view .lede {
+        margin: 4px 4px 0;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+        line-height: 1.45;
       }
       #panel-body .lede {
         margin: 0 4px 12px;
@@ -1215,6 +1229,19 @@
          so they are cut off with it. */
       #pane-chat[data-card] > #transcript-wrap {
         overflow: hidden;
+      }
+      /* #190: with the keys up a long command took the transcript's whole
+         box, so the reader saw only the card. The transcript keeps room for
+         about two lines of the agent's last words; the card's body scrolls to
+         give it, its command box first. */
+      :root.kb-open #pane-chat[data-card] > #transcript-wrap {
+        flex-basis: 64px;
+        min-height: 64px;
+      }
+      /* The command box then fits the card's body whole (two lines and a
+         bit, scrolling for the rest) rather than being cut by it. */
+      :root.kb-open .pcard .pc-cmd {
+        max-height: 44px;
       }
       /* Bands that come and go above the transcript keep the column's gutter
          now that the column itself has none. */
@@ -2099,11 +2126,18 @@
         border-radius: 10px;
       }
       #dir-list .token-row {
+        width: 100%;
         min-height: 44px;
         box-sizing: border-box;
         padding: 0 12px;
         font-size: 15px;
-        border-bottom-color: var(--g1-line);
+        border: 0;
+        border-bottom: 1px solid var(--g1-line);
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        text-align: left;
+        cursor: pointer;
       }
       #dir-list > :not(.token-row) {
         padding: 12px;
@@ -2123,12 +2157,15 @@
       #dir-use {
         width: 100%;
       }
+      /* #190: in the 280px pane the field takes its own line rather than the
+         few characters Start here leaves beside it. */
       #dir-picker .typed {
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
       }
       #new-session-cwd {
-        flex: 1 1 auto;
+        flex: 1 1 200px;
         min-width: 0;
         min-height: 44px;
         box-sizing: border-box;
@@ -2303,6 +2340,18 @@
         }
         #list-screen[hidden] {
           display: flex;
+        }
+        /* #190: the Fork include/empty sheet and its scrim belong to the
+           chat column, not to the panes beside it. */
+        #h1-ask {
+          left: var(--h1-left);
+          right: var(--h1-right);
+        }
+        #h1-ask .ask-card {
+          box-sizing: border-box;
+          width: 100%;
+          max-width: 80ch;
+          align-self: center;
         }
         #list-back {
           visibility: hidden;
@@ -3128,7 +3177,7 @@
               </div>
             </section>
             <section id="ws-target" class="ops-card" hidden>
-              <h2>Workspace</h2>
+              <h2>Target workspace</h2>
               <div class="ops-note">(what the rows under Workspace act on)</div>
               <div style="margin-top: 6px">
                 <select id="ws-target-select"></select>
@@ -3489,7 +3538,7 @@
           <div class="panel" id="panel-zone" data-panel="zone" hidden>
             <p class="lede">The zone message times are printed in, saved on the gateway for the paired token you are reading with, so a phone and a laptop can each carry their own.</p>
             <section id="ui-prefs" class="ops-card">
-              <h2>UI preferences</h2>
+              <h2>Message times</h2>
               <!-- #184. The sticky tab bar setting went with the tab bar: the bar
                    that replaced it is always at the top of the screen, so there is
                    nothing left for the box to pin. -->
@@ -3580,8 +3629,8 @@
           <input
             id="past-filter"
             type="search"
-            placeholder="Search by name"
-            aria-label="Search conversations by name"
+            placeholder="Search names and previews"
+            aria-label="Search conversations by name and preview"
             autocomplete="off"
           />
         </div>
@@ -3646,24 +3695,15 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
           <strong class="ttl">New conversation</strong>
-          <button
-            type="button"
-            class="help-btn"
-            aria-label="What is this screen?"
-            aria-expanded="false"
-            aria-controls="help-dir-picker"
-          >
-            ?
-          </button>
+          <span class="scr-sp" aria-hidden="true"></span>
         </div>
         <div class="scr-body">
-          <div class="help-text" id="help-dir-picker" hidden>
-            Choose the folder on the host the new conversation runs in.
-            <b>Start here</b> on a recent folder or beside a typed path starts
-            it there; tap a folder to go into it, and <b>New conversation in
-            this folder</b> starts it in the one you are in. Nothing starts
-            until you choose, and back leaves without starting one.
-          </div>
+          <!-- #190: the one sentence every panel screen opens with, in place
+               of the ? that hid a paragraph. -->
+          <p class="lede" id="help-dir-picker">
+            Pick the folder on the host it runs in; nothing starts until you
+            choose one.
+          </p>
           <div class="grp">Recent folders</div>
           <div id="dir-recent">(no recent folders yet)</div>
           <div class="grp">On the host</div>
@@ -3691,23 +3731,13 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
           <strong class="ttl">Archived</strong>
-          <button
-            type="button"
-            class="help-btn"
-            aria-label="What are Archived conversations?"
-            aria-expanded="false"
-            aria-controls="help-archived-view"
-          >
-            ?
-          </button>
+          <span class="scr-sp" aria-hidden="true"></span>
         </div>
         <div class="scr-body">
-          <div class="help-text" id="help-archived-view" hidden>
-            Conversations the daemon has filed away from the folder the list
-            shows. They are <b>not</b> openable from here, since the daemon
-            refuses to read an archived transcript, so each offers
-            <b>Restore</b> only, which puts it back on the list.
-          </div>
+          <p class="lede" id="help-archived-view">
+            Filed away from these folders: they cannot be opened, only restored
+            to the list.
+          </p>
           <div id="archived-note"></div>
           <div id="archived-list">(not listed)</div>
         </div>
@@ -3813,24 +3843,16 @@
             overflow-y: auto;
           }
           /* #177. The pills are controls on the transcript, so they take the
-             control ground and edge, with the bright ink so they still read
-             as something to press over the rows they float on. The shadow is
-             what lifts a dark pill off a dark row. #184: 36px, the drawn size,
-             and the pair sits side by side at the top. */
+             control ground and edge, with the bright ink. #184: 36px, the
+             drawn size, and the pair sits side by side at the top. #190: the
+             column is the list's header row (the view places it above the
+             first row and sets its position), so it scrolls away with the
+             rows rather than floating over them. */
           #tx-top {
-            position: absolute;
-            top: 8px;
-            left: 12px;
-            right: 12px;
-            z-index: 2;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 8px;
-            pointer-events: none;
-          }
-          #tx-top > * {
-            pointer-events: auto;
           }
           #tx-top .pills {
             display: flex;
@@ -3868,14 +3890,13 @@
             transform: translateX(-50%);
             z-index: 2;
           }
-          /* The recap and the side question open under the pills, bounded so
-             an answer of any length scrolls inside its card. */
+          /* The recap and the side question open under the pills, in the
+             header row. #190: inside the list an answer of any length is
+             scrolled past with the rows, so neither card is bounded any more:
+             it cannot push the composer down from there. */
           #recap,
           #btw-panel {
             align-self: stretch;
-            flex: 0 1 auto;
-            min-height: 0;
-            overflow-y: auto;
             background: var(--g1-raise);
             border: 1px solid var(--g1-edge);
             border-radius: 12px;
@@ -3884,13 +3905,6 @@
             line-height: 1.45;
             color: var(--g1-ink-hi);
             box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-          }
-          /* Open, the column gets a definite height so the card can shrink
-             to it and scroll: the top 60% of the transcript, which leaves the
-             newest rows readable under it. */
-          #tx-top:has(> #recap:not([hidden])),
-          #tx-top:has(> #btw-panel:not([hidden])) {
-            bottom: 40%;
           }
           #recap[hidden],
           #btw-panel[hidden] {
@@ -4532,13 +4546,13 @@
         <div id="transcript-wrap">
           <div id="transcript"></div>
           <!-- #184. The pills at the top of the transcript, and what the recap
-               pill and the side question open, in place under them. They float
-               over the rows rather than sitting above the scroller for the
-               reason the load-earlier pill always did: an in-flow sibling takes
-               height out of the bounded scroller, which is what broke the
-               render-all fallback's scroll pin. Both panels are bounded and
-               scroll, because an open panel that grows is how a band once
-               pushed the composer under the fold on a phone. -->
+               pill and the side question open, in place under them. #190: the
+               view moves this column into the list as its header row, above
+               the first row, so it scrolls with the rows; it is not a sibling
+               of the scroller, which would take height out of the bounded box
+               (what broke the render-all fallback's scroll pin), and it does
+               not float over the rows, which covered whichever row was at the
+               top. -->
           <div id="tx-top">
             <div class="pills">
               <button id="load-earlier" type="button" hidden>
@@ -5216,14 +5230,20 @@
         sessions: null,
         bridges: null,
         tokens: null,
-        costs: null,
-        costSince: '',
       };
       function renderMoreValues() {
         const v = {};
         if (storedFiles.length) v.files = String(storedFiles.length);
-        const cost = sessionCostText();
-        if (cost) v.usage = cost;
+        // #190: both from what the page holds, as every value here is: the
+        // turns on screen (counted the way the rewind picker counts them) and
+        // the messages queued here for after this turn.
+        if (watchedSessionId) {
+          const turns = transcriptModel.userTurns().length;
+          if (turns) v.rewind = turns + (turns === 1 ? ' turn' : ' turns');
+          if (outbox.length) v.queue = outbox.length + ' queued';
+        }
+        const used = sessionUsageParts();
+        if (used) v.usage = used.tokens + (used.cost ? ' \u00b7 ' + used.cost : '');
         if (permRules) {
           let n = 0;
           for (const sc of ['user', 'workspace']) {
@@ -5276,23 +5296,103 @@
         // The group heads say where Workspace and Host point, as drawn.
         const ws = wsTargetCwd || (caps && caps.workspaceCwd) || '';
         $('more-ws').textContent = ws
-          ? ' \u00b7 ' + ws.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~')
+          ? ' \u00b7 ' + shortFolder(ws)
           : '';
         const host = listHostLabel();
         $('more-host').textContent = host ? ' \u00b7 ' + host : '';
       }
 
-      // #187. The watched conversation's cost, for More's Usage row and the
-      // sheet's context line. It comes from the Usage panel's own read, when
-      // that read was grouped by session and the watched conversation has a
-      // row in its window. Nothing polls for it: until the reader has loaded
-      // Usage the page does not know the number, and says nothing.
-      function sessionCostText() {
-        const costs = moreFacts.costs;
-        if (!costs || !watchedSessionId || !costs.has(watchedSessionId)) {
-          return '';
+      // #190. The watched conversation's own usage, for More's Usage row and
+      // the sheet's context line: its tokens, and its cost when the gateway's
+      // rate table priced it. Read once as the conversation opens (/rc/usage
+      // narrowed to the session, all time; #187 waited for the reader to load
+      // the Usage panel) and kept current by the stream's usage_tick frames.
+      // Nothing polls. Rows the rate table could not price are counted by the
+      // gateway, so a cost of 0 for them reads `no price`, not $0.00, and a
+      // cost that covers only some of the rows carries a `+`. A gateway with no
+      // usage store (404) leaves both places empty.
+      let sessionUsage = null; // { id, tokens, cents, events, unpriced }
+      let sessionUsageGen = 0;
+      let sessionUsageTicked = false; // a tick landed while the read was out
+      const USAGE_SINCE = '1970-01-01T00:00:00Z';
+      function usageCount(v) {
+        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+      }
+      async function loadSessionUsage(id) {
+        const gen = ++sessionUsageGen;
+        sessionUsageTicked = false;
+        // A re-watch of the same conversation keeps its figure until the read
+        // lands; another conversation's is gone at once.
+        if (sessionUsage && sessionUsage.id !== id) sessionUsage = null;
+        if (!id || !token()) return;
+        let body = null;
+        try {
+          const q = new URLSearchParams({
+            group_by: 'session',
+            session: id,
+            since: USAGE_SINCE,
+          });
+          const res = await fetch('/rc/usage?' + q, {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (gen !== sessionUsageGen || watchedSessionId !== id) return;
+          if (!res.ok) {
+            sessionUsage = null;
+            return renderSessionUsage();
+          }
+          body = await res.json();
+        } catch {
+          return;
         }
-        return '$' + (costs.get(watchedSessionId) / 100).toFixed(2);
+        if (gen !== sessionUsageGen || watchedSessionId !== id) return;
+        // A ticked figure that landed while this read was out is newer.
+        if (sessionUsageTicked) return;
+        const rows = body && Array.isArray(body.rows) ? body.rows : [];
+        const row = rows.find((r) => r && r.key === id);
+        sessionUsage = {
+          id,
+          tokens: row ? (row.tokensIn || 0) + (row.tokensOut || 0) : 0,
+          cents: row && typeof row.costCents === 'number' ? row.costCents : 0,
+          events: row ? usageCount(row.events) : 0,
+          unpriced: row ? usageCount(row.unpricedEvents) : 0,
+        };
+        renderSessionUsage();
+      }
+      function noteUsageTick(t) {
+        if (!t || typeof t !== 'object' || t.sessionId !== watchedSessionId) {
+          return;
+        }
+        sessionUsageTicked = true;
+        sessionUsage = {
+          id: t.sessionId,
+          tokens: (t.tokensInTotal || 0) + (t.tokensOutTotal || 0),
+          cents: (t.costMicrocentsSesTotal || 0) / 1000000,
+          events: usageCount(t.eventsTotal),
+          unpriced: usageCount(t.unpricedEventsTotal),
+        };
+        renderSessionUsage();
+      }
+      function renderSessionUsage() {
+        if (ctxInfo) renderFooter();
+        if (!$('more-screen').hidden) renderMoreValues();
+      }
+      // { tokens: '12.3k tokens', cost: '$0.42' | '$0.42+' | 'no price' | '' },
+      // or null while there is nothing to say.
+      function sessionUsageParts() {
+        const u = sessionUsage;
+        if (!u || u.id !== watchedSessionId || !(u.tokens > 0)) return null;
+        const counted = u.events !== null && u.unpriced !== null;
+        let cost = '';
+        if (counted && u.events > 0 && u.unpriced >= u.events) {
+          cost = 'no price';
+        } else if (u.cents > 0 || (counted && u.events > 0)) {
+          cost =
+            (u.cents > 0 && u.cents < 1
+              ? '<$0.01'
+              : '$' + (u.cents / 100).toFixed(2)) +
+            (counted && u.unpriced > 0 ? '+' : '');
+        }
+        return { tokens: fmtK(u.tokens) + ' tokens', cost };
       }
 
       // #187. Install as app. The manifest asks for display: standalone, and
@@ -5794,7 +5894,6 @@
         }
         // The view reports changes only: seed the pill from its state now.
         $('jump-bottom').hidden = transcriptView.isNearBottom();
-        watchPillsRoom();
         applyStampZone();
       }
       // #197. A picture attached to a message is stored in the session, so its
@@ -5853,31 +5952,19 @@
         return pending;
       }
 
-      // #177. The pills (load earlier, the recap) float over the top of the
-      // transcript, so the first row was drawn under them. The list reserves
-      // the room they take, which is the row's height and the 8px under it,
-      // and gives it back when no pill is showing (the row is display:none
-      // then, so it measures 0).
-      let pillsWatch = null;
-      function watchPillsRoom() {
-        const pills = document.querySelector('#tx-top .pills');
-        if (!pills || typeof ResizeObserver === 'undefined') return;
-        if (pillsWatch) pillsWatch.disconnect();
-        const sync = () => {
-          if (!transcriptView) return;
-          const h = pills.getBoundingClientRect().height;
-          transcriptView.setTopInset(h > 0 ? Math.ceil(h) + 8 : 0);
-        };
-        pillsWatch = new ResizeObserver(sync);
-        pillsWatch.observe(pills);
-        sync();
-      }
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
           model: transcriptModel,
           scroller: $('transcript'),
           virtualCore,
           markdownIt,
+          // #190: the pills (load earlier, the recap) and what they open are
+          // the list's header row: they sit above the first row and scroll
+          // away with the rows, and the view keeps a reader's row in place
+          // when the row changes height above them (#177's reserved inset,
+          // under pills that floated over whatever row was at the top, is
+          // retired with it).
+          header: $('tx-top'),
           // While the user is reading history (scrolled up), show the
           // floating "jump to bottom" pill; it hides again once we reach
           // the bottom ("near" = within a bubble's height of the end).
@@ -6866,9 +6953,12 @@
           f.append(row('Mode', t));
         }
         const fill = fillWords();
-        // #187: the conversation's cost beside its fill, once Usage has read
-        // it (sessionCostText); before that the line is the fill alone.
-        const cost = sessionCostText();
+        // #190: what the conversation has spent beside its fill
+        // (sessionUsageParts); with nothing recorded the line is the fill.
+        const used = sessionUsageParts();
+        const cost = used
+          ? 'spent ' + used.tokens + (used.cost ? ', ' + used.cost : '')
+          : '';
         if (fill || cost) {
           const col = document.createElement('div');
           col.className = 'sh-col';
@@ -6880,9 +6970,13 @@
             c.id = 'footer-cost';
             c.textContent = cost;
             c.title =
-              'cost of this conversation since ' +
-              moreFacts.costSince +
-              ', from Usage';
+              'tokens and cost this conversation has used, from the ' +
+              "gateway's usage store" +
+              (used.cost === 'no price'
+                ? '; the rate table has no price for its model'
+                : used.cost.endsWith('+')
+                  ? '; some of it has no price in the rate table'
+                  : '');
             if (fill) v.append(' \u00b7 ');
             v.append(c);
           }
@@ -9445,6 +9539,19 @@
         // boundary. Drawn unless it is this window's own echo (#114), which
         // the send path already put on screen at the moment you typed it.
         if (su === 'user_message_chunk') {
+          // #190: a message that joined a running turn (the resume's replay
+          // marks its record so) is a row of that turn, not a new one: no turn
+          // is counted for it and the turn above it is not closed.
+          if (
+            u._meta &&
+            u._meta.source === 'mid_turn_message_injected' &&
+            typeof text === 'string' &&
+            text
+          ) {
+            transcriptModel.addMidTurnUser(text, sentAt);
+            scrollTranscript();
+            return;
+          }
           // #197: a picture or file the sender attached is not text, and drawn
           // as text it was an empty bubble. It joins the message above it when
           // there is one, so it is not a second turn.
@@ -9732,8 +9839,30 @@
             // written to the WAL and can never come back as a replayed boundary.
             insideReplay = false;
             return;
+          // #190: the conversation's running usage, for the sheet and More.
+          case 'usage_tick':
+            return noteUsageTick(ev.data);
+          // #190. Send now hands a queued message to the running turn through
+          // the mid-turn route, and the daemon takes it at the turn's next tool
+          // boundary. This frame is the only echo it sends for that (no
+          // user_message_chunk), so the message is drawn here, where the turn
+          // read it: a row of the same turn, not the start of another one.
+          case 'mid_turn_message_injected': {
+            const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            if (d.sessionId && d.sessionId !== watchedSessionId) return;
+            const said = Array.isArray(d.messages) ? d.messages : [];
+            const at = frameStamp(ev);
+            for (const m of said) {
+              const text = typeof m === 'string' ? clean(m) : '';
+              if (!text.trim()) continue;
+              transcriptModel.finishThought();
+              transcriptModel.addMidTurnUser(text, at);
+            }
+            if (said.length) scrollTranscript();
+            return;
+          }
           // suppressed noise (still in raw JSON): client_joined, client_left,
-          // usage_tick, permission_* (rendered as cards)
+          // permission_* (rendered as cards)
           default:
             return;
         }
@@ -9804,6 +9933,7 @@
         const items = transcriptModel.items;
         for (let i = items.length - 1, n = 0; i >= 0 && n < 400; i--, n++) {
           const k = items[i].kind;
+          if (k === 'user' && items[i].midTurn) continue; // #190: same turn
           if (k === 'fork' || k === 'user') return;
           if (k === 'asst') return markTurnEnd(items[i], true);
         }
@@ -9816,7 +9946,7 @@
         let closed = !!first && first.kind === 'user';
         for (let i = rows.length - 1; i >= 0; i--) {
           const k = rows[i].kind;
-          if (k === 'user') closed = true;
+          if (k === 'user' && !rows[i].midTurn) closed = true;
           else if (k === 'asst') {
             if (closed) rows[i].turnEnd = true;
             closed = false;
@@ -9871,7 +10001,9 @@
         const items = transcriptModel.items;
         const at = items.lastIndexOf(src);
         let n = 0;
-        for (let i = 0; i < at; i++) if (items[i].kind === 'user') n++;
+        for (let i = 0; i < at; i++) {
+          if (items[i].kind === 'user' && !items[i].midTurn) n++;
+        }
         return n;
       }
       // The whole answer of the turn the asst row ends: every answer row since
@@ -9881,7 +10013,7 @@
         const items = transcriptModel.items;
         const parts = [];
         for (let i = items.lastIndexOf(asst); i >= 0; i--) {
-          if (items[i].kind === 'user') break;
+          if (items[i].kind === 'user' && !items[i].midTurn) break;
           if (items[i].kind === 'asst' && items[i].text) parts.unshift(items[i].text);
         }
         return parts.join('\n\n');
@@ -11025,6 +11157,19 @@
       // harmless.
       // #186: `early` is the push deep link's read, made before anything is
       // watched so the card is pinned before the transcript arrives.
+      // #190: the service worker tells an open page about a push (sw.js
+      // tellPages). A permission request for the conversation on screen is
+      // asked for now, even while the page is hidden and its poll is paused,
+      // so the card is there when the reader comes back.
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('message', (e) => {
+          const d = e && e.data;
+          if (!d || d.type !== 'rc-push') return;
+          if (d.kind !== 'permission.required') return;
+          if (!d.sessionId || d.sessionId !== watchedSessionId) return;
+          void refreshPendingCards(d.sessionId);
+        });
+      }
       async function refreshPendingCards(sessionId, early) {
         if (!token()) return;
         // #172: and the visit it was asked in. The deep link's early read is
@@ -11134,6 +11279,9 @@
       // answer that happens to land last.
       function noteConversationSwitch() {
         switchGen += 1;
+        // #190: the usage figure names the conversation being left.
+        sessionUsage = null;
+        sessionUsageGen += 1;
         // #201: an upload's progress note belongs to the conversation it was
         // for. The files themselves are kept per conversation and the strip is
         // redrawn for the new one once watchedSessionId has moved.
@@ -11224,15 +11372,46 @@
       // An unreadable body or a null earliestAvailableId (reason 'no_wal',
       // nothing left on disk) falls back to the old null cursor rather than
       // inventing one.
-      async function replayCursorFromBody(res) {
-        let body;
-        try {
-          body = await res.json();
-        } catch {
-          return null;
-        }
-        const earliest = body && body.data && body.data.earliestAvailableId;
+      // #150: from the 412 body's `data`, read once by its caller.
+      function replayCursorFromData(data) {
+        const earliest = data && data.earliestAvailableId;
         return Number.isFinite(earliest) && earliest >= 0 ? earliest - 1 : null;
+      }
+
+      // #150. A 412 past the WAL horizon can say `recovery: 'reload'`: the
+      // conversation is intact on disk, so instead of retrying from the oldest
+      // id the WAL keeps (and showing a transcript with its start missing) the
+      // page resumes it, which draws the whole history from the resume's own
+      // frames and watches from the resume's watermark, already in the
+      // gateway's numbering. Only with the folder the resume needs, a token
+      // that may call it (WRITE, `writeScope` from /rc/capabilities), and once
+      // per conversation per page load: a resumed watch that 412s again takes
+      // the retry, so the two cannot loop.
+      const walReloaded = new Set();
+      function tokenCanResume() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.writeScope === true
+        );
+      }
+      // The retry the 412 always had, from the oldest id the WAL keeps, and a
+      // word that what is older is not on screen.
+      function retryPastWalHorizon(data) {
+        lastSeenEventId = replayCursorFromData(data);
+        scheduleWatchRetry(412);
+        setStatus(
+          'earlier history is not displayed: it is older than the gateway keeps',
+        );
+      }
+      async function reloadPastWalHorizon(id, cwd, title, data) {
+        walReloaded.add(id);
+        const at =
+          Number.isFinite(data.lastEventId) && data.lastEventId >= 0
+            ? data.lastEventId
+            : null;
+        const ok = await resumeConversation(id, cwd, title, { walReloadFrom: at });
+        if (!ok && watchedSessionId === id) retryPastWalHorizon(data);
       }
 
       function scheduleWatchRetry(status) {
@@ -11578,6 +11757,9 @@
         // #201: its files can never be sent, the session is gone.
         pendingAttachmentsBySession.delete(watchedSessionId);
         watchedSessionId = null;
+        // #190: its cards go with it, as a switch takes them (a push deep
+        // link's card for the conversation being opened stays).
+        dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments();
         syncStoredForSession();
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
@@ -11611,6 +11793,9 @@
         // Unwatch that left it set kept polling the daemon every 5s (#59).
         noteConversationSwitch(); // #172: nor anything asked for it before
         watchedSessionId = null;
+        // #190: the cards of the conversation left go with it, as a switch
+        // takes them, rather than staying pinned over a chat that is empty.
+        dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments(); // #201: nothing watched, nothing staged
         syncStoredForSession();
         // #50: redrawn after the clear for the same reason as in
@@ -12931,6 +13116,9 @@
         const opening = box.hidden;
         box.hidden = !opening;
         $('recap-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
+        // #190: the recap opens in the list's header row, which a reader who
+        // opened it from the ⋯ menu may have scrolled far past.
+        if (opening && transcriptView) transcriptView.revealHeader();
         if (opening) await loadRecap();
         else renderRecap();
       };
@@ -13048,8 +13236,12 @@
         panel.hidden = !opening;
         $('btw-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
         if (opening) {
+          // #190: the panel opens in the list's header row; the view brings
+          // it into view, so the focus must not scroll the list as well.
+          if (transcriptView) transcriptView.revealHeader();
           const field = $('btw-question');
-          if (field) field.focus(); // on a phone the keyboard is half the task
+          // On a phone the keyboard is half the task.
+          if (field) field.focus({ preventScroll: true });
         }
       };
 
@@ -13608,7 +13800,9 @@
         }
         if (scr.hidden === !open) return;
         scr.hidden = !open;
-        $('h1-title').setAttribute('aria-expanded', String(open));
+        if (!paneLayout()) {
+          $('h1-title').setAttribute('aria-expanded', String(open));
+        }
         if (!open) return;
         closeH1Menu(false);
         setMoreOpen(false);
@@ -13616,7 +13810,10 @@
         // or it would hide rows for a reason the reader cannot see.
         if ($('past-filter').value) showListSearch(true);
         renderList();
-        void refreshArchivedCount();
+        void refreshArchivedCount(true);
+        // #190: read now rather than on the 30 s tick, so a conversation
+        // opened in another folder since shows its live dot as the list opens.
+        if (curDirPath) void refreshPastConversations(curDirPath);
         $('list-back').focus({ preventScroll: true });
       }
       function closeListToChat() {
@@ -13629,6 +13826,29 @@
         if (paneLayout()) setListSearch(true);
         else setListOpen(true);
       });
+      // #190. In the pane layout the list is a standing pane, not a dialog,
+      // and the title focuses its search rather than opening it, so neither
+      // says otherwise to a screen reader there.
+      function syncListRoles() {
+        const pane = paneLayout();
+        const title = $('h1-title');
+        const scr = $('list-screen');
+        if (pane) {
+          title.removeAttribute('aria-haspopup');
+          title.removeAttribute('aria-expanded');
+          title.setAttribute('aria-controls', 'past-filter');
+          title.setAttribute('aria-label', 'Search conversations');
+          scr.setAttribute('role', 'region');
+        } else {
+          title.setAttribute('aria-haspopup', 'dialog');
+          title.setAttribute('aria-expanded', String(!scr.hidden));
+          title.setAttribute('aria-controls', 'list-screen');
+          title.removeAttribute('aria-label');
+          scr.setAttribute('role', 'dialog');
+        }
+      }
+      syncListRoles();
+      PANE_QUERY.addEventListener('change', syncListRoles);
       $('list-back').addEventListener('click', closeListToChat);
       $('list-screen').addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
@@ -13706,6 +13926,12 @@
       // lovelace.tail1234.ts.net) and an address is kept whole. A home
       // directory reads as ~, as drawn; the full path is the line's title.
       function listHostLabel() {
+        // #190: the gateway names its host when the token may know it.
+        const named =
+          caps && caps.remoteControl && typeof caps.remoteControl.hostName === 'string'
+            ? caps.remoteControl.hostName
+            : '';
+        if (named) return named.split('.')[0];
         const h = String(location.hostname || '');
         if (!h || h.includes(':') || /^[0-9.]+$/.test(h)) return h;
         return h.split('.')[0];
@@ -13714,6 +13940,17 @@
       // for the title. #193: one rule for the folder line, each row's folder
       // and the folder screen, so a folder reads the same wherever it is.
       function shortFolder(cwd) {
+        // #190: the host's own $HOME when the gateway says it, so a folder
+        // under another user's home, or a home outside /home, reads as it is.
+        const home =
+          caps && caps.remoteControl && typeof caps.remoteControl.homeDir === 'string'
+            ? caps.remoteControl.homeDir.replace(/\/+$/, '')
+            : '';
+        if (home) {
+          return cwd === home || cwd.startsWith(home + '/')
+            ? '~' + cwd.slice(home.length)
+            : cwd;
+        }
         return cwd.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~');
       }
       // U+2066..U+2069 isolate the path as a left-to-right run inside the
@@ -13734,7 +13971,9 @@
             ? 'no folder yet'
             : 'All folders';
         cwdBox.classList.toggle('all', !one);
-        $('list-host').textContent = one && host ? 'on ' + host : '';
+        // #190: the host is said once, here, for every row under it (the rows
+        // all come from this gateway's host).
+        $('list-host').textContent = host && !none ? 'on ' + host : '';
         $('list-folder').title = one || (none ? '' : 'All folders');
         $('list-folder').setAttribute(
           'aria-label',
@@ -13742,7 +13981,7 @@
             ? 'Showing folder ' + one + (host ? ' on ' + host : '')
             : none
               ? 'No folder yet'
-              : 'Showing all folders') + '. Change',
+              : 'Showing all folders' + (host ? ' on ' + host : '')) + '. Change',
         );
       }
 
@@ -13751,16 +13990,25 @@
       // Opening puts focus on its way back, so a keyboard reader lands in
       // what they opened; shutting it from inside hands focus back to New
       // conversation.
+      // #190: browsing here moves the list's current folder (renderDirList),
+      // and a folder that is not recent then fell out of All folders. The
+      // screen remembers where the list was and goes back there as it shuts,
+      // unless a conversation started (the folder it started in is recent).
+      let dirPickerFrom = null;
       function setDirPickerOpen(open, refocus) {
         const picker = $('dir-picker');
         if (picker.hidden === !open) return;
         picker.hidden = !open;
         $('list-new').setAttribute('aria-expanded', String(open));
         if (open) {
+          dirPickerFrom = curDirPath;
           setFolderMenuOpen(false);
           $('dir-back').focus({ preventScroll: true });
           return;
         }
+        const from = dirPickerFrom;
+        dirPickerFrom = null;
+        if (from && curDirPath !== from) void browseTo(from, true);
         if (refocus && listShown()) $('list-new').focus({ preventScroll: true });
       }
       $('list-folder').addEventListener('click', () =>
@@ -13917,21 +14165,24 @@
         $('dir-current').textContent = body.path;
         const list = $('dir-list');
         list.textContent = '';
+        // #190: buttons, so Tab reaches them and Enter or Space goes in.
         if (curDirParent) {
-          const up = document.createElement('div');
+          const up = document.createElement('button');
+          up.type = 'button';
           up.className = 'token-row';
-          up.style.cursor = 'pointer';
           up.textContent = '.. (' + curDirParent + ')';
+          up.setAttribute('aria-label', 'Up to ' + curDirParent);
           up.onclick = () => browseTo(curDirParent);
           list.appendChild(up);
         }
         const entries = Array.isArray(body.entries) ? body.entries : [];
         for (const entry of entries) {
-          const row = document.createElement('div');
+          const row = document.createElement('button');
+          row.type = 'button';
           row.className = 'token-row';
-          row.style.cursor = 'pointer';
           row.textContent = entry.name + '/';
           const childPath = joinPath(body.path, entry.name);
+          row.setAttribute('aria-label', 'Go into ' + childPath);
           row.onclick = () => browseTo(childPath);
           list.appendChild(row);
         }
@@ -13940,6 +14191,12 @@
           none.textContent = '(no subfolders)';
           list.appendChild(none);
         }
+        // #190: one Tab stop for the whole list, however many folders it
+        // holds (a home folder can hold hundreds); the arrows, Home and End
+        // move between rows, as they do between More's rows.
+        list.querySelectorAll('button.token-row').forEach((b, i) => {
+          b.tabIndex = i === 0 ? 0 : -1;
+        });
         // Landing on a new path is "a workspace is selected" — refresh the
         // past-conversations list for it (the browse-time trigger: default
         // open, subfolder tap, ".." , and a typed path routed through
@@ -13947,6 +14204,26 @@
         // lifecycle + interval refreshes alongside).
         void refreshPastConversations(curDirPath);
       }
+
+      $('dir-list').addEventListener('keydown', (e) => {
+        const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
+        if (!keys.includes(e.key) || !e.target.matches('button.token-row')) {
+          return;
+        }
+        const rows = Array.from($('dir-list').querySelectorAll('button.token-row'));
+        const at = rows.indexOf(e.target);
+        const next =
+          e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? rows.length - 1
+              : Math.max(0, Math.min(rows.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)));
+        e.preventDefault();
+        rows.forEach((b, i) => {
+          b.tabIndex = i === next ? 0 : -1;
+        });
+        rows[next].focus();
+      });
 
       // GET /rc/fs?path=<abs> (path omitted → server default, $HOME). Renders
       // `parent` as the ".." target and `entries` as tappable subfolder rows.
@@ -14222,12 +14499,21 @@
         // the displayed title (title text, or the session-id fallback the
         // rows show) case-insensitively. The truncated note below still
         // describes the fetched set, which the filter does not change.
+        // #190: and the preview, the line under the title, which is what a
+        // reader often remembers a conversation by.
         const shown = pastFilter
           ? inView.filter(
-              (s) => s && convoTitle(s).toLowerCase().includes(pastFilter),
+              (s) =>
+                s &&
+                (
+                  convoTitle(s) +
+                  '\n' +
+                  strOr(s.preview, '')
+                )
+                  .toLowerCase()
+                  .includes(pastFilter),
             )
           : inView;
-        const host = listHostLabel();
         if (pastFilter && shown.length === 0) {
           closeRowMenu(false);
           none('No conversations match "' + $('past-filter').value + '".');
@@ -14275,12 +14561,6 @@
             path.className = 'cwd';
             path.textContent = isolatedFolder(s.cwd);
             dir.appendChild(path);
-            if (host) {
-              const on = document.createElement('span');
-              on.className = 'host';
-              on.textContent = 'on ' + host;
-              dir.appendChild(on);
-            }
             row.appendChild(dir);
           }
           // when · preview. A live-only row has neither, having no
@@ -14424,8 +14704,22 @@
         return { rows: newestFirst(rows), failed };
       }
       let archivedReading = null; // the key a count read is in flight for
-      async function refreshArchivedCount() {
+      // #190: when the count was last read. Opening the list re-reads it only
+      // once it is older than this; an archive or a restore here, and a
+      // change of folders, still read it at once.
+      const ARCHIVED_FRESH_MS = 30000;
+      let archivedReadAt = 0;
+      async function refreshArchivedCount(onOpen) {
         const key = archivedKey();
+        if (
+          onOpen &&
+          archivedCountKey === key &&
+          archivedCount !== null &&
+          Date.now() - archivedReadAt < ARCHIVED_FRESH_MS
+        ) {
+          renderArchivedCount();
+          return;
+        }
         const folders = viewFolders();
         if (folders.length === 0 || !token()) {
           archivedCount = null;
@@ -14439,6 +14733,7 @@
         if (key !== archivedKey()) return; // the list moved on to other folders
         archivedCountKey = key;
         archivedCount = got.failed.length ? null : got.rows.length;
+        archivedReadAt = Date.now();
         renderArchivedCount();
       }
       // Re-read when the folders the count is for have changed since it was
@@ -14664,6 +14959,26 @@
           preventScroll: true,
         });
       }
+      // #190. A poll that lands while the menu is open moves its counts in
+      // place, keeping the items and the focus where they are.
+      function syncFolderMenuCounts() {
+        if (!folderMenuShown()) return;
+        for (const b of folderMenuEl.querySelectorAll('[role="menuitemradio"]')) {
+          const cwd = b.dataset.folder || '';
+          const held = pastConvos.filter(
+            (s) => s && (cwd === '' || s.cwd === cwd),
+          ).length;
+          const n = b.querySelector('.n');
+          if (n && n.textContent !== String(held)) n.textContent = String(held);
+          b.setAttribute(
+            'aria-label',
+            (cwd ? shortFolder(cwd) : 'All folders') +
+              ', ' +
+              held +
+              (held === 1 ? ' conversation' : ' conversations'),
+          );
+        }
+      }
       // Hung under the folder line and as wide as it less 8px a side, which
       // in the pane layout is the pane's width, so it never spills over the
       // chat beside it.
@@ -14768,6 +15083,7 @@
         // #119: fed from this same poll rather than its own, so the list
         // cannot drift from what the folder holds.
         renderList();
+        syncFolderMenuCounts(); // #190
         // Archived (n) belongs to the folders: read again for these if the
         // list is up to show it, else marked unknown until it opens.
         archivedCountFollows();
@@ -15044,8 +15360,15 @@
       // request there would open a tab on every recovery, and a resync storm
       // would open one per resync. The ask belongs to the tap, not to the
       // hand-off. Default off, so a new caller cannot inherit it by accident.
+      // Resolves true once the resume answered 200 and its watch started.
+      // #150: opts.walReloadFrom (a number, or null) is the 412's lastEventId
+      // on the WAL reload path, used when an older daemon's answer has no
+      // watermark or no frames.
       async function resumeConversation(sessionId, cwd, title, opts) {
-        if (!token()) return setStatus('pair first');
+        if (!token()) {
+          setStatus('pair first');
+          return false;
+        }
         // #172: a resume is a switch asked for, so it moves the number at the
         // tap. A cold A then a warm B used to end on A, because A's answer
         // landed last, cleared B's transcript and aborted B's watch. The
@@ -15066,10 +15389,10 @@
               body: JSON.stringify({ cwd }),
             },
           );
-          if (gen !== switchGen) return;
+          if (gen !== switchGen) return false;
           if (res.status === 200) {
             const j = await res.json();
-            if (gen !== switchGen) return;
+            if (gen !== switchGen) return false;
             lastSeenEventId = null;
             // Resume is a conversation SWITCH, not a reconnect: startWatch
             // only self-clears when fromEventId is null (which would skip the
@@ -15117,7 +15440,22 @@
             // this resume and noReplayResynced stops a second from-0
             // attempt (a loop) — the watermark watch plus the status poll
             // still recover the card.
-            if (replay.length === 0 && !noReplayResynced.has(j.sessionId)) {
+            const walReload =
+              !!opts && Object.prototype.hasOwnProperty.call(opts, 'walReloadFrom');
+            if (
+              walReload &&
+              (typeof j.lastEventId !== 'number' || replay.length === 0)
+            ) {
+              // #150: never from 0 here, which is the cursor that just 412'd:
+              // the 412's own lastEventId, or with none (an empty WAL) the
+              // newest frame drawn, or no cursor when nothing was.
+              if (typeof opts.walReloadFrom === 'number') {
+                from = opts.walReloadFrom;
+              }
+            } else if (
+              replay.length === 0 &&
+              !noReplayResynced.has(j.sessionId)
+            ) {
               from = 0;
               noReplayFallbackSessionId = j.sessionId;
             }
@@ -15130,6 +15468,7 @@
             // tap failed to open. Still best-effort in the #49 sense, which is
             // non-blocking rather than silent: requestHostTerminal reports why.
             if (opts && opts.hostTerminal) void requestHostTerminal(j.sessionId);
+            return true;
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');
           } else if (res.status === 404) {
@@ -15142,9 +15481,10 @@
             setStatus('resume failed (' + res.status + ')');
           }
         } catch (e) {
-          if (gen !== switchGen) return;
+          if (gen !== switchGen) return false;
           setStatus('resume failed: ' + e);
         }
+        return false;
       }
 
       async function deletePastConversation(sessionId, title, cwd) {
@@ -15636,9 +15976,34 @@
               // stream and clearTranscript() blanked a conversation that is
               // intact on disk. Retry from the boundary replayFrom vouches
               // for instead.
-              if (res.status === 412)
-                lastSeenEventId = await replayCursorFromBody(res);
-              scheduleWatchRetry(res.status);
+              if (res.status === 412) {
+                let body = null;
+                try {
+                  body = await res.json();
+                } catch {
+                  body = null;
+                }
+                const data =
+                  body && body.data && typeof body.data === 'object'
+                    ? body.data
+                    : {};
+                const cwd = watchedSessionCwd;
+                if (
+                  data.recovery === 'reload' &&
+                  cwd &&
+                  tokenCanResume() &&
+                  !walReloaded.has(id) &&
+                  watchedSessionId === id
+                ) {
+                  // Its watch starts after an await, so this teardown is done
+                  // with the shared state by the time it runs.
+                  void reloadPastWalHorizon(id, cwd, title, data);
+                } else {
+                  retryPastWalHorizon(data);
+                }
+              } else {
+                scheduleWatchRetry(res.status);
+              }
             }
             // issue #46: a failed stream connect must not strand a pending
             // question — the status fetch still redraws the card the
@@ -15657,6 +16022,7 @@
           renderLoadEarlier();
           void fetchContext(id);
           void fetchContextUsage(id);
+          void loadSessionUsage(id); // #190
           void renderLineage(id);
           void refreshIdleToggle();
           void loadPermRules(false); // task #27: refresh the rules for this workspace
@@ -19724,18 +20090,6 @@
         );
         if (!body) return;
         const rows = Array.isArray(body.rows) ? body.rows : [];
-        // #187. Grouped by session, a row's key is the session id, so this
-        // read is also each conversation's cost in the window: kept for the
-        // sheet's context line and More's Usage row, and redrawn there now.
-        if ($('usage-group').value === 'session') {
-          moreFacts.costs = new Map(
-            rows
-              .filter((r) => typeof r.costCents === 'number')
-              .map((r) => [String(r.key), r.costCents]),
-          );
-          moreFacts.costSince = $('usage-since').value.trim() || '24h';
-          renderFooter();
-        }
         out.textContent = '';
         if (rows.length === 0) {
           out.textContent = '(no rows in that window)';

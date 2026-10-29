@@ -43,6 +43,30 @@ async function originDaemonName() {
   return '';
 }
 
+// #190. A page left open in the background is told about the push, so it can
+// ask for the request it names before the reader comes back to it (its own
+// 5 s status poll pauses while it is hidden). Best effort: a worker with no
+// clients API, or no page, tells nobody and still shows the notification.
+async function tellPages(p) {
+  if (!self.clients || typeof self.clients.matchAll !== 'function') return;
+  try {
+    const all = await self.clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true,
+    });
+    for (const c of all) {
+      c.postMessage({
+        type: 'rc-push',
+        kind: p.kind,
+        sessionId: p.sessionId,
+        requestId: p.requestId,
+      });
+    }
+  } catch {
+    /* nobody to tell */
+  }
+}
+
 self.addEventListener('push', (event) => {
   let p;
   try {
@@ -70,6 +94,7 @@ self.addEventListener('push', (event) => {
       // needed".
       const dname = await originDaemonName();
       if (dname) title = '[' + dname + '] ' + title;
+      await tellPages(p);
       await self.registration.showNotification(title, {
         body: String(p.summary || '').slice(0, 140),
         tag: p.requestId || p.sessionId || undefined,

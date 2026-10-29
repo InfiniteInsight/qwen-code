@@ -111,6 +111,10 @@ export interface UsageResponseRow {
   costMicrocents: number;
   /** Cost in cents (floating point, derived from costMicrocents at presentation). */
   costCents: number;
+  /** #190: rows in the group and how many the rate table could not price.
+   * JSON only; the CSV keeps the spec's header. */
+  events?: number;
+  unpricedEvents?: number;
   efficiency: EfficiencyMetrics;
 }
 

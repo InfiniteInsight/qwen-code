@@ -510,6 +510,45 @@ describe('#165 the response is scoped by token', () => {
     expect(text).not.toContain('build.internal');
   });
 
+  // #190: the list's folder line names the host and reads $HOME as ~, which
+  // are host facts, so only a token that already sees host paths gets them.
+  it('names the host and its home directory to owner and write tokens only', async () => {
+    const m = await mount({ ...DEPS, hostName: 'lovelace.tail.ts.net', homeDir: '/srv/me' }, true, {
+      id: 'o',
+      scopes: ['owner'],
+    });
+    try {
+      const rc = ((await (await fetch(`${m.base}/rc/capabilities`)).json()) as {
+        remoteControl: Record<string, unknown>;
+      }).remoteControl;
+      expect(rc.hostName).toBe('lovelace.tail.ts.net');
+      expect(rc.homeDir).toBe('/srv/me');
+    } finally {
+      await m.close();
+    }
+    for (const client of [
+      { id: 'r', scopes: ['session:read'] },
+      { id: 's', scopes: ['session:read', 'share'], sessionLockId: 'sess-1' },
+    ]) {
+      const { rc } = await capsAs(client);
+      expect('hostName' in rc).toBe(false);
+      expect('homeDir' in rc).toBe(false);
+    }
+  });
+
+  // #150: the page resumes a conversation whose watch fell past the WAL
+  // horizon only when the token may call resume.
+  it.each([
+    ['owner', { id: 'o', scopes: ['owner'] }, true],
+    ['write', { id: 'w', scopes: ['write', 'session:read'] }, true],
+    ['read-only', { id: 'r', scopes: ['session:read'] }, false],
+    ['approve-only', { id: 'a', scopes: ['approve'] }, false],
+    ['no scopes', { id: 'x' }, false],
+  ])('says whether a %s token holds write', async (_name, client, want) => {
+    const { rc } = await capsAs(client);
+    expect(rc.writeScope).toBe(want);
+  });
+
   it('fails closed for a client with no scopes array', async () => {
     const { text } = await capsAs({ id: 'x' });
     expect(text).not.toContain('/home/evan');

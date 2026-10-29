@@ -85,11 +85,26 @@ export function createUsageRoute(deps: UsageRouteDeps): RequestHandler {
       return;
     }
 
+    // #190: `session=<id>` narrows the read to one conversation, which is how
+    // the page asks for the watched conversation's own figure without pulling
+    // every session's row. The scope filter still applies on top of it.
+    const session = q['session'];
+    if (
+      session !== undefined &&
+      (typeof session !== 'string' || session === '' || session.length > 200)
+    ) {
+      res
+        .status(400)
+        .json({ error: 'invalid session', code: 'invalid_session' });
+      return;
+    }
+
     const rows = deps.store.aggregate({
       sinceMs,
       untilMs,
       groupBy,
       attributionTokenId: usageAttributionFilter(client),
+      ...(session !== undefined ? { sessionId: session } : {}),
     });
 
     const label = deps.labelFor ?? ((_g, key) => key);
@@ -104,6 +119,8 @@ export function createUsageRoute(deps: UsageRouteDeps): RequestHandler {
         tokensCached: r.tokensCached,
         costMicrocents: r.costMicrocents,
         costCents,
+        events: r.events,
+        unpricedEvents: r.unpricedEvents,
         efficiency: computeEfficiency(r.costMicrocents, r.tokensOut),
       };
     });

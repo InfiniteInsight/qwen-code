@@ -269,6 +269,25 @@ describe('UsageIngester', () => {
     expect(store.sessionTotals('sess_1').tokensInTotal).toBe(1); // row still written
   });
 
+  // #190: the tick carries what a page needs to say `no price` instead of $0.
+  it('a tick counts the rows of the session and the ones the rate table missed', () => {
+    const { ingester, ticks } = makeIngester();
+    ingester.ingest('sess_1', frame({ inputTokens: 1000, outputTokens: 500 }), {
+      attributionTokenId: 't',
+      subActor: null,
+    });
+    ingester.ingest(
+      'sess_1',
+      frame({ inputTokens: 1 }, { modelId: 'unknown-model' }),
+      { attributionTokenId: 't', subActor: null },
+    );
+    expect(ticks[ticks.length - 1]).toMatchObject({
+      sessionId: 'sess_1',
+      eventsTotal: 2,
+      unpricedEventsTotal: 1,
+    });
+  });
+
   it('is a no-op for a frame with no usage', () => {
     const { ingester, ticks } = makeIngester();
     const r = ingester.ingest(
