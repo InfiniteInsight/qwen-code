@@ -11274,6 +11274,11 @@
         // parent tool call id -> the tool row whose child frames the model
         // keeps, for every Agent row on the page, running or settled.
         stream: new Map(),
+        // The Agent rows the stream has touched during the turn now running.
+        // Only these count as running on the stream's word: an Agent row from
+        // an earlier turn that never saw its settle (a crash, a replay cut
+        // short) must not read as running because some later turn is.
+        liveSubs: new Set(),
       };
       var agentSheet = {
         open: false,
@@ -11343,10 +11348,19 @@
           return;
         }
         const it = ev.item;
-        if (!it || it.kind !== 'tool' || !it.sub || !it.toolCallId) return;
+        if (!it || it.kind !== 'tool' || !it.toolCallId) return;
+        if (turnRunning()) agentsState.liveSubs.add(it.toolCallId);
+        if (!it.sub) return;
         agentsState.stream.set(it.toolCallId, it);
         agentsSoon(it);
       });
+      function agentStreamLive(item) {
+        return (
+          !!item &&
+          turnRunning() &&
+          agentsState.liveSubs.has(item.toolCallId)
+        );
+      }
 
       // One agent as the screen draws it, from its roster row, its stream row,
       // or both. The stream is live and the roster is up to a poll old, so a
@@ -11364,7 +11378,7 @@
               : sub.failed
                 ? 'failed'
                 : 'completed';
-        } else if (sub && turnRunning()) {
+        } else if (sub && agentStreamLive(item)) {
           state = 'running';
         } else if (row) {
           state = row.status;
@@ -11420,11 +11434,10 @@
           if (r.id) seen.add(r.id);
           out.push(agentView(r, agentStreamItem(r.toolUseId)));
         }
-        if (turnRunning()) {
-          for (const [ref, it] of agentsState.stream) {
-            if (seen.has(ref) || !it.sub || it.sub.done) continue;
-            out.push(agentView(null, it));
-          }
+        for (const [ref, it] of agentsState.stream) {
+          if (seen.has(ref) || !it.sub || it.sub.done) continue;
+          if (!agentStreamLive(it)) continue;
+          out.push(agentView(null, it));
         }
         const rank = (v) =>
           v.state === 'running' ? 0 : v.state === 'paused' ? 1 : 2;
@@ -11555,6 +11568,7 @@
         agentsState.err = '';
         agentsState.reading = false;
         agentsState.stops.clear();
+        agentsState.liveSubs.clear();
         agentsState.wasLive = false;
         agentSheet.usage.clear();
         agentSheet.lineage = null;
@@ -11570,6 +11584,7 @@
         syncAgentsForSession();
         if (running !== agentsState.wasLive) {
           agentsState.wasLive = running;
+          if (!running) agentsState.liveSubs.clear();
           if (watchedSessionId) agentsSchedule(running ? 0 : 400);
         }
         renderAgentsChrome();

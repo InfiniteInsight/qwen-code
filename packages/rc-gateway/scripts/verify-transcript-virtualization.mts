@@ -26345,6 +26345,38 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P408 the stream counts an agent as running only in the turn running now: one left unsettled by an earlier turn is not counted, a new one is at once',
+  frames: () => runningAgentFrames(),
+  stub: { capabilitiesFeatures: AGENT_FEATURES },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 3, 15_000);
+    // The roster is empty throughout, so whatever the chip says is the
+    // stream's word alone.
+    await waitChip(page, '1 agent');
+    // The turn ends without its Agent row ever settling, as a crash leaves it.
+    await page.evaluate(() => endTurn());
+    await waitChip(page, null);
+    await page.evaluate(() =>
+      __pg.update({ sessionUpdate: 'user_message_chunk', content: { text: 'next question' } }),
+    );
+    await page.waitForFunction(() => turnRunning(), null, { timeout: 5_000 });
+    await page.waitForTimeout(1_500);
+    const stale = await agentsChipState(page);
+    expect(stale!.hidden, `an Agent row from the turn before counts as running (${JSON.stringify(stale)})`);
+    await page.evaluate(() => {
+      __pg.update({ sessionUpdate: 'tool_call', toolCallId: 'tc-new', title: 'Agent', status: 'in_progress' });
+      __pg.update({ sessionUpdate: 'agent_message_chunk', content: { text: 'on it' }, _meta: { parentToolCallId: 'tc-new', subagentType: 'Explore' } });
+    });
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    const rows = await waitSheetRows(page, 1);
+    expect(rows[0]!.key === 'tc-new' && rows[0]!.state === 'running', `the sheet lists ${JSON.stringify(rows)}`);
+    return `"1 agent" from the stream; gone when the turn ended unsettled; not counted in the next turn; a new Agent row counted at once and listed before any roster names it`;
+  },
+});
+
 // The inline block's trace button, on the view alone: offered only when the
 // page says it can draw a trace, kept once the child settles, and a tap hands
 // the page the parent Agent row. Each builds a view of its own over a fresh
