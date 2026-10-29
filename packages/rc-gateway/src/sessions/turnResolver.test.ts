@@ -126,4 +126,48 @@ describe('resolveTurn', () => {
       error: 'rewind_not_applicable',
     });
   });
+
+  it('does not count notification or mid-turn user records, which the daemon index excludes', () => {
+    const sub = (uuid: string, subtype: string): ForkRecord => ({
+      uuid,
+      type: 'user',
+      subtype,
+      message: { role: 'user', parts: [] },
+    });
+    const records = [
+      userRec('u0'), // 0 - turn 0
+      assistantRec('a0'), // 1
+      sub('n0', 'notification'), // 2 - delivered as a task-notification turn
+      assistantRec('a1'), // 3
+      sub('m0', 'mid_turn_user_message'), // 4 - rides with tool results
+      userRec('u1'), // 5 - turn 1
+    ];
+    expect(resolveTurn(records, 1)).toEqual({
+      ok: true,
+      targetTurnIndex: 1,
+      addressableTurnCount: 2,
+      truncatedEventId: 5,
+    });
+    expect(resolveTurn(records, 2)).toMatchObject({
+      ok: true,
+      truncatedEventId: records.length,
+    });
+    expect(resolveTurn(records, 3)).toEqual({
+      ok: false,
+      error: 'rewind_not_applicable',
+    });
+  });
+
+  it('still counts a cron turn: the daemon counts those as user prompts', () => {
+    const records: ForkRecord[] = [
+      userRec('u0'),
+      { uuid: 'c0', type: 'user', subtype: 'cron' },
+      userRec('u1'),
+    ];
+    expect(resolveTurn(records, 1)).toMatchObject({
+      ok: true,
+      addressableTurnCount: 3,
+      truncatedEventId: 1,
+    });
+  });
 });
