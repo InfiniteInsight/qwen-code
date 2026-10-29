@@ -21,6 +21,7 @@ import type { OwnerEventBus } from '../ownerEvents.js';
 import type { PushNotifier } from '../webpush/notifier.js';
 import { getSharedWal, type SessionWal } from '../wal.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
+import { activeBranch } from './activeBranch.js';
 
 /**
  * The daemon surface this route needs: `rewindSession` plus
@@ -265,7 +266,13 @@ export function createRewindRoute(
         return;
       }
 
-      const resolved = resolveTurn(records, body.toTurn);
+      // Count turns on the LIVE branch only: a previous rewind leaves the
+      // abandoned branch's user lines in the file, and the daemon's snapshot
+      // list counts only the live ones. `truncatedEventId` comes back as an
+      // index into the live list; map it to the raw file position so it names
+      // the record it says it does (the tip stays "end of the file").
+      const live = activeBranch(records);
+      const resolved = resolveTurn(live.records, body.toTurn);
       if (!resolved.ok) {
         const status = resolved.error === 'invalid_turn' ? 400 : 409;
         res
@@ -273,8 +280,11 @@ export function createRewindRoute(
           .json({ error: resolved.error, code: resolved.error });
         return;
       }
-      const { targetTurnIndex, addressableTurnCount, truncatedEventId } =
-        resolved;
+      const { targetTurnIndex, addressableTurnCount } = resolved;
+      const truncatedEventId =
+        resolved.truncatedEventId >= live.records.length
+          ? records.length
+          : live.indices[resolved.truncatedEventId]!;
 
       // 3. Map `toTurn` onto the daemon's promptId-keyed rewind and proxy
       //    it. The daemon's snapshot `turnIndex` counts the same user turns

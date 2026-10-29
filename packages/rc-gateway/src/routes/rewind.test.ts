@@ -903,3 +903,76 @@ describe('POST /session/:id/rewind', () => {
     expect(((await res.json()) as { files?: unknown }).files).toBeUndefined();
   });
 });
+
+/**
+ * A transcript a previous rewind left a dead branch in: three turns, then a
+ * rewind back to keep one turn (the rewind record re-roots at a0), then one
+ * new turn on the live branch. Raw user lines: 4. Live user turns: 2.
+ */
+async function writeRewoundTranscript(): Promise<void> {
+  await mkdir(chatsDir, { recursive: true });
+  const base = { sessionId: SESSION_ID, cwd: CWD };
+  const records = [
+    { ...base, uuid: 'u0', parentUuid: null, type: 'user' },
+    { ...base, uuid: 'a0', parentUuid: 'u0', type: 'assistant' },
+    { ...base, uuid: 'u1', parentUuid: 'a0', type: 'user' },
+    { ...base, uuid: 'a1', parentUuid: 'u1', type: 'assistant' },
+    { ...base, uuid: 'u2', parentUuid: 'a1', type: 'user' },
+    { ...base, uuid: 'a2', parentUuid: 'u2', type: 'assistant' },
+    {
+      ...base,
+      uuid: 'rw',
+      parentUuid: 'a0',
+      type: 'system',
+      subtype: 'rewind',
+    },
+    { ...base, uuid: 'u1b', parentUuid: 'rw', type: 'user' },
+    { ...base, uuid: 'a1b', parentUuid: 'u1b', type: 'assistant' },
+  ];
+  await writeFile(
+    join(chatsDir, `${SESSION_ID}.jsonl`),
+    records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    'utf8',
+  );
+}
+
+describe('POST /session/:id/rewind after a previous rewind (dead branch)', () => {
+  it('keeping the tip is the tip: no daemon call, truncatedEventId is the raw record count', async () => {
+    await writeRewoundTranscript();
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+    });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 2 });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({ toTurn: 2, truncatedEventId: 9 });
+    expect(rewindCalls).toHaveLength(0);
+  });
+
+  it('a live-branch turn is named by its own record, not an abandoned one', async () => {
+    await writeRewoundTranscript();
+    const { daemon, rewindCalls } = fakeDaemon({
+      snapshots: makeSnapshots(2),
+    });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(202);
+    // Live turn 1 is u1b, raw index 7 (the dead u1 sits at raw index 2).
+    expect(await res.json()).toMatchObject({ toTurn: 1, truncatedEventId: 7 });
+    expect(rewindCalls).toEqual([
+      { id: SESSION_ID, promptId: `${SESSION_ID}########1` },
+    ]);
+  });
+
+  it('a turn past the live tip is rewind_not_applicable even if dead lines would cover it', async () => {
+    await writeRewoundTranscript();
+    const { daemon } = fakeDaemon({ snapshots: makeSnapshots(2) });
+    const url = await mount({ daemon });
+
+    const res = await postRewind(url, { toTurn: 3 });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'rewind_not_applicable' });
+  });
+});

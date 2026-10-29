@@ -31,6 +31,7 @@ import {
 import type { ForkRecord } from '../sessions/forkTranscript.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import { getSharedWal } from '../wal.js';
+import { activeBranch } from './activeBranch.js';
 
 /** The daemon surface this route needs: `loadSession` (restore the freshly
  * written fork as a live session) plus `resumeSession` — the pool-ownership
@@ -250,8 +251,14 @@ export function createForkRoute(
       return;
     }
 
+    // A turn-addressed fork slices the LIVE branch. A previous rewind leaves
+    // the abandoned branch's records in the file; counting and slicing the raw
+    // list would both mis-number the turns and copy dead records into the
+    // fork, which `forkRecords` then chains in as live history.
+    let liveSlice: ForkRecord[] | undefined;
     if (hasFromTurn) {
-      const resolved = resolveTurn(allRecords, body.fromTurn);
+      const live = activeBranch(allRecords);
+      const resolved = resolveTurn(live.records, body.fromTurn);
       if (!resolved.ok) {
         const status = resolved.error === 'invalid_turn' ? 400 : 409;
         res
@@ -259,7 +266,12 @@ export function createForkRoute(
           .json({ error: resolved.error, code: resolved.error });
         return;
       }
-      fromEventId = resolved.truncatedEventId;
+      // The WAL coordinate and fork header keep naming a raw record position.
+      fromEventId =
+        resolved.truncatedEventId >= live.records.length
+          ? allRecords.length
+          : live.indices[resolved.truncatedEventId]!;
+      liveSlice = live.records.slice(0, resolved.truncatedEventId);
     }
 
     // Apply fromEventId slicing: when present, take only the first fromEventId
@@ -268,9 +280,11 @@ export function createForkRoute(
     const records =
       transcriptMode === 'empty'
         ? []
-        : fromEventId !== undefined
-          ? allRecords.slice(0, fromEventId)
-          : allRecords;
+        : liveSlice !== undefined
+          ? liveSlice
+          : fromEventId !== undefined
+            ? allRecords.slice(0, fromEventId)
+            : allRecords;
 
     // 5. Replicate forkSession's copy and write the new file exclusively.
     const newId = randomId();
