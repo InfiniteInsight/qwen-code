@@ -62,8 +62,10 @@ import {
   pendingHistoryItemsOf,
   pendingToolCallsOf,
   projectDaemonEvent,
+  projectReplaySnapshot,
   thoughtOf,
   type DaemonFrame,
+  type DaemonReplaySnapshotFrames,
   type PendingPermission,
 } from './projectDaemonEvent.js';
 import { buildDaemonConfirmation } from './daemonConfirmation.js';
@@ -85,6 +87,25 @@ export interface DaemonPermissionResponse {
 export interface DaemonSessionDriver {
   /** This client's daemon clientId; required so the daemon's self-echo is dropped. */
   readonly clientId?: string;
+  /**
+   * The transcript `DaemonSessionClient.load` retained from the load response.
+   * The live stream resumes AFTER it (its first frame is `replay_complete`
+   * with `replayedCount: 0`), so it is the only source of what was said before
+   * this client attached. Drained into history once, before subscribing.
+   */
+  readonly replaySnapshot?: DaemonReplaySnapshotFrames;
+  /** Release the retained snapshot once it has been committed to history. */
+  consumeReplaySnapshot?: () => unknown;
+  /** Older persisted records precede the snapshot. */
+  readonly historyHasMore?: boolean;
+  /** The persisted replay was only partly reconstructed. */
+  readonly replayPartial?: boolean;
+  /** The daemon's compaction failed at least once; the snapshot may lag. */
+  readonly replayDegraded?: boolean;
+  /** The load attached to a session with a prompt in flight. */
+  readonly hasActivePrompt?: boolean;
+  /** The cursor the first live subscription resumes after. */
+  readonly lastEventId?: number;
   events(opts?: {
     signal?: AbortSignal;
   }): AsyncGenerator<DaemonFrame, void, unknown>;
@@ -141,6 +162,10 @@ export function useDaemonStream(
   const streamingResponseLengthRef = useRef(0);
   const addItemRef = useRef(addItem);
   addItemRef.current = addItem;
+  // The driver whose replay snapshot has been committed. A ref (not state) so
+  // StrictMode's effect re-run on the same instance sees it and never seeds a
+  // second copy of the transcript.
+  const seededDriverRef = useRef<DaemonSessionDriver | null>(null);
 
   // Fold one frame into the projection and reflect it in the UI. Shared by the
   // event loop and the prompt()-resolution finalizer.
@@ -183,6 +208,35 @@ export function useDaemonStream(
   );
 
   useEffect(() => {
+    // Seed the conversation so far, ONCE per driver, synchronously, before the
+    // live loop below subscribes, so no live frame can land ahead of it. Items
+    // are appended through `addItem` like any live commit: history grows from
+    // empty while MainContent's progressive <Static> replay catches up, and
+    // nothing bumps the Static remount key (the #3899 path is never taken).
+    if (seededDriverRef.current !== driver) {
+      seededDriverRef.current = driver;
+      const replay = driver.replaySnapshot;
+      if (replay) {
+        const { state, committed } = projectReplaySnapshot(replay, {
+          ownClientId: driver.clientId,
+          lastEventId: driver.lastEventId,
+          hasActivePrompt: driver.hasActivePrompt,
+          historyHasMore: driver.historyHasMore,
+          replayPartial: driver.replayPartial,
+          replayDegraded: driver.replayDegraded,
+        });
+        dbg(
+          `replay seed compacted=${replay.compactedReplay.length} live=${replay.liveJournal.length} committed=${committed.length} -> state=${state.streamingState} lastEventId=${state.lastEventId ?? '∅'}`,
+        );
+        stateRef.current = state;
+        for (const item of committed) addItemRef.current(item, now());
+        streamingResponseLengthRef.current = state.pendingText.length;
+        setSnapshot(state);
+        // The raw wire events are in history now; let the client drop them.
+        driver.consumeReplaySnapshot?.();
+      }
+    }
+
     const ac = new AbortController();
     let disposed = false;
 

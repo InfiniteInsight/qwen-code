@@ -57,9 +57,10 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
           baseUrl: daemonUrl,
           token: daemonToken,
         });
-        // With an id, load THAT session (already seeded with history replay by
-        // the SDK). Without one, omit workspaceCwd → the daemon's bound
-        // workspace session.
+        // With an id, load THAT session. The SDK retains the load response's
+        // transcript on `replaySnapshot` (the live stream resumes after it);
+        // `useDaemonStream` commits it to history before subscribing. Without
+        // an id, omit workspaceCwd and get the daemon's bound workspace session.
         const session = sessionId
           ? await DaemonSessionClient.load(client, sessionId)
           : await DaemonSessionClient.createOrAttach(client, {});
