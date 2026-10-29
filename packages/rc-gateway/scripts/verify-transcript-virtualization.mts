@@ -7985,7 +7985,7 @@ PAGE_SCENARIOS.push({
       () => {
         const f = document.getElementById('session-footer');
         const t = f ? f.textContent ?? '' : '';
-        return t.includes('65.5k/262.1k') ? t : null;
+        return t.includes('65.5k of 262.1k tokens') ? t : null;
       },
       null,
       { timeout: 15_000 },
@@ -22413,6 +22413,91 @@ PAGE_SCENARIOS.push({
     return `the picture and its caption drew as one row (${JSON.stringify(users[0])}) after ${asked.length} reads`;
   },
 });
+
+
+// #177. The G1 findings that were still open after the dark shell, read against
+// the H1 page that replaced the rail, the drawer and the tab bar. Each
+// scenario names the finding, runs at 390x844 and, where the layout differs,
+// at 1100x810, and saves a shot when SHOTS names a directory.
+{
+  const G177_SIZES = [
+    { width: 390, height: 844 },
+    { width: 1100, height: 810 },
+  ] as const;
+  const g177Frames = (): Frame[] => {
+    const f = new Frames();
+    for (let i = 1; i <= 14; i++) {
+      f.user(`p300 question ${i}`).asst(
+        `p300 answer ${i} ` + 'lorem ipsum dolor sit amet consectetur '.repeat(6),
+      ).done();
+    }
+    return f.list;
+  };
+  const g177Settle = async (page: Page): Promise<void> => {
+    await page.waitForTimeout(250);
+    await frames3(page);
+  };
+  const g177Ready = async (page: Page, viewer: Viewer): Promise<void> => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 14 * 3, 30_000);
+    await page.waitForFunction('ctxInfo && ctxUsage', null, { timeout: 15_000 });
+    await settlePage(page);
+  };
+
+  const openMore = async (page: Page): Promise<void> => {
+    if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
+  };
+  const closeMore = (page: Page): Promise<void> => openPanel(page, 'chat');
+
+  PAGE_SCENARIOS.push({
+    name: 'P300 the inspector sheet reads in words: the context fill says tokens and of, the folder and the keep-this-mode box carry labels, at 390 and 1100',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        await openSheet(page);
+        await g177Settle(page);
+        const r = (await page.evaluate(`(() => {
+          const f = document.getElementById('session-footer');
+          const rows = Array.from(f.querySelectorAll('.sh-row')).map((row) => ({
+            label: (row.querySelector('.sh-lbl') || {}).textContent || '',
+            text: row.textContent || '',
+          }));
+          const box = document.getElementById('footer-mode-persist');
+          return {
+            rows,
+            text: f.textContent || '',
+            keepLabel: box && box.labels && box.labels[0] ? box.labels[0].textContent.trim() : '',
+            seg: f.querySelector('.seg') ? f.querySelector('.seg').getAttribute('aria-label') : '',
+            bare: /[0-9][kKmM]?\\/[0-9]/.test(f.textContent || ''),
+          };
+        })()`)) as { rows: { label: string; text: string }[]; text: string; keepLabel: string; seg: string | null; bare: boolean };
+        const ctx = r.rows.find((x) => x.label === 'Context');
+        expect(
+          !!ctx && /65\.5k of 262\.1k tokens/.test(ctx.text),
+          `${size.width}: the Context row reads ${JSON.stringify(ctx && ctx.text)}, not the fill in words ("65.5k of 262.1k tokens")`,
+        );
+        expect(!r.bare, `${size.width}: a bare n/n fill is left in the sheet (${JSON.stringify(r.text)})`);
+        expect(
+          r.rows.some((x) => x.label === 'Folder on host' && x.text.length > 'Folder on host'.length),
+          `${size.width}: no Folder on host row with a path (${JSON.stringify(r.rows)})`,
+        );
+        expect(
+          /new conversations here/.test(r.keepLabel) && r.seg === 'Approval mode',
+          `${size.width}: the persist checkbox is labelled ${JSON.stringify(r.keepLabel)} and the mode group ${JSON.stringify(r.seg)}`,
+        );
+        await shot(page, `p300-sheet-${size.width}`);
+        lines.push(`${size.width}: Context "${ctx!.text}"`);
+        await page.click('#h1-status');
+      }
+      return lines.join('; ');
+    },
+  });
+
+}
 
 
 async function runPageSection(): Promise<Result[]> {

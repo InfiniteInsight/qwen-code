@@ -6480,6 +6480,25 @@
         return '';
       }
 
+      // #177. The sheet's Context row says what the numbers are: tokens, and
+      // how many of the window. The status line keeps the short n/n form
+      // (fillText) for its 390px width.
+      function fillWords() {
+        if (ctxUsage) {
+          return (
+            (ctxUsage.estimated ? '~' : '') +
+            fmtK(ctxUsage.total) +
+            ' of ' +
+            fmtK(ctxUsage.window) +
+            ' tokens'
+          );
+        }
+        if (liveIn > 0 || liveOut > 0) {
+          return fmtK(liveIn) + ' tokens in, ' + fmtK(liveOut) + ' out';
+        }
+        return '';
+      }
+
       // #192. Host actions: programs on the gateway's host that the owner
       // listed in ~/.qwen/rc/host-actions.json, the Windows tray launcher
       // first among them. When the launcher is down, a conversation started
@@ -6826,7 +6845,7 @@
           t.textContent = ctxInfo.modeName;
           f.append(row('Mode', t));
         }
-        const fill = fillText();
+        const fill = fillWords();
         // #187: the conversation's cost beside its fill, once Usage has read
         // it (sessionCostText); before that the line is the fill alone.
         const cost = sessionCostText();
