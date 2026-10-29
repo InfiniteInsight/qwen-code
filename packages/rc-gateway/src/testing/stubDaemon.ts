@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { DaemonSessionSummary } from '@qwen-code/sdk';
@@ -26,6 +27,25 @@ const STUB_SUPPORTED_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+
+/** #123: what GET /file answers for any path the stub has not written. */
+const STUB_FILE_TEXT = '# hello\n';
+/** #123: the fixed mtime GET /stat reports (2026-01-01T00:00:00Z). */
+const STUB_FILE_MTIME_MS = 1767225600000;
+
+/** The daemon's content hash: `sha256:` and the hex digest of the UTF-8. */
+function stubContentHash(text: string): string {
+  return `sha256:${createHash('sha256').update(text, 'utf-8').digest('hex')}`;
+}
+
+/** The daemon's fs refusal envelope (sendFsError, workspace-file-read.ts). */
+function stubFsError(
+  errorKind: string,
+  error: string,
+  status: number,
+): { errorKind: string; error: string; status: number } {
+  return { errorKind, error, status };
+}
 
 export interface StubDaemon {
   baseUrl: string;
@@ -109,6 +129,26 @@ export interface StubDaemon {
   lastFileQuery: Record<string, unknown> | undefined;
   /** Query the most recent GET /file/bytes request carried. */
   lastFileBytesQuery: Record<string, unknown> | undefined;
+  /** #123: query the most recent GET /stat carried. */
+  lastStatQuery: Record<string, unknown> | undefined;
+  /** #123: body the most recent POST /file/write carried. */
+  lastFileWrite: Record<string, unknown> | undefined;
+  /** #123: body the most recent POST /file/edit carried. */
+  lastFileEdit: Record<string, unknown> | undefined;
+  /** #123: what the most recent POST /file/upload carried. */
+  lastFileUpload:
+    | { path: unknown; contentType: string | undefined; byteLength: number }
+    | undefined;
+  /** #123: the decoded workspace selector and path of the most recent
+   * POST /workspaces/:workspace/file/delete. */
+  lastFileDelete: { workspace: string; path: unknown } | undefined;
+  /**
+   * #123: the files this stub has written (path -> text), by write, edit or
+   * upload. GET /file and GET /stat answer from here first, so a write is
+   * read back, and a test can change a file under a reader the way another
+   * client would, to drive a stale save.
+   */
+  workspaceFiles: Map<string, string>;
   /**
    * Query the most recent GET /session/:id/transcript request carried. The
    * gateway relays the caller's paging parameters untouched, so a test can
@@ -606,6 +646,25 @@ export interface StubDaemonOptions {
   fileBytesErrorBody?: unknown;
   /** Full body for GET /file/bytes (overrides the default shape). */
   fileBytesResult?: unknown;
+  /** #123: status for GET /stat (default 200). Non-200 -> error body. */
+  statStatus?: number;
+  /** JSON body to return on a non-200 GET /stat response. */
+  statErrorBody?: unknown;
+  /**
+   * #123: force a status on POST /file/write, /file/edit, /file/upload or
+   * /workspaces/:workspace/file/delete. Unset, each answers as the daemon
+   * would from the stub's own file store (a create, a hash-checked replace,
+   * a numbered upload, a delete); set, it answers that status with the
+   * matching error body, so a refusal can be driven without staging one.
+   */
+  fileWriteStatus?: number;
+  fileWriteErrorBody?: unknown;
+  fileEditStatus?: number;
+  fileEditErrorBody?: unknown;
+  fileUploadStatus?: number;
+  fileUploadErrorBody?: unknown;
+  fileDeleteStatus?: number;
+  fileDeleteErrorBody?: unknown;
   /** Status for POST /session/:id/attachments (default 201). */
   attachmentUploadStatus?: number;
   /** JSON body to return on a non-201 POST /session/:id/attachments. */
@@ -728,6 +787,15 @@ export async function startStubDaemon(
     lastMemoryQuery: undefined as Record<string, unknown> | undefined,
     lastFileQuery: undefined as Record<string, unknown> | undefined,
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
+    lastStatQuery: undefined as Record<string, unknown> | undefined,
+    lastFileWrite: undefined as Record<string, unknown> | undefined,
+    lastFileEdit: undefined as Record<string, unknown> | undefined,
+    lastFileUpload: undefined as
+      | { path: unknown; contentType: string | undefined; byteLength: number }
+      | undefined,
+    lastFileDelete: undefined as
+      | { workspace: string; path: unknown }
+      | undefined,
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
     lastRecapSessionId: undefined as string | undefined,
@@ -781,7 +849,10 @@ export async function startStubDaemon(
   // type, so a JSON file would be claimed and drained here before this stub's
   // raw reader could count the bytes. Reuses the gateway's rule rather than
   // restating it, so the two sides cannot drift.
-  app.use(gateJsonBody(express.json()));
+  // #123: at the daemon's own JSON limit (`express.json({limit: '10mb'})`,
+  // cli/src/serve), so a file write the gateway lets through is not refused
+  // here by the 100 KB default a real daemon does not have.
+  app.use(gateJsonBody(express.json({ limit: '10mb' })));
 
   // -- Workspace control (rc-workspace-permissions) -------------------------
   // Daemon-global endpoints (no session id). Default responses mirror the
@@ -2136,6 +2207,18 @@ export async function startStubDaemon(
     );
   });
 
+  // #123: the file store the write routes below change. Any path the stub
+  // has not written reads as STUB_FILE_TEXT, as it always has; a written one
+  // reads back what was written; a deleted one is not there.
+  const stubFiles = {
+    written: new Map<string, string>(),
+    deleted: new Set<string>(),
+  };
+  const stubFileText = (p: string): string | undefined =>
+    stubFiles.deleted.has(p)
+      ? undefined
+      : (stubFiles.written.get(p) ?? STUB_FILE_TEXT);
+
   app.get('/file', (req, res) => {
     state.lastFileQuery = Object.fromEntries(
       Object.entries(req.query as Record<string, unknown>),
@@ -2146,23 +2229,285 @@ export async function startStubDaemon(
       return;
     }
     const target = String(req.query['path'] ?? 'README.md');
+    const text = stubFileText(target);
+    if (text === undefined && !opts.fileResult) {
+      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      return;
+    }
+    const content = text ?? STUB_FILE_TEXT;
+    const bytes = Buffer.byteLength(content, 'utf-8');
     res.status(200).json(
       opts.fileResult ?? {
         kind: 'file',
         path: target,
-        content: '# hello\n',
+        content,
         encoding: 'utf-8',
         bom: false,
         lineEnding: 'lf',
-        sizeBytes: 8,
-        returnedBytes: 8,
+        sizeBytes: bytes,
+        returnedBytes: bytes,
         truncated: false,
+        // The real read always carries the whole file's hash
+        // (workspace-file-read.ts), which a replace must send back.
+        hash: stubContentHash(content),
         matchedIgnore: null,
-        originalLineCount: 2,
+        originalLineCount: content.split('\n').length,
         nextCursor: null,
         hasMore: false,
       },
     );
+  });
+
+  // -- Workspace file writes (#123) --------------------------------------
+  // Shapes copied from packages/cli/src/serve/routes/workspace-file-write.ts
+  // and the stat handler in workspace-file-read.ts. Refusals use the
+  // daemon's fs envelope `{errorKind, error, hint?, status}`.
+
+  app.get('/stat', (req, res) => {
+    state.lastStatQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.statStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.statErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = req.query['path'];
+    if (typeof target !== 'string' || target.length === 0) {
+      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      return;
+    }
+    const text = stubFileText(target);
+    if (text === undefined) {
+      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      return;
+    }
+    res.status(200).json({
+      kind: 'stat',
+      path: target,
+      type: 'file',
+      sizeBytes: Buffer.byteLength(text, 'utf-8'),
+      modifiedMs: STUB_FILE_MTIME_MS,
+    });
+  });
+
+  app.post('/file/write', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.lastFileWrite = body;
+    if (opts.fileWriteStatus !== undefined) {
+      res
+        .status(opts.fileWriteStatus)
+        .json(opts.fileWriteErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = body['path'];
+    const content = body['content'];
+    const mode = body['mode'];
+    if (typeof target !== 'string' || target.length === 0) {
+      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      return;
+    }
+    if (typeof content !== 'string') {
+      res.status(400).json(stubFsError('parse_error', '`content` must be a string', 400));
+      return;
+    }
+    if (mode !== 'create' && mode !== 'replace') {
+      res.status(400).json(stubFsError('parse_error', '`mode` must be "create" or "replace"', 400));
+      return;
+    }
+    const expected = body['expectedHash'];
+    if (
+      (mode === 'replace' || expected !== undefined) &&
+      !(typeof expected === 'string' && /^sha256:[0-9a-f]{64}$/.test(expected))
+    ) {
+      res.status(400).json(stubFsError('parse_error', '`expectedHash` must match sha256:<64 lowercase hex chars>', 400));
+      return;
+    }
+    if (mode === 'create') {
+      if (stubFiles.written.has(target)) {
+        res.status(409).json(stubFsError('file_already_exists', `file already exists: ${target}`, 409));
+        return;
+      }
+    } else {
+      const current = stubFileText(target);
+      if (current === undefined) {
+        res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+        return;
+      }
+      const found = stubContentHash(current);
+      if (found !== expected) {
+        res.status(409).json({
+          ...stubFsError('hash_mismatch', `expected ${String(expected)}, found ${found}`, 409),
+          hint: 're-read the file and retry with the latest hash',
+        });
+        return;
+      }
+    }
+    stubFiles.written.set(target, content);
+    stubFiles.deleted.delete(target);
+    res.status(mode === 'create' ? 201 : 200).json({
+      kind: 'file_write',
+      path: target,
+      mode,
+      created: mode === 'create',
+      sizeBytes: Buffer.byteLength(content, 'utf-8'),
+      hash: stubContentHash(content),
+      encoding: 'utf-8',
+      bom: false,
+      lineEnding: 'lf',
+      matchedIgnore: null,
+    });
+  });
+
+  app.post('/file/edit', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.lastFileEdit = body;
+    if (opts.fileEditStatus !== undefined) {
+      res
+        .status(opts.fileEditStatus)
+        .json(opts.fileEditErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = body['path'];
+    const oldText = body['oldText'];
+    const newText = body['newText'];
+    const expected = body['expectedHash'];
+    if (typeof target !== 'string' || target.length === 0) {
+      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      return;
+    }
+    if (typeof oldText !== 'string' || typeof newText !== 'string') {
+      res.status(400).json(stubFsError('parse_error', '`oldText` must be a string', 400));
+      return;
+    }
+    if (!(typeof expected === 'string' && /^sha256:[0-9a-f]{64}$/.test(expected))) {
+      res.status(400).json(stubFsError('parse_error', '`expectedHash` must match sha256:<64 lowercase hex chars>', 400));
+      return;
+    }
+    const current = stubFileText(target);
+    if (current === undefined) {
+      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      return;
+    }
+    const found = stubContentHash(current);
+    if (found !== expected) {
+      res.status(409).json({
+        ...stubFsError('hash_mismatch', `expected ${expected}, found ${found}`, 409),
+        hint: 're-read the file and retry with the latest hash',
+      });
+      return;
+    }
+    const first = current.indexOf(oldText);
+    if (oldText.length === 0 || first < 0) {
+      res.status(422).json(stubFsError('text_not_found', 'oldText was not found', 422));
+      return;
+    }
+    if (current.indexOf(oldText, first + 1) >= 0) {
+      res.status(422).json(stubFsError('ambiguous_text_match', 'oldText matches more than once', 422));
+      return;
+    }
+    const next =
+      current.slice(0, first) + newText + current.slice(first + oldText.length);
+    stubFiles.written.set(target, next);
+    res.status(200).json({
+      kind: 'file_edit',
+      path: target,
+      replacements: 1,
+      sizeBytes: Buffer.byteLength(next, 'utf-8'),
+      hash: stubContentHash(next),
+      encoding: 'utf-8',
+      bom: false,
+      lineEnding: 'lf',
+      matchedIgnore: null,
+    });
+  });
+
+  app.post(
+    '/file/upload',
+    express.raw({ type: () => true, limit: '64mb' }),
+    (req, res) => {
+      const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      state.lastFileUpload = {
+        path: req.query['path'],
+        contentType: req.headers['content-type'],
+        byteLength: data.length,
+      };
+      if (opts.fileUploadStatus !== undefined) {
+        res
+          .status(opts.fileUploadStatus)
+          .json(opts.fileUploadErrorBody ?? { error: 'stub error' });
+        return;
+      }
+      const type = String(req.headers['content-type'] ?? '')
+        .split(';')[0]
+        .trim()
+        .toLowerCase();
+      if (type !== 'application/octet-stream') {
+        res.status(415).json({
+          errorKind: 'unsupported_media_type',
+          error: 'File uploads require application/octet-stream',
+          status: 415,
+        });
+        return;
+      }
+      const target = req.query['path'];
+      if (typeof target !== 'string' || target.length === 0) {
+        res.status(400).json(stubFsError('parse_error', '`path` query parameter is required', 400));
+        return;
+      }
+      // Never overwrite: an occupied name is numbered, as the daemon does.
+      const slash = target.lastIndexOf('/');
+      const dir = slash >= 0 ? target.slice(0, slash + 1) : '';
+      const base = target.slice(dir.length);
+      const dot = base.lastIndexOf('.');
+      const stem = dot > 0 ? base.slice(0, dot) : base;
+      const ext = dot > 0 ? base.slice(dot) : '';
+      let finalPath = target;
+      for (let n = 1; stubFiles.written.has(finalPath); n++) {
+        finalPath = `${dir}${stem} (${n})${ext}`;
+      }
+      const text = data.toString('utf-8');
+      stubFiles.written.set(finalPath, text);
+      stubFiles.deleted.delete(finalPath);
+      res.status(201).json({
+        kind: 'file_upload',
+        path: finalPath,
+        sizeBytes: data.length,
+        hash: `sha256:${createHash('sha256').update(data).digest('hex')}`,
+      });
+    },
+  );
+
+  app.post('/workspaces/:workspace/file/delete', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.lastFileDelete = { workspace: req.params.workspace, path: body['path'] };
+    if (opts.fileDeleteStatus !== undefined) {
+      res
+        .status(opts.fileDeleteStatus)
+        .json(opts.fileDeleteErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    // The daemon resolves the selector against its registry; this stub has
+    // one workspace, the one its capabilities name.
+    if (req.params.workspace !== (opts.workspaceCwd ?? '/stub/workspace')) {
+      res.status(400).json({
+        error: 'Requested workspace does not match this daemon',
+        code: 'workspace_mismatch',
+      });
+      return;
+    }
+    const target = body['path'];
+    if (typeof target !== 'string' || target.length === 0) {
+      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      return;
+    }
+    if (stubFileText(target) === undefined) {
+      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      return;
+    }
+    stubFiles.written.delete(target);
+    stubFiles.deleted.add(target);
+    res.status(200).json({ kind: 'file_delete', path: target });
   });
 
   app.get('/session/:id/status', (req, res) => {
@@ -2741,6 +3086,22 @@ export async function startStubDaemon(
     get lastFileBytesQuery() {
       return state.lastFileBytesQuery;
     },
+    get lastStatQuery() {
+      return state.lastStatQuery;
+    },
+    get lastFileWrite() {
+      return state.lastFileWrite;
+    },
+    get lastFileEdit() {
+      return state.lastFileEdit;
+    },
+    get lastFileUpload() {
+      return state.lastFileUpload;
+    },
+    get lastFileDelete() {
+      return state.lastFileDelete;
+    },
+    workspaceFiles: stubFiles.written,
     get lastTranscriptQuery() {
       return state.lastTranscriptQuery;
     },
