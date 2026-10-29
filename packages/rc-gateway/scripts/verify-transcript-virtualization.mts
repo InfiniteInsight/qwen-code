@@ -21190,6 +21190,106 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. Open on a search hit from another daemon watched that id on THIS
+  // gateway (a 404) after tearing down the current watch. The other daemon's
+  // own page is where that conversation lives, and the deep link is how a page
+  // is told which conversation to open.
+  const OTHER = 'http://127.0.0.1:9';
+  const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
+  const otherDaemon = async (page: Page, viewerUrl: string): Promise<void> => {
+    await page.evaluate(
+      `localStorage.setItem('qwen-rc:clients', ${JSON.stringify(JSON.stringify({ daemons: [{ name: 'here', url: viewerUrl, default: true }, { name: 'elsewhere', url: OTHER }] }))})`,
+    );
+  };
+  const otherLanding = async (page: Page, landed: string[]): Promise<void> => {
+    await page.route(`${OTHER}/**`, async (route) => {
+      const u = new URL(route.request().url());
+      if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS });
+      if (u.pathname === '/rc/search') {
+        return route.fulfill({
+          status: 200,
+          headers: CORS,
+          contentType: 'application/json',
+          body: JSON.stringify({ hits: [{ sessionId: 'otherdaemon-session-1', eventId: 'e', kind: 'user', ts: '2026-01-01T00:00:00Z', snippet: 'p244 over there' }], elapsedMs: 1 }),
+        });
+      }
+      if (u.pathname === '/rc/sessions') {
+        return route.fulfill({
+          status: 200,
+          headers: CORS,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessions: [{ sessionId: 'otherdaemon-session-1', title: 'p245 over there', updatedAt: '2026-01-01T00:00:00Z' }] }),
+        });
+      }
+      landed.push(u.pathname + u.search);
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>other gateway</title>' });
+    });
+  };
+
+  PAGE_SCENARIOS.push({
+    name: "P244 Open on a search hit from another daemon takes the page to that daemon's /ui/?session= and leaves this gateway's watch alone",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page, viewer }) => {
+      const landed: string[] = [];
+      await otherDaemon(page, viewer.url);
+      await otherLanding(page, landed);
+      await page.route(
+        (u) => u.origin === new URL(viewer.url).origin && u.pathname === '/rc/search',
+        (route) => json(route, { hits: [], elapsedMs: 1 }),
+      );
+      const streams = streamsOf(page, 'otherdaemon-session-1');
+      let aborted = false;
+      await go(page, A);
+      await page.exposeFunction('__p244Unwatched', () => {
+        aborted = true;
+      });
+      await page.evaluate(
+        `document.getElementById('stop').addEventListener('click', () => window.__p244Unwatched()); document.getElementById('search-q').value = 'p244'; document.getElementById('search-all-daemons').checked = true; void runSearch()`,
+      );
+      await page.waitForFunction("document.querySelector('#search-results .daemon-pill')", null, { timeout: 10_000 });
+      await page.evaluate("document.querySelector('#search-results .search-row button').click()");
+      await page.waitForURL(`${OTHER}/**`, { timeout: 10_000 });
+      expect(
+        landed.some((l) => l === '/ui/?session=otherdaemon-session-1'),
+        `the page went to ${JSON.stringify(landed)}, not the other daemon's /ui/?session=`,
+      );
+      expect(streams.length === 0, `this gateway was asked for the other daemon's session ${streams.length} time(s)`);
+      expect(!aborted, "the current watch was torn down before the other daemon's page opened");
+      return `went to ${OTHER}${landed[0]}; no stream asked of this gateway; the watch of A was not torn down first`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P245 a row in the all-daemons session list opens its conversation at that daemon's /ui/?session=, and in place for this gateway's own rows",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page, viewer }) => {
+      const landed: string[] = [];
+      await otherDaemon(page, viewer.url);
+      await otherLanding(page, landed);
+      await page.route(
+        // The list's own read has no folder; the open's probe of a folder does.
+        (u) => u.origin === new URL(viewer.url).origin && u.pathname === '/rc/sessions' && !u.searchParams.has('cwd'),
+        (route) => json(route, { sessions: [{ sessionId: B, title: 'p245 here', updatedAt: '2026-01-02T00:00:00Z' }] }),
+      );
+      await go(page, A);
+      await page.evaluate("void runAggregatedSessions()");
+      await page.waitForFunction("document.querySelectorAll('#daemons-sessions .agg-session-row').length === 2", null, { timeout: 10_000 });
+      // This gateway's own row opens in place (no reload onto a path it does not serve).
+      await page.evaluate("Array.from(document.querySelectorAll('#daemons-sessions .agg-session-row')).find((r) => r.textContent.includes('p245 here')).querySelector('.open').click()");
+      await onAir(page, B);
+      // The other daemon's row goes to its page.
+      await page.evaluate("Array.from(document.querySelectorAll('#daemons-sessions .agg-session-row')).find((r) => r.textContent.includes('p245 over there')).querySelector('.open').click()");
+      await page.waitForURL(`${OTHER}/**`, { timeout: 10_000 });
+      expect(
+        landed.some((l) => l === '/ui/?session=otherdaemon-session-1'),
+        `the other daemon's row went to ${JSON.stringify(landed)}`,
+      );
+      return `own row opened in place; the other daemon's row went to ${OTHER}${landed[0]}`;
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 

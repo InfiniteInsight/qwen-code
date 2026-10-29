@@ -16549,12 +16549,18 @@
               .slice(0, 16)
               .replace('T', ' ') +
             ')';
-          // Spec 4.5: clicking a session navigates to that daemon's
-          // /ui/session/<sid> (full navigation to the source daemon).
-          open.onclick = () =>
-            location.assign(
-              u.base + '/ui/session/' + encodeURIComponent(u.s.sessionId),
-            );
+          // Spec 4.5: clicking a session navigates to that daemon. #173: to its
+          // /ui/?session= deep link (the gateway serves no /ui/session/<sid>,
+          // so the old target was a 404), and in place for this gateway's own
+          // rows, which need no reload.
+          open.onclick = () => {
+            if (new URL(u.base).origin === location.origin) {
+              noteConversationSwitch();
+              void openConversationById(String(u.s.sessionId));
+              return;
+            }
+            location.assign(openOnDaemonUrl(u.base, u.s.sessionId));
+          };
           row.appendChild(open);
           out.appendChild(row);
         }
@@ -17123,7 +17129,18 @@
       // recency sort, timeout). THE riskiest line is rendering hit.snippet —
       // it is arbitrary transcript text (user/model/tool), so it goes through
       // textContent ONLY (never innerHTML), like every other server field.
-      function searchHitRow(h, daemonName) {
+      // #173: where another daemon opens a conversation named by id: its own
+      // page, on the deep link (/ui/ serves no per-session path).
+      function openOnDaemonUrl(daemonUrl, sessionId) {
+        return (
+          daemonUrl.replace(/\/+$/, '') +
+          '/ui/?session=' +
+          encodeURIComponent(sessionId)
+        );
+      }
+      // #173: `daemon` is the manifest entry the hit came from, or undefined
+      // for this gateway's own.
+      function searchHitRow(h, daemon) {
         const row = document.createElement('div');
         // Dedicated column layout (not .token-row's space-between flex) so the
         // snippet sits BENEATH the header and a long unbroken snippet wraps.
@@ -17132,7 +17149,7 @@
         // Multi-daemon fan-out (spec 4.7): tag each hit with its source
         // daemon. Omitted for the local (origin) daemon — its results stay
         // authoritative and render exactly as before.
-        if (daemonName) head.appendChild(daemonPill(daemonName));
+        if (daemon) head.appendChild(daemonPill(daemon.name));
         const label = document.createElement('span');
         label.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
         // Open (cycle 65): reuse the existing watch panel — hand straight to
@@ -17146,6 +17163,13 @@
           // replayed nothing. Nothing is torn down first: startWatch replaces
           // the live stream itself, and a stop here left the page empty while
           // the probe was still reading.
+          if (daemon) {
+            // Another daemon's conversation lives on that daemon: this page
+            // would watch the id on THIS gateway (a 404) after tearing down
+            // the current watch. Its own page opens it from the deep link.
+            location.assign(openOnDaemonUrl(daemon.url, h.sessionId));
+            return;
+          }
           if (!token()) return setStatus('pair first');
           noteConversationSwitch();
           void openConversationById(h.sessionId);
@@ -17287,7 +17311,7 @@
                   continue;
                 }
                 for (const h2 of v.hits)
-                  out.appendChild(searchHitRow(h2, v.d.name));
+                  out.appendChild(searchHitRow(h2, v.d));
               }
               // …then one footer note per failed / empty daemon (spec 4.7:
               // a daemon's absence must NOT fail the modal).
