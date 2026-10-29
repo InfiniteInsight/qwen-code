@@ -20,6 +20,7 @@
 import { useContext } from 'react';
 import { useDaemonStream } from './useDaemonStream.js';
 import {
+  DaemonLossContext,
   DaemonStreamContext,
   type DaemonAwareStreamHook,
 } from './DaemonStreamContext.js';
@@ -55,7 +56,8 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
       'useDaemonStreamAdapter requires a DaemonStreamContext driver (attach the session before rendering).',
     );
   }
-  const ds = useDaemonStream(driver, addItem);
+  const loss = useContext(DaemonLossContext);
+  const ds = useDaemonStream(driver, addItem, loss ?? undefined);
 
   return {
     streamingState: ds.streamingState,
