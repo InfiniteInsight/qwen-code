@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   TerminalRequestLog,
+  planAttachedTuiCommand,
   planTerminalCommand,
   terminalQwenArgv,
   defaultTerminalLogPath,
@@ -116,9 +117,58 @@ describe('TerminalRequestLog', () => {
 });
 
 describe('planTerminalCommand', () => {
-  it('builds an attach command carrying the token unmodified', () => {
+  it('runs the qwen-rc attach wrapper by session id and folder, with no daemon credentials', () => {
     const { linuxArgv, title } = planTerminalCommand(base);
     expect(linuxArgv).toEqual([
+      'qwen-rc',
+      'attach',
+      '--session',
+      '11111111-2222-3333-4444-555555555555',
+      base.workspaceCwd,
+    ]);
+    // The tab's argv is visible to every process on the host: the daemon
+    // endpoint comes from the gateway at run time instead.
+    expect(linuxArgv.join(' ')).not.toContain('tok with spaces');
+    expect(linuxArgv).not.toContain('--daemon-token');
+    expect(linuxArgv).not.toContain('--attach-daemon');
+    expect(title).toBe('qwen 11111111');
+  });
+
+  it('runs a caller-supplied qwen-rc argv ahead of the attach subcommand', () => {
+    const { linuxArgv } = planTerminalCommand(base, {
+      rcArgv: ['/usr/bin/node', '/fork/packages/rc-gateway/dist/cli.js'],
+    });
+    expect(linuxArgv.slice(0, 4)).toEqual([
+      '/usr/bin/node',
+      '/fork/packages/rc-gateway/dist/cli.js',
+      'attach',
+      '--session',
+    ]);
+  });
+
+  it('does not put the qwen argv on the tab: the wrapper learns it from the gateway', () => {
+    const { linuxArgv } = planTerminalCommand(base, {
+      qwenArgv: ['node', '/fork/packages/cli/dist/index.js'],
+    });
+    expect(linuxArgv).not.toContain('/fork/packages/cli/dist/index.js');
+  });
+
+  it('quotes shell-active characters only in the display form', () => {
+    const { linuxArgv, displayCommand } = planTerminalCommand({
+      ...base,
+      workspaceCwd: "/tmp/a b's",
+    });
+    // argv keeps raw values: the launcher uses execFile, no shell runs.
+    expect(linuxArgv).toContain("/tmp/a b's");
+    // The logged form stays paste-safe for a POSIX shell.
+    expect(displayCommand).toContain(`'/tmp/a b'\\''s'`);
+    expect(displayCommand.startsWith('wsl.exe --cd ')).toBe(true);
+  });
+});
+
+describe('planAttachedTuiCommand', () => {
+  it('builds the attach command carrying the token unmodified', () => {
+    expect(planAttachedTuiCommand(base)).toEqual([
       'qwen',
       '--attach-daemon',
       'http://127.0.0.1:46135',
@@ -127,31 +177,17 @@ describe('planTerminalCommand', () => {
       '--attach-session',
       '11111111-2222-3333-4444-555555555555',
     ]);
-    expect(title).toBe('qwen 11111111');
   });
 
   it('runs a caller-supplied qwen argv ahead of the attach flags', () => {
-    const { linuxArgv } = planTerminalCommand(base, {
+    const argv = planAttachedTuiCommand(base, {
       qwenArgv: ['node', '/fork/packages/cli/dist/index.js'],
     });
-    expect(linuxArgv.slice(0, 3)).toEqual([
+    expect(argv.slice(0, 3)).toEqual([
       'node',
       '/fork/packages/cli/dist/index.js',
       '--attach-daemon',
     ]);
-  });
-
-  it('quotes shell-active characters only in the display form', () => {
-    const { linuxArgv, displayCommand } = planTerminalCommand({
-      ...base,
-      workspaceCwd: '/tmp/a b',
-      daemonToken: "o'k",
-    });
-    // argv keeps raw values: the launcher uses execFile, no shell runs.
-    expect(linuxArgv).toContain("o'k");
-    // The logged form stays paste-safe for a POSIX shell.
-    expect(displayCommand).toContain("'/tmp/a b'");
-    expect(displayCommand).toContain(`'o'\\''k'`);
   });
 });
 

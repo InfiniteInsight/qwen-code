@@ -26,10 +26,14 @@ import { randomUUID } from 'node:crypto';
 export interface TerminalRequest {
   id: string;
   /** Conversation the tab should show. Carried for tab titles and for
-   * attach-by-id once the TUI grows `--attach-session`. */
+   * attach-by-id. */
   sessionId: string;
   workspaceCwd: string;
-  /** Loopback base URL of the daemon bound to `workspaceCwd`. */
+  /**
+   * Loopback base URL of the daemon bound to `workspaceCwd`. Kept in the log
+   * (the launcher validates it) although the tab's argv no longer carries it:
+   * the tab's `qwen-rc attach` asks the gateway for the live endpoint.
+   */
   daemonUrl: string;
   /** That daemon's `QWEN_SERVER_TOKEN`; never leaves the host filesystem. */
   daemonToken: string;
@@ -329,6 +333,14 @@ export interface TerminalPlanOptions {
    * second, unmirrored agent instead of attaching.
    */
   qwenArgv?: string[];
+  /**
+   * This gateway's own entry point (`qwen-rc`), as argv. A phone-opened tab runs
+   * `<rcArgv> attach --session <id> <cwd>` so it re-attaches when its daemon
+   * dies, instead of ending on a dead session. Defaults to `qwen-rc` on PATH;
+   * the gateway passes `process.execPath` + its own script so the tab runs the
+   * same build that wrote the request.
+   */
+  rcArgv?: string[];
 }
 
 /** The command a host terminal must run, as the gateway decided it. */
@@ -341,26 +353,25 @@ export interface TerminalCommand {
   displayCommand: string;
 }
 
+function titleFor(sessionId: string): string {
+  return `qwen ${sessionId.slice(0, 8)}`;
+}
+
 /**
- * Compose the command a host terminal runs to show one conversation.
+ * The TUI itself, attached to one daemon session: what `qwen-rc attach` runs
+ * as its child. `--attach-daemon` is what makes it a second client of the SAME
+ * daemon session.
  *
- * The gateway owns this so qwen's flag names live in exactly one place; the
- * Windows-side launcher only wraps it (`wsl.exe --cd … --exec …` inside a
- * `wt new-tab`) and never learns qwen's CLI. `--attach-daemon` is what makes
- * the terminal a second client of the SAME daemon session.
+ * The session id is passed explicitly: the web UI creates conversations with
+ * `scope:'thread'`, so a workspace's daemon holds several sessions and
+ * attaching to "the workspace session" would show the wrong conversation.
  */
-export function planTerminalCommand(
-  req: Pick<
-    TerminalRequest,
-    'sessionId' | 'workspaceCwd' | 'daemonUrl' | 'daemonToken'
-  >,
-  opts: TerminalPlanOptions = {},
-): TerminalCommand {
+export function planAttachedTuiCommand(
+  req: Pick<TerminalRequest, 'sessionId' | 'daemonUrl' | 'daemonToken'>,
+  opts: Pick<TerminalPlanOptions, 'qwenArgv'> = {},
+): string[] {
   const qwenArgv = opts.qwenArgv?.length ? opts.qwenArgv : ['qwen'];
-  // The session id is passed explicitly: the web UI creates conversations with
-  // `scope:'thread'`, so a workspace's daemon holds several sessions and
-  // attaching to "the workspace session" would show the wrong conversation.
-  const linuxArgv = [
+  return [
     ...qwenArgv,
     '--attach-daemon',
     req.daemonUrl,
@@ -369,9 +380,36 @@ export function planTerminalCommand(
     '--attach-session',
     req.sessionId,
   ];
+}
+
+/**
+ * Compose the command a host terminal runs to show one conversation.
+ *
+ * The gateway owns this so qwen's flag names live in exactly one place; the
+ * Windows-side launcher only wraps it (`wsl.exe --cd … --exec …` inside a
+ * `wt new-tab`) and never learns qwen's CLI.
+ *
+ * The tab runs `qwen-rc attach --session <id> <workspaceCwd>` rather than qwen:
+ * that wrapper asks the gateway for the daemon endpoint (so no daemon URL or
+ * token appears on the tab's argv, where `ps` would show it) and runs the TUI
+ * from {@link planAttachedTuiCommand}, re-attaching when the TUI reports its
+ * daemon gone. The wrapper process is what stays alive across re-attaches.
+ */
+export function planTerminalCommand(
+  req: Pick<TerminalRequest, 'sessionId' | 'workspaceCwd'>,
+  opts: TerminalPlanOptions = {},
+): TerminalCommand {
+  const rcArgv = opts.rcArgv?.length ? opts.rcArgv : ['qwen-rc'];
+  const linuxArgv = [
+    ...rcArgv,
+    'attach',
+    '--session',
+    req.sessionId,
+    req.workspaceCwd,
+  ];
   return {
     linuxArgv,
-    title: `qwen ${req.sessionId.slice(0, 8)}`,
+    title: titleFor(req.sessionId),
     // Quoted for a POSIX shell so it can be pasted/logged; the launcher runs
     // the argv through execFile and never touches a shell.
     displayCommand: [

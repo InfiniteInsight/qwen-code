@@ -37,6 +37,41 @@ describe('isSessionMirrored', () => {
     expect(await isSessionMirrored(SESSION, lister)).toBe(true);
   });
 
+  it('matches the qwen-rc attach wrapper, which outlives each TUI it runs', async () => {
+    const wrapper = (...rest: string[]) => [
+      'node',
+      '/opt/rc/dist/cli.js',
+      'attach',
+      ...rest,
+    ];
+    expect(
+      await isSessionMirrored(SESSION, async () => [
+        wrapper('--session', SESSION, '/srv/work'),
+      ]),
+    ).toBe(true);
+    expect(
+      await isSessionMirrored(SESSION, async () => [
+        wrapper('/srv/work', `--session=${SESSION}`),
+      ]),
+    ).toBe(true);
+  });
+
+  it('does not match a wrapper on another session or a longer id', async () => {
+    const lister = async () => [
+      ['node', 'cli.js', 'attach', '--session', 'other', '/srv/work'],
+      ['node', 'cli.js', 'attach', '--session', SESSION + '-x', '/srv/work'],
+    ];
+    expect(await isSessionMirrored(SESSION, lister)).toBe(false);
+  });
+
+  it('does not match a --session flag on a command that is not an attach', async () => {
+    const lister = async () => [
+      ['some-tool', '--session', SESSION],
+      ['some-tool', `--session=${SESSION}`, 'attach'],
+    ];
+    expect(await isSessionMirrored(SESSION, lister)).toBe(false);
+  });
+
   it('is false when nothing attaches to it', async () => {
     const lister = async () => [
       ['bash'],

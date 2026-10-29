@@ -57,7 +57,8 @@ export const LAUNCHER_STALE_MS = 3 * LAUNCHER_POLL_MS;
  * needs.
  *
  * When a terminal is already attached to the session on this host (a live
- * process whose argv carries `--attach-session <id>`, see `hostMirrors.ts`) the
+ * process whose argv carries `--attach-session <id>` or the wrapper's
+ * `attach --session <id>`, see `hostMirrors.ts`) the
  * route answers 200 `{ alreadyMirrored: true, sessionId }` and writes nothing:
  * no request, no audit record. A tab attached to a dead daemon still counts.
  *
@@ -132,12 +133,7 @@ export function createTerminalOpenRoute(
     }
 
     const command = planTerminalCommand(
-      {
-        sessionId,
-        workspaceCwd: endpoint.workspaceCwd,
-        daemonUrl: endpoint.url,
-        daemonToken: endpoint.token,
-      },
+      { sessionId, workspaceCwd: endpoint.workspaceCwd },
       planOpts,
     );
     const request = await requests.enqueue({

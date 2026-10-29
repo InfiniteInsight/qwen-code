@@ -284,6 +284,18 @@ describe('POST /rc/host/attach (create)', () => {
     ]);
   });
 
+  it('hands back the TUI argv, never the qwen-rc wrapper a phone-opened tab runs', async () => {
+    const { daemon } = fakePool();
+    const { url } = await mount(daemon, {
+      planOpts: { qwenArgv: QWEN, rcArgv: ['node', '/opt/rc/cli.js'] },
+    });
+    const res = await post(url, '/rc/host/attach', { cwd: workspace });
+    const argv = res.body.linuxArgv as string[];
+    expect(argv.slice(0, QWEN.length)).toEqual(QWEN);
+    expect(argv).not.toContain('attach');
+    expect(argv).not.toContain('/opt/rc/cli.js');
+  });
+
   it('defaults the command to qwen on PATH when no argv is configured', async () => {
     const { daemon } = fakePool();
     const { url } = await mount(daemon, { planOpts: {} });

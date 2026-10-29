@@ -138,6 +138,15 @@ describe('POST /rc/terminals', () => {
       workspaceCwd: ENDPOINT.workspaceCwd,
       daemonToken: 'secret-tok',
     });
+    // The tab runs the re-attaching wrapper, and its argv carries no secret.
+    expect(queued[0]?.linuxArgv).toEqual([
+      'qwen-rc',
+      'attach',
+      '--session',
+      SESSION,
+      ENDPOINT.workspaceCwd,
+    ]);
+    expect(JSON.stringify(queued[0]?.linuxArgv)).not.toContain('secret-tok');
   });
 
   it('reports the launcher live once its poll has been seen', async () => {

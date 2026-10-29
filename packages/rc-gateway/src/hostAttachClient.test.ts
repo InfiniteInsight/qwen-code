@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import type { SpawnSyncReturns } from 'node:child_process';
 import express from 'express';
 import {
+  classifyReattach,
   DEFAULT_GATEWAY_PORT,
   hostAttachTokenPath,
   parseAttachArgs,
@@ -426,5 +427,229 @@ describe('runHostAttach', () => {
     const { code, lines } = await run(['--bogus']);
     expect(code).toBe(2);
     expect(lines.join('\n')).toContain('qwen-rc attach [cwd] [--session <id>]');
+  });
+});
+
+describe('classifyReattach', () => {
+  const args = { cwd: '/srv/w', sessionId: SESSION };
+  const target: GatewayLoopbackTarget = { host: '127.0.0.1', port: 8443 };
+  const res = (status: number, body: Record<string, unknown> = {}) => ({
+    res: { status, body },
+  });
+
+  it('is ready on a 200 that names a session and an argv', () => {
+    expect(
+      classifyReattach(
+        res(200, {
+          sessionId: SESSION,
+          workspaceCwd: '/srv/canon',
+          linuxArgv: ['qwen', '--x'],
+        }),
+        args,
+        target,
+      ),
+    ).toEqual({
+      kind: 'ready',
+      linuxArgv: ['qwen', '--x'],
+      workspaceCwd: '/srv/canon',
+    });
+  });
+
+  it('retries 502 and 503', () => {
+    for (const status of [502, 503]) {
+      expect(classifyReattach(res(status), args, target).kind).toBe('retry');
+    }
+  });
+
+  it('retries when no gateway is answering yet', () => {
+    for (const code of ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT']) {
+      const err = Object.assign(new Error('x'), { code });
+      expect(classifyReattach({ err }, args, target).kind).toBe('retry');
+    }
+  });
+
+  it('stops on a 404 with the session_not_found line', () => {
+    const got = classifyReattach(
+      res(404, { code: 'session_not_found', error: 'Session not found' }),
+      args,
+      target,
+    );
+    expect(got).toEqual({
+      kind: 'stop',
+      message: `qwen-rc attach: no conversation ${SESSION} in /srv/w (session_not_found)`,
+    });
+  });
+
+  it('stops on 401, 403, 400 and 409', () => {
+    for (const status of [401, 403, 400, 409]) {
+      expect(classifyReattach(res(status), args, target).kind).toBe('stop');
+    }
+  });
+
+  it('stops on a 200 with no session in it', () => {
+    expect(classifyReattach(res(200, {}), args, target).kind).toBe('stop');
+  });
+
+  it('stops on a TLS verification failure rather than waiting on it', () => {
+    const err = Object.assign(new Error('bad cert'), {
+      code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    });
+    const got = classifyReattach({ err }, args, target);
+    expect(got.kind).toBe('stop');
+  });
+});
+
+describe('runHostAttach re-attach', () => {
+  const READY = (tag: string) => ({
+    status: 200,
+    body: {
+      sessionId: SESSION,
+      workspaceCwd: '/srv/w',
+      linuxArgv: ['fake-qwen', `--${tag}`],
+    },
+  });
+
+  async function reattachRun(opts: {
+    statuses: Array<number | null>;
+    answers: Array<{ status: number; body: Record<string, unknown> } | Error>;
+    deps?: Partial<HostAttachRunDeps>;
+  }) {
+    await loadOrCreateLocalToken(hostAttachTokenPath(rcDir));
+    const statuses = [...opts.statuses];
+    const answers = [...opts.answers];
+    const spawned: string[][] = [];
+    const paths: string[] = [];
+    const bodies: unknown[] = [];
+    const slept: number[] = [];
+    const lines: string[] = [];
+    let clock = 0;
+    const code = await runHostAttach({
+      argv: ['--session', SESSION, '/srv/w'],
+      cwd: rcDir,
+      rcDir,
+      stderr: (l) => lines.push(l),
+      spawn: ((cmd: string, args: string[]) => {
+        spawned.push([cmd, ...args]);
+        clock += 60_000;
+        return {
+          status: statuses.shift() ?? 0,
+          signal: null,
+          pid: 1,
+          output: [],
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.alloc(0),
+        };
+      }) as unknown as HostAttachRunDeps['spawn'],
+      request: (async (
+        _t: unknown,
+        _tok: string,
+        path: string,
+        body: unknown,
+      ) => {
+        paths.push(path);
+        bodies.push(body);
+        const a = answers.shift();
+        if (a === undefined) throw new Error('unscripted request');
+        if (a instanceof Error) throw a;
+        return a;
+      }) as unknown as HostAttachRunDeps['request'],
+      shieldSignals: () => () => {},
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+      now: () => clock,
+      watchInterrupt: () => () => {},
+      ...opts.deps,
+    });
+    return { code, spawned, paths, bodies, slept, lines };
+  }
+
+  it('relaunches the TUI with the new argv after it exits 75', async () => {
+    const out = await reattachRun({
+      statuses: [75, 0],
+      answers: [READY('first'), READY('second')],
+    });
+    expect(out.code).toBe(0);
+    expect(out.spawned).toEqual([
+      ['fake-qwen', '--first'],
+      ['fake-qwen', '--second'],
+    ]);
+    // The re-attach asks by id with the workspace it already has.
+    expect(out.paths).toEqual([
+      `/rc/host/attach/${SESSION}`,
+      `/rc/host/attach/${SESSION}`,
+    ]);
+    expect(out.bodies[1]).toEqual({ cwd: '/srv/w' });
+    expect(out.lines).toEqual([
+      `attached ${SESSION} in /srv/w`,
+      `daemon gone, re-attaching ${SESSION}…`,
+    ]);
+  });
+
+  it('waits through 503s, 502s and a closed port, then relaunches', async () => {
+    const out = await reattachRun({
+      statuses: [75, 3],
+      answers: [
+        READY('first'),
+        { status: 503, body: { code: 'workspace_pool_full' } },
+        { status: 502, body: { code: 'daemon_unavailable' } },
+        Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }),
+        READY('second'),
+      ],
+    });
+    expect(out.code).toBe(3);
+    expect(out.slept).toEqual([1000, 2000, 4000]);
+    expect(out.spawned[1]).toEqual(['fake-qwen', '--second']);
+  });
+
+  it('exits 1 with the reason when the session is gone (404)', async () => {
+    const out = await reattachRun({
+      statuses: [75],
+      answers: [
+        READY('first'),
+        { status: 404, body: { code: 'session_not_found' } },
+      ],
+    });
+    expect(out.code).toBe(1);
+    expect(out.lines.at(-1)).toBe(
+      `qwen-rc attach: no conversation ${SESSION} in /srv/w (session_not_found)`,
+    );
+    expect(out.spawned).toHaveLength(1);
+  });
+
+  it('exits 1 when the gateway refuses the token (401) mid-wait', async () => {
+    const out = await reattachRun({
+      statuses: [75],
+      answers: [READY('first'), { status: 401, body: {} }],
+    });
+    expect(out.code).toBe(1);
+    expect(out.lines.at(-1)).toContain('refused the host-attach token');
+  });
+
+  it('passes a non-75 TUI exit straight through without asking the gateway again', async () => {
+    const out = await reattachRun({
+      statuses: [7],
+      answers: [READY('first')],
+    });
+    expect(out.code).toBe(7);
+    expect(out.paths).toHaveLength(1);
+  });
+
+  it('exits 130 on Ctrl-C during the wait', async () => {
+    let interrupt: (() => void) | undefined;
+    const out = await reattachRun({
+      statuses: [75],
+      answers: [READY('first'), { status: 503, body: {} }],
+      deps: {
+        watchInterrupt: (fn) => {
+          interrupt = fn;
+          return () => {};
+        },
+        sleep: async () => interrupt?.(),
+      },
+    });
+    expect(out.code).toBe(130);
+    expect(out.spawned).toHaveLength(1);
   });
 });

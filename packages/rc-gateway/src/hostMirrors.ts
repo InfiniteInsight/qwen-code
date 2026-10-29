@@ -8,7 +8,9 @@
  * Is a host terminal already showing this conversation? (issue #194, slice C)
  *
  * A host terminal is a TUI started as `qwen --attach-daemon <url>
- * --daemon-token <t> --attach-session <id>` on the same machine as the gateway.
+ * --daemon-token <t> --attach-session <id>` on the same machine as the gateway,
+ * run under the `qwen-rc attach --session <id> <cwd>` wrapper (slice E) that
+ * re-attaches it when its daemon dies.
  * The launcher coalesces duplicate requests for one session only within a few
  * seconds, so picking the same conversation twice an hour apart opened a second
  * tab on it. The gateway now looks for the tab itself.
@@ -29,6 +31,8 @@ import { join } from 'node:path';
 export type ProcessLister = () => Promise<string[][]>;
 
 const ATTACH_FLAG = '--attach-session';
+const WRAPPER_SUBCOMMAND = 'attach';
+const WRAPPER_FLAG = '--session';
 
 /**
  * Argv of every readable process under a /proc-shaped directory. Entries that
@@ -61,12 +65,26 @@ export async function readProcArgv(procDir = '/proc'): Promise<string[][]> {
   return read.filter((a): a is string[] => a !== undefined);
 }
 
-/** Whether `argv` attaches to exactly `sessionId` (never a longer id it prefixes). */
+/**
+ * Whether `argv` attaches to exactly `sessionId` (never a longer id it
+ * prefixes). Two shapes count:
+ * - the TUI: `... --attach-session <id>`;
+ * - the wrapper a phone-opened tab runs: `qwen-rc attach ... --session <id>`.
+ *   The wrapper is what stays alive across re-attaches (the TUI under it is
+ *   gone while it waits for a daemon), so it must count. A bare `--session` is
+ *   too common a flag to trust alone, so it only counts after an `attach`
+ *   argument.
+ */
 function attachesTo(argv: string[], sessionId: string): boolean {
+  const attachAt = argv.indexOf(WRAPPER_SUBCOMMAND);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === ATTACH_FLAG && argv[i + 1] === sessionId) return true;
     if (a === `${ATTACH_FLAG}=${sessionId}`) return true;
+    if (attachAt !== -1 && i > attachAt) {
+      if (a === WRAPPER_FLAG && argv[i + 1] === sessionId) return true;
+      if (a === `${WRAPPER_FLAG}=${sessionId}`) return true;
+    }
   }
   return false;
 }
