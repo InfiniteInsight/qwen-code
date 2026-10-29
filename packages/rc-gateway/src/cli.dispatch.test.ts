@@ -31,6 +31,20 @@ function run(...args: string[]) {
   );
 }
 
+/** Run with a throwaway HOME (nothing under the real ~/.qwen/rc is touched) and stdin at EOF. */
+function runIsolated(home: string, ...args: string[]) {
+  return spawnSync(
+    process.execPath,
+    ['--import', tsxImport as string, CLI, ...args],
+    {
+      encoding: 'utf8',
+      timeout: 60_000,
+      input: '',
+      env: { ...process.env, HOME: home },
+    },
+  );
+}
+
 describe.skipIf(!tsxImport)(
   'qwen-rc top-level dispatch fall-through',
   { timeout: 30_000 },
@@ -91,6 +105,18 @@ describe.skipIf(!tsxImport)(
         expect(r.status).toBe(2);
         expect(r.stderr).toContain('--dir needs');
       });
+    });
+
+    it('usage prune under a closed stdin exits nonzero instead of silently exiting 0', () => {
+      const home = mkdtempSync(join(tmpdir(), 'qwen-rc-home-'));
+      try {
+        const r = runIsolated(home, 'usage', 'prune', '--before', '2020-01-01');
+        if (/cost tracking unavailable/.test(r.stderr)) return; // no sqlite here
+        expect(r.status).toBe(1);
+        expect(r.stderr).toContain('no answer');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
   },
 );

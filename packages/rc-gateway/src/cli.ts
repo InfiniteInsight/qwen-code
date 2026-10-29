@@ -22,7 +22,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
 import { join, basename } from 'node:path';
-import { createInterface } from 'node:readline';
+import { askLine, confirmPrompt } from './cliPrompt.js';
 import {
   USAGE_TEXT,
   resolveTopLevel,
@@ -1988,17 +1988,7 @@ async function loadBonjourFactory(): Promise<BonjourFactory | null> {
 }
 
 /** Prompt the operator for a y/N confirmation on stdin (prune without --yes). */
-async function confirm(question: string): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await new Promise<string>((resolve) =>
-      rl.question(question, resolve),
-    );
-    return /^y(es)?$/i.test(answer.trim());
-  } finally {
-    rl.close();
-  }
-}
+const confirm = confirmPrompt;
 
 // Entrypoint: `qwen-rc serve`
 /**
@@ -3047,20 +3037,9 @@ if (process.argv[2] === 'serve') {
             process.exit(2);
             return;
           }
-          const rl = createInterface({
-            input: process.stdin,
-            output: process.stdout,
-          });
-          try {
-            code = await new Promise<string>((resolve) =>
-              rl.question(
-                `Pairing code for ${a.name} (shown by qwen-rc serve): `,
-                resolve,
-              ),
-            );
-          } finally {
-            rl.close();
-          }
+          code = await askLine(
+            `Pairing code for ${a.name} (shown by qwen-rc serve): `,
+          );
         }
         const redeem = await daemonRequest(
           { url: base },
