@@ -2053,6 +2053,35 @@
         border-radius: 10px;
         font-size: 15px;
       }
+      /* #132. A row's group from the session catalog, on its folder line:
+         the group's colour and name, or the colour alone for a colour tag.
+         It keeps its size and the path gives way, as the host once did. */
+      #past-list .s .dir .grp {
+        flex: 0 1 auto;
+        max-width: 45%;
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+      }
+      #past-list .s .dir .grp .gd {
+        flex: none;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--g1-ink-mid);
+      }
+      #past-list .s .dir .grp .gn {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* #132. A folder the catalog could not read, said where its rows are. */
+      #past-list .note.cat-err {
+        color: var(--g1-ink-hi);
+        border-bottom: 1px solid var(--g1-line);
+      }
       #list-archived-open {
         width: 100%;
         min-height: 48px;
@@ -14650,6 +14679,7 @@
         if ($('past-filter').value) showListSearch(true);
         renderList();
         void refreshArchivedCount(true);
+        void refreshCatalog(true); // #132
         // #190: read now rather than on the 30 s tick, so a conversation
         // opened in another folder since shows its live dot as the list opens.
         if (curDirPath) void refreshPastConversations(curDirPath);
@@ -15304,6 +15334,9 @@
       // filter keystroke, and whenever the conversation on screen changes
       // (showSessionTitle), so the blue rule follows it.
       function renderList() {
+        // #132: what the catalog's foot looks like as drawn. Only once the
+        // gateway has answered, so nothing here runs before it is declared.
+        if (sessionCatalogOn()) catalogFootDrawn = catalogFootSig();
         renderListHead();
         renderBarTitle(); // #184: a rename or a new list can change the title
         const box = $('past-list');
@@ -15332,6 +15365,8 @@
                 ? 'No conversations in these folders yet.'
                 : 'No folder yet. Use New conversation to pick one.',
           );
+          renderCatalogNotices(box); // #132
+          renderLoadMore(pager, true);
           return;
         }
         // issue #44: filter the already-fetched set client-side, matching
@@ -15356,6 +15391,7 @@
         if (pastFilter && shown.length === 0) {
           closeRowMenu(false);
           none('No conversations match "' + $('past-filter').value + '".');
+          renderLoadMore(pager, true); // #132: older ones may match
           return;
         }
         const pageCount = Math.ceil(shown.length / PAST_PAGE_SIZE);
@@ -15400,6 +15436,9 @@
             path.className = 'cwd';
             path.textContent = isolatedFolder(s.cwd);
             dir.appendChild(path);
+            // #132: its group, from the session catalog, when it has one.
+            const grp = rowGroupChip(s);
+            if (grp) dir.appendChild(grp);
             row.appendChild(dir);
           }
           // when · preview. A live-only row has neither, having no
@@ -15446,6 +15485,7 @@
           wrap.append(row, more);
           box.appendChild(wrap);
         }
+        renderCatalogNotices(box); // #132
         // #193: per folder, since each folder's read is capped on its own.
         const cut = viewFolders().filter(
           (f) => folderRows.has(f) && folderRows.get(f).truncated,
@@ -15483,6 +15523,7 @@
           pageLabel.textContent = 'page ' + pastPage + ' of ' + pageCount;
           pager.append(prevBtn, pageLabel, nextBtn);
         }
+        renderLoadMore(pager, pastPage >= pageCount); // #132
         body.scrollTop = scroll;
         // The 30 s poll rebuilds these rows. A menu open on one of them stays
         // open on its replacement rather than closing under the reader's
@@ -15918,7 +15959,7 @@
           uiWrite(LIST_FOLDER_NAME, undefined);
           restoreListSearch();
         }
-        pastConvos = mergeFolderRows(folders);
+        pastConvos = withCatalog(mergeFolderRows(folders), folders); // #132
         // #119: fed from this same poll rather than its own, so the list
         // cannot drift from what the folder holds.
         renderList();
@@ -15926,6 +15967,7 @@
         // Archived (n) belongs to the folders: read again for these if the
         // list is up to show it, else marked unknown until it opens.
         archivedCountFollows();
+        catalogFollows(); // #132
       }
 
       // #193: every folder's rows as one list, each row carrying the folder
@@ -15960,6 +16002,337 @@
           const wb = when(b);
           return wa === wb ? 0 : wb > wa ? 1 : -1;
         });
+      }
+
+      // #132. The session catalog (POST /rc/sessions/catalog), read beside
+      // the per-folder /rc/sessions reads rather than instead of them. Those
+      // stay the list's rows: they carry the preview line and every row a
+      // folder holds (up to its cap), which is what the search runs over, and
+      // they are all an older gateway has. The catalog adds what they cannot
+      // say: each row's group (the daemon's organization store), a folder the
+      // daemon refused to list, and Load more, which pages one merged order
+      // across every folder and places what it finds by time. It is read
+      // when the list opens and when its folders change, not on the 30 s
+      // poll, as Archived (n) is: groups change only when someone files a
+      // conversation. Only when the gateway says the route exists
+      // (`sessionCatalog`), so a new page on an old gateway lists as before.
+      let catalogPageSize = 100; // a `let` so a scenario can make pages small
+      const CATALOG_FRESH_MS = 30000;
+      // Load more reads on until it finds a row the list does not hold yet,
+      // up to this many pages a press, since the first pages of the merged
+      // order are mostly the rows /rc/sessions already drew.
+      const CATALOG_MORE_PAGES = 5;
+      const catalogState = {
+        key: null, // the folders the state was read for, '\n'-joined
+        reading: null, // the key a first-page read is in flight for
+        readAt: 0,
+        loading: false, // a Load more is in flight
+        deeper: false, // Load more has gone past the first page
+        cursor: null,
+        rows: new Map(), // sessionId -> catalog row
+        groups: new Map(), // group id -> group record, merged across folders
+        errors: new Map(), // folder -> { code, message, status }
+      };
+      function sessionCatalogOn() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.sessionCatalog === true
+        );
+      }
+      function catalogKey() {
+        return listFolders().join('\n');
+      }
+      function catalogFresh(key) {
+        catalogState.key = key;
+        catalogState.readAt = 0;
+        catalogState.deeper = false;
+        catalogState.cursor = null;
+        catalogState.rows.clear();
+        catalogState.groups.clear();
+        catalogState.errors.clear();
+      }
+      // One page into the state: rows by id (a later read of a row wins),
+      // groups by id, and each folder's error as of the page that named it.
+      function takeCatalogPage(body) {
+        for (const s of body.sessions) {
+          if (s && typeof s.sessionId === 'string') catalogState.rows.set(s.sessionId, s);
+        }
+        const groups = body.groups && Array.isArray(body.groups.groups) ? body.groups.groups : [];
+        for (const g of groups) {
+          if (g && typeof g.id === 'string') catalogState.groups.set(g.id, g);
+        }
+        for (const w of Array.isArray(body.workspaces) ? body.workspaces : []) {
+          if (!w || typeof w.workspace !== 'string') continue;
+          if (w.error && typeof w.error === 'object') catalogState.errors.set(w.workspace, w.error);
+          else catalogState.errors.delete(w.workspace);
+        }
+      }
+      function catalogFollows() {
+        const key = catalogKey();
+        if (catalogState.key === key || catalogState.reading === key) return;
+        if (listShown()) void refreshCatalog(false);
+      }
+      // The first page for the list's folders. On open it is read again only
+      // once older than CATALOG_FRESH_MS. A failed read changes nothing: the
+      // list is drawn from /rc/sessions either way.
+      async function refreshCatalog(onOpen) {
+        if (!token() || !sessionCatalogOn()) return;
+        const folders = listFolders();
+        if (folders.length === 0) return;
+        const key = folders.join('\n');
+        if (catalogState.reading === key) return;
+        if (
+          onOpen &&
+          catalogState.key === key &&
+          Date.now() - catalogState.readAt < CATALOG_FRESH_MS
+        ) {
+          return;
+        }
+        catalogState.reading = key;
+        const r = await rcCall('/rc/sessions/catalog', {
+          method: 'POST',
+          body: JSON.stringify({
+            workspaces: folders,
+            options: { view: 'organized', size: catalogPageSize },
+            includeGroups: true,
+          }),
+        });
+        if (catalogState.reading === key) catalogState.reading = null;
+        if (catalogKey() !== key) return; // the folders moved on meanwhile
+        if (!r.ok || !r.body || !Array.isArray(r.body.sessions)) return;
+        if (catalogState.key !== key) catalogFresh(key);
+        takeCatalogPage(r.body);
+        catalogState.readAt = Date.now();
+        // A first page read again after Load more keeps the deeper cursor,
+        // so the next press goes on from where the last one stopped.
+        if (!catalogState.deeper) {
+          catalogState.cursor = typeof r.body.nextCursor === 'string' ? r.body.nextCursor : null;
+        }
+        redrawWithCatalog();
+      }
+      // Redrawn only when the catalog changed something drawn: the rows are
+      // rebuilt on a redraw, so a read that found nothing new would otherwise
+      // take keyboard focus off the row the reader is on.
+      function catalogRowsSig(rows) {
+        return rows
+          .map((s) => (s ? s.sessionId + ':' + (s.groupId || '') + ':' + (s.groupColor || '') : ''))
+          .join('|');
+      }
+      function catalogFootSig() {
+        return (
+          [...catalogState.errors].map(([f, e]) => f + '=' + strOr(e.message, '')).join('|') +
+          '#' +
+          (catalogState.cursor ? 'more' : '') +
+          (catalogState.loading ? 'loading' : '')
+        );
+      }
+      let catalogFootDrawn = ''; // set by renderList
+      function redrawWithCatalog() {
+        const folders = listFolders();
+        const next = withCatalog(mergeFolderRows(folders), folders);
+        if (
+          catalogRowsSig(next) === catalogRowsSig(pastConvos) &&
+          catalogFootSig() === catalogFootDrawn
+        ) {
+          return;
+        }
+        pastConvos = next;
+        renderList();
+        syncFolderMenuCounts();
+      }
+      // Whether a catalog row the folder's own read did not list may be
+      // drawn. A complete /rc/sessions read lists every transcript in its
+      // folder, so a row missing from it is gone (archived or deleted since
+      // the catalog was read) or has no transcript yet (the live-state read
+      // draws those): drawing it would bring back a row the reader just
+      // removed. Only past the end of a capped read, or for a folder whose
+      // read is missing, does the catalog know rows the list does not.
+      function catalogMayAdd(c) {
+        const got = folderRows.get(c.workspace);
+        if (!got) return true;
+        if (!got.truncated) return false;
+        const t = Date.parse(c.updatedAt);
+        if (Number.isNaN(t)) return false;
+        let oldest = Infinity;
+        for (const s of got.sessions) {
+          if (!s || s.liveOnly) continue;
+          const u = Date.parse(s.updatedAt);
+          if (!Number.isNaN(u) && u < oldest) oldest = u;
+        }
+        return t < oldest;
+      }
+      // The list's rows with the catalog's marks on them, and the catalog's
+      // rows past the end of a capped folder read (Load more's), by time.
+      function withCatalog(rows, folders) {
+        if (!sessionCatalogOn()) return rows;
+        if (catalogState.key !== folders.join('\n') || catalogState.rows.size === 0) {
+          return rows;
+        }
+        const have = new Set();
+        const out = rows.map((s) => {
+          if (!s || !s.sessionId) return s;
+          have.add(s.sessionId);
+          const c = catalogState.rows.get(s.sessionId);
+          return c ? { ...s, ...catalogMarks(c) } : s;
+        });
+        let added = false;
+        for (const [id, c] of catalogState.rows) {
+          if (have.has(id) || !folders.includes(c.workspace)) continue;
+          if (!catalogMayAdd(c)) continue;
+          out.push(catalogListRow(c));
+          added = true;
+        }
+        return added ? newestFirst(out) : out;
+      }
+      function catalogMarks(c) {
+        const m = {};
+        if (typeof c.groupId === 'string' && c.groupId) m.groupId = c.groupId;
+        if (typeof c.color === 'string' && c.color) m.groupColor = c.color;
+        return m;
+      }
+      // A catalog row in the list's own words. The daemon's `displayName` is
+      // the title only when `titleSource` says one was set; otherwise it is
+      // the first prompt, which is the preview line.
+      function catalogListRow(c) {
+        const titled = c.titleSource === 'manual' || c.titleSource === 'auto';
+        const name = strOr(c.displayName, '');
+        const preview = strOr(c.preview, '') || (titled ? '' : name);
+        return {
+          sessionId: c.sessionId,
+          ...(titled && name ? { title: name } : {}),
+          ...(typeof c.updatedAt === 'string' ? { updatedAt: c.updatedAt } : {}),
+          ...(preview ? { preview } : {}),
+          cwd: c.workspace,
+          ...catalogMarks(c),
+        };
+      }
+      const GROUP_SWATCHES = {
+        red: '#f85149',
+        orange: '#db6d28',
+        yellow: '#d29922',
+        green: '#3fb950',
+        blue: '#58a6ff',
+        purple: '#bc8cff',
+      };
+      function groupSwatch(color) {
+        if (typeof color !== 'string') return null;
+        if (GROUP_SWATCHES[color]) return GROUP_SWATCHES[color];
+        return /^#[0-9a-fA-F]{6}$/.test(color) ? color : null;
+      }
+      // A colour tag wins over a named group, as the daemon buckets them.
+      function rowGroupChip(s) {
+        let name = '';
+        let swatch = null;
+        let id = '';
+        if (s.groupColor && groupSwatch(s.groupColor)) {
+          swatch = groupSwatch(s.groupColor);
+          id = 'color:' + s.groupColor;
+        } else if (s.groupId && catalogState.groups.has(s.groupId)) {
+          const g = catalogState.groups.get(s.groupId);
+          name = strOr(g.name, '');
+          swatch = groupSwatch(g.color);
+          id = g.id;
+        } else {
+          return null;
+        }
+        const chip = document.createElement('span');
+        chip.className = 'grp';
+        chip.dataset.group = id;
+        const dot = document.createElement('span');
+        dot.className = 'gd';
+        dot.setAttribute('aria-hidden', 'true');
+        if (swatch) dot.style.background = swatch;
+        chip.appendChild(dot);
+        if (name) {
+          const t = document.createElement('span');
+          t.className = 'gn';
+          t.textContent = name;
+          chip.appendChild(t);
+          chip.title = 'group ' + name;
+        } else {
+          chip.setAttribute('role', 'img');
+          chip.setAttribute('aria-label', s.groupColor + ' tag');
+          chip.title = s.groupColor + ' tag';
+        }
+        return chip;
+      }
+      // A folder the catalog could not read, said in the list it belongs to
+      // rather than dropped: its /rc/sessions rows still show, and this says
+      // why its groups and older rows do not.
+      function renderCatalogNotices(box) {
+        if (!sessionCatalogOn() || catalogState.key !== catalogKey()) return;
+        for (const f of viewFolders()) {
+          const e = catalogState.errors.get(f);
+          if (!e) continue;
+          const d = document.createElement('div');
+          d.className = 'note cat-err';
+          d.dataset.workspace = f;
+          d.setAttribute('role', 'status');
+          d.textContent =
+            shortFolder(f) +
+            ': ' +
+            strOr(e.message, strOr(e.code, 'could not be read')) +
+            ' Its groups and older conversations are not shown.';
+          box.appendChild(d);
+        }
+      }
+      // On the last page of the list, while the catalog has more.
+      function renderLoadMore(pager, lastPage) {
+        if (!lastPage || !sessionCatalogOn()) return;
+        if (catalogState.key !== catalogKey() || !catalogState.cursor) return;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.id = 'past-more';
+        b.textContent = catalogState.loading ? 'Loading…' : 'Load more';
+        b.disabled = catalogState.loading;
+        b.onclick = () => void loadMoreConversations();
+        pager.appendChild(b);
+      }
+      async function loadMoreConversations() {
+        const key = catalogState.key;
+        let cursor = catalogState.cursor;
+        if (!cursor || catalogState.loading) return;
+        catalogState.loading = true;
+        renderList();
+        const before = new Set(pastConvos.map((s) => s && s.sessionId));
+        const gained = new Set();
+        let failed = null;
+        try {
+          for (let i = 0; i < CATALOG_MORE_PAGES && cursor && gained.size === 0; i++) {
+            const r = await rcCall('/rc/sessions/catalog', {
+              method: 'POST',
+              body: JSON.stringify({ cursor: cursor, includeGroups: true }),
+            });
+            if (catalogState.key !== key) return; // the folders moved on
+            if (!r.ok || !r.body || !Array.isArray(r.body.sessions)) {
+              failed = r.code;
+              break;
+            }
+            takeCatalogPage(r.body);
+            // Counted as drawn, not as read: a page of rows the list
+            // already holds only adds their groups.
+            const folders = listFolders();
+            for (const s of withCatalog(mergeFolderRows(folders), folders)) {
+              if (s && !before.has(s.sessionId)) gained.add(s.sessionId);
+            }
+            cursor = typeof r.body.nextCursor === 'string' ? r.body.nextCursor : null;
+            catalogState.cursor = cursor;
+            catalogState.deeper = true;
+          }
+        } finally {
+          catalogState.loading = false;
+        }
+        redrawWithCatalog();
+        setStatus(
+          failed
+            ? 'could not load more conversations: ' + failed
+            : gained.size
+              ? 'loaded ' + gained.size + ' more conversation' + (gained.size === 1 ? '' : 's')
+              : cursor
+                ? 'nothing new yet; Load more reads further back'
+                : 'no older conversations',
+        );
       }
 
       // #173: files the folder of the conversation on screen with the recent
