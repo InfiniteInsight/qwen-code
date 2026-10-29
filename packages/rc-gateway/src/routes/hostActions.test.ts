@@ -198,6 +198,40 @@ describe('GET /rc/host/actions', () => {
     ).toEqual([false, false]);
   });
 
+  it('reports a probe that could not be spawned as unknown, with the errno and program only', async () => {
+    const { url, owner } = await boot(
+      HostActions.fromConfig(
+        {
+          launcher: {
+            label: 'Qwen Remote Launcher',
+            status: ['powershell.exe', '-Command', 'secret'],
+            start: ['start-launcher'],
+          },
+          llama: CONFIG.llama,
+        },
+        async (argv) =>
+          argv[0] === 'powershell.exe'
+            ? { code: null, error: 'ENOENT' }
+            : { code: 0 },
+      ),
+    );
+    const r = await call(`${url}/rc/host/actions`, owner);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({
+      actions: [
+        {
+          name: 'launcher',
+          label: 'Qwen Remote Launcher',
+          running: false,
+          status: 'unknown',
+          error: 'ENOENT: powershell.exe',
+        },
+        { name: 'llama', label: 'llama-swap', running: true },
+      ],
+    });
+    expect(JSON.stringify(r.body)).not.toContain('secret');
+  });
+
   it('404s when the gateway was given no store', async () => {
     const { url, owner } = await boot(undefined);
     expect((await call(`${url}/rc/host/actions`, owner)).status).toBe(404);
@@ -269,6 +303,39 @@ describe('POST /rc/host/actions/:name/start', () => {
     const r = await call(`${url}/rc/host/actions/llama/start`, owner, 'POST');
     expect(r.status).toBe(502);
     expect(r.body).toMatchObject({ code: 'host_action_failed', exitCode: null });
+  });
+
+  it('answers 502 spawn_failed when the start command cannot be spawned, and audits it without the argv', async () => {
+    const { url, owner, auditPath } = await boot(
+      HostActions.fromConfig(
+        {
+          launcher: {
+            label: 'Qwen Remote Launcher',
+            status: ['probe-launcher'],
+            start: ['/mnt/c/Windows/powershell.exe', '-Command', 'secret'],
+          },
+        },
+        async (argv) =>
+          argv[0]!.endsWith('powershell.exe')
+            ? { code: null, error: 'ENOENT' }
+            : { code: 1 },
+      ),
+    );
+    const r = await call(`${url}/rc/host/actions/launcher/start`, owner, 'POST');
+    expect(r.status).toBe(502);
+    expect(r.body).toEqual({
+      error: 'The start command could not be run (ENOENT: powershell.exe)',
+      code: 'spawn_failed',
+    });
+    const rows = await pollHostRows(auditPath, 1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      outcome: 'failed',
+      detail: { name: 'launcher', exitCode: null, spawnError: 'ENOENT' },
+    });
+    const text = JSON.stringify(rows[0]);
+    expect(text).not.toContain('secret');
+    expect(text).not.toContain('/mnt/c');
   });
 
   it('404s host_action_unknown for a name the file does not hold, and runs nothing', async () => {

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,6 +14,7 @@ import {
   START_TIMEOUT_MS,
   STATUS_TIMEOUT_MS,
   execFileRunner,
+  findOnPath,
   parseHostActions,
   type HostActionRunner,
 } from './hostActions.js';
@@ -32,15 +33,30 @@ const LAUNCHER = {
  * program being run.
  */
 function fakeRunner(
-  answer: (argv: readonly string[]) => number | null | Promise<number | null>,
+  answer: (
+    argv: readonly string[],
+  ) =>
+    | number
+    | null
+    | { code: null; error: string }
+    | Promise<number | null | { code: null; error: string }>,
 ): HostActionRunner & { calls: Array<{ argv: string[]; timeoutMs: number }> } {
   const calls: Array<{ argv: string[]; timeoutMs: number }> = [];
   const run = (async (argv: readonly string[], timeoutMs: number) => {
     calls.push({ argv: [...argv], timeoutMs });
-    return { code: await answer(argv) };
+    const a = await answer(argv);
+    return typeof a === 'object' && a !== null ? a : { code: a };
   }) as HostActionRunner & { calls: typeof calls };
   run.calls = calls;
   return run;
+}
+
+/** A PATH value of one directory under `dir` holding an executable for each name. */
+async function pathWith(dir: string, names: string[]): Promise<string> {
+  const bin = join(dir, 'bin');
+  await mkdir(bin, { recursive: true });
+  for (const n of names) await writeFile(join(bin, n), '#!/bin/sh\n', { mode: 0o755 });
+  return bin;
 }
 
 describe('parseHostActions', () => {
@@ -206,9 +222,85 @@ describe('HostActions.load (the boot path)', () => {
     const path = join(dir, 'host-actions.json');
     await writeFile(path, JSON.stringify(LAUNCHER), { mode: 0o600 });
     const lines: string[] = [];
-    const store = await HostActions.load(path, (l) => lines.push(l), fakeRunner(() => 0));
+    const bin = await pathWith(dir, ['probe-launcher', 'start-launcher']);
+    const store = await HostActions.load(
+      path,
+      (l) => lines.push(l),
+      fakeRunner(() => 0),
+      bin,
+    );
     expect(store?.has('launcher')).toBe(true);
     expect(lines).toEqual([`host-actions: 1 from ${path} (launcher)`]);
+  });
+
+  it('warns once per action for a bare program the unit PATH does not hold, naming the action and the program', async () => {
+    const path = join(dir, 'host-actions.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        launcher: {
+          label: 'Launcher',
+          status: ['powershell.exe', '-Command', 'x'],
+          start: ['powershell.exe', '-Command', 'y'],
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const lines: string[] = [];
+    const bin = await pathWith(dir, []);
+    const store = await HostActions.load(path, (l) => lines.push(l), fakeRunner(() => 0), bin);
+    expect(store?.has('launcher')).toBe(true);
+    const warns = lines.filter((l) => /PATH/.test(l));
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('launcher');
+    expect(warns[0]).toContain('powershell.exe');
+    expect(warns[0]).toMatch(/does not include it/);
+    expect(warns[0]).not.toContain('-Command');
+    expect(warns[0]).not.toContain('\n');
+  });
+
+  it('names each missing program when status and start differ, and stays quiet for found ones and for paths', async () => {
+    const path = join(dir, 'host-actions.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        a: { label: 'A', status: ['probe-a'], start: ['start-a'] },
+        b: { label: 'B', status: ['/abs/probe'], start: ['./rel/start'] },
+        c: { label: 'C', status: ['here'], start: ['here'] },
+      }),
+      { mode: 0o600 },
+    );
+    const lines: string[] = [];
+    const bin = await pathWith(dir, ['probe-a', 'here']);
+    await HostActions.load(path, (l) => lines.push(l), fakeRunner(() => 0), bin);
+    const warns = lines.filter((l) => /PATH/.test(l));
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('a:');
+    expect(warns[0]).toContain('start-a');
+    expect(warns[0]).not.toContain('probe-a');
+  });
+});
+
+describe('findOnPath', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-host-actions-path-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('finds an executable on any directory of the PATH, and not a non-executable or a missing one', async () => {
+    const bin = await pathWith(dir, ['tool']);
+    await writeFile(join(dir, 'bin', 'plain'), '', { mode: 0o644 });
+    expect(await findOnPath('tool', `/nonexistent:${bin}`)).toBe(true);
+    expect(await findOnPath('plain', bin)).toBe(false);
+    expect(await findOnPath('absent', bin)).toBe(false);
+  });
+
+  it('finds nothing on an unset or empty PATH', async () => {
+    expect(await findOnPath('tool', undefined)).toBe(false);
+    expect(await findOnPath('tool', '')).toBe(false);
   });
 });
 
@@ -239,6 +331,42 @@ describe('HostActions.probe', () => {
       }),
     );
     expect(await store.probe('launcher')).toBe(false);
+  });
+
+  it('reports a spawn failure as unknown with the code and the program basename, never the argv', async () => {
+    const store = HostActions.fromConfig(
+      {
+        launcher: {
+          label: 'L',
+          status: ['powershell.exe', '-Command', 'secret-arg'],
+          start: ['x'],
+        },
+        abs: {
+          label: 'A',
+          status: ['/mnt/c/Windows/System32/powershell.exe', '-Command', 'z'],
+          start: ['x'],
+        },
+      },
+      fakeRunner(() => ({ code: null, error: 'ENOENT' })),
+    );
+    expect(await store.check('launcher')).toEqual({
+      running: false,
+      error: 'ENOENT: powershell.exe',
+    });
+    expect(await store.check('abs')).toEqual({
+      running: false,
+      error: 'ENOENT: powershell.exe',
+    });
+    expect(await store.probe('launcher')).toBe(false);
+  });
+
+  it('carries no error for a program that ran and exited nonzero or was killed', async () => {
+    const store = HostActions.fromConfig(LAUNCHER, fakeRunner(() => 1));
+    expect(await store.check('launcher')).toEqual({ running: false });
+    const killed = HostActions.fromConfig(LAUNCHER, fakeRunner(() => null));
+    expect(await killed.check('launcher')).toEqual({ running: false });
+    const up = HostActions.fromConfig(LAUNCHER, fakeRunner(() => 0));
+    expect(await up.check('launcher')).toEqual({ running: true });
   });
 
   it('throws for a name it does not hold', async () => {
@@ -295,6 +423,17 @@ describe('HostActions.start', () => {
     expect(await store.start('launcher')).toEqual({ ok: false, code: null });
   });
 
+  it('reports a start that cannot be spawned with the code and program, and does not probe', async () => {
+    const run = fakeRunner(() => ({ code: null, error: 'EACCES' }));
+    const store = HostActions.fromConfig(LAUNCHER, run);
+    expect(await store.start('launcher')).toEqual({
+      ok: false,
+      code: null,
+      spawn: { code: 'EACCES', error: 'EACCES: start-launcher' },
+    });
+    expect(run.calls).toHaveLength(1);
+  });
+
   it('joins a second press to the start already running rather than running the argv twice', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -325,9 +464,29 @@ describe('execFileRunner', () => {
     expect(await execFileRunner([node, '-e', 'process.exit(3)'], 5000)).toEqual({ code: 3 });
   });
 
-  it('reports no code for a program that does not exist', async () => {
+  it('reports no code and the errno for a program that does not exist', async () => {
     expect(
       await execFileRunner(['/nonexistent/qwen-rc-host-action'], 5000),
+    ).toEqual({ code: null, error: 'ENOENT' });
+    expect(
+      await execFileRunner(['qwen-rc-host-action-not-on-path'], 5000),
+    ).toEqual({ code: null, error: 'ENOENT' });
+  });
+
+  it('reports the errno for a file it may not execute', async () => {
+    const d = await mkdtemp(join(tmpdir(), 'rc-host-actions-eacces-'));
+    try {
+      const f = join(d, 'plain');
+      await writeFile(f, '', { mode: 0o644 });
+      expect(await execFileRunner([f], 5000)).toEqual({ code: null, error: 'EACCES' });
+    } finally {
+      await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it('carries no error when the cap kills a child that did start', async () => {
+    expect(
+      await execFileRunner([node, '-e', 'setTimeout(() => {}, 10000)'], 200),
     ).toEqual({ code: null });
   });
 
