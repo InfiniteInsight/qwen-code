@@ -276,6 +276,11 @@ export function createCapabilityRoute(deps: {
       ...(deps.daemonQwenBinHealthy !== undefined && audience === 'full'
         ? { daemonQwenBinHealthy: deps.daemonQwenBinHealthy }
         : {}),
+      // #132: POST /rc/sessions/catalog is mounted: one merged order and one
+      // cursor across the workspaces, with groups. The page is served from
+      // disk and can meet an older gateway, so it reads the catalog only when
+      // this says the route exists, and otherwise lists exactly as before.
+      sessionCatalog: true,
       // #123: /rc/workspace/{stat,file/write,file/edit,file/upload,file/delete}
       // are mounted. The page draws its file-write controls only when this is
       // true, the token holds write (`writeScope`), and the daemon advertises
