@@ -299,12 +299,20 @@ export function createForkRoute(
     const forkedAt = now().toISOString();
 
     // Build the fork header — the very first JSONL line of the fork transcript.
-    const forkHeader = buildForkHeader({
-      parentSessionId: parentId,
-      ...(fromEventId !== undefined ? { parentEventId: fromEventId } : {}),
-      transcriptMode,
-      forkedAt,
-    });
+    const forkHeader = {
+      ...buildForkHeader({
+        parentSessionId: parentId,
+        ...(fromEventId !== undefined ? { parentEventId: fromEventId } : {}),
+        transcriptMode,
+        forkedAt,
+      }),
+      // Lineage (`parentOf`) and the `/rc/sessions` listing read only the
+      // FIRST record's `forkedFrom.sessionId`, and this header is that record.
+      // Without it every route-made fork lists as a root with an empty
+      // lineage. Same shape core stamps on copied records; there is no source
+      // message, so `messageUuid` is null.
+      forkedFrom: { sessionId: parentId, messageUuid: null },
+    };
 
     const forkedRecords = forkRecords(records, parentId, newId);
     // When named, append a core-faithful custom_title record (chained onto the

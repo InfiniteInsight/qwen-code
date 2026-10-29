@@ -24,6 +24,9 @@ import { resolveChatsDir, archiveChatsDirOf } from '../sessions/chatsPath.js';
 import { createForkRoute } from './fork.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import { decodeSegment } from '../wal.js';
+import { listSessions } from '../sessions/sessionList.js';
+import { parentOf } from '../sessions/lineage.js';
+import { readParentRecords } from '../sessions/forkStore.js';
 
 // A cwd whose sanitizeCwd is stable and lands under our tmp runtime base.
 const CWD = '/fork-test/ws';
@@ -774,5 +777,26 @@ describe('fromTurn addressing after a rewind (dead branch)', () => {
 
   it('a mid turn keeps the live records before it and none of the dead ones', async () => {
     expect(await forkedUuids(1)).toEqual(['u0', 'a0', 'rw']);
+  });
+});
+
+describe('a route-made fork is visible to lineage', () => {
+  it('lists with its parent and reports the parent as its lineage parent', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const url = await mount({
+      daemon,
+      audit: fakeAudit(),
+      randomId: () => NEW_ID,
+    });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(200);
+
+    const listed = await listSessions(chatsDir);
+    const child = listed.sessions.find((s) => s.sessionId === NEW_ID);
+    expect(child?.parentSessionId).toBe(PARENT_ID);
+
+    const records = await readParentRecords(chatsDir, NEW_ID);
+    expect(parentOf(records)).toBe(PARENT_ID);
   });
 });
