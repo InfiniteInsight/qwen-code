@@ -16,6 +16,14 @@ import {
   type DaemonPermissionResponse,
 } from './useDaemonStream.js';
 import type { DaemonFrame } from './projectDaemonEvent.js';
+import {
+  HOOK_TEXT,
+  PROMPT_TEXT,
+  afterTurn,
+  capturedTurn,
+  compactedTurn,
+  turnError,
+} from './two-client-turn.fixture.js';
 
 /**
  * A controllable fake daemon driver: tests `push()` frames into the live
@@ -47,6 +55,7 @@ function makeFakeDriver(
   let consumeCalls = 0;
   let replay = opts.replay;
   let resolvePrompt: ((v: unknown) => void) | null = null;
+  let rejectPrompt: ((e: unknown) => void) | null = null;
   const prompts: Array<{ prompt: Array<{ type: 'text'; text: string }> }> = [];
   const permissions: Array<{
     requestId: string;
@@ -59,6 +68,7 @@ function makeFakeDriver(
     push: (f: DaemonFrame) => void;
     end: () => void;
     finishPrompt: (result?: unknown) => void;
+    failPrompt: (error: unknown) => void;
     stats: () => {
       eventsCalls: number;
       prompts: typeof prompts;
@@ -110,8 +120,9 @@ function makeFakeDriver(
     async prompt(req) {
       prompts.push(req);
       if (opts.manualPrompt) {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
           resolvePrompt = resolve;
+          rejectPrompt = reject;
         });
       }
       return { stopReason: 'end_turn' };
@@ -136,6 +147,10 @@ function makeFakeDriver(
     finishPrompt(result: unknown = { stopReason: 'end_turn' }) {
       resolvePrompt?.(result);
       resolvePrompt = null;
+    },
+    failPrompt(error: unknown) {
+      rejectPrompt?.(error);
+      rejectPrompt = null;
     },
     stats() {
       return {
@@ -836,6 +851,200 @@ describe('useDaemonStream', () => {
       );
       expect(added.at(-1)).toEqual({ type: 'gemini', text: 'Work done' });
     });
+  });
+
+  // #195: frames as a live daemon sends them with a phone and this tab on one
+  // session. After each turn_complete the daemon still publishes content-less
+  // chunks (a background request's lifecycle markers); the tab must stay idle.
+  describe('turn end with another client attached (#195)', () => {
+    // A frame the reducer applies visibly, pushed last: once the hook shows
+    // it, every frame before it has been folded in.
+    const marker = (modelId: string): DaemonFrame => ({
+      type: 'model_switched',
+      data: { modelId },
+    });
+
+    const recording = () => {
+      const added: HistoryItemWithoutId[] = [];
+      const addItem = vi.fn((item: HistoryItemWithoutId) => {
+        added.push(item);
+        return added.length;
+      });
+      return { added, addItem };
+    };
+
+    it('a phone-sent turn goes idle on its turn_complete and stays idle', async () => {
+      const driver = makeFakeDriver({ clientId: 'me' });
+      const { added, addItem } = recording();
+      const { result } = renderHook(() => useDaemonStream(driver, addItem));
+
+      const turn = capturedTurn(2, 'phone', 'prompt-phone');
+      act(() => {
+        for (const f of turn) driver.push(f);
+      });
+      await waitFor(() =>
+        expect(added).toContainEqual({
+          type: 'gemini',
+          text: `pong${HOOK_TEXT}`,
+        }),
+      );
+      act(() => {
+        for (const f of afterTurn(2 + turn.length)) driver.push(f);
+        driver.push(marker('after-phone'));
+      });
+      await waitFor(() =>
+        expect(result.current.daemonModelId).toBe('after-phone'),
+      );
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(added.filter((i) => i.type === 'user')).toEqual([
+        { type: 'user', text: PROMPT_TEXT },
+      ]);
+    });
+
+    it("the tab's own turn goes idle while the phone is attached", async () => {
+      const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+      const { added, addItem } = recording();
+      const { result } = renderHook(() => useDaemonStream(driver, addItem));
+
+      // The phone's turn first, then the tab answers.
+      const phone = capturedTurn(2, 'phone', 'prompt-phone');
+      act(() => {
+        for (const f of [...phone, ...afterTurn(2 + phone.length)]) {
+          driver.push(f);
+        }
+        driver.push(marker('after-phone'));
+      });
+      await waitFor(() =>
+        expect(result.current.daemonModelId).toBe('after-phone'),
+      );
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+
+      let sent: Promise<void> = Promise.resolve();
+      act(() => {
+        sent = result.current.submitQuery(PROMPT_TEXT);
+      });
+      const tab = capturedTurn(4 + phone.length, 'me', 'prompt-tab');
+      act(() => {
+        for (const f of tab) driver.push(f);
+      });
+      await waitFor(() =>
+        expect(added.at(-1)).toEqual({
+          type: 'gemini',
+          text: `pong${HOOK_TEXT}`,
+        }),
+      );
+      // The SDK resolves prompt() off that same turn_complete.
+      await act(async () => {
+        driver.finishPrompt({ stopReason: 'end_turn' });
+        await sent;
+      });
+      act(() => {
+        for (const f of afterTurn(4 + phone.length + tab.length)) {
+          driver.push(f);
+        }
+        driver.push(marker('after-tab'));
+      });
+      await waitFor(() =>
+        expect(result.current.daemonModelId).toBe('after-tab'),
+      );
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(result.current.pendingHistoryItems).toEqual([]);
+      // Phone's line rendered from the stream, the tab's own line once (local
+      // echo; the daemon's self-echo is dropped).
+      expect(added.filter((i) => i.type === 'user')).toEqual([
+        { type: 'user', text: PROMPT_TEXT },
+        { type: 'user', text: PROMPT_TEXT },
+      ]);
+      expect(added.filter((i) => i.type === 'gemini')).toHaveLength(2);
+    });
+
+    it('renders every live frame after a seeded load and ends the turn', async () => {
+      // Attached with `load` after the phone's first turn; the live stream
+      // resumes at the load's lastEventId + 1 (as captured).
+      const loaded = compactedTurn(2, 'phone', 'prompt-1');
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: { compactedReplay: loaded.compactedReplay, liveJournal: [] },
+        lastEventId: loaded.lastEventId,
+      });
+      const { added, addItem } = recording();
+      const { result } = renderHook(() => useDaemonStream(driver, addItem));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+      expect(added).toHaveLength(2);
+
+      const next = capturedTurn(loaded.lastEventId + 1, 'phone', 'prompt-2');
+      act(() => {
+        for (const f of next) driver.push(f);
+      });
+      await waitFor(() => expect(added).toHaveLength(4));
+      act(() => {
+        for (const f of afterTurn(loaded.lastEventId + 1 + next.length)) {
+          driver.push(f);
+        }
+        driver.push(marker('after-live'));
+      });
+      await waitFor(() =>
+        expect(result.current.daemonModelId).toBe('after-live'),
+      );
+
+      expect(added.slice(2)).toEqual([
+        { type: 'user', text: PROMPT_TEXT },
+        { type: 'gemini', text: `pong${HOOK_TEXT}` },
+      ]);
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(result.current.pendingHistoryItems).toEqual([]);
+    });
+  });
+
+  // A failed prompt: the daemon publishes turn_error (not turn_complete) and
+  // the SDK rejects prompt() with its turn error, before it hands the frame on.
+  it("the tab's own failed turn goes idle, shows the error once, and does not throw", async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+
+    let sent: Promise<void> = Promise.resolve();
+    act(() => {
+      sent = result.current.submitQuery(PROMPT_TEXT);
+    });
+    // The turn streams 'pong', then the model request dies.
+    act(() => {
+      for (const f of capturedTurn(2, 'me', 'prompt-tab').slice(0, 9)) {
+        driver.push(f);
+      }
+    });
+    await waitFor(() =>
+      expect(result.current.pendingHistoryItems).toEqual([
+        { type: 'gemini', text: 'pong' },
+      ]),
+    );
+    await act(async () => {
+      driver.failPrompt(
+        Object.assign(new Error('terminated'), {
+          status: 500,
+          code: 'turn_error',
+          _daemonTurnError: true,
+        }),
+      );
+      await sent;
+    });
+    act(() => {
+      driver.push(turnError(11, 'me', 'prompt-tab'));
+      driver.push({ type: 'model_switched', data: { modelId: 'after' } });
+    });
+    await waitFor(() => expect(result.current.daemonModelId).toBe('after'));
+
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+    expect(result.current.pendingHistoryItems).toEqual([]);
+    expect(added.map((i) => i.type)).toEqual(['user', 'gemini', 'error']);
+    expect(added[1]).toEqual({ type: 'gemini', text: 'pong' });
   });
 
   it('aborts the subscription on unmount', async () => {

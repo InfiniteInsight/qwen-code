@@ -21,6 +21,14 @@ import {
   type DaemonFrame,
   type DaemonProjectionState,
 } from './projectDaemonEvent.js';
+import {
+  HOOK_TEXT,
+  PROMPT_TEXT,
+  afterTurn,
+  capturedTurn,
+  compactedTurn,
+  turnError,
+} from './two-client-turn.fixture.js';
 
 /**
  * Real frame sequence captured from a live `qwen serve` text turn
@@ -986,5 +994,228 @@ describe('model and approval-mode frames', () => {
       liveJournal: [],
     });
     expect(state.modelId).toBe('old');
+  });
+});
+
+// --- #195: the turn's end with two clients on one session ---
+
+describe('turn end with another client attached (#195)', () => {
+  const PHONE_PROMPT = 'prompt-phone';
+  const TAB_PROMPT = 'prompt-tab';
+
+  /** Fold frames one by one, recording the streaming state after each. */
+  function fold(state: DaemonProjectionState, frames: DaemonFrame[]) {
+    const committed: HistoryItemWithoutId[] = [];
+    const states: StreamingState[] = [];
+    for (const f of frames) {
+      const r = projectDaemonEvent(state, f);
+      state = r.state;
+      committed.push(...r.committed);
+      states.push(state.streamingState);
+    }
+    return { state, committed, states };
+  }
+
+  it('a phone-sent turn ends on its turn_complete and stays ended through the frames after it', () => {
+    const turn = capturedTurn(2, PHONE, PHONE_PROMPT);
+    const { state, committed, states } = fold(
+      initialDaemonProjectionState(SELF),
+      [...turn, ...afterTurn(2 + turn.length)],
+    );
+    // Idle from the turn_complete on, not just at the end.
+    expect(states.slice(turn.length - 1)).toEqual([
+      StreamingState.Idle,
+      StreamingState.Idle,
+      StreamingState.Idle,
+    ]);
+    expect(state.streamingState).toBe(StreamingState.Idle);
+    expect(committed).toEqual([
+      { type: 'user', text: PROMPT_TEXT },
+      { type: 'gemini', text: `pong${HOOK_TEXT}` },
+    ]);
+    expect(pendingHistoryItemsOf(state)).toEqual([]);
+    expect(thoughtOf(state)).toBeNull();
+  });
+
+  it("the tab's own turn ends while the phone is attached", () => {
+    const turn = capturedTurn(2, SELF, TAB_PROMPT);
+    const { state, committed } = fold(initialDaemonProjectionState(SELF), [
+      ...turn,
+      ...afterTurn(2 + turn.length),
+    ]);
+    expect(state.streamingState).toBe(StreamingState.Idle);
+    // The tab echoed its own input locally; only the reply commits here.
+    expect(committed).toEqual([{ type: 'gemini', text: `pong${HOOK_TEXT}` }]);
+  });
+
+  it('goes back and forth between phone and tab without a stuck turn', () => {
+    const phone = capturedTurn(2, PHONE, PHONE_PROMPT);
+    const gap1 = afterTurn(2 + phone.length);
+    const tab = capturedTurn(4 + phone.length, SELF, TAB_PROMPT);
+    const gap2 = afterTurn(4 + phone.length + tab.length);
+    let state = initialDaemonProjectionState(SELF);
+    for (const segment of [phone, gap1, tab, gap2]) {
+      state = fold(state, segment).state;
+      expect(state.streamingState).toBe(StreamingState.Idle);
+    }
+  });
+
+  it('a content-less chunk does not open a turn, but one with text still does', () => {
+    const idle = initialDaemonProjectionState(SELF);
+    for (const f of afterTurn(40)) {
+      expect(projectDaemonEvent(idle, f).state.streamingState).toBe(
+        StreamingState.Idle,
+      );
+    }
+    // A background turn announces itself with a labelled chunk and later
+    // ends with its own turn_complete; that still shows as running.
+    const opened = projectDaemonEvent(
+      idle,
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Checking the build' },
+        _meta: { source: 'background_notification_turn_started' },
+      }),
+    ).state;
+    expect(opened.streamingState).toBe(StreamingState.Responding);
+  });
+
+  it('applies every live frame after a seeded load: the cursor drops nothing new', () => {
+    // The tab attached with `load` after the phone's first turn; the live
+    // stream resumes at lastEventId + 1, and the tab then sends its own turn.
+    const loaded = compactedTurn(2, PHONE, PHONE_PROMPT);
+    const seeded = projectReplaySnapshot(
+      { compactedReplay: loaded.compactedReplay, liveJournal: [] },
+      { ownClientId: SELF, lastEventId: loaded.lastEventId },
+    );
+    expect(seeded.committed).toEqual([
+      { type: 'user', text: PROMPT_TEXT },
+      { type: 'gemini', text: `pong${HOOK_TEXT}` },
+    ]);
+    expect(seeded.state.streamingState).toBe(StreamingState.Idle);
+    expect(seeded.state.lastEventId).toBe(loaded.lastEventId);
+
+    const live = capturedTurn(loaded.lastEventId + 1, SELF, TAB_PROMPT);
+    let state = seeded.state;
+    const committed: HistoryItemWithoutId[] = [];
+    for (const f of live) {
+      const r = projectDaemonEvent(state, f);
+      // Every live frame advances the watermark: none is taken for a dup.
+      expect(r.state.lastEventId).toBe(f.id);
+      state = r.state;
+      committed.push(...r.committed);
+    }
+    expect(committed).toEqual([{ type: 'gemini', text: `pong${HOOK_TEXT}` }]);
+    state = fold(state, afterTurn(loaded.lastEventId + 1 + live.length)).state;
+    expect(state.streamingState).toBe(StreamingState.Idle);
+
+    // A frame the load already covered is still dropped (slice A's guard).
+    const replayedAgain = projectDaemonEvent(
+      state,
+      loaded.compactedReplay.at(-1)!,
+    );
+    expect(replayedAgain.state).toBe(state);
+  });
+
+  it('a content-less chunk inside a turn keeps the turn running', () => {
+    const turn = capturedTurn(2, PHONE, PHONE_PROMPT);
+    // Everything up to the usage chunk: the turn is still live.
+    const { state } = fold(
+      initialDaemonProjectionState(SELF),
+      turn.slice(0, 11),
+    );
+    expect(state.streamingState).toBe(StreamingState.Responding);
+    expect(state.lastUsage?.totalTokens).toBe(27337);
+  });
+});
+
+// --- a failed turn ends with turn_error, never turn_complete ---
+
+describe('turn_error ends the turn', () => {
+  const PROMPT_ID = 'prompt-phone';
+  // The phone's turn up to its streamed reply 'pong' (ids 2-10).
+  const partialTurn = () => capturedTurn(2, PHONE, PROMPT_ID).slice(0, 9);
+
+  it('a phone-sent turn whose model request died: reply so far kept, error shown, idle', () => {
+    const { state, committed } = runAll(
+      [...partialTurn(), turnError(11, PHONE, PROMPT_ID), ...afterTurn(12)],
+      SELF,
+    );
+    expect(committed.map((i) => i.type)).toEqual(['user', 'gemini', 'error']);
+    expect(committed[1]).toEqual({ type: 'gemini', text: 'pong' });
+    expect((committed[2] as { text: string }).text).toContain('terminated');
+    expect(state.streamingState).toBe(StreamingState.Idle);
+    expect(pendingHistoryItemsOf(state)).toEqual([]);
+    expect(thoughtOf(state)).toBeNull();
+  });
+
+  it("the tab's own failed turn ends the same way", () => {
+    const own = capturedTurn(2, SELF, 'prompt-tab').slice(0, 9);
+    const { state, committed } = runAll(
+      [...own, turnError(11, SELF, 'prompt-tab')],
+      SELF,
+    );
+    expect(committed.map((i) => i.type)).toEqual(['gemini', 'error']);
+    expect(state.streamingState).toBe(StreamingState.Idle);
+  });
+
+  it('names the failure the daemon reported', () => {
+    const { committed } = runAll(
+      [
+        ...partialTurn(),
+        turnError(
+          11,
+          PHONE,
+          PROMPT_ID,
+          'Rate limit exceeded. Try again later.',
+        ),
+      ],
+      SELF,
+    );
+    expect(committed.at(-1)).toMatchObject({
+      type: 'error',
+      text: expect.stringContaining('Rate limit exceeded. Try again later.'),
+    });
+  });
+
+  it('closes an open approval gate and commits the gated tool', () => {
+    let state = initialDaemonProjectionState(SELF);
+    state = projectDaemonEvent(state, {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_1',
+        toolCall: { toolCallId: 'call_1', title: 'Write file' },
+        options: [{ optionId: 'proceed_once', kind: 'allow_once' }],
+      },
+    }).state;
+    expect(state.streamingState).toBe(StreamingState.WaitingForConfirmation);
+    const r = projectDaemonEvent(state, turnError(20, PHONE, PROMPT_ID));
+    expect(r.state.streamingState).toBe(StreamingState.Idle);
+    expect(activePermissionOf(r.state)).toBeUndefined();
+    expect(r.committed.map((i) => i.type)).toEqual(['tool_group', 'error']);
+  });
+
+  it('is a turn boundary in a seeded replay, so the next turn stays separate', () => {
+    const next = capturedTurn(12, PHONE, 'prompt-2');
+    const { committed, state } = projectReplaySnapshot(
+      {
+        compactedReplay: [
+          ...partialTurn(),
+          turnError(11, PHONE, PROMPT_ID),
+          ...next,
+        ],
+        liveJournal: [],
+      },
+      { ownClientId: SELF, lastEventId: 11 + next.length },
+    );
+    expect(committed.map((i) => i.type)).toEqual([
+      'user',
+      'gemini',
+      'error',
+      'user',
+      'gemini',
+    ]);
+    expect(committed[1]).toEqual({ type: 'gemini', text: 'pong' });
+    expect(state.streamingState).toBe(StreamingState.Idle);
   });
 });
