@@ -23329,6 +23329,61 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #190. `send now` on a queued message: the meaning slice 1 (#184) settled and
+// the issue keeps is that it joins the running turn through the mid-turn
+// message route, never stops it. The daemon's only echo for such a
+// message is its `mid_turn_message_injected` frame (no user_message_chunk is
+// sent for it live), so that frame is where the message has to appear.
+PAGE_SCENARIOS.push({
+  name: 'P314 send now hands a queued message to the running turn through the mid-turn route without stopping it, and the message is drawn where the daemon says the turn took it',
+  stub: { promptDelayMs: 12_000 },
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    await page.setViewportSize({ width: 390, height: 844 });
+    const handed: string[] = [];
+    const other: string[] = [];
+    await page.route(/\/session\/[^/]+\/mid-turn-message$/, async (route) => {
+      handed.push((JSON.parse(route.request().postData() || '{}') as { message?: string }).message ?? '');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ accepted: true, messageId: 'p314-1' }) });
+    });
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (/\/(cancel|prompt)$/.test(u.pathname) || u.pathname.endsWith('/mid-turn-messages/send-now')) other.push(r.method() + ' ' + u.pathname);
+    });
+    await watch(page, sid);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    await page.fill('#prompt', 'the turn is running');
+    await page.click('#send');
+    await page.waitForFunction('turnRunning()');
+    await page.fill('#prompt', 'queued while busy');
+    await page.click('#queue');
+    const sent = other.length; // the first prompt itself
+    await page.click('#queued-now');
+    await page.waitForFunction(`document.getElementById('queued').hidden`);
+    await settlePage(page);
+    const mid = (await page.evaluate(`({ running: turnRunning(), stop: document.getElementById('cancel-turn').getClientRects().length > 0, users: userTurnsSeen })`)) as { running: boolean; stop: boolean; users: number };
+    expect(handed.length === 1 && handed[0] === 'queued while busy', `send now handed ${JSON.stringify(handed)}`);
+    expect(other.length === sent, `send now also sent ${JSON.stringify(other.slice(sent))}`);
+    expect(mid.running && mid.stop, `after send now the turn is not running with Stop on screen (${JSON.stringify(mid)})`);
+    const inject = (sessionId: string, text: string) =>
+      page.evaluate(`renderFrame(${JSON.stringify({ type: 'mid_turn_message_injected', data: { sessionId, messages: [text], messageIds: ['p314-1'] } })})`);
+    await inject('99999999-0000-0000-0000-000000000000', 'another conversation');
+    await inject(sid, 'queued while busy');
+    await settlePage(page);
+    const rows = (await page.evaluate(`transcriptModel.items.filter((i) => i.kind === 'user').map((i) => i.text)`)) as string[];
+    const after = (await page.evaluate('userTurnsSeen')) as number;
+    expect(
+      rows.join('|') === 'the turn is running|queued while busy',
+      `the user rows read ${JSON.stringify(rows)}: the message the turn took is not drawn (or another conversation's is)`,
+    );
+    expect(after === mid.users, `the injected message counted as a new turn (${mid.users} -> ${after})`);
+    const still = (await page.evaluate('turnRunning()')) as boolean;
+    expect(still, 'drawing the injected message ended the turn');
+    await shot(page, 'p314-injected-390');
+    return `send now posted the text once to /mid-turn-message and nothing else; the turn kept running with Stop; the injection frame drew "${rows[1]}" as a row of the same turn`;
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

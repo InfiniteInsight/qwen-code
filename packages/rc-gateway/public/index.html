@@ -9791,6 +9791,25 @@
           // #190: the conversation's running usage, for the sheet and More.
           case 'usage_tick':
             return noteUsageTick(ev.data);
+          // #190. Send now hands a queued message to the running turn through
+          // the mid-turn route, and the daemon takes it at the turn's next tool
+          // boundary. This frame is the only echo it sends for that (no
+          // user_message_chunk), so the message is drawn here, where the turn
+          // read it: a row of the same turn, not the start of another one.
+          case 'mid_turn_message_injected': {
+            const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            if (d.sessionId && d.sessionId !== watchedSessionId) return;
+            const said = Array.isArray(d.messages) ? d.messages : [];
+            const at = frameStamp(ev);
+            for (const m of said) {
+              const text = typeof m === 'string' ? clean(m) : '';
+              if (!text.trim()) continue;
+              transcriptModel.finishThought();
+              transcriptModel.addUser(text, at);
+            }
+            if (said.length) scrollTranscript();
+            return;
+          }
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // permission_* (rendered as cards)
           default:
