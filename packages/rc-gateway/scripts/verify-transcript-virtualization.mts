@@ -21702,6 +21702,59 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. The auth gate's success path loads the reader's stamp zone and turns
+  // notifications on; doPair (the code, and the QR link) did neither, so a
+  // freshly paired phone had an empty timezone select and no push until a
+  // reload.
+  const p255 = { vapid: 0, prefs: 0 };
+  PAGE_SCENARIOS.push({
+    name: 'P255 pairing with a code loads the saved time zone and turns notifications on, as the page does on a load with a token',
+    waitView: false,
+    before: async (page) => {
+      await page.addInitScript({
+        content: `(function () {
+          // The harness's real token is held back and handed out by the
+          // redeem, so the rest of the page's calls are authorized.
+          var real = localStorage.getItem('qwen-rc-token');
+          localStorage.removeItem('qwen-rc-token');
+          var realFetch = window.fetch;
+          window.fetch = function (u) {
+            if (String(u).indexOf('/rc/pair/redeem') >= 0) {
+              return Promise.resolve(new Response(JSON.stringify({ id: 'tok-255', token: real, scopes: ['owner'] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+            }
+            return realFetch.apply(this, arguments);
+          };
+          var reg = { pushManager: {
+            getSubscription: function () { return Promise.resolve(null); },
+            subscribe: function () { return Promise.resolve({ endpoint: 'https://push.example/p255', toJSON: function () { return { endpoint: 'https://push.example/p255' }; }, unsubscribe: function () { return Promise.resolve(true); } }); },
+          } };
+          window.PushManager = window.PushManager || function () {};
+          Object.defineProperty(Notification, 'permission', { get: function () { return 'granted'; } });
+          navigator.serviceWorker.register = function () { return Promise.resolve(reg); };
+          navigator.serviceWorker.getRegistration = function () { return Promise.resolve(reg); };
+        })();`,
+      });
+      await page.route('**/rc/ui-prefs', (route) => {
+        p255.prefs += 1;
+        return json(route, { stampZone: 'Pacific/Auckland' });
+      });
+      await page.route('**/rc/push/vapid', (route) => {
+        p255.vapid += 1;
+        return json(route, { error: 'not configured' }, 404);
+      });
+    },
+    run: async ({ page }) => {
+      await page.waitForFunction("!document.getElementById('auth-gate').hidden", null, { timeout: 10_000 });
+      expect(p255.prefs === 0 && p255.vapid === 0, 'the gate itself loaded the zone or subscribed');
+      await page.evaluate(`document.getElementById('code').value = 'ABC123'; document.getElementById('pair').click()`);
+      await page.waitForFunction("!document.getElementById('app-body').hidden", null, { timeout: 10_000 });
+      await poll(() => p255.prefs >= 1, 'pairing never loaded the saved time zone');
+      await poll(() => p255.vapid >= 1, 'pairing never turned notifications on');
+      await page.waitForFunction("stampZoneSelect.value === 'Pacific/Auckland'", null, { timeout: 10_000 });
+      return 'after Pair the zone select read Pacific/Auckland and notifications were attempted';
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 

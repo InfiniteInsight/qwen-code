@@ -10385,6 +10385,11 @@
           // tokens reveal the daemon switcher + the "all daemons" search
           // toggle (add-multi-workspace-client task 4.1).
           void loadDaemonManifest();
+          // #173: the two things the load-with-a-token path does that this one
+          // skipped, so a freshly paired phone had an empty time zone select
+          // and no push until a reload.
+          void loadStampZone();
+          void autoEnableNotifications();
           // A fresh device may arrive via a push deep link (#40) and pair
           // from the auth gate: authGate() won't re-run after pairing, so
           // handle any surviving ?session= param here (no-op if absent).
