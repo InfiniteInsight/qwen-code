@@ -201,7 +201,7 @@ import {
   FileQuotaWal,
   quotaLimitsFromPolicy,
 } from './policy/quotas.js';
-import { PolicyReloader } from './policy/reloader.js';
+import { createPolicyHotReload, type HotReload } from './policy/hotReload.js';
 import { PermissionOverlayStore } from './policy/overlays.js';
 import { DebouncedReloader } from './reload/debouncedReloader.js';
 import {
@@ -1272,14 +1272,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // Policy hot-reload (cycle 45, Phase 3.1): watch both policy files; on a
   // debounced (250 ms) change, reload the LAYERED policy and, on success, swap
   // it into the enforcer AND rebuild the quota limits IN PLACE. A malformed
-  // reload RETAINS the previous ruleset (PolicyReloader never throws) and audits
-  // policy_reload_failed — a running gateway must not crash/widen on a half-typed
-  // save (spec "Parse error preserves previous ruleset"). NOTE: a rule id reused
+  // reload RETAINS the previous ruleset and audits policy_reload_failed (file
+  // and reason), a running gateway must not crash/widen on a half-typed save
+  // (spec "Parse error preserves previous ruleset"). The workspace file is
+  // model-writable (issue #156): the reload runs the same loader as boot, so it
+  // can only narrow, and createPolicyHotReload bounds how often it can run. NOTE: a rule id reused
   // across a reload inherits its prior consumption counts (fail-safe: more
   // prompting, not a loosening). The policy_load_error SSE frame is deferred —
   // no gateway-level owner-broadcast surface exists yet (Phase 4).
   const watchers: FSWatcher[] = [];
-  let reloader: PolicyReloader | undefined;
+  let reloader: HotReload | undefined;
   // Routing hot-reload (notification-routing spec: "hot-reloaded on change with a
   // 250 ms debounce; on parse failure retain the previously-compiled ruleset and
   // emit routing_reload_failed"). Symmetric to the policy reloader above and
@@ -1294,44 +1296,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     | undefined;
   if (enforcer) {
     const activeEnforcer = enforcer;
-    reloader = new PolicyReloader({
-      load: () =>
-        loadLayeredPolicy(
-          join(homedir(), '.qwen', 'rc', 'policy.yaml'),
-          workspaceCwd,
-          // eslint-disable-next-line no-console
-          (msg) => console.warn(msg),
-          // RELOAD semantics: a malformed workspace file must RETAIN the
-          // previous ruleset (throw → onError), not silently drop the layer and
-          // widen permissions. A deleted (ENOENT) workspace file still resolves
-          // to user-only (an intended layer removal).
-          { strictWorkspace: true },
-        ),
+    reloader = createPolicyHotReload({
+      userPath: join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+      workspaceCwd,
       // apply MUST stay synchronous (atomic vs handlePermission's await-vote).
       apply: (p) => {
         activeEnforcer.setPolicy(p);
         applyQuotaLimits(p);
         currentPolicy = p;
       },
-      onReloaded: (p) => {
-        void audit.record({
-          action: 'policy_reloaded',
-          detail: { ruleCount: p.rules.length },
-        });
-        // eslint-disable-next-line no-console
-        console.log(`policy: reloaded (${p.rules.length} rule(s))`);
-      },
-      onError: (err) => {
-        const reason = (err as Error)?.name ?? 'error';
-        void audit.record({
-          action: 'policy_reload_failed',
-          detail: { reason },
-        });
-        // eslint-disable-next-line no-console
-        console.warn(
-          `policy: reload failed, keeping previous ruleset (${reason})`,
-        );
-      },
+      audit,
     });
     const activeReloader = reloader;
     // Routing shares the same workspace cwd + parent dirs as policy, so build its
@@ -1381,7 +1355,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
             // filename can be null on some platforms/events → trigger anyway
             // (the watched dirs are tiny; debounce collapses spurious wakes).
             if (filename === null || filename === 'policy.yaml') {
-              activeReloader.trigger();
+              activeReloader.trigger(
+                filename === null ? undefined : join(dir, filename),
+              );
             }
             if (filename === null || filename === 'routing.yaml') {
               activeRoutingReloader?.trigger();
