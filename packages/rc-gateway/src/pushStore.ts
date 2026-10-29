@@ -5,8 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readJsonStore, writeFileAtomic } from './atomicWrite.js';
 
 export interface PushSubscriptionRecord {
   /** Random 128-bit hex id. */
@@ -56,12 +55,12 @@ export class PushStore {
     nowFn: () => number = Date.now,
   ): Promise<PushStore> {
     let records: PushSubscriptionRecord[] = [];
-    try {
-      const raw = await readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as PersistShape;
-      if (Array.isArray(parsed.subscriptions)) records = parsed.subscriptions;
-    } catch {
-      // Missing/corrupt file → start empty.
+    // Missing file → start empty; a corrupt one is logged and kept aside.
+    const parsed = (await readJsonStore(filePath)) as
+      | Partial<PersistShape>
+      | undefined;
+    if (parsed && Array.isArray(parsed.subscriptions)) {
+      records = parsed.subscriptions;
     }
     return new PushStore(filePath, records, nowFn);
   }
@@ -210,11 +209,20 @@ export class PushStore {
     return true;
   }
 
+  /**
+   * Temp-and-rename (#165), with the body built when the write starts, so a
+   * burst of adds coalesces into at most two whole-file writes rather than
+   * one per add. Each write is still the whole file; the per-token cap in
+   * {@link addCapped} is what bounds its size.
+   */
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { subscriptions: this.records };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+    await writeFileAtomic(
+      this.filePath,
+      () => {
+        const body: PersistShape = { subscriptions: this.records };
+        return JSON.stringify(body, null, 2);
+      },
+      { mode: 0o600 },
+    );
   }
 }

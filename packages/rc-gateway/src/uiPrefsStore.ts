@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readJsonStore, writeFileAtomic } from './atomicWrite.js';
 import { isValidTimeZone } from './policy/conditions.js';
 
 /**
@@ -49,15 +48,14 @@ export class UiPrefsStore {
 
   static async open(filePath: string): Promise<UiPrefsStore> {
     let byToken: Record<string, UiPrefs> = {};
-    try {
-      const raw = await readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as PersistShape;
-      if (parsed && typeof parsed.byToken === 'object' && parsed.byToken) {
-        byToken = parsed.byToken;
-      }
-    } catch {
-      // Missing/corrupt file → start empty, which reads as "everyone on the
-      // default". A lost preference is a lost setting, not a wrong time.
+    // Missing/corrupt file → start empty, which reads as "everyone on the
+    // default". A lost preference is a lost setting, not a wrong time; a
+    // corrupt file is still logged and kept aside (#165).
+    const parsed = (await readJsonStore(filePath)) as
+      | Partial<PersistShape>
+      | undefined;
+    if (parsed && typeof parsed.byToken === 'object' && parsed.byToken) {
+      byToken = parsed.byToken;
     }
     return new UiPrefsStore(filePath, byToken);
   }
@@ -97,11 +95,15 @@ export class UiPrefsStore {
     return true;
   }
 
+  /** Temp-and-rename (#165): a crash mid-write keeps the old file whole. */
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { byToken: this.byToken };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+    await writeFileAtomic(
+      this.filePath,
+      () => {
+        const body: PersistShape = { byToken: this.byToken };
+        return JSON.stringify(body, null, 2);
+      },
+      { mode: 0o600 },
+    );
   }
 }

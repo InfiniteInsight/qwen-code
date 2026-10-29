@@ -11,8 +11,9 @@
  * needs. Private material is written 0600 under a 0700 directory — these keys are
  * the crown jewels and must never be group/world-readable.
  */
-import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, readFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
+import { writeFileAtomic } from '../../atomicWrite.js';
 
 export interface CertMeta {
   /** All domains (SAN) the cert covers; `domains[0]` is the primary/store key. */
@@ -75,20 +76,28 @@ export class CertStore {
     }
   }
 
-  /** Persist a bundle, forcing 0700 dir / 0600 files (mkdir/writeFile honor umask). */
+  /**
+   * Persist a bundle, forcing 0700 dir / 0600 files (mkdir/open honor umask).
+   *
+   * Each file is replaced by temp-and-rename (#165), so a crash mid-save can
+   * no longer leave a truncated key or cert behind. The four files are still
+   * four renames, so a crash between two of them can pair a new cert with
+   * the old key; `meta.json` goes last, so in that window the stored expiry
+   * is the old one and the next wake renews early, which repairs the pair.
+   */
   async save(primaryDomain: string, bundle: CertBundle): Promise<void> {
     const dir = this.dirFor(primaryDomain);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await chmod(dir, 0o700);
     const writes: Array<[string, string]> = [
-      [FILES.cert, bundle.cert],
       [FILES.privateKey, bundle.privateKey],
+      [FILES.cert, bundle.cert],
       [FILES.chain, bundle.chain],
       [FILES.meta, `${JSON.stringify(bundle.meta, null, 2)}\n`],
     ];
     for (const [name, contents] of writes) {
       const path = join(dir, name);
-      await writeFile(path, contents, { mode: 0o600 });
+      await writeFileAtomic(path, contents, { mode: 0o600 });
       await chmod(path, 0o600);
     }
   }

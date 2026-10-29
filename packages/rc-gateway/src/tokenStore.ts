@@ -5,9 +5,8 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import { argon2id } from '@noble/hashes/argon2';
+import { readJsonStore, writeFileAtomic } from './atomicWrite.js';
 import type { RcScope } from './scopes.js';
 import type { CorsOriginRecord } from './types.js';
 
@@ -268,13 +267,14 @@ export class TokenStore {
   ): Promise<TokenStore> {
     let records: TokenRecord[] = [];
     let corsRows: CorsOriginRow[] = [];
-    try {
-      const raw = await readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as PersistShape;
+    // Missing file → start empty (first issue() persists it). A corrupt one
+    // is logged and kept aside by readJsonStore rather than silently lost.
+    const parsed = (await readJsonStore(filePath)) as
+      | Partial<PersistShape>
+      | undefined;
+    if (parsed && typeof parsed === 'object') {
       if (Array.isArray(parsed.tokens)) records = parsed.tokens;
       if (Array.isArray(parsed.corsOrigins)) corsRows = parsed.corsOrigins;
-    } catch {
-      // Missing/corrupt file → start empty. First issue() persists it.
     }
     return new TokenStore(filePath, records, corsRows, nowFn);
   }
@@ -692,17 +692,22 @@ export class TokenStore {
 
   private async persist(): Promise<void> {
     // Any change to the record set (mint, revoke, rotate) must not be
-
     // survivable by a cached verification.
-
     this.verifyCache.clear();
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = {
-      tokens: this.records,
-      corsOrigins: this.corsRows,
-    };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+    // Temp-and-rename (#165): a crash mid-write leaves the old file whole
+    // instead of a partial one that open() would read as "no tokens". The
+    // body is built when the write starts, so a burst of changes coalesces
+    // into one write of the latest state.
+    await writeFileAtomic(
+      this.filePath,
+      () => {
+        const body: PersistShape = {
+          tokens: this.records,
+          corsOrigins: this.corsRows,
+        };
+        return JSON.stringify(body, null, 2);
+      },
+      { mode: 0o600 },
+    );
   }
 }
