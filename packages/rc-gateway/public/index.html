@@ -548,6 +548,17 @@
         vertical-align: middle;
         accent-color: var(--g1-link);
       }
+      /* #129: a turn of the watched conversation, tappable. A row of text that
+         takes the full width and a thumb-sized height. */
+      #turns-body .turn-jump {
+        display: block;
+        width: 100%;
+        min-height: 44px;
+        margin: 2px 0;
+        padding: 6px 10px;
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
       .ops-note {
         color: var(--g1-ink-lo);
         font-size: 0.85rem;
@@ -2748,26 +2759,24 @@
               <div id="rewind-result"></div>
             </section>
             <!-- #126. The turn index shipped as a relay with a test and no caller
-                 anywhere. This is the caller. It is a list rather than a jump, and
-                 the reason is on the wire rather than in here: a jump has to say
-                 which drawn row is turn N, and nothing on the page can. The daemon
-                 stamps a record id onto a stored frame only in three goal-control
-                 call sites (packages/acp-bridge/src/transcript-replay.ts:1881,
-                 :1894, :2342); the emitter that builds every ordinary frame
-                 (createTranscriptMessageUpdate, :521) attaches none, so the
-                 recordId field DaemonSessionClient.hydrateEvent reads at :1569 is
-                 undefined for every row this panel could draw. The only ids a
-                 reader is ever handed are a page's targetRecordId and the opaque
-                 cursor, and neither maps a turn to a row. So the panel answers
-                 "how long is this conversation, and what did the daemon call each
-                 turn" -- including turns never loaded -- and asks for nothing.
+                 anywhere. #126 drew it as a list because a jump has to say which
+                 drawn row is turn N and nothing on the page could. #129 found
+                 that it can: the turn's turnId is the record id of its user
+                 message, and every frame of a stored page (and of the resume's
+                 replay of one) carries that id at _meta['qwen.session.recordId'],
+                 which the transcript model keeps on the user row it draws. So a
+                 turn of the conversation being watched is a button here, and
+                 jumpToTurn finds its row, or reads earlier pages until it is
+                 drawn. A list for some other session id stays text: its rows are
+                 not on this page to jump to.
                  Bounded like the panels around it: an open list that grows is how
                  the to-do strip pushed the composer under the fold on a phone, and
                  a conversation can hold hundreds of these rows. -->
             <section id="session-turns" class="ops-card">
               <h2>Turns</h2>
               <div class="ops-note">
-                (the daemon's own turn list; requires session-read scope)
+                (the daemon's own turn list; tap a turn of the conversation you are
+                watching to go to it; requires session-read scope)
               </div>
               <div>
                 <input
@@ -2776,7 +2785,7 @@
                 />
                 <button id="turns-load">Read turns</button>
               </div>
-              <div id="turns-body" style="max-height: 140px; overflow-y: auto">
+              <div id="turns-body" style="max-height: 220px; overflow-y: auto">
                 (not loaded)
               </div>
             </section>
@@ -6469,12 +6478,62 @@
       let transcriptCursor = null; // opaque; only ever sent back as received
       let transcriptExhausted = false; // a read proved there is nothing older
       let transcriptPaging = false; // one page in flight at a time
+      // #129: what the load-earlier pill says while a jump to a turn is reading
+      // earlier pages for it, instead of the plain "loading".
+      let jumpNote = '';
+      // #129: the turn a jump is looking for, while its pages are being read. A
+      // second tap on another turn only changes this; the walk in flight looks
+      // for whichever is named when each page lands.
+      let jumpTarget = null;
 
       function renderLoadEarlier() {
         const btn = $('load-earlier');
         btn.hidden = !watchedSessionId || transcriptExhausted;
         btn.disabled = transcriptPaging;
-        btn.textContent = transcriptPaging ? '↑ loading…' : '↑ load earlier';
+        btn.textContent =
+          transcriptPaging && jumpNote
+            ? jumpNote
+            : transcriptPaging
+              ? '↑ loading…'
+              : '↑ load earlier';
+      }
+
+      // One page of stored history, read and spliced in front of the rows. It
+      // returns { added, exhausted }, or null when the visit it was asked for
+      // has gone (#172), and throws when the read fails, leaving the cursor
+      // where it was so the next ask retries the same page.
+      async function readEarlierPage(id, gen, size) {
+        const q = new URLSearchParams({
+          direction: 'backward',
+          limit: String(size),
+        });
+        if (transcriptCursor) q.set('cursor', transcriptCursor);
+        const res = await fetch(
+          '/session/' + encodeURIComponent(id) + '/transcript?' + q,
+          { headers: { Authorization: 'Bearer ' + token() } },
+        );
+        if (gen !== switchGen) return null;
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(strOr(body.error, 'HTTP ' + res.status));
+        }
+        const page = await res.json();
+        if (gen !== switchGen) return null;
+        const rows = TranscriptModel.replayStoredPage(page.events);
+        markStoredTurnEnds(rows); // #184: their finished turns get actions
+        transcriptCursor = strOr(page.nextCursor, '') || null;
+        // Continuing needs the cursor as much as the daemon saying there is
+        // more: without one a second tap would re-read the same newest page
+        // and prepend it a second time.
+        transcriptExhausted = page.hasMore !== true || !transcriptCursor;
+        // Rows arriving above the viewport leave the scroll position aimed
+        // at different content. Only the view puts the reader back; it owns
+        // every other scroll correction, and the model calls this just
+        // before rows go in (a page that adds none leaves nothing held).
+        const added = transcriptModel.prependItems(rows, () => {
+          if (transcriptView) transcriptView.anchorReader();
+        });
+        return { added, exhausted: transcriptExhausted };
       }
 
       async function loadEarlierMessages() {
@@ -6497,37 +6556,10 @@
           const MAX_HOPS = 6;
           let added = 0;
           for (let hop = 0; hop < MAX_HOPS && !added; hop++) {
-            const q = new URLSearchParams({
-              direction: 'backward',
-              limit: String(TRANSCRIPT_PAGE_SIZE),
-            });
-            if (transcriptCursor) q.set('cursor', transcriptCursor);
-            const res = await fetch(
-              '/session/' + encodeURIComponent(id) + '/transcript?' + q,
-              { headers: { Authorization: 'Bearer ' + token() } },
-            );
-            if (gen !== switchGen) return;
-            if (!res.ok) {
-              const body = await res.json().catch(() => ({}));
-              throw new Error(strOr(body.error, 'HTTP ' + res.status));
-            }
-            const page = await res.json();
-            if (gen !== switchGen) return;
-            const rows = TranscriptModel.replayStoredPage(page.events);
-            markStoredTurnEnds(rows); // #184: their finished turns get actions
-            transcriptCursor = strOr(page.nextCursor, '') || null;
-            // Continuing needs the cursor as much as the daemon saying there is
-            // more: without one a second tap would re-read the same newest page
-            // and prepend it a second time.
-            transcriptExhausted = page.hasMore !== true || !transcriptCursor;
-            // Rows arriving above the viewport leave the scroll position aimed
-            // at different content. Only the view puts the reader back; it owns
-            // every other scroll correction, and the model calls this just
-            // before rows go in (a page that adds none leaves nothing held).
-            added = transcriptModel.prependItems(rows, () => {
-              if (transcriptView) transcriptView.anchorReader();
-            });
-            if (transcriptExhausted) break;
+            const r = await readEarlierPage(id, gen, TRANSCRIPT_PAGE_SIZE);
+            if (!r) return;
+            added = r.added;
+            if (r.exhausted) break;
           }
           if (!added && !transcriptExhausted) {
             setStatus('nothing older to show');
@@ -6544,6 +6576,131 @@
           // #172: after a switch the flag is the new visit's, and
           // noteConversationSwitch already let go of this one's hold on it.
           if (gen === switchGen) {
+            transcriptPaging = false;
+            renderLoadEarlier();
+          }
+        }
+      }
+
+      // ---- Jump to a turn (#129) ---------------------------------------------
+      // The turn index names a turn by turnId, the record id of its user
+      // message, and the model keeps the record ids of the user rows it draws,
+      // so a turn is found by id and never by its place in the list or its
+      // wording. A turn whose row is drawn is scrolled to. Otherwise earlier
+      // pages are read, through the same cursor load-earlier uses so that the
+      // rows stay contiguous (a page fetched around the turn would sit beside
+      // rows hundreds of records away with nothing drawn to say so), until it
+      // is. Bounded: a turn further back than JUMP_MAX_PAGES pages says so, and
+      // the pages already read stay, so tapping it again goes on from there.
+      const JUMP_MAX_PAGES = 12;
+      const JUMP_PAGE_SIZE = 200;
+      const JUMP_TOP = 12; // px under the top edge the turn's row is put at
+      function turnName(turn) {
+        const n = Number(turn && turn.ordinal);
+        return Number.isFinite(n) ? 'turn ' + (n + 1) : 'that turn';
+      }
+      function revealTurn(turn) {
+        const row = transcriptModel.rowOfRecord(turn.turnId);
+        if (!row || !transcriptView || typeof transcriptView.revealItem !== 'function')
+          return false;
+        transcriptView.revealItem(row, JUMP_TOP, true);
+        return true;
+      }
+      // Whether the daemon still lists the turn: true or false when its whole
+      // index fits one read, null when that could not be settled (a failed
+      // read, or an index longer than a page). The list the reader tapped was
+      // read earlier; a rewind or a deleted record since leaves a row in it
+      // that no page of history will ever hold, and walking the whole
+      // conversation to learn that would be a long way to find nothing.
+      async function turnStillListed(id, turn) {
+        const r = await rcCall(
+          '/session/' + encodeURIComponent(id) + '/turn-index?limit=500',
+        );
+        if (!r.ok || !r.body || !Array.isArray(r.body.turns)) return null;
+        if (r.body.turns.some((t) => t && t.turnId === turn.turnId)) return true;
+        const total = Number(r.body.totalTurns);
+        return Number.isFinite(total) && total <= r.body.turns.length
+          ? false
+          : null;
+      }
+      async function jumpToTurn(turn) {
+        const id = watchedSessionId;
+        if (!turn || !turn.turnId) return;
+        if (!id || turn.sessionId !== id) {
+          setStatus('that turn is from another conversation; read the turns again');
+          return;
+        }
+        // The turn list is a screen over the chat; the jump is in the chat.
+        setMoreOpen(false);
+        if (jumpTarget) {
+          jumpTarget = turn;
+          setStatus('looking for ' + turnName(turn) + '…');
+          return;
+        }
+        if (revealTurn(turn)) {
+          setStatus('showing ' + turnName(turn));
+          return;
+        }
+        if (transcriptPaging) {
+          setStatus('earlier messages are loading; tap the turn again in a moment');
+          return;
+        }
+        const gen = switchGen;
+        jumpTarget = turn;
+        transcriptPaging = true;
+        jumpNote = '↑ looking for ' + turnName(turn) + '…';
+        renderLoadEarlier();
+        setStatus('looking for ' + turnName(turn) + '…');
+        let listed = null;
+        try {
+          listed = await turnStillListed(id, turn);
+          if (gen !== switchGen) return;
+          if (listed === false) {
+            setStatus(
+              turnName(turn) +
+                ' is no longer in this conversation (rewound or deleted)',
+            );
+            return;
+          }
+          for (let hop = 0; hop < JUMP_MAX_PAGES; hop++) {
+            if (transcriptExhausted) break;
+            const progress =
+              'looking for ' + turnName(jumpTarget) + ', page ' + (hop + 1) +
+              ' of up to ' + JUMP_MAX_PAGES;
+            jumpNote = '↑ ' + progress + '…';
+            renderLoadEarlier();
+            setStatus(progress + '…');
+            const r = await readEarlierPage(id, gen, JUMP_PAGE_SIZE);
+            if (!r) return;
+            if (revealTurn(jumpTarget)) {
+              setStatus('showing ' + turnName(jumpTarget));
+              return;
+            }
+            if (r.exhausted) break;
+          }
+          const name = turnName(jumpTarget);
+          if (transcriptExhausted) {
+            setStatus(
+              listed === true
+                ? 'the daemon lists ' + name + ', but its message is not in the history that was read'
+                : name + ' is not in this conversation any more (rewound or deleted)',
+            );
+          } else {
+            setStatus(
+              name + ' is further back than ' + JUMP_MAX_PAGES +
+                ' pages; tap it again to keep looking',
+            );
+          }
+        } catch (err) {
+          if (gen !== switchGen) return;
+          setStatus(
+            'could not reach ' + turnName(jumpTarget || turn) + ': ' +
+              (err && err.message ? err.message : String(err)),
+          );
+        } finally {
+          if (gen === switchGen) {
+            jumpTarget = null;
+            jumpNote = '';
             transcriptPaging = false;
             renderLoadEarlier();
           }
@@ -9919,6 +10076,10 @@
         // boundary. Drawn unless it is this window's own echo (#114), which
         // the send path already put on screen at the moment you typed it.
         if (su === 'user_message_chunk') {
+          // #129: the record this frame came from, which the resume's replay
+          // stamps (a live frame carries none), so the turn index can name the
+          // row. Undefined is the ordinary case and draws the row all the same.
+          const userRecordId = TranscriptModel.recordIdOf(null, u);
           // #190: a message that joined a running turn (the resume's replay
           // marks its record so) is a row of that turn, not a new one: no turn
           // is counted for it and the turn above it is not closed.
@@ -9928,7 +10089,7 @@
             typeof text === 'string' &&
             text
           ) {
-            transcriptModel.addMidTurnUser(text, sentAt);
+            transcriptModel.addMidTurnUser(text, sentAt, userRecordId);
             scrollTranscript();
             return;
           }
@@ -9943,7 +10104,7 @@
               : null;
           if (part) {
             markPrevTurnEnd();
-            const added = transcriptModel.addUserPart(part, sentAt);
+            const added = transcriptModel.addUserPart(part, sentAt, userRecordId);
             scrollTranscript(!added.merged);
             if (!added.merged) {
               userTurnsSeen += 1;
@@ -9964,7 +10125,11 @@
           // opens and the arm is what re-opens it.
           if (!claimSelfEcho(text)) {
             markPrevTurnEnd();
-            const added = transcriptModel.addUserChunk(text, sentAt);
+            const added = transcriptModel.addUserChunk(
+              text,
+              sentAt,
+              userRecordId,
+            );
             joined = added.merged;
             scrollTranscript(true);
           }
@@ -11670,6 +11835,9 @@
         // A page of history in flight is for the visit being left and is
         // dropped when it lands, so the one-at-a-time flag it holds goes now.
         transcriptPaging = false;
+        // #129: and so is a walk looking for a turn of it.
+        jumpTarget = null;
+        jumpNote = '';
         renderLoadEarlier();
         // The pickers below were filled from the conversation being left. Left
         // up, a turn picked on A was posted to B, with B's id in the confirm.
@@ -20245,21 +20413,41 @@
         if (!turns.length && total) {
           rows.push('the daemon listed none for this start');
         }
+        renderRows(out, rows);
+        // #129: a turn of the conversation being watched is a button that goes
+        // to it; one listed for some other session id is text, because its rows
+        // are not on this page. The text is the same either way.
         for (const t of turns) {
           const n = Number(t && t.ordinal);
-          rows.push(
+          const line =
             (Number.isFinite(n) ? n + 1 : '?') +
-              '. ' +
-              String((t && t.label) || '(untitled)') +
-              ' [' +
-              String((t && t.kind) || 'unknown') +
-              ']' +
-              (typeof (t && t.timestamp) === 'string'
-                ? ' ' + new Date(t.timestamp).toLocaleTimeString()
-                : ''),
-          );
+            '. ' +
+            String((t && t.label) || '(untitled)') +
+            ' [' +
+            String((t && t.kind) || 'unknown') +
+            ']' +
+            (typeof (t && t.timestamp) === 'string'
+              ? ' ' + new Date(t.timestamp).toLocaleTimeString()
+              : '');
+          const turnId = t && typeof t.turnId === 'string' ? t.turnId : '';
+          const jumpable = !!turnId && id === watchedSessionId;
+          const row = document.createElement(jumpable ? 'button' : 'div');
+          row.textContent = line;
+          if (jumpable) {
+            row.type = 'button';
+            row.className = 'turn-jump';
+            row.dataset.turnId = turnId;
+            row.title = 'Go to this turn in the conversation';
+            row.addEventListener('click', () => {
+              void jumpToTurn({
+                turnId,
+                ordinal: Number.isFinite(n) ? n : null,
+                sessionId: id,
+              });
+            });
+          }
+          out.appendChild(row);
         }
-        renderRows(out, rows);
       };
 
       // #124. The session resources read. Every state is drawn in the daemon's

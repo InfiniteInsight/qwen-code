@@ -295,6 +295,34 @@
       hideProcessing();
     }
 
+    // ---- Record ids (#129) -------------------------------------------------
+    // A stored frame carries the id of the record it came from at
+    // _meta['qwen.session.recordId'], and the daemon's turn index names a turn
+    // by the id of its user message. A user row keeps the id of every record
+    // it was built from (a message of several blocks is several records and
+    // one row, and the index may name either), so a turn can be found among
+    // the rows that are drawn. Only user rows keep one: an answer row is
+    // many records run together, and no index names one. A row the reader
+    // typed in this window, and a live frame, has none, which is the truth:
+    // the stream does not stamp one.
+    function noteRecord(item, recordId) {
+      if (item && typeof recordId === 'string' && recordId) {
+        var have = item.recordIds || (item.recordIds = []);
+        if (have.indexOf(recordId) < 0) have.push(recordId);
+      }
+      return item;
+    }
+    // The row built from the record, or null: never a guess from position or
+    // wording, so a turn the rows do not hold is reported as not held.
+    function rowOfRecord(recordId) {
+      if (typeof recordId !== 'string' || !recordId) return null;
+      for (var i = 0; i < items.length; i++) {
+        var ids = items[i].recordIds;
+        if (ids && ids.indexOf(recordId) >= 0) return items[i];
+      }
+      return null;
+    }
+
     // ---- Plain rows -------------------------------------------------------
     // addUser hands back the item it created: the viewer needs a reference to
     // this exact message to mark it not sent when the POST carrying it turns
@@ -308,10 +336,11 @@
     // a bubble of its own, but it is not a turn: the daemon's rewind index and
     // the gateway's turn resolver skip `mid_turn_user_message`, so userTurns
     // (and every rewind and fork number built on it) skips it too.
-    function addMidTurnUser(text, time) {
+    function addMidTurnUser(text, time, recordId) {
       resetTurn();
-      return push(
-        newItem('user', { text: clean(text), time: time, midTurn: true }),
+      return noteRecord(
+        push(newItem('user', { text: clean(text), time: time, midTurn: true })),
+        recordId,
       );
     }
     // #197. One attachment of a user message. It joins the user row it belongs
@@ -319,15 +348,17 @@
     // text-and-picture message is one row, not two, and the rows that count
     // turns (fork, rewind) still see one message. With no user row to join it
     // opens a row of its own, which has no text. Returns { item, merged }.
-    function addUserPart(part, time) {
+    function addUserPart(part, time, recordId) {
       resetTurn();
       var last = items.length ? items[items.length - 1] : null;
       if (last && last.kind === 'user') {
         last.parts = (last.parts || []).concat([part]);
+        noteRecord(last, recordId);
         emitUpdate(last);
         return { item: last, merged: true };
       }
       var item = push(newItem('user', { text: '', time: time, parts: [part] }));
+      noteRecord(item, recordId);
       return { item: item, merged: false };
     }
     // #171. The text of a user message. The daemon echoes one chunk per block,
@@ -335,16 +366,20 @@
     // after it: the caption belongs in that row. Filling a row that already
     // has text would merge two prompts queued back to back, so only a row with
     // parts and no text takes it. Returns { item, merged } like addUserPart.
-    function addUserChunk(text, time) {
+    function addUserChunk(text, time, recordId) {
       resetTurn();
       var last = items.length ? items[items.length - 1] : null;
       if (last && last.kind === 'user' && !last.text && last.parts) {
         last.text = clean(text);
+        noteRecord(last, recordId);
         emitUpdate(last);
         return { item: last, merged: true };
       }
       return {
-        item: push(newItem('user', { text: clean(text), time: time })),
+        item: noteRecord(
+          push(newItem('user', { text: clean(text), time: time })),
+          recordId,
+        ),
         merged: false,
       };
     }
@@ -867,6 +902,9 @@
     function absorb(last, first) {
       first.text = last.text || first.text;
       first.parts = (last.parts || []).concat(first.parts || []);
+      (last.recordIds || []).forEach(function (id) {
+        noteRecord(first, id);
+      });
       if (typeof last.time === 'number') first.time = last.time;
       emitUpdate(first);
     }
@@ -938,6 +976,12 @@
             if (on.kind === 'tool') {
               fillTool(on, list[from + j]);
               emitUpdate(on);
+            } else if (on.kind === 'user') {
+              // The row on screen was drawn from a frame that stamped no
+              // record id; its stored copy knows it (#129).
+              (list[from + j].recordIds || []).forEach(function (id) {
+                noteRecord(on, id);
+              });
             }
           }
           return list.slice(0, from);
@@ -1070,6 +1114,7 @@
       placeFork: placeFork,
       clearFork: clearFork,
       userTurns: userTurns,
+      rowOfRecord: rowOfRecord,
       search: function (query) {
         return searchItems(items, query);
       },
@@ -1274,6 +1319,18 @@
     return typeof data.sessionUpdate === 'string' ? data : null;
   }
 
+  // The id of the record a frame came from (#129): beside the clock, on the
+  // update's own _meta or, for a nested update, on the envelope data's.
+  var RECORD_ID_KEY = 'qwen.session.recordId';
+  function recordIdOf(ev, u) {
+    var metas = [u && u._meta, ev && ev.data && ev.data._meta];
+    for (var i = 0; i < metas.length; i++) {
+      var id = isRecord(metas[i]) ? metas[i][RECORD_ID_KEY] : undefined;
+      if (typeof id === 'string' && id) return id;
+    }
+    return undefined;
+  }
+
   function applyStoredFrame(m, ev) {
     if (!ev || typeof ev !== 'object') return;
     // #199: a failed turn's terminal draws the same error row a live one does.
@@ -1290,6 +1347,7 @@
     var su = u.sessionUpdate;
     var text = u.content && u.content.text;
     var sentAt = stampOf(ev) || undefined;
+    var recordId = recordIdOf(ev, u);
     // Child frames belong to the parent Agent tool's row, not the transcript.
     var parentId =
       u._meta && typeof u._meta.parentToolCallId === 'string'
@@ -1311,13 +1369,13 @@
         typeof text === 'string' &&
         text
       ) {
-        return m.addMidTurnUser(text, sentAt);
+        return m.addMidTurnUser(text, sentAt, recordId);
       }
       var part = userBlockOf(u.content);
-      if (part) return m.addUserPart(part, sentAt);
+      if (part) return m.addUserPart(part, sentAt, recordId);
       // A frame with nothing to say draws nothing (it was an empty bubble).
       if (typeof text !== 'string' || !text) return;
-      return m.addUserChunk(text, sentAt);
+      return m.addUserChunk(text, sentAt, recordId);
     }
     if (su === 'agent_message_chunk') {
       if (u.content && u.content.type === 'image')
@@ -1371,6 +1429,8 @@
     frameStamp: function (ev) {
       return stampOf(ev) || undefined;
     },
+    // The record id a frame carries, or undefined (#129).
+    recordIdOf: recordIdOf,
     turnErrorText: turnErrorText,
     userPartOf: userPartOf,
     userBlockOf: userBlockOf,

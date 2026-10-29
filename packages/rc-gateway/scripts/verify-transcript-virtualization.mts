@@ -2655,9 +2655,13 @@ interface PgItem {
   note?: string;
   busy?: boolean;
   toolCallId?: string;
+  /** #129: the record ids a user row was built from. */
+  recordIds?: string[];
 }
 interface PgModel {
   items: PgItem[];
+  /** #129: the user row built from a record, or null. */
+  rowOfRecord(recordId: string): PgItem | null;
   readonly curAsst: PgItem | null;
   readonly forkItem: PgItem | null;
   userTurns(): PgItem[];
@@ -2722,6 +2726,13 @@ declare const userTurnsSeen: number;
 declare let turnOpen: boolean;
 declare let runClock: unknown;
 declare const forkTurnCount: number;
+// #129. The jump to a turn, and the one-page-at-a-time flag its walk holds.
+declare let transcriptPaging: boolean;
+declare const jumpToTurn: (turn: {
+  turnId: string;
+  ordinal: number | null;
+  sessionId: string;
+}) => Promise<void>;
 declare const __pg: {
   view(): VtView | null | undefined;
   frame(): Promise<void>;
@@ -25264,6 +25275,439 @@ PAGE_SCENARIOS.push({
     },
   });
 }
+
+
+// ---- #129 jump to a turn ---------------------------------------------------
+// The turn index names a turn by the record id of its user message and the
+// model keeps that id on the row it draws, so a tap on a turn finds a row by
+// id. These scenarios use the shapes the daemon sends: a stored page's frames
+// carry `qwen.session.recordId` beside the clock, the resume's replay carries
+// it on the update, and a live frame carries none.
+const jumpAnswer = (n: number): string =>
+  Array.from(
+    { length: 4 },
+    (_, k) =>
+      `answer ${n} paragraph ${k}: lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore.`,
+  ).join('\n\n');
+
+/** One turn as the resume's replay frames it: ids on the update, none on the answer. */
+function jumpReplay(f: Frames, n: number, withIds: boolean): Frames {
+  return f
+    .upd({
+      sessionUpdate: 'user_message_chunk',
+      content: { text: `question ${n}` },
+      _meta: withIds ? { 'qwen.session.recordId': `jt-${n}` } : {},
+    })
+    .asst(jumpAnswer(n));
+}
+
+/** One turn as a stored page frames it: flat, the id beside the clock. */
+function jumpStored(n: number): Record<string, unknown>[] {
+  const at = 1_700_000_000_000 + n * 60_000;
+  const frame = (sessionUpdate: string, id: string, text: string, ts: number) => ({
+    v: 1,
+    type: 'session_update',
+    data: {
+      sessionUpdate,
+      content: { type: 'text', text },
+      _meta: { timestamp: ts, 'qwen.session.recordId': id },
+    },
+  });
+  return [
+    frame('user_message_chunk', `jt-${n}`, `question ${n}`, at),
+    frame('agent_message_chunk', `ja-${n}`, jumpAnswer(n), at + 1000),
+  ];
+}
+
+/** Pages newest first: page 0 holds the last `per` turns of 1..newest, oldest-first inside. */
+function jumpPages(newest: number, per: number, skip: number[] = []): Record<string, unknown>[][] {
+  const pages: Record<string, unknown>[][] = [];
+  for (let top = newest; top >= 1; top -= per) {
+    const turns: Record<string, unknown>[] = [];
+    for (let n = Math.max(1, top - per + 1); n <= top; n++) {
+      if (!skip.includes(n)) turns.push(...jumpStored(n));
+    }
+    pages.push(turns);
+  }
+  return pages;
+}
+
+/** Answers the transcript route from `pages`, one by its cursor, logging each query. */
+async function routeJumpPages(
+  page: Page,
+  sid: string,
+  pages: Record<string, unknown>[][],
+  seen: string[],
+  hold?: { at: number; gate: Promise<void> },
+): Promise<void> {
+  await page.route(
+    (u) => u.pathname === `/session/${sid}/transcript`,
+    async (route) => {
+      const u = new URL(route.request().url());
+      seen.push(u.search);
+      const cursor = u.searchParams.get('cursor');
+      const at = cursor ? Number(cursor.replace('jc-', '')) : 0;
+      if (hold && hold.at === at) await hold.gate;
+      const more = at + 1 < pages.length;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          v: 1,
+          sessionId: sid,
+          events: pages[at] ?? [],
+          ...(more ? { nextCursor: `jc-${at + 1}` } : {}),
+          hasMore: more,
+        }),
+      });
+    },
+  );
+}
+
+type JumpIndexMode = 'all' | 'fail' | { omit: number };
+/** Answers the turn index route for turns 1..total, in whichever mode the scenario sets. */
+async function routeJumpIndex(
+  page: Page,
+  sid: string,
+  total: number,
+  mode: { now: JumpIndexMode },
+): Promise<void> {
+  await page.route(
+    (u) => u.pathname === `/session/${sid}/turn-index`,
+    async (route) => {
+      if (mode.now === 'fail') {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"x","code":"daemon_unavailable"}' });
+        return;
+      }
+      const omit = typeof mode.now === 'object' ? mode.now.omit : -1;
+      const turns = [];
+      for (let n = 1; n <= total; n++) {
+        if (n === omit) continue;
+        turns.push({
+          ordinal: turns.length,
+          turnId: `jt-${n}`,
+          kind: 'prompt',
+          label: `question ${n}`,
+          timestamp: new Date(1_700_000_000_000 + n * 60_000).toISOString(),
+        });
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ v: 1, sessionId: sid, snapshot: 'sn-1', totalTurns: turns.length, start: 0, turns }),
+      });
+    },
+  );
+}
+
+/** Opens the Turns list over the chat and reads it, the way a reader does. */
+async function readTurnList(page: Page): Promise<void> {
+  await openPanel(page, 'rewind');
+  await page.click('#turns-load');
+  await page.waitForSelector('#turns-body .turn-jump', { timeout: 10_000 });
+}
+async function tapTurn(page: Page, id: string): Promise<void> {
+  await page.click(`#turns-body .turn-jump[data-turn-id="${id}"]`);
+}
+async function jumpStatus(page: Page): Promise<string> {
+  return page.evaluate(() => (document.getElementById('status')?.textContent ?? '').trim());
+}
+/** Where the turn's row sits under the transcript's top edge, or null when it is not mounted. */
+async function turnTop(page: Page, id: string): Promise<number | null> {
+  return page.evaluate((rid) => {
+    const it = transcriptModel.rowOfRecord(rid);
+    if (!it) return null;
+    const el = document.querySelector<HTMLElement>(`#transcript .vrow[data-id="${it.id}"]`);
+    if (!el) return null;
+    return Math.round(el.getBoundingClientRect().top - document.getElementById('transcript')!.getBoundingClientRect().top);
+  }, id);
+}
+const userQuestions = (page: Page): Promise<number[]> =>
+  page.evaluate(() =>
+    transcriptModel.items
+      .filter((i) => i.kind === 'user')
+      .map((i) => Number(String(i.text).replace('question ', ''))),
+  );
+const pillState = (page: Page) =>
+  page.evaluate(() => ({
+    more: !(document.getElementById('more-screen') as HTMLElement).hidden,
+    jump: !(document.getElementById('jump-bottom') as HTMLElement).hidden,
+    earlier: (document.getElementById('load-earlier') as HTMLElement).textContent ?? '',
+    paging: transcriptPaging,
+  }));
+
+PAGE_SCENARIOS.push({
+  name: 'P380 a turn already drawn is brought to the top of the list by a tap in the Turns list, with no page read: from the replay that carried record ids, and one already in view still moves',
+  frames: () => {
+    const f = new Frames();
+    for (let n = 1; n <= 12; n++) jumpReplay(f, n, true);
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const seen: string[] = [];
+    await routeJumpPages(page, sid, jumpPages(12, 4), seen);
+    await routeJumpIndex(page, sid, 12, { now: 'all' });
+    await watch(page, sid);
+    await waitForFrame(page, 24, 30_000);
+    await settlePage(page);
+
+    const held = await page.evaluate(() => transcriptModel.items.filter((i) => i.recordIds).length);
+    expect(held === 12, `${held} of 12 replayed user rows kept a record id`);
+    const atEnd = await pillState(page);
+    expect(!atEnd.jump, 'setup: the reader was not at the end');
+
+    await readTurnList(page);
+    await tapTurn(page, 'jt-3');
+    await settlePage(page);
+    const top3 = await turnTop(page, 'jt-3');
+    expect(top3 !== null && top3 >= 0 && top3 <= 80, `turn 3 is ${top3}px under the top edge, not at the top`);
+    const after = await pillState(page);
+    expect(!after.more, 'the Turns screen was left over the chat');
+    expect(after.jump, 'a reader who left the end has no way back: the jump-to-bottom pill is hidden');
+    expect(seen.length === 0, `a turn that was drawn read ${seen.length} pages`);
+    const status3 = await jumpStatus(page);
+    expect(status3 === 'showing turn 3', `the note reads ${JSON.stringify(status3)}`);
+
+    // Already wholly in view is not a reason to stay put: the reader asked for it.
+    const inView = await turnTop(page, 'jt-4');
+    expect(inView !== null && inView > 100, `setup: turn 4 is at ${inView}px, expected it lower in the view`);
+    await readTurnList(page);
+    await tapTurn(page, 'jt-4');
+    await settlePage(page);
+    const top4 = await turnTop(page, 'jt-4');
+    expect(top4 !== null && top4 >= 0 && top4 <= 80, `turn 4 was in view at ${inView}px and is ${top4}px after the tap, not at the top`);
+    expect(seen.length === 0, `a second drawn turn read ${seen.length} pages`);
+    return `turn 3 landed ${top3}px under the top edge and turn 4 (${inView}px, in view) ${top4}px, with no page read; the pill is up and the note reads ${JSON.stringify(status3)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P381 a turn three pages up at 390x844 reads earlier pages by the cursor, says which page it is on, keeps the rows contiguous, then shows the turn at the top and stops reading',
+  frames: () => jumpReplay(new Frames(), 24, false).list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const seen: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    // 24 turns, 3 a page, 8 pages. Turn 13 is on the fourth page read.
+    await routeJumpPages(page, sid, jumpPages(24, 3), seen, { at: 2, gate });
+    await routeJumpIndex(page, sid, 24, { now: 'all' });
+    await watch(page, sid);
+    await waitForFrame(page, 2, 30_000);
+    await settlePage(page);
+    expect((await userQuestions(page)).join() === '24', 'setup: the replay did not hold just turn 24');
+    expect(
+      (await page.evaluate(() => transcriptModel.rowOfRecord('jt-24'))) === null,
+      'setup: a live row already knew its record id',
+    );
+
+    await readTurnList(page);
+    await tapTurn(page, 'jt-13');
+
+    // The walk is waiting on the third page: its progress is on the pill and in the status.
+    await page.waitForFunction(() => /page 3 of up to 12/.test(document.getElementById('status')?.textContent ?? ''), null, { timeout: 10_000 });
+    const mid = await pillState(page);
+    const midStatus = await jumpStatus(page);
+    expect(/looking for turn 13, page 3 of up to 12/.test(midStatus), `the status reads ${JSON.stringify(midStatus)}`);
+    expect(/looking for turn 13, page 3 of up to 12/.test(mid.earlier) && mid.paging, `the pill reads ${JSON.stringify(mid)}`);
+    expect(!mid.more, 'the Turns screen stayed over the chat while it looked');
+    release();
+
+    await page.waitForFunction(() => document.getElementById('status')?.textContent === 'showing turn 13', null, { timeout: 15_000 });
+    await settlePage(page);
+    const top = await turnTop(page, 'jt-13');
+    expect(top !== null && top >= 0 && top <= 80, `turn 13 is ${top}px under the top edge`);
+    const qs = await userQuestions(page);
+    const want = Array.from({ length: 12 }, (_, i) => 13 + i).join();
+    expect(qs.join() === want, `the rows read turns ${qs.join()}, expected ${want} with none missing`);
+    // The newest page is the one the replay already drew, so it is asked for
+    // first and adds nothing; each later page goes in front of the last.
+    const cursors = seen.map((q) => new URLSearchParams(q).get('cursor') ?? '');
+    expect(cursors.join('|') === '|jc-1|jc-2|jc-3', `the pages were asked for as ${JSON.stringify(cursors)}`);
+    expect(seen.every((q) => /direction=backward/.test(q) && /limit=200/.test(q)), `a query lost its paging words: ${JSON.stringify(seen)}`);
+    // Turn 24 was drawn live with no id; the stored copy the first page held gave it one.
+    expect(
+      (await page.evaluate(() => transcriptModel.rowOfRecord('jt-24'))) !== null,
+      'the live row never learned its record id from the stored page that repeated it',
+    );
+    const end = await pillState(page);
+    expect(!end.paging && /load earlier/.test(end.earlier), `the pill was left reading ${JSON.stringify(end)}`);
+    expect(end.jump, 'the way back to the end is not offered');
+    await page.waitForTimeout(500);
+    expect(seen.length === 4, `${seen.length} pages were read, expected 4 and no more`);
+    return `turn 13 was found on the fourth page read (${cursors.map((c) => c || 'newest').join(', ')}); the note named page 3 of up to 12 while it waited; rows ${qs[0]} to ${qs[qs.length - 1]} are contiguous; the turn sits ${top}px under the top edge`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P382 a turn further back than the 12 pages it will read says so and keeps what it read, and tapping it again goes on from there to the turn',
+  frames: () => jumpReplay(new Frames(), 14, false).list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const seen: string[] = [];
+    // 14 turns, one a page: turn 1 is on the fourteenth page, past the bound.
+    await routeJumpPages(page, sid, jumpPages(14, 1), seen);
+    await routeJumpIndex(page, sid, 14, { now: 'all' });
+    await watch(page, sid);
+    await waitForFrame(page, 2, 30_000);
+    await settlePage(page);
+    await readTurnList(page);
+    await tapTurn(page, 'jt-1');
+    await page.waitForFunction(() => /further back than 12 pages/.test(document.getElementById('status')?.textContent ?? ''), null, { timeout: 30_000 });
+    await settlePage(page);
+    const note = await jumpStatus(page);
+    expect(seen.length === 12, `${seen.length} pages were read before it gave up, expected 12`);
+    expect(note === 'turn 1 is further back than 12 pages; tap it again to keep looking', `the note reads ${JSON.stringify(note)}`);
+    const kept = await userQuestions(page);
+    expect(kept.join() === '3,4,5,6,7,8,9,10,11,12,13,14', `the rows it read were not kept: ${kept.join()}`);
+    const idle = await pillState(page);
+    expect(!idle.paging && /load earlier/.test(idle.earlier), `the pill was left reading ${JSON.stringify(idle)}`);
+
+    await readTurnList(page);
+    await tapTurn(page, 'jt-1');
+    await page.waitForFunction(() => document.getElementById('status')?.textContent === 'showing turn 1', null, { timeout: 30_000 });
+    await settlePage(page);
+    const cursors = seen.map((q) => new URLSearchParams(q).get('cursor') ?? '');
+    expect(
+      cursors.join('|') === ['', ...Array.from({ length: 13 }, (_, i) => `jc-${i + 1}`)].join('|'),
+      `the second tap did not go on from the cursor it had: ${JSON.stringify(cursors)}`,
+    );
+    const top = await turnTop(page, 'jt-1');
+    expect(top !== null && top >= 0 && top <= 80, `turn 1 is ${top}px under the top edge`);
+    expect((await userQuestions(page)).length === 14, 'the rows are not turns 1 to 14');
+    return `12 pages read then ${JSON.stringify(note)}; all 12 stayed; the second tap read pages 13 and 14 from the same cursor and showed turn 1 ${top}px under the top edge`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P383 a turn that is gone says so in plain words: rewound away (no page read), lost from the history the daemon still lists, and with the index unreadable',
+  frames: () => jumpReplay(new Frames(), 8, false).list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const seen: string[] = [];
+    // Turn 3's records are gone from the stored history (deleted).
+    await routeJumpPages(page, sid, jumpPages(8, 4, [3]), seen);
+    const mode: { now: JumpIndexMode } = { now: 'all' };
+    await routeJumpIndex(page, sid, 8, mode);
+    await watch(page, sid);
+    await waitForFrame(page, 2, 30_000);
+    await settlePage(page);
+    // The list is read while the daemon still names turn 3 ...
+    await readTurnList(page);
+
+    // ... and a rewind takes it away before the reader taps it.
+    mode.now = { omit: 3 };
+    await tapTurn(page, 'jt-3');
+    await page.waitForFunction(() => /no longer in this conversation/.test(document.getElementById('status')?.textContent ?? ''), null, { timeout: 10_000 });
+    const rewound = await jumpStatus(page);
+    expect(rewound === 'turn 3 is no longer in this conversation (rewound or deleted)', `the note reads ${JSON.stringify(rewound)}`);
+    expect(seen.length === 0, `a turn the daemon no longer lists read ${seen.length} pages to find that out`);
+    const a = await pillState(page);
+    expect(!a.paging && /load earlier/.test(a.earlier), `the pill was left reading ${JSON.stringify(a)}`);
+
+    // The daemon still lists it, and no page of history holds its message.
+    mode.now = 'all';
+    await readTurnList(page);
+    await tapTurn(page, 'jt-3');
+    await page.waitForFunction(() => /history that was read/.test(document.getElementById('status')?.textContent ?? ''), null, { timeout: 15_000 });
+    const lost = await jumpStatus(page);
+    expect(lost === 'the daemon lists turn 3, but its message is not in the history that was read', `the note reads ${JSON.stringify(lost)}`);
+    expect(seen.length === 2, `${seen.length} pages were read to the start of the history, expected 2`);
+    const qs = await userQuestions(page);
+    expect(qs.join() === '1,2,4,5,6,7,8', `the rows read turns ${qs.join()}`);
+
+    // With the index unreadable and the history read to its start, it cannot be told apart from gone.
+    mode.now = 'fail';
+    await readTurnList(page).catch(() => undefined);
+    await page.evaluate(() => {
+      void jumpToTurn({ turnId: 'jt-3', ordinal: 2, sessionId: watchedSessionId });
+    });
+    await page.waitForFunction(() => /not in this conversation any more/.test(document.getElementById('status')?.textContent ?? ''), null, { timeout: 10_000 });
+    const unknown = await jumpStatus(page);
+    expect(unknown === 'turn 3 is not in this conversation any more (rewound or deleted)', `the note reads ${JSON.stringify(unknown)}`);
+    expect(seen.length === 2, `an exhausted history was read again (${seen.length} pages)`);
+    return `${JSON.stringify(rewound)} with no page read; ${JSON.stringify(lost)} after ${seen.length} pages; ${JSON.stringify(unknown)} with the index down`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P384 after a jump the reader returns with the jump-to-bottom pill, and a second jump from the top goes back down to a later turn',
+  frames: () => {
+    const f = new Frames();
+    for (let n = 1; n <= 12; n++) jumpReplay(f, n, true);
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const seen: string[] = [];
+    await routeJumpPages(page, sid, jumpPages(12, 4), seen);
+    await routeJumpIndex(page, sid, 12, { now: 'all' });
+    await watch(page, sid);
+    await waitForFrame(page, 24, 30_000);
+    await settlePage(page);
+    const gapBefore = await page.evaluate(() => __pg.gap());
+    expect(gapBefore <= 2, `setup: the reader started ${gapBefore}px from the end`);
+
+    await readTurnList(page);
+    await tapTurn(page, 'jt-2');
+    await settlePage(page);
+    const away = await page.evaluate(() => __pg.gap());
+    expect(away > 400, `the jump left the reader ${away}px from the end`);
+    const p1 = await pillState(page);
+    expect(p1.jump, 'the pill is not offered after the jump');
+
+    await page.click('#jump-bottom');
+    await settlePage(page);
+    const back = await page.evaluate(() => __pg.gap());
+    const p2 = await pillState(page);
+    expect(back <= 2, `the pill left the reader ${back}px from the end`);
+    expect(!p2.jump, 'the pill is still up at the end');
+
+    // From the end to a middle turn, and from there to a later one.
+    await readTurnList(page);
+    await tapTurn(page, 'jt-7');
+    await settlePage(page);
+    const t7 = await turnTop(page, 'jt-7');
+    expect(t7 !== null && t7 >= 0 && t7 <= 80, `turn 7 is ${t7}px under the top edge`);
+    await readTurnList(page);
+    await tapTurn(page, 'jt-10');
+    await settlePage(page);
+    const t10 = await turnTop(page, 'jt-10');
+    expect(t10 !== null && t10 >= 0 && t10 <= 80, `turn 10 is ${t10}px under the top edge`);
+    expect(seen.length === 0, `the reader's moves read ${seen.length} pages`);
+    return `${away}px from the end after the jump, ${back}px after the pill; then turn 7 at ${t7}px and turn 10 at ${t10}px under the top edge`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P385 only the turns of the conversation being watched are buttons: a list read for another session id stays text',
+  frames: () => jumpReplay(new Frames(), 3, true).list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    await routeJumpIndex(page, sid, 3, { now: 'all' });
+    await routeJumpIndex(page, 'someone-elses-session', 3, { now: 'all' });
+    await watch(page, sid);
+    await waitForFrame(page, 2, 30_000);
+    await settlePage(page);
+    await readTurnList(page);
+    const mine = await page.evaluate(() => ({
+      buttons: document.querySelectorAll('#turns-body button.turn-jump').length,
+      rows: Array.from(document.getElementById('turns-body')!.children).map((c) => c.textContent ?? ''),
+    }));
+    expect(mine.buttons === 3, `${mine.buttons} of 3 turns of the watched session are buttons`);
+    await page.fill('#turns-id', 'someone-elses-session');
+    await page.click('#turns-load');
+    await page.waitForFunction(() => /3 turns/.test(document.getElementById('turns-body')?.textContent ?? ''), null, { timeout: 10_000 });
+    await page.waitForFunction(() => document.querySelectorAll('#turns-body button.turn-jump').length === 0, null, { timeout: 5_000 });
+    const other = await page.evaluate(() => Array.from(document.getElementById('turns-body')!.children).map((c) => c.textContent ?? ''));
+    expect(other.length === 4 && other[1].startsWith('1. question 1'), `the other list reads ${JSON.stringify(other)}`);
+    expect(other.join('|') === mine.rows.join('|'), 'the same turns read differently as text');
+    return `3 buttons for the watched session, 0 for another id, the same ${other.length} rows of text in both`;
+  },
+});
 
 
 async function runPageSection(): Promise<Result[]> {

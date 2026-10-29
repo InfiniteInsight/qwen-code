@@ -2197,11 +2197,15 @@
       // restorePlace path, so an unmounted row far away is reached the way a
       // reload reaches it), then its first mark is brought into view if the row
       // is taller than the box.
-      revealItem: function (item, top) {
+      // #129. `always` is for a reader who asked for this row by name (a turn
+      // tapped in the index): it is put at `top` even when it is wholly in view,
+      // because a tap that moved nothing reads as a tap that did nothing. A
+      // search leaves a visible hit where it is.
+      revealItem: function (item, top, always) {
         if (destroyed || !item || items.indexOf(item) < 0) return;
         pendingFocus = item;
         var m = mounted.get(item.id);
-        if (!(m && rowInView(m))) {
+        if (always || !(m && rowInView(m))) {
           pendingPlace = {
             item: item,
             top: typeof top === 'number' && isFinite(top) ? top : FIND_MARGIN,
