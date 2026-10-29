@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import express from 'express';
 import { chromium, type Page } from 'playwright';
 import { DaemonClient } from '@qwen-code/sdk';
 import {
@@ -333,6 +334,40 @@ export function harnessRuntimeRoot(): string {
   return dir;
 }
 
+/**
+ * The host name the harness gateway reports on /rc/capabilities (#190). The
+ * folder line shows its first label, so a scenario reads `on harness-host`.
+ */
+export const HARNESS_HOST_NAME = 'harness-host.test';
+
+/**
+ * Stands in for what a write-scope token reads off /rc/capabilities (#190):
+ * `hostName`, and `homeDir` as the folder the scenarios plant theirs under
+ * (`harnessRuntimeRoot()`), so a planted folder reads as `~/name` the way a
+ * folder under the host's $HOME does. Without it the page would see this
+ * machine's real hostname and $HOME, and the lists would depend on the host
+ * running them. Only a body that already carries the two (the audience that
+ * may read them) is touched, so a reader's view stays without them.
+ */
+function stubHostFacts(app: express.Express): express.Express {
+  const outer = express();
+  outer.use((req, res, next) => {
+    if (req.path === '/rc/capabilities' || req.path === '/capabilities') {
+      const json = res.json.bind(res);
+      res.json = (body: unknown) => {
+        const rc = (body as { remoteControl?: Record<string, unknown> } | null)
+          ?.remoteControl;
+        if (rc && 'hostName' in rc) rc['hostName'] = HARNESS_HOST_NAME;
+        if (rc && 'homeDir' in rc) rc['homeDir'] = harnessRuntimeRoot();
+        return json(body);
+      };
+    }
+    next();
+  });
+  outer.use(app);
+  return outer;
+}
+
 export async function bootViewer(
   opts: BootViewerOptions = {},
 ): Promise<Viewer> {
@@ -417,7 +452,7 @@ export async function bootViewer(
     hostActions: opts.hostActions ? harnessHostActions() : undefined,
   });
   const server = await new Promise<Server>((resolve) => {
-    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    const s = stubHostFacts(app).listen(0, '127.0.0.1', () => resolve(s));
   });
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 

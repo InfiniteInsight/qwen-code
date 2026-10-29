@@ -37,7 +37,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page, Route } from 'playwright';
-import { bootViewer, harnessRuntimeRoot, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, harnessRuntimeRoot, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 
 const execFileAsync = promisify(execFile);
@@ -17328,8 +17328,14 @@ PAGE_SCENARIOS.push({
   // chosen. The folders are planted under the harness root, the way P127 and
   // P132 plant, so what is listed is the page's doing and not the host's.
 
-  // The folder line's own shortening, which a row's folder line repeats.
-  const short = (p: string) => p.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~');
+  // The folder line's own shortening, which a row's folder line repeats. The
+  // harness gateway reports the root the folders are planted under as its
+  // homeDir (#190), so the page reads a planted folder as ~/name.
+  const short = (p: string) => {
+    const home = harnessRuntimeRoot();
+    return p === home || p.startsWith(home + '/') ? '~' + p.slice(home.length) : p;
+  };
+  const HOST_LINE = 'on ' + HARNESS_HOST_NAME.split('.')[0];
   // Two folders, the first browsed to (the current folder) and the second a
   // recent one, two conversations in each, their mtimes set so the rows
   // interleave by time across the folders: a newest, then b, then a, then b.
@@ -17402,7 +17408,7 @@ PAGE_SCENARIOS.push({
         );
         const want = [t.a.folder, t.b.folder, t.a.folder, t.b.folder];
         expect(
-          rows.every((r, i) => r.dir === want[i] && r.path === short(want[i]!) && r.host === 'on 127.0.0.1'),
+          rows.every((r, i) => r.dir === want[i] && r.path === short(want[i]!) && r.host === null),
           `a row does not name its folder in the folder line's words (${JSON.stringify(rows.map((r) => [r.dir, r.path, r.host]))})`,
         );
         expect(
@@ -17418,7 +17424,7 @@ PAGE_SCENARIOS.push({
       } finally {
         t.cleanup();
       }
-      return `two folders planted under the harness root, the current one and a recent one, two conversations each: the list shows all four newest first across the folders (${t.order.join(' > ')}), each 64px row with its folder (path and "on 127.0.0.1") as a muted second line, under All folders`;
+      return `two folders planted under the harness root, the current one and a recent one, two conversations each: the list shows all four newest first across the folders (${t.order.join(' > ')}), each 64px row with its folder (the path under ~, the host said once on the folder line, #319) as a muted second line, under All folders`;
     },
   });
 
@@ -17488,6 +17494,8 @@ PAGE_SCENARIOS.push({
           { folder: t.a.folder, label: short(t.a.folder), n: '2', checked: 'false' },
           { folder: t.b.folder, label: short(t.b.folder), n: '2', checked: 'false' },
           { folder: empty.folder, label: short(empty.folder), n: '0', checked: 'false' },
+          // Watching the conversation on screen made its workspace a recent folder.
+          { folder: '/proj', label: '/proj', n: '0', checked: 'false' },
         ];
         expect(
           opened.open && JSON.stringify(opened.items) === JSON.stringify(want),
@@ -17504,7 +17512,7 @@ PAGE_SCENARIOS.push({
         const one = await head();
         const narrowed = await folderRows(page);
         expect(
-          !(await menu()).open && one.focus && one.title === t.b.folder && one.text === short(t.b.folder) && one.host === 'on 127.0.0.1',
+          !(await menu()).open && one.focus && one.title === t.b.folder && one.text === short(t.b.folder) && one.host === HOST_LINE,
           `picking the recent folder did not shut the menu onto the line naming it (${JSON.stringify(one)})`,
         );
         expect(
@@ -17829,7 +17837,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P186 a refresh reads at most six folders, all at once, each with its live snapshot (spawn=0 for all but the current one), and the filter, the search, the folder menu and opening the list read nothing',
+    name: 'P186 a refresh reads at most six folders, all at once, each with its live snapshot (spawn=0 for all but the current one), and the filter, the search and the folder menu read nothing (opening the list reads its folders once)',
     waitView: false,
     run: async ({ page }) => {
       await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
@@ -17927,6 +17935,11 @@ PAGE_SCENARIOS.push({
       archived.length = 0;
       await page.setViewportSize(PHONE);
       await openList(page);
+      // Opening the list reads its folders at once (badd114cd4), so that read
+      // is waited for and set aside; what follows must add none.
+      await page.waitForTimeout(600);
+      const openRead = reads.length;
+      reads.length = 0;
       await page.click('#list-folder');
       await page.click(`#list-folders [role="menuitemradio"][data-folder="${recent[2]}"]`);
       const picked = (await page.evaluate(`document.querySelectorAll('#past-list .srow').length`)) as number;
@@ -17935,11 +17948,14 @@ PAGE_SCENARIOS.push({
       await page.click('#list-search');
       await page.keyboard.type('p186');
       await page.keyboard.press('Escape');
-      await closeList(page);
-      await openList(page);
       await page.waitForTimeout(600);
       expect(picked === 1, `picking a folder showed ${picked} rows, not its one`);
       expect(reads.length === 0, `the views read ${reads.length} folders (${JSON.stringify(reads.map((r) => r.cwd))}) rather than drawing from what was read`);
+      expect(openRead === 6, `opening the list read ${openRead} folders, not the current one and the first five recent`);
+      await closeList(page);
+      await openList(page);
+      await page.waitForTimeout(600);
+      expect(reads.length === 6, `opening the list again read ${reads.length} folders, not one refresh of six`);
       // Archived (n) reads the filed half when the list opens and when the
       // view changes, over the same six folders and never the ones past
       // the cap.
@@ -17949,7 +17965,7 @@ PAGE_SCENARIOS.push({
         `Archived (n) read ${archived.length} archived listings, ${outside.length} of them outside the six folders (${JSON.stringify(outside)})`,
       );
       await closeList(page);
-      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, each beside its live snapshot (the current folder's the spawning read, the five others spawn=0), and the current folder's alone when the gateway does not say it honours spawn=0; the five recent folders' rows listed; opening the list, the folder menu, a pick and back, a search and two opens read no folder listing (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
+      return `one refresh read the current folder and the first five of seven stored recent ones, ${one.length} reads all sent before the first answer, each beside its live snapshot (the current folder's the spawning read, the five others spawn=0), and the current folder's alone when the gateway does not say it honours spawn=0; the five recent folders' rows listed; the folder menu, a pick and back and a search read no folder listing, and each open of the list read its six once (Archived (n) read ${archived.length} archived listings, all within the six folders)`;
     },
   });
 
@@ -24381,6 +24397,55 @@ PAGE_SCENARIOS.push({
         `${size.width}: the rows' folders read ${JSON.stringify(r.dirs)}`,
       );
       await shot(page, `p334-list-${size.width}`);
+      lines.push(`${size.width}: "${r.host}", folders ${JSON.stringify(r.dirs)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P370 with no homeDir on /rc/capabilities (a reader, or a gateway older than #190) the list falls back to the old match: /home/<user> and /Users/<user> read as ~, any other folder whole, and the host from the address',
+  waitView: false,
+  before: async (page) => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { remoteControl: Record<string, unknown> };
+      // What the harness gateway reports to its write-scope token, minus the
+      // two host facts a reader is not given.
+      delete body.remoteControl.homeDir;
+      delete body.remoteControl.hostName;
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    await page.waitForFunction(`caps && caps.remoteControl && !('homeDir' in caps.remoteControl)`, null, { timeout: 10_000 });
+    const home = harnessRuntimeRoot();
+    await h190ListFixture(page, {
+      '/home/me/proj': [{ sessionId: '37000000-0000-0000-0000-000000000001', title: 'under home', updatedAt: h190Now }],
+      [home + '/planted']: [{ sessionId: '37000000-0000-0000-0000-000000000002', title: 'under the planted home', updatedAt: h190Now }],
+      '/srv/other': [{ sessionId: '37000000-0000-0000-0000-000000000003', title: 'elsewhere', updatedAt: h190Now }],
+    }, { '/home/me/proj': { parent: null, entries: [] } });
+    await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify(${JSON.stringify([home + '/planted', '/srv/other'])})); renderRecentWorkspaces(); browseTo('/home/me/proj', true)`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 10_000 });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await h190Settle(page);
+      const r = (await page.evaluate(`({
+        host: document.getElementById('list-host').textContent,
+        dirs: Array.from(document.querySelectorAll('#past-list .s .dir .cwd')).map((e) => e.textContent.replace(/[\\u2066-\\u2069]/g, '')),
+        fallback: [shortFolder('/home/me/proj'), shortFolder('/Users/me'), shortFolder('/home/me2/x'), shortFolder(${JSON.stringify(home + '/planted')}), shortFolder('/srv/other')],
+      })`)) as { host: string; dirs: string[]; fallback: string[] };
+      expect(
+        r.dirs.includes('~/proj') && r.dirs.includes('/srv/other'),
+        `${size.width}: the rows' folders read ${JSON.stringify(r.dirs)}`,
+      );
+      expect(
+        JSON.stringify(r.fallback) === JSON.stringify(['~/proj', '~', '~/x', `${home}/planted`, '/srv/other']),
+        `${size.width}: the fallback reads ${JSON.stringify(r.fallback)}`,
+      );
+      expect(r.host === 'on 127.0.0.1', `${size.width}: with no hostName the folder line names ${JSON.stringify(r.host)}, not the address`);
       lines.push(`${size.width}: "${r.host}", folders ${JSON.stringify(r.dirs)}`);
     }
     return lines.join('; ');
