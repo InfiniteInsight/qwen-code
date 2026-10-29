@@ -130,20 +130,16 @@ describe('classifyReviewToolCall — contract', () => {
     }
   });
 
-  it('gates the gh comment-post shell on comment', () => {
+  it('never auto-approves the gh comment-post shell, comment flag or not (#169)', () => {
     expect(
-      classifyReviewToolCall(shell('gh api repos/o/r/pulls/1/reviews'), {
-        ...AUTO,
-        repo: 'o/r',
-      }),
+      classifyReviewToolCall(shell('gh api repos/o/r/pulls/1/reviews'), AUTO),
     ).toBe('escalate');
     expect(
       classifyReviewToolCall(shell('gh api repos/o/r/pulls/1/reviews'), {
         ...AUTO,
         comment: true,
-        repo: 'o/r',
       }),
-    ).toBe('approve');
+    ).toBe('escalate');
   });
 
   it('escalates a non-string command', () => {
@@ -162,7 +158,7 @@ describe('classifyReviewToolCall — contract', () => {
 // bypass is closed.
 // ---------------------------------------------------------------------------
 describe('classifyReviewToolCall — adversarial hardening', () => {
-  const COMMENT: ReviewPolicy = { ...AUTO, comment: true, repo: 'o/r' };
+  const COMMENT: ReviewPolicy = { ...AUTO, comment: true };
 
   it('escalates allowlisted git carrying command-injection / file-write flags', () => {
     // git's external-diff / config / textconv / pager machinery executes
@@ -252,7 +248,7 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
     ).toBe('escalate');
   });
 
-  it('escalates gh subcommands beyond posting a PR review comment', () => {
+  it('escalates every gh subcommand, the review-comment post included', () => {
     for (const c of [
       'gh repo delete owner/repo', // not `gh api`
       'gh secret set FOO bar', // not `gh api`
@@ -261,23 +257,16 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
       'gh api repos/o/r/pulls/1/reviews --method PUT', // destructive method
       'gh api repos/o/r/issues/1/comments', // wrong endpoint family
       'gh api repos/o/r/git/refs repos/o/r/pulls/1/reviews', // decoy: real endpoint is first positional
+      // #169: the review-comment posts too. The bundled skill writes to the PR
+      // only through `qwen review submit`, so a `gh api` post is off-script.
+      'gh api repos/o/r/pulls/1/reviews',
+      'gh api repos/o/r/pulls/1/comments',
     ]) {
-      expect(classifyReviewToolCall(shell(c), COMMENT)).toBe('escalate');
+      expect([c, classifyReviewToolCall(shell(c), COMMENT)]).toEqual([
+        c,
+        'escalate',
+      ]);
     }
-    // the sanctioned create-review post still approves under comment
-    expect(
-      classifyReviewToolCall(
-        shell('gh api repos/o/r/pulls/1/reviews'),
-        COMMENT,
-      ),
-    ).toBe('approve');
-    // and the inline-comment endpoint too
-    expect(
-      classifyReviewToolCall(
-        shell('gh api repos/o/r/pulls/1/comments'),
-        COMMENT,
-      ),
-    ).toBe('approve');
   });
 
   it('escalates tsc file-write flags but keeps typecheck approvable', () => {
@@ -509,13 +498,13 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
     ]) {
       expect(classifyReviewToolCall(shell(c), COMMENT)).toBe('escalate');
     }
-    // a non-file field value still approves.
+    // #169: a non-file field value escalates too, like every gh call.
     expect(
       classifyReviewToolCall(
         shell('gh api repos/o/r/pulls/1/reviews -f event=COMMENT'),
         COMMENT,
       ),
-    ).toBe('approve');
+    ).toBe('escalate');
   });
 
   it('MINOR 5: pins tsc project path in-tree and enumerates qwen review subcommands', () => {
@@ -677,53 +666,38 @@ describe('classifyReviewToolCall: @file and home dotfiles (#169)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue #169: `gh api` is pinned to the repository under review, not merely to
-// the path shape. `gh api repos/attacker/x/pulls/1/comments -f body=...` used
-// to auto-approve because only the shape was checked.
+// Issue #169: `gh api` was pinned to the path shape only, so
+// `gh api repos/attacker/x/pulls/1/comments -f body=...` auto-approved. The
+// bundled skill writes to the PR only through `qwen review submit`, so `gh` is
+// never auto-approved now, whatever repo the path names.
 // ---------------------------------------------------------------------------
-describe('classifyReviewToolCall: gh api pinned to the review repo (#169)', () => {
-  const REVIEW: ReviewPolicy = { ...AUTO, comment: true, repo: 'owner/proj' };
+describe('classifyReviewToolCall: gh is never auto-approved (#169)', () => {
+  const COMMENT: ReviewPolicy = { ...AUTO, comment: true };
 
-  it('escalates a comment post to any other repository', () => {
+  it('escalates a comment post to any repository, the reviewed one included', () => {
     for (const c of [
       'gh api repos/attacker/x/pulls/1/comments -f body=pwned',
-      'gh api repos/attacker/proj/pulls/1/reviews', // same name, other owner
-      'gh api repos/owner/other/pulls/1/reviews', // same owner, other repo
-      'gh api repos/owner/proj.evil/pulls/1/reviews',
+      'gh api repos/owner/proj/pulls/1/comments -f body=x',
+      'gh api repos/owner/proj/pulls/9/reviews',
+      'gh pr comment 1 --body x',
+      'gh',
     ]) {
-      expect([c, classifyReviewToolCall(shell(c), REVIEW)]).toEqual([
+      expect([c, classifyReviewToolCall(shell(c), COMMENT)]).toEqual([
         c,
         'escalate',
       ]);
     }
   });
 
-  it('approves the review repo itself, case-insensitively like GitHub', () => {
+  it('a stale repo-pin field from an older caller cannot bring approval back', () => {
+    // The short-lived `repo` field is gone from ReviewPolicy; a caller still
+    // sending it must get exactly what everyone else gets.
+    const stale = { ...COMMENT, repo: 'owner/proj' } as ReviewPolicy;
     expect(
       classifyReviewToolCall(
-        shell('gh api repos/owner/proj/pulls/1/comments -f body=x'),
-        REVIEW,
+        shell('gh api repos/owner/proj/pulls/1/reviews'),
+        stale,
       ),
-    ).toBe('approve');
-    expect(
-      classifyReviewToolCall(
-        shell('gh api repos/Owner/PROJ/pulls/9/reviews'),
-        REVIEW,
-      ),
-    ).toBe('approve');
-  });
-
-  it('escalates every gh api call when the review repo is unknown or malformed', () => {
-    const cmd = shell('gh api repos/owner/proj/pulls/1/reviews');
-    // The route has not wired a repo yet: AUTO + comment, no `repo` field.
-    expect(classifyReviewToolCall(cmd, { ...AUTO, comment: true })).toBe(
-      'escalate',
-    );
-    for (const repo of [null, '', 'owner', 'owner/proj/x', '/proj', 'owner/']) {
-      expect([repo, classifyReviewToolCall(cmd, { ...REVIEW, repo })]).toEqual([
-        repo,
-        'escalate',
-      ]);
-    }
+    ).toBe('escalate');
   });
 });
