@@ -72,6 +72,18 @@ execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
   cwd: root,
 });
 
+// A package that was skipped above (or whose dependents were) leaves a bundle
+// importing names its dependency no longer exports; fail the build loudly
+// instead of letting a daemon or a terminal tab find out (#191). A --cli-only
+// build rebuilds a subset on purpose, so the other packages' dists are not its
+// concern.
+if (!cliOnly) {
+  execSync('node scripts/check-dist-consistency.mjs', {
+    stdio: 'inherit',
+    cwd: root,
+  });
+}
+
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above
 try {
