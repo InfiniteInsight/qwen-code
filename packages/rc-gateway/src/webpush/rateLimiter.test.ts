@@ -88,6 +88,29 @@ describe('PushRateLimiter', () => {
   });
 });
 
+describe('PushRateLimiter.refund (#169)', () => {
+  it('gives back the slot counted at that instant', () => {
+    const rl = new PushRateLimiter();
+    expect(rl.tryConsume('s1', 1, T0).allowed).toBe(true);
+    expect(rl.remaining('s1', 1, T0)).toBe(0);
+    rl.refund('s1', T0);
+    expect(rl.remaining('s1', 1, T0)).toBe(1);
+    expect(rl.tryConsume('s1', 1, T0 + 1).allowed).toBe(true);
+  });
+
+  it('refunds only one slot, and never one it did not count', () => {
+    const rl = new PushRateLimiter();
+    rl.tryConsume('s1', 5, T0);
+    rl.tryConsume('s1', 5, T0);
+    rl.refund('s1', T0);
+    expect(rl.remaining('s1', 5, T0)).toBe(4);
+    rl.refund('s1', T0 + 999); // nothing counted then
+    rl.refund('s2', T0); // unknown subscription
+    expect(rl.remaining('s1', 5, T0)).toBe(4);
+    expect(rl.remaining('s2', 5, T0)).toBe(5);
+  });
+});
+
 describe('PushRateLimiter.tryConsumeCritical (#169)', () => {
   it('spends the shared budget first, exactly like tryConsume, while under the cap', () => {
     const rl = new PushRateLimiter();

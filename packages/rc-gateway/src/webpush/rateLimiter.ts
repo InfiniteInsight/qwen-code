@@ -102,6 +102,19 @@ export class PushRateLimiter {
     return Math.max(0, maxPerHour - live);
   }
 
+  /**
+   * Give back ONE slot that {@link tryConsume} counted at `atMs`, because the
+   * work it paid for never happened (#169: an idle-suggestion model call that
+   * failed). A no-op when nothing was counted at that instant, so a stray or
+   * repeated refund can never mint budget the caller did not spend.
+   */
+  refund(subId: string, atMs: number): void {
+    const entry = this.subs.get(subId);
+    if (!entry) return;
+    const i = entry.hits.lastIndexOf(atMs);
+    if (i !== -1) entry.hits.splice(i, 1);
+  }
+
   /** Forget a subscription's windows, reserve included (e.g. on unsubscribe). */
   forget(subId: string): void {
     this.subs.delete(subId);

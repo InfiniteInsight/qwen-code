@@ -71,6 +71,14 @@ export interface SessionEventPumpOptions {
    */
   onSessionIdle?: (sessionId: string, workspaceCwd: string) => void;
   /**
+   * The mirror of {@link onSessionIdle}: called ONCE per session when its
+   * `hasActivePrompt` transitions false→true (a new prompt started). The idle
+   * suggester's `cancelForSession` rides on it (#169), so a model call still
+   * running for the previous idle edge cannot publish suggestions that are
+   * already stale. Same contract: synchronous, guarded, never blocks reconcile.
+   */
+  onSessionActive?: (sessionId: string) => void;
+  /**
    * How long the loop waits for one event's `notify()` before moving on to the
    * next event (#169). The delivery keeps running in the background; only the
    * loop stops waiting for it, so a hung push endpoint cannot hold up the
@@ -125,6 +133,7 @@ export class SessionEventPump {
     sessionId: string,
     workspaceCwd: string,
   ) => void;
+  private readonly onSessionActive?: (sessionId: string) => void;
   private readonly notifyWaitMs: number;
 
   private readonly loops = new Map<string, Loop>();
@@ -138,7 +147,8 @@ export class SessionEventPump {
   private readonly refused = new Set<string>();
   /**
    * Last-observed active-prompt state per session, for true→false edge detection
-   * (idle suggestions). Tracked only when `onSessionIdle` is wired; cleared on
+   * (idle suggestions). Tracked only when `onSessionIdle` or `onSessionActive`
+   * is wired; cleared on
    * session-drop and `stop()` so it never outlives the loops.
    */
   private readonly activePrompt = new Map<string, boolean>();
@@ -163,6 +173,7 @@ export class SessionEventPump {
     this.onEvent = opts.onEvent;
     this.enforcer = opts.enforcer;
     this.onSessionIdle = opts.onSessionIdle;
+    this.onSessionActive = opts.onSessionActive;
     this.notifyWaitMs = opts.notifyWaitMs ?? DEFAULT_NOTIFY_WAIT_MS;
   }
 
@@ -230,24 +241,28 @@ export class SessionEventPump {
 
   /**
    * Track this session's active-prompt state and fire {@link onSessionIdle} once
-   * on a true→false transition (the agent just went idle). The FIRST observation
+   * on a true→false transition (the agent just went idle), and
+   * {@link onSessionActive} once on a false→true one (a new prompt started).
+   * The FIRST observation
    * only seeds the state — a session first seen idle, or first seen mid-prompt,
    * never fires until we actually witness the falling edge — so startup doesn't
-   * emit a suggestion storm for every pre-existing session. No-op when no idle
+   * emit a suggestion storm for every pre-existing session. No-op when neither
    * handler is wired (so the map stays empty and there's zero overhead).
    */
   private detectIdleEdge(s: DaemonSessionSummary): void {
-    if (!this.onSessionIdle) return;
+    if (!this.onSessionIdle && !this.onSessionActive) return;
     const now = s.hasActivePrompt === true;
     const prev = this.activePrompt.get(s.sessionId);
     this.activePrompt.set(s.sessionId, now);
-    if (prev === true && now === false) {
-      try {
-        this.onSessionIdle(s.sessionId, s.workspaceCwd);
-      } catch {
-        // Idle suggestions are best-effort enrichment; a throwing handler must
-        // never break the reconcile loop or push delivery.
+    try {
+      if (prev === true && now === false) {
+        this.onSessionIdle?.(s.sessionId, s.workspaceCwd);
+      } else if (prev === false && now === true) {
+        this.onSessionActive?.(s.sessionId);
       }
+    } catch {
+      // Idle suggestions are best-effort enrichment; a throwing handler must
+      // never break the reconcile loop or push delivery.
     }
   }
 

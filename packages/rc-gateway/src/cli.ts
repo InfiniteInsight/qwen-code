@@ -1589,6 +1589,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   let onSessionIdle:
     | ((sessionId: string, workspaceCwd: string) => void)
     | undefined;
+  // The rising edge (a new prompt started) cancels a suggestion round still
+  // running for the previous idle edge, so it cannot publish stale chips (#169).
+  let onSessionActive: ((sessionId: string) => void) | undefined;
   if (suggestCfg) {
     const idleHandle = createIdleSuggestionHandler({
       chat: createChatTransport(suggestCfg),
@@ -1611,6 +1614,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       getSessionEnabled: (id) => idleToggles.get(id),
     });
     onSessionIdle = idleHandle.onSessionIdle;
+    onSessionActive = idleHandle.cancelForSession;
     // eslint-disable-next-line no-console
     console.log(
       idleConfig.enabled
@@ -1697,6 +1701,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // NOT newly activate idle suggestions — enabling cost tracking must not change
       // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
       ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
+      ...(onSessionActive && notifier ? { onSessionActive } : {}),
       onEvent: (sid: string, ev: { type: string; data: unknown }) => {
         usageFeeder?.onEvent(sid, ev);
         // Fire-and-forget: lifecycle transitions must never block or

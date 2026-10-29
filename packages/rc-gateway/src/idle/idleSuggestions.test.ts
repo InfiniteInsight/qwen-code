@@ -267,6 +267,84 @@ describe('createIdleSuggestionHandler', () => {
     ]);
   });
 
+  describe('hourly slot refund on failure (#169)', () => {
+    it('refunds the slot when the model call fails, so the next idle edge still runs', async () => {
+      const limiter = new PushRateLimiter();
+      let calls = 0;
+      const chat: ChatTransport = async () => {
+        calls++;
+        if (calls === 1) throw new Error('model down');
+        return '["Run the tests"]';
+      };
+      const { handler, events, audited } = harness({
+        config: { maxSuggestionsPerHour: 1 },
+        over: { limiter, now: () => 1_000_000, chat },
+      });
+      handler('s', '/w');
+      await flush();
+      expect(events).toEqual([]);
+      // The failed call did not spend the only slot of the hour.
+      expect(limiter.remaining('s', 1, 1_000_000)).toBe(1);
+      handler('s', '/w');
+      await flush();
+      expect(calls).toBe(2);
+      expect(events).toHaveLength(1);
+      expect(
+        audited.filter((a) => a.action === 'idle_suggest_rate_limited'),
+      ).toEqual([]);
+    });
+
+    it('refunds the slot when the round is cancelled mid-call', async () => {
+      const limiter = new PushRateLimiter();
+      const chat: ChatTransport = (_m, opts) =>
+        new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        });
+      const { handler, cancelForSession } = harness({
+        config: { maxSuggestionsPerHour: 1 },
+        over: { limiter, now: () => 1_000_000, chat },
+      });
+      handler('s', '/w');
+      await flush();
+      expect(limiter.remaining('s', 1, 1_000_000)).toBe(0); // in flight
+      cancelForSession('s');
+      await flush();
+      expect(limiter.remaining('s', 1, 1_000_000)).toBe(1);
+    });
+
+    it('refunds the slot when a step before the model call throws', async () => {
+      const limiter = new PushRateLimiter();
+      const { handler } = harness({
+        config: { maxSuggestionsPerHour: 1 },
+        over: {
+          limiter,
+          now: () => 1_000_000,
+          readModel: async () => 'some-model',
+          getChat: async () => {
+            throw new Error('selector broke');
+          },
+        },
+      });
+      handler('s', '/w');
+      await flush();
+      expect(limiter.remaining('s', 1, 1_000_000)).toBe(1);
+    });
+
+    it('keeps the slot spent when the model answered, even with nothing usable', async () => {
+      const limiter = new PushRateLimiter();
+      const { handler, events } = harness({
+        config: { maxSuggestionsPerHour: 1 },
+        over: { limiter, now: () => 1_000_000, chat: async () => 'no json' },
+      });
+      handler('s', '/w');
+      await flush();
+      expect(events).toEqual([]);
+      expect(limiter.remaining('s', 1, 1_000_000)).toBe(0); // the call cost a slot
+    });
+  });
+
   describe('AbortController cancellation', () => {
     it('cancelForSession aborts in-flight generation so no frame is published', async () => {
       // The chat transport resolves only after cancelForSession is called,

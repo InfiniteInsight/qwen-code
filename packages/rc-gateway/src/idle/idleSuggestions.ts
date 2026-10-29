@@ -173,6 +173,13 @@ export function createIdleSuggestionHandler(
     const ctrl = new AbortController();
     inFlight.set(sessionId, ctrl);
 
+    // Refund bookkeeping (#169): the instant a slot was counted, and whether
+    // the model call it paid for actually answered. A slot is refunded unless
+    // the model answered, so a failed, cancelled or never-made call does not
+    // cost the session its budget for the rest of the hour.
+    let spentAt: number | undefined;
+    let answered = false;
+
     void (async () => {
       try {
         const chatsDir = resolveDir(workspaceCwd);
@@ -204,6 +211,7 @@ export function createIdleSuggestionHandler(
             }
             return;
           }
+          spentAt = nowMs;
           // Snapshot remaining AFTER consuming the slot.
           remaining = deps.limiter.remaining(
             sessionId,
@@ -222,9 +230,17 @@ export function createIdleSuggestionHandler(
         const modelId = await readModel(chatsDir, sessionId).catch(() => null);
         const chat =
           (modelId ? await deps.getChat?.(modelId) : undefined) ?? deps.chat;
+        // generateSuggestions swallows a transport failure into `[]`, which
+        // reads the same as a reply with nothing usable; record which one it
+        // was so only a call that actually answered keeps its slot.
+        const tracked: ChatTransport = async (messages, opts) => {
+          const reply = await chat(messages, opts);
+          answered = true;
+          return reply;
+        };
         const suggestions = await generateSuggestions({
           turns,
-          chat,
+          chat: tracked,
           max: cfg.maxSuggestions,
           signal: ctrl.signal,
           timeoutMs: deps.timeoutMs,
@@ -249,6 +265,10 @@ export function createIdleSuggestionHandler(
       } catch {
         // Enrichment: any failure degrades to silence, never throws into the pump.
       } finally {
+        // A slot counted for a model call that never answered goes back.
+        if (spentAt !== undefined && !answered) {
+          deps.limiter?.refund(sessionId, spentAt);
+        }
         // Remove our controller only if it's still the current one (another call
         // may have already replaced it with a newer controller).
         if (inFlight.get(sessionId) === ctrl) {

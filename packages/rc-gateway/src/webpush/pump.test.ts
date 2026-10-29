@@ -494,6 +494,30 @@ describe('SessionEventPump', () => {
       expect(idle).toEqual([]);
     });
 
+    it('fires onSessionActive once on a hasActivePrompt false→true transition (#169)', async () => {
+      const active: string[] = [];
+      const sessions = [
+        { sessionId: 's1', workspaceCwd: '/w', hasActivePrompt: false },
+      ];
+      stub = await startStubDaemon({ workspaceCwd: '/w', sessions });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      pump = new SessionEventPump(daemon, fakeNotifier([]), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        onSessionActive: (id) => active.push(id),
+      });
+      await pump.start();
+      // First sighting (idle) only seeds the state.
+      await new Promise((r) => setTimeout(r, 80));
+      expect(active).toEqual([]);
+      // A new prompt starts → the rising edge cancels any idle round.
+      sessions[0].hasActivePrompt = true;
+      expect(await waitFor(() => active.length >= 1)).toBe(true);
+      await new Promise((r) => setTimeout(r, 80));
+      expect(active).toEqual(['s1']);
+    });
+
     it('a throwing idle handler never breaks reconcile (loops still tracked)', async () => {
       const sessions = [
         { sessionId: 's1', workspaceCwd: '/w', hasActivePrompt: true },
