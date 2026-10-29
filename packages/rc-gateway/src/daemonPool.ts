@@ -41,6 +41,9 @@ import type {
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceHooksStatus,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
+  DaemonSessionSavedWorkflowStatus,
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
@@ -455,6 +458,30 @@ export interface SessionDaemon {
     subagentRef: string,
     clientId?: string,
   ): Promise<DaemonSubagentSessionResolution>;
+  /**
+   * #110: the session's agent roster, running and recently finished, as the
+   * daemon's registry and its on-disk sidecars report it. Named for the SDK's
+   * `DaemonClient.sessionAgents`, because a bare client stands in for the pool.
+   */
+  sessionAgents(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionAgentsStatus>;
+  /**
+   * #110: who spawned whom. The daemon's trace is the agents' lineage read off
+   * their sidecars, optionally narrowed to one root's tree; it carries no
+   * steps, tool calls or messages.
+   */
+  sessionAgentTrace(
+    sessionId: string,
+    opts?: { rootAgentId?: string; clientId?: string },
+  ): Promise<DaemonAgentTrace>;
+  /** #110: one saved workflow definition by name, or `workflow: null`. */
+  sessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSavedWorkflowStatus>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
   // Daemon-global methods: no session id, but workspace-scoped — each takes
@@ -2282,6 +2309,53 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSubagentSessionResolution> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.resolveSubagentSession(sessionId, subagentRef, clientId),
+    );
+  }
+
+  /**
+   * #110: the agent roster, relayed verbatim. Each row's `outputFile` is a
+   * path under the workspace's project dir, which is the same disclosure
+   * `sessionTasks` makes to the same read scope, for the reason recorded on it.
+   * No gateway-side cache: a running agent's stats move between reads.
+   */
+  async sessionAgents(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionAgentsStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionAgents(sessionId, clientId),
+    );
+  }
+
+  /**
+   * #110: the agents' lineage, relayed verbatim. `rootAgentId` narrows it to
+   * one top-level agent's tree on the daemon, so a caller asking about one
+   * agent need not page through every sidecar the session has.
+   */
+  async sessionAgentTrace(
+    sessionId: string,
+    opts: { rootAgentId?: string; clientId?: string } = {},
+  ): Promise<DaemonAgentTrace> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionAgentTrace(sessionId, {
+        rootAgentId: opts.rootAgentId,
+        clientId: opts.clientId,
+      }),
+    );
+  }
+
+  /**
+   * #110: one saved workflow definition. The daemon answers `workflow: null`
+   * for an unknown name and for an untrusted workspace alike, so nothing here
+   * can tell those apart and nothing should try.
+   */
+  async sessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSavedWorkflowStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionSavedWorkflow(sessionId, name, clientId),
     );
   }
 
