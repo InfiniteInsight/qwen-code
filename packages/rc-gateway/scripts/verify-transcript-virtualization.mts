@@ -26503,58 +26503,6 @@ PAGE_SCENARIOS.push({
 }
 
 
-async function runPageSection(): Promise<Result[]> {
-  const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
-  const results: Result[] = [];
-  // Completion order rather than file order: a scenario that hangs for two
-  // minutes must not hold up the line behind it, which is the whole point of
-  // the pool. Every line names its own scenario, so the interleaving costs
-  // nothing a grep cannot look past.
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < queue.length) {
-      const s = queue[next++]!;
-      const result = await runOnePageScenario(s);
-      console.log(
-        // The pre-commit dash guard enforces on added lines only, so the
-        // literal in the view section's copy of this line stays as it is.
-        `${result.ok ? 'PASS' : 'FAIL'} ${result.name} \u2014 ${result.detail}`,
-      );
-      results.push(result);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(JOBS, queue.length) }, () => worker()),
-  );
-  return results;
-}
-
-const SECTIONS: Record<string, (viewer: Viewer) => Promise<Result[]>> = {
-  view: runViewSection,
-  page: runPageSection,
-};
-
-async function main(): Promise<void> {
-  const wanted = process.argv[2] ?? process.env['SECTION'] ?? 'all';
-  const names = wanted === 'all' ? Object.keys(SECTIONS) : [wanted];
-  for (const n of names) {
-    if (!SECTIONS[n]) throw new Error(`unknown section ${n}`);
-  }
-  const results: Result[] = [];
-  for (const n of names) {
-    console.log(`== section ${n}`);
-    const viewer = await bootViewer();
-    try {
-      results.push(...(await SECTIONS[n]!(viewer)));
-    } finally {
-      await viewer.close();
-    }
-  }
-  const failed = results.filter((r) => !r.ok).length;
-  console.log(`${results.length - failed} passed, ${failed} failed`);
-  process.exit(failed ? 1 : 0);
-}
-
 // ---- #132 the session catalog --------------------------------------------
 // The list keeps its rows from /rc/sessions and reads POST /rc/sessions/catalog
 // beside them: groups on the rows, a notice for a folder whose daemon refused,
@@ -26969,7 +26917,6 @@ async function main(): Promise<void> {
     },
   });
 }
-
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
