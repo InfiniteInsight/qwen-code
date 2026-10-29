@@ -6,7 +6,7 @@
 
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
-import type { Policy } from './loader.js';
+import type { Policy, PolicyAction } from './loader.js';
 import {
   evaluate,
   type PolicyDecision,
@@ -39,6 +39,16 @@ export function policyDecisionReason(d: PolicyDecision): string {
   if (d.source === 'default') return 'default';
   if (d.usedDeferredField) return 'rule-downgraded-deferred';
   return `rule-${d.action}`;
+}
+
+/** What {@link PolicyEnforcer.decidePermission} decided for one event. */
+export interface PermissionOutcome {
+  /** True iff the request was auto-voted (the caller should NOT push). */
+  handled: boolean;
+  /** The policy action reached; absent when no decision was reached. */
+  action?: PolicyAction;
+  /** `'policy'` when a rule matched, `'default'` for the fall-through. */
+  source?: 'policy' | 'default';
 }
 
 /**
@@ -127,7 +137,22 @@ export class PolicyEnforcer {
     sessionId: string,
     event: { type: string; data: unknown },
   ): Promise<boolean> {
-    if (event.type !== 'permission_request') return false;
+    return (await this.decidePermission(sessionId, event)).handled;
+  }
+
+  /**
+   * {@link handlePermission}, also reporting WHAT was decided. The pump needs
+   * the decision to tell the rest of the gateway whether a human is actually
+   * needed (an auto-handled request is not a blocked agent) and to stamp the
+   * routing event with `policy.action` / `policy.decisionSource` (issue #166).
+   * `action`/`source` are absent only when no decision was reached (not a
+   * permission_request, or the eval-error fail-safe). Never throws.
+   */
+  async decidePermission(
+    sessionId: string,
+    event: { type: string; data: unknown },
+  ): Promise<PermissionOutcome> {
+    if (event.type !== 'permission_request') return { handled: false };
 
     // Defensive ctx extraction (design §2): event.data shape is untrusted.
     const data: Record<string, unknown> =
@@ -199,8 +224,13 @@ export class PolicyEnforcer {
           reason: 'eval-error',
         },
       });
-      return false;
+      return { handled: false };
     }
+    const outcome = (handled: boolean): PermissionOutcome => ({
+      handled,
+      action: d.action,
+      source: d.source,
+    });
 
     if (d.action === 'allow') {
       if (requestId && approveOptionId) {
@@ -257,7 +287,7 @@ export class PolicyEnforcer {
                 ...(quotaRemaining !== undefined ? { quotaRemaining } : {}),
               },
             });
-            return true;
+            return outcome(true);
           }
           // Vote returned false (not thrown): RELEASE the reservation — a
           // failed vote must not permanently consume a slot (fail-safe,
@@ -287,7 +317,7 @@ export class PolicyEnforcer {
           reason: policyDecisionReason(d),
         },
       });
-      return false;
+      return outcome(false);
     }
 
     if (d.action === 'deny') {
@@ -313,7 +343,7 @@ export class PolicyEnforcer {
                 reason: policyDecisionReason(d),
               },
             });
-            return true;
+            return outcome(true);
           }
         } catch {
           // Swallow — fall through to the fail-safe below.
@@ -333,7 +363,7 @@ export class PolicyEnforcer {
           reason: policyDecisionReason(d),
         },
       });
-      return false;
+      return outcome(false);
     }
 
     // prompt (incl. fail-closed default): never vote, fall through to push.
@@ -354,6 +384,6 @@ export class PolicyEnforcer {
         reason: policyDecisionReason(d),
       },
     });
-    return false;
+    return outcome(false);
   }
 }

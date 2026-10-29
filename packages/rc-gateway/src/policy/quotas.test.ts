@@ -261,3 +261,45 @@ describe('quotaLimitsFromPolicy', () => {
     expect(store.state('q', T0)).toBe('untracked');
   });
 });
+
+describe('quotaLimitsFromPolicy across layers (issue #166)', () => {
+  const policy = (rules: Policy['rules']): Policy => ({
+    defaults: { action: 'prompt', requireScope: 'approve' },
+    rules,
+  });
+
+  it('a workspace rule sharing a user rule id gets its own quota key, not the user one', () => {
+    const user = policy([
+      {
+        id: 'shared',
+        match: { tool: 'fetch' },
+        action: 'allow',
+        maxPerWindow: { count: 2, windowSec: 3600 },
+      },
+    ]);
+    const workspace = policy([
+      {
+        id: 'shared',
+        match: { tool: 'read' },
+        action: 'prompt',
+        maxPerWindow: { count: 5, windowSec: 60 },
+      },
+    ]);
+    const merged = mergePolicies(workspace, user);
+    const ids = merged.rules.map((r) => r.id);
+    expect(new Set(ids).size).toBe(2); // ids are unique after the merge
+    expect(ids).toContain('shared'); // the user rule keeps its id
+    const m = quotaLimitsFromPolicy(merged);
+    expect(m.get('shared')).toEqual({ count: 2, windowSec: 3600 });
+    const wsId = ids.find((i) => i !== 'shared')!;
+    expect(m.get(wsId)).toEqual({ count: 5, windowSec: 60 });
+  });
+
+  it('a workspace id that does not collide is left as written', () => {
+    const merged = mergePolicies(
+      policy([{ id: 'ws-only', match: {}, action: 'deny' }]),
+      policy([{ id: 'u', match: {}, action: 'allow' }]),
+    );
+    expect(merged.rules.map((r) => r.id)).toEqual(['ws-only', 'u']);
+  });
+});

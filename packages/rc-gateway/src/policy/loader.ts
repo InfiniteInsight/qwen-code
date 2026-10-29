@@ -129,6 +129,55 @@ function isAction(v: unknown): v is PolicyAction {
   return typeof v === 'string' && (ACTIONS as readonly string[]).includes(v);
 }
 
+/** A non-blank string. */
+function isNonBlankString(v: unknown): v is string {
+  return typeof v === 'string' && v.trim() !== '';
+}
+
+/**
+ * Fail-closed type check of a rule's string-typed `match` fields (issue #166).
+ * Before this, `tool: [execute, edit]` was stored as written and a deny on it
+ * silently never matched, a blank `tool:` (YAML null) made the evaluator throw
+ * on every request, and `policy lint` reported both as ok. A key that is
+ * present with the wrong type is an error, never a silent no-op.
+ *
+ * - `tool`, `originScope`, `sessionTag`: a non-blank string.
+ * - `argsGlob`, `pathGlob`: a non-blank string, or a non-empty list of them
+ *   (an empty list could never match, so it is rejected rather than ignored).
+ *
+ * (`operation` has its own check, and `timeOfDay` is validated by the
+ * evaluator's condition parser.)
+ */
+function validateMatchTypes(match: Record<string, unknown>, i: number): void {
+  for (const key of ['tool', 'originScope', 'sessionTag'] as const) {
+    if (match[key] !== undefined && !isNonBlankString(match[key])) {
+      throw new PolicyError(
+        `rule[${i}].match.${key} must be a non-empty string (got ${describeType(match[key])})`,
+      );
+    }
+  }
+  for (const key of ['argsGlob', 'pathGlob'] as const) {
+    const v = match[key];
+    if (v === undefined) continue;
+    const ok = Array.isArray(v)
+      ? v.length > 0 && v.every(isNonBlankString)
+      : isNonBlankString(v);
+    if (!ok) {
+      throw new PolicyError(
+        `rule[${i}].match.${key} must be a non-empty string or a non-empty ` +
+          `list of non-empty strings (got ${describeType(v)})`,
+      );
+    }
+  }
+}
+
+/** Short type label for an error message (never echoes the value). */
+function describeType(v: unknown): string {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'a list';
+  return typeof v === 'object' ? 'a mapping' : typeof v;
+}
+
 /**
  * Validate a rule's `maxPerWindow` into a typed `{ count, windowSec }`
  * (FAIL-CLOSED — a malformed quota blocks boot, like every other policy schema
@@ -226,6 +275,8 @@ function parsePolicyDocument(text: string): {
       );
     }
     const match = raw['match'] as Record<string, unknown>;
+
+    validateMatchTypes(match, i);
 
     // Normalize a tool NAME (e.g. `run_shell_command`) to its ACP kind (e.g.
     // `execute`) — the permission frame carries only a kind, never a tool
@@ -412,9 +463,22 @@ const DEFAULT_PROMPT_POLICY: Policy = {
  */
 export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
   if (!workspace) return user;
-  const workspaceRules = workspace.rules
-    .filter(isWithinWorkspaceBounds)
-    .map((rule): PolicyRule => ({ ...rule, layer: 'workspace' }));
+  // Rule ids key the audit trail AND the quota store, and each file is only
+  // checked for duplicates on its own. A workspace rule that reuses a user rule
+  // id would share that rule's quota key and be indistinguishable from it in
+  // the audit feed, so it is renamed `workspace:<id>` (issue #166). The user
+  // rule keeps its id, so existing audit filters and quota history are
+  // untouched; a non-colliding workspace id is left as written.
+  const userIds = new Set(user.rules.flatMap((r) => (r.id ? [r.id] : [])));
+  const workspaceRules = workspace.rules.filter(isWithinWorkspaceBounds).map(
+    (rule): PolicyRule => ({
+      ...rule,
+      ...(rule.id !== undefined && userIds.has(rule.id)
+        ? { id: `workspace:${rule.id}` }
+        : {}),
+      layer: 'workspace',
+    }),
+  );
   return {
     defaults: user.defaults,
     rules: [...workspaceRules, ...user.rules],
