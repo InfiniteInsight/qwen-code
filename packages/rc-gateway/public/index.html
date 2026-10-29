@@ -6007,6 +6007,11 @@
       async function loadEarlierMessages() {
         const id = watchedSessionId;
         if (!id || transcriptPaging) return;
+        // #172: the page and its cursor belong to this visit. One landing
+        // after a switch was prepended into the next conversation and its
+        // cursor kept there, so it is dropped instead (the cursor is not kept
+        // per conversation, so there is nowhere else to put it).
+        const gen = switchGen;
         transcriptPaging = true;
         renderLoadEarlier();
         try {
@@ -6019,11 +6024,13 @@
             '/session/' + encodeURIComponent(id) + '/transcript?' + q,
             { headers: { Authorization: 'Bearer ' + token() } },
           );
+          if (gen !== switchGen) return;
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
             throw new Error(strOr(body.error, 'HTTP ' + res.status));
           }
           const page = await res.json();
+          if (gen !== switchGen) return;
           const rows = TranscriptModel.replayStoredPage(page.events);
           markStoredTurnEnds(rows); // #184: their finished turns get actions
           transcriptCursor = strOr(page.nextCursor, '') || null;
@@ -6042,6 +6049,7 @@
             setStatus('nothing older to show');
           }
         } catch (err) {
+          if (gen !== switchGen) return;
           // A failed page costs nothing already on screen and leaves the cursor
           // where it was, so the next tap retries the same page.
           setStatus(
@@ -6049,8 +6057,12 @@
               (err && err.message ? err.message : String(err)),
           );
         } finally {
-          transcriptPaging = false;
-          renderLoadEarlier();
+          // #172: after a switch the flag is the new visit's, and
+          // noteConversationSwitch already let go of this one's hold on it.
+          if (gen === switchGen) {
+            transcriptPaging = false;
+            renderLoadEarlier();
+          }
         }
       }
       $('load-earlier').addEventListener('click', () => {
@@ -7021,6 +7033,9 @@
       async function changeApprovalMode(sel, persistCb) {
         const id = watchedSessionId;
         if (!id) return;
+        // #172: the footer, the note and the plan row below are the
+        // conversation on screen's; a late answer was writing A's mode there.
+        const gen = switchGen;
         const mode = sel.value;
         const prev = ctxInfo ? ctxInfo.currentModeId : mode;
         const setNote = (msg) => {
@@ -7045,6 +7060,7 @@
           );
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
+            if (gen !== switchGen) return;
             sel.value = prev;
             const detail =
               res.status === 401 || res.status === 403
@@ -7057,10 +7073,13 @@
           }
           const out = await res.json().catch(() => ({}));
           // #182: kept only when the daemon names the mode it is now in, so
-          // the page never remembers a mode it merely asked for.
+          // the page never remembers a mode it merely asked for. #172: kept
+          // after a switch too, since it is filed under A's own id and is
+          // still true of A.
           if (typeof out.mode === 'string' && out.mode) {
             uiSessionWrite(MODE_NAME, id, out.mode);
           }
+          if (gen !== switchGen) return;
           if (ctxInfo) {
             ctxInfo.currentModeId = out.mode || mode;
             const m = (ctxInfo.availableModes || []).find(
@@ -7080,6 +7099,7 @@
               (out.persisted ? ' (persisted)' : ''),
           );
         } catch (err) {
+          if (gen !== switchGen) return;
           sel.value = prev;
           const detail = 'approval mode change failed: ' + err.message;
           setNote(detail);
@@ -7096,6 +7116,7 @@
       async function switchModel(modelId) {
         const id = watchedSessionId;
         if (!id) return;
+        const gen = switchGen; // #172: as changeApprovalMode, above
         try {
           const res = await fetch('/session/' + encodeURIComponent(id) + '/model', {
             method: 'POST',
@@ -7105,8 +7126,10 @@
             },
             body: JSON.stringify({ modelId }),
           });
+          if (gen !== switchGen) return;
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
+            if (gen !== switchGen) return;
             const detail =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs a write-scoped token'
@@ -7122,6 +7145,7 @@
             renderFooter();
           }
         } catch (err) {
+          if (gen !== switchGen) return;
           setStatus('model switch failed: ' + err.message);
         }
       }
@@ -8779,6 +8803,7 @@
       // opened, and the daemon's own message is shown rather than guessed at.
       async function runWorkspaceGlob(pattern) {
         if (!pattern) return;
+        const gen = ++wsViewGen; // #172: see wsViewGen
         const view = wsFilesViewEl();
         view.innerHTML = '';
         // Its own status element: borrowing the listing's would move it out of
@@ -8803,11 +8828,13 @@
           );
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
+            if (gen !== wsViewGen) return;
             status.textContent = wsFilesErrorText(res.status, e);
             view.appendChild(status);
             return;
           }
           const data = await res.json();
+          if (gen !== wsViewGen) return;
           const matches = Array.isArray(data.matches) ? data.matches : [];
           const list = document.createElement('div');
           list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
@@ -8833,10 +8860,20 @@
           status.textContent = bits.join(' \u00b7 ');
           view.append(list, status);
         } catch (err) {
+          if (gen !== wsViewGen) return;
           status.textContent = 'find failed: ' + err.message;
           view.appendChild(status);
         }
       }
+
+      // #172: which open of the file view a read belongs to. The view is one
+      // box that a file, its next page or a find all write into, so a file
+      // opened while another was still reading got the first one's bytes in
+      // its <pre> with its own appended after them. Moved by each fresh open
+      // and each find; a "more" page reads it without moving it, and is the
+      // same open. The same pattern as switchGen, kept apart from it because
+      // what changes here is the file, not the conversation.
+      let wsViewGen = 0;
 
       function wsFilesViewEl() {
         let v = $('ws-files-view');
@@ -8854,6 +8891,7 @@
       // truncated read says so, and nextCursor/hasMore page the rest, so a
       // long file is never shown as though it were whole.
       async function openWorkspaceFile(relPath, cursor) {
+        const gen = cursor ? wsViewGen : ++wsViewGen;
         const view = wsFilesViewEl();
         if (!cursor) {
           view.innerHTML = '';
@@ -8879,16 +8917,19 @@
           });
           if (res.status === 422) {
             const e = await res.json().catch(() => ({}));
+            if (gen !== wsViewGen) return;
             if (e.code === 'binary_file') return void renderWorkspaceBytes(relPath);
             status.textContent = wsFilesErrorText(422, e);
             return;
           }
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
+            if (gen !== wsViewGen) return;
             status.textContent = wsFilesErrorText(res.status, e);
             return;
           }
           const data = await res.json();
+          if (gen !== wsViewGen) return;
           let pre = view.querySelector('pre');
           if (!pre) {
             pre = document.createElement('pre');
@@ -8908,12 +8949,20 @@
             const more = document.createElement('button');
             more.textContent = 'more';
             more.dataset.role = 'more';
-            more.addEventListener('click', () =>
-              void openWorkspaceFile(relPath, data.nextCursor),
-            );
+            // #172: one page at a time. A double tap read the same cursor
+            // twice and appended its window twice. A page that lands removes
+            // this button and draws the next; one that fails lets it go.
+            more.addEventListener('click', () => {
+              if (more.disabled) return;
+              more.disabled = true;
+              void openWorkspaceFile(relPath, data.nextCursor).finally(() => {
+                more.disabled = false;
+              });
+            });
             view.appendChild(more);
           }
         } catch (err) {
+          if (gen !== wsViewGen) return;
           status.textContent = 'read failed: ' + err.message;
         }
       }
@@ -8922,6 +8971,7 @@
       // GET /rc/workspace/file/bytes is the answer. Offered as a download
       // rather than pasted into the page as base64.
       async function renderWorkspaceBytes(relPath) {
+        const gen = wsViewGen; // #172: the open that found the file binary
         const view = wsFilesViewEl();
         const status = wsSectionStatusEl('ws-files-file-status');
         if (!status.isConnected) view.appendChild(status);
@@ -8935,10 +8985,12 @@
           );
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
+            if (gen !== wsViewGen) return;
             status.textContent = wsFilesErrorText(res.status, e);
             return;
           }
           const data = await res.json();
+          if (gen !== wsViewGen) return;
           const b64 =
             typeof data.contentBase64 === 'string' ? data.contentBase64 : '';
           const old = $('ws-files-dl');
@@ -8955,6 +9007,7 @@
               ? data.sizeBytes + ' bytes'
               : 'bytes') + (data.truncated ? ' (window truncated)' : '');
         } catch (err) {
+          if (gen !== wsViewGen) return;
           status.textContent = 'byte read failed: ' + err.message;
         }
       }
@@ -9020,13 +9073,18 @@
 
       async function fetchContext(id) {
         if (!id || !token()) return;
+        // #172: A's model, modes and folder were landing in B's footer and
+        // pickers, and its folder could retarget the workspace controls.
+        const gen = switchGen;
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(id) + '/context',
             { headers: { Authorization: 'Bearer ' + token() } },
           );
           if (!res.ok) return; // footer stays hidden; not fatal to watching
-          ctxInfo = parseContext(await res.json());
+          const body = await res.json();
+          if (gen !== switchGen) return;
+          ctxInfo = parseContext(body);
           renderFooter();
           // rc-workspace-scoping (#28): watching a session in a non-default
           // workspace targets the workspace controls at it — but only when
@@ -9054,6 +9112,7 @@
       // and the footer keeps showing the stream's in/out counts.
       async function fetchContextUsage(id) {
         if (!id || !token()) return;
+        const gen = switchGen; // #172: A's fill must not stand in B's footer
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(id) + '/context-usage',
@@ -9061,6 +9120,7 @@
           );
           if (!res.ok) return; // leave the last fill standing; not fatal
           const body = await res.json();
+          if (gen !== switchGen) return;
           const u = (body && body.usage) || {};
           const total = typeof u.totalTokens === 'number' ? u.totalTokens : 0;
           const window =
@@ -9776,6 +9836,11 @@
         if (sessionId === watchedSessionId && watchedSessionCwd) {
           payload.cwd = watchedSessionCwd;
         }
+        // #172: forking moves the reader to the fork, so it is a switch asked
+        // for. A late answer only takes the busy mark off the row, which is
+        // harmless when the row went with a cleared transcript.
+        noteConversationSwitch();
+        const gen = switchGen;
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(sessionId) + '/fork',
@@ -9788,6 +9853,7 @@
               body: JSON.stringify(payload),
             },
           );
+          if (gen !== switchGen) return show(false, '');
           if (!res.ok) {
             let code = res.status;
             try {
@@ -9796,6 +9862,7 @@
             } catch {
               /* non-JSON error body */
             }
+            if (gen !== switchGen) return show(false, '');
             show(
               false,
               res.status === 401 || res.status === 403
@@ -9805,6 +9872,7 @@
             return;
           }
           const data = await res.json();
+          if (gen !== switchGen) return show(false, '');
           setStatus('forked → ' + String(data.sessionId).slice(0, 8) + '…');
           // Switch the viewer to the fork: abort any live stream first,
           // then run the standard watch hand-off (no freeform id field
@@ -9813,6 +9881,7 @@
           lastSeenEventId = null;
           startWatch(data.sessionId);
         } catch (e) {
+          if (gen !== switchGen) return show(false, '');
           show(false, 'fork error: ' + e);
         }
       }
@@ -10755,6 +10824,14 @@
       // watched so the card is pinned before the transcript arrives.
       async function refreshPendingCards(sessionId, early) {
         if (!token()) return;
+        // #172: and the visit it was asked in. The deep link's early read is
+        // the one exception: it is made before its own watch opens, on
+        // purpose, and the id check below already drops it if the reader goes
+        // anywhere else.
+        const gen = switchGen;
+        const superseded = () =>
+          (sessionId !== watchedSessionId && sessionId !== deepLinkSessionId) ||
+          (!early && gen !== switchGen);
         let res;
         try {
           res = await fetch(
@@ -10768,9 +10845,7 @@
         // another conversation since it was asked would otherwise get a card
         // nobody can answer from here pinned over theirs, and a 404 would
         // forget the conversation they moved to.
-        if (sessionId !== watchedSessionId && sessionId !== deepLinkSessionId) {
-          return;
-        }
+        if (superseded()) return;
         if (res.status === 404) {
           // The deep link's read comes before any watch, and the watch it
           // then opens reports a gone conversation itself.
@@ -10781,6 +10856,7 @@
         }
         if (res.status !== 200) return; // 502 — nothing to draw, keep polling
         const body = await res.json().catch(() => null);
+        if (superseded()) return; // #172: the body is a second await
         if (!body || !Array.isArray(body.pendingInteractions)) return;
         // Older daemons omit pendingInteractions entirely — the absence
         // also skips the auto-resolve below (can't distinguish "none
@@ -10835,6 +10911,44 @@
 
       let controller = null;
       let watchedSessionId = null;
+      // #172: which visit to a conversation a late answer belongs to. A switch
+      // replaces watchedSessionId and the stream controller, and neither can
+      // recall a request already sent, so a fetch made for the conversation on
+      // screen reads this before its first await and drops its answer once the
+      // number has moved:
+      //   const gen = switchGen;
+      //   ...await...
+      //   if (gen !== switchGen) return;
+      // A number rather than the session id, because leaving A and coming back
+      // to A is two switches: a page or a resume asked for on the first visit
+      // must not land in the second, whose transcript was cleared and replayed
+      // since. Moved only by noteConversationSwitch.
+      let switchGen = 0;
+      // Called wherever the watched conversation changes or a change is asked
+      // for: startWatch onto another id, a resume, a new conversation, a fork,
+      // forgetGoneSession and Unwatch. An ask counts as well as the arrival,
+      // because two asks in flight are settled by the later tap, not by the
+      // answer that happens to land last.
+      function noteConversationSwitch() {
+        switchGen += 1;
+        // A page of history in flight is for the visit being left and is
+        // dropped when it lands, so the one-at-a-time flag it holds goes now.
+        transcriptPaging = false;
+        renderLoadEarlier();
+        // The pickers below were filled from the conversation being left. Left
+        // up, a turn picked on A was posted to B, with B's id in the confirm.
+        $('rewind-pick').style.display = 'none';
+        $('rewind-pick-result').textContent = '';
+        const models = $('model-picker-dialog');
+        if (models && models.open) models.close();
+        // The fork sheet names a turn of the conversation being left; Cancel
+        // is its own way out, so it resolves null and nothing is forked.
+        const ask = $('h1-ask');
+        if (ask && !ask.hidden) {
+          const cancel = ask.querySelector('.cancel');
+          if (cancel) cancel.click();
+        }
+      }
       // #186: the conversation a push deep link is opening, from the moment
       // its pending card is asked for until a watch of something else
       // replaces it; refreshPendingCards draws for it before it is watched.
@@ -11252,6 +11366,7 @@
         clearPersistedWatch();
         showSessionTitle(null);
         watchedSessionTitle = null;
+        noteConversationSwitch(); // #172: nothing for the gone one lands now
         watchedSessionId = null;
         syncStoredForSession();
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
@@ -11283,6 +11398,7 @@
         watchedSessionTitle = null;
         // The pending-cards poll is gated only on watchedSessionId, so an
         // Unwatch that left it set kept polling the daemon every 5s (#59).
+        noteConversationSwitch(); // #172: nor anything asked for it before
         watchedSessionId = null;
         syncStoredForSession();
         // #50: redrawn after the clear for the same reason as in
@@ -11454,6 +11570,9 @@
           st.textContent = '';
           return;
         }
+        // #172: the switch is the conversation on screen's, so A's state
+        // landing after a switch would tick or untick it for B.
+        const gen = switchGen;
         try {
           const res = await fetch(
             '/session/' +
@@ -11461,18 +11580,23 @@
               '/idle-suggest-toggle',
             { headers: { Authorization: 'Bearer ' + token() } },
           );
+          if (gen !== switchGen) return;
           if (!res.ok) {
             st.textContent = '';
             return;
           }
-          renderIdleToggle(await res.json());
+          const s = await res.json();
+          if (gen !== switchGen) return;
+          renderIdleToggle(s);
         } catch {
+          if (gen !== switchGen) return;
           st.textContent = '';
         }
       }
       $('idle-suggest-toggle').onchange = async () => {
         if (!watchedSessionId || !token()) return;
         const askedFor = watchedSessionId;
+        const gen = switchGen; // #172: as refreshIdleToggle, above
         const cb = $('idle-suggest-toggle');
         const desired = cb.checked;
         cb.disabled = true;
@@ -11493,16 +11617,20 @@
           if (res.ok) {
             const s = await res.json();
             // #182: the state the gateway reports back, which under a global
-            // off is not the one asked for (the POST only narrows).
+            // off is not the one asked for (the POST only narrows). #172:
+            // kept after a switch, filed under the id it was set for.
             if (s && typeof s.enabled === 'boolean') {
               uiSessionWrite(IDLE_NAME, askedFor, s.enabled);
             }
+            if (gen !== switchGen) return;
             renderIdleToggle(s); // reflect EFFECTIVE state
           } else {
+            if (gen !== switchGen) return;
             setStatus('idle toggle failed (' + res.status + ')');
             await refreshIdleToggle();
           }
         } catch {
+          if (gen !== switchGen) return;
           await refreshIdleToggle();
         }
       };
@@ -14603,6 +14731,12 @@
       // hand-off. Default off, so a new caller cannot inherit it by accident.
       async function resumeConversation(sessionId, cwd, title, opts) {
         if (!token()) return setStatus('pair first');
+        // #172: a resume is a switch asked for, so it moves the number at the
+        // tap. A cold A then a warm B used to end on A, because A's answer
+        // landed last, cleared B's transcript and aborted B's watch. The
+        // resync self-heal and the deep link come through here too.
+        noteConversationSwitch();
+        const gen = switchGen;
         const label = title || 'session ' + sessionId.slice(0, 8);
         setStatus('resuming ' + label + '…');
         try {
@@ -14617,8 +14751,10 @@
               body: JSON.stringify({ cwd }),
             },
           );
+          if (gen !== switchGen) return;
           if (res.status === 200) {
             const j = await res.json();
+            if (gen !== switchGen) return;
             lastSeenEventId = null;
             // Resume is a conversation SWITCH, not a reconnect: startWatch
             // only self-clears when fromEventId is null (which would skip the
@@ -14691,6 +14827,7 @@
             setStatus('resume failed (' + res.status + ')');
           }
         } catch (e) {
+          if (gen !== switchGen) return;
           setStatus('resume failed: ' + e);
         }
       }
@@ -14972,6 +15109,10 @@
       // workspace. Needs a write/owner token.
       $('new-session').onclick = async () => {
         if (!token()) return setStatus('pair first');
+        // #172: a switch asked for, as a resume is, so a row tapped while the
+        // create is in flight wins over the create's late answer.
+        noteConversationSwitch();
+        const gen = switchGen;
         $('new-session').disabled = true;
         setStatus('creating session…');
         try {
@@ -14993,6 +15134,9 @@
             const j = await res.json();
             // Record the RESOLVED workspace (not the raw typed/blank input) so
             // "daemon default" runs still land a real absolute path in Recent.
+            // #172: recorded even when the reader has moved on, because the
+            // conversation was made regardless and the push is what puts its
+            // folder on the list, where they can still find it.
             if (j.workspaceCwd) {
               // #193: read before the push, which can move the folder shown
               // off the recent list.
@@ -15006,7 +15150,7 @@
               // browser is left where it was: moving it would drop the folder
               // it was on from the list whenever that folder is not a recent
               // one.
-              if (was && was !== made) setListFolder(made);
+              if (gen === switchGen && was && was !== made) setListFolder(made);
             }
             // rc-workspace-scoping (#28): offer the freshly resolved
             // workspace in the target selector (the pool may now hold it).
@@ -15014,6 +15158,8 @@
               wsKnownWorkspaces.push(j.workspaceCwd);
               renderWsTargetSelector();
             }
+            // #172: the rest moves the page, which is the reader's to move.
+            if (gen !== switchGen) return;
             setStatus(
               'created ' +
                 j.sessionId.slice(0, 8) +
@@ -15028,6 +15174,8 @@
             startWatch(j.sessionId); // connect the stream + open the composer
             // issue #49: mirror this conversation in a terminal on the host.
             void requestHostTerminal(j.sessionId);
+          } else if (gen !== switchGen) {
+            // #172: a refusal for a create the reader has moved on from.
           } else if (res.status === 401 || res.status === 403) {
             setStatus('not authorized — needs a write/owner token');
           } else if (res.status === 502) {
@@ -15036,7 +15184,7 @@
             setStatus('create failed (' + res.status + ')');
           }
         } catch (e) {
-          setStatus('create failed: ' + e);
+          if (gen === switchGen) setStatus('create failed: ' + e);
         } finally {
           $('new-session').disabled = false;
         }
@@ -15069,6 +15217,9 @@
           // while its rows are still the ones on screen.
           savePlace();
           cancelPlaceRestore();
+          // #172: before watchedSessionId moves, so nothing asked for the
+          // conversation being left can land in this one.
+          noteConversationSwitch();
         }
         watchedSessionId = id;
         if (switching) {
@@ -16569,19 +16720,26 @@
           new Promise((r) => setTimeout(r, 1500)),
         ]);
         void (async () => {
+          // #172: the probe can take a folder's worth of reads, and a reader
+          // who taps another conversation meanwhile has answered it. Without
+          // this the probe's resume landed last and took the page back.
+          const gen = switchGen;
           for (const cwd of loadRecentWorkspaces()) {
             try {
               const res = await fetch(
                 '/rc/sessions?cwd=' + encodeURIComponent(cwd),
                 { headers: { Authorization: 'Bearer ' + token() } },
               );
+              if (gen !== switchGen) return;
               if (!res.ok) continue;
               const body = await res.json();
+              if (gen !== switchGen) return;
               const s = (body.sessions || []).find(
                 (x) => x && x.sessionId === id,
               );
               if (s) {
                 await pinned;
+                if (gen !== switchGen) return;
                 void resumeConversation(id, cwd, strOr(s.title, ''), {
                   hostTerminal: true,
                 });
@@ -16594,6 +16752,7 @@
           // No recent workspace listed it: replay from 0, like
           // restoreWatchedSession, so a persisted transcript rebuilds.
           await pinned;
+          if (gen !== switchGen) return;
           void startWatch(id, 0);
         })();
         return true;
@@ -17773,6 +17932,7 @@
         if (!window.confirm('End session ' + id + '? This cannot be undone.'))
           return;
         out.textContent = 'ending…';
+        const gen = switchGen;
         const r = await rcCall('/session/' + encodeURIComponent(id) + '/end', {
           method: 'POST',
           body: '{}',
@@ -17781,8 +17941,9 @@
           out.textContent = 'session ended';
           // The session is gone: drop the watch (and any self-heal retry
           // the stream-end may have scheduled) instead of re-attaching to
-          // a corpse.
-          $('stop').onclick();
+          // a corpse. #172: only while it is still the one watched; after
+          // a switch this Unwatch would drop the conversation gone to.
+          if (gen === switchGen) $('stop').onclick();
         } else {
           out.textContent = 'end failed: ' + r.code;
         }
@@ -17900,6 +18061,7 @@
         // may differ from the daemon's boot workspace.
         const rwBody = { toTurn: keep };
         if (watchedSessionCwd) rwBody.cwd = watchedSessionCwd;
+        const gen = switchGen;
         const r = await rcCall(
           '/session/' + encodeURIComponent(id) + '/rewind',
           {
@@ -17908,6 +18070,9 @@
           },
         );
         btn.disabled = false;
+        // #172: the rewind happened to A either way. What a late answer must
+        // not do is re-watch A over the conversation the reader went to.
+        if (gen !== switchGen) return;
         if (!r.ok) {
           out.textContent = 'rewind failed: ' + r.code;
           return;
