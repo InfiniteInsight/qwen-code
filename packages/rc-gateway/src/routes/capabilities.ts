@@ -197,8 +197,10 @@ export function createCapabilityRoute(deps: {
     const audience = audienceOf(req.rcClient);
     const remoteControl: Record<string, unknown> = {
       version: RC_PROTOCOL_VERSION,
-      supportedTransports: ['sse', 'ws'],
-      supportedScopes: ['owner', 'write', 'approve', 'read'],
+      // Only what is served and mintable: SSE is the one transport, and the
+      // read scope is spelled `session:read` (`read` is rejected at minting).
+      supportedTransports: ['sse'],
+      supportedScopes: ['owner', 'write', 'approve', 'session:read'],
       pairingEnabled: true,
       auditEnabled: true,
       walHorizonSec: 86400,
