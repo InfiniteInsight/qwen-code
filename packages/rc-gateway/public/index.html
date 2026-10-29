@@ -14545,6 +14545,16 @@
             },
             body: JSON.stringify({ sessionId: id }),
           });
+          if (res.status === 200) {
+            // #194: a terminal is already attached to this conversation on the
+            // host, so the gateway queued nothing. An old gateway never answers
+            // 200 here (it queues every time), so this branch is new-gateway only.
+            const j = await res.json().catch(() => ({}));
+            if (j && j.alreadyMirrored) {
+              setStatus('already open on the host');
+              return;
+            }
+          }
           if (res.status === 202) {
             // 202 means the request was written down, which is not the same
             // claim as "a terminal is opening". The gateway now reports whether
