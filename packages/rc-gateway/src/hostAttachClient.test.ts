@@ -35,6 +35,7 @@ import {
   type HostAttachDaemon,
 } from './routes/hostAttach.js';
 import { UnknownSessionError } from './daemonPool.js';
+import type { TerminalGuard } from './terminalGuard.js';
 
 const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -651,5 +652,57 @@ describe('runHostAttach re-attach', () => {
     });
     expect(out.code).toBe(130);
     expect(out.spawned).toHaveLength(1);
+  });
+
+  describe('when the terminal goes away (#207)', () => {
+    /** A guard that is alive until `close()`, then fires what is registered. */
+    function closableGuard(): { guard: TerminalGuard; close: () => void } {
+      let gone = false;
+      const callbacks = new Set<() => void>();
+      const guard: TerminalGuard = {
+        gone: () => gone,
+        reason: () => (gone ? 'fd 0 is /dev/pts/9 (deleted)' : undefined),
+        onGone: (cb) => {
+          if (gone) {
+            cb();
+            return () => {};
+          }
+          callbacks.add(cb);
+          return () => void callbacks.delete(cb);
+        },
+        stop: () => {},
+      };
+      return {
+        guard,
+        close: () => {
+          gone = true;
+          for (const cb of [...callbacks]) cb();
+        },
+      };
+    }
+
+    it('exits 129 when the terminal goes during the re-attach wait, without spawning again', async () => {
+      const t = closableGuard();
+      const out = await reattachRun({
+        statuses: [75],
+        answers: [READY('first'), { status: 503, body: {} }],
+        deps: {
+          terminalGuard: t.guard,
+          sleep: async () => t.close(),
+        },
+      });
+      expect(out.code).toBe(129);
+      expect(out.spawned).toHaveLength(1);
+    });
+
+    it('a live terminal changes no exit code', async () => {
+      const t = closableGuard();
+      const out = await reattachRun({
+        statuses: [7],
+        answers: [READY('first')],
+        deps: { terminalGuard: t.guard },
+      });
+      expect(out.code).toBe(7);
+    });
   });
 });
