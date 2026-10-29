@@ -42,11 +42,10 @@
  * reducer produces DISPLAY + gate state only — the hook owns the actual vote.
  *
  * Known slice-1 gaps to reconcile at integration:
- * - **Only `turn_complete` clears the streaming state.** An errored/canceled
- *   turn (`stream_error`, `session_died`, or a failed prompt) would leave
- *   `streamingState` at `Responding` with orphaned `pendingText` — a stuck
- *   spinner. The terminal-error frames must reset state (and surface an error
- *   item) in a follow-up.
+ * - **A turn ends on `turn_complete` or `turn_error`** (a failed prompt; it
+ *   commits an error line). `stream_error` and `session_died` are left to the
+ *   hook: the stream closing finalizes the turn there, and `session_died`
+ *   ends an attached tab.
  * - **Thoughts are ephemeral** (shown live, never committed), and assistant
  *   text commits as `gemini` (not `gemini_content`); both are deliberate
  *   simplifications to revisit against the in-process path at integration.
@@ -159,6 +158,17 @@ const asRecord = (v: unknown): Record<string, unknown> =>
 const textOf = (update: Record<string, unknown>): string => {
   const content = asRecord(update['content']);
   return typeof content['text'] === 'string' ? (content['text'] as string) : '';
+};
+
+/**
+ * Whether a message chunk carries something to show: non-empty text, or a
+ * non-text block (an image the assistant produced). Usage and request
+ * lifecycle chunks carry `{ type: 'text', text: '' }` plus `_meta` only.
+ */
+const hasChunkContent = (update: Record<string, unknown>): boolean => {
+  const content = asRecord(update['content']);
+  if (typeof content['text'] === 'string') return content['text'].length > 0;
+  return Object.keys(content).length > 0;
 };
 
 const readUsage = (
@@ -276,10 +286,10 @@ function setToolStatus(
 
 /**
  * Commit the in-flight turn (tool group, then assistant message) and clear the
- * pending buffers. Shared by `turn_complete` and the replay turn-segmentation in
- * `user_message_chunk` (history replay sends no `turn_complete` between turns, so
- * a new user message marks the previous assistant turn done). Reasoning stays
- * ephemeral.
+ * pending buffers. Shared by `turn_complete`, `turn_error` and the replay
+ * turn-segmentation in `user_message_chunk` (history replay sends no
+ * `turn_complete` between turns, so a new user message marks the previous
+ * assistant turn done). Reasoning stays ephemeral.
  */
 function flushPendingTurn(state: DaemonProjectionState): {
   committed: HistoryItemWithoutId[];
@@ -342,7 +352,16 @@ function projectSessionUpdate(
       return {
         state: {
           ...state,
-          streamingState: StreamingState.Responding,
+          // A chunk with nothing to show is not evidence that a turn is
+          // running. The daemon sends such chunks for usage and for model
+          // request lifecycle markers, and keeps sending them AFTER
+          // `turn_complete` for background requests (the memory extractor),
+          // with no promptId or originator. Letting one set Responding
+          // reopened a finished turn: the tab kept its thinking row and
+          // `esc to cancel` after the reply had rendered (#195).
+          streamingState: hasChunkContent(update)
+            ? StreamingState.Responding
+            : state.streamingState,
           // Concatenate verbatim — a terminal chunk may carry empty text plus
           // `_meta.usage`; appending '' is a no-op.
           pendingText: state.pendingText + text,
@@ -368,6 +387,17 @@ function projectSessionUpdate(
     default:
       return { state, committed: [] };
   }
+}
+
+/** The one history line a `turn_error` adds (`data.message`, `errorKind`). */
+function turnErrorText(data: Record<string, unknown>): string {
+  const message =
+    typeof data['message'] === 'string' && data['message'].trim()
+      ? data['message'].trim()
+      : 'unknown error';
+  return data['errorKind'] === 'model_stream_interrupted'
+    ? `The reply stopped: the connection to the model was lost (${message}).`
+    : `The turn failed: ${message}`;
 }
 
 /** Extract a `toolCallId` from an opaque ACP `toolCall` object if present. */
@@ -498,6 +528,25 @@ function projectFrame(
       };
     }
 
+    case 'turn_error': {
+      // A failed prompt's terminal: the daemon publishes this INSTEAD of
+      // `turn_complete` (the model request died mid-stream, a rate limit, a
+      // loop guard), for whichever client sent the turn. Keep what was said
+      // so far, say why it stopped, and go Idle.
+      const flushed = flushPendingTurn(state);
+      return {
+        state: {
+          ...flushed.state,
+          streamingState: StreamingState.Idle,
+          pendingPermission: undefined,
+        },
+        committed: [
+          ...flushed.committed,
+          { type: 'error', text: turnErrorText(data) },
+        ],
+      };
+    }
+
     // The daemon is the source of truth for the model and mode in an attached
     // tab. Both frames are broadcast to every client, including the one that
     // asked for the change, so origin is deliberately not consulted: the
@@ -584,8 +633,9 @@ function replayIncompleteText(partial: boolean, degraded: boolean): string {
  *   compaction stamps a merged event with the id of its LAST source chunk and
  *   keeps latest-wins updates in their first slot, so ids inside a compacted
  *   turn are not monotonic and the watermark would silently drop real history.
- * - Turns are segmented by their compacted `turn_complete` boundary, or by the
- *   next user message when a turn ended any other way (`turn_error`).
+ * - Turns are segmented by their compacted `turn_complete` or `turn_error`
+ *   boundary (a replayed failure keeps its error line), or by the next user
+ *   message when a turn ended any other way.
  * - With no prompt in flight the trailing turn is committed and the state goes
  *   Idle (no stuck spinner); with one in flight it stays pending and live.
  * - Older history this view cannot page in (`historyHasMore`, or a

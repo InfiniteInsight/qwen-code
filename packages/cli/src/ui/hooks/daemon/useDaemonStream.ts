@@ -29,8 +29,6 @@
  * `Responding`.
  *
  * Known gaps for a later pass (NOT done here):
- * - **Errored/canceled turns** (`stream_error`/`session_died`) don't reset
- *   streaming state yet (reducer slice-1 gap) — a stuck spinner.
  * - Several contract fields are documented stubs (see the return).
  */
 import { appendFileSync } from 'node:fs';
@@ -423,6 +421,18 @@ export function useDaemonStream(
           prompt: [{ type: 'text', text: query }],
         });
       } catch (err) {
+        // The turn failed in the daemon (it published `turn_error`, which the
+        // SDK turns into this rejection before it yields the frame). The turn
+        // is over: end it here, and leave the error line to the frame so it
+        // is shown once, the same way for this tab's turns and the phone's.
+        // Structural twin of the SDK's `isDaemonTurnError` (no SDK import).
+        if (
+          (err as { _daemonTurnError?: unknown })?._daemonTurnError === true
+        ) {
+          dbg(`prompt() failed with a turn error: ${String(err)}`);
+          finalizeTurn();
+          return;
+        }
         // The daemon dying mid-prompt ends the tab (exit 75). An error the
         // daemon recovers from (it answers the re-check) is rethrown as before.
         if (
