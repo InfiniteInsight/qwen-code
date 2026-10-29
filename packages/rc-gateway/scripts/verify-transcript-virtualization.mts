@@ -24152,6 +24152,53 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P335 Archived (n) is read when the list opens only once the last read is 30 s old, and at once after an archive here',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190ListFixture(page, {
+      '/p335': [{ sessionId: '33500000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now }],
+    }, { '/p335': { parent: null, entries: [] } });
+    const archivedReads: number[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('archiveState=archived')) archivedReads.push(Date.now());
+    });
+    await page.route(/\/rc\/sessions\/archive$/, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ archived: ['33500000-0000-0000-0000-000000000001'] }) }),
+    );
+    await page.evaluate(h190At('/p335'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await openList(page);
+    await page.waitForFunction(`document.getElementById('list-archived-open').textContent.trim() === 'Archived (0)'`, null, { timeout: 5_000 });
+    const first = archivedReads.length;
+    await page.click('#list-back');
+    await openList(page);
+    await page.click('#list-back');
+    await openList(page);
+    await page.waitForTimeout(400);
+    const reopened = archivedReads.length - first;
+    // An archive here reads it again at once.
+    await page.evaluate(`archivePastConversation('33500000-0000-0000-0000-000000000001', '/p335')`);
+    const end = Date.now() + 3_000;
+    while (archivedReads.length - first === reopened && Date.now() < end) await page.waitForTimeout(50);
+    const afterArchive = archivedReads.length - first - reopened;
+    // An old read is read again on the next open (once the archive's own
+    // reads have landed, so none of them restamps the clock).
+    await page.waitForTimeout(800);
+    await page.evaluate(`archivedReadAt = Date.now() - 31000`);
+    await page.click('#list-back');
+    const before = archivedReads.length;
+    await openList(page);
+    await page.waitForTimeout(400);
+    expect(first >= 1 && reopened === 0, `opening the list again within 30 s read the count ${reopened} more times`);
+    expect(afterArchive >= 1, 'an archive here did not read the count again');
+    expect(archivedReads.length > before, 'a 31 s old count was not read again as the list opened');
+    return `first open read it (${first}), two more opens within 30 s read nothing, an archive read it again, and an open after 31 s read it`;
+  },
+});
+
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

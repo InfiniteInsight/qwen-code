@@ -13810,7 +13810,7 @@
         // or it would hide rows for a reason the reader cannot see.
         if ($('past-filter').value) showListSearch(true);
         renderList();
-        void refreshArchivedCount();
+        void refreshArchivedCount(true);
         // #190: read now rather than on the 30 s tick, so a conversation
         // opened in another folder since shows its live dot as the list opens.
         if (curDirPath) void refreshPastConversations(curDirPath);
@@ -14704,8 +14704,22 @@
         return { rows: newestFirst(rows), failed };
       }
       let archivedReading = null; // the key a count read is in flight for
-      async function refreshArchivedCount() {
+      // #190: when the count was last read. Opening the list re-reads it only
+      // once it is older than this; an archive or a restore here, and a
+      // change of folders, still read it at once.
+      const ARCHIVED_FRESH_MS = 30000;
+      let archivedReadAt = 0;
+      async function refreshArchivedCount(onOpen) {
         const key = archivedKey();
+        if (
+          onOpen &&
+          archivedCountKey === key &&
+          archivedCount !== null &&
+          Date.now() - archivedReadAt < ARCHIVED_FRESH_MS
+        ) {
+          renderArchivedCount();
+          return;
+        }
         const folders = viewFolders();
         if (folders.length === 0 || !token()) {
           archivedCount = null;
@@ -14719,6 +14733,7 @@
         if (key !== archivedKey()) return; // the list moved on to other folders
         archivedCountKey = key;
         archivedCount = got.failed.length ? null : got.rows.length;
+        archivedReadAt = Date.now();
         renderArchivedCount();
       }
       // Re-read when the folders the count is for have changed since it was
