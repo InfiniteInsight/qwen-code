@@ -26837,8 +26837,14 @@ PAGE_SCENARIOS.push({
           { sessionId: catId(1), title: 'p424 one', preview: 'the first', updatedAt: h190Now },
           { sessionId: catId(2), title: 'p424 two', preview: 'the second', updatedAt: h190Now },
         ],
-      }, { '/p424': { parent: null, entries: [] } });
+      }, { '/p424': { parent: null, entries: [] }, '/p190': { parent: null, entries: [] } });
+      // The boot's own browse first: it can leave before the routes above
+      // exist, and landing after the browse below it would move the list off
+      // /p424. The fixture serves a pathless browse as /p190, so it settles
+      // either way.
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null', null, { timeout: 10_000 });
       await page.evaluate(h190At('/p424'));
+      await page.waitForFunction(`pastConvosCwd === '/p424'`, null, { timeout: 10_000 });
       await openList(page);
       await catCount(page, 2);
       await page.waitForTimeout(500);
