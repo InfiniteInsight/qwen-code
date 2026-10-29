@@ -240,6 +240,37 @@ describe('TokenStore', () => {
     expect(store.scopesFor(share.id)).toBeUndefined();
   });
 
+  it('#165 scopesFor applies the 180-day max-age ceiling resolve() applies', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    now = 1_000_000 + 180 * DAY_MS;
+    // Exactly at the ceiling both still answer (the check is strict >).
+    expect(store.scopesFor(id)).toEqual([SESSION_READ]);
+    expect(store.resolve(`Bearer ${token}`)).not.toBeNull();
+    now += 1;
+    // One ms past it the token can no longer log in, so it must not keep
+    // receiving push either.
+    expect(store.resolve(`Bearer ${token}`)).toBeNull();
+    expect(store.scopesFor(id)).toBeUndefined();
+  });
+
+  it('#165 scopesFor max-age also binds a long-lived share', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 365 * 86_400,
+      parentId: 'owner-1',
+    });
+    now = 1_000_000 + 181 * DAY_MS; // TTL still in the future
+    expect(store.scopesFor(share.id)).toBeUndefined();
+  });
+
   it('sessionLockFor returns the lock for a share and undefined for a normal token', async () => {
     const store = await TokenStore.open(path);
     const normal = await store.issue([SESSION_READ], 'normal');

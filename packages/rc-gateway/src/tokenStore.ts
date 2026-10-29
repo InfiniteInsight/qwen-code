@@ -500,13 +500,19 @@ export class TokenStore {
    * Resolve a token id to a copy of its scopes (pure read, no I/O). Used by the
    * push notifier to scope-gate fan-out. Returns undefined for an unknown id OR
    * an expired token — an expired share token must grant no push delivery, just
-   * as `resolve()` rejects it for requests.
+   * as `resolve()` rejects it for requests. The absolute max-age ceiling
+   * applies here too (#165): a token too old to log in must not keep being
+   * notified.
    */
   scopesFor(id: string): RcScope[] | undefined {
     const rec = this.records.find((r) => r.id === id);
     if (!rec) return undefined;
     if (rec.revokedAt !== undefined) return undefined;
-    if (rec.expiresAt !== undefined && this.nowFn() >= rec.expiresAt) {
+    const now = this.nowFn();
+    if (now > rec.issuedAt + DEFAULT_MAX_TOKEN_AGE_DAYS * DAY_MS) {
+      return undefined;
+    }
+    if (rec.expiresAt !== undefined && now >= rec.expiresAt) {
       return undefined;
     }
     return [...rec.scopes];
