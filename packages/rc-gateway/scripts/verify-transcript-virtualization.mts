@@ -30,6 +30,7 @@
  *   ONLY=V9,V10 npx tsx scripts/verify-transcript-virtualization.mts view
  */
 import { execFile } from 'node:child_process';
+import { deflateSync } from 'node:zlib';
 import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -19866,6 +19867,166 @@ const noisePicture = (
       const legacy = await note();
       expect(legacy === 'big.bin: 9.0 MB is over the 8.0 MB limit', `with no capability the refusal reads ${JSON.stringify(legacy)}`);
       return `photo ${photo.length} -> ${up.size} bytes (${said}); small untouched; non-image: ${refusal}; alpha png ${alphaPng.length} -> ${png.size} as ${png.type}, then ${flat.size} as ${flat.type} (${pngSaid}); legacy: ${legacy}`;
+    },
+  });
+}
+
+/**
+ * #197. A real PNG of `w` x `h` made here, so the route stub can serve bytes
+ * the browser decodes at a known size. A vertical gradient: any picture would
+ * do, but a flat one cannot show a wrong crop.
+ */
+function solidPng(w: number, h: number): Buffer {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf: Buffer): number => {
+    let c = 0xffffffff;
+    for (const b of buf) c = crcTable[(c ^ b) & 255]! ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const sum = Buffer.alloc(4);
+    sum.writeUInt32BE(crc(body));
+    return Buffer.concat([len, body, sum]);
+  };
+  const head = Buffer.alloc(13);
+  head.writeUInt32BE(w, 0);
+  head.writeUInt32BE(h, 4);
+  head[8] = 8; // bit depth
+  head[9] = 2; // truecolour
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * (w * 3 + 1);
+    for (let x = 0; x < w; x++) {
+      raw[row + 1 + x * 3] = (y * 255) / h;
+      raw[row + 2 + x * 3] = (x * 255) / w;
+      raw[row + 3 + x * 3] = 160;
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', head),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+{
+  const ref = (type: string, attachmentId: string, mimeType: string, size: number) => ({
+    type,
+    attachmentId,
+    mimeType,
+    size,
+  });
+  const attachmentFrames = (): Frame[] => {
+    const f = new Frames();
+    const chunk = (content: unknown) => f.upd({ sessionUpdate: 'user_message_chunk', content });
+    // A message of text and a picture, as one prompt sends it.
+    chunk({ type: 'text', text: 'what is this?' });
+    chunk(ref('image', 'IMG_0001.jpg', 'image/png', 4_300_000));
+    f.asst('A gradient.');
+    // A file on its own.
+    chunk(ref('resource', 'notes.txt', 'text/plain', 2048));
+    f.asst('Read it.');
+    // A picture on its own: no text at all.
+    chunk(ref('image', 'IMG_0002.png', 'image/png', 1_000_000));
+    f.asst('Got it.');
+    return f.done().list;
+  };
+  PAGE_SCENARIOS.push({
+    name: 'P197 a sent picture draws a thumbnail (240px at most, fetched with the bearer, a tap opens it full size in a new tab) and a sent file a chip with its name, type and size; text and picture are one bubble, no bubble is blank, and every row measures so none overlaps its neighbour',
+    // #197. Before this a message whose only part was a reference block drew an
+    // empty user bubble. The fetch is held back so the placeholder is on screen
+    // first: the row has to be measured again when the picture lands.
+    noConsoleErrors: true,
+    frames: attachmentFrames,
+    run: async ({ page, viewer }) => {
+      const png = solidPng(200, 600);
+      const requests: { path: string; auth: string }[] = [];
+      await page.route('**/session/*/attachments/*', async (route) => {
+        const u = new URL(route.request().url());
+        requests.push({
+          path: decodeURIComponent(u.pathname),
+          auth: route.request().headers()['authorization'] ?? '',
+        });
+        await new Promise((r) => setTimeout(r, 400));
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ data: png.toString('base64'), mimeType: 'image/png' }),
+        });
+      });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 8, 30_000);
+      await settlePage(page);
+      await page.waitForFunction(
+        () => document.querySelectorAll('#transcript img.att-thumb[src^="blob:"]').length >= 2,
+        null,
+        { timeout: 15_000 },
+      );
+      await settlePage(page);
+      const s = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll<HTMLElement>('#transcript .vrow'));
+        const bubbles = Array.from(document.querySelectorAll<HTMLElement>('#transcript .bubble.user'));
+        const sorted = rows.slice().sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+        const gaps: number[] = [];
+        for (let i = 1; i < sorted.length; i++) {
+          gaps.push(Math.round(sorted[i]!.getBoundingClientRect().top - sorted[i - 1]!.getBoundingClientRect().bottom));
+        }
+        const first = bubbles[0]!;
+        const thumbs = Array.from(document.querySelectorAll<HTMLImageElement>('#transcript img.att-thumb'));
+        const chip = document.querySelector<HTMLElement>('#transcript .att-chip');
+        return {
+          users: bubbles.length,
+          firstText: (first.querySelector('span:not([class])') as HTMLElement | null)?.textContent ?? '',
+          firstThumbs: first.querySelectorAll('img.att-thumb').length,
+          firstName: first.querySelector('.att-name')?.textContent ?? '',
+          thumbHeights: thumbs.map((i) => Math.round(i.getBoundingClientRect().height)),
+          thumbNatural: thumbs.map((i) => `${i.naturalWidth}x${i.naturalHeight}`),
+          target: first.querySelector('a.att-link')?.getAttribute('target') ?? '',
+          rel: first.querySelector('a.att-link')?.getAttribute('rel') ?? '',
+          chip: chip?.textContent ?? '',
+          blank: bubbles.filter((b) => (b.textContent ?? '').replace(/^\s*you\b/, '').trim() === '' && !b.querySelector('img,.att-chip')).length,
+          hiddenBody: bubbles.map((b) => (b.querySelector(':scope > span:not([class])') as HTMLElement | null)?.hidden ?? null),
+          gaps,
+          rows: rows.length,
+        };
+      });
+      expect(s.users === 3, `${s.users} user bubbles, not 3 (text+picture is one, file, picture alone)`);
+      expect(s.firstText === 'what is this?', `the first bubble reads ${JSON.stringify(s.firstText)}`);
+      expect(s.firstThumbs === 1 && s.firstName === 'IMG_0001.jpg', `the first bubble has ${s.firstThumbs} thumbnails named ${JSON.stringify(s.firstName)}`);
+      expect(s.thumbHeights.length === 2 && s.thumbHeights.every((h) => h > 100 && h <= 240), `thumbnail heights ${JSON.stringify(s.thumbHeights)} are not within 240px`);
+      expect(s.thumbNatural.every((n) => n === '200x600'), `the thumbnails decoded as ${JSON.stringify(s.thumbNatural)}`);
+      expect(s.target === '_blank' && s.rel === 'noopener noreferrer', `the link is target ${s.target} rel ${s.rel}`);
+      expect(/notes\.txt/.test(s.chip) && /text\/plain/.test(s.chip) && /2 KB/.test(s.chip), `the chip reads ${JSON.stringify(s.chip)}`);
+      expect(s.blank === 0, `${s.blank} user bubbles are blank`);
+      expect(s.hiddenBody[2] === true && s.hiddenBody[0] === false, `the text span is hidden ${JSON.stringify(s.hiddenBody)}`);
+      expect(
+        requests.length === 2 &&
+          requests.every((r) => r.auth.startsWith('Bearer ') && r.auth.length > 10) &&
+          requests.map((r) => r.path).sort().join() ===
+            [`/session/${viewer.sessionId}/attachments/IMG_0001.jpg`, `/session/${viewer.sessionId}/attachments/IMG_0002.png`].sort().join(),
+        `the page fetched ${JSON.stringify(requests)}`,
+      );
+      // Measured: virtual-core places each row from the size it measured plus
+      // the 8px gap, so a row that is taller or shorter than it was measured
+      // opens a gap or overlaps the next.
+      expect(s.gaps.length >= 5 && s.gaps.every((g) => g >= 7 && g <= 9), `the gaps between ${s.rows} mounted rows are ${JSON.stringify(s.gaps)}, not 8px`);
+
+      // A tap opens the picture full size in a new tab, as a blob document.
+      const popup = page.waitForEvent('popup', { timeout: 10_000 });
+      await page.click('#transcript .bubble.user a.att-link');
+      const tab = await popup;
+      const tabUrl = tab.url();
+      await tab.close();
+      expect(tabUrl.startsWith('blob:'), `the tap opened ${tabUrl}`);
+      return `3 user bubbles, 0 blank; thumbnails ${JSON.stringify(s.thumbHeights)}px; chip ${JSON.stringify(s.chip)}; gaps ${JSON.stringify(s.gaps)}; tap -> ${tabUrl.slice(0, 20)}...`;
     },
   });
 }

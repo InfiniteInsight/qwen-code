@@ -4141,6 +4141,59 @@
             max-height: 240px;
             object-fit: contain;
           }
+          /* An attachment on a message you sent (#197): a stored picture is
+             fetched with the token and drawn as a thumbnail (the 240px cap is
+             what estimate() in transcript-view.js assumes for a row it has not
+             measured); anything else is a chip with its name, type and size.
+             The box keeps a height while the picture loads, and the row is
+             measured again when it lands. */
+          #transcript .user .att-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 6px;
+          }
+          #transcript .user .att-list[hidden] {
+            display: none;
+          }
+          #transcript .user .att-image.att-loading {
+            min-height: 96px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 8px;
+          }
+          #transcript .user .att-link {
+            display: block;
+            line-height: 0;
+          }
+          #transcript .user .att-thumb {
+            display: block;
+            max-width: 100%;
+            max-height: 240px;
+            object-fit: contain;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.25);
+          }
+          #transcript .user .att-name,
+          #transcript .user .att-note {
+            margin-top: 4px;
+            font-size: 0.8rem;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+          }
+          #transcript .user .att-chip {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.28);
+            font-size: 0.85rem;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+          }
+          #transcript .user .att-chip-meta {
+            font-size: 0.75rem;
+          }
           #transcript .image .image-note {
             padding: 8px 10px;
             font-size: 0.85rem;
@@ -5720,6 +5773,62 @@
         $('jump-bottom').hidden = transcriptView.isNearBottom();
         applyStampZone();
       }
+      // #197. A picture attached to a message is stored in the session, so its
+      // thumbnail is fetched with the token (an <img src> cannot carry one) and
+      // handed to the row as a blob: URL, which is also what the full-size tap
+      // opens. Only a raster type is let through, whatever the daemon says it
+      // holds: a blob: document runs on this origin, so an SVG must never get
+      // here. The urls are kept per session and bounded; one let go is asked
+      // for again by the row that still shows it.
+      const ATTACHMENT_THUMB_TYPES = /^image\/(png|jpe?g|gif|webp|avif|bmp)$/;
+      const ATTACHMENT_URL_CAP = 24;
+      const attachmentUrls = new Map();
+      function loadAttachmentThumb(attachmentId) {
+        const sid = watchedSessionId;
+        if (!sid || !attachmentId) return Promise.resolve(null);
+        const key = sid + '/' + attachmentId;
+        const known = attachmentUrls.get(key);
+        if (known) return known;
+        const pending = (async () => {
+          try {
+            const res = await fetch(
+              '/session/' +
+                encodeURIComponent(sid) +
+                '/attachments/' +
+                encodeURIComponent(attachmentId),
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            if (!res.ok) return null;
+            const body = await res.json();
+            const mime = String((body && body.mimeType) || '')
+              .split(';')[0]
+              .trim()
+              .toLowerCase();
+            if (!body || typeof body.data !== 'string' || !body.data) return null;
+            if (!ATTACHMENT_THUMB_TYPES.test(mime)) return null;
+            const bin = atob(body.data);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return { url: URL.createObjectURL(new Blob([bytes], { type: mime })) };
+          } catch {
+            return null;
+          }
+        })();
+        attachmentUrls.set(key, pending);
+        void pending.then((r) => {
+          if (!r && attachmentUrls.get(key) === pending) attachmentUrls.delete(key);
+        });
+        while (attachmentUrls.size > ATTACHMENT_URL_CAP) {
+          const oldest = attachmentUrls.keys().next().value;
+          const gone = attachmentUrls.get(oldest);
+          attachmentUrls.delete(oldest);
+          void gone.then((r) => {
+            if (r) URL.revokeObjectURL(r.url);
+          });
+        }
+        return pending;
+      }
+
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
           model: transcriptModel,
@@ -5737,6 +5846,8 @@
           onTurnAct: (act, item) => void turnAct(act, item),
           // #184: retry on a refused message's marker.
           onRetry: (item) => retryNotSent(item),
+          // #197: the picture on a message with an attachment.
+          loadAttachment: (attachmentId) => loadAttachmentThumb(attachmentId),
           onCancelSubagent: (item) =>
             void doCancelSubagent(watchedSessionId, item),
           onCostSubagent: (item) =>
@@ -9078,6 +9189,24 @@
         // boundary. Drawn unless it is this window's own echo (#114), which
         // the send path already put on screen at the moment you typed it.
         if (su === 'user_message_chunk') {
+          // #197: a picture or file the sender attached is not text, and drawn
+          // as text it was an empty bubble. It joins the message above it when
+          // there is one, so it is not a second turn.
+          const part =
+            typeof TranscriptModel.userPartOf === 'function'
+              ? TranscriptModel.userPartOf(u.content)
+              : null;
+          if (part) {
+            markPrevTurnEnd();
+            const added = transcriptModel.addUserPart(part, sentAt);
+            scrollTranscript(!added.merged);
+            if (!added.merged) {
+              userTurnsSeen += 1;
+              asstThisTurn = false;
+            }
+            if (!insideReplay) showProcessing();
+            return;
+          }
           userTurnsSeen += 1;
           asstThisTurn = false;
           // Drawn before the arm below, because addUser closes the turn it

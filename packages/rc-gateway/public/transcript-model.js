@@ -47,6 +47,102 @@
     return Math.floor(secs / 60) + 'm' + Math.round(secs % 60) + 's';
   }
 
+  // ---- User attachments (#197) ------------------------------------------------
+  // A user message can be a content block that is not text: an image or file
+  // the sender attached, carried either as a reference into the session's
+  // attachment store ({ type, attachmentId, mimeType, size }), as inline bytes,
+  // or as a resource link. Read off content.text these all came out empty and
+  // drew a blank bubble. This turns one such block into a `part` the view can
+  // draw, or null when the block is plain text (or nothing the viewer knows).
+  //
+  // Raster only for a thumbnail, for the reason addImage gives below: the
+  // full-size view is a blob: document on this origin, so a sender-chosen
+  // image/svg+xml must never reach it. Anything else is a file chip.
+  var PART_IMAGE_TYPES = {
+    'image/png': 1,
+    'image/jpeg': 1,
+    'image/jpg': 1,
+    'image/gif': 1,
+    'image/webp': 1,
+    'image/avif': 1,
+    'image/bmp': 1,
+  };
+  function isRecord(v) {
+    return !!v && typeof v === 'object' && !Array.isArray(v);
+  }
+  function b64Bytes(b64) {
+    var pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor(b64.length / 4) * 3 - pad);
+  }
+  function lastSegment(uri) {
+    var tail = String(uri).split(/[?#]/)[0].split('/').pop();
+    return tail || String(uri);
+  }
+  function userPartOf(content) {
+    if (!isRecord(content)) return null;
+    var type = content.type;
+    var mime = strOr(content.mimeType, '').toLowerCase();
+    var size =
+      typeof content.size === 'number' && Number.isFinite(content.size)
+        ? Math.max(0, content.size)
+        : 0;
+    var id = strOr(content.attachmentId, '');
+    if (type === 'image' || type === 'resource') {
+      if (id) {
+        return {
+          kind: type === 'image' && PART_IMAGE_TYPES[mime] ? 'image' : 'file',
+          name: id,
+          attachmentId: id,
+          mimeType: mime,
+          size: size,
+        };
+      }
+      if (
+        type === 'image' &&
+        typeof content.data === 'string' &&
+        content.data
+      ) {
+        var okType = !!PART_IMAGE_TYPES[mime];
+        return {
+          kind: okType ? 'image' : 'file',
+          name: 'image',
+          mimeType: mime,
+          size: b64Bytes(content.data),
+          data: okType ? content.data : undefined,
+        };
+      }
+      var r = content.resource;
+      if (type === 'resource' && isRecord(r) && typeof r.uri === 'string') {
+        var body =
+          typeof r.text === 'string'
+            ? r.text.length
+            : typeof r.blob === 'string'
+              ? b64Bytes(r.blob)
+              : 0;
+        return {
+          kind: 'file',
+          name: clean(lastSegment(r.uri)),
+          mimeType: strOr(r.mimeType, '').toLowerCase(),
+          size: body,
+        };
+      }
+      return null;
+    }
+    if (
+      type === 'resource_link' &&
+      typeof content.uri === 'string' &&
+      content.uri
+    ) {
+      return {
+        kind: 'file',
+        name: strOr(content.name, clean(lastSegment(content.uri))),
+        mimeType: mime,
+        size: size,
+      };
+    }
+    return null;
+  }
+
   function createTranscriptModel(opts) {
     var now = (opts && opts.now) || Date.now;
     var items = [];
@@ -156,6 +252,22 @@
     function addUser(text, time) {
       resetTurn();
       return push(newItem('user', { text: clean(text), time: time }));
+    }
+    // #197. One attachment of a user message. It joins the user row it belongs
+    // to - the one just above, once the processing row is set aside - so a
+    // text-and-picture message is one row, not two, and the rows that count
+    // turns (fork, rewind) still see one message. With no user row to join it
+    // opens a row of its own, which has no text. Returns { item, merged }.
+    function addUserPart(part, time) {
+      resetTurn();
+      var last = items.length ? items[items.length - 1] : null;
+      if (last && last.kind === 'user') {
+        last.parts = (last.parts || []).concat([part]);
+        emitUpdate(last);
+        return { item: last, merged: true };
+      }
+      var item = push(newItem('user', { text: '', time: time, parts: [part] }));
+      return { item: item, merged: false };
     }
     function appendAssistant(text, time) {
       finishThought();
@@ -554,6 +666,7 @@
       },
       subscribe: subscribe,
       addUser: addUser,
+      addUserPart: addUserPart,
       appendAssistant: appendAssistant,
       appendThought: appendThought,
       finishThought: finishThought,
@@ -635,7 +748,11 @@
         m.upsertSubagentTool(u, parentId);
       return;
     }
-    if (su === 'user_message_chunk') return m.addUser(text || '', sentAt);
+    if (su === 'user_message_chunk') {
+      var part = userPartOf(u.content);
+      if (part) return m.addUserPart(part, sentAt);
+      return m.addUser(text || '', sentAt);
+    }
     if (su === 'agent_message_chunk') {
       if (u.content && u.content.type === 'image')
         return m.addImage(u.content.mimeType, u.content.data);
@@ -678,5 +795,6 @@
     clean: clean,
     createTranscriptModel: createTranscriptModel,
     replayStoredPage: replayStoredPage,
+    userPartOf: userPartOf,
   };
 })();
