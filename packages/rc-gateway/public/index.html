@@ -8823,14 +8823,38 @@
             if (tool.displayName && tool.displayName !== tool.name) {
               parts.push(tool.displayName);
             }
-            parts.push(tool.disabled ? 'disabled' : 'enabled');
-            note.textContent = parts.join(' — ');
+            // #141: three states. An older gateway sends no `state`.
+            const state =
+              tool.state || (tool.disabled ? 'disabled' : 'enabled');
+            const isOn = state === 'on' || state === 'enabled';
+            parts.push(
+              state === 'optIn'
+                ? 'off by default (opt-in)'
+                : state === 'disabled'
+                  ? 'disabled'
+                  : 'enabled',
+            );
+            note.textContent = parts.join(' \u2014 ');
+            row.dataset.state = state;
             const btn = document.createElement('button');
-            btn.textContent = tool.disabled ? 'enable' : 'disable';
+            btn.textContent = isOn ? 'disable' : 'enable';
             btn.addEventListener('click', () =>
-              setToolEnabled(tool.name, !tool.disabled, btn),
+              setToolEnabled(tool.name, !isOn, btn),
             );
             row.append(name, note, btn);
+            if (tool.optIn && tool.optIn.setting) {
+              // The switch is a setting, not the disabled list, and it
+              // reaches conversations started after it.
+              row.style.flexWrap = 'wrap';
+              const gate = document.createElement('span');
+              gate.className = 'ws-tool-optin-note';
+              gate.style.cssText = 'flex-basis:100%;font-size:12px;opacity:0.6';
+              gate.textContent =
+                'Switched by ' +
+                tool.optIn.setting +
+                '. Applies to new conversations; ones already running keep their tools.';
+              row.append(gate);
+            }
             row.dataset.filter = (
               tool.name +
               ' ' +
@@ -8891,8 +8915,14 @@
             btn.disabled = false;
             return;
           }
+          const done = await res.json().catch(() => ({}));
           status.textContent =
-            'tool ' + toolName + (enabled ? ' enabled' : ' disabled');
+            'tool ' +
+            toolName +
+            (enabled ? ' enabled' : ' disabled') +
+            (done && done.optIn && done.optIn.note
+              ? '. ' + done.optIn.note
+              : '');
           await loadWorkspaceTools(false); // re-read catalog
         } catch (err) {
           status.textContent = 'change failed: ' + err.message;

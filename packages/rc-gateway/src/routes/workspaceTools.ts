@@ -5,6 +5,10 @@
  */
 
 import type { Request, RequestHandler, Response } from 'express';
+import type {
+  DaemonToolCatalog,
+  DaemonWorkspaceSettingsStatus,
+} from '@qwen-code/sdk/daemon';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
@@ -12,8 +16,69 @@ import type { AuditRecorder } from '../auditLog.js';
 /** The daemon surface this route file needs. */
 export type WorkspaceToolsDaemon = Pick<
   SessionDaemon,
-  'setWorkspaceToolEnabled' | 'workspaceToolsCatalog'
+  | 'setWorkspaceToolEnabled'
+  | 'workspaceToolsCatalog'
+  | 'workspaceSettings'
+  | 'setWorkspaceSetting'
 >;
+
+/**
+ * Opt-in built-ins (#141): tools that are not registered at all unless a
+ * setting is true, so the `tools.disabled` list cannot turn them on. The
+ * core names them in `OPT_IN_TOOL_MESSAGES` (core/src/core/coreToolScheduler.ts)
+ * and registers `todo_write` on `isTodoWriteEnabled()` and `list_directory`
+ * on `isLsToolEnabled()` (core/src/config/config.ts). Both settings are
+ * dialog settings the daemon's `POST /workspace/settings` accepts at
+ * workspace scope, so no daemon change is needed to flip them.
+ */
+const OPT_IN_TOOL_SETTINGS: Readonly<Record<string, string>> = {
+  todo_write: 'tools.todoWrite.enabled',
+  list_directory: 'tools.listDirectory.enabled',
+};
+
+function optInSettingFor(toolName: string): string | undefined {
+  return Object.hasOwn(OPT_IN_TOOL_SETTINGS, toolName)
+    ? OPT_IN_TOOL_SETTINGS[toolName]
+    : undefined;
+}
+
+/** `disabled`: in `tools.disabled`; `optIn`: gated by a setting that is off; else `on`. */
+export type WorkspaceToolState = 'disabled' | 'optIn' | 'on';
+
+/**
+ * Add each tool's `state` to the daemon catalog, plus `optIn:
+ * {setting, enabled}` on an opt-in built-in (also while its setting is on,
+ * so a disable knows what to flip). A catalog without a tools array passes
+ * through untouched.
+ */
+function annotateCatalog(
+  catalog: DaemonToolCatalog,
+  settings: DaemonWorkspaceSettingsStatus,
+): unknown {
+  if (!catalog || !Array.isArray(catalog.tools)) return catalog;
+  const descriptors = Array.isArray(settings?.settings)
+    ? settings.settings
+    : [];
+  const settingOn = (key: string): boolean =>
+    descriptors.find((d) => d.key === key)?.values?.effective === true;
+  return {
+    ...catalog,
+    tools: catalog.tools.map((tool) => {
+      const setting =
+        tool.source === 'builtin' ? optInSettingFor(tool.name) : undefined;
+      const optIn =
+        setting !== undefined
+          ? { setting, enabled: settingOn(setting) }
+          : undefined;
+      const state: WorkspaceToolState = tool.disabled
+        ? 'disabled'
+        : optIn && !optIn.enabled
+          ? 'optIn'
+          : 'on';
+      return { ...tool, state, ...(optIn ? { optIn } : {}) };
+    }),
+  };
+}
 
 export interface WorkspaceToolsRouteDeps {
   audit?: AuditRecorder;
@@ -88,8 +153,67 @@ function sendMappedToolsError(
 }
 
 /**
+ * The opt-in class (#141). Enable writes the gating setting true (workspace
+ * scope, that one key; the daemon merges it into the stored settings) and,
+ * when the tool is also in `tools.disabled`, takes it out of that list too,
+ * since either one keeps it unregistered. Disable writes the setting false
+ * and leaves the list alone. The change reaches conversations started after
+ * it: each new session builds its config from the settings files (a
+ * stat-fingerprinted cache), while a running one keeps the tools it was
+ * built with. The daemon itself is not reloaded.
+ */
+async function applyOptInToggle(
+  daemon: WorkspaceToolsDaemon,
+  toolName: string,
+  setting: string,
+  enabled: boolean,
+  workspaceCwd: string | undefined,
+): Promise<unknown> {
+  let inDisabledList = false;
+  if (enabled) {
+    const catalog = await daemon.workspaceToolsCatalog(workspaceCwd);
+    inDisabledList =
+      Array.isArray(catalog?.tools) &&
+      catalog.tools.some((t) => t.name === toolName && t.disabled);
+  }
+  const written = await daemon.setWorkspaceSetting(
+    'workspace',
+    setting,
+    enabled,
+    undefined,
+    workspaceCwd,
+  );
+  if (inDisabledList) {
+    await daemon.setWorkspaceToolEnabled(
+      toolName,
+      true,
+      undefined,
+      workspaceCwd,
+    );
+  }
+  return {
+    toolName,
+    enabled,
+    optIn: {
+      setting,
+      value: enabled,
+      appliesTo: 'new_sessions',
+      daemonReloadRequired: false,
+      ...(written && typeof written.requiresRestart === 'boolean'
+        ? { settingRequiresRestart: written.requiresRestart }
+        : {}),
+      note: enabled
+        ? 'Saved. The tool is available in new conversations; ones already running keep the tools they started with.'
+        : 'Saved. The tool is gone from new conversations; ones already running keep it until they end.',
+    },
+  };
+}
+
+/**
  * POST /rc/workspace/tools/:name/enable — enable/disable ONE built-in tool
- * in the workspace's `tools.disabled` list (`{enabled: boolean}`). Mounted
+ * in the workspace's `tools.disabled` list (`{enabled: boolean}`); for an
+ * opt-in built-in (`todo_write`, `list_directory`) it writes the gating
+ * setting instead (see applyOptInToggle). Mounted
  * OWNER-only (server.ts); the mount's `requireScope` writes the
  * `scope_denied` audit row on denial, so the daemon is never touched by an
  * under-scoped caller.
@@ -136,15 +260,26 @@ export function createWorkspaceToolToggleRoute(
       }
       const toolName = req.params.name as string;
       const enabled = body.enabled;
+      const optInSetting = optInSettingFor(toolName);
 
-      let result;
+      let result: unknown;
       try {
-        result = await daemon.setWorkspaceToolEnabled(
-          toolName,
-          enabled,
-          undefined,
-          target.cwd,
-        );
+        if (optInSetting !== undefined) {
+          result = await applyOptInToggle(
+            daemon,
+            toolName,
+            optInSetting,
+            enabled,
+            target.cwd,
+          );
+        } else {
+          result = await daemon.setWorkspaceToolEnabled(
+            toolName,
+            enabled,
+            undefined,
+            target.cwd,
+          );
+        }
       } catch (err) {
         sendMappedToolsError(
           res,
@@ -161,6 +296,8 @@ export function createWorkspaceToolToggleRoute(
         detail: {
           toolName,
           enabled,
+          // The gating setting this call wrote, for an opt-in built-in only.
+          ...(optInSetting !== undefined ? { setting: optInSetting } : {}),
           // Only recorded for a non-default target (undefined for the
           // default workspace keeps the row shape unchanged for existing
           // readers).
@@ -184,7 +321,10 @@ export function createWorkspaceToolToggleRoute(
  * GET /rc/workspace/tools — read the workspace's tools catalog (every
  * built-in tool with per-tool disabled state, plus disabled MCP-style or
  * unknown names). Mounted write-scope (server.ts); the response is the
- * daemon's, unchanged. Read-only: no audit row.
+ * daemon's catalog with a `state` (`disabled` | `optIn` | `on`) added to
+ * each tool and, for an opt-in built-in, `optIn: {setting, enabled}` read
+ * from the daemon's settings (#141). A failed settings read fails the
+ * listing: guessing would call a gated tool on. Read-only: no audit row.
  *
  * Accepts an optional `workspace` target (rc-workspace-scoping, #28):
  * `?workspace=<cwd>`; absent/empty → the default/boot workspace.
@@ -194,7 +334,7 @@ export function createWorkspaceToolToggleRoute(
  * completeness).
  */
 export function createWorkspaceToolsCatalogRoute(
-  daemon: Pick<SessionDaemon, 'workspaceToolsCatalog'>,
+  daemon: Pick<SessionDaemon, 'workspaceToolsCatalog' | 'workspaceSettings'>,
 ): RequestHandler {
   return async (req: Request, res: Response) => {
     const target = parseWorkspaceTarget(req.query.workspace);
@@ -206,8 +346,11 @@ export function createWorkspaceToolsCatalogRoute(
       return;
     }
     try {
-      const result = await daemon.workspaceToolsCatalog(target.cwd);
-      res.status(200).json(result);
+      const [catalog, settings] = await Promise.all([
+        daemon.workspaceToolsCatalog(target.cwd),
+        daemon.workspaceSettings(undefined, target.cwd),
+      ]);
+      res.status(200).json(annotateCatalog(catalog, settings));
     } catch (err) {
       if (!res.headersSent) {
         sendMappedToolsError(
