@@ -165,7 +165,9 @@ export type AuditAction =
   | 'session_recap_generated'
   | 'session_btw_answered'
   | 'session_worktree_reset'
-  | 'host_action_started';
+  | 'host_action_started'
+  | 'host_attached'
+  | 'host_attach_rejected';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -282,6 +284,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_btw_answered',
   'session_worktree_reset',
   'host_action_started',
+  'host_attached',
+  'host_attach_rejected',
 ];
 
 export interface AuditEntry {

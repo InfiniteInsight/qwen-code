@@ -83,6 +83,37 @@ const LAUNCHER_HEARTBEAT_BASENAME = 'terminal-launcher-heartbeat.json';
  */
 export const RECENT_WORKSPACES_CAP = 16;
 
+/** A workspace this gateway worked in, with when it last did (epoch ms). */
+export interface RecentWorkspace {
+  cwd: string;
+  at: number;
+}
+
+/**
+ * Union several recent-workspace lists into the one the session listing
+ * scans: newest first, each workspace once at its newest time, capped as a
+ * whole. Pure, so every source (the terminal request log, the host-attach
+ * record) is merged by the same rule and none of them needs to know the
+ * others exist.
+ */
+export function mergeRecentWorkspaces(
+  lists: ReadonlyArray<readonly RecentWorkspace[]>,
+  cap: number,
+): string[] {
+  if (!(cap > 0)) return [];
+  const newest = new Map<string, number>();
+  for (const list of lists) {
+    for (const { cwd, at } of list) {
+      const seen = newest.get(cwd);
+      if (seen === undefined || at > seen) newest.set(cwd, at);
+    }
+  }
+  return [...newest.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, cap)
+    .map(([cwd]) => cwd);
+}
+
 /**
  * Append-only JSONL request log. Sole writer is the gateway process; the
  * launcher only reads it and keeps its own cursor, so concurrent writes are
@@ -174,15 +205,24 @@ export class TerminalRequestLog {
    * terminal keeps the single-workspace listing it has today.
    */
   async recentWorkspaces(cap: number): Promise<string[]> {
+    return (await this.recentWorkspaceEntries(cap)).map((e) => e.cwd);
+  }
+
+  /**
+   * The same set as {@link recentWorkspaces}, each with the time of its newest
+   * request, so it can be merged newest first with the host-attach record
+   * (hostAttachedWorkspaces.ts) by {@link mergeRecentWorkspaces}.
+   */
+  async recentWorkspaceEntries(cap: number): Promise<RecentWorkspace[]> {
     if (!(cap > 0)) return [];
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: RecentWorkspace[] = [];
     const all = await this.readAll();
     for (let i = all.length - 1; i >= 0; i--) {
       const cwd = all[i].workspaceCwd;
       if (!cwd || seen.has(cwd)) continue;
       seen.add(cwd);
-      out.push(cwd);
+      out.push({ cwd, at: all[i].createdAt });
       if (out.length === cap) break;
     }
     return out;

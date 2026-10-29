@@ -74,6 +74,8 @@ export function createCapabilityRoute(deps: {
   costTracking?: { currencyLabel: () => string };
   mdnsStatus?: () => { advertising: boolean; instanceName?: string };
   nativeShells?: () => NativeShellsCapability;
+  /** True when the loopback `POST /rc/host/attach` routes are mounted. */
+  hostAttach?: boolean;
   /** Read of the daemon's own `/capabilities` envelope (see #96). */
   daemonStatus?: () => Promise<DaemonCapabilities>;
   /** Test seam for the daemon read's bound. */
@@ -108,6 +110,12 @@ export function createCapabilityRoute(deps: {
       // instead of queueing a second tab when one is already attached. An old
       // gateway answers 202 every time, so the page can tell the two apart.
       hostTerminalAlreadyMirrored: true,
+      // #194 slice D: a terminal on this host can start a conversation the
+      // phone then sees (`qwen-rc attach`). The route itself is loopback-only
+      // and never reachable from the phone; the flag is here so the page can
+      // tell the user the command exists. True only when the gateway mounted
+      // it, which the boot wiring always does.
+      hostAttach: deps.hostAttach === true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

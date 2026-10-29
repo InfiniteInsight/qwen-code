@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { timingSafeEqual } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { forwardedPeer } from '../tls/http2Front.js';
+import { bearerMatches, isLoopbackRemote } from '../localCredential.js';
 
 /** Default token-bucket sizing: 50 burst, 10/s sustained. */
 const DEFAULT_BUCKET_CAPACITY = 50;
@@ -52,21 +52,6 @@ class TokenBucket {
   }
 }
 
-/** Loopback remote addresses (the gateway may bind loopback OR LAN+TLS). */
-function isLoopbackRemote(addr: string | undefined): boolean {
-  if (!addr) return false;
-  const a = addr.startsWith('::ffff:') ? addr.slice(7) : addr;
-  return a === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
-}
-
-/** Constant-time bearer comparison against the ingest token. */
-function tokenMatches(header: string | undefined, expected: string): boolean {
-  if (!header || !header.startsWith('Bearer ')) return false;
-  const got = Buffer.from(header.slice(7).trim(), 'utf8');
-  const want = Buffer.from(expected, 'utf8');
-  return got.length === want.length && timingSafeEqual(got, want);
-}
-
 /**
  * POST /rc/hooks/ingest — read-only hook mirror (design: "Hook event
  * mirror"). MUST be mounted BEFORE bearerResolve: the ingest token is not
@@ -103,7 +88,7 @@ export function createHookIngestRoute(deps: HookIngestDeps): RequestHandler {
       res.status(403).json({ error: 'Loopback only', code: 'loopback_only' });
       return;
     }
-    if (!tokenMatches(req.headers.authorization, deps.ingestToken)) {
+    if (!bearerMatches(req.headers.authorization, deps.ingestToken)) {
       void deps.audit?.record({
         action: 'hook_ingest_rejected',
         detail: { reason: 'bad_token' },

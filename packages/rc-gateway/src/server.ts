@@ -203,7 +203,8 @@ import { createSessionLiveStateRoute } from './routes/sessionLiveState.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
-import { RECENT_WORKSPACES_CAP } from './terminals.js';
+import { RECENT_WORKSPACES_CAP, mergeRecentWorkspaces } from './terminals.js';
+import type { HostAttachedWorkspaces } from './hostAttachedWorkspaces.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
 import { createSessionWorktreeResetRoute } from './routes/sessionWorktreeReset.js';
 import {
@@ -215,6 +216,7 @@ import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { createHookIngestRoute } from './routes/hookIngest.js';
+import { createHostAttachRoutes } from './routes/hostAttach.js';
 import { WorkflowRunRegistry } from './workflows/workflowRegistry.js';
 import {
   createStartWorkflowRoute,
@@ -447,6 +449,26 @@ export interface GatewayDeps {
     bucketCapacity?: number;
     bucketRefillPerSec?: number;
   };
+  /**
+   * Host attach (#194 slice D, `qwen-rc attach`). When set, `POST
+   * /rc/host/attach` and `POST /rc/host/attach/:sessionId` mount:
+   * loopback-only, authenticated by the persistent host-attach `token` (NOT a
+   * TokenStore token), and mounted BEFORE `bearerResolve` like the hook
+   * ingest route. The routes need `daemon.daemonEndpointForSession` (a
+   * `DaemonPool`) and answer 501 without it. Omitted: the routes do not mount
+   * and `/rc/capabilities` reports `hostAttach: false`.
+   */
+  hostAttach?: {
+    token: string;
+  };
+  /**
+   * The workspaces `qwen-rc attach` has used (#194 slice D). The host attach
+   * routes note each one here, and `GET /rc/sessions` merges them with the
+   * request log's workspaces, so a conversation started from a terminal in a
+   * folder the phone never used is listed. Omitted: the listing reads the
+   * request log alone, as before.
+   */
+  hostAttachedWorkspaces?: HostAttachedWorkspaces;
   /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
   workflows?: {
     runsDir?: string;
@@ -705,6 +727,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         bucketRefillPerSec: deps.hookIngest.bucketRefillPerSec,
       }),
     );
+  }
+
+  // Host attach (#194 slice D): a terminal on this machine starts or
+  // re-attaches a conversation the phone can then pick up. Mounted BEFORE
+  // bearerResolve for the same reason as the hook ingest route: the
+  // host-attach token is a dedicated host-local secret, so a phone's
+  // TokenStore token never opens these routes and this token never reaches
+  // a phone route. Same `QWEN_RC_TERMINAL_QWEN` argv as /rc/terminals, so
+  // both hand out one command shape.
+  if (deps.hostAttach) {
+    const hostAttach = createHostAttachRoutes({
+      daemon: deps.daemon,
+      token: deps.hostAttach.token,
+      audit,
+      planOpts: { qwenArgv: deps.terminalQwenArgv },
+      attachedWorkspaces: deps.hostAttachedWorkspaces,
+    });
+    app.post('/rc/host/attach', hostAttach.create);
+    app.post('/rc/host/attach/:sessionId', hostAttach.attach);
   }
 
   const webRoot =
@@ -1280,6 +1321,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         : undefined,
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
+      hostAttach: deps.hostAttach !== undefined,
       // #96: the daemon's own flag list, read per request. The gateway block
       // above stays whatever the gateway itself promises; this is the daemon's
       // answer, so the UI can finally tell the two apart.
@@ -1427,13 +1469,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       // the pool's idle reaping, which reading the live pool would not be. An
       // explicit `?cwd` stays confined to that one workspace, since that is what
       // the per-workspace views ask for.
+      // #194 slice D: the host-attach record joins the request log here, so a
+      // conversation started by `qwen-rc attach` in a folder no phone has
+      // opened is listed too. Merged newest first under one cap; the request
+      // log itself is never written for this, since the launcher would open a
+      // tab for the line.
       async (req) => {
         const q = req.query.cwd;
         if (typeof q === 'string' && q.length > 0) return [];
-        return (
-          (await deps.terminalRequests?.recentWorkspaces(
+        const [fromTerminals, fromAttach] = await Promise.all([
+          deps.terminalRequests?.recentWorkspaceEntries(
             RECENT_WORKSPACES_CAP,
-          )) ?? []
+          ) ?? [],
+          deps.hostAttachedWorkspaces?.read() ?? [],
+        ]);
+        return mergeRecentWorkspaces(
+          [fromTerminals, fromAttach],
+          RECENT_WORKSPACES_CAP,
         );
       },
     ),

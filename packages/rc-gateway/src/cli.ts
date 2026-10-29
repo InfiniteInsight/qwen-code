@@ -90,6 +90,12 @@ import { forwardApprovalModeChange } from './webpush/approvalModeForward.js';
 import { AgentRegistry } from './agents/agentRegistry.js';
 import { ReviewRegistry, type ReviewRecord } from './reviews/reviewRegistry.js';
 import { loadOrCreateHookIngestToken } from './agents/hookIngestToken.js';
+import { loadOrCreateLocalToken } from './localCredential.js';
+import { hostAttachTokenPath } from './hostAttachClient.js';
+import {
+  HostAttachedWorkspaces,
+  defaultHostAttachedWorkspacesPath,
+} from './hostAttachedWorkspaces.js';
 import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
@@ -699,6 +705,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const hookIngestToken = await loadOrCreateHookIngestToken(
     join(homedir(), '.qwen', 'rc', 'hook-ingest-token'),
   );
+  // Host attach (#194 slice D): the credential `qwen-rc attach` presents on
+  // loopback. Minted once and kept across restarts like the ingest token, so
+  // a terminal never holds a token a restart has invalidated.
+  const hostAttachToken = await loadOrCreateLocalToken(
+    hostAttachTokenPath(join(homedir(), '.qwen', 'rc')),
+  );
   // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
   // function is handed to both `agents.costFor` and `review.costFor` so the
   // two control planes never disagree on a session's cost.
@@ -922,6 +934,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         }),
     },
     hookIngest: { ingestToken: hookIngestToken },
+    hostAttach: { token: hostAttachToken },
+    // #194 slice D: the folders `qwen-rc attach` used, beside the request log,
+    // so the phone's list includes conversations started from a terminal.
+    hostAttachedWorkspaces: HostAttachedWorkspaces.open(
+      defaultHostAttachedWorkspacesPath(homedir()),
+    ),
   });
   // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
   // app's audit recorder (constructed inside createGatewayApp, so the pool
@@ -2264,6 +2282,26 @@ if (process.argv[2] === 'serve') {
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error(`terminals: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'attach') {
+  // `qwen-rc attach [cwd] [--session <id>]` (#194 slice D): start a
+  // conversation here in the terminal, as a daemon session the phone can pick
+  // up, or re-attach to one by id. Asks the running gateway over loopback
+  // (POST /rc/host/attach) and runs the attached TUI it hands back, with this
+  // terminal passed straight through; exits with the TUI's code. All logic
+  // lives in ./hostAttachClient.js.
+  void (async () => {
+    const { runHostAttach } = await import('./hostAttachClient.js');
+    const code = await runHostAttach({
+      argv: process.argv.slice(3),
+      cwd: process.cwd(),
+      rcDir: join(homedir(), '.qwen', 'rc'),
+    });
+    process.exit(code);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`qwen-rc attach: ${(err as Error).message}`);
     process.exit(1);
   });
 } else if (process.argv[2] === 'reindex') {
