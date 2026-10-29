@@ -50,6 +50,28 @@ beforeAll(async () => {
     if (req.method === 'GET' && req.url === '/boom') {
       return send(500, { error: 'kaboom', code: 'internal' });
     }
+    if (req.method === 'GET' && req.url === '/stall-after-headers') {
+      // Headers and the first bytes go out, then nothing, ever.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"status":');
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/trickle') {
+      // Each chunk well inside the idle window, the whole body well past it.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const parts = ['{"a":', '1,', '"b":', '2}'];
+      let i = 0;
+      const next = (): void => {
+        if (i === parts.length) {
+          res.end();
+          return;
+        }
+        res.write(parts[i++]);
+        setTimeout(next, 60);
+      };
+      next();
+      return;
+    }
     return send(404, { error: 'no such route', code: 'not_found' });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -57,6 +79,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // The stall route never ends its response on its own.
+  server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -163,6 +187,32 @@ describe('daemonRequest', () => {
       expect(Date.now() - started).toBeLessThan(400);
     }
   });
+
+  // #163: the timer used to be cleared once headers arrived, so a daemon that
+  // stalled after them hung the command forever.
+  it('throws DaemonUnreachableError when the body stalls after the headers', async () => {
+    const started = Date.now();
+    const err = await daemonRequest(
+      { url: base },
+      { method: 'GET', path: '/stall-after-headers', timeoutMs: 100 },
+    ).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DaemonUnreachableError);
+    expect((err as Error).message).toMatch(/no data for 100 ms/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('keeps reading a body that arrives slowly but steadily', async () => {
+    // Four chunks 60 ms apart: longer in total than the 150 ms window, never
+    // silent for that long.
+    const r = await daemonRequest(
+      { url: base },
+      { method: 'GET', path: '/trickle', timeoutMs: 150 },
+    );
+    expect(r.json).toEqual({ a: 1, b: 2 });
+  });
 });
 
 describe('probeHealth', () => {
@@ -174,5 +224,25 @@ describe('probeHealth', () => {
     await expect(probeHealth('http://127.0.0.1:1', 500)).resolves.toBe(
       'unreachable',
     );
+  });
+
+  it('settles within its timeout for a daemon that stalls after the headers', async () => {
+    // `qwen-rc daemons health` against this used to hang forever.
+    const stalled = createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.flushHeaders();
+    });
+    await new Promise<void>((resolve) =>
+      stalled.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const url = `http://127.0.0.1:${(stalled.address() as AddressInfo).port}`;
+      const started = Date.now();
+      await expect(probeHealth(url, 100)).resolves.toBe('unreachable');
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      stalled.closeAllConnections();
+      await new Promise<void>((resolve) => stalled.close(() => resolve()));
+    }
   });
 });

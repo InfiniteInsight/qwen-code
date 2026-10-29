@@ -148,9 +148,9 @@ function codeForStatus(status: number): string {
 
 export interface ErrorBackstopOptions {
   /**
-   * Stamp the actual-request CORS headers. Body-parser errors are raised before
-   * the CORS middleware runs, so the backstop applies them itself; setting the
-   * same headers twice is harmless.
+   * Stamp the actual-request CORS headers. An error raised by anything mounted
+   * ahead of the CORS middleware would otherwise go out without them, so the
+   * backstop applies them itself; setting the same headers twice is harmless.
    */
   applyCors?: (req: Request, res: Response) => void;
   /** Where 500s are logged (default console.error). */
