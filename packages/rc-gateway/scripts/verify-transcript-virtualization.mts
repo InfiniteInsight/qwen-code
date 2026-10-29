@@ -21481,6 +21481,98 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. The workspace controls follow the conversation on screen, but only
+  // while no target was chosen: after the first conversation outside the boot
+  // workspace the target was set and nothing moved it again, so the Settings
+  // controls stuck to that first workspace. A target the reader chose by hand
+  // is still never taken over.
+  PAGE_SCENARIOS.push({
+    name: 'P250 the workspace controls follow each conversation opened (a folder, another folder, back to the boot workspace) but never take over a target the reader picked',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const ctxFor: Record<string, string> = {};
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => {
+          const cwd = ctxFor[sidOf(route)] ?? '/stub/workspace';
+          const c = context('x') as { workspaceCwd: string };
+          return json(route, { ...c, workspaceCwd: cwd });
+        },
+      );
+      ctxFor[A] = '/p250/a';
+      ctxFor[B] = '/p250/b';
+      const target = (): Promise<string | null> => page.evaluate('wsTargetCwd') as Promise<string | null>;
+      const follows = async (want: string | null, what: string): Promise<void> => {
+        await page.waitForFunction(`wsTargetCwd === ${JSON.stringify(want)}`, null, { timeout: 5_000 }).catch(() => {});
+        const got = await target();
+        expect(got === want, `${what}: the controls act on ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
+      };
+      await go(page, A);
+      await follows('/p250/a', 'a conversation outside the boot workspace');
+      await go(page, B);
+      await follows('/p250/b', 'the next conversation, in another folder');
+      await go(page, '66666666-7777-8888-9999-000000000000');
+      await follows(null, 'a conversation in the boot workspace');
+      // A hand-picked target is the reader's.
+      await page.evaluate(`setWsTarget('/p250/manual')`);
+      await go(page, A);
+      await page.waitForTimeout(600);
+      await follows('/p250/manual', 'after the reader picked a target by hand');
+      return 'a -> b -> boot workspace followed; a hand-picked target held through the next conversation';
+    },
+  });
+
+  // #173. Every stream (re)connect ran loadPermRules(false), which replaced the
+  // rules lists the reader was editing with the daemon's copy and dropped
+  // whatever was added or removed and not yet saved.
+  PAGE_SCENARIOS.push({
+    name: 'P251 unsaved edits to the permission rules survive a background reload (a stream reconnect), and an explicit refresh discards them',
+    waitView: false,
+    noConsoleErrors: true,
+    frames: frames172,
+    stub: {
+      workspacePermissionsResult: {
+        v: 1,
+        version: 'p251',
+        user: { path: '/home/tester/.qwen/settings.json', rules: { allow: [], ask: [], deny: [] } },
+        workspace: { path: '/proj', rules: { allow: ['Read(./docs/**)'], ask: [], deny: [] } },
+        merged: { allow: [], ask: [], deny: [] },
+        isTrusted: true,
+      },
+    },
+    run: async ({ page }) => {
+      // The conversation is in the boot workspace, so opening it moves no
+      // target (a different workspace's rules rightly replace these).
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => json(route, { ...(context('x') as object), workspaceCwd: '/stub/workspace' }),
+      );
+      const rules = (): Promise<string> =>
+        page.evaluate(`JSON.stringify(permRules.workspace.rules.allow)`) as Promise<string>;
+      await openPanel(page, 'perms');
+      await page.waitForFunction(() => !document.getElementById('perm-rules-body')!.textContent!.includes('loading'));
+      await page.evaluate(`(() => {
+        const inp = Array.from(document.querySelectorAll('#perm-rules-body input')).find((i) => i.placeholder.startsWith('allow rule'));
+        inp.value = 'Bash(p251:*)';
+        Array.from(inp.parentNode.querySelectorAll('button')).find((b) => b.textContent === 'add').click();
+      })()`);
+      expect((await rules()).includes('Bash(p251:*)'), `the rule was not added (${await rules()})`);
+      // What a stream (re)connect does.
+      await go(page, A);
+      await page.evaluate('loadPermRules(false)');
+      await page.waitForTimeout(500);
+      const kept = await rules();
+      expect(kept.includes('Bash(p251:*)'), `a background reload dropped the unsaved rule (${kept})`);
+      const drawn = await page.evaluate(`document.getElementById('perm-rules-body').textContent`) as string;
+      expect(drawn.includes('Bash(p251:*)'), 'the unsaved rule left the panel');
+      // The reader's own Refresh is a decision to discard.
+      await page.evaluate('loadPermRules(true)');
+      await page.waitForFunction(`!JSON.stringify(permRules.workspace.rules.allow).includes('p251')`, null, { timeout: 5_000 });
+      return 'a reload on reconnect kept the unsaved rule; Refresh dropped it';
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 

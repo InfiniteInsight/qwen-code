@@ -7195,6 +7195,10 @@
       // daemon the gateway was started in); otherwise a cwd string sent as
       // the `workspace` query/body field on every /rc/workspace/* call.
       let wsTargetCwd = null;
+      // #173: true while the target is one the page chose for the conversation
+      // on screen, false once the reader picked it (or it is the default).
+      // Only an automatic target is moved when the next conversation opens.
+      let wsTargetAuto = false;
       // Non-default cwds the pool currently holds (from GET /rc/workspaces),
       // merged with cwds of sessions opened in this tab so the selector can
       // offer workspaces before the first control call has spawned one.
@@ -7280,8 +7284,9 @@
       // Switch which workspace the sections act on. Resets every cached
       // snapshot and re-seeds each section with its Load placeholder so no
       // section can display another workspace's data.
-      function setWsTarget(cwd) {
+      function setWsTarget(cwd, auto) {
         cwd = cwd || null;
+        wsTargetAuto = !!auto && cwd !== null;
         if (cwd === wsTargetCwd) return;
         wsTargetCwd = cwd;
         if (cwd && !wsKnownWorkspaces.includes(cwd))
@@ -7293,6 +7298,7 @@
         wsLastData.files = null;
         wsLastData.perms = null;
         wsFilesPath = '.';
+        permRulesDirty = false; // another workspace's rules replace these
         renderWsTargetLabels();
         // #173: closed AND emptied. An edit opened for the old workspace posts
         // its set to wsTargetBody(), which is the new one by the time it is
@@ -7397,6 +7403,7 @@
             x.style.marginLeft = '4px';
             x.addEventListener('click', () => {
               rules.splice(i, 1);
+              permRulesDirty = true;
               renderPermRulesSection();
             });
             chip.appendChild(x);
@@ -7423,6 +7430,7 @@
             const v = inp.value.trim();
             if (!v) return;
             rules.push(v);
+            permRulesDirty = true;
             renderPermRulesSection();
           });
           const save = document.createElement('button');
@@ -7441,8 +7449,15 @@
         }
       }
 
+      // #173: set while the lists on screen hold an add or a remove that was not
+      // saved. A background load (a stream connect, a switch of conversation)
+      // leaves them alone; the reader's own Refresh, a save and a switch of
+      // workspace replace them.
+      let permRulesDirty = false;
       async function loadPermRules(notify) {
         if (!permRulesGate()) return;
+        if (permRulesDirty && !notify) return;
+        if (notify) permRulesDirty = false;
         try {
           const res = await fetch(wsTargetQuery('/rc/workspace/permissions'), {
             headers: { Authorization: 'Bearer ' + token() },
@@ -7496,6 +7511,7 @@
             const body = await res.json().catch(() => ({}));
             if (res.status === 409 && body.code === 'stale_base') {
               st.textContent = 'conflict — rules changed, reloading…';
+              permRulesDirty = false; // the reload is what the reader reviews
               await loadPermRules(false);
               st.textContent = 'rules changed — review and retry';
               setStatus(
@@ -7517,6 +7533,7 @@
             return;
           }
           permRules = await res.json();
+          permRulesDirty = false;
           st.textContent = 'saved';
           renderPermRulesSection();
         } catch (err) {
@@ -9152,17 +9169,20 @@
           ctxInfo = parseContext(body);
           renderFooter();
           // rc-workspace-scoping (#28): watching a session in a non-default
-          // workspace targets the workspace controls at it — but only when
-          // nothing is explicitly selected (never hijack a manual choice)
-          // and the session cwd actually differs from the boot workspace.
+          // workspace targets the workspace controls at it, but never over a
+          // target the reader picked. #173: a target the page itself chose
+          // for the last conversation is followed on, to this one's folder or
+          // back to the boot workspace, instead of sticking to the first.
           if (
-            wsTargetCwd === null &&
+            (wsTargetCwd === null || wsTargetAuto) &&
             ctxInfo.cwd &&
             caps &&
-            caps.workspaceCwd &&
-            ctxInfo.cwd !== caps.workspaceCwd
+            caps.workspaceCwd
           ) {
-            setWsTarget(ctxInfo.cwd);
+            setWsTarget(
+              ctxInfo.cwd !== caps.workspaceCwd ? ctxInfo.cwd : null,
+              true,
+            );
           }
         } catch {
           /* transient; leave footer as-is */
