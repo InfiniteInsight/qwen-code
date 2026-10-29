@@ -21633,6 +21633,75 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. Token Revoke, share revoke, CORS Remove, push Unsubscribe and the
+  // queue's drop each fired a DELETE on one tap, and the token list did not say
+  // which row was the token this page signs in with. Each now asks first; the
+  // verifier dismisses a dialog unless a scenario says yes.
+  PAGE_SCENARIOS.push({
+    name: 'P254 token revoke, share revoke, CORS remove, push unsubscribe and queue drop each ask before they delete, and the token list marks the page\'s own token',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const deletes: string[] = [];
+      const ok = (route: Route, body: unknown): Promise<void> => {
+        if (route.request().method() === 'DELETE') {
+          deletes.push(new URL(route.request().url()).pathname);
+          return route.fulfill({ status: 204 });
+        }
+        return json(route, body);
+      };
+      await page.route(/\/rc\/tokens(\/[^/]+)?$/, (route) =>
+        ok(route, [
+          { id: 'tok-own', label: 'web', scopes: ['owner'] },
+          { id: 'tok-other', label: 'phone', scopes: ['write'] },
+        ]),
+      );
+      await page.route(/\/rc\/share(\/[^/]+)?$/, (route) =>
+        ok(route, { shares: [{ id: 'sh-1', label: 'link', scopes: ['view'], sessionLockId: 'x', usesRemaining: 1, maxUses: 1 }] }),
+      );
+      await page.route(/\/rc\/cors(\/.+)?$/, (route) => ok(route, { origins: [{ origin: 'https://p254.example', source: 'runtime' }] }));
+      await page.route(/\/rc\/push\/subscriptions(\/[^/?]+)?(\?.*)?$/, (route) =>
+        ok(route, { subscriptions: [{ id: 'ps-1', createdAt: '2026-01-01T00:00:00Z', endpoint: 'https://push.example/x' }] }),
+      );
+      await page.route(/\/session\/[^/]+\/pending-prompts(\/[^/]+)?$/, (route) =>
+        ok(route, { pendingPrompts: [{ promptId: 'pp-1', state: 'queued', text: 'p254 queued' }] }),
+      );
+      await go(page, A);
+      await page.evaluate(`localStorage.setItem('qwen-rc-token-id', 'tok-own')`);
+      const rows: { name: string; open: string; button: string }[] = [
+        { name: 'token', open: `$('list-tokens').onclick()`, button: `#tokens .token-row:last-child button` },
+        { name: 'share', open: `$('list-shares').onclick()`, button: `#shares-list button` },
+        { name: 'cors', open: `listCorsOrigins()`, button: `#cors-out button` },
+        { name: 'push', open: `$('list-subs').onclick()`, button: `#subs button:last-of-type` },
+        { name: 'queue', open: `$('prompt-queue-list').onclick()`, button: `#prompt-queue-body button` },
+      ];
+      const asked: string[] = [];
+      await page.exposeFunction('__p254Asked', (m: string) => asked.push(m));
+      for (const r of rows) {
+        await page.evaluate(`window.confirm = () => false; ${r.open}`);
+        await page.waitForFunction(`document.querySelector(${JSON.stringify(r.button)})`, null, { timeout: 10_000 });
+        const before = deletes.length;
+        await page.evaluate(`document.querySelector(${JSON.stringify(r.button)}).click()`);
+        await page.waitForTimeout(400);
+        expect(deletes.length === before, `${r.name}: one tap deleted without asking (${JSON.stringify(deletes)})`);
+        await page.evaluate(`window.confirm = (m) => { window.__p254Asked(m); return true; }; document.querySelector(${JSON.stringify(r.button)}).click()`);
+        await poll(() => deletes.length === before + 1, `${r.name}: a yes did not delete`);
+      }
+      expect(asked.length === 5, `${asked.length} questions for 5 deletes (${JSON.stringify(asked)})`);
+      // The token list names the page's own token and warns on revoking it.
+      await page.evaluate(`window.confirm = () => false; $('list-tokens').onclick()`);
+      await page.waitForFunction(`document.querySelectorAll('#tokens .token-row').length === 2`, null, { timeout: 10_000 });
+      const own = (await page.evaluate(`Array.from(document.querySelectorAll('#tokens .token-row')).map((r) => r.textContent)`)) as string[];
+      expect(own[0]!.includes('this device') && !own[1]!.includes('this device'), `the token list reads ${JSON.stringify(own)}`);
+      const tokenQuestion = asked[0]!;
+      expect(!/this device|sign/i.test(tokenQuestion), 'the other token\'s question was not the plain one');
+      await page.evaluate(`window.confirm = (m) => { window.__p254Asked(m); return false; }; document.querySelector('#tokens .token-row button').click()`);
+      await poll(() => asked.length === 6, 'the own token\'s revoke asked nothing');
+      expect(/this device|sign/i.test(asked[5]!), `revoking the page's own token asked ${JSON.stringify(asked[5])}`);
+      return `5 deletes each asked first; the own token is marked and its question says it signs this page out`;
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 

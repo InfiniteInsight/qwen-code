@@ -4828,6 +4828,10 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
+      // #173: the id the gateway gave this page's token when it paired, so the
+      // token list can say which row is this device. A page paired before this
+      // was kept has none, and its list marks nothing rather than guessing.
+      const TOKEN_ID_KEY = 'qwen-rc-token-id';
       const WATCHED_KEY = 'qwen-rc:watched-session';
       // #50. Which conversation THIS window is on, per-window, so a second window
       // can hold a second conversation. WATCHED_KEY stays what it was, the last
@@ -5475,6 +5479,7 @@
                 localStorage.getItem(TOKEN_KEY) === tokenAtRequest
               ) {
                 localStorage.removeItem(TOKEN_KEY);
+                localStorage.removeItem(TOKEN_ID_KEY);
                 showAuthGate();
               }
             } catch {
@@ -10340,6 +10345,12 @@
           }
           const data = await res.json();
           localStorage.setItem(TOKEN_KEY, data.token);
+          try {
+            if (data.id) localStorage.setItem(TOKEN_ID_KEY, String(data.id));
+            else localStorage.removeItem(TOKEN_ID_KEY);
+          } catch {
+            /* private mode: the list just marks nothing */
+          }
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
           // Task #27: authGate() ran before any token existed, so fetch the
@@ -16089,6 +16100,16 @@
       // textContent (a server-set `label`/`scopes` can't inject markup) —
       // mirrors renderPermissionCard, never innerHTML. Self-contained.
       async function revokeToken(id, row, btn) {
+        // #173: the page's own token is the one it signs in with.
+        const own = id === localStorage.getItem(TOKEN_ID_KEY);
+        if (
+          !window.confirm(
+            own
+              ? 'Revoke the token this device signs in with? This page is signed out and has to pair again.'
+              : 'Revoke token ' + id + '? Whatever uses it stops working.',
+          )
+        )
+          return;
         btn.disabled = true;
         try {
           const res = await fetch('/rc/tokens/' + encodeURIComponent(id), {
@@ -16138,7 +16159,10 @@
               '  [' +
               (t.scopes || []).join(',') +
               ']  ' +
-              t.id;
+              t.id +
+              (t.id === localStorage.getItem(TOKEN_ID_KEY)
+                ? '  (this device)'
+                : '');
             const btn = document.createElement('button');
             btn.textContent = 'Revoke';
             btn.onclick = () => revokeToken(t.id, row, btn);
@@ -17174,6 +17198,12 @@
       // sync before the await, collapse the row to text on success (destroys
       // the detached buttons -> no dangling handler), re-enable on error.
       async function unsubscribeSub(id, row, btn) {
+        if (
+          !window.confirm(
+            'Unsubscribe ' + id + '? That device stops getting notifications.',
+          )
+        )
+          return;
         btn.disabled = true;
         try {
           const res = await fetch(
@@ -17641,6 +17671,12 @@
       // revoke (story L3). Mirrors cycle-56 token management; ShareInfo carries
       // NO token value. textContent/createElement only.
       async function revokeShare(id, row, btn) {
+        if (
+          !window.confirm(
+            'Revoke share ' + id + '? The link stops working for whoever holds it.',
+          )
+        )
+          return;
         btn.disabled = true;
         try {
           const res = await fetch('/rc/share/' + encodeURIComponent(id), {
@@ -18707,6 +18743,14 @@
           btn.textContent = 'drop';
           btn.style.marginLeft = '6px';
           btn.onclick = async () => {
+            if (
+              !window.confirm(
+                p.state === 'queued'
+                  ? 'Drop this queued message? It will not run.'
+                  : 'Cancel the turn that is running?',
+              )
+            )
+              return;
             btn.disabled = true;
             const c = await rcCall(
               '/session/' +
@@ -19767,6 +19811,12 @@
             const btn = document.createElement('button');
             btn.textContent = 'Remove';
             btn.onclick = async () => {
+              if (
+                !window.confirm(
+                  'Remove ' + o.origin + '? Pages on it can no longer call this gateway.',
+                )
+              )
+                return;
               btn.disabled = true;
               try {
                 const res = await fetch(
