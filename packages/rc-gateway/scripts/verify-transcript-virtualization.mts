@@ -20674,12 +20674,19 @@ const noisePicture = (
       const uploads: { name: string; type: string; size: number }[] = [];
       page.on('request', (r) => {
         const u = new URL(r.url());
-        if (r.method() !== 'POST' || !u.pathname.endsWith('/attachments')) return;
-        uploads.push({
-          name: u.searchParams.get('name') ?? '',
-          type: r.headers()['content-type'] ?? '',
-          size: r.postDataBuffer()?.length ?? 0,
-        });
+        if (r.method() !== 'POST') return;
+        if (u.pathname.endsWith('/attachments')) {
+          uploads.push({
+            name: u.searchParams.get('name') ?? '',
+            type: r.headers()['content-type'] ?? '',
+            size: r.postDataBuffer()?.length ?? 0,
+          });
+        } else if (u.pathname.endsWith('/attachment-uploads')) {
+          // #130: a file over one chunk is begun with its name, type and size,
+          // so the begin states what the single POST's body and headers did.
+          const begun = JSON.parse(r.postData() ?? '{}') as { name?: string; mimeType?: string; size?: number };
+          uploads.push({ name: begun.name ?? '', type: begun.mimeType ?? '', size: begun.size ?? 0 });
+        }
       });
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
@@ -20692,7 +20699,9 @@ const noisePicture = (
       const settle = async (n: number): Promise<void> => {
         try {
           await page.waitForFunction(
-            (want) => (document.querySelectorAll('#pending-list > span').length >= want) || /limit/.test(document.getElementById('pending-note')?.textContent ?? ''),
+            // #130: a file still going up in chunks is a row too, but it reads
+            // "name 33% (..)" until it is a reference, so it is not yet staged.
+            (want) => (document.querySelectorAll('#pending-list > span').length >= want && !/%/.test(document.getElementById('pending-list')?.textContent ?? '')) || /limit/.test(document.getElementById('pending-note')?.textContent ?? ''),
             n,
             { timeout: 30_000 },
           );
@@ -24993,6 +25002,203 @@ PAGE_SCENARIOS.push({
     return 'on, disabled and opt-in told apart; opt-in names tools.todoWrite.enabled and new conversations; enable then disable wrote true then false';
   },
 });
+
+
+// #130. A phone photo that survives a dropped connection: a file over one
+// chunk goes up in pieces the gateway keeps by index, and what was lost is
+// resent while what landed is not.
+{
+  const MB = 1_000_000;
+  const poll = async (cond: () => boolean, what: string): Promise<void> => {
+    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(cond(), what);
+  };
+  const bigFile = (name: string, size: number) => ({
+    name,
+    mimeType: 'application/octet-stream',
+    buffer: Buffer.from(Uint8Array.from({ length: size }, (_, i) => (i * 31 + 7) % 251)),
+  });
+  type Counted = { puts: Map<number, { sent: number; ok: number }>; begins: number; statuses: number; completes: number; singles: number };
+  const watchUploads = (page: Page): Counted => {
+    const c: Counted = { puts: new Map(), begins: 0, statuses: 0, completes: 0, singles: 0 };
+    const slot = (i: number) => {
+      if (!c.puts.has(i)) c.puts.set(i, { sent: 0, ok: 0 });
+      return c.puts.get(i)!;
+    };
+    const chunkIndex = (url: string): number | null => {
+      const m = /\/attachment-uploads\/[^/]+\/chunks\/(\d+)$/.exec(new URL(url).pathname);
+      return m ? Number(m[1]) : null;
+    };
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      const i = r.method() === 'PUT' ? chunkIndex(r.url()) : null;
+      if (i !== null) slot(i).sent++;
+      else if (r.method() === 'POST' && u.pathname.endsWith('/attachment-uploads')) c.begins++;
+      else if (r.method() === 'GET' && /\/attachment-uploads\/[^/]+$/.test(u.pathname)) c.statuses++;
+      else if (r.method() === 'POST' && u.pathname.endsWith('/complete')) c.completes++;
+      else if (r.method() === 'POST' && u.pathname.endsWith('/attachments')) c.singles++;
+    });
+    page.on('response', (r) => {
+      const i = r.request().method() === 'PUT' ? chunkIndex(r.url()) : null;
+      if (i !== null && r.status() === 200) slot(i).ok++;
+    });
+    return c;
+  };
+  const stripText = (page: Page): Promise<string> =>
+    page.evaluate(() => document.getElementById('pending-list')?.textContent ?? '');
+  const waitStaged = async (page: Page, name: string): Promise<void> => {
+    try {
+      // Done reads "name (1.2 MB)"; going up reads "name 33% (1.2 MB)".
+      await page.waitForFunction(
+        (n) => {
+          const t = document.getElementById('pending-list')?.textContent ?? '';
+          return t.includes(n + ' (') && !t.includes('%');
+        },
+        name,
+        { timeout: 45_000 },
+      );
+    } catch {
+      throw new Error(`${name} never finished; the strip reads ${JSON.stringify(await stripText(page))}`);
+    }
+  };
+  const resumableReady = (page: Page): Promise<unknown> =>
+    page.waitForFunction(
+      () => (caps as { remoteControl?: { resumableAttachmentUploads?: boolean } } | null)?.remoteControl?.resumableAttachmentUploads === true,
+      null,
+      { timeout: 15_000 },
+    );
+  const sendAndRead = async (page: Page, text: string): Promise<Record<string, unknown>> => {
+    let body: Record<string, unknown> | null = null;
+    await page.route(/\/session\/[^/]+\/prompt$/, async (route) => {
+      body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ stopReason: 'end_turn' }) });
+    });
+    await page.fill('#prompt', text);
+    await page.click('#send');
+    await poll(() => body !== null, `the send of ${text} never reached the wire`);
+    return body!;
+  };
+  const attachmentIds = (body: Record<string, unknown>): string[] =>
+    ((body['blocks'] ?? []) as { attachmentId?: string }[]).map((b) => b.attachmentId ?? '').filter(Boolean);
+
+  PAGE_SCENARIOS.push({
+    name: 'P360 a chunk that fails twice is tried again and the third try lands: the strip shows the percentage while it goes, the other chunks are sent once, and the message carries the attachment',
+    // #130. Two aborted PUTs of the middle chunk. The retry is the page's:
+    // three waits (0.5, 1.5, 4 s) and then it stops, so two failures are
+    // inside what it absorbs without anyone tapping anything.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const seen = watchUploads(page);
+      const percents: string[] = [];
+      let failures = 0;
+      await page.route(/\/attachment-uploads\/[^/]+\/chunks\/1$/, async (route) => {
+        if (failures < 2) {
+          failures++;
+          return route.abort('failed');
+        }
+        return route.continue();
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await resumableReady(page);
+      await page.exposeFunction('noteStrip', (t: string) => percents.push(t));
+      await page.evaluate(() => {
+        new MutationObserver(() => void (window as unknown as { noteStrip: (t: string) => void }).noteStrip(document.getElementById('pending-list')?.textContent ?? '')).observe(
+          document.getElementById('pending-list')!,
+          { childList: true, subtree: true, characterData: true },
+        );
+      });
+      await page.setInputFiles('#attach-file', bigFile('IMG_0360.bin', 1_300_000));
+      await waitStaged(page, 'IMG_0360.bin');
+
+      expect(failures === 2, `${failures} chunk requests were failed, not 2`);
+      const one = seen.puts.get(1);
+      expect(one !== undefined && one.sent === 3 && one.ok === 1, `chunk 1 was sent ${one?.sent} times and landed ${one?.ok} times`);
+      for (const i of [0, 2]) {
+        const c = seen.puts.get(i);
+        expect(c !== undefined && c.sent === 1 && c.ok === 1, `chunk ${i} was sent ${c?.sent} times and landed ${c?.ok} times`);
+      }
+      expect(seen.puts.size === 3 && seen.begins === 1 && seen.completes === 1 && seen.singles === 0, `begins ${seen.begins}, chunks ${seen.puts.size}, completes ${seen.completes}, single posts ${seen.singles}`);
+      const pcts = percents.map((t) => /(\d+)%/.exec(t)?.[1]).filter((p): p is string => p !== undefined).map(Number);
+      expect(pcts.includes(33) && pcts.includes(66) && pcts.every((p, i) => i === 0 || p >= pcts[i - 1]!), `the strip showed ${JSON.stringify(pcts)}`);
+      const body = await sendAndRead(page, 'p360 sent');
+      expect(attachmentIds(body).join() === 'IMG_0360.bin', `the message carried ${JSON.stringify(body)}`);
+      expect((await stripText(page)) === '', 'the strip kept the file after the send');
+      return `chunk 1 failed twice and landed on the third try, chunks 0 and 2 once each, progress ${pcts.join(', ')}%, one begin, one complete, and the message carried IMG_0360.bin`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P361 a connection that drops mid-upload pauses the file on the strip, and when it comes back the page asks which chunks landed and sends only the rest',
+    // #130. The browser goes offline as chunk 1 is sent. The page runs out of
+    // retries, says it has paused, and keeps the upload id on the entry. The
+    // network returns (the `online` event), and the page resumes from the
+    // gateway's status rather than from the start.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const seen = watchUploads(page);
+      let dropped = false;
+      await page.route(/\/attachment-uploads\/[^/]+\/chunks\/1$/, async (route) => {
+        if (!dropped) {
+          dropped = true;
+          await page.context().setOffline(true);
+          return route.abort('internetdisconnected');
+        }
+        return route.continue();
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await resumableReady(page);
+      await page.setInputFiles('#attach-file', bigFile('IMG_0361.bin', 1_300_000));
+      try {
+        await page.waitForFunction(() => /paused at 33%/.test(document.getElementById('pending-list')?.textContent ?? ''), null, { timeout: 30_000 });
+      } catch {
+        throw new Error(`the upload never paused; the strip reads ${JSON.stringify(await stripText(page))}`);
+      }
+      const paused = await stripText(page);
+      expect(/IMG_0361\.bin paused at 33%/.test(paused) && paused.includes('Resume'), `the paused row reads ${JSON.stringify(paused)}`);
+      expect(seen.statuses === 0, 'the page asked for a status before the connection came back');
+      await page.context().setOffline(false);
+      await waitStaged(page, 'IMG_0361.bin');
+
+      const zero = seen.puts.get(0);
+      expect(zero !== undefined && zero.sent === 1 && zero.ok === 1, `chunk 0 (landed before the drop) was sent ${zero?.sent} times`);
+      for (const i of [1, 2]) {
+        const c = seen.puts.get(i);
+        expect(c !== undefined && c.ok === 1, `chunk ${i} landed ${c?.ok} times`);
+      }
+      expect(seen.begins === 1 && seen.statuses === 1 && seen.completes === 1, `begins ${seen.begins}, statuses ${seen.statuses}, completes ${seen.completes}: the upload restarted instead of resuming`);
+      const body = await sendAndRead(page, 'p361 sent');
+      expect(attachmentIds(body).join() === 'IMG_0361.bin', `the message carried ${JSON.stringify(body)}`);
+      return `chunk 0 landed once, the drop paused the row at 33%, the reconnect asked the status once and sent chunks 1 and 2, one begin, and the message carried IMG_0361.bin`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P362 a file under one chunk goes by the single POST with no upload begun, and so does a big one when the gateway does not report resumable uploads',
+    // #130. The fallbacks: a file that fits in one chunk has nothing to
+    // resume, and an old gateway has no routes to resume with.
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const seen = watchUploads(page);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await resumableReady(page);
+      await page.setInputFiles('#attach-file', bigFile('small.bin', 300_000));
+      await waitStaged(page, 'small.bin');
+      expect(seen.singles === 1 && seen.begins === 0, `a small file made ${seen.singles} single posts and ${seen.begins} begins`);
+
+      // An old gateway says nothing about it.
+      await page.evaluate(() => { delete (caps as { remoteControl: { resumableAttachmentUploads?: boolean } }).remoteControl.resumableAttachmentUploads; });
+      await page.setInputFiles('#attach-file', bigFile('big.bin', 1_300_000));
+      await waitStaged(page, 'big.bin');
+      expect(seen.singles === 2 && seen.begins === 0 && seen.puts.size === 0, `against an old gateway: ${seen.singles} single posts, ${seen.begins} begins, ${seen.puts.size} chunks`);
+      const body = await sendAndRead(page, 'p362 sent');
+      expect(attachmentIds(body).sort().join() === 'big.bin,small.bin', `the message carried ${JSON.stringify(body)}`);
+      return `a 300 KB file made one single POST and no begin; with the capability gone a ${1_300_000 / MB} MB file did the same; both rode the message`;
+    },
+  });
+}
 
 
 async function runPageSection(): Promise<Result[]> {

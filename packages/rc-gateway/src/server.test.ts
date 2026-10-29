@@ -2443,3 +2443,116 @@ describe('#205 token revoke cascade (web push, APNs, digest, audit)', () => {
     });
   });
 });
+
+describe('resumable attachment uploads (#130) behind the gateway', () => {
+  const SID = '11111111-1111-1111-1111-111111111111';
+  const UP = `/session/${SID}/attachment-uploads`;
+  async function tokenFor(
+    url: string,
+    pairing: PairingService,
+    scopes: string[],
+  ) {
+    const { code } = pairing.mint(scopes);
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    return ((await r.json()) as { token: string }).token;
+  }
+
+  it('refuses every verb to a token that cannot write', async () => {
+    const { url, pairing } = await boot();
+    const reader = await tokenFor(url, pairing, [SESSION_READ]);
+    const auth = { Authorization: `Bearer ${reader}` };
+    const calls: Array<[string, string, BodyInit | undefined, string]> = [
+      ['POST', UP, JSON.stringify({ name: 'a.jpg', size: 4 }), 'application/json'],
+      ['PUT', `${UP}/u1/chunks/0`, new Uint8Array(4), 'application/octet-stream'],
+      ['GET', `${UP}/u1`, undefined, 'application/json'],
+      ['POST', `${UP}/u1/complete`, undefined, 'application/json'],
+      ['DELETE', `${UP}/u1`, undefined, 'application/json'],
+    ];
+    for (const [method, path, body, type] of calls) {
+      const res = await fetch(url + path, {
+        method,
+        body,
+        headers: { ...auth, 'Content-Type': type },
+      });
+      expect(res.status, `${method} ${path}`).toBe(403);
+    }
+  });
+
+  it('401s without a token', async () => {
+    const { url } = await boot();
+    const res = await fetch(url + UP, { method: 'POST' });
+    expect(res.status).toBe(401);
+  });
+
+  it('holds begin to the configured size limit', async () => {
+    const { url, pairing } = await boot(undefined, { maxAttachmentBytes: 1000 });
+    const token = await tokenFor(url, pairing, [WRITE, SESSION_READ]);
+    const begin = (size: number) =>
+      fetch(url + UP, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ name: 'a.bin', mimeType: 'image/jpeg', size }),
+      });
+    expect((await begin(1000)).status).toBe(201);
+    const over = await begin(1001);
+    expect(over.status).toBe(413);
+    expect(((await over.json()) as { code: string }).code).toBe(
+      'attachment_too_large',
+    );
+  });
+
+  it('carries a file begun, chunked and completed through to the daemon, and audits it', async () => {
+    const { url, pairing, auditPath } = await boot(undefined, {
+      maxAttachmentBytes: 4 * 1024 * 1024,
+    });
+    const token = await tokenFor(url, pairing, [WRITE, SESSION_READ]);
+    const auth = { Authorization: `Bearer ${token}` };
+    const size = 512 * 1024 + 700;
+    const begun = (await (
+      await fetch(url + UP, {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'IMG_7.jpg', mimeType: 'image/jpeg', size }),
+      })
+    ).json()) as { uploadId: string; chunkSize: number; chunkCount: number };
+    expect(begun.chunkSize).toBe(512 * 1024);
+    expect(begun.chunkCount).toBe(2);
+    const bytes = new Uint8Array(size).fill(7);
+    for (const i of [1, 0]) {
+      const part = bytes.subarray(
+        i * begun.chunkSize,
+        Math.min(size, (i + 1) * begun.chunkSize),
+      );
+      const r = await fetch(`${url}${UP}/${begun.uploadId}/chunks/${i}`, {
+        method: 'PUT',
+        headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+        body: part,
+      });
+      expect(r.status).toBe(200);
+    }
+    const st = (await (
+      await fetch(`${url}${UP}/${begun.uploadId}`, { headers: auth })
+    ).json()) as { landed: number[] };
+    expect(st.landed).toEqual([0, 1]);
+    const done = await fetch(`${url}${UP}/${begun.uploadId}/complete`, {
+      method: 'POST',
+      headers: auth,
+    });
+    expect(done.status).toBe(201);
+    expect(stub!.lastAttachmentUpload).toMatchObject({
+      name: 'IMG_7.jpg',
+      byteLength: size,
+    });
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'attachment_uploaded'),
+    );
+    expect(rows.filter((x) => x.action === 'attachment_uploaded')).toHaveLength(1);
+  });
+});

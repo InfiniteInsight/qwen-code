@@ -190,6 +190,7 @@ import {
   createAttachmentReadRoute,
   createAttachmentRemoveRoute,
   createAttachmentUploadRoute,
+  createResumableAttachmentUploads,
   gateJsonBody,
   createRawAttachmentBody,
   createAttachmentLimitResolver,
@@ -1225,6 +1226,55 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorRateLimit, // bridge fan-in: cap uploads per chat user
     createRawAttachmentBody(attachmentLimit),
     createAttachmentUploadRoute(deps.daemon, audit),
+  );
+  // #130: the resumable form of the upload above, for a phone whose connection
+  // drops mid-file. Every verb is WRITE like the single POST, with the same
+  // guard set; the rate limiter sits on the begin only, because a photo is
+  // many chunk requests and a per-chat-user cap on those would throttle one
+  // upload against itself. The size limit is the one the single POST enforces,
+  // applied when the upload begins.
+  const resumableUploads = createResumableAttachmentUploads({
+    daemon: deps.daemon,
+    limit: attachmentLimit,
+    audit,
+  });
+  app.post(
+    '/session/:id/attachment-uploads',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    subActorRateLimit,
+    resumableUploads.begin,
+  );
+  app.put(
+    '/session/:id/attachment-uploads/:uploadId/chunks/:index',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    resumableUploads.chunkBody,
+    resumableUploads.chunk,
+  );
+  app.get(
+    '/session/:id/attachment-uploads/:uploadId',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    resumableUploads.status,
+  );
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/complete',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    resumableUploads.complete,
+  );
+  app.delete(
+    '/session/:id/attachment-uploads/:uploadId',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    resumableUploads.cancel,
   );
   // GET /session/:id/attachments — session-read-scope, mirroring /export: the
   // names and metadata the daemon returns are part of the conversation, and
