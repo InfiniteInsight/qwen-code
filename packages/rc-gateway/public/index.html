@@ -19956,10 +19956,12 @@
               } else if (!c.ok) {
                 label.textContent =
                   bits.join('  ') + '  [stop failed: ' + c.code + ']';
-              } else if (c.body && c.body.reason === 'disabled') {
-                label.textContent =
-                  bits.join('  ') + '  [workflow runs are not enabled here]';
               } else {
+                // #110: no branch for reason 'disabled'. The daemon sends it
+                // only for a workflow cancel on an untrusted workspace, and a
+                // workflow row is listed only on a trusted one that opted in,
+                // which this page never asks for, so it could not fire. This
+                // line is the honest answer for every refusal.
                 label.textContent =
                   bits.join('  ') + '  [the daemon did not stop it]';
               }

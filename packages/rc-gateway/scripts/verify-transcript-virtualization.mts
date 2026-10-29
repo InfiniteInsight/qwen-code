@@ -7064,14 +7064,15 @@ PAGE_SCENARIOS.push({
       `a refused stop was not named as one (${JSON.stringify(refused[0])})`,
     );
 
-    // A policy refusal says why, because "workflow runs are not enabled here"
-    // is actionable and "the daemon did not stop it" is not.
+    // #110: the page no longer names reason 'disabled'. It can only come back
+    // for a workflow row, which this page never lists, so a refusal carrying
+    // it reads as every other refusal does and never as a stop.
     await listRuns();
     cancelBody = { cancelled: false, reason: 'disabled' };
     const disabled = await stopRow(0);
     expect(
-      disabled[0].includes('not enabled'),
-      `a disabled-workspace refusal lost its reason (${JSON.stringify(disabled[0])})`,
+      disabled[0].includes('did not stop') && !/not enabled|stopped/.test(disabled[0]),
+      `a refusal carrying reason disabled did not read as an honest refusal (${JSON.stringify(disabled[0])})`,
     );
 
     // A transport failure names the gateway code, not the daemon's message.
@@ -7084,7 +7085,7 @@ PAGE_SCENARIOS.push({
       `a transport failure was not named (${JSON.stringify(broke[0])})`,
     );
 
-    return `only running rows offer stop; the request carries the task id and the kind; cancelled:true reads as stopped; a 200 with cancelled:false does NOT; a disabled-workspace refusal names itself; a transport failure names daemon_unavailable`;
+    return `only running rows offer stop; the request carries the task id and the kind; cancelled:true reads as stopped; a 200 with cancelled:false does NOT; a refusal with reason disabled reads as did not stop; a transport failure names daemon_unavailable`;
   },
 });
 
