@@ -19030,6 +19030,12 @@ PAGE_SCENARIOS.push({
     },
   ];
   const MORE_ROWS = MORE_GROUPS.flatMap((g) => g.rows);
+  // The rows More draws that open no panel screen, each placed before the
+  // panel row it precedes (P164). Kept apart from MORE_GROUPS because the
+  // panel scenarios open every row there by its key.
+  const MORE_ACTION_ROWS: Record<string, { before: string; action: string; label: string }[]> = {
+    'This conversation': [{ before: 'search', action: 'find', label: 'Find in conversation' }],
+  };
 
   // #187. The controls the three old panes held, card by card, measured on the
   // page as it stood before this slice (3b9574da0e) with every card opened, at
@@ -19184,15 +19190,15 @@ PAGE_SCENARIOS.push({
                 upper: cs.textTransform,
                 weight: cs.fontWeight,
                 color: cs.color,
-                // #110: a row the gateway or daemon does not offer is in the
-                // markup but not drawn, so it is not one of the drawing's rows.
-                rows: Array.from(g.querySelectorAll('.row')).filter((row) => row.getClientRects().length > 0).map((row) => {
+                rows: Array.from(g.querySelectorAll('.row')).map((row) => {
                   const b = row.getBoundingClientRect();
                   const chev = row.querySelector('svg.chev');
                   const cb = chev ? chev.getBoundingClientRect() : null;
                   const val = row.querySelector('.val');
                   return {
                     key: row.dataset.panel,
+                    action: row.dataset.action || null,
+                    drawn: row.getClientRects().length > 0,
                     label: row.querySelector('.lbl').textContent,
                     value: val ? val.textContent : null,
                     valSize: val ? getComputedStyle(val).fontSize : '',
@@ -19221,7 +19227,7 @@ PAGE_SCENARIOS.push({
             upper: string;
             weight: string;
             color: string;
-            rows: { key: string; label: string; value: string | null; valSize: string; h: number; w: number; chevRight: number }[];
+            rows: { key: string; action: string | null; drawn: boolean; label: string; value: string | null; valSize: string; h: number; w: number; chevRight: number }[];
           }[];
         };
         const at = `${w}x${h}`;
@@ -19245,11 +19251,29 @@ PAGE_SCENARIOS.push({
             g.size === '12px' && g.upper === 'uppercase' && g.weight === '600' && g.color === 'rgb(139, 148, 158)',
             `the ${want.head} head is ${g.size} ${g.upper} ${g.weight} ${g.color} at ${at}, not 12px uppercase 600 muted`,
           );
+          // The action rows open no panel, so they are not in MORE_GROUPS,
+          // which the panel scenarios walk: #138's Find is always drawn, and
+          // #110's Agents only where the gateway and daemon serve the agent
+          // reads, which this stub's daemon does not advertise. Any other
+          // row in the markup and not drawn is a regression.
+          const undrawn = g.rows.filter((x) => !x.drawn);
           expect(
-            JSON.stringify(g.rows.map((x) => [x.key, x.label])) === JSON.stringify(want.rows),
-            `the ${want.head} rows are ${JSON.stringify(g.rows.map((x) => x.label))} at ${at}`,
+            undrawn.every((x) => x.action === 'agents'),
+            `rows in the markup and not drawn at ${at}: ${JSON.stringify(undrawn.map((x) => x.label))}`,
           );
-          for (const row of g.rows) {
+          const drawnRows = g.rows.filter((x) => x.drawn);
+          const wantDrawn: [string, string][] = [];
+          for (const [k, label] of want.rows) {
+            for (const a of MORE_ACTION_ROWS[want.head] ?? []) {
+              if (a.before === k) wantDrawn.push(['action:' + a.action, a.label]);
+            }
+            wantDrawn.push([k, label]);
+          }
+          expect(
+            JSON.stringify(drawnRows.map((x) => [x.action ? 'action:' + x.action : x.key, x.label])) === JSON.stringify(wantDrawn),
+            `the ${want.head} rows are ${JSON.stringify(drawnRows.map((x) => x.label))} at ${at}`,
+          );
+          for (const row of drawnRows) {
             expect(row.h === 48 && row.w === r.inner, `${row.label} is ${row.w}x${row.h} at ${at}, not ${r.inner}x48`);
             expect(row.value !== null && row.valSize === '13px', `${row.label} has no 13px value column at ${at}`);
             expect(row.chevRight >= 15 && row.chevRight <= 17, `${row.label}'s chevron is ${row.chevRight}px from the right edge at ${at}, not 16`);
@@ -19264,7 +19288,7 @@ PAGE_SCENARIOS.push({
           expect(value(key) === '', `${key} shows ${JSON.stringify(value(key))} with no fact behind it`);
         }
         await page.click('#more-back');
-        lines.push(`${at}: ${pane ? `the ${RIGHT_PANE}px right-hand pane` : 'the screen'}, 56px head, ${MORE_ROWS.length} rows of 48 in 4 groups, 12px uppercase heads, chevron 16px in`);
+        lines.push(`${at}: ${pane ? `the ${RIGHT_PANE}px right-hand pane` : 'the screen'}, 56px head, ${MORE_ROWS.length} panel rows and Find of 48 in 4 groups (Agents not drawn without the agent reads), 12px uppercase heads, chevron 16px in`);
       }
       return lines.join('; ') + '; Permission rules 4, Dictation "auto, auto-send off", Diagnostics ok, the rest blank until the page knows';
     },
