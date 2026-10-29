@@ -3344,7 +3344,9 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
-    name: 'P4 fork row',
+    // #190: named for what it checks since #184 turned the fork row into
+    // the turn-actions row (Fork here, Rewind to here, Copy).
+    name: 'P4 the turn-actions row follows the newest answer, and Fork here asks include or empty',
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await waitForFrame(page, 1, 10_000);
