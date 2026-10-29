@@ -6429,17 +6429,16 @@ PAGE_SCENARIOS.push({
       `an archived row is pressable, promising a read the daemon refuses (${JSON.stringify(filed.rows[0]!)})`,
     );
 
-    // The ? is one delegated listener on document keyed on aria-controls (the
-    // rule P35 proves for the seven surfaces), so this screen's follows it.
+    // #190: the screen says what it is in one sentence, as every panel screen
+    // does, rather than behind a ?.
     const help = (await page.evaluate(String.raw`(() => {
-      const btn = document.querySelector('#archived-view .help-btn');
-      if (!btn) return 'no ? button';
       const el = document.getElementById('help-archived-view');
-      const before = el.hidden;
-      btn.click();
-      return String(before === true) + '/' + String(!el.hidden) + '/' + btn.getAttribute('aria-expanded');
-    })()`)) as string;
-    expect(help === 'true/true/true', `the archived screen's ? did not behave like the other panels' (got ${help})`);
+      return {
+        q: !!document.querySelector('#archived-view .help-btn'),
+        lede: !!el && el.classList.contains('lede') && !el.hidden && el.getClientRects().length > 0,
+      };
+    })()`)) as { q: boolean; lede: boolean };
+    expect(!help.q && help.lede, `the archived screen keeps a ? or shows no lede (${JSON.stringify(help)})`);
 
     await page.click('#archived-list .arow button');
     await page.waitForFunction(
@@ -23779,6 +23778,35 @@ PAGE_SCENARIOS.push({
     const phone = await read();
     expect(phone.popup === 'dialog' && phone.controls === 'list-screen' && phone.role === 'dialog', `390: ${JSON.stringify(phone)}`);
     return `1100 ${JSON.stringify(wide)}; 390 ${JSON.stringify(phone)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P323 the folder and archived screens say what they are in one sentence, with no ? left, at 390 and 1100',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {}, { '/p323': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p323'));
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      for (const [door, scr, back] of [['#list-new', 'dir-picker', '#dir-back'], ['#list-archived-open', 'archived-view', '#archived-back']] as const) {
+        await openList(page);
+        await page.click(door);
+        await page.waitForFunction(`!document.getElementById(${JSON.stringify(scr)}).hidden`);
+        const r = (await page.evaluate(`(() => {
+          const s = document.getElementById(${JSON.stringify(scr)});
+          const l = s.querySelector('.lede');
+          const t = l ? l.textContent.replace(/\\s+/g, ' ').trim() : '';
+          return { q: s.querySelectorAll('.help-btn').length, lede: t, shown: !!l && l.getClientRects().length > 0, stops: (t.match(/[.]/g) || []).length };
+        })()`)) as { q: number; lede: string; shown: boolean; stops: number };
+        expect(r.q === 0 && r.shown && r.stops === 1 && r.lede.endsWith('.'), `${size.width} ${scr}: ${JSON.stringify(r)}`);
+        await shot(page, `p323-${scr}-${size.width}`);
+        await page.click(back);
+        lines.push(`${size.width} ${scr}: "${r.lede}"`);
+      }
+    }
+    return lines.join('; ');
   },
 });
 

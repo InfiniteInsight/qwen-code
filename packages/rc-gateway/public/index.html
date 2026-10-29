@@ -872,6 +872,13 @@
       #panel-body {
         padding: 12px 12px 24px;
       }
+      #dir-picker .lede,
+      #archived-view .lede {
+        margin: 4px 4px 0;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+        line-height: 1.45;
+      }
       #panel-body .lede {
         margin: 0 4px 12px;
         color: var(--g1-ink-mid);
@@ -3656,24 +3663,15 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
           <strong class="ttl">New conversation</strong>
-          <button
-            type="button"
-            class="help-btn"
-            aria-label="What is this screen?"
-            aria-expanded="false"
-            aria-controls="help-dir-picker"
-          >
-            ?
-          </button>
+          <span class="scr-sp" aria-hidden="true"></span>
         </div>
         <div class="scr-body">
-          <div class="help-text" id="help-dir-picker" hidden>
-            Choose the folder on the host the new conversation runs in.
-            <b>Start here</b> on a recent folder or beside a typed path starts
-            it there; tap a folder to go into it, and <b>New conversation in
-            this folder</b> starts it in the one you are in. Nothing starts
-            until you choose, and back leaves without starting one.
-          </div>
+          <!-- #190: the one sentence every panel screen opens with, in place
+               of the ? that hid a paragraph. -->
+          <p class="lede" id="help-dir-picker">
+            Pick the folder on the host it runs in; nothing starts until you
+            choose one.
+          </p>
           <div class="grp">Recent folders</div>
           <div id="dir-recent">(no recent folders yet)</div>
           <div class="grp">On the host</div>
@@ -3701,23 +3699,13 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
           <strong class="ttl">Archived</strong>
-          <button
-            type="button"
-            class="help-btn"
-            aria-label="What are Archived conversations?"
-            aria-expanded="false"
-            aria-controls="help-archived-view"
-          >
-            ?
-          </button>
+          <span class="scr-sp" aria-hidden="true"></span>
         </div>
         <div class="scr-body">
-          <div class="help-text" id="help-archived-view" hidden>
-            Conversations the daemon has filed away from the folder the list
-            shows. They are <b>not</b> openable from here, since the daemon
-            refuses to read an archived transcript, so each offers
-            <b>Restore</b> only, which puts it back on the list.
-          </div>
+          <p class="lede" id="help-archived-view">
+            Filed away from these folders: they cannot be opened, only restored
+            to the list.
+          </p>
           <div id="archived-note"></div>
           <div id="archived-list">(not listed)</div>
         </div>
