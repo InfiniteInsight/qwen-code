@@ -23918,6 +23918,37 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P328 More shows how many turns Rewind to a turn can reach and how many messages are queued here, from what the page holds',
+  frames: () => new Frames().user('p328 one').asst('a1').done().user('p328 two').asst('a2').done().list,
+  run: async ({ page, viewer }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 30_000);
+    await settlePage(page);
+    const read = async () => {
+      await openPanel(page, 'chat');
+      await page.click('#h1-more');
+      const v = (await page.evaluate(`({
+        rewind: document.querySelector('#more-screen .row[data-panel="rewind"] .val').textContent,
+        queue: document.querySelector('#more-screen .row[data-panel="queue"] .val').textContent,
+      })`)) as { rewind: string; queue: string };
+      await page.click('#more-back');
+      return v;
+    };
+    const a = await read();
+    expect(a.rewind === '2 turns' && a.queue === '', `More reads ${JSON.stringify(a)}`);
+    await page.evaluate(`outbox = ['p328 later']; renderQueued();`);
+    const b = await read();
+    expect(b.queue === '1 queued', `with one message queued More reads ${JSON.stringify(b)}`);
+    await page.evaluate(`outbox = []; renderQueued();`);
+    await page.click('#h1-more');
+    await shot(page, 'p328-more-390');
+    await page.click('#more-back');
+    return `Rewind to a turn "${a.rewind}", Prompt queue "${b.queue}" with one queued`;
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

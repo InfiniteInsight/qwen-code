@@ -5209,6 +5209,14 @@
       function renderMoreValues() {
         const v = {};
         if (storedFiles.length) v.files = String(storedFiles.length);
+        // #190: both from what the page holds, as every value here is: the
+        // turns on screen (counted the way the rewind picker counts them) and
+        // the messages queued here for after this turn.
+        if (watchedSessionId) {
+          const turns = transcriptModel.userTurns().length;
+          if (turns) v.rewind = turns + (turns === 1 ? ' turn' : ' turns');
+          if (outbox.length) v.queue = outbox.length + ' queued';
+        }
         const used = sessionUsageParts();
         if (used) v.usage = used.tokens + (used.cost ? ' \u00b7 ' + used.cost : '');
         if (permRules) {
