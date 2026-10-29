@@ -19475,6 +19475,36 @@ PAGE_SCENARIOS.push({
       return `360x780, keys up to ${r.vv}: field and Send on screen, Allow and Deny whole, transcript ${r.tr}px, ${r.lines} lines of the command`;
     },
   });
+
+  // #190: a push tells a page left in the background, which asks for the
+  // request at once instead of waiting to be shown again.
+  PAGE_SCENARIOS.push({
+    name: 'P333 a push the service worker passes to a hidden page has it ask for the request at once, so the card is up when the reader returns',
+    frames: () => new Frames().ev('client_joined').user('clean up').asst('on it').list,
+    stub: { sessionStatus: statusBody([permPending('p333', 'rm -rf ./build')]) },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 2, 15_000);
+      // Hidden from here on: the 5 s poll stands down, as on a phone with the
+      // page in the background. Any card the first reads drew is taken down.
+      await page.evaluate(`Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); dropAllCards();`);
+      await page.waitForTimeout(300);
+      const asked: number[] = [];
+      page.on('request', (r) => {
+        if (/\/session\/[^/]+\/status$/.test(new URL(r.url()).pathname)) asked.push(Date.now());
+      });
+      const t0 = Date.now();
+      await page.evaluate(
+        (sid) => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'rc-push', kind: 'permission.required', sessionId: sid, requestId: 'p333' } })),
+        viewer.sessionId,
+      );
+      await page.waitForFunction(`!!document.querySelector('#cards .pcard[data-request-id="p333"]')`, null, { timeout: 2_500 }).catch(() => undefined);
+      const r = (await page.evaluate(`({ card: !!document.querySelector('#cards .pcard[data-request-id="p333"]') })`)) as { card: boolean };
+      expect(asked.length > 0 && asked[0]! - t0 < 1_500 && r.card, `the page asked ${asked.length} times (first after ${asked.length ? asked[0]! - t0 : '-'}ms) and drew the card: ${r.card}`);
+      return `asked ${asked[0]! - t0}ms after the worker's message, card p333 drawn while hidden`;
+    },
+  });
 }
 
 // #188 (h1). The laptop, derived from the phone: at 1100px and wider the List

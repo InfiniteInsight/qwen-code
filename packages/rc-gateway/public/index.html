@@ -11157,6 +11157,19 @@
       // harmless.
       // #186: `early` is the push deep link's read, made before anything is
       // watched so the card is pinned before the transcript arrives.
+      // #190: the service worker tells an open page about a push (sw.js
+      // tellPages). A permission request for the conversation on screen is
+      // asked for now, even while the page is hidden and its poll is paused,
+      // so the card is there when the reader comes back.
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('message', (e) => {
+          const d = e && e.data;
+          if (!d || d.type !== 'rc-push') return;
+          if (d.kind !== 'permission.required') return;
+          if (!d.sessionId || d.sessionId !== watchedSessionId) return;
+          void refreshPendingCards(d.sessionId);
+        });
+      }
       async function refreshPendingCards(sessionId, early) {
         if (!token()) return;
         // #172: and the visit it was asked in. The deep link's early read is
