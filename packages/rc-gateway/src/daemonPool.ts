@@ -1117,7 +1117,12 @@ export class DaemonPool implements SessionDaemon {
 
     const p = (async () => {
       try {
-        const s = await this.opts.spawn(key);
+        // Through `promiseFrom` (#203): a spawner that throws before it
+        // returns a promise would otherwise run the `finally` below right
+        // now, before `spawning.set` further down stores `p`, and the
+        // rejected `p` stored after it would answer every later call for
+        // this cwd. Awaiting a rejection always yields first.
+        const s = await promiseFrom(() => this.opts.spawn(key));
         const entry = this.newEntry(s);
         if (this.stopped) {
           // `stopAll()` ran while this spawn was in flight — the pool's
@@ -2655,6 +2660,16 @@ export class DaemonPool implements SessionDaemon {
   }
 }
 
+/** `fn()`, with a synchronous throw handed back as a rejected promise
+ * instead of thrown at the call site (#203). */
+function promiseFrom<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return fn();
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
 /** Resolve with `p`'s value, or with `fallback` if `p` rejects or has not
  * settled within `ms`. Never rejects. The timer is unref'd so a pending
  * probe cannot hold the process open. */
@@ -2680,7 +2695,10 @@ function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 /** Socket codes (found on an error or its `cause` chain) that mean the daemon
  * transport is gone: the process is dead or the socket was torn down. Node's
  * "socket hang up" carries `ECONNRESET` and undici's "other side closed"
- * carries `UND_ERR_SOCKET`, so the codes cover both without reading text. */
+ * carries `UND_ERR_SOCKET`, so the codes cover both without reading text.
+ * Only `ECONNREFUSED` is taken as a death outright; the others are also what
+ * a live daemon's keep-alive race produces on an ordinary call, so the pool
+ * confirms them with a probe first (#203, `transportDeathConfirmed`). */
 const TRANSPORT_DEATH_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',

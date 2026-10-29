@@ -171,6 +171,53 @@ describe('DaemonPool', () => {
     expect(pool.size()).toBe(1);
   });
 
+  // #203: the pool cleared its in-flight record in a `finally` inside the
+  // spawn closure. A spawner that throws before returning a promise runs that
+  // `finally` synchronously, BEFORE the record is stored, so the rejected
+  // spawn was stored afterwards and handed to every later caller for good.
+  it('a spawn that throws synchronously leaves the workspace retryable', async () => {
+    let attempt = 0;
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      // Deliberately not `async`: the throw happens before any promise exists.
+      spawn: (cwd) => {
+        if (++attempt === 1) throw new Error('boom: sync spawn failure');
+        return Promise.resolve({
+          client: fakeClient(cwd),
+          stop: async () => {},
+          workspaceCwd: cwd,
+        });
+      },
+    });
+    await expect(pool.getOrSpawn('/proj/sync')).rejects.toThrow(/boom/);
+    const client = await pool.getOrSpawn('/proj/sync');
+    expect((client as unknown as { tag: string }).tag).toBe('/proj/sync');
+    expect(attempt).toBe(2);
+    expect(pool.workspaces()).toEqual(['/proj/sync']);
+  });
+
+  it('a default respawn that throws synchronously is retried on the next call', async () => {
+    let attempt = 0;
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: (cwd) => {
+        if (++attempt === 1) throw new Error('boom: sync spawn failure');
+        return Promise.resolve({
+          client: fakeClient(`${cwd}#respawn`),
+          stop: async () => {},
+          workspaceCwd: cwd,
+        });
+      },
+    });
+    pool.handleDaemonExit('/home/evan', { code: 1, signal: null });
+    await expect(pool.health()).rejects.toThrow(/boom/);
+    const ok = (await pool.health()) as unknown as { calledOn: string };
+    expect(ok.calledOn).toBe('/home/evan#respawn');
+    expect(attempt).toBe(2);
+  });
+
   it('routes a session-keyed call to the daemon that created the session', async () => {
     const pool = makePool([]); // spawn returns fakeClient(cwd)
     const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
