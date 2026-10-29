@@ -1230,6 +1230,19 @@
       #pane-chat[data-card] > #transcript-wrap {
         overflow: hidden;
       }
+      /* #190: with the keys up a long command took the transcript's whole
+         box, so the reader saw only the card. The transcript keeps room for
+         about two lines of the agent's last words; the card's body scrolls to
+         give it, its command box first. */
+      :root.kb-open #pane-chat[data-card] > #transcript-wrap {
+        flex-basis: 64px;
+        min-height: 64px;
+      }
+      /* The command box then fits the card's body whole (two lines and a
+         bit, scrolling for the rest) rather than being cut by it. */
+      :root.kb-open .pcard .pc-cmd {
+        max-height: 44px;
+      }
       /* Bands that come and go above the transcript keep the column's gutter
          now that the column itself has none. */
       /* #173. The MCP add/edit form is a column when open. Its layout lives

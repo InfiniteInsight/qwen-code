@@ -19392,6 +19392,65 @@ PAGE_SCENARIOS.push({
       return `after Unwatch no card is left (${JSON.stringify(r)})`;
     },
   });
+
+  // #190: with the keys up and a 2 KB command pinned, the transcript keeps
+  // room for the agent's last words (P177 measured none), and the card still
+  // shows its buttons and two lines of the command.
+  const h190KeysUpRoom = async (page: Page, size: { width: number; height: number }, keys: number) => {
+    await page.setViewportSize(size);
+    await frames3(page);
+    const visible = await keyboardUp(page, keys);
+    const r = (await page.evaluate(String.raw`(() => {
+      const tr = document.getElementById('transcript').getBoundingClientRect();
+      const card = document.querySelector('#cards .pcard:not([hidden]):not(.retiring)');
+      const allow = card.querySelector('.pc-allow').getBoundingClientRect();
+      const deny = card.querySelector('.pc-deny').getBoundingClientRect();
+      const cmd = card.querySelector('.pc-cmd');
+      const cs = getComputedStyle(cmd);
+      const lh = parseFloat(cs.lineHeight) || 18;
+      const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const vv = window.visualViewport.offsetTop + window.visualViewport.height;
+      // What of the box shows: inside the card body that scrolls it, and
+      // above the keys.
+      const ob = cmd.getBoundingClientRect();
+      const body = card.querySelector('.pc-body').getBoundingClientRect();
+      const cb = { top: Math.max(ob.top, body.top), bottom: Math.min(ob.bottom, body.bottom) };
+      const mid = document.elementFromPoint((ob.left + ob.right) / 2, (cb.top + Math.min(cb.bottom, vv)) / 2);
+      const field = document.getElementById('prompt').getBoundingClientRect();
+      const send = document.getElementById('h1-plus').getBoundingClientRect();
+      return {
+        tr: Math.round(tr.height),
+        allow: allow.bottom <= vv + 0.5 && allow.height >= 48,
+        deny: deny.bottom <= vv + 0.5 && deny.height >= 48,
+        lines: Math.floor((Math.min(cb.bottom, vv) - cb.top - pad) / lh),
+        cmdMine: !!mid && (mid === cmd || cmd.contains(mid)),
+        field: field.bottom <= vv + 0.5 && send.bottom <= vv + 0.5,
+        vv: Math.round(vv),
+      };
+    })()`)) as { tr: number; allow: boolean; deny: boolean; lines: number; cmdMine: boolean; field: boolean; vv: number };
+    return { visible, ...r };
+  };
+  PAGE_SCENARIOS.push({
+    name: 'P331 with the keys up at 390x480 and a 2 KB command pinned, the transcript keeps room for the last words, and the card its buttons and two lines of the command',
+    keyboard: true,
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('clear the stale alpine caches');
+      f.asst('The old alpine entries are dead weight; I can clear them.');
+      return f.ev('permission_request', permFrame('p331', BIG_CMD)).list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p331', BIG_CMD)]) },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p331');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const r = await h190KeysUpRoom(page, PHONE, KEYBOARD_KEYS);
+      expect(r.tr >= 60, `the transcript is ${r.tr}px with the keys up and the card pinned`);
+      expect(r.allow && r.deny && r.lines >= 2 && r.cmdMine && r.field, `the card or the composer lost out: ${JSON.stringify(r)}`);
+      await shot(page, 'p331-keys-card-390x480');
+      await keyboardDown(page);
+      return `transcript ${r.tr}px, Allow and Deny whole above the keys at ${r.vv}, ${r.lines} lines of the command`;
+    },
+  });
 }
 
 // #188 (h1). The laptop, derived from the phone: at 1100px and wider the List
