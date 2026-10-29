@@ -13,8 +13,11 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import Database from 'better-sqlite3';
+import { archiveChatsDirOf } from '../sessions/chatsPath.js';
 import {
   KIND_MAP,
+  isArchivedFileKey,
+  transcriptFileKeys,
   recordText,
   type TranscriptRecord,
   type SearchHit,
@@ -66,6 +69,7 @@ interface IndexRow {
   kind: string | null;
   ts: string | null;
   snip: string | null;
+  file: string | null;
 }
 
 const SNIPPET_MAX = 200;
@@ -131,7 +135,98 @@ export class SearchIndex {
          mtimeMs REAL NOT NULL
        )`,
     );
+    // Key/value sidecar. `chatsDir` records WHICH directory this index was last
+    // built from, so a later query can cheaply notice a changed transcript and
+    // refresh without a manual `reindex`.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS index_meta (
+         key TEXT PRIMARY KEY,
+         value TEXT NOT NULL
+       )`,
+    );
     return new SearchIndex(db);
+  }
+
+  /** Records the chats dir this index mirrors (inside the caller's transaction). */
+  private storeSource(chatsDir: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO index_meta (key, value) VALUES ('chatsDir', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(chatsDir);
+  }
+
+  /** The chats dir this index was last built from, or null (never built / legacy db). */
+  private storedSource(): string | null {
+    const row = this.db
+      .prepare(`SELECT value FROM index_meta WHERE key = 'chatsDir'`)
+      .get() as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  /**
+   * Lists the transcript files to index under `chatsDir` (live + `archive/`)
+   * with their current mtimes. A file that vanishes mid-stat is treated as gone.
+   */
+  private static statDisk(chatsDir: string): Map<string, number> {
+    let live: string[] = [];
+    try {
+      live = readdirSync(chatsDir);
+    } catch {
+      /* missing/unreadable dir → empty */
+    }
+    let archived: string[] = [];
+    try {
+      archived = readdirSync(archiveChatsDirOf(chatsDir));
+    } catch {
+      /* no archive dir */
+    }
+    const disk = new Map<string, number>();
+    for (const name of transcriptFileKeys(live, archived)) {
+      try {
+        disk.set(name, statSync(join(chatsDir, name)).mtimeMs);
+      } catch {
+        /* vanished/unreadable → not on disk for our purposes */
+      }
+    }
+    return disk;
+  }
+
+  /**
+   * Cheap staleness check against the stored source dir: a readdir + one stat
+   * per transcript compared with the `file_meta` mtimes, no transcript read and
+   * no scan of the records table. Returns true when any file is new, changed or
+   * gone.
+   */
+  private isStale(chatsDir: string): boolean {
+    const disk = SearchIndex.statDisk(chatsDir);
+    const known = new Map<string, number>(
+      (
+        this.db.prepare('SELECT file, mtimeMs FROM file_meta').all() as Array<{
+          file: string;
+          mtimeMs: number;
+        }>
+      ).map((r) => [r.file, r.mtimeMs]),
+    );
+    if (disk.size !== known.size) return true;
+    for (const [name, mtimeMs] of disk) {
+      if (known.get(name) !== mtimeMs) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Brings the index up to date with the dir it was built from, when (and only
+   * when) a transcript changed. Does nothing for an index that was never built
+   * (no recorded source). The query path calls this, so a ranked search no
+   * longer serves a snapshot frozen at the last manual `reindex`.
+   */
+  refreshIfStale(): boolean {
+    const source = this.storedSource();
+    if (source === null || !this.isStale(source)) return false;
+    this.reindexIncremental(source);
+    return true;
   }
 
   /**
@@ -141,15 +236,11 @@ export class SearchIndex {
    * the shared {@link recordText}; records with empty searchable text (e.g.
    * `custom_title` system records) are skipped (they can never match). Missing
    * dir / unreadable file / corrupt line are skipped, never thrown. Returns the
-   * counts of files read and records indexed.
+   * counts of files read and records indexed. Transcripts under `chats/archive/`
+   * are indexed too (keyed `archive/<name>`; a live copy of the same name wins).
    */
   reindex(chatsDir: string): { files: number; records: number } {
-    let names: string[];
-    try {
-      names = readdirSync(chatsDir);
-    } catch {
-      names = []; // missing/unreadable dir → an empty index, not an error.
-    }
+    const names = [...SearchIndex.statDisk(chatsDir).keys()];
     const upsertMeta = this.db.prepare(
       `INSERT INTO file_meta (file, mtimeMs) VALUES (?, ?)
        ON CONFLICT(file) DO UPDATE SET mtimeMs = excluded.mtimeMs`,
@@ -160,19 +251,28 @@ export class SearchIndex {
       this.db.exec('DELETE FROM records');
       this.db.exec('DELETE FROM file_meta');
       for (const name of names) {
-        if (!name.endsWith('.jsonl')) continue;
-        const n = this.indexFile(chatsDir, name);
-        if (n === null) continue; // unreadable file → skip.
-        // Seed file_meta with the mtime so a later incremental pass treats this
-        // file as unchanged (a full rebuild leaves a consistent mtime baseline).
+        // Stat BEFORE reading. A transcript appended to between the two would
+        // otherwise be recorded with the NEWER mtime but indexed with the OLDER
+        // content, and a later incremental pass would call it unchanged and
+        // never pick up the tail. Stat-then-read can only err the other way
+        // (one redundant re-index), which is harmless.
+        let mtimeMs: number | undefined;
         try {
-          upsertMeta.run(name, statSync(join(chatsDir, name)).mtimeMs);
+          mtimeMs = statSync(join(chatsDir, name)).mtimeMs;
         } catch {
           /* stat raced a delete → its rows just won't be tracked; harmless */
         }
+        const n = this.indexFile(chatsDir, name);
+        // Seed file_meta with the mtime so a later incremental pass treats this
+        // file as unchanged (a full rebuild leaves a consistent mtime baseline).
+        // An unreadable file is tracked too, so the staleness check does not
+        // call the index stale (and rescan) on every query because of it.
+        if (mtimeMs !== undefined) upsertMeta.run(name, mtimeMs);
+        if (n === null) continue; // unreadable file → skip.
         files++;
         records += n;
       }
+      this.storeSource(chatsDir);
     });
     rebuild();
     return { files, records };
@@ -198,21 +298,8 @@ export class SearchIndex {
     removed: number;
     records: number;
   } {
-    let names: string[];
-    try {
-      names = readdirSync(chatsDir).filter((n) => n.endsWith('.jsonl'));
-    } catch {
-      names = [];
-    }
     // Current on-disk mtimes (a file that vanishes mid-stat is treated as gone).
-    const disk = new Map<string, number>();
-    for (const name of names) {
-      try {
-        disk.set(name, statSync(join(chatsDir, name)).mtimeMs);
-      } catch {
-        /* vanished/unreadable → not on disk for our purposes */
-      }
-    }
+    const disk = SearchIndex.statDisk(chatsDir);
 
     const known = new Map<string, number>(
       (
@@ -252,11 +339,13 @@ export class SearchIndex {
         if (known.get(name) === mtimeMs) continue; // unchanged → skip
         this.db.prepare('DELETE FROM records WHERE file = ?').run(name);
         const n = this.indexFile(chatsDir, name);
-        if (n === null) continue; // became unreadable → leave its rows dropped
+        // Track the mtime even when the file is unreadable (see reindex).
         upsertMeta.run(name, mtimeMs);
+        if (n === null) continue; // became unreadable → leave its rows dropped
         updated++;
         records += n;
       }
+      this.storeSource(chatsDir);
     });
     run();
     return { scanned: disk.size, updated, removed, records };
@@ -319,6 +408,16 @@ export class SearchIndex {
     const match = toFtsMatch(rawQuery);
     if (match === null) return { hits: [], truncated: false };
 
+    // Refresh first when a transcript changed since the last build, so a ranked
+    // search sees new sessions without a manual `reindex`. A failed refresh (a
+    // busy or read-only db, a vanished dir) must not turn an answerable query
+    // into an error: serve what the index has.
+    try {
+      this.refreshIfStale();
+    } catch {
+      /* keep the existing snapshot */
+    }
+
     const where = ['records MATCH ?'];
     const params: Array<string | number> = [match];
 
@@ -348,7 +447,7 @@ export class SearchIndex {
 
     const limit = Math.min(Math.max(1, opts.limit ?? 50), 200);
     const sql =
-      `SELECT sessionId, eventId, kind, ts, ` +
+      `SELECT sessionId, eventId, kind, ts, file, ` +
       `snippet(records, 0, '', '', '…', 24) AS snip ` +
       `FROM records WHERE ${where.join(' AND ')} ` +
       `ORDER BY bm25(records) LIMIT ?`;
@@ -362,6 +461,7 @@ export class SearchIndex {
       kind: r.kind ?? '',
       ts: r.ts ?? '',
       snippet: (r.snip ?? '').replace(/\s+/g, ' ').trim().slice(0, SNIPPET_MAX),
+      ...(isArchivedFileKey(r.file ?? '') ? { archived: true as const } : {}),
     }));
     return { hits, truncated };
   }
