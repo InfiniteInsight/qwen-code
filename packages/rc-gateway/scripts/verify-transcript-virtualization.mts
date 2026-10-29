@@ -22540,6 +22540,77 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  PAGE_SCENARIOS.push({
+    name: 'P302 the More rows and the status line take Enter and Space, and the arrow keys, Home and End move between More rows, at 390 and 1100',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      const focused = (): Promise<string> =>
+        page.evaluate(`(() => { const a = document.activeElement; return a && a.dataset && a.dataset.panel ? a.dataset.panel : (a ? a.id || a.tagName : ''); })()`) as Promise<string>;
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        // The status line is a button: Enter and Space open the sheet and shut it.
+        await page.focus('#h1-status');
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        expect(await page.isVisible('#h1-sheet'), `${size.width}: Enter on the status line did not open the sheet`);
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        expect(!(await page.isVisible('#h1-sheet')), `${size.width}: a second Enter on the status line did not shut the sheet`);
+        await page.keyboard.press('Space');
+        await g177Settle(page);
+        expect(await page.isVisible('#h1-sheet'), `${size.width}: Space on the status line did not open the sheet`);
+        await page.keyboard.press('Space');
+        await g177Settle(page);
+        // More: the rows, in the order they are drawn.
+        await page.focus('#h1-more');
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        const rows = (await page.evaluate(
+          `Array.from(document.querySelectorAll('#more-screen .row')).filter((r) => r.getClientRects().length && !r.disabled).map((r) => r.dataset.panel)`,
+        )) as string[];
+        expect(rows.length >= 4, `${size.width}: only ${rows.length} visible More rows`);
+        expect((await focused()) === rows[0], `${size.width}: More opened with focus on ${await focused()}, not ${rows[0]}`);
+        await page.keyboard.press('ArrowDown');
+        expect((await focused()) === rows[1], `${size.width}: ArrowDown moved focus to ${await focused()}, not ${rows[1]}`);
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('ArrowUp');
+        expect((await focused()) === rows[1], `${size.width}: ArrowUp moved focus to ${await focused()}, not ${rows[1]}`);
+        await page.keyboard.press('End');
+        expect((await focused()) === rows[rows.length - 1], `${size.width}: End moved focus to ${await focused()}, not ${rows[rows.length - 1]}`);
+        await page.keyboard.press('ArrowDown');
+        expect((await focused()) === rows[rows.length - 1], `${size.width}: ArrowDown past the last row moved focus to ${await focused()}`);
+        await page.keyboard.press('Home');
+        expect((await focused()) === rows[0], `${size.width}: Home moved focus to ${await focused()}, not ${rows[0]}`);
+        await shot(page, `p302-more-${size.width}`);
+        // Enter opens the row's panel, Escape comes back onto the row, Space opens it again.
+        await page.keyboard.press('ArrowDown');
+        const second = rows[1]!;
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        expect(
+          await page.evaluate(`openPanelKey`) === second && (await page.isVisible('#panel-screen')),
+          `${size.width}: Enter on the ${second} row did not open its panel`,
+        );
+        await page.keyboard.press('Escape');
+        await g177Settle(page);
+        expect((await focused()) === second, `${size.width}: Escape from the panel left focus on ${await focused()}, not the ${second} row`);
+        await page.keyboard.press('Space');
+        await g177Settle(page);
+        expect(
+          await page.evaluate(`openPanelKey`) === second && (await page.isVisible('#panel-screen')),
+          `${size.width}: Space on the ${second} row did not open its panel`,
+        );
+        await page.keyboard.press('Escape');
+        await closeMore(page);
+        lines.push(`${size.width}: ${rows.length} rows, Enter/Space/arrows/Home/End`);
+      }
+      return lines.join('; ');
+    },
+  });
+
 }
 
 
