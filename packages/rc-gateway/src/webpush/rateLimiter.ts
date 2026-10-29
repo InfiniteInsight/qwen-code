@@ -7,6 +7,16 @@
 /** Default per-subscription push cap when a subscription sets no `maxPerHour`. */
 export const DEFAULT_MAX_PER_HOUR = 30;
 
+/**
+ * Per-subscription hourly reserve for critical kinds (#169). Once the shared
+ * `maxPerHour` budget is spent, a critical push (a permission prompt, a dead or
+ * crashed session) spends this reserve instead of being dropped, so 30 turn
+ * endings can no longer silence a `permission.required` for an hour. Small on
+ * purpose: it is a floor for the pushes that need a human, not a second budget
+ * a runaway loop can drain into the device.
+ */
+export const CRITICAL_RESERVE_PER_HOUR = 10;
+
 const HOUR_MS = 3_600_000;
 
 interface SubWindow {
@@ -38,6 +48,8 @@ export interface RateLimitResult {
  */
 export class PushRateLimiter {
   private readonly subs = new Map<string, SubWindow>();
+  /** Critical-kind reserve windows, spent only once the shared cap is full. */
+  private readonly reserve = new Map<string, SubWindow>();
 
   /**
    * Record a send if the subscription is under `maxPerHour` within the rolling
@@ -50,22 +62,31 @@ export class PushRateLimiter {
     maxPerHour: number,
     nowMs: number,
   ): RateLimitResult {
-    const cutoff = nowMs - HOUR_MS;
-    const entry = this.subs.get(subId) ?? { hits: [], dropping: false };
-    // Prune instants that have aged out of the rolling window.
-    entry.hits = entry.hits.filter((t) => t > cutoff);
+    return take(this.subs, subId, maxPerHour, nowMs);
+  }
 
-    if (entry.hits.length >= maxPerHour) {
-      const firstDrop = !entry.dropping;
-      entry.dropping = true;
-      this.subs.set(subId, entry);
-      return { allowed: false, firstDrop };
+  /**
+   * {@link tryConsume} for a critical kind. While the subscription is under its
+   * shared `maxPerHour` it spends that budget, exactly as before. Once the
+   * shared cap is full it spends the separate `reserve` window instead, so the
+   * critical push bypasses the cap but is still capped itself. `firstDrop` then
+   * marks the transition into an exhausted RESERVE. A spill into the reserve
+   * leaves the shared window's drop state alone, so the next ordinary drop
+   * still audits as the transition it is.
+   */
+  tryConsumeCritical(
+    subId: string,
+    maxPerHour: number,
+    reservePerHour: number,
+    nowMs: number,
+  ): RateLimitResult {
+    const shared = pruned(this.subs, subId, nowMs);
+    if (shared.hits.length < maxPerHour) {
+      shared.hits.push(nowMs);
+      shared.dropping = false;
+      return { allowed: true, firstDrop: false };
     }
-
-    entry.hits.push(nowMs);
-    entry.dropping = false;
-    this.subs.set(subId, entry);
-    return { allowed: true, firstDrop: false };
+    return take(this.reserve, subId, reservePerHour, nowMs);
   }
 
   /**
@@ -81,8 +102,41 @@ export class PushRateLimiter {
     return Math.max(0, maxPerHour - live);
   }
 
-  /** Forget a subscription's window (e.g. on unsubscribe). */
+  /** Forget a subscription's windows, reserve included (e.g. on unsubscribe). */
   forget(subId: string): void {
     this.subs.delete(subId);
+    this.reserve.delete(subId);
   }
+}
+
+/** The subscription's window in `map`, pruned to the hour ending at `nowMs`. */
+function pruned(
+  map: Map<string, SubWindow>,
+  subId: string,
+  nowMs: number,
+): SubWindow {
+  const cutoff = nowMs - HOUR_MS;
+  const entry = map.get(subId) ?? { hits: [], dropping: false };
+  // Prune instants that have aged out of the rolling window.
+  entry.hits = entry.hits.filter((t) => t > cutoff);
+  map.set(subId, entry);
+  return entry;
+}
+
+/** Count a send against `map`'s window if it is under `cap`. */
+function take(
+  map: Map<string, SubWindow>,
+  subId: string,
+  cap: number,
+  nowMs: number,
+): RateLimitResult {
+  const entry = pruned(map, subId, nowMs);
+  if (entry.hits.length >= cap) {
+    const firstDrop = !entry.dropping;
+    entry.dropping = true;
+    return { allowed: false, firstDrop };
+  }
+  entry.hits.push(nowMs);
+  entry.dropping = false;
+  return { allowed: true, firstDrop: false };
 }

@@ -13,8 +13,16 @@ import { TokenStore } from '../tokenStore.js';
 import { PushStore } from '../pushStore.js';
 import { VapidStore } from './vapid.js';
 import { PushSender, type PushTransport } from './sender.js';
-import { PushNotifier, type ApnsNotifier } from './notifier.js';
-import { PushRateLimiter } from './rateLimiter.js';
+import {
+  PushNotifier,
+  RATE_LIMIT_CRITICAL_KINDS,
+  type ApnsNotifier,
+} from './notifier.js';
+import {
+  PushRateLimiter,
+  DEFAULT_MAX_PER_HOUR,
+  CRITICAL_RESERVE_PER_HOUR,
+} from './rateLimiter.js';
 import { PushCoalescer } from './coalescer.js';
 import { PushDigest } from './digest.js';
 import type { PushPayload } from './payload.js';
@@ -1091,6 +1099,9 @@ describe('PushNotifier rate limit (cycle 46)', () => {
     type: 'permission_request',
     data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r' },
   };
+  // A non-critical kind: it has no reserve, so the shared cap is the whole
+  // story for it (#169 gave the critical kinds their own reserve).
+  const TURN = { type: 'prompt_completed', data: {} };
   const NOW = new Date(1_000_000);
 
   it('drops sends past maxPerHour and audits push_rate_limited ONCE (firstDrop)', async () => {
@@ -1112,17 +1123,80 @@ describe('PushNotifier rate limit (cycle 46)', () => {
       rl,
     );
 
-    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // sent
-    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // dropped (transition)
-    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // dropped (no re-audit)
+    await notifier.notify(TURN, { sessionId: 's1' }, NOW); // sent
+    await notifier.notify(TURN, { sessionId: 's1' }, NOW); // dropped (transition)
+    await notifier.notify(TURN, { sessionId: 's1' }, NOW); // dropped (no re-audit)
 
     expect(sent).toHaveLength(1);
     const limited = audit.calls.filter((c) => c.action === 'push_rate_limited');
     expect(limited).toHaveLength(1); // only the transition audits
     expect(limited[0].detail).toMatchObject({
       subscriptionId: sub.id,
+      kind: 'session.turn_complete',
+    });
+  });
+
+  it('critical kinds bypass an exhausted cap through their own small reserve (#169)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const rl = new PushRateLimiter();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      rl,
+    );
+    // 30 turn endings fill the default hourly cap...
+    for (let i = 0; i < DEFAULT_MAX_PER_HOUR + 1; i++) {
+      await notifier.notify(TURN, { sessionId: 's1' }, NOW);
+    }
+    expect(sent).toHaveLength(DEFAULT_MAX_PER_HOUR);
+    // ...but a permission prompt and a crashed turn still reach the device.
+    await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+    await notifier.notify(
+      { type: 'session_interrupted', data: { recovered: false } },
+      { sessionId: 's1' },
+      NOW,
+    );
+    expect(sent.slice(-2).map((s) => s.payload.kind)).toEqual([
+      'permission.required',
+      'session.interrupted',
+    ]);
+    // The reserve is itself capped, and its exhaustion audits once.
+    for (let i = 0; i < CRITICAL_RESERVE_PER_HOUR + 3; i++) {
+      await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+    }
+    expect(sent).toHaveLength(DEFAULT_MAX_PER_HOUR + CRITICAL_RESERVE_PER_HOUR);
+    const reserveDrops = audit.calls.filter(
+      (c) =>
+        c.action === 'push_rate_limited' &&
+        (c.detail as Record<string, unknown>)?.reserve === 'critical',
+    );
+    expect(reserveDrops).toHaveLength(1);
+    expect(reserveDrops[0].detail).toMatchObject({
+      subscriptionId: sub.id,
       kind: 'permission.required',
     });
+  });
+
+  it('every kind the notifier treats as critical gets the reserve', () => {
+    for (const k of [
+      'permission.required',
+      'session.died',
+      'policy.deny',
+      'session.interrupted',
+    ]) {
+      expect([k, RATE_LIMIT_CRITICAL_KINDS.has(k)]).toEqual([k, true]);
+    }
+    expect(RATE_LIMIT_CRITICAL_KINDS.has('session.turn_complete')).toBe(false);
+    expect(RATE_LIMIT_CRITICAL_KINDS.has('agent.blocked')).toBe(false);
   });
 
   it('with NO limiter wired there is no cap (back-compat)', async () => {
@@ -1181,7 +1255,7 @@ describe('PushNotifier rate limit (cycle 46)', () => {
       rl,
     );
     for (let i = 0; i < 31; i++) {
-      await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+      await notifier.notify(TURN, { sessionId: 's1' }, NOW);
     }
     expect(sent).toHaveLength(30); // the default cap
   });

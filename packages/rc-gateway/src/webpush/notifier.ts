@@ -23,7 +23,11 @@ import {
   buildDigestPayload,
   type PushPayload,
 } from './payload.js';
-import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
+import {
+  type PushRateLimiter,
+  DEFAULT_MAX_PER_HOUR,
+  CRITICAL_RESERVE_PER_HOUR,
+} from './rateLimiter.js';
 import type { PushCoalescer } from './coalescer.js';
 import type { PushDigest, DigestSummary } from './digest.js';
 import { QuietDigestWatcher } from './quietDigestWatcher.js';
@@ -58,6 +62,19 @@ export const SNOOZE_BYPASS_KINDS = new Set([
 export const QUIET_HOURS_BYPASS_KINDS = new Set([
   ...SNOOZE_BYPASS_KINDS,
   'session.interrupted',
+]);
+
+/**
+ * Kinds that bypass an exhausted per-subscription rate limit through their own
+ * small reserve (`CRITICAL_RESERVE_PER_HOUR`, #169): every kind that bypasses
+ * quiet hours, plus `permission.required`, which a human must answer and which
+ * 30 turn endings used to silence for the rest of the hour. `agent.blocked`
+ * stays out for the same reason it left the snooze bypass (#166): the
+ * permission prompt behind it already gets the reserve.
+ */
+export const RATE_LIMIT_CRITICAL_KINDS = new Set([
+  'permission.required',
+  ...QUIET_HOURS_BYPASS_KINDS,
 ]);
 
 /**
@@ -460,17 +477,28 @@ export class PushNotifier {
             typeof r.maxPerHour === 'number' && r.maxPerHour > 0
               ? r.maxPerHour
               : DEFAULT_MAX_PER_HOUR;
-          const { allowed, firstDrop } = this.rateLimiter.tryConsume(
-            r.id,
-            cap,
-            now.getTime(),
-          );
+          // Critical kinds spill into their own small reserve once the shared
+          // cap is spent, so a burst of turn endings cannot silence a
+          // permission prompt or a dead session for the rest of the hour.
+          const critical = RATE_LIMIT_CRITICAL_KINDS.has(payload.kind);
+          const { allowed, firstDrop } = critical
+            ? this.rateLimiter.tryConsumeCritical(
+                r.id,
+                cap,
+                CRITICAL_RESERVE_PER_HOUR,
+                now.getTime(),
+              )
+            : this.rateLimiter.tryConsume(r.id, cap, now.getTime());
           if (!allowed) {
             if (firstDrop) {
               void this.audit?.record({
                 action: 'push_rate_limited',
                 target: ctx.sessionId,
-                detail: { kind: payload.kind, subscriptionId: r.id },
+                detail: {
+                  kind: payload.kind,
+                  subscriptionId: r.id,
+                  ...(critical ? { reserve: 'critical' } : {}),
+                },
               });
             }
             return;
