@@ -18,6 +18,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { TokenStore } from './tokenStore.js';
 import { createGatewayApp } from './server.js';
+import { PairingService } from './pairing.js';
 import type { UiPrefsStore } from './uiPrefsStore.js';
 
 const ALLOWED_ORIGIN = 'https://app.example.com';
@@ -122,7 +123,11 @@ describe('createGatewayApp error backstop', () => {
     const url = await boot();
     const res = await fetch(`${url}/session/x/prompt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: ALLOWED_ORIGIN },
+      headers: {
+        Authorization: `Bearer ${ownerToken}`,
+        'Content-Type': 'application/json',
+        Origin: ALLOWED_ORIGIN,
+      },
       body: '{"oops":',
       signal: AbortSignal.timeout(3000),
     });
@@ -135,9 +140,132 @@ describe('createGatewayApp error backstop', () => {
     });
     expect(text).not.toContain('SyntaxError');
     expect(text).not.toMatch(STACK_FRAME);
-    // The JSON parser runs before the CORS middleware; the backstop still
-    // stamps the headers so the browser sees the 400 rather than a CORS error.
+    // The CORS headers are on the 400, so the browser sees it rather than a
+    // CORS error.
     expect(res.headers.get('access-control-allow-origin')).toBe(ALLOWED_ORIGIN);
+  });
+
+  // #163: the JSON parser used to run ahead of bearerResolve, so anyone could
+  // make the gateway parse a body, and a malformed one was answered (400)
+  // without ever being asked who was sending it.
+  it('never parses an unauthenticated body: malformed or oversized, it is a 401', async () => {
+    const url = await boot();
+    const malformed = await fetch(`${url}/session/x/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"oops":',
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(malformed.status).toBe(401);
+    expect(await malformed.json()).toEqual({
+      error: 'Unauthorized',
+      code: 'unauthorized',
+    });
+    // Over the parser's limit: a parser that ran would answer 413 first.
+    const oversized = await fetch(`${url}/session/x/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pad: 'x'.repeat(200 * 1024) }),
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(oversized.status).toBe(401);
+  });
+
+  it('answers JSON without a stack whatever NODE_ENV says', async () => {
+    const prior = process.env['NODE_ENV'];
+    process.env['NODE_ENV'] = 'development';
+    try {
+      const url = await boot();
+      const res = await fetch(`${url}/session/x/prompt`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ownerToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{"oops":',
+        signal: AbortSignal.timeout(3000),
+      });
+      expect(res.status).toBe(400);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        error: 'invalid_json',
+        code: 'invalid_json',
+      });
+      expect(text).not.toMatch(STACK_FRAME);
+      expect(text).not.toContain(dir);
+    } finally {
+      if (prior === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = prior;
+    }
+  });
+
+  it('still parses the pairing redeem body, whose code is the credential', async () => {
+    const url = await boot({ pairing: new PairingService() });
+    const res = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'not-a-code', label: 'x' }),
+      signal: AbortSignal.timeout(3000),
+    });
+    // The route read the body and refused the code itself.
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'invalid_pairing_code',
+    );
+  });
+
+  it('parses a hook-ingest body only for the holder of the ingest token', async () => {
+    const url = await boot({ hookIngest: { ingestToken: 'ingest-secret' } });
+    const stranger = await fetch(`${url}/rc/hooks/ingest`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer wrong',
+        'Content-Type': 'application/json',
+      },
+      body: '{"oops":',
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(stranger.status).toBe(401);
+
+    const holderMalformed = await fetch(`${url}/rc/hooks/ingest`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ingest-secret',
+        'Content-Type': 'application/json',
+      },
+      body: '{"oops":',
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(holderMalformed.status).toBe(400);
+    expect(await holderMalformed.json()).toEqual({
+      error: 'invalid_json',
+      code: 'invalid_json',
+    });
+
+    const holder = await fetch(`${url}/rc/hooks/ingest`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ingest-secret',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ event: 'PreToolUse' }),
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(holder.status).toBe(202);
+  });
+
+  it('does not parse a host-attach body for a caller without the host token', async () => {
+    const url = await boot({ hostAttach: { token: 'host-secret' } });
+    const res = await fetch(`${url}/rc/host/attach`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${ownerToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{"oops":',
+      signal: AbortSignal.timeout(3000),
+    });
+    expect(res.status).toBe(401);
   });
 
   it('keeps the status of a client error raised by middleware', async () => {
