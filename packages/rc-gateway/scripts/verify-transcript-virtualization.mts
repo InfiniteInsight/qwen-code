@@ -23691,6 +23691,38 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P320 the folder filter counts move while its menu is open, without shutting it or moving focus',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const rows: Record<string, H190Row[]> = {
+      '/p320': [{ sessionId: '32000000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now }],
+    };
+    await h190ListFixture(page, rows, { '/p320': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p320'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await openList(page);
+    await page.click('#list-folder');
+    const read = () =>
+      page.evaluate(`({
+        open: !document.getElementById('list-folders').hidden,
+        counts: Array.from(document.querySelectorAll('#list-folders .n')).map((e) => e.textContent),
+        focus: document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.folder : null,
+      })`) as Promise<{ open: boolean; counts: string[]; focus: string | null }>;
+    const before = await read();
+    rows['/p320'] = rows['/p320']!.concat([{ sessionId: '32000000-0000-0000-0000-000000000002', title: 'two', updatedAt: h190Now }]);
+    await page.evaluate(`refreshPastConversations('/p320')`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`);
+    const after = await read();
+    expect(before.open && after.open, `the menu shut (${JSON.stringify({ before, after })})`);
+    expect(before.counts.join(',') === '1,1' && after.counts.join(',') === '2,2', `the counts read ${before.counts} then ${after.counts}`);
+    expect(after.focus === before.focus, `focus moved from ${before.focus} to ${after.focus}`);
+    await page.keyboard.press('Escape');
+    return `counts ${before.counts} became ${after.counts} with the menu open and focus kept`;
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

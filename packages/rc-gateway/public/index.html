@@ -14824,6 +14824,26 @@
           preventScroll: true,
         });
       }
+      // #190. A poll that lands while the menu is open moves its counts in
+      // place, keeping the items and the focus where they are.
+      function syncFolderMenuCounts() {
+        if (!folderMenuShown()) return;
+        for (const b of folderMenuEl.querySelectorAll('[role="menuitemradio"]')) {
+          const cwd = b.dataset.folder || '';
+          const held = pastConvos.filter(
+            (s) => s && (cwd === '' || s.cwd === cwd),
+          ).length;
+          const n = b.querySelector('.n');
+          if (n && n.textContent !== String(held)) n.textContent = String(held);
+          b.setAttribute(
+            'aria-label',
+            (cwd ? shortFolder(cwd) : 'All folders') +
+              ', ' +
+              held +
+              (held === 1 ? ' conversation' : ' conversations'),
+          );
+        }
+      }
       // Hung under the folder line and as wide as it less 8px a side, which
       // in the pane layout is the pane's width, so it never spills over the
       // chat beside it.
@@ -14928,6 +14948,7 @@
         // #119: fed from this same poll rather than its own, so the list
         // cannot drift from what the folder holds.
         renderList();
+        syncFolderMenuCounts(); // #190
         // Archived (n) belongs to the folders: read again for these if the
         // list is up to show it, else marked unknown until it opens.
         archivedCountFollows();
