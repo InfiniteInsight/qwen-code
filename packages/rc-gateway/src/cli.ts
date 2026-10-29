@@ -93,6 +93,10 @@ import { loadOrCreateHookIngestToken } from './agents/hookIngestToken.js';
 import { loadOrCreateLocalToken } from './localCredential.js';
 import { hostAttachTokenPath } from './hostAttachClient.js';
 import {
+  HostAttachedWorkspaces,
+  defaultHostAttachedWorkspacesPath,
+} from './hostAttachedWorkspaces.js';
+import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
   loadRateTableFile,
@@ -931,6 +935,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     },
     hookIngest: { ingestToken: hookIngestToken },
     hostAttach: { token: hostAttachToken },
+    // #194 slice D: the folders `qwen-rc attach` used, beside the request log,
+    // so the phone's list includes conversations started from a terminal.
+    hostAttachedWorkspaces: HostAttachedWorkspaces.open(
+      defaultHostAttachedWorkspacesPath(homedir()),
+    ),
   });
   // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
   // app's audit recorder (constructed inside createGatewayApp, so the pool

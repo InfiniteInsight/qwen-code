@@ -203,7 +203,8 @@ import { createSessionLiveStateRoute } from './routes/sessionLiveState.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
-import { RECENT_WORKSPACES_CAP } from './terminals.js';
+import { RECENT_WORKSPACES_CAP, mergeRecentWorkspaces } from './terminals.js';
+import type { HostAttachedWorkspaces } from './hostAttachedWorkspaces.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
 import { createSessionWorktreeResetRoute } from './routes/sessionWorktreeReset.js';
 import {
@@ -460,6 +461,14 @@ export interface GatewayDeps {
   hostAttach?: {
     token: string;
   };
+  /**
+   * The workspaces `qwen-rc attach` has used (#194 slice D). The host attach
+   * routes note each one here, and `GET /rc/sessions` merges them with the
+   * request log's workspaces, so a conversation started from a terminal in a
+   * folder the phone never used is listed. Omitted: the listing reads the
+   * request log alone, as before.
+   */
+  hostAttachedWorkspaces?: HostAttachedWorkspaces;
   /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
   workflows?: {
     runsDir?: string;
@@ -733,6 +742,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       token: deps.hostAttach.token,
       audit,
       planOpts: { qwenArgv: deps.terminalQwenArgv },
+      attachedWorkspaces: deps.hostAttachedWorkspaces,
     });
     app.post('/rc/host/attach', hostAttach.create);
     app.post('/rc/host/attach/:sessionId', hostAttach.attach);
@@ -1459,13 +1469,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       // the pool's idle reaping, which reading the live pool would not be. An
       // explicit `?cwd` stays confined to that one workspace, since that is what
       // the per-workspace views ask for.
+      // #194 slice D: the host-attach record joins the request log here, so a
+      // conversation started by `qwen-rc attach` in a folder no phone has
+      // opened is listed too. Merged newest first under one cap; the request
+      // log itself is never written for this, since the launcher would open a
+      // tab for the line.
       async (req) => {
         const q = req.query.cwd;
         if (typeof q === 'string' && q.length > 0) return [];
-        return (
-          (await deps.terminalRequests?.recentWorkspaces(
+        const [fromTerminals, fromAttach] = await Promise.all([
+          deps.terminalRequests?.recentWorkspaceEntries(
             RECENT_WORKSPACES_CAP,
-          )) ?? []
+          ) ?? [],
+          deps.hostAttachedWorkspaces?.read() ?? [],
+        ]);
+        return mergeRecentWorkspaces(
+          [fromTerminals, fromAttach],
+          RECENT_WORKSPACES_CAP,
         );
       },
     ),

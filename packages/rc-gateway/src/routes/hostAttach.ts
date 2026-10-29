@@ -33,6 +33,12 @@ export interface HostAttachDeps {
   audit?: AuditRecorder;
   /** The same options the terminals route gets (`QWEN_RC_TERMINAL_QWEN`). */
   planOpts?: TerminalPlanOptions;
+  /**
+   * Where each successful attach notes its workspace, so the phone's session
+   * listing widens to it (hostAttachedWorkspaces.ts). Never the request log:
+   * the launcher opens a tab for every line in that.
+   */
+  attachedWorkspaces?: { record(cwd: string): Promise<void> };
 }
 
 /** How the session in a 200 was reached. */
@@ -91,6 +97,11 @@ export interface HostAttachRoutes {
  * home dir as this user. That was already true of the request log, which the
  * Windows launcher reads.
  *
+ * Folder list: every 200 notes `workspaceCwd` in the host-attach record, which
+ * the session listing merges with the request log's workspaces, so a
+ * conversation started in a folder the phone never used still shows there.
+ * Refusals note nothing.
+ *
  * Audit: one row per call. `host_attach_rejected` with the gate's reason, or
  * `host_attached` with `outcome`, the session id as `target` when there is a
  * valid one, and `via` (or the failing step plus its code). Never a path,
@@ -137,14 +148,19 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
     res.status(status).json({ error, code });
   };
 
-  /** Answer the attach material for a session the pool now tracks. */
-  const answer = (
+  /**
+   * Answer the attach material for a session the pool now tracks, after
+   * noting its workspace for the session listing. The note is best effort: a
+   * record that cannot be written costs the listing one folder, never the
+   * attach.
+   */
+  const answer = async (
     res: Response,
     step: Step,
     via: Via,
     sessionId: string,
     endpoint: DaemonEndpoint | undefined,
-  ): void => {
+  ): Promise<void> => {
     if (!endpoint?.token) {
       // Reachable in attach mode (the gateway did not mint the daemon's token)
       // and for a daemon registered without endpoint material; mirrors the
@@ -168,6 +184,11 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       },
       deps.planOpts,
     );
+    try {
+      await deps.attachedWorkspaces?.record(endpoint.workspaceCwd);
+    } catch {
+      // See above: the listing loses a folder, the terminal still attaches.
+    }
     void audit?.record({
       action: 'host_attached',
       target: sessionId,
@@ -278,7 +299,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       );
       return;
     }
-    answer(res, 'create', 'created', sessionId, endpoint);
+    await answer(res, 'create', 'created', sessionId, endpoint);
   };
 
   const attach: RequestHandler = async (req, res) => {
@@ -323,7 +344,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       tracked = false;
     }
     if (tracked) {
-      answer(res, 'attach', 'pooled', sessionId, pooled);
+      await answer(res, 'attach', 'pooled', sessionId, pooled);
       return;
     }
 
@@ -383,7 +404,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       );
       return;
     }
-    answer(res, 'resume', 'resumed', sessionId, endpoint);
+    await answer(res, 'resume', 'resumed', sessionId, endpoint);
   };
 
   return { create, attach };

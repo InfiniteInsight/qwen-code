@@ -32,6 +32,8 @@ import { TokenStore } from '../tokenStore.js';
 import { PairingService } from '../pairing.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from '../scopes.js';
 import type { SessionDaemon } from '../daemonPool.js';
+import { HostAttachedWorkspaces } from '../hostAttachedWorkspaces.js';
+import { resolveChatsDir } from '../sessions/chatsPath.js';
 
 const TOKEN = 'host-attach-token-1';
 const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -521,46 +523,57 @@ describe('POST /rc/host/attach/:sessionId (attach by id)', () => {
   });
 });
 
-describe('mounted in the gateway app', () => {
-  /**
-   * The whole app, so the mount order is what is under test: the routes sit
-   * before bearerResolve, which means the host-attach token works there and
-   * nowhere else, and a phone's owner token does not work there.
-   */
-  async function bootApp(withHostAttach: boolean) {
-    const { daemon } = fakePool();
-    const fullDaemon = {
-      ...(daemon as object),
-      capabilities: async () => ({ v: 1, mode: 'http-bridge', features: [] }),
-    } as unknown as SessionDaemon;
-    const store = await TokenStore.open(join(dir, 'tokens.json'));
-    const pairing = new PairingService();
-    const { app } = createGatewayApp({
-      daemon: fullDaemon,
-      store,
-      pairing,
-      auditPath: join(dir, 'audit.log'),
-      commandsUserDir: join(dir, 'user-commands'),
-      terminalQwenArgv: QWEN,
-      ...(withHostAttach ? { hostAttach: { token: TOKEN } } : {}),
-    });
-    const server: Server = await new Promise((resolve) => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s));
-    });
-    gateway = server;
-    const { port } = server.address() as AddressInfo;
-    const url = `http://127.0.0.1:${port}`;
-    const { code } = pairing.mint([OWNER, SESSION_READ, APPROVE, WRITE]);
-    const owner = (await (
-      await fetch(`${url}/rc/pair/redeem`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, label: 'phone' }),
-      })
-    ).json()) as { token: string };
-    return { url, ownerToken: owner.token };
-  }
+/**
+ * The whole app, so the mount order is what is under test: the routes sit
+ * before bearerResolve, which means the host-attach token works there and
+ * nowhere else, and a phone's owner token does not work there.
+ */
+async function bootApp(
+  withHostAttach: boolean,
+  attachedWorkspaces?: HostAttachedWorkspaces,
+) {
+  const { daemon } = fakePool();
+  const fullDaemon = {
+    ...(daemon as object),
+    capabilities: async () => ({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      workspaceCwd: join(dir, 'boot'),
+    }),
+  } as unknown as SessionDaemon;
+  const store = await TokenStore.open(join(dir, 'tokens.json'));
+  const pairing = new PairingService();
+  const { app } = createGatewayApp({
+    daemon: fullDaemon,
+    store,
+    pairing,
+    auditPath: join(dir, 'audit.log'),
+    commandsUserDir: join(dir, 'user-commands'),
+    terminalQwenArgv: QWEN,
+    ...(withHostAttach ? { hostAttach: { token: TOKEN } } : {}),
+    ...(attachedWorkspaces
+      ? { hostAttachedWorkspaces: attachedWorkspaces }
+      : {}),
+  });
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  gateway = server;
+  const { port } = server.address() as AddressInfo;
+  const url = `http://127.0.0.1:${port}`;
+  const { code } = pairing.mint([OWNER, SESSION_READ, APPROVE, WRITE]);
+  const owner = (await (
+    await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'phone' }),
+    })
+  ).json()) as { token: string };
+  return { url, ownerToken: owner.token };
+}
 
+describe('mounted in the gateway app', () => {
   it('lets the host-attach token through and refuses a phone owner token', async () => {
     const { url, ownerToken } = await bootApp(true);
     const ok = await post(url, '/rc/host/attach', { cwd: workspace });
@@ -605,5 +618,169 @@ describe('mounted in the gateway app', () => {
       })
     ).json()) as { remoteControl: { hostAttach?: boolean } };
     expect(caps.remoteControl.hostAttach).toBe(false);
+  });
+});
+
+describe('the attached-workspaces record', () => {
+  function fakeRecorder(fail = false) {
+    const calls: string[] = [];
+    return {
+      calls,
+      record: async (cwd: string) => {
+        calls.push(cwd);
+        if (fail) throw new Error('EACCES');
+      },
+    };
+  }
+
+  it('notes the canonical workspace on each of created, pooled and resumed', async () => {
+    const rec = fakeRecorder();
+    const canonical = {
+      url: 'http://127.0.0.1:46135',
+      token: 'daemon-secret',
+      workspaceCwd: '/canonical/proj',
+    };
+    const OTHER = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const { daemon } = fakePool({ known: [OTHER], endpoint: () => canonical });
+    const { url } = await mount(daemon, { attachedWorkspaces: rec });
+    const created = await post(url, '/rc/host/attach', { cwd: workspace });
+    const pooled = await post(url, `/rc/host/attach/${OTHER}`, {});
+    const resumed = await post(
+      url,
+      '/rc/host/attach/cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee',
+      { cwd: workspace },
+    );
+    expect([created.body.via, pooled.body.via, resumed.body.via]).toEqual([
+      'created',
+      'pooled',
+      'resumed',
+    ]);
+    expect(rec.calls).toEqual([
+      '/canonical/proj',
+      '/canonical/proj',
+      '/canonical/proj',
+    ]);
+  });
+
+  it('notes nothing on any refusal', async () => {
+    const rec = fakeRecorder();
+    const file = join(dir, 'a-file');
+    await writeFile(file, 'x');
+    const { daemon } = fakePool();
+    const { url } = await mount(daemon, { attachedWorkspaces: rec });
+    const statuses = [
+      (
+        await post(
+          url,
+          '/rc/host/attach',
+          { cwd: workspace },
+          { headers: REMOTE_PEER },
+        )
+      ).status,
+      (
+        await post(
+          url,
+          '/rc/host/attach',
+          { cwd: workspace },
+          { token: 'wrong' },
+        )
+      ).status,
+      (await post(url, '/rc/host/attach', {})).status,
+      (await post(url, '/rc/host/attach', { cwd: file })).status,
+      (await post(url, `/rc/host/attach/${SESSION}`, {})).status,
+      (await post(url, '/rc/host/attach/not-a-session', { cwd: workspace }))
+        .status,
+    ];
+    expect(statuses).toEqual([403, 401, 400, 400, 400, 404]);
+
+    // The daemon-side refusals too: no token, unknown session, daemon down.
+    const remount = async (d: HostAttachDaemon) => {
+      await new Promise<void>((r) => gateway!.close(() => r()));
+      gateway = undefined;
+      return (await mount(d, { attachedWorkspaces: rec })).url;
+    };
+    let u = await remount(
+      fakePool({
+        endpoint: () => ({
+          url: 'http://127.0.0.1:1',
+          token: undefined,
+          workspaceCwd: workspace,
+        }),
+      }).daemon,
+    );
+    expect((await post(u, '/rc/host/attach', { cwd: workspace })).status).toBe(
+      409,
+    );
+    expect(
+      (await post(u, `/rc/host/attach/${SESSION}`, { cwd: workspace })).status,
+    ).toBe(409);
+    u = await remount(
+      fakePool({
+        resume: async () => {
+          throw Object.assign(new Error('nope'), { status: 404 });
+        },
+      }).daemon,
+    );
+    expect(
+      (await post(u, `/rc/host/attach/${SESSION}`, { cwd: workspace })).status,
+    ).toBe(404);
+    u = await remount(
+      fakePool({
+        create: async () => {
+          throw new Error('ECONNREFUSED');
+        },
+      }).daemon,
+    );
+    expect((await post(u, '/rc/host/attach', { cwd: workspace })).status).toBe(
+      502,
+    );
+    expect(rec.calls).toEqual([]);
+  });
+
+  it('still attaches when the record cannot be written', async () => {
+    const rec = fakeRecorder(true);
+    const { daemon } = fakePool();
+    const { url } = await mount(daemon, { attachedWorkspaces: rec });
+    const res = await post(url, '/rc/host/attach', { cwd: workspace });
+    expect(res.status).toBe(200);
+    expect(rec.calls).toEqual([workspace]);
+  });
+
+  it('puts a terminal-born conversation in a never-used folder into the phone list', async () => {
+    const runtimeBase = join(dir, 'runtime');
+    const prior = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = runtimeBase;
+    try {
+      // The conversation's transcript lives under the attached folder only.
+      const chats = resolveChatsDir(workspace);
+      await mkdir(chats, { recursive: true });
+      await writeFile(
+        join(chats, `${SESSION}.jsonl`),
+        `${JSON.stringify({ sessionId: SESSION, type: 'user' })}\n`,
+      );
+      const store = HostAttachedWorkspaces.open(
+        join(dir, 'rc', 'host-attached-workspaces.json'),
+      );
+      const { url, ownerToken } = await bootApp(true, store);
+      const list = async () =>
+        (
+          (await (
+            await fetch(`${url}/rc/sessions`, {
+              headers: { Authorization: `Bearer ${ownerToken}` },
+            })
+          ).json()) as { sessions: Array<{ sessionId: string }> }
+        ).sessions.map((x) => x.sessionId);
+
+      expect(await list()).not.toContain(SESSION);
+      const res = await post(url, '/rc/host/attach', { cwd: workspace });
+      expect(res.status).toBe(200);
+      expect(await store.read()).toEqual([
+        { cwd: workspace, at: expect.any(Number) },
+      ]);
+      expect(await list()).toContain(SESSION);
+    } finally {
+      if (prior === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = prior;
+    }
   });
 });
