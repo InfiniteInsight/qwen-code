@@ -64,7 +64,11 @@ import {
   resolveDaemonBin,
   validateQwenBinPath,
 } from './daemonBin.js';
-import { DaemonPool, type PooledDaemonSpawn } from './daemonPool.js';
+import {
+  DaemonPool,
+  type DaemonPoolOptions,
+  type PooledDaemonSpawn,
+} from './daemonPool.js';
 import { getFreePort } from './freePort.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
@@ -718,6 +722,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const daemonPool = new DaemonPool({
     defaultDaemon: handle.daemon,
     defaultWorkspaceCwd,
+    // #203: attach mode never replaces the terminal's daemon with one of the
+    // gateway's own; see bootDaemonPoolOptions.
+    ...bootDaemonPoolOptions(handle),
     // Host-terminal material (issue #49): the boot daemon's own endpoint, so a
     // conversation on the default workspace can be opened in a host terminal.
     defaultEndpoint: {
@@ -2041,6 +2048,22 @@ export async function stopBootOwnedDaemon(timeoutMs = 5000): Promise<boolean> {
     }
   }
   return true;
+}
+
+/**
+ * The daemon-pool options that follow from how the boot daemon was reached
+ * (#203). In attach mode the default workspace's daemon is the terminal's
+ * `qwen serve`, shared rather than owned, so the pool must not replace it
+ * with a `qwen serve` of its own when it goes away: that would move the
+ * phone's conversations onto a second daemon the terminal never sees, both
+ * writing the same workspace. The loss is reported instead, and the pool
+ * picks the terminal's daemon up again once it answers. A daemon this
+ * gateway spawned keeps the respawn #163 added.
+ */
+export function bootDaemonPoolOptions(
+  handle: Pick<DaemonHandle, 'attached' | 'stop'>,
+): Pick<DaemonPoolOptions, 'respawnDefaultDaemon'> {
+  return { respawnDefaultDaemon: !handle.attached };
 }
 
 /**

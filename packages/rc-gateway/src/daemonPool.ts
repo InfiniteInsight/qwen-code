@@ -621,8 +621,24 @@ export interface SessionDaemon {
 export interface DaemonPoolOptions {
   /** The boot daemon, already running, used when a create omits cwd. The
    * pool never stops it. Once it dies, the default workspace is served by a
-   * replacement from `spawn(defaultWorkspaceCwd)` instead (#163). */
+   * replacement from `spawn(defaultWorkspaceCwd)` instead (#163), unless
+   * `respawnDefaultDaemon` is false. */
   defaultDaemon: DaemonClient;
+  /**
+   * Whether a dead default daemon is replaced by one the pool spawns
+   * (`spawn(defaultWorkspaceCwd)`). Default true.
+   *
+   * False is for attach mode (#203), where the default daemon is a terminal's
+   * `qwen serve` the gateway only shares. A gateway-owned replacement there
+   * would carry the phone's conversations away from the terminal they were
+   * shared with, onto a second daemon writing the same workspace. So with this
+   * off, losing that daemon is reported instead: the `daemon_died` row names
+   * the reason, the recovery saga finds nothing to resume on, and every call
+   * for the default workspace fails with {@link DefaultDaemonUnavailableError}
+   * until the external daemon answers `/health` again, at which point the
+   * pool serves the default workspace from it once more.
+   */
+  respawnDefaultDaemon?: boolean;
   defaultWorkspaceCwd: string;
   /** Endpoint of the boot daemon, used for terminal requests against the
    * default workspace (issue #49). Absent → those requests are refused. */
@@ -704,6 +720,29 @@ export function isGoneSessionError(err: unknown): boolean {
     err instanceof UnknownSessionError ||
     (err as { status?: unknown } | undefined)?.status === 404
   );
+}
+
+/** The `reason` a lost attached daemon is reported under (#203). */
+export const ATTACHED_DAEMON_UNREACHABLE = 'attached_daemon_unreachable';
+
+/**
+ * Thrown for a call that needs the default workspace's daemon while the daemon
+ * the gateway attached to is gone and does not answer, when the pool was told
+ * not to replace it (`respawnDefaultDaemon: false`, attach mode, #203). Routes
+ * map it like any other daemon failure (502 `daemon_unavailable`), and the
+ * capability route reports the daemon `available: false`. The recovery saga
+ * gets it from its respawn attempt and records `reason` on every session it
+ * could not bring back.
+ */
+export class DefaultDaemonUnavailableError extends Error {
+  readonly reason = ATTACHED_DAEMON_UNREACHABLE;
+  constructor() {
+    super(
+      'The attached daemon serving the default workspace is unreachable, ' +
+        'and this gateway does not start one of its own in attach mode',
+    );
+    this.name = 'DefaultDaemonUnavailableError';
+  }
 }
 
 /** Thrown when `getOrSpawn` needs to spawn a daemon for a new workspace but
@@ -804,14 +843,23 @@ export class DaemonPool implements SessionDaemon {
    * it gets its own record, so `dead` is the idempotency guard for THAT
    * daemon's death and a replacement starts clean. A single pool-wide flag
    * used to latch on the first death and swallow every later one.
+   *
+   * With `respawnDefaultDaemon` off (attach mode, #203) nothing replaces the
+   * boot daemon: it is re-attached under a fresh record once it answers
+   * again (see `reattachDefaultEntry`).
    */
   private defaultEntry: Entry;
   /** The boot daemon's own record, kept so its exit (`handleDaemonExit`)
-   * can only ever mark the boot daemon dead, never a replacement. */
-  private readonly bootEntry: Entry;
-  /** The in-flight respawn of the default workspace's daemon, shared by
-   * every caller that finds the current one dead. */
+   * can only ever mark the boot daemon dead, never a replacement. Replaced
+   * by a fresh record when the boot daemon is re-attached (#203), because
+   * that record serves the same process. */
+  private bootEntry: Entry;
+  /** The in-flight respawn (or, in attach mode, re-attach) of the default
+   * workspace's daemon, shared by every caller that finds the current one
+   * dead. */
   private defaultSpawning: Promise<Entry> | undefined;
+  /** `opts.respawnDefaultDaemon`, defaulted (#203). */
+  private readonly respawnDefault: boolean;
 
   /** Wire the audit recorder in (add-mid-turn-recovery: `daemon_died`
    * rows). Called by cli.ts after the gateway app is constructed. */
@@ -839,6 +887,7 @@ export class DaemonPool implements SessionDaemon {
     this.maxDaemons = opts.maxDaemons ?? DEFAULT_MAX_DAEMONS;
     this.idleReapMs = opts.idleReapMs ?? DEFAULT_IDLE_REAP_MS;
     this.probeTimeoutMs = opts.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    this.respawnDefault = opts.respawnDefaultDaemon ?? true;
     this.defaultWorkspaceCwd = this.normalizeCwd(opts.defaultWorkspaceCwd);
     this.bootEntry = this.newEntry({
       client: opts.defaultDaemon,
@@ -917,25 +966,15 @@ export class DaemonPool implements SessionDaemon {
   }
 
   /** The default workspace's daemon, or the respawn that replaces it when
-   * the current one is dead (#163). Concurrent callers share one respawn. */
+   * the current one is dead (#163). Concurrent callers share one respawn.
+   * In attach mode (#203) the "respawn" is a re-attach to the same external
+   * daemon, which fails while that daemon does not answer. */
   private liveDefaultEntry(): Entry | Promise<Entry> {
     if (!this.defaultEntry.dead) return this.defaultEntry;
     if (this.defaultSpawning) return this.defaultSpawning;
-    const key = this.defaultWorkspaceCwd;
-    const p = (async () => {
-      const s = await this.opts.spawn(key);
-      const entry = this.newEntry(s);
-      if (this.stopped) {
-        // Same reason as the pooled spawn below: nothing would stop it later.
-        await s.stop().catch(() => {});
-        return entry;
-      }
-      // Identity-guarded like a pooled entry: a late exit of this daemon
-      // after it, too, was replaced cannot kill its successor.
-      s.onExit = (info) => this.markDead(key, info, entry);
-      this.defaultEntry = entry;
-      return entry;
-    })();
+    const p = this.respawnDefault
+      ? this.respawnDefaultEntry()
+      : this.reattachDefaultEntry();
     this.defaultSpawning = p;
     // Cleared as a reaction rather than in a `finally` inside the closure, so
     // it can never run before the assignment above, and a failed respawn is
@@ -945,6 +984,55 @@ export class DaemonPool implements SessionDaemon {
     };
     p.then(clear, clear);
     return p;
+  }
+
+  /** Spawn a gateway-owned replacement for the dead default daemon (#163). */
+  private async respawnDefaultEntry(): Promise<Entry> {
+    const key = this.defaultWorkspaceCwd;
+    const s = await this.opts.spawn(key);
+    const entry = this.newEntry(s);
+    if (this.stopped) {
+      // Same reason as the pooled spawn below: nothing would stop it later.
+      await s.stop().catch(() => {});
+      return entry;
+    }
+    // Identity-guarded like a pooled entry: a late exit of this daemon
+    // after it, too, was replaced cannot kill its successor.
+    s.onExit = (info) => this.markDead(key, info, entry);
+    this.defaultEntry = entry;
+    return entry;
+  }
+
+  /**
+   * Attach mode (#203): serve the default workspace from the external daemon
+   * again, never from one of the pool's own. One `/health` question, bounded
+   * by `probeTimeoutMs`: an answer re-attaches it under a fresh record (so a
+   * later loss is reported like the first), and anything else is
+   * {@link DefaultDaemonUnavailableError}. A daemon that comes back on the
+   * same URL and token is therefore picked up by the next call, and a death
+   * that turns out to have been a false alarm resumes its sessions in place
+   * when the recovery saga asks.
+   */
+  private async reattachDefaultEntry(): Promise<Entry> {
+    const client = this.opts.defaultDaemon;
+    const answers = await settleWithin(
+      (async () => {
+        await client.health();
+        return true;
+      })(),
+      this.probeTimeoutMs,
+      false,
+    );
+    if (!answers) throw new DefaultDaemonUnavailableError();
+    const entry = this.newEntry({
+      client,
+      stop: this.bootEntry.stop,
+      endpoint: this.opts.defaultEndpoint,
+    });
+    if (this.stopped) return entry;
+    this.bootEntry = entry;
+    this.defaultEntry = entry;
+    return entry;
   }
 
   /** `getOrSpawn`, answering with the entry itself so a caller can mark
@@ -1238,7 +1326,8 @@ export class DaemonPool implements SessionDaemon {
    *   them via `resumeSession`),
    * - writes ONE `daemon_died` audit row — detail
    *   `{ exitCode, signal, sessionCount }`, no workspace path (the
-   *   session-create/resume audit rule),
+   *   session-create/resume audit rule), plus `reason` when the dead daemon
+   *   is an attached one nothing will replace (#203),
    * - hands the affected list to `opts.onDaemonDeath` (the recovery
    *   orchestrator; absent → the sessions are simply dropped, 404s as
    *   today — the audit row is still written).
@@ -1283,6 +1372,11 @@ export class DaemonPool implements SessionDaemon {
           exitCode: exit.code,
           signal: exit.signal,
           sessionCount: affected.size,
+          // Attach mode (#203): nothing will replace this daemon, so the row
+          // says why its sessions are not coming back.
+          ...(isDefaultKey && !this.respawnDefault
+            ? { reason: ATTACHED_DAEMON_UNREACHABLE }
+            : {}),
         },
       })
       .catch(() => {});

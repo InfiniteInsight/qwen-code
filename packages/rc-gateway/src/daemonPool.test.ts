@@ -7,13 +7,17 @@
 import { describe, it, expect } from 'vitest';
 import {
   DaemonPool,
+  DefaultDaemonUnavailableError,
   UnknownSessionError,
   WorkspacePoolFullError,
   type DaemonExitInfo,
   type PooledDaemonSpawn,
 } from './daemonPool.js';
 import type { AuditEntry } from './auditLog.js';
-import { RecoveryOrchestrator } from './recovery/orchestrator.js';
+import {
+  RecoveryOrchestrator,
+  createReportOutcome,
+} from './recovery/orchestrator.js';
 import type { DaemonClient, DaemonEvent } from '@qwen-code/sdk';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 
@@ -907,6 +911,8 @@ function makeDeathHarness(
     defaultClient?: unknown;
     /** Records every pooled daemon `stop()` by cwd. */
     stopped?: string[];
+    /** Passed through to the pool (#203: attach mode passes false). */
+    respawnDefaultDaemon?: boolean;
   } = {},
 ): DeathHarness {
   const exits: ExitHandle[] = [];
@@ -916,6 +922,9 @@ function makeDeathHarness(
     defaultDaemon: (opts.defaultClient ??
       fakeClient('default')) as DaemonClient,
     defaultWorkspaceCwd: '/home/evan',
+    ...(opts.respawnDefaultDaemon !== undefined
+      ? { respawnDefaultDaemon: opts.respawnDefaultDaemon }
+      : {}),
     maxDaemons: opts.maxDaemons,
     idleReapMs: opts.idleReapMs ?? 999_999_999,
     now: opts.now,
@@ -1447,6 +1456,148 @@ describe('DaemonPool boot daemon death (#163)', () => {
     const ok = (await h.pool.health()) as unknown as { calledOn: string };
     expect(ok.calledOn).toBe('/home/evan');
     expect(attempts).toBe(2);
+  });
+});
+
+// -- Attach mode: the default daemon is someone else's (#203) ------------
+// A gateway started with --attach-daemon shares the terminal's `qwen serve`.
+// When that daemon goes away, starting a gateway-owned replacement would fork
+// the conversations away from the terminal, so the loss is reported instead.
+
+describe('DaemonPool attach mode: no respawn of the default daemon (#203)', () => {
+  it('audits the loss, starts no daemon of its own, and reports the default workspace down', async () => {
+    const dead = { value: false };
+    const h = makeDeathHarness({
+      defaultClient: bootClient(dead),
+      respawnDefaultDaemon: false,
+    });
+    const s = await h.pool.createOrAttachSession({});
+    dead.value = true;
+    // The loss is seen on a call: attach mode has no child exit to watch.
+    await expect(h.pool.capabilities()).rejects.toThrow(/fetch failed/);
+
+    expect(h.deaths).toHaveLength(1);
+    expect(h.deaths[0].key).toBe('/home/evan');
+    expect(h.deaths[0].sessions).toEqual([s.sessionId]);
+    expect(h.auditRows).toEqual([
+      {
+        action: 'daemon_died',
+        detail: {
+          exitCode: null,
+          signal: null,
+          sessionCount: 1,
+          reason: 'attached_daemon_unreachable',
+        },
+      },
+    ]);
+
+    await expect(h.pool.health()).rejects.toBeInstanceOf(
+      DefaultDaemonUnavailableError,
+    );
+    await expect(h.pool.capabilities()).rejects.toBeInstanceOf(
+      DefaultDaemonUnavailableError,
+    );
+    await expect(h.pool.createOrAttachSession({})).rejects.toBeInstanceOf(
+      DefaultDaemonUnavailableError,
+    );
+    const err = await h.pool.health().catch((e: unknown) => e);
+    expect((err as DefaultDaemonUnavailableError).reason).toBe(
+      'attached_daemon_unreachable',
+    );
+    // No gateway-owned `qwen serve` for the default workspace, ever.
+    expect(h.exits).toEqual([]);
+    // Other workspaces are still the pool's to spawn, as before.
+    await h.pool.getOrSpawn('/proj/a');
+    expect(h.exits.map((e) => e.cwd)).toEqual(['/proj/a']);
+  });
+
+  it('the recovery saga marks the default sessions unrecoverable and says why', async () => {
+    const dead = { value: false };
+    const h = makeDeathHarness({
+      defaultClient: bootClient(dead),
+      respawnDefaultDaemon: false,
+    });
+    const sessionRows: AuditEntry[] = [];
+    const orchestrator = new RecoveryOrchestrator({
+      pool: h.pool,
+      promptQueue: { isInFlight: () => false },
+      reportOutcome: createReportOutcome({
+        audit: {
+          record: async (e) => {
+            sessionRows.push(e);
+          },
+        },
+      }),
+    });
+    h.pool.setRecoveryProvider(orchestrator);
+    const sagas: Array<Promise<void>> = [];
+    h.pool.setOnDaemonDeath((key, sessions, exit) => {
+      sagas.push(orchestrator.recover(key, sessions, exit));
+    });
+    const s = await h.pool.createOrAttachSession({});
+    dead.value = true;
+    await expect(h.pool.sessionContext(s.sessionId)).rejects.toThrow(
+      /fetch failed/,
+    );
+    await Promise.all(sagas);
+
+    expect(h.pool.recoveryState(s.sessionId)).toBe('unrecoverable');
+    expect(sessionRows).toEqual([
+      {
+        action: 'session_interrupted',
+        target: s.sessionId,
+        outcome: 'failed',
+        detail: {
+          recovered: false,
+          hadInFlightTurn: false,
+          reason: 'attached_daemon_unreachable',
+        },
+      },
+    ]);
+    expect(h.exits).toEqual([]);
+  });
+
+  it('serves the default workspace from the external daemon again once it answers, and never replaces it', async () => {
+    const dead = { value: false };
+    const h = makeDeathHarness({
+      defaultClient: bootClient(dead),
+      respawnDefaultDaemon: false,
+    });
+    await h.pool.createOrAttachSession({});
+    dead.value = true;
+    await expect(h.pool.capabilities()).rejects.toThrow(/fetch failed/);
+    await expect(h.pool.health()).rejects.toBeInstanceOf(
+      DefaultDaemonUnavailableError,
+    );
+
+    // The terminal's daemon is back on the same URL and token.
+    dead.value = false;
+    const health = (await h.pool.health()) as unknown as { calledOn: string };
+    expect(health.calledOn).toBe('default');
+    const again = await h.pool.createOrAttachSession({});
+    expect(again.sessionId).toBe('boot-s');
+    expect(h.exits).toEqual([]);
+
+    // A second loss is reported like the first.
+    dead.value = true;
+    await expect(h.pool.sessionContext(again.sessionId)).rejects.toThrow(
+      /fetch failed/,
+    );
+    expect(h.deaths).toHaveLength(2);
+    expect(h.deaths[1].sessions).toEqual([again.sessionId]);
+  });
+
+  it('respawn stays on when the option is omitted (the spawn-mode default)', async () => {
+    const dead = { value: true };
+    const h = makeDeathHarness({ defaultClient: bootClient(dead) });
+    h.pool.handleDaemonExit('/home/evan', { code: 1, signal: null });
+    const health = (await h.pool.health()) as unknown as { calledOn: string };
+    expect(health.calledOn).toBe('/home/evan');
+    expect(h.auditRows[0].detail).toEqual({
+      exitCode: 1,
+      signal: null,
+      sessionCount: 0,
+    });
   });
 });
 
