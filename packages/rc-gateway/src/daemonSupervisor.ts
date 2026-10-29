@@ -67,6 +67,12 @@ export interface StartDaemonOptions {
    * process cwd (the boot daemon's default, unchanged).
    */
   workspaceCwd?: string;
+  /**
+   * The gateway's own `--max-attachment-bytes`. Handed to the spawned daemon
+   * as `QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES` so one flag controls the whole
+   * upload path. Unset leaves whatever the daemon would inherit untouched.
+   */
+  maxAttachmentBytes?: number;
 }
 
 export interface DaemonHandle {
@@ -116,12 +122,32 @@ export function buildServeArgs(port: number, workspaceCwd?: string): string[] {
   return args;
 }
 
+/**
+ * The environment a spawned daemon runs with: the gateway's own, the daemon
+ * token, and (when the gateway has a configured attachment limit) that limit
+ * as the daemon's per-attachment cap.
+ */
+export function buildDaemonEnv(
+  base: NodeJS.ProcessEnv,
+  token: string,
+  maxAttachmentBytes?: number,
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    QWEN_SERVER_TOKEN: token,
+    ...(maxAttachmentBytes !== undefined
+      ? { QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES: String(maxAttachmentBytes) }
+      : {}),
+  };
+}
+
 /** Default spawner: launch `qwen serve` on loopback with QWEN_SERVER_TOKEN. */
 function defaultSpawner(
   token: string,
   qwenBin: string,
   port: number,
   workspaceCwd?: string,
+  maxAttachmentBytes?: number,
 ): SpawnedDaemon {
   // Ephemeral-port (0) read-back from the daemon's stdout is not implemented;
   // polling http://127.0.0.1:0 would never connect. Fail loudly instead of
@@ -144,7 +170,7 @@ function defaultSpawner(
   // daemon, which reparents to init and survives. Group-kill reaches both. We do
   // NOT `unref()` — we keep tracking the child.
   const spawnOpts: SpawnOptions = {
-    env: { ...process.env, QWEN_SERVER_TOKEN: token },
+    env: buildDaemonEnv(process.env, token, maxAttachmentBytes),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
     ...(workspaceCwd && { cwd: workspaceCwd }),
@@ -269,6 +295,7 @@ export async function startDaemon(
           opts.qwenBin ?? 'qwen',
           port,
           opts.workspaceCwd,
+          opts.maxAttachmentBytes,
         );
     daemon = new DaemonClient({
       baseUrl: spawned.baseUrl,

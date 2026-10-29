@@ -170,6 +170,11 @@ export interface DaemonCapabilitiesLimits {
   sessionRestoreTimeoutMs?: number;
   /** Present when `workspace_file_upload` is advertised. */
   maxWorkspaceFileUploadBytes?: number;
+  /**
+   * Present when `session_attachments` is advertised: the per-attachment byte
+   * cap in force. Older daemons omit it and enforce 8 MiB.
+   */
+  maxSessionAttachmentItemBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {

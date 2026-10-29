@@ -60,6 +60,8 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import {
   SESSION_ATTACHMENT_CHUNK_BYTES,
   SessionAttachmentUploadError,
+  formatSessionAttachmentLimit,
+  getSessionAttachmentMaxItemBytes,
 } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   CHANNEL_PROMPT_META_KEY,
@@ -7779,7 +7781,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/attachments',
     mutate(),
-    express.raw({ type: '*/*', limit: '8mb' }),
+    express.raw({ type: '*/*', limit: getSessionAttachmentMaxItemBytes() }),
     ((error, _req, res, next) => {
       if (
         error &&
@@ -7787,7 +7789,9 @@ export function registerSessionRoutes(
         'status' in error &&
         error.status === 413
       ) {
-        res.status(413).json({ error: 'Request body too large (max 8 MiB)' });
+        res.status(413).json({
+          error: `Request body too large (max ${formatSessionAttachmentLimit(getSessionAttachmentMaxItemBytes())})`,
+        });
         return;
       }
       next(error);

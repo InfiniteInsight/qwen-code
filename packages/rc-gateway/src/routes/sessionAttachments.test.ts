@@ -21,6 +21,7 @@ import {
   DEFAULT_MAX_ATTACHMENT_BYTES,
   MAX_CONFIGURABLE_ATTACHMENT_BYTES,
   effectiveAttachmentLimit,
+  createAttachmentLimitResolver,
   gateJsonBody,
   createRawAttachmentBody,
   parseMaxAttachmentBytes,
@@ -46,7 +47,7 @@ afterEach(async () => {
 async function mountGateway(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
-  maxBytes: number = DAEMON_ATTACHMENT_ITEM_BYTES,
+  maxBytes: number | (() => Promise<number>) = DAEMON_ATTACHMENT_ITEM_BYTES,
 ): Promise<string> {
   const app = express();
   app.use(gateJsonBody(express.json()));
@@ -730,5 +731,125 @@ describe('effectiveAttachmentLimit', () => {
     expect(effectiveAttachmentLimit(MAX_CONFIGURABLE_ATTACHMENT_BYTES)).toBe(
       DAEMON_ATTACHMENT_ITEM_BYTES,
     );
+  });
+});
+
+describe('effectiveAttachmentLimit follows the daemon-advertised cap', () => {
+  const MIB = 1024 * 1024;
+
+  it('holds the configured limit to the cap the daemon advertises', () => {
+    expect(effectiveAttachmentLimit(undefined, 32 * MIB)).toBe(
+      DEFAULT_MAX_ATTACHMENT_BYTES,
+    );
+    expect(effectiveAttachmentLimit(64 * MIB, 32 * MIB)).toBe(32 * MIB);
+    expect(effectiveAttachmentLimit(undefined, 2 * MIB)).toBe(2 * MIB);
+    expect(effectiveAttachmentLimit(1000, 32 * MIB)).toBe(1000);
+  });
+
+  it('falls back to 8 MiB when the daemon advertises nothing usable', () => {
+    for (const bad of [undefined, 0, -1, Number.NaN, 1.5]) {
+      expect(effectiveAttachmentLimit(64 * MIB, bad)).toBe(8 * MIB);
+    }
+  });
+});
+
+describe('createAttachmentLimitResolver', () => {
+  const MIB = 1024 * 1024;
+  const caps = (cap?: number) =>
+    ({
+      features: [],
+      ...(cap === undefined
+        ? {}
+        : { limits: { maxSessionAttachmentItemBytes: cap } }),
+    }) as never;
+
+  it('reads the cap from the daemon capabilities and caches it', async () => {
+    let calls = 0;
+    const resolve = createAttachmentLimitResolver(64 * MIB, async () => {
+      calls += 1;
+      return caps(32 * MIB);
+    });
+    expect(await resolve()).toBe(32 * MIB);
+    expect(await resolve()).toBe(32 * MIB);
+    expect(calls).toBe(1);
+  });
+
+  it('re-reads after the cache expires, so a restarted daemon is followed', async () => {
+    let now = 0;
+    let cap = 16 * MIB;
+    const resolve = createAttachmentLimitResolver(
+      64 * MIB,
+      async () => caps(cap),
+      { ttlMs: 1000, now: () => now },
+    );
+    expect(await resolve()).toBe(16 * MIB);
+    cap = 24 * MIB;
+    now = 999;
+    expect(await resolve()).toBe(16 * MIB);
+    now = 1001;
+    expect(await resolve()).toBe(24 * MIB);
+  });
+
+  it('uses 8 MiB for an old daemon that advertises nothing', async () => {
+    const resolve = createAttachmentLimitResolver(64 * MIB, async () => caps());
+    expect(await resolve()).toBe(8 * MIB);
+  });
+
+  it('keeps the last known cap when a later read fails, and uses 8 MiB if there never was one', async () => {
+    let now = 0;
+    let fail = false;
+    const resolve = createAttachmentLimitResolver(
+      64 * MIB,
+      async () => {
+        if (fail) throw new Error('down');
+        return caps(32 * MIB);
+      },
+      { ttlMs: 10, now: () => now },
+    );
+    expect(await resolve()).toBe(32 * MIB);
+    fail = true;
+    now = 100;
+    expect(await resolve()).toBe(32 * MIB);
+
+    const never = createAttachmentLimitResolver(64 * MIB, async () => {
+      throw new Error('down');
+    });
+    expect(await never()).toBe(8 * MIB);
+  });
+});
+
+describe('createRawAttachmentBody with a resolved limit', () => {
+  it('accepts a body above 8 MiB when the resolver reports a larger cap', async () => {
+    const fake = fakeDaemon();
+    const base = await mountGateway(
+      fake.daemon,
+      undefined,
+      (async () => 12 * 1024 * 1024) as never,
+    );
+    const res = await postRaw(
+      base,
+      '/session/s-1/attachments?name=photo.jpg',
+      new Uint8Array(9 * 1024 * 1024),
+      'image/jpeg',
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it('refuses above the resolved cap and names that number', async () => {
+    const fake = fakeDaemon();
+    const base = await mountGateway(
+      fake.daemon,
+      undefined,
+      (async () => 1000) as never,
+    );
+    const res = await postRaw(
+      base,
+      '/session/s-1/attachments?name=a.bin',
+      new Uint8Array(1001),
+      'application/octet-stream',
+    );
+    expect(res.status).toBe(413);
+    expect(String(res.body['error'])).toContain('1000');
+    expect(fake.calls.filter((c) => c['kind'] === 'upload')).toHaveLength(0);
   });
 });

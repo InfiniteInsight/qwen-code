@@ -5,6 +5,7 @@
  */
 
 import type { Application } from 'express';
+import { getSessionAttachmentMaxItemBytes } from '@qwen-code/acp-bridge/sessionAttachments';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   getServeProtocolVersions,
@@ -129,6 +130,11 @@ export function registerCapabilitiesRoutes(
         sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
         ...(features.includes('workspace_file_upload')
           ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
+        ...(features.includes('session_attachments')
+          ? {
+              maxSessionAttachmentItemBytes: getSessionAttachmentMaxItemBytes(),
+            }
           : {}),
         ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
           ? {

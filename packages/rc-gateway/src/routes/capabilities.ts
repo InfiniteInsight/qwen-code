@@ -79,9 +79,10 @@ export function createCapabilityRoute(deps: {
   /**
    * The upload size limit the attachment route enforces (#196), so the page
    * can shrink an image to fit before sending it. Omitted when not wired; the
-   * page then assumes the old 8 MiB.
+   * page then assumes the old 8 MiB. A function is read per request, because
+   * the enforced number follows the cap the daemon advertises.
    */
-  maxAttachmentBytes?: number;
+  maxAttachmentBytes?: number | (() => Promise<number>);
   /** Read of the daemon's own `/capabilities` envelope (see #96). */
   daemonStatus?: () => Promise<DaemonCapabilities>;
   /** Test seam for the daemon read's bound. */
@@ -123,8 +124,13 @@ export function createCapabilityRoute(deps: {
       // it, which the boot wiring always does.
       hostAttach: deps.hostAttach === true,
       // #196: the largest upload `POST /session/:id/attachments` accepts.
-      ...(typeof deps.maxAttachmentBytes === 'number'
-        ? { maxAttachmentBytes: deps.maxAttachmentBytes }
+      ...(deps.maxAttachmentBytes !== undefined
+        ? {
+            maxAttachmentBytes:
+              typeof deps.maxAttachmentBytes === 'number'
+                ? deps.maxAttachmentBytes
+                : await deps.maxAttachmentBytes(),
+          }
         : {}),
     };
     if (deps.costTracking) {

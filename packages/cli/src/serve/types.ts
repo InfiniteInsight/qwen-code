@@ -560,6 +560,12 @@ export interface CapabilitiesEnvelope {
     sessionRestoreTimeoutMs?: number;
     /** Present when `workspace_file_upload` is advertised. */
     maxWorkspaceFileUploadBytes?: number;
+    /**
+     * Present when `session_attachments` is advertised: the per-attachment
+     * byte cap in force (`QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES`). Older
+     * daemons omit it and enforce 8 MiB.
+     */
+    maxSessionAttachmentItemBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

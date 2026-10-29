@@ -446,6 +446,23 @@ const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const CAPABILITY_PREFLIGHT_TTL_MS = 60_000;
+
+/**
+ * The daemon's staged-upload budget: no single attachment can exceed it, so it
+ * is the ceiling used while the daemon's own per-item cap is not yet known.
+ */
+const SESSION_ATTACHMENT_STAGED_BUDGET_BYTES = 128 * 1024 * 1024;
+
+interface AttachmentCapabilities {
+  chunked: boolean;
+  /** `limits.maxSessionAttachmentItemBytes`; absent on older daemons. */
+  maxItemBytes?: number;
+}
+
+function formatAttachmentLimit(bytes: number): string {
+  const mib = 1024 * 1024;
+  return bytes % mib === 0 ? `${bytes / mib} MiB` : `${bytes} bytes`;
+}
 // Provider mutations persist before their bounded runtime sync. A default
 // client deadline could report failure while the daemon still completes it.
 const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
@@ -858,8 +875,10 @@ export class DaemonClient {
   private cachedSessionRestoreTimeoutMs: number | undefined;
   private capabilityFeatures?: { features: Set<string>; expiresAt: number };
   private capabilitiesRequest?: Promise<DaemonCapabilities>;
-  private attachmentCapabilities?: { chunked: boolean; expiresAt: number };
-  private attachmentCapabilitiesRequest?: Promise<boolean>;
+  private attachmentCapabilities?: AttachmentCapabilities & {
+    expiresAt: number;
+  };
+  private attachmentCapabilitiesRequest?: Promise<AttachmentCapabilities>;
   private attachmentCapabilitiesGeneration = 0;
   private activeAttachmentUploads = 0;
   private readonly attachmentUploadQueue: Array<() => void> = [];
@@ -4463,18 +4482,20 @@ export class DaemonClient {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonSessionAttachmentReference> {
     opts?.signal?.throwIfAborted();
-    if (data.size > 8 * 1024 * 1024) {
-      throw new RangeError('Session attachments must not exceed 8 MiB');
-    }
+    // Until the daemon has said what it enforces, the only ceiling known is
+    // the staged-upload budget; the daemon's own 413 stays authoritative.
+    const knownCap = this.freshAttachmentCapabilities()?.maxItemBytes;
+    this.assertAttachmentWithinCap(data.size, knownCap);
     if (data.size > 512 * 1024) {
-      let chunked: boolean;
+      let capabilities: AttachmentCapabilities;
       try {
-        chunked = await this.supportsAttachmentChunks(opts?.signal);
+        capabilities = await this.loadAttachmentCapabilities(opts?.signal);
       } catch (error) {
         opts?.signal?.throwIfAborted();
         throw new DaemonAttachmentUploadError(error);
       }
-      if (chunked)
+      this.assertAttachmentWithinCap(data.size, capabilities.maxItemBytes);
+      if (capabilities.chunked)
         return this.uploadAttachmentChunks(
           sessionId,
           data,
@@ -4514,16 +4535,28 @@ export class DaemonClient {
     );
   }
 
-  private async supportsAttachmentChunks(
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    signal?.throwIfAborted();
-    if (
-      this.attachmentCapabilities &&
+  private freshAttachmentCapabilities(): AttachmentCapabilities | undefined {
+    return this.attachmentCapabilities &&
       this.attachmentCapabilities.expiresAt > Date.now()
-    ) {
-      return this.attachmentCapabilities.chunked;
+      ? this.attachmentCapabilities
+      : undefined;
+  }
+
+  private assertAttachmentWithinCap(size: number, advertised?: number): void {
+    const cap = advertised ?? SESSION_ATTACHMENT_STAGED_BUDGET_BYTES;
+    if (size > cap) {
+      throw new RangeError(
+        `Session attachments must not exceed ${formatAttachmentLimit(cap)}`,
+      );
     }
+  }
+
+  private async loadAttachmentCapabilities(
+    signal?: AbortSignal,
+  ): Promise<AttachmentCapabilities> {
+    signal?.throwIfAborted();
+    const fresh = this.freshAttachmentCapabilities();
+    if (fresh) return fresh;
     if (!this.attachmentCapabilitiesRequest) {
       const generation = this.attachmentCapabilitiesGeneration;
       const request = this.fetchWithTimeout(
@@ -4546,13 +4579,27 @@ export class DaemonClient {
           const chunked = body.features.includes(
             'session_attachment_chunk_upload',
           );
+          const limits = (body as { limits?: unknown }).limits;
+          const advertised =
+            limits && typeof limits === 'object'
+              ? (limits as { maxSessionAttachmentItemBytes?: unknown })
+                  .maxSessionAttachmentItemBytes
+              : undefined;
+          const capabilities: AttachmentCapabilities = {
+            chunked,
+            ...(typeof advertised === 'number' &&
+            Number.isSafeInteger(advertised) &&
+            advertised > 0
+              ? { maxItemBytes: advertised }
+              : {}),
+          };
           if (generation === this.attachmentCapabilitiesGeneration) {
             this.attachmentCapabilities = {
-              chunked,
+              ...capabilities,
               expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
             };
           }
-          return chunked;
+          return capabilities;
         },
         undefined,
         'rest',

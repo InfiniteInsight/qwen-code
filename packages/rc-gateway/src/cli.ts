@@ -57,6 +57,8 @@ import { UiPrefsStore } from './uiPrefsStore.js';
 import { HostActions } from './hostActions.js';
 import {
   effectiveAttachmentLimit,
+  advertisedAttachmentCap,
+  DEFAULT_MAX_ATTACHMENT_BYTES,
   parseMaxAttachmentBytes,
   DAEMON_ATTACHMENT_ITEM_BYTES,
 } from './routes/sessionAttachments.js';
@@ -464,7 +466,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           token: opts.attachDaemonToken!,
         },
       })
-    : await startDaemon({ port: opts.daemonPort ?? 4180 });
+    : await startDaemon({
+        port: opts.daemonPort ?? 4180,
+        // #196: the gateway's own limit becomes the daemon's per-attachment
+        // cap, so one flag controls the whole upload path.
+        ...(opts.maxAttachmentBytes !== undefined
+          ? { maxAttachmentBytes: opts.maxAttachmentBytes }
+          : {}),
+      });
   if (handle.attached) {
     // eslint-disable-next-line no-console
     console.log(
@@ -506,17 +515,31 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // eslint-disable-next-line no-console
     (line) => console.log(line),
   );
-  // #196: say so once when the configured limit is held down to the daemon's
-  // per-file cap, so an operator who raised it is not left guessing.
-  if (
-    opts.maxAttachmentBytes !== undefined &&
-    effectiveAttachmentLimit(opts.maxAttachmentBytes) !==
-      opts.maxAttachmentBytes
-  ) {
-    // eslint-disable-next-line no-console
-    console.log(
-      `qwen-rc serve: attachment limit ${opts.maxAttachmentBytes} bytes is held to ${DAEMON_ATTACHMENT_ITEM_BYTES}, the daemon's per-file cap`,
+  // #196: say so once when the configured limit is held down to what the
+  // daemon accepts per file, with the real reason, so an operator who raised
+  // it is not left guessing. The read is best effort: a daemon that cannot be
+  // asked yet is simply not reported on.
+  try {
+    const daemonCaps = await handle.daemon.capabilities();
+    const wanted = opts.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+    const daemonCap = advertisedAttachmentCap(daemonCaps);
+    const enforced = effectiveAttachmentLimit(
+      opts.maxAttachmentBytes,
+      daemonCap,
     );
+    if (enforced < wanted) {
+      // eslint-disable-next-line no-console
+      console.log(
+        daemonCap === undefined
+          ? `qwen-rc serve: attachment limit ${wanted} bytes is held to ${enforced}: the daemon advertises no per-file cap, so it is treated as an older daemon that accepts ${DAEMON_ATTACHMENT_ITEM_BYTES} bytes`
+          : `qwen-rc serve: attachment limit ${wanted} bytes is held to ${enforced}: the daemon's per-file cap is ${daemonCap} bytes` +
+              (handle.attached
+                ? ' (attached daemon; raise QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES there)'
+                : ''),
+      );
+    }
+  } catch {
+    // The daemon is not answering yet; requests will read the cap themselves.
   }
   // Host-terminal requests (issue #49): the gateway is the only writer; the
   // Windows-side launcher app reads it and keeps its own cursor. Requests carry
@@ -631,7 +654,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // allocated loopback port instead of the fixed boot port.
     spawn: async (cwd) => {
       const port = await getFreePort();
-      const spawned = await startDaemon({ port, workspaceCwd: cwd });
+      const spawned = await startDaemon({
+        port,
+        workspaceCwd: cwd,
+        ...(opts.maxAttachmentBytes !== undefined
+          ? { maxAttachmentBytes: opts.maxAttachmentBytes }
+          : {}),
+      });
       const out: PooledDaemonSpawn = {
         client: spawned.daemon,
         stop: spawned.stop,

@@ -82,17 +82,29 @@ export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_CONFIGURABLE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 
 /**
- * The daemon's PER-FILE cap, which is a different number from the 100 MiB
- * per-session budget above. `DaemonClient.uploadSessionAttachment` throws a
- * `RangeError` above it (packages/sdk-typescript/src/daemon/DaemonClient.ts)
- * and the daemon's own store refuses it too
- * (`SESSION_ATTACHMENT_MAX_ITEM_BYTES`, packages/acp-bridge/src/
- * sessionAttachments.ts). The gateway cannot edit either, so a configured limit
- * above this would accept bytes that are then refused one layer down. The
- * effective limit is therefore the smaller of the two; when the daemon side is
- * raised, change this one constant.
+ * What a daemon that advertises no per-file cap is assumed to enforce: the
+ * 8 MiB that every daemon enforced before the cap became configurable
+ * (`limits.maxSessionAttachmentItemBytes` in its `/capabilities`). A current
+ * daemon states its real cap, so this is only the answer for an old one.
  */
 export const DAEMON_ATTACHMENT_ITEM_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The per-file cap a daemon advertises in its capabilities, or `undefined`
+ * when it advertises nothing usable. Read defensively: the envelope is the
+ * daemon's, and an old one has no such field.
+ */
+export function advertisedAttachmentCap(
+  capabilities: unknown,
+): number | undefined {
+  const limits = (capabilities as { limits?: unknown } | undefined)?.limits;
+  if (!limits || typeof limits !== 'object') return undefined;
+  const cap = (limits as { maxSessionAttachmentItemBytes?: unknown })
+    .maxSessionAttachmentItemBytes;
+  return typeof cap === 'number' && Number.isSafeInteger(cap) && cap > 0
+    ? cap
+    : undefined;
+}
 
 /**
  * Validates one `--max-attachment-bytes` / `QWEN_RC_MAX_ATTACHMENT_BYTES`
@@ -120,16 +132,63 @@ export function parseMaxAttachmentBytes(
 
 /**
  * The limit the route enforces and `/rc/capabilities` reports: the configured
- * one (default {@link DEFAULT_MAX_ATTACHMENT_BYTES}) held to what the daemon
- * will actually accept per file.
+ * one (default {@link DEFAULT_MAX_ATTACHMENT_BYTES}) held to the per-file cap
+ * the daemon advertises, or to {@link DAEMON_ATTACHMENT_ITEM_BYTES} when it
+ * advertises none (an old daemon).
  */
 export function effectiveAttachmentLimit(
   configured: number | undefined,
+  daemonCap?: number,
 ): number {
-  return Math.min(
-    configured ?? DEFAULT_MAX_ATTACHMENT_BYTES,
-    DAEMON_ATTACHMENT_ITEM_BYTES,
-  );
+  const cap =
+    typeof daemonCap === 'number' &&
+    Number.isSafeInteger(daemonCap) &&
+    daemonCap > 0
+      ? daemonCap
+      : DAEMON_ATTACHMENT_ITEM_BYTES;
+  return Math.min(configured ?? DEFAULT_MAX_ATTACHMENT_BYTES, cap);
+}
+
+/** How long a read of the daemon's advertised cap is trusted. */
+const ATTACHMENT_LIMIT_TTL_MS = 30_000;
+
+/**
+ * A function that answers "what is the enforced limit right now", following
+ * the cap the daemon advertises. The read is cached for a short while so an
+ * upload does not cost a round trip, and re-made after that so a daemon
+ * restarted with a different cap is followed without restarting the gateway.
+ * A failed read keeps the last cap seen; with none seen it answers the old
+ * 8 MiB, the one number every daemon has enforced.
+ */
+export function createAttachmentLimitResolver(
+  configured: number | undefined,
+  readDaemonCapabilities: () => Promise<unknown>,
+  opts: { ttlMs?: number; now?: () => number } = {},
+): () => Promise<number> {
+  const ttlMs = opts.ttlMs ?? ATTACHMENT_LIMIT_TTL_MS;
+  const now = opts.now ?? Date.now;
+  let known: { cap: number | undefined; at: number } | undefined;
+  let inflight: Promise<void> | undefined;
+  const refresh = (): Promise<void> => {
+    inflight ??= Promise.resolve()
+      .then(readDaemonCapabilities)
+      .then(
+        (caps) => {
+          known = { cap: advertisedAttachmentCap(caps), at: now() };
+        },
+        () => {
+          // Keep what was known; try again on the next request.
+        },
+      )
+      .finally(() => {
+        inflight = undefined;
+      });
+    return inflight;
+  };
+  return async () => {
+    if (!known || now() - known.at >= ttlMs) await refresh();
+    return effectiveAttachmentLimit(configured, known?.cap);
+  };
 }
 
 interface FsErrorBody {
@@ -222,10 +281,15 @@ export function gateJsonBody(json: RequestHandler): RequestHandler {
  * Express's default HTML error page, so they are answered in the envelope the
  * rest of this file uses.
  */
-function attachmentBodyGuard(maxBytes: number): ErrorRequestHandler {
+function attachmentBodyGuard(
+  fallbackBytes: number | undefined,
+): ErrorRequestHandler {
   return (err, _req, res, next) => {
     if (res.headersSent) return next(err);
     if ((err as { type?: unknown }).type === 'entity.too.large') {
+      const maxBytes =
+        (res.locals as { attachmentLimit?: number }).attachmentLimit ??
+        fallbackBytes;
       res.status(413).json({
         error: `Attachments must not exceed ${maxBytes} bytes`,
         code: 'attachment_too_large',
@@ -247,11 +311,30 @@ function attachmentBodyGuard(maxBytes: number): ErrorRequestHandler {
  * `/rc/capabilities` reports it, so the page can size an image to fit.
  */
 export function createRawAttachmentBody(
-  maxBytes: number = effectiveAttachmentLimit(undefined),
+  maxBytes: number | (() => Promise<number>) = effectiveAttachmentLimit(
+    undefined,
+  ),
 ): Array<RequestHandler | ErrorRequestHandler> {
+  const resolve =
+    typeof maxBytes === 'number' ? async () => maxBytes : maxBytes;
+  const parsers = new Map<number, RequestHandler>();
+  const raw: RequestHandler = (req, res, next) => {
+    resolve().then(
+      (limit) => {
+        (res.locals as { attachmentLimit?: number }).attachmentLimit = limit;
+        let parser = parsers.get(limit);
+        if (!parser) {
+          parser = express.raw({ type: () => true, limit });
+          parsers.set(limit, parser);
+        }
+        parser(req, res, next);
+      },
+      (err: unknown) => next(err),
+    );
+  };
   return [
-    express.raw({ type: () => true, limit: maxBytes }),
-    attachmentBodyGuard(maxBytes),
+    raw,
+    attachmentBodyGuard(typeof maxBytes === 'number' ? maxBytes : undefined),
   ];
 }
 
