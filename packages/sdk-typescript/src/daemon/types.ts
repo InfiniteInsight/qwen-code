@@ -4609,6 +4609,40 @@ export interface DaemonPendingPromptsResult {
   pendingPrompts: DaemonPendingPromptSummary[];
 }
 
+/**
+ * Answer of `GET /session/:id/turns/current` and
+ * `GET /session/:id/turns/:promptId`. Copied from the daemon's
+ * `BridgeTurnStatus` (packages/acp-bridge/src/bridgeTypes.ts), which the route
+ * sends as-is.
+ *
+ * `state` is `running` or `queued` for a live turn; the other states describe a
+ * turn that has ended. For the current route, `idle` (with no other field but
+ * `sessionId`) means the session has never run a turn. `startedAt`, `queuedAt`
+ * and `endedAt` are epoch milliseconds. The daemon reports no phase and no
+ * per-tool progress here: tool calls live in the transcript, not this record.
+ */
+export interface DaemonSessionTurnStatus {
+  sessionId: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error';
+  promptId?: string;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  queuedAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  stopReason?: string;
+  error?: {
+    message: string;
+    code?: string;
+    messageTruncated?: boolean;
+    codeTruncated?: boolean;
+  };
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: string;
+  originatorClientId?: string;
+}
+
 export interface DaemonRemovePendingPromptResult {
   removed: boolean;
 }
