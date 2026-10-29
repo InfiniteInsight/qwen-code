@@ -36,9 +36,11 @@ import type { OwnerEventBus } from '../ownerEvents.js';
 export const SNOOZE_BYPASS_KINDS = new Set([
   'session.died',
   'policy.deny',
-  // A blocked agent needs a human — quiet-hours/snooze bypass (design:
-  // "agent_blocked is a candidate critical kind").
-  'agent.blocked',
+  // `agent.blocked` is deliberately NOT here (issue #166). It once bypassed
+  // snooze and quiet hours as a "candidate critical kind", but the
+  // permission.required push for the same request honours both, so the bypass
+  // only paged a snoozed operator a second time. The lifecycle now raises it
+  // only when policy did not auto-handle the request (a human really is needed).
 ]);
 
 /**

@@ -264,6 +264,81 @@ describe('SessionEventPump', () => {
     expect(got).toBe(true);
   });
 
+  describe('onEvent and permission_request (issue #166)', () => {
+    const permFrame = {
+      id: 7,
+      type: 'permission_request',
+      data: {
+        requestId: 'r1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'humanized',
+          kind: 'execute',
+          rawInput: {},
+        },
+        options: [{ optionId: 'ok', kind: 'allow_once' }],
+      },
+    };
+
+    async function runWith(
+      policy: Policy | undefined,
+    ): Promise<{ seen: string[]; collected: Dispatched[] }> {
+      const collected: Dispatched[] = [];
+      const seen: string[] = [];
+      stub = await startStubDaemon({
+        workspaceCwd: '/w',
+        sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+        holdOpenMs: 2000,
+        permissionStatus: 200,
+        frames: [permFrame],
+      });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const dispatched: string[] = [];
+      pump = new SessionEventPump(daemon, fakeNotifier(collected), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        ...(policy ? { enforcer: new PolicyEnforcer(daemon, policy) } : {}),
+        onEvent: (_id, ev) => seen.push(ev.type),
+        onDispatch: (id) => dispatched.push(id),
+      });
+      await pump.start();
+      expect(await waitFor(() => dispatched.length >= 1)).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      return { seen, collected };
+    }
+
+    it('does not deliver a policy-auto-approved permission_request to onEvent', async () => {
+      const { seen, collected } = await runWith({
+        defaults: { action: 'prompt', requireScope: 'approve' },
+        rules: [{ id: 'ok', match: { tool: 'execute' }, action: 'allow' }],
+      });
+      expect(seen).not.toContain('permission_request');
+      expect(collected).toHaveLength(0);
+    });
+
+    it('does not deliver a policy-auto-denied permission_request to onEvent', async () => {
+      const { seen } = await runWith({
+        defaults: { action: 'prompt', requireScope: 'approve' },
+        rules: [{ id: 'no', match: { tool: 'execute' }, action: 'deny' }],
+      });
+      expect(seen).not.toContain('permission_request');
+    });
+
+    it('delivers a prompt-decision permission_request to onEvent exactly once', async () => {
+      const { seen } = await runWith({
+        defaults: { action: 'prompt', requireScope: 'approve' },
+        rules: [],
+      });
+      expect(seen.filter((t) => t === 'permission_request')).toHaveLength(1);
+    });
+
+    it('delivers permission_request to onEvent immediately when no enforcer is wired', async () => {
+      const { seen } = await runWith(undefined);
+      expect(seen.filter((t) => t === 'permission_request')).toHaveLength(1);
+    });
+  });
+
   it('updates lastEventId from numeric event ids', async () => {
     const collected: Dispatched[] = [];
     const onDispatchSeen: Array<{ id: string; event: DaemonEvent }> = [];

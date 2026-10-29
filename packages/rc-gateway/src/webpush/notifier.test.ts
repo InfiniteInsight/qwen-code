@@ -901,6 +901,44 @@ rules:
     });
   });
 
+  it('agent.blocked respects a subscription quiet window (no bypass; issue #166)', async () => {
+    const subId = await approverWithSub();
+    await store.setQuietHours(subId, {
+      from: '09:00',
+      to: '17:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      {
+        type: 'agent_blocked',
+        data: { agentType: 'general-purpose', status: 'blocked' },
+      },
+      { sessionId: 's1' },
+      new Date('2026-06-10T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(0);
+    expect(
+      audit.calls.find((c) => c.action === 'push_suppressed')?.detail,
+    ).toMatchObject({ kind: 'agent.blocked', reason: 'quiet_hours' });
+  });
+
+  it('agent.blocked respects an active snooze (no bypass; issue #166)', async () => {
+    await approverWithSub();
+    const snoozeDir = mkdtempSync(join(tmpdir(), 'rc-notifier-snooze-'));
+    const snooze = await SnoozeStore.open(join(snoozeDir, 'snooze.state'));
+    await snooze.snooze(60, 'all');
+    const notifier = new PushNotifier(tokens, store, sender, snooze, audit);
+    await notifier.notify(
+      { type: 'agent_blocked', data: { status: 'blocked' } },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(0);
+    expect(
+      audit.calls.find((c) => c.action === 'push_suppressed')?.detail,
+    ).toMatchObject({ kind: 'agent.blocked', reason: 'snoozed' });
+  });
+
   it('sends when now is OUTSIDE the quiet window', async () => {
     const subId = await approverWithSub();
     await store.setQuietHours(subId, {
@@ -1740,9 +1778,7 @@ describe('PushNotifier watched-session suppression (#40)', () => {
   } as const;
 
   /** Sub + notifier with an isWatched probe (13th ctor arg). */
-  async function setup(
-    watched: Map<string, boolean>,
-  ): Promise<{
+  async function setup(watched: Map<string, boolean>): Promise<{
     notifier: PushNotifier;
     notifierAudit: ReturnType<typeof fakeAudit>;
   }> {
