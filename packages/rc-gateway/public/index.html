@@ -5794,6 +5794,7 @@
         }
         // The view reports changes only: seed the pill from its state now.
         $('jump-bottom').hidden = transcriptView.isNearBottom();
+        watchPillsRoom();
         applyStampZone();
       }
       // #197. A picture attached to a message is stored in the session, so its
@@ -5852,6 +5853,25 @@
         return pending;
       }
 
+      // #177. The pills (load earlier, the recap) float over the top of the
+      // transcript, so the first row was drawn under them. The list reserves
+      // the room they take, which is the row's height and the 8px under it,
+      // and gives it back when no pill is showing (the row is display:none
+      // then, so it measures 0).
+      let pillsWatch = null;
+      function watchPillsRoom() {
+        const pills = document.querySelector('#tx-top .pills');
+        if (!pills || typeof ResizeObserver === 'undefined') return;
+        if (pillsWatch) pillsWatch.disconnect();
+        const sync = () => {
+          if (!transcriptView) return;
+          const h = pills.getBoundingClientRect().height;
+          transcriptView.setTopInset(h > 0 ? Math.ceil(h) + 8 : 0);
+        };
+        pillsWatch = new ResizeObserver(sync);
+        pillsWatch.observe(pills);
+        sync();
+      }
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
           model: transcriptModel,

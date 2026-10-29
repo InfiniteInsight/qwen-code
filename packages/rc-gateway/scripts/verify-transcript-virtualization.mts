@@ -22611,6 +22611,70 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  PAGE_SCENARIOS.push({
+    name: 'P303 the load-earlier pill does not cover the first transcript line or the crash banner: the list top reserves the pills row, at 390 and 1100',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        await page.waitForSelector('#load-earlier', { state: 'visible' });
+        await page.evaluate(`showCrashBanner(true); document.getElementById('transcript').scrollTop = 0;`);
+        await g177Settle(page);
+        const read = (): Promise<{ pill: { t: number; b: number; l: number; r: number }; rows: { t: number; b: number; l: number; r: number; text: string }[]; banner: { t: number; b: number } | null }> =>
+          page.evaluate(`(() => {
+            const rc = (el) => { const b = el.getBoundingClientRect(); return { t: b.top, b: b.bottom, l: b.left, r: b.right }; };
+            const banner = document.getElementById('crash-banner');
+            return {
+              pill: rc(document.getElementById('load-earlier')),
+              rows: Array.from(document.querySelectorAll('#transcript .vrow')).map((r) => Object.assign(rc(r), { text: (r.textContent || '').slice(0, 30) })),
+              banner: banner && !banner.hidden ? rc(banner) : null,
+            };
+          })()`) as never;
+        const r = await read();
+        const hit = (a: { t: number; b: number; l: number; r: number }, c: { t: number; b: number; l: number; r: number }) =>
+          !(a.b <= c.t || c.b <= a.t || a.r <= c.l || c.r <= a.l);
+        const covered = r.rows.filter((row) => row.b > 0 && hit(r.pill, row));
+        expect(covered.length === 0, `${size.width}: the pill (${Math.round(r.pill.t)}-${Math.round(r.pill.b)}) covers ${covered.length} row(s): ${JSON.stringify(covered[0])}`);
+        expect(!!r.banner && !hit(r.pill, { ...r.banner, l: 0, r: size.width }), `${size.width}: the pill overlaps the crash banner (${JSON.stringify(r.banner)})`);
+        await shot(page, `p303-pill-${size.width}`);
+        // The reader's place does not move when the pill goes (the history is
+        // all loaded), nor when it comes back.
+        await page.evaluate(`document.getElementById('transcript').scrollTop = 600`);
+        await g177Settle(page);
+        const mark = (): Promise<number> =>
+          page.evaluate(`(() => {
+            const edge = document.getElementById('transcript').getBoundingClientRect().top;
+            const first = Array.from(document.querySelectorAll('#transcript .vrow')).find((r) => r.getBoundingClientRect().bottom > edge + 4);
+            return first ? first.getBoundingClientRect().top : -1;
+          })()`) as Promise<number>;
+        const before = await mark();
+        await page.evaluate(`transcriptExhausted = true; renderLoadEarlier()`);
+        await g177Settle(page);
+        const gone = await mark();
+        await page.evaluate(`transcriptExhausted = false; renderLoadEarlier()`);
+        await g177Settle(page);
+        const back = await mark();
+        expect(
+          Math.abs(gone - before) <= 1.5 && Math.abs(back - before) <= 1.5,
+          `${size.width}: the reader's row moved from ${before} to ${gone} when the pill went and ${back} when it came back`,
+        );
+        // And with the pill gone at the top, the first row sits where it always did.
+        await page.evaluate(`transcriptExhausted = true; renderLoadEarlier(); document.getElementById('transcript').scrollTop = 0`);
+        await g177Settle(page);
+        const bare = await read();
+        const topRow = Math.min(...bare.rows.map((x) => x.t));
+        const wrapTop = (await page.evaluate(`document.getElementById('transcript').getBoundingClientRect().top`)) as number;
+        expect(topRow - wrapTop <= 12, `${size.width}: with no pill the first row is ${topRow - wrapTop}px below the top, space reserved for nothing`);
+        await page.evaluate(`transcriptExhausted = false; renderLoadEarlier(); showCrashBanner(false)`);
+        lines.push(`${size.width}: pill ${Math.round(r.pill.b)} above first row ${Math.round(Math.min(...r.rows.map((x) => x.t)))}`);
+      }
+      return lines.join('; ');
+    },
+  });
+
 }
 
 
