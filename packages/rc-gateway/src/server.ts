@@ -696,6 +696,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorCap,
     audit,
   );
+  // #165: the routes that each cost one model call (recap, btw) are limited
+  // per TOKEN as well when no sub-actor is asserted, with the same window and
+  // cap, so a view-only guest cannot loop them. Bridged requests keep their
+  // per-sub-actor window, shared with every other write route as before.
+  const modelCallRateLimit = enforceSubActorRateLimit(
+    subActorLimiter,
+    subActorCap,
+    audit,
+    Date.now,
+    { perToken: true },
+  );
   // Owner-managed per-sub-actor bans (block one chat user without revoking the
   // bridge token). In-memory; ban/lift are audited so they survive in the log.
   const subActorBans = new SubActorBanStore();
@@ -936,7 +947,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
-    subActorRateLimit, // bridge fan-in: a recap costs tokens like a prompt
+    modelCallRateLimit, // a recap costs a model call: per sub-actor, else per token
     createSessionRecapRoute(deps.daemon, audit),
   );
   // POST /session/:id/btw - ask one conversation a side question without
@@ -954,7 +965,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
     subActorBan, // banned chat user, refused before any budget is spent
-    subActorRateLimit, // a side question costs a model call like a prompt
+    modelCallRateLimit, // a side question costs a model call: per sub-actor, else per token
     createSessionBtwRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's

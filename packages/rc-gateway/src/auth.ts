@@ -177,22 +177,68 @@ export function enforceSubActorBan(bans: SubActorBanStore): RequestHandler {
 }
 
 /**
+ * Prefix for a per-token limiter key. A sub-actor id must start alphanumeric
+ * (SUB_ACTOR_RE), so no asserted sub-actor can ever equal one of these.
+ */
+const TOKEN_KEY_PREFIX = '#token:';
+
+export interface SubActorRateLimitOptions {
+  /**
+   * #165: when no sub-actor is asserted, count the request against the
+   * TOKEN instead of passing it through, with the same window and cap. For
+   * the routes that each cost a model call (recap, btw), where "only a bridge
+   * is limited" meant a view-only guest could loop one model call per
+   * request. Over the cap → 429 `rate_limited` (the code the page already
+   * shows as "too many questions just now"), audited once per burst as
+   * `token_rate_limited`.
+   */
+  perToken?: boolean;
+}
+
+/**
  * Per-sub-actor write rate limit (`add-bridge-protocol`). Applies ONLY when a
- * sub-actor was asserted (a bridge-mediated request) — a normal owner/client
- * write is never sub-actor-limited (it has no subActor). Over the cap → 429
- * `sub_actor_rate_limited`, audited once per burst (firstDrop). Mount on write
- * routes AFTER `resolveSubActor`. Never throws. A request with no subActor (the
- * common case) is a pure pass-through.
+ * sub-actor was asserted (a bridge-mediated request), unless `perToken` is
+ * set: then a request with no sub-actor is limited per token instead. Over
+ * the cap → 429 `sub_actor_rate_limited`, audited once per burst
+ * (firstDrop). Mount on write routes AFTER `resolveSubActor`. Never throws.
+ * Without `perToken`, a request with no subActor (the common case) is a pure
+ * pass-through.
  */
 export function enforceSubActorRateLimit(
   limiter: SubActorRateLimiter,
   cap: number,
   audit?: AuditRecorder,
   now: () => number = Date.now,
+  opts: SubActorRateLimitOptions = {},
 ): RequestHandler {
   return (req, res, next) => {
     const sub = req.rcClient?.subActor;
     if (!sub) {
+      const tokenId = req.rcClient?.id;
+      if (!opts.perToken || !tokenId) {
+        next();
+        return;
+      }
+      const verdict = limiter.tryConsume(
+        TOKEN_KEY_PREFIX + tokenId,
+        cap,
+        now(),
+      );
+      if (!verdict.allowed) {
+        if (verdict.firstDrop) {
+          void audit?.record({
+            action: 'token_rate_limited',
+            actorTokenId: tokenId,
+            shareId: req.rcClient?.shareId,
+            shareLabel: req.rcClient?.shareLabel,
+            target: req.params.id,
+          });
+        }
+        res
+          .status(429)
+          .json({ error: 'Rate limit exceeded', code: 'rate_limited' });
+        return;
+      }
       next();
       return;
     }

@@ -98,6 +98,7 @@ export type AuditAction =
   | 'bridge_registration_rejected'
   | 'bridge_deregistered'
   | 'sub_actor_rate_limited'
+  | 'token_rate_limited'
   | 'sub_actor_banned'
   | 'sub_actor_unbanned'
   | 'bridge_invite_minted'
@@ -216,6 +217,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'bridge_registration_rejected',
   'bridge_deregistered',
   'sub_actor_rate_limited',
+  'token_rate_limited',
   'sub_actor_banned',
   'sub_actor_unbanned',
   'bridge_invite_minted',

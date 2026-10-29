@@ -40,7 +40,10 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * recap costs a model call and a phone could be tapped repeatedly. Being a read
  * is about what it reveals; the cap is about what it spends, and the two
  * questions have different answers. `subActorBan` comes first so a banned chat
- * user is refused before any budget is spent.
+ * user is refused before any budget is spent. The limiter keys on the asserted
+ * sub-actor for a bridge and on the token for everyone else (#165): keyed on
+ * sub-actors alone it passed every non-bridge caller, so a view-only guest
+ * could loop one model call per request.
  *
  * WHY NO TIMEOUT IS APPLIED HERE
  *
