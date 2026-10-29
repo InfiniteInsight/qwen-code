@@ -2508,6 +2508,11 @@
       #agents-chip[hidden] {
         display: none;
       }
+      /* #110. A More row that is not offered: the row rule sets display, which
+         beats the hidden attribute, so this says it again. */
+      #more-screen .row[hidden] {
+        display: none;
+      }
       #agents-chip .dot {
         width: 8px;
         height: 8px;

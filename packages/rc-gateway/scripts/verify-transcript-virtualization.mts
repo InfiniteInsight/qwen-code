@@ -26222,12 +26222,21 @@ PAGE_SCENARIOS.push({
 async function agentsAbsent(page: Page, asks: string[]): Promise<string> {
   await page.waitForSelector('.subagent-cancel', { state: 'visible', timeout: 15_000 });
   await page.waitForTimeout(6_500);
-  const seen = await page.evaluate(() => ({
-    chip: !document.getElementById('agents-chip')!.hidden,
-    more: !document.getElementById('more-agents')!.hidden,
-    trace: Array.from(document.querySelectorAll('.subagent-trace')).some((b) => !(b as HTMLElement).hidden),
-    sheet: !document.getElementById('agents-sheet')!.hidden,
-  }));
+  // Drawn, not just unflagged: a rule that sets display on a row beats the
+  // hidden attribute, so More is opened and each box is measured.
+  await page.click('#h1-more');
+  await page.waitForSelector('#more-screen:not([hidden])', { timeout: 5_000 });
+  // A string, because a named arrow inside an evaluate callback reaches the
+  // page as a __name(...) call it does not define.
+  const seen = (await page.evaluate(String.raw`(() => {
+    const drawn = function (el) { return !!el && el.getClientRects().length > 0; };
+    return {
+      chip: drawn(document.getElementById('agents-chip')),
+      more: drawn(document.getElementById('more-agents')),
+      trace: Array.from(document.querySelectorAll('.subagent-trace')).some(drawn),
+      sheet: drawn(document.getElementById('agents-sheet')),
+    };
+  })()`)) as { chip: boolean; more: boolean; trace: boolean; sheet: boolean };
   expect(!seen.chip && !seen.more && !seen.trace && !seen.sheet, `something new showed: ${JSON.stringify(seen)}`);
   expect(asks.length === 0, `the page asked ${JSON.stringify(asks)}`);
   return 'no chip, no More row, no trace button, no sheet, and no agent read in 6.5s with a running subagent';
