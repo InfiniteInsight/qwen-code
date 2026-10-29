@@ -6,9 +6,9 @@
 
 import { createECDH, createPrivateKey, type JsonWebKey } from 'node:crypto';
 import webpush from 'web-push';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile, rename } from 'node:fs/promises';
 import { hostname } from 'node:os';
+import { writeFileAtomic } from '../atomicWrite.js';
 
 export interface VapidKeys {
   /** Base64url-encoded uncompressed P-256 public key (65 bytes). For browsers. */
@@ -71,11 +71,10 @@ function generateVapidPem(): { pem: string } & VapidKeys {
 }
 
 /**
- * Credential-key redaction pattern. Matches common patterns for keys that
- * should never appear in logs or audit fields.
+ * Credential-key redaction pattern. It lives with the payload builder, which
+ * applies it to every push (#169); re-exported here for existing importers.
  */
-export const CREDENTIAL_REDACT_RE =
-  /(?:api[_-]?key|private[_-]?key|secret|password|auth|credential|token)[=:]\s*\S+/gi;
+export { CREDENTIAL_REDACT_RE } from './payload.js';
 
 /**
  * Gateway-owned VAPID keypair. Stored as a PEM private key file at mode 0600
@@ -94,31 +93,67 @@ export class VapidStore {
   ) {}
 
   static async open(filePath: string, subject?: string): Promise<VapidStore> {
-    let keys: VapidKeys | undefined;
+    // Only a MISSING file means "first run, generate a key" (#169). Any other
+    // read error (EACCES, EIO, EMFILE, ...) says nothing about the key on disk,
+    // and regenerating would overwrite it and orphan every browser
+    // subscription bound to it, so the open fails loudly instead.
+    let raw: string | undefined;
     try {
-      const raw = await readFile(filePath, 'utf8');
-      // Support both formats:
-      // 1. PEM (new format): starts with -----BEGIN
-      // 2. JSON (legacy format): { publicKey, privateKey } base64url
-      if (raw.trim().startsWith('-----BEGIN')) {
-        keys = pemToVapidKeys(raw);
-      } else {
-        // Legacy JSON format — still readable for migration
-        const parsed = JSON.parse(raw) as Partial<VapidKeys>;
-        if (
-          typeof parsed.publicKey === 'string' &&
-          parsed.publicKey.length > 0 &&
-          typeof parsed.privateKey === 'string' &&
-          parsed.privateKey.length > 0
-        ) {
-          keys = { publicKey: parsed.publicKey, privateKey: parsed.privateKey };
-          // Migrate to PEM format on next write (regenerate below skipped — use existing keys)
-          // Write the PEM version of this key
-          await VapidStore.writePem(filePath, keys);
-        }
+      raw = await readFile(filePath, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(
+          `VAPID key: could not read ${filePath} (${(err as Error).message}); ` +
+            'refusing to replace the key',
+        );
       }
-    } catch {
-      // Missing/corrupt file → regenerate below.
+    }
+
+    let keys: VapidKeys | undefined;
+    if (raw !== undefined) {
+      try {
+        // Support both formats:
+        // 1. PEM (new format): starts with -----BEGIN
+        // 2. JSON (legacy format): { publicKey, privateKey } base64url
+        if (raw.trim().startsWith('-----BEGIN')) {
+          keys = pemToVapidKeys(raw);
+        } else {
+          // Legacy JSON format: still readable for migration
+          const parsed = JSON.parse(raw) as Partial<VapidKeys>;
+          if (
+            typeof parsed.publicKey === 'string' &&
+            parsed.publicKey.length > 0 &&
+            typeof parsed.privateKey === 'string' &&
+            parsed.privateKey.length > 0
+          ) {
+            keys = {
+              publicKey: parsed.publicKey,
+              privateKey: parsed.privateKey,
+            };
+          }
+        }
+      } catch {
+        // Unparseable: regenerated below.
+      }
+      if (keys && !raw.trim().startsWith('-----BEGIN')) {
+        // Migrate the legacy JSON key to PEM. Best effort: the legacy file
+        // still holds the same key if this write fails.
+        await VapidStore.writePem(filePath, keys).catch(() => {});
+      }
+      if (!keys) {
+        // The file exists and holds no usable key. Keep it aside rather than
+        // overwrite it below, as the JSON stores do (#165).
+        const aside = `${filePath}.corrupt-${Date.now()}`;
+        const moved = await rename(filePath, aside).then(
+          () => true,
+          () => false,
+        );
+        // eslint-disable-next-line no-console
+        console.warn(
+          `VAPID key: ${filePath} holds no usable key, generating a new one` +
+            (moved ? `; the unreadable file was kept as ${aside}` : ''),
+        );
+      }
     }
 
     if (!keys) {
@@ -137,12 +172,15 @@ export class VapidStore {
     return new VapidStore(keys, resolvedSubject, filePath);
   }
 
-  /** Write the PEM private key for the given keys to filePath at mode 0600. */
+  /**
+   * Write the PEM private key for the given keys to filePath at mode 0600.
+   * Crash-safe (temp file + rename, #169): an in-place write cut short left a
+   * partial file, which the next open could only treat as corrupt and replace.
+   */
   private static async writePem(
     filePath: string,
     keys: VapidKeys,
   ): Promise<void> {
-    await mkdir(dirname(filePath), { recursive: true });
     // Convert base64url private key to PEM for storage
     const ecdh = createECDH('prime256v1');
     const dBytes = Buffer.from(keys.privateKey, 'base64url');
@@ -157,7 +195,7 @@ export class VapidStore {
     };
     const privKey = createPrivateKey({ key: privJwk, format: 'jwk' });
     const pem = privKey.export({ type: 'sec1', format: 'pem' }) as string;
-    await writeFile(filePath, pem, { mode: 0o600 });
+    await writeFileAtomic(filePath, pem, { mode: 0o600 });
   }
 
   /**

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { homedir } from 'node:os';
 import { resolve, relative, isAbsolute, sep } from 'node:path';
 
 /**
@@ -26,7 +27,8 @@ import { resolve, relative, isAbsolute, sep } from 'node:path';
  * cannot prove a flag safe, so any unrecognized flag ESCALATES. This closes
  * attacker-pointed OUT-OF-tree code loads (`--config`, `--manifest-path`,
  * `-f <makefile>`, `--init-script`, `-exec`, `--prefix`, …) which a denylist
- * would miss. `node:path` is used only for pure path math (no fs I/O).
+ * would miss. `node:path` is used only for pure path math (no fs I/O), and
+ * `node:os` only to name this process's home directory.
  */
 
 export interface ReviewToolCall {
@@ -39,6 +41,12 @@ export interface ReviewPolicy {
   /** false = vote mode: escalate everything. */
   autoApprove: boolean;
   autofix: boolean;
+  /**
+   * The review was asked to post to the PR. NOT an auto-approval input
+   * (#169): the skill posts only through `qwen review submit`, which is not
+   * on the allowlist, and every `gh` call escalates, so a PR write always
+   * reaches a human whatever this says.
+   */
   comment: boolean;
   /**
    * Absolute path of the review worktree. An `edit`/`write` under `autofix`
@@ -188,22 +196,6 @@ const QWEN_REVIEW_SUBCOMMANDS: ReadonlySet<string> = new Set([
 ]);
 const QWEN_FLAGS: ReadonlySet<string> = new Set(['--remote']);
 
-/**
- * `gh api` paths that post a PR review comment (the sole sanctioned `gh`
- * mutation).
- */
-const GH_REVIEW_PATH = /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/(reviews|comments)$/;
-// Allowed `gh api` flags (each with a value constraint below). Anything else
-// (`--input`, `--jq`, `-i`, …) escalates.
-const GH_FIELD_FLAGS: ReadonlySet<string> = new Set([
-  '-f',
-  '-F',
-  '--field',
-  '--raw-field',
-]);
-const GH_HEADER_FLAGS: ReadonlySet<string> = new Set(['-H', '--header']);
-const GH_METHOD_FLAGS: ReadonlySet<string> = new Set(['-X', '--method']);
-
 /** Split `--flag=value` into `[name, value]`; `[token, undefined]` if no `=`. */
 function splitEq(t: string): [string, string | undefined] {
   const i = t.indexOf('=');
@@ -221,6 +213,97 @@ function isInTreePathToken(t: string): boolean {
   return true;
 }
 
+/**
+ * Where an auto-approvable shell command runs. The shell tool executes in
+ * `rawInput.directory` when one is given and in the workspace otherwise, so a
+ * relative path token is read from `cwdAbs`, not necessarily from the root.
+ * Both are null when the policy carries no worktree root (then nothing can be
+ * resolved, and every check that needs a real location escalates).
+ */
+interface ShellContext {
+  rootAbs: string | null;
+  cwdAbs: string | null;
+}
+
+/**
+ * Build the {@link ShellContext} for one call, or null (escalate) when the
+ * call names a `directory` that cannot be proven to sit inside the worktree:
+ * a non-string, any directory with no root to confine it against, one that
+ * resolves outside the root, or one under a home directory's dotfiles. An
+ * empty string means "the default", exactly as the shell tool reads it.
+ */
+function shellContext(
+  directory: unknown,
+  worktreeRoot: string | null,
+): ShellContext | null {
+  const rootAbs =
+    typeof worktreeRoot === 'string' && worktreeRoot.length > 0
+      ? resolve(worktreeRoot)
+      : null;
+  if (directory === undefined || directory === null || directory === '') {
+    return { rootAbs, cwdAbs: rootAbs };
+  }
+  if (typeof directory !== 'string' || rootAbs === null) return null;
+  const cwdAbs = resolve(rootAbs, directory);
+  if (!isInsideRoot(rootAbs, cwdAbs)) return null;
+  if (reachesHomeDotfile(rootAbs, cwdAbs)) return null;
+  return { rootAbs, cwdAbs };
+}
+
+/**
+ * The home directory's dot entry `abs` sits under (`/home/u/.ssh` for
+ * `/home/u/.ssh/id_rsa`), or null when it is not under one. Homes are
+ * `/home/<user>`, `/Users/<user>`, `/root` and this process's own home.
+ */
+function homeDotEntry(abs: string): string | null {
+  const m =
+    /^(\/(?:home|Users)\/[^/]+\/\.[^/]*)(?:\/|$)/.exec(abs) ??
+    /^(\/root\/\.[^/]*)(?:\/|$)/.exec(abs);
+  if (m) return m[1];
+  const home = homedir();
+  if (isAbsolute(home) && home !== '/' && abs.startsWith(home + '/')) {
+    const first = abs.slice(home.length + 1).split('/')[0];
+    if (first.startsWith('.')) return `${home}/${first}`;
+  }
+  return null;
+}
+
+/**
+ * True when `abs` reaches into a home directory's dotfiles (`~/.ssh`, `~/.aws`,
+ * `~/.qwen`, ...) from the workspace: that is, it sits under a home dot entry
+ * that is NOT itself an ancestor of the root. A workspace that is the home
+ * directory makes `~/.ssh` "in tree" by path math alone; this refuses it. A
+ * clone that lives under `~/.local/src/repo` keeps its own files approvable.
+ */
+function reachesHomeDotfile(rootAbs: string, abs: string): boolean {
+  const entry = homeDotEntry(abs);
+  if (entry === null) return false;
+  return !isInsideRoot(entry, rootAbs);
+}
+
+/**
+ * A path token (positional or path-flag value) the command may read. A leading
+ * `@` is a response file to tsc (which echoes each line back in a TS6231 error)
+ * and to any script `npm run` passes it to, so it is a FILE READ: it needs a
+ * known root and the path after the `@` must be in tree like any other. Every
+ * path with a known location must also resolve inside the root and must not
+ * reach a home directory's dotfiles.
+ */
+function isSafePathToken(t: string, ctx: ShellContext): boolean {
+  let p = t;
+  if (p.startsWith('@')) {
+    if (ctx.rootAbs === null || ctx.cwdAbs === null) return false;
+    p = p.slice(1);
+  }
+  if (!isInTreePathToken(p)) return false;
+  if (ctx.rootAbs !== null && ctx.cwdAbs !== null) {
+    const abs = resolve(ctx.cwdAbs, p);
+    if (!isInsideRoot(ctx.rootAbs, abs)) return false;
+    if (reachesHomeDotfile(ctx.rootAbs, abs)) return false;
+  }
+  return true;
+}
+
 interface ArgSpec {
   flags: ReadonlySet<string>;
   pathFlags?: ReadonlySet<string>;
@@ -231,14 +314,18 @@ interface ArgSpec {
  * Validate the argument tail of an allowlisted command: allowed flags only,
  * in-tree path-flag values, in-tree positionals. Escalate on anything else.
  */
-function validateShellArgs(tokens: string[], spec: ArgSpec): ReviewDecision {
+function validateShellArgs(
+  tokens: string[],
+  spec: ArgSpec,
+  ctx: ShellContext,
+): ReviewDecision {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t.startsWith('-')) {
       const [name, attached] = splitEq(t);
       if (spec.pathFlags?.has(name)) {
         const val = attached ?? tokens[++i];
-        if (val === undefined || !isInTreePathToken(val)) return 'escalate';
+        if (val === undefined || !isSafePathToken(val, ctx)) return 'escalate';
         continue;
       }
       if (spec.flags.has(name)) continue;
@@ -246,46 +333,7 @@ function validateShellArgs(tokens: string[], spec: ArgSpec): ReviewDecision {
     }
     // positional
     if (spec.rejectColonPositional && t.includes(':')) return 'escalate';
-    if (!isInTreePathToken(t)) return 'escalate';
-  }
-  return 'approve';
-}
-
-function classifyGh(argv: string[], policy: ReviewPolicy): ReviewDecision {
-  if (!policy.comment) return 'escalate';
-  if (argv[1] !== 'api') return 'escalate';
-  const rest = argv.slice(2);
-  // `gh api` executes exactly ONE endpoint: the FIRST bare positional. Pin it
-  // to a review/comment path (a "some token matches" check is decoy-bypassable
-  // via `gh api <bad-endpoint> repos/o/r/pulls/1/reviews`).
-  let endpoint: string | undefined;
-  for (let i = 0; i < rest.length; i++) {
-    const t = rest[i];
-    if (t.startsWith('-')) {
-      const [name, attached] = splitEq(t);
-      if (GH_METHOD_FLAGS.has(name)) {
-        const val = attached ?? rest[++i];
-        if (val !== 'POST') return 'escalate'; // only POST a review
-        continue;
-      }
-      if (GH_FIELD_FLAGS.has(name)) {
-        const val = attached ?? rest[++i];
-        // `@` = read-file-from-disk (e.g. `-F body=@/home/user/.ssh/id_rsa`),
-        // an exfiltration primitive.
-        if (val === undefined || val.includes('@')) return 'escalate';
-        continue;
-      }
-      if (GH_HEADER_FLAGS.has(name)) {
-        const val = attached ?? rest[++i];
-        if (val === undefined) return 'escalate';
-        continue;
-      }
-      return 'escalate'; // unknown gh flag (--input, --jq, …)
-    }
-    if (endpoint === undefined) endpoint = t; // first bare positional
-  }
-  if (endpoint === undefined || !GH_REVIEW_PATH.test(endpoint)) {
-    return 'escalate';
+    if (!isSafePathToken(t, ctx)) return 'escalate';
   }
   return 'approve';
 }
@@ -299,24 +347,28 @@ function classifyGh(argv: string[], policy: ReviewPolicy): ReviewDecision {
  * (cannot confine). The legitimate absolute (`<worktree>/.qwen/reviews`) and
  * relative (`.qwen/reviews`) forms both still approve.
  */
-function classifyMkdir(argv: string[], policy: ReviewPolicy): ReviewDecision {
-  const { worktreeRoot } = policy;
-  if (typeof worktreeRoot !== 'string' || worktreeRoot.length === 0) {
-    return 'escalate';
-  }
-  const rootAbs = resolve(worktreeRoot);
+function classifyMkdir(argv: string[], ctx: ShellContext): ReviewDecision {
+  const { rootAbs, cwdAbs } = ctx;
+  if (rootAbs === null || cwdAbs === null) return 'escalate';
   const paths = argv.slice(1).filter((t) => !t.startsWith('-'));
   if (paths.length === 0) return 'escalate';
   for (const p of paths) {
     const segs = p.split('/');
     if (segs.includes('..')) return 'escalate'; // traversal escapes .qwen
     if (!segs.includes('.qwen')) return 'escalate'; // must be under a real .qwen
-    if (!isInsideRoot(rootAbs, p)) return 'escalate'; // out-of-tree target
+    // out-of-tree target (a relative path resolves from the shell directory)
+    const abs = resolve(cwdAbs, p);
+    if (!isInsideRoot(rootAbs, abs)) return 'escalate';
+    if (hasGitSegment(abs)) return 'escalate'; // never under git metadata
   }
   return 'approve';
 }
 
-function classifyShell(command: unknown, policy: ReviewPolicy): ReviewDecision {
+function classifyShell(
+  rawInput: Record<string, unknown> | undefined,
+  policy: ReviewPolicy,
+): ReviewDecision {
+  const command = rawInput?.['command'];
   if (typeof command !== 'string') return 'escalate';
   const trimmed = command.trim();
   if (trimmed.length === 0) return 'escalate';
@@ -327,47 +379,59 @@ function classifyShell(command: unknown, policy: ReviewPolicy): ReviewDecision {
   const cmd = argv[0];
   if (cmd === undefined || cmd.length === 0) return 'escalate';
 
+  // Every in-tree check below is relative to where the command runs.
+  const ctx = shellContext(rawInput?.['directory'], policy.worktreeRoot);
+  if (ctx === null) return 'escalate';
+
   switch (cmd) {
+    // `gh` is never auto-approved (#169). Its one sanctioned use was posting
+    // a PR review comment, and the shape of that call could not prove it
+    // landed on the PR under review (`repos/attacker/x/pulls/1/comments`
+    // approved). The bundled skill writes to the PR only through
+    // `qwen review submit`, which is not on the allowlist either, so every
+    // PR write reaches a human.
     case 'gh':
-      return classifyGh(argv, policy);
+      return 'escalate';
     case 'mkdir':
-      return classifyMkdir(argv, policy);
+      return classifyMkdir(argv, ctx);
     case 'git':
       if (!GIT_SUBCOMMANDS.has(argv[1])) return 'escalate';
-      return validateShellArgs(argv.slice(2), { flags: GIT_FLAGS });
+      return validateShellArgs(argv.slice(2), { flags: GIT_FLAGS }, ctx);
     case 'npm':
     case 'pnpm':
     case 'yarn':
       if (!NPM_SUBCOMMANDS.has(argv[1])) return 'escalate';
-      return validateShellArgs(argv.slice(2), { flags: NPM_FLAGS });
+      return validateShellArgs(argv.slice(2), { flags: NPM_FLAGS }, ctx);
     case 'cargo':
       if (!CARGO_SUBCOMMANDS.has(argv[1])) return 'escalate';
-      return validateShellArgs(argv.slice(2), { flags: CARGO_FLAGS });
+      return validateShellArgs(argv.slice(2), { flags: CARGO_FLAGS }, ctx);
     case 'go':
       if (!GO_SUBCOMMANDS.has(argv[1])) return 'escalate';
-      return validateShellArgs(argv.slice(2), { flags: GO_FLAGS });
+      return validateShellArgs(argv.slice(2), { flags: GO_FLAGS }, ctx);
     case 'make':
       if (!MAKE_SUBCOMMANDS.has(argv[1])) return 'escalate';
-      return validateShellArgs(argv.slice(2), { flags: MAKE_FLAGS });
+      return validateShellArgs(argv.slice(2), { flags: MAKE_FLAGS }, ctx);
     case 'mvn':
     case 'mvnw':
     case './mvnw':
     case 'gradle':
     case 'gradlew':
     case './gradlew':
-      return validateShellArgs(argv.slice(1), {
-        flags: MVN_GRADLE_FLAGS,
-        rejectColonPositional: true,
-      });
+      return validateShellArgs(
+        argv.slice(1),
+        { flags: MVN_GRADLE_FLAGS, rejectColonPositional: true },
+        ctx,
+      );
     case 'tsc':
-      return validateShellArgs(argv.slice(1), {
-        flags: TSC_FLAGS,
-        pathFlags: TSC_PATH_FLAGS,
-      });
+      return validateShellArgs(
+        argv.slice(1),
+        { flags: TSC_FLAGS, pathFlags: TSC_PATH_FLAGS },
+        ctx,
+      );
     case 'qwen':
       if (argv[1] !== 'review') return 'escalate';
       if (!QWEN_REVIEW_SUBCOMMANDS.has(argv[2])) return 'escalate';
-      return validateShellArgs(argv.slice(3), { flags: QWEN_FLAGS });
+      return validateShellArgs(argv.slice(3), { flags: QWEN_FLAGS }, ctx);
     default:
       return 'escalate';
   }
@@ -390,6 +454,20 @@ export const EDIT_PATH_FIELDS = [
   'absolute_path',
 ] as const;
 
+/**
+ * True when any segment of the absolute path `abs` is `.git` (compared
+ * case-insensitively, for case-insensitive filesystems) (#169). Git metadata
+ * is code, not content: an edit to `.git/config` (`core.fsmonitor`,
+ * `diff.external`), to `.git/hooks/*`, or to a linked worktree's `.git`
+ * pointer turns the next auto-approved `git status` / `git diff` into
+ * arbitrary execution. Exported so the permission bridge applies the SAME rule
+ * to the realpath'd target (an in-tree symlink alias hides the segment from
+ * this string-level check).
+ */
+export function hasGitSegment(abs: string): boolean {
+  return abs.split(/[\\/]/).some((s) => s.toLowerCase() === '.git');
+}
+
 /** True iff `p` resolves (string-level only) inside `rootAbs`. */
 function isInsideRoot(rootAbs: string, p: string): boolean {
   const targetAbs = resolve(rootAbs, p);
@@ -405,7 +483,8 @@ function isInsideRoot(rootAbs: string, p: string): boolean {
  * resolves inside the review worktree. EVERY present path field is confined —
  * not first-wins — so a divergent decoy (`{file_path:'src/a.ts',
  * path:'/etc/passwd'}`) cannot slip through. Escalate if no path field is
- * present, or if any present one is non-string/empty or resolves outside.
+ * present, or if any present one is non-string/empty, resolves outside, or
+ * has a `.git` segment (see {@link hasGitSegment}).
  *
  * SECURITY CAVEAT — STRING-LEVEL ONLY: this uses `path.resolve` and does NOT
  * resolve symlinks. A symlink committed *inside* the worktree (e.g.
@@ -432,6 +511,8 @@ function classifyEdit(
     sawPath = true;
     if (typeof v !== 'string' || v.length === 0) return 'escalate';
     if (!isInsideRoot(rootAbs, v)) return 'escalate';
+    // In tree but git metadata: a human decides (#169).
+    if (hasGitSegment(resolve(rootAbs, v))) return 'escalate';
   }
   if (!sawPath) return 'escalate'; // no path to confine
   return 'approve';
@@ -469,7 +550,7 @@ export function classifyReviewToolCall(
         ? classifyEdit(toolCall.rawInput, policy.worktreeRoot)
         : 'escalate';
     case 'execute':
-      return classifyShell(toolCall.rawInput?.['command'], policy);
+      return classifyShell(toolCall.rawInput, policy);
     case 'fetch': // exfiltration vector
     case 'other': // agent fanout / lsp / MCP — indistinguishable, escalate
     default:

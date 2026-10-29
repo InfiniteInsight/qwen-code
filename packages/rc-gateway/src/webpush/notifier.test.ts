@@ -13,11 +13,19 @@ import { TokenStore } from '../tokenStore.js';
 import { PushStore } from '../pushStore.js';
 import { VapidStore } from './vapid.js';
 import { PushSender, type PushTransport } from './sender.js';
-import { PushNotifier, type ApnsNotifier } from './notifier.js';
-import { PushRateLimiter } from './rateLimiter.js';
+import {
+  PushNotifier,
+  RATE_LIMIT_CRITICAL_KINDS,
+  type ApnsNotifier,
+} from './notifier.js';
+import {
+  PushRateLimiter,
+  DEFAULT_MAX_PER_HOUR,
+  CRITICAL_RESERVE_PER_HOUR,
+} from './rateLimiter.js';
 import { PushCoalescer } from './coalescer.js';
 import { PushDigest } from './digest.js';
-import type { PushPayload } from './payload.js';
+import { MAX_PAYLOAD_BYTES, type PushPayload } from './payload.js';
 import { ApnsStore } from '../nativePush/apnsStore.js';
 import { SESSION_READ, APPROVE, SHARE, OWNER, WRITE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
@@ -1131,6 +1139,9 @@ describe('PushNotifier rate limit (cycle 46)', () => {
     type: 'permission_request',
     data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r' },
   };
+  // A non-critical kind: it has no reserve, so the shared cap is the whole
+  // story for it (#169 gave the critical kinds their own reserve).
+  const TURN = { type: 'prompt_completed', data: {} };
   const NOW = new Date(1_000_000);
 
   it('drops sends past maxPerHour and audits push_rate_limited ONCE (firstDrop)', async () => {
@@ -1152,17 +1163,80 @@ describe('PushNotifier rate limit (cycle 46)', () => {
       rl,
     );
 
-    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // sent
-    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // dropped (transition)
-    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // dropped (no re-audit)
+    await notifier.notify(TURN, { sessionId: 's1' }, NOW); // sent
+    await notifier.notify(TURN, { sessionId: 's1' }, NOW); // dropped (transition)
+    await notifier.notify(TURN, { sessionId: 's1' }, NOW); // dropped (no re-audit)
 
     expect(sent).toHaveLength(1);
     const limited = audit.calls.filter((c) => c.action === 'push_rate_limited');
     expect(limited).toHaveLength(1); // only the transition audits
     expect(limited[0].detail).toMatchObject({
       subscriptionId: sub.id,
+      kind: 'session.turn_complete',
+    });
+  });
+
+  it('critical kinds bypass an exhausted cap through their own small reserve (#169)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const rl = new PushRateLimiter();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      rl,
+    );
+    // 30 turn endings fill the default hourly cap...
+    for (let i = 0; i < DEFAULT_MAX_PER_HOUR + 1; i++) {
+      await notifier.notify(TURN, { sessionId: 's1' }, NOW);
+    }
+    expect(sent).toHaveLength(DEFAULT_MAX_PER_HOUR);
+    // ...but a permission prompt and a crashed turn still reach the device.
+    await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+    await notifier.notify(
+      { type: 'session_interrupted', data: { recovered: false } },
+      { sessionId: 's1' },
+      NOW,
+    );
+    expect(sent.slice(-2).map((s) => s.payload.kind)).toEqual([
+      'permission.required',
+      'session.interrupted',
+    ]);
+    // The reserve is itself capped, and its exhaustion audits once.
+    for (let i = 0; i < CRITICAL_RESERVE_PER_HOUR + 3; i++) {
+      await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+    }
+    expect(sent).toHaveLength(DEFAULT_MAX_PER_HOUR + CRITICAL_RESERVE_PER_HOUR);
+    const reserveDrops = audit.calls.filter(
+      (c) =>
+        c.action === 'push_rate_limited' &&
+        (c.detail as Record<string, unknown>)?.reserve === 'critical',
+    );
+    expect(reserveDrops).toHaveLength(1);
+    expect(reserveDrops[0].detail).toMatchObject({
+      subscriptionId: sub.id,
       kind: 'permission.required',
     });
+  });
+
+  it('every kind the notifier treats as critical gets the reserve', () => {
+    for (const k of [
+      'permission.required',
+      'session.died',
+      'policy.deny',
+      'session.interrupted',
+    ]) {
+      expect([k, RATE_LIMIT_CRITICAL_KINDS.has(k)]).toEqual([k, true]);
+    }
+    expect(RATE_LIMIT_CRITICAL_KINDS.has('session.turn_complete')).toBe(false);
+    expect(RATE_LIMIT_CRITICAL_KINDS.has('agent.blocked')).toBe(false);
   });
 
   it('with NO limiter wired there is no cap (back-compat)', async () => {
@@ -1221,7 +1295,7 @@ describe('PushNotifier rate limit (cycle 46)', () => {
       rl,
     );
     for (let i = 0; i < 31; i++) {
-      await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+      await notifier.notify(TURN, { sessionId: 's1' }, NOW);
     }
     expect(sent).toHaveLength(30); // the default cap
   });
@@ -1482,6 +1556,28 @@ describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
     expect(sent).toHaveLength(1); // no double-fire
   });
 
+  it('SECURITY: a revoked token’s browser gets no digest (#169)', async () => {
+    const { notifier } = await quietSub();
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { kind: 'execute', title: 'x' }, requestId: 'r' },
+      },
+      { sessionId: 's1' },
+      new Date('2026-06-09T02:00:00Z'),
+    );
+    notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z')); // seed quiet
+    // Revoked while quiet. Only APNs cascades on revoke; the web push record
+    // stays in the store, so the digest path must check the token itself.
+    const [rec] = store.listAll();
+    expect(await tokens.revoke(rec.tokenId)).toBe(true);
+    notifier.flushQuietDigests(new Date('2026-06-09T08:00:00Z')); // window ended
+    await settle();
+    expect(sent).toHaveLength(0);
+    // The pending counts are still dropped, so nothing lingers for the id.
+    expect(notifier.digestSummary()).toEqual([]);
+  });
+
   it('does not send a digest when nothing was suppressed while quiet', async () => {
     const { notifier } = await quietSub();
     notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z')); // seed quiet, no counts
@@ -1585,6 +1681,98 @@ describe('PushNotifier — APNs fan-out', () => {
     );
     await notifier.notify(PERM, { sessionId: 's1' });
     expect(apns.sends.map((s) => s.deviceToken)).toEqual(['app-dev']);
+  });
+
+  it('a hung web push endpoint does not hold back the APNs fan-out (#169)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/hung',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    // A web push delivery that never answers.
+    const hungSender = new PushSender(vapid, store, audit, {
+      transport: () => new Promise(() => {}),
+      requestTimeoutMs: 60_000,
+      ...FAST,
+    });
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      hungSender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    void notifier.notify(PERM, { sessionId: 's1' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(apns.sends.map((s) => s.deviceToken)).toEqual(['app-dev']);
+  });
+
+  it('both transports get the redacted, budgeted payload; a budget cut is audited (#169)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: {
+          toolCall: { kind: 'execute', title: 'Shell: export API_KEY=sk-1' },
+          requestId: 'r'.repeat(4000),
+        },
+      },
+      { sessionId: 's1', sessionName: 'x'.repeat(300) },
+    );
+    expect(sent).toHaveLength(1);
+    for (const p of [sent[0].payload, apns.sends[0].payload]) {
+      expect(p.summary).not.toContain('sk-1');
+      expect(Buffer.byteLength(JSON.stringify(p), 'utf8')).toBeLessThanOrEqual(
+        MAX_PAYLOAD_BYTES,
+      );
+    }
+    const cut = audit.calls.filter(
+      (c) => c.action === 'push_payload_truncated',
+    );
+    expect(cut).toHaveLength(1); // once per event, not per subscription
+    expect(cut[0]).toMatchObject({
+      target: 's1',
+      detail: { kind: 'permission.required' },
+    });
   });
 
   it('a global snooze suppresses the APNs fan-out too (no send)', async () => {

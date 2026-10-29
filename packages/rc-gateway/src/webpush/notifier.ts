@@ -21,9 +21,14 @@ import type { PushSender } from './sender.js';
 import {
   buildPayload,
   buildDigestPayload,
+  finalizePayload,
   type PushPayload,
 } from './payload.js';
-import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
+import {
+  type PushRateLimiter,
+  DEFAULT_MAX_PER_HOUR,
+  CRITICAL_RESERVE_PER_HOUR,
+} from './rateLimiter.js';
 import type { PushCoalescer } from './coalescer.js';
 import type { PushDigest, DigestSummary } from './digest.js';
 import { QuietDigestWatcher } from './quietDigestWatcher.js';
@@ -61,9 +66,23 @@ export const QUIET_HOURS_BYPASS_KINDS = new Set([
 ]);
 
 /**
+ * Kinds that bypass an exhausted per-subscription rate limit through their own
+ * small reserve (`CRITICAL_RESERVE_PER_HOUR`, #169): every kind that bypasses
+ * quiet hours, plus `permission.required`, which a human must answer and which
+ * 30 turn endings used to silence for the rest of the hour. `agent.blocked`
+ * stays out for the same reason it left the snooze bypass (#166): the
+ * permission prompt behind it already gets the reserve.
+ */
+export const RATE_LIMIT_CRITICAL_KINDS = new Set([
+  'permission.required',
+  ...QUIET_HOURS_BYPASS_KINDS,
+]);
+
+/**
  * The APNs send seam the notifier drives (satisfied by `ApnsSender`). Kept
  * structural so the notifier needn't import the http2 transport. The orphan
- * guard (`isTokenLive`) and 410/400 removal + 429/5xx backoff live in the sender.
+ * guard (`isTokenLive`), removal on a 410 or a 400 BadDeviceToken, and 429/5xx
+ * backoff live in the sender.
  */
 export interface ApnsNotifier {
   send(sub: ApnsSubscriptionRecord, payload: PushPayload): Promise<unknown>;
@@ -183,6 +202,12 @@ export class PushNotifier {
    * (see the cycle-75 design). No cross-session leak — the counts only exist for
    * pushes that already passed the scope + session-lock gates when recorded.
    *
+   * The scope gate is re-checked at SEND time (#169): the counts were recorded
+   * hours earlier, and a token revoked or expired since then must not reach its
+   * device. Revocation cascades only to APNs records, so a revoked token's web
+   * push record is still in the store here. Only kinds the token may still
+   * receive are counted; nothing left means no digest.
+   *
    * Sync and never throws: `sender.send` is best-effort/never-throwing and is
    * fired-and-forgotten, so a failed digest is simply lost (like all push)
    * rather than retried next window.
@@ -198,7 +223,15 @@ export class PushNotifier {
       if (!summary || summary.total <= 0) return;
       const rec = byId.get(id);
       if (!rec) return;
-      void this.sender.send(rec, buildDigestPayload(summary));
+      const scopes = this.tokens.scopesFor(rec.tokenId);
+      if (!scopes) return; // revoked or expired token: silent, like notify()
+      let total = 0;
+      for (const [kind, n] of Object.entries(summary.byKind)) {
+        const need = KIND_SCOPE[kind];
+        if (need !== undefined && scopes.includes(need)) total += n;
+      }
+      if (total <= 0) return;
+      void this.sender.send(rec, buildDigestPayload({ ...summary, total }));
     });
   }
 
@@ -233,8 +266,18 @@ export class PushNotifier {
     },
     now: Date = new Date(),
   ): Promise<void> {
-    const payload = buildPayload(event, ctx);
-    if (!payload) return;
+    const built = buildPayload(event, ctx);
+    if (!built) return;
+    // Redact, cap and budget ONCE, before any gate or transport (#169), so the
+    // web push and APNs fan-outs carry the same bounded, redacted payload.
+    const { payload, truncated } = finalizePayload(built);
+    if (truncated) {
+      void this.audit?.record({
+        action: 'push_payload_truncated',
+        target: ctx.sessionId,
+        detail: { kind: payload.kind },
+      });
+    }
     // Watched-session gate (#40): turn endings are redundant while someone is
     // watching the session live — suppress the whole fan-out once, before any
     // send, like snooze. Other kinds (e.g. permission.required) still push to
@@ -306,7 +349,7 @@ export class PushNotifier {
     }
     const need = KIND_SCOPE[payload.kind];
     if (!need) return;
-    await Promise.all(
+    const web = Promise.all(
       this.store.listAll().map(async (r) => {
         const scopes = this.tokens.scopesFor(r.tokenId);
         if (!scopes || !hasScope(scopes, need)) return;
@@ -460,17 +503,28 @@ export class PushNotifier {
             typeof r.maxPerHour === 'number' && r.maxPerHour > 0
               ? r.maxPerHour
               : DEFAULT_MAX_PER_HOUR;
-          const { allowed, firstDrop } = this.rateLimiter.tryConsume(
-            r.id,
-            cap,
-            now.getTime(),
-          );
+          // Critical kinds spill into their own small reserve once the shared
+          // cap is spent, so a burst of turn endings cannot silence a
+          // permission prompt or a dead session for the rest of the hour.
+          const critical = RATE_LIMIT_CRITICAL_KINDS.has(payload.kind);
+          const { allowed, firstDrop } = critical
+            ? this.rateLimiter.tryConsumeCritical(
+                r.id,
+                cap,
+                CRITICAL_RESERVE_PER_HOUR,
+                now.getTime(),
+              )
+            : this.rateLimiter.tryConsume(r.id, cap, now.getTime());
           if (!allowed) {
             if (firstDrop) {
               void this.audit?.record({
                 action: 'push_rate_limited',
                 target: ctx.sessionId,
-                detail: { kind: payload.kind, subscriptionId: r.id },
+                detail: {
+                  kind: payload.kind,
+                  subscriptionId: r.id,
+                  ...(critical ? { reserve: 'critical' } : {}),
+                },
               });
             }
             return;
@@ -482,7 +536,10 @@ export class PushNotifier {
     // Second transport: fan the same payload out to APNs device subscriptions
     // (add-native-mobile-shells), under the same global gates already applied
     // above (snooze, routing drop) plus the token-level gates re-checked per sub.
-    await this.notifyApns(payload, ctx, routingEv, routing, need, now);
+    // Started alongside the web fan-out rather than after it (#169): a web
+    // endpoint that never answers must not hold back every device's APNs push.
+    const apns = this.notifyApns(payload, ctx, routingEv, routing, need, now);
+    await Promise.all([web, apns]);
   }
 
   /**
@@ -593,8 +650,9 @@ export class PushNotifier {
     if (!need) return;
     const scopes = this.tokens.scopesFor(tokenId);
     if (!scopes || !hasScope(scopes, need)) return;
+    const final = finalizePayload(payload).payload;
     await Promise.all(
-      this.store.listFor(tokenId).map((r) => this.sender.send(r, payload)),
+      this.store.listFor(tokenId).map((r) => this.sender.send(r, final)),
     );
   }
 }

@@ -4,12 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpath, lstat } from 'node:fs/promises';
-import { resolve, dirname, relative, isAbsolute, sep } from 'node:path';
+import { realpath, lstat, readFile, stat } from 'node:fs/promises';
+import {
+  resolve,
+  dirname,
+  basename,
+  join,
+  relative,
+  isAbsolute,
+  sep,
+} from 'node:path';
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
 import {
   classifyReviewToolCall,
   EDIT_PATH_FIELDS,
+  hasGitSegment,
   type ReviewPolicy,
   type ReviewToolCall,
 } from './reviewClassifier.js';
@@ -34,6 +43,9 @@ import {
  *      classifier approves an `edit`, the bridge `fs.realpath`-verifies every
  *      target path field actually lands inside the worktree, defeating an in-tree
  *      symlink that points outside (which the string-level classifier cannot see).
+ *      Guard 2b then refuses a real target in git metadata (`.git/`, a git dir
+ *      under another name, a `.git` file's `gitdir:`), since writing it is code
+ *      execution on the next auto-approved `git` command (#169).
  *
  * GUARD 3 — `kind` INTEGRITY (trust boundary, documented, no code needed):
  * The classifier auto-approves `read`/`search` on `toolCall.kind` ALONE. That is
@@ -258,6 +270,8 @@ export class ReviewPermissionBridge {
       if (typeof v !== 'string' || v.length === 0) return false;
 
       const target = resolve(worktreeRoot, v);
+      // The real path the write lands on: the target's realpath, or for a new
+      // file its realpath'd parent joined with the new name.
       let real: string;
       try {
         real = await realpath(target);
@@ -279,12 +293,16 @@ export class ReviewPermissionBridge {
         );
         if (existsAsLink) return false; // dangling symlink → escalate
         try {
-          real = await realpath(dirname(target));
+          real = join(await realpath(dirname(target)), basename(target));
         } catch {
           return false; // parent unresolvable → escalate
         }
       }
       if (!isInside(realRoot, real)) return false;
+      // GUARD 2b (#169): in tree is not enough when the real target is git
+      // metadata. Judged on the REAL path, so an in-tree symlink alias of
+      // `.git/config` or `.git/hooks` escalates like the plain path does.
+      if (await touchesGitMetadata(realRoot, real)) return false;
     }
     if (!sawPath) return false; // no path field to confine → escalate
     return true;
@@ -304,6 +322,100 @@ export class ReviewPermissionBridge {
   /** Test helper: await the subscription loop draining a finite fake stream. */
   async drain(sessionId: string): Promise<void> {
     await this.loops.get(sessionId)?.done;
+  }
+}
+
+/**
+ * GUARD 2b (#169): true when the real write target `real` lands in git
+ * metadata, so the edit must go to a human. Writing git metadata is code
+ * execution, not an edit: `.git/config` (`core.fsmonitor`, `diff.external`)
+ * or `.git/hooks/*` runs on the next auto-approved `git status` / `git diff`,
+ * and a `.git` file decides which git dir a worktree uses. True when:
+ *
+ *  - the real path has a `.git` segment (the classifier's own rule, on the
+ *    path the write actually reaches); or
+ *  - a directory between the target and the root is one git would accept as
+ *    a git dir (a `HEAD` plus `objects` or `commondir`), whatever it is named,
+ *    e.g. a `--separate-git-dir` store inside the workspace; or
+ *  - a `.git` file on that path points (`gitdir: ...`) at a directory the
+ *    target is inside, even one not complete enough to pass the test above; or
+ *  - anything on the way cannot be inspected (an unreadable `.git` file, an fs
+ *    error other than "not there"): escalate rather than guess.
+ */
+async function touchesGitMetadata(
+  realRoot: string,
+  real: string,
+): Promise<boolean> {
+  if (hasGitSegment(real)) return true;
+  try {
+    for (let dir = dirname(real); isInside(realRoot, dir); dir = dirname(dir)) {
+      if (await looksLikeGitDir(dir)) return true;
+      const pointed = await gitdirOf(dir);
+      if (pointed === 'unreadable') return true;
+      if (pointed !== null && isInside(pointed, real)) return true;
+      if (dir === realRoot) break;
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/** git's own git-dir test (setup.c): a `HEAD` plus `objects` or `commondir`. */
+async function looksLikeGitDir(dir: string): Promise<boolean> {
+  if (!(await exists(join(dir, 'HEAD')))) return false;
+  return (
+    (await exists(join(dir, 'objects'))) ||
+    (await exists(join(dir, 'commondir')))
+  );
+}
+
+/**
+ * The real git dir that `dir/.git` designates: the `.git` directory itself, or
+ * the `gitdir:` target of a `.git` file, resolved relative to `dir` as git
+ * does. null when there is no `.git` entry; `unreadable` when one exists but
+ * cannot be resolved to a git dir (a dangling link, a file with no `gitdir:`
+ * line), which the caller escalates.
+ */
+async function gitdirOf(dir: string): Promise<string | null | 'unreadable'> {
+  const dotGit = join(dir, '.git');
+  if (!(await exists(dotGit, { follow: false }))) return null;
+  let st;
+  try {
+    st = await stat(dotGit);
+  } catch {
+    return 'unreadable'; // a dangling `.git` symlink
+  }
+  if (st.isDirectory()) return realpath(dotGit);
+  if (!st.isFile()) return 'unreadable';
+  const firstLine = (await readFile(dotGit, 'utf8')).split('\n', 1)[0];
+  const m = /^gitdir:\s*(.+?)\s*$/.exec(firstLine);
+  if (!m) return 'unreadable';
+  const target = resolve(dir, m[1]);
+  try {
+    return await realpath(target);
+  } catch (err) {
+    // A pointer to a git dir that does not exist yet still claims the path.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return target;
+    throw err;
+  }
+}
+
+/**
+ * Whether `p` exists. "Not there" (ENOENT, ENOTDIR) is false; any other error
+ * throws, so the caller escalates instead of reading it as absent.
+ */
+async function exists(
+  p: string,
+  opts: { follow: boolean } = { follow: true },
+): Promise<boolean> {
+  try {
+    await (opts.follow ? stat(p) : lstat(p));
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw err;
   }
 }
 

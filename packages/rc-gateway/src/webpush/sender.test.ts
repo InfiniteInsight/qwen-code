@@ -211,6 +211,45 @@ describe('PushSender', () => {
     await expect(sender.send(record, PAYLOAD)).resolves.toBeUndefined();
   });
 
+  it('a request that never answers times out as transient and is retried (#169)', async () => {
+    let calls = 0;
+    const transport: PushTransport = () => {
+      calls++;
+      return new Promise(() => {}); // the endpoint accepted, then went silent
+    };
+    const sender = new PushSender(vapid, store, audit, {
+      transport,
+      requestTimeoutMs: 10,
+      ...FAST,
+    });
+    await expect(sender.send(record, PAYLOAD)).resolves.toBeUndefined();
+    expect(calls).toBe(5); // every attempt hit the deadline
+    const failed = audit.calls.filter((c) => c.action === 'push_send_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].detail).toMatchObject({
+      subscriptionId: record.id,
+      reason: 'transient_exhausted',
+      timedOut: true,
+    });
+    expect(store.get(record.id)).toBeDefined(); // a timeout never removes
+  });
+
+  it('a timed-out attempt followed by a 201 is delivered', async () => {
+    let calls = 0;
+    const transport: PushTransport = () =>
+      ++calls === 1
+        ? new Promise(() => {})
+        : Promise.resolve({ statusCode: 201 });
+    const sender = new PushSender(vapid, store, audit, {
+      transport,
+      requestTimeoutMs: 10,
+      ...FAST,
+    });
+    await sender.send(record, PAYLOAD);
+    expect(calls).toBe(2);
+    expect(audit.calls.map((c) => c.action)).toEqual(['push_sent']);
+  });
+
   it('never throws even when the transport throws on every attempt', async () => {
     const transport: PushTransport = async () => {
       throw new Error('always down');
