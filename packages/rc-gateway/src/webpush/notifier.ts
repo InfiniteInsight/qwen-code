@@ -21,6 +21,7 @@ import type { PushSender } from './sender.js';
 import {
   buildPayload,
   buildDigestPayload,
+  finalizePayload,
   type PushPayload,
 } from './payload.js';
 import {
@@ -265,8 +266,18 @@ export class PushNotifier {
     },
     now: Date = new Date(),
   ): Promise<void> {
-    const payload = buildPayload(event, ctx);
-    if (!payload) return;
+    const built = buildPayload(event, ctx);
+    if (!built) return;
+    // Redact, cap and budget ONCE, before any gate or transport (#169), so the
+    // web push and APNs fan-outs carry the same bounded, redacted payload.
+    const { payload, truncated } = finalizePayload(built);
+    if (truncated) {
+      void this.audit?.record({
+        action: 'push_payload_truncated',
+        target: ctx.sessionId,
+        detail: { kind: payload.kind },
+      });
+    }
     // Watched-session gate (#40): turn endings are redundant while someone is
     // watching the session live — suppress the whole fan-out once, before any
     // send, like snooze. Other kinds (e.g. permission.required) still push to
@@ -639,8 +650,9 @@ export class PushNotifier {
     if (!need) return;
     const scopes = this.tokens.scopesFor(tokenId);
     if (!scopes || !scopes.includes(need)) return;
+    const final = finalizePayload(payload).payload;
     await Promise.all(
-      this.store.listFor(tokenId).map((r) => this.sender.send(r, payload)),
+      this.store.listFor(tokenId).map((r) => this.sender.send(r, final)),
     );
   }
 }

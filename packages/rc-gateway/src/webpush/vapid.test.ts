@@ -5,9 +5,16 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, statSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { VapidStore, CREDENTIAL_REDACT_RE } from './vapid.js';
 
 const ENV_KEY = 'QWEN_RC_WEBPUSH_SUBJECT';
@@ -61,6 +68,31 @@ describe('VapidStore', () => {
     const store = await VapidStore.open(path);
     expect(store.getApplicationServerKey()).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(store.getKeys().privateKey.length).toBeGreaterThan(0);
+  });
+
+  it('keeps a corrupt file aside instead of overwriting it (#169)', async () => {
+    const path = tempPath();
+    await VapidStore.open(path);
+    writeFileSync(path, 'not valid pem');
+    await VapidStore.open(path);
+    const aside = readdirSync(dirname(path)).filter((f) =>
+      f.startsWith(`${basename(path)}.corrupt-`),
+    );
+    expect(aside).toHaveLength(1);
+    expect(readFileSync(join(dirname(path), aside[0]), 'utf8')).toBe(
+      'not valid pem',
+    );
+  });
+
+  it('does NOT replace the key when the file exists but cannot be read (#169)', async () => {
+    // A read error that is not "missing" (EISDIR here; EACCES, EIO or EMFILE
+    // in the field) says nothing about the key. Regenerating would orphan
+    // every browser subscription bound to it, so open fails loudly instead.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-vapid-'));
+    const path = join(dir, 'vapid.pem');
+    mkdirSync(path); // readFile → EISDIR
+    await expect(VapidStore.open(path)).rejects.toThrow(/could not read/);
+    expect(statSync(path).isDirectory()).toBe(true); // nothing written over it
   });
 
   it('migrates legacy JSON format to PEM on first open', async () => {

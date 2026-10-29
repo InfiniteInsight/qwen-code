@@ -24,6 +24,8 @@ export interface PushPayload {
 }
 
 const MAX_SUMMARY = 140;
+/** Schema v1 cap for `sessionName` (add-webpush-notifications). */
+const MAX_SESSION_NAME = 64;
 /**
  * Pre-encryption budget (bytes). Push services cap the encrypted POST at
  * ~4096 bytes; encryption adds framing overhead, so we budget 3800 bytes for
@@ -31,9 +33,26 @@ const MAX_SUMMARY = 140;
  */
 export const MAX_PAYLOAD_BYTES = 3800;
 
+/**
+ * Credential-key redaction pattern. Matches common patterns for keys that
+ * should never appear in logs or audit fields, or in a push payload: a
+ * permission summary carries the tool's title, which for a shell call is the
+ * command line (`export API_KEY=...`).
+ */
+export const CREDENTIAL_REDACT_RE =
+  /(?:api[_-]?key|private[_-]?key|secret|password|auth|credential|token)[=:]\s*\S+/gi;
+
 /** Truncate to <=140 chars, ending with a single-char ellipsis if cut. */
-function truncate(s: string): string {
-  return s.length > MAX_SUMMARY ? s.slice(0, MAX_SUMMARY - 1) + '…' : s;
+function truncate(s: string, max: number = MAX_SUMMARY): string {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** Replace each credential-looking `key=value` / `key: value` value with `•••`. */
+export function redactCredentials(s: string): string {
+  return s.replace(CREDENTIAL_REDACT_RE, (m) => {
+    const sep = m.search(/[=:]/);
+    return m.slice(0, sep + 1) + '•••';
+  });
 }
 
 /** Build the deep link for a session. No token, no secrets. */
@@ -305,30 +324,79 @@ export function buildDigestPayload(summary: DigestSummary): PushPayload {
  * `push_payload_truncated` audit entry). Pure: the input payload is never
  * mutated.
  *
+ * When no summary cut fits (a daemon-supplied `requestId` or
+ * `approveOptionId` that alone exceeds the budget), the optional fields
+ * (`sessionName`, `requestId`, `approveOptionId`) are dropped and the summary
+ * is restored and cut again: a permission push without its ids still opens
+ * the app, where a push service's 413 delivers nothing.
+ *
  * Invariant: the returned payload always satisfies
  * `Buffer.byteLength(JSON.stringify(payload), 'utf8') <= MAX_PAYLOAD_BYTES`
- * unless the payload is pathologically large with an empty summary (which is
- * impossible in practice — non-summary fields are short constants).
+ * unless `sessionId` itself (which the deep link repeats) is larger than the
+ * budget, which no daemon session id is.
  */
 export function enforcePayloadBudget(payload: PushPayload): {
   payload: PushPayload;
   truncated: boolean;
 } {
-  const json = JSON.stringify(payload);
-  if (Buffer.byteLength(json, 'utf8') <= MAX_PAYLOAD_BYTES) {
-    return { payload, truncated: false };
-  }
-  // Make a mutable copy; shorten summary one char at a time until it fits.
-  const copy: PushPayload = { ...payload };
+  const fits = (p: PushPayload): boolean =>
+    Buffer.byteLength(JSON.stringify(p), 'utf8') <= MAX_PAYLOAD_BYTES;
+  if (fits(payload)) return { payload, truncated: false };
+  const cut = shortenSummary({ ...payload }, fits);
+  if (fits(cut)) return { payload: cut, truncated: true };
+  // Degenerate: an optional field is what does not fit. Drop them all and cut
+  // the ORIGINAL summary again, so it keeps as much text as the room allows.
+  const bare: PushPayload = { ...payload };
+  delete bare.sessionName;
+  delete bare.requestId;
+  delete bare.approveOptionId;
+  return { payload: shortenSummary(bare, fits), truncated: true };
+}
+
+/**
+ * Shorten `copy.summary` (mutating the copy) one character at a time, ending
+ * with `…`, until `fits` or nothing is left. Unchanged when it already fits.
+ */
+function shortenSummary(
+  copy: PushPayload,
+  fits: (p: PushPayload) => boolean,
+): PushPayload {
+  if (fits(copy)) return copy;
   let chars = Array.from(copy.summary); // handle multi-byte / surrogate pairs
   while (chars.length > 0) {
-    // Drop the last character and append ellipsis
     chars = chars.slice(0, chars.length - 1);
     copy.summary = chars.join('') + '…';
-    if (Buffer.byteLength(JSON.stringify(copy), 'utf8') <= MAX_PAYLOAD_BYTES) {
-      return { payload: copy, truncated: true };
-    }
+    if (fits(copy)) return copy;
   }
-  // Degenerate: summary is empty+ellipsis; just return as-is.
-  return { payload: copy, truncated: true };
+  return copy;
+}
+
+/**
+ * The last step before a payload leaves the gateway, for every transport
+ * (#169: `enforcePayloadBudget` and `CREDENTIAL_REDACT_RE` existed but were
+ * never called, so neither the budget nor redaction applied). It redacts
+ * credential-looking values from the free-text fields (`summary`,
+ * `sessionName`), holds `sessionName` to the schema's 64 characters, then
+ * enforces the byte budget. `truncated` reports only a budget cut, which the
+ * caller audits as `push_payload_truncated`. Pure: returns the input itself
+ * when nothing changed.
+ */
+export function finalizePayload(payload: PushPayload): {
+  payload: PushPayload;
+  truncated: boolean;
+} {
+  const summary = truncate(redactCredentials(payload.summary));
+  const sessionName =
+    payload.sessionName === undefined
+      ? undefined
+      : truncate(redactCredentials(payload.sessionName), MAX_SESSION_NAME);
+  const cleaned =
+    summary === payload.summary && sessionName === payload.sessionName
+      ? payload
+      : {
+          ...payload,
+          summary,
+          ...(sessionName !== undefined ? { sessionName } : {}),
+        };
+  return enforcePayloadBudget(cleaned);
 }

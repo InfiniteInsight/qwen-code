@@ -9,6 +9,7 @@ import {
   buildPayload,
   buildDigestPayload,
   enforcePayloadBudget,
+  finalizePayload,
   MAX_PAYLOAD_BYTES,
   AGENT_EVENT_KINDS,
 } from './payload.js';
@@ -241,6 +242,69 @@ describe('enforcePayloadBudget', () => {
     const payload = makePayload('Permission needed: run_shell_command');
     const result = enforcePayloadBudget(payload);
     expect(result.truncated).toBe(false);
+  });
+
+  it('drops the optional fields when the summary alone cannot fit (#169)', () => {
+    // A daemon-supplied request id no summary cut can make room for.
+    const payload = {
+      ...makePayload('Permission needed: x'),
+      requestId: 'r'.repeat(4000),
+      approveOptionId: 'allow_once',
+    };
+    const result = enforcePayloadBudget(payload);
+    expect(result.truncated).toBe(true);
+    expect(result.payload.requestId).toBeUndefined();
+    expect(result.payload.approveOptionId).toBeUndefined();
+    expect(result.payload.sessionId).toBe('ses-1'); // the deep link survives
+    expect(
+      Buffer.byteLength(JSON.stringify(result.payload), 'utf8'),
+    ).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
+  });
+});
+
+describe('finalizePayload (#169)', () => {
+  const perm = (title: string, sessionName?: string) =>
+    buildPayload(
+      {
+        type: 'permission_request',
+        data: { toolCall: { kind: 'execute', title }, requestId: 'r1' },
+      },
+      { sessionId: 's1', ...(sessionName ? { sessionName } : {}) },
+    )!;
+
+  it('redacts credential-looking values from the summary and session name', () => {
+    const { payload } = finalizePayload(
+      perm(
+        'Shell: curl -H token=abc123 api_key=sk-live-9 x',
+        'deploy password: hunter2',
+      ),
+    );
+    expect(payload.summary).not.toContain('abc123');
+    expect(payload.summary).not.toContain('sk-live-9');
+    expect(payload.summary).toContain('token=•••');
+    expect(payload.sessionName).toBe('deploy password:•••');
+    expect(payload.requestId).toBe('r1'); // ids are not free text
+  });
+
+  it('caps the session name at the schema limit of 64 characters', () => {
+    const { payload, truncated } = finalizePayload(perm('ls', 'n'.repeat(500)));
+    expect(Array.from(payload.sessionName!).length).toBeLessThanOrEqual(64);
+    expect(payload.sessionName!.endsWith('…')).toBe(true);
+    expect(truncated).toBe(false); // the byte budget never came into it
+  });
+
+  it('enforces the byte budget and reports a budget cut', () => {
+    const big = { ...perm('ls'), requestId: 'r'.repeat(4000) };
+    const { payload, truncated } = finalizePayload(big);
+    expect(truncated).toBe(true);
+    expect(
+      Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+    ).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
+  });
+
+  it('leaves an ordinary payload exactly as built', () => {
+    const p = perm('Shell: npm test', 'my session');
+    expect(finalizePayload(p)).toEqual({ payload: p, truncated: false });
   });
 });
 

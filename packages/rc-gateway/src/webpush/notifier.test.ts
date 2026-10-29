@@ -25,7 +25,7 @@ import {
 } from './rateLimiter.js';
 import { PushCoalescer } from './coalescer.js';
 import { PushDigest } from './digest.js';
-import type { PushPayload } from './payload.js';
+import { MAX_PAYLOAD_BYTES, type PushPayload } from './payload.js';
 import { ApnsStore } from '../nativePush/apnsStore.js';
 import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
@@ -1679,6 +1679,60 @@ describe('PushNotifier — APNs fan-out', () => {
     void notifier.notify(PERM, { sessionId: 's1' });
     await new Promise((r) => setTimeout(r, 20));
     expect(apns.sends.map((s) => s.deviceToken)).toEqual(['app-dev']);
+  });
+
+  it('both transports get the redacted, budgeted payload; a budget cut is audited (#169)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: {
+          toolCall: { kind: 'execute', title: 'Shell: export API_KEY=sk-1' },
+          requestId: 'r'.repeat(4000),
+        },
+      },
+      { sessionId: 's1', sessionName: 'x'.repeat(300) },
+    );
+    expect(sent).toHaveLength(1);
+    for (const p of [sent[0].payload, apns.sends[0].payload]) {
+      expect(p.summary).not.toContain('sk-1');
+      expect(Buffer.byteLength(JSON.stringify(p), 'utf8')).toBeLessThanOrEqual(
+        MAX_PAYLOAD_BYTES,
+      );
+    }
+    const cut = audit.calls.filter(
+      (c) => c.action === 'push_payload_truncated',
+    );
+    expect(cut).toHaveLength(1); // once per event, not per subscription
+    expect(cut[0]).toMatchObject({
+      target: 's1',
+      detail: { kind: 'permission.required' },
+    });
   });
 
   it('a global snooze suppresses the APNs fan-out too (no send)', async () => {
