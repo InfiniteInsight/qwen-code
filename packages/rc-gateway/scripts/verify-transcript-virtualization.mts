@@ -13963,8 +13963,9 @@ PAGE_SCENARIOS.push({
         // Keyboard: Tab from the back button reaches the folder's create,
         // Escape shuts it back onto New conversation, Enter on that opens it
         // again, and the back button shuts it onto New conversation too.
+        // #190: the folder rows are buttons now, one Tab stop for the list.
         let reached = '';
-        for (let i = 0; i < 8 && reached !== 'dir-use'; i++) {
+        for (let i = 0; i < 10 && reached !== 'dir-use'; i++) {
           await page.keyboard.press('Tab');
           reached = (await readPicker(page)).focusOn;
         }
@@ -23542,6 +23543,91 @@ PAGE_SCENARIOS.push({
     await page.waitForFunction(`(document.getElementById('status').textContent || '').includes('earlier history is not displayed')`, null, { timeout: 5_000 });
     await shot(page, 'p316-status-390');
     return lines.join('; ') + '; the status line says earlier history is not displayed';
+  },
+});
+
+// #190, item 4: the List screen's adjustments. Every one runs on routed
+// listings: /rc/sessions per folder, an empty live-state, and /rc/fs per path,
+// so the rows and folders are the scenario's own and not the harness host's.
+type H190Row = { sessionId: string; title?: string; preview?: string; updatedAt?: string };
+const h190ListFixture = async (
+  page: Page,
+  rows: Record<string, H190Row[]>,
+  fs: Record<string, { parent: string | null; entries: string[] }> = {},
+): Promise<{ reads: string[] }> => {
+  const reads: string[] = [];
+  await page.route(/\/rc\/sessions\?cwd=/, (route) => {
+    const u = new URL(route.request().url());
+    const cwd = u.searchParams.get('cwd') || '';
+    if (u.searchParams.get('archiveState') === 'archived') {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: [], truncated: false }) });
+    }
+    reads.push(cwd);
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ sessions: rows[cwd] ?? [], truncated: false }),
+    });
+  });
+  await page.route(/\/rc\/sessions\/live-state\?/, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ v: 1, sessions: [] }) }),
+  );
+  await page.route(/\/rc\/fs(\?|$)/, (route) => {
+    const path = new URL(route.request().url()).searchParams.get('path') || '/p190';
+    const f = fs[path];
+    if (!f) return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"no such folder"}' });
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ path, parent: f.parent, entries: f.entries.map((name) => ({ name })) }),
+    });
+  });
+  return { reads };
+};
+const h190At = (cwd: string) =>
+  `(() => { localStorage.setItem('qwen-rc-workspaces', '[]'); renderRecentWorkspaces(); return browseTo(${JSON.stringify(cwd)}, true); })()`;
+const h190Now = new Date().toISOString();
+
+PAGE_SCENARIOS.push({
+  name: 'P317 the folder screen folder rows are buttons, one Tab stop moved through with the arrows, and Enter goes in, at 390 and 1100',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {}, {
+      '/p317': { parent: '/', entries: ['alpha', 'beta'] },
+      '/p317/alpha': { parent: '/p317', entries: [] },
+      '/': { parent: null, entries: ['p317'] },
+    });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await page.evaluate(h190At('/p317'));
+      await openList(page);
+      await page.click('#list-new');
+      await page.waitForFunction(`document.getElementById('dir-current').textContent === '/p317'`);
+      const kinds = (await page.evaluate(`Array.from(document.querySelectorAll('#dir-list > *')).map((e) => e.tagName + ':' + (e.textContent || '').trim())`)) as string[];
+      expect(kinds.join('|') === 'BUTTON:.. (/)|BUTTON:alpha/|BUTTON:beta/', `${size.width}: the folder rows are ${JSON.stringify(kinds)}, not buttons`);
+      // Tab from the screen's back button until a folder row has focus: the
+      // list is one Tab stop, and ArrowDown moves to the next row.
+      await page.focus('#dir-back');
+      const focusedRow = () =>
+        page.evaluate(`(() => { const a = document.activeElement; return a && a.closest('#dir-list') ? (a.textContent || '').trim() : ''; })()`) as Promise<string>;
+      let on = '';
+      for (let i = 0; i < 20 && !on; i++) {
+        await page.keyboard.press('Tab');
+        on = await focusedRow();
+      }
+      const stops = (await page.evaluate(`Array.from(document.querySelectorAll('#dir-list button')).filter((b) => b.tabIndex === 0).length`)) as number;
+      expect(on === '.. (/)' && stops === 1, `${size.width}: Tab reached ${JSON.stringify(on)} with ${stops} tab stops in the list`);
+      await page.keyboard.press('ArrowDown');
+      on = await focusedRow();
+      expect(on === 'alpha/', `${size.width}: ArrowDown moved to ${JSON.stringify(on)}, not alpha/`);
+      await shot(page, `p317-folders-${size.width}`);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(`document.getElementById('dir-current').textContent === '/p317/alpha'`, null, { timeout: 5_000 });
+      await page.click('#dir-back');
+      lines.push(`${size.width}: rows are buttons, one Tab stop, ArrowDown to alpha/, Enter went in`);
+    }
+    return lines.join('; ');
   },
 });
 
