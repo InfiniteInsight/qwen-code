@@ -13736,6 +13736,9 @@
         if ($('past-filter').value) showListSearch(true);
         renderList();
         void refreshArchivedCount();
+        // #190: read now rather than on the 30 s tick, so a conversation
+        // opened in another folder since shows its live dot as the list opens.
+        if (curDirPath) void refreshPastConversations(curDirPath);
         $('list-back').focus({ preventScroll: true });
       }
       function closeListToChat() {

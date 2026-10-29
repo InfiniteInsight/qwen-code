@@ -13993,7 +13993,9 @@ PAGE_SCENARIOS.push({
       // No folder: a first browse that failed is exactly when the typed path
       // is the way in, so the door has to survive it.
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.evaluate('renderPastConversations([], null, false)');
+      // #190: opening the list reads the browser's folder at once, so the
+      // failed browse is the browser's state too, not only the list's.
+      await page.evaluate('curDirPath = null; renderPastConversations([], null, false)');
       await openList(page);
       await page.click('#list-new');
       const bare = await readPicker(page);
@@ -23839,6 +23841,26 @@ PAGE_SCENARIOS.push({
     const titles = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
     expect(titles.join('|') === 'kept', `after backing out the list shows ${JSON.stringify(titles)}`);
     return `browsed to /p324/other and back out: the list is on /p324/home again with its row`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P325 opening the list reads its folders at once, so a live dot does not wait for the 30 s tick',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { reads } = await h190ListFixture(page, {
+      '/p325': [{ sessionId: '32500000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now }],
+    }, { '/p325': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p325'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await h190Settle(page);
+    const before = reads.length;
+    await openList(page);
+    const end = Date.now() + 3_000;
+    while (reads.length === before && Date.now() < end) await page.waitForTimeout(50);
+    expect(reads.length > before, `opening the list read nothing (${reads.length} reads before and after)`);
+    return `opening the list read ${reads.slice(before).join(', ')} at once`;
   },
 });
 
