@@ -161,6 +161,8 @@ export interface StubDaemon {
    * untouched, so a test can only prove that by reading what arrived here.
    */
   lastTurnIndexQuery: Record<string, unknown> | undefined;
+  /** How many GET /session/:id/turns/current requests have arrived (#131). */
+  currentTurnReads: number;
   /**
    * Session id the most recent POST /session/:id/recap carried. The gateway
    * is supposed to carry the watched id through to the daemon, and only what
@@ -443,6 +445,19 @@ export interface StubDaemonOptions {
   turnIndexStatusCode?: number;
   /** Full body for GET /session/:id/turn-index (overrides the default page). */
   turnIndexPage?: unknown;
+  /**
+   * Body for GET /session/:id/turns/current (#131), a daemon `BridgeTurnStatus`.
+   * A function is called on every read, so a scenario can stamp `startedAt`
+   * relative to the moment of the read rather than the moment it was written.
+   * Left unset the stub answers `{ sessionId, state: 'idle' }`, which is what a
+   * daemon answers for a session that has never run a turn.
+   */
+  currentTurn?: unknown;
+  /**
+   * Status for GET /session/:id/turns/current (default 200). A 404 with no
+   * `code` is how a daemon from before the route answers.
+   */
+  currentTurnStatusCode?: number;
   /**
    * Status for POST /session/:id/recap (default 200). A 404 is how a daemon
    * from before the recap route answers a request for it, which is the one
@@ -798,6 +813,7 @@ export async function startStubDaemon(
       | undefined,
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
     lastTurnIndexQuery: undefined as Record<string, unknown> | undefined,
+    currentTurnReads: 0,
     lastRecapSessionId: undefined as string | undefined,
     lastBtwSessionId: undefined as string | undefined,
     lastBtwQuestion: undefined as string | undefined,
@@ -1788,6 +1804,24 @@ export async function startStubDaemon(
       ],
       startTime: '2026-01-01T00:00:00.000Z',
     });
+  });
+
+  // The daemon registers `current` before `/turns/:promptId` and answers with
+  // its `BridgeTurnStatus` as-is (packages/cli/src/serve/routes/session.ts).
+  app.get('/session/:id/turns/current', (req, res) => {
+    state.currentTurnReads += 1;
+    const status = opts.currentTurnStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'Not Found' });
+      return;
+    }
+    const body =
+      typeof opts.currentTurn === 'function'
+        ? (opts.currentTurn as () => unknown)()
+        : opts.currentTurn;
+    res.status(200).json(
+      body ?? { sessionId: String(req.params.id), state: 'idle' },
+    );
   });
 
   app.post('/session/:id/recap', (req, res) => {
@@ -3107,6 +3141,9 @@ export async function startStubDaemon(
     },
     get lastTurnIndexQuery() {
       return state.lastTurnIndexQuery;
+    },
+    get currentTurnReads() {
+      return state.currentTurnReads;
     },
     get lastRecapSessionId() {
       return state.lastRecapSessionId;

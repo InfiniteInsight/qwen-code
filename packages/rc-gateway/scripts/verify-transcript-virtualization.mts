@@ -2998,6 +2998,10 @@ type PageScenario =
         turnIndexPage?: unknown;
         /** Status the stub answers the turn index read with. */
         turnIndexStatusCode?: number;
+        /** #131. Body, or a function returning it, for GET /session/:id/turns/current. */
+        currentTurn?: unknown;
+        /** #131. Status the stub answers the current-turn read with. */
+        currentTurnStatusCode?: number;
         /**
          * #192. Mount the harness's host-actions store: one action, the
          * launcher, not running until one start has run. Left unset the
@@ -22891,6 +22895,8 @@ async function runPageScenario(
     artifactContentStatus: s.stub?.artifactContentStatus,
     turnIndexPage: s.stub?.turnIndexPage,
     turnIndexStatusCode: s.stub?.turnIndexStatusCode,
+    currentTurn: s.stub?.currentTurn,
+    currentTurnStatusCode: s.stub?.currentTurnStatusCode,
     hostActions: s.stub?.hostActions,
     pool: s.stub?.pool,
   });
@@ -26343,6 +26349,158 @@ PAGE_SCENARIOS.push({
     return 'Upload alone, with no New file, Edit or Delete, for a daemon advertising workspace_file_upload without write or delete';
   },
 });
+
+
+// #131. The status line's sheet gains a "This turn" row while the daemon reports
+// a turn running, from GET /session/:id/turns/current. The stub answers with a
+// real BridgeTurnStatus whose startedAt is stamped at each read.
+{
+  const turnReads = (page: Page): { n: number } => {
+    const seen = { n: 0 };
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname.endsWith('/turns/current')) seen.n += 1;
+    });
+    return seen;
+  };
+  // Stamped at the first read and then fixed, as a real turn's start is, so the
+  // clock the page shows has to move on its own between reads.
+  const runningTurn = (agoMs: number) => {
+    let startedAt: number | undefined;
+    return () => {
+      startedAt ??= Date.now() - agoMs;
+      return {
+        sessionId: SESSION_ID_131,
+        state: 'running',
+        promptId: 'prompt-131',
+        promptText: 'refactor the widget factory so the sheet shows it',
+        queuedAt: startedAt - 500,
+        startedAt,
+      };
+    };
+  };
+  const SESSION_ID_131 = '11111111-2222-3333-4444-555555555555';
+  const readRow = (page: Page) =>
+    page.evaluate(() => {
+      const row = document.getElementById('turn-row');
+      const sheet = document.getElementById('h1-sheet')!;
+      return {
+        present: !!row,
+        text: row ? (row.textContent ?? '') : '',
+        elapsed: document.getElementById('turn-elapsed')?.textContent ?? '',
+        prompt: document.getElementById('turn-prompt')?.textContent ?? '',
+        overflow: sheet.scrollWidth > sheet.clientWidth + 1,
+      };
+    });
+  const clockSecs = (t: string): number => {
+    const m = /^(?:(\d+)m)?(\d+)s$/.exec(t) ?? /^(\d+)m(\d+)s$/.exec(t);
+    return m ? Number(m[1] ?? 0) * 60 + Number(m[2]) : -1;
+  };
+  const startTurn = async (page: Page): Promise<void> => {
+    await page.waitForFunction('ctxInfo && caps && caps.remoteControl', null, { timeout: 15_000 });
+    await page.fill('#prompt', 'p390 hold the turn');
+    await page.click('#send');
+    await page.waitForFunction('turnOpen === true', null, { timeout: 5_000 });
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P390 while a turn runs the sheet shows a This turn row (running, since when, how long, the prompt), read every 4s only while the sheet is open, and it goes when the turn ends',
+    stub: { promptDelayMs: 40_000, currentTurn: runningTurn(65_000) },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const reads = turnReads(page);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await startTurn(page);
+      await page.waitForTimeout(500);
+      expect(reads.n === 0, `${reads.n} reads of the current turn before the sheet was opened`);
+
+      await openSheet(page);
+      await page.waitForSelector('#turn-row', { timeout: 5_000 });
+      const first = await readRow(page);
+      expect(/^This turn/.test(first.text) && /running/.test(first.text) && /since \d/.test(first.text), `the row reads ${JSON.stringify(first.text)}`);
+      const s1 = clockSecs(first.elapsed);
+      expect(s1 >= 64 && s1 <= 75, `the turn is 65s old and the row says ${JSON.stringify(first.elapsed)}`);
+      expect(first.prompt.startsWith('refactor the widget factory'), `the prompt line reads ${JSON.stringify(first.prompt)}`);
+      expect(!first.overflow, 'the sheet scrolls sideways with the row in it');
+      await shot(page, 'p390-this-turn');
+
+      // Refreshed on a timer while it stays open: a second read, and the clock
+      // has moved on by about as long as we waited.
+      await page.waitForTimeout(4_600);
+      expect(reads.n >= 2, `${reads.n} reads after 5s with the sheet open`);
+      const later = await readRow(page);
+      const s2 = clockSecs(later.elapsed);
+      expect(s2 - s1 >= 4 && s2 - s1 <= 8, `the clock went from ${first.elapsed} to ${later.elapsed}`);
+
+      // Shut: no more reads. Opened again: one at once, and the row is back.
+      await page.click('#h1-status');
+      const atClose = reads.n;
+      await page.waitForTimeout(4_600);
+      expect(reads.n === atClose, `${reads.n - atClose} reads with the sheet shut`);
+      await openSheet(page);
+      await page.waitForSelector('#turn-row', { timeout: 5_000 });
+      expect(reads.n === atClose + 1, `${reads.n - atClose} reads when the sheet opened again`);
+
+      // The turn ends over the watch: the row goes with it and the reads stop.
+      await page.evaluate(`renderFrame({ type: 'turn_complete', data: {} })`);
+      await page.waitForFunction(`!document.getElementById('turn-row')`, null, { timeout: 5_000 });
+      const atEnd = reads.n;
+      await page.waitForTimeout(4_600);
+      expect(reads.n === atEnd, `${reads.n - atEnd} reads after the turn ended`);
+      return `row "${first.text}" at ${first.elapsed}, ${later.elapsed} five seconds on; ${atClose} reads then none while shut, one on reopening, none after turn_complete`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P391 an idle conversation has no This turn row and the sheet does not read the turn; one the daemon calls idle while the page thinks it runs asks and still draws no row',
+    stub: { promptDelayMs: 40_000 },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const reads = turnReads(page);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction('ctxInfo && caps && caps.remoteControl', null, { timeout: 15_000 });
+      await openSheet(page);
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.waitForTimeout(5_000);
+      const idle = await readRow(page);
+      expect(!idle.present, `an idle sheet has the row: ${JSON.stringify(idle.text)}`);
+      expect(reads.n === 0, `${reads.n} reads of the current turn with nothing running`);
+      await page.click('#h1-status');
+
+      await startTurn(page);
+      await openSheet(page);
+      for (let i = 0; i < 30 && reads.n === 0; i++) await page.waitForTimeout(100);
+      expect(reads.n >= 1, 'a running turn with the sheet open made no read');
+      await page.waitForTimeout(500);
+      const none = await readRow(page);
+      expect(!none.present, `the daemon said idle and the sheet drew ${JSON.stringify(none.text)}`);
+      return `idle: no row and no read; running here but idle at the daemon: ${reads.n} read, no row`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P392 against a gateway that does not list currentTurn there is no This turn row and no read, even with a turn running and the sheet open',
+    stub: { promptDelayMs: 40_000, currentTurn: runningTurn(65_000) },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const reads = turnReads(page);
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction('ctxInfo && caps && caps.remoteControl', null, { timeout: 15_000 });
+      const had = await page.evaluate(() => (caps as { remoteControl: { currentTurn?: boolean } }).remoteControl.currentTurn);
+      expect(had === true, `the gateway under test lists currentTurn as ${String(had)}`);
+      await page.evaluate(() => { delete (caps as { remoteControl: { currentTurn?: boolean } }).remoteControl.currentTurn; });
+      await startTurn(page);
+      await openSheet(page);
+      await page.waitForTimeout(5_000);
+      const row = await readRow(page);
+      expect(!row.present, `the row is drawn without the capability: ${JSON.stringify(row.text)}`);
+      expect(reads.n === 0, `${reads.n} reads without the capability`);
+      return 'the gateway lists currentTurn; with it removed from caps, a running turn and an open sheet made no read and drew no row';
+    },
+  });
+}
 
 
 async function runPageSection(): Promise<Result[]> {
