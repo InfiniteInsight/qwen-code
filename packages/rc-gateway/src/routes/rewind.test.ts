@@ -166,6 +166,8 @@ interface MountOpts {
   walDir?: string;
   queue?: PromptQueue;
   now?: () => Date;
+  reconcileMs?: number;
+  reconcilePollMs?: number;
 }
 
 async function mount(opts: MountOpts): Promise<string> {
@@ -183,6 +185,8 @@ async function mount(opts: MountOpts): Promise<string> {
       walDir: opts.walDir,
       queue: opts.queue,
       now: opts.now,
+      reconcileMs: opts.reconcileMs,
+      reconcilePollMs: opts.reconcilePollMs,
     }),
   );
   const s: Server = await new Promise((resolve) => {
@@ -974,5 +978,90 @@ describe('POST /session/:id/rewind after a previous rewind (dead branch)', () =>
     const res = await postRewind(url, { toTurn: 3 });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'rewind_not_applicable' });
+  });
+});
+
+describe('POST /session/:id/rewind when the gateway times out but the daemon succeeds', () => {
+  const timeout = () => new DOMException('timeout', 'TimeoutError');
+
+  it('reconciles against the snapshot list and commits: 202, marker, audit', async () => {
+    await writeTranscript(3);
+    const snapshots = makeSnapshots(3);
+    const { daemon } = fakeDaemon({
+      snapshots,
+      rewind: async () => {
+        // The daemon finishes the rewind after the gateway's fetch gave up:
+        // snapshots from the target turn onward are gone.
+        snapshots.splice(1);
+        throw timeout();
+      },
+    });
+    const audit = fakeAudit();
+    const bus = new OwnerEventBus();
+    const seen: OwnerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({
+      daemon,
+      audit,
+      bus,
+      walDir,
+      reconcileMs: 500,
+      reconcilePollMs: 10,
+    });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({ toTurn: 1, truncatedEventId: 2 });
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'session_rewound',
+      detail: { toTurn: 1, reconciledAfterTimeout: true },
+    });
+    expect(seen).toHaveLength(1);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(1);
+    wal.close();
+  });
+
+  it('504 rewind_timeout, no marker, no audit, when the rewind never shows up as applied', async () => {
+    await writeTranscript(3);
+    const { daemon } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+      rewind: async () => {
+        throw timeout();
+      },
+    });
+    const audit = fakeAudit();
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({
+      daemon,
+      audit,
+      walDir,
+      reconcileMs: 60,
+      reconcilePollMs: 10,
+    });
+
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(504);
+    expect(await res.json()).toMatchObject({ code: 'rewind_timeout' });
+    expect(audit.calls).toHaveLength(0);
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(0);
+    wal.close();
+  });
+
+  it('a non-timeout daemon failure is still 502 daemon_unavailable', async () => {
+    await writeTranscript(3);
+    const { daemon } = fakeDaemon({
+      snapshots: makeSnapshots(3),
+      rewind: async () => {
+        throw new Error('connection refused');
+      },
+    });
+    const url = await mount({ daemon, reconcileMs: 60, reconcilePollMs: 10 });
+    const res = await postRewind(url, { toTurn: 1 });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ code: 'daemon_unavailable' });
   });
 });

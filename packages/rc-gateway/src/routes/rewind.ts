@@ -57,6 +57,13 @@ export interface RewindRouteDeps {
   notifier?: PushNotifier;
   /** Override the shared PromptQueue (for tests that need isolated queues). */
   queue?: PromptQueue;
+  /**
+   * How long (ms) to keep checking whether a rewind that outlived the SDK's
+   * fetch timeout actually landed. Default 60s.
+   */
+  reconcileMs?: number;
+  /** Poll interval (ms) for that check. Default 2s. */
+  reconcilePollMs?: number;
 }
 
 /**
@@ -102,6 +109,12 @@ export interface RewindRouteDeps {
  *     surfaced verbatim as 409; every other failure (unreachable, 4xx/5xx,
  *     network) maps to 502 `daemon_unavailable`. On ANY failure: no WAL
  *     marker, no audit — nothing half-applied.
+ *     A fetch TIMEOUT on `rewindSession` is the exception: the daemon cannot
+ *     cancel a dispatched rewind, so the outcome is unknown. The route polls
+ *     `getRewindSnapshots` for up to `reconcileMs`; once the target snapshot is
+ *     gone the rewind landed and the saga continues (audit detail carries
+ *     `reconciledAfterTimeout`); still present -> 504 `rewind_timeout`;
+ *     daemon silent throughout -> 502.
  *  4. Append `session_rewound` to the session's `SessionWal` at
  *     `(wal.latestId() ?? 0) + 1` (unlike fork, rewind has no caller-supplied
  *     WAL coordinate to derive an id from, so it uses the WAL's own next
@@ -127,6 +140,8 @@ export function createRewindRoute(
   const now = deps.now ?? (() => new Date());
   const { audit, bus, walDir, notifier } = deps;
   const queue = deps.queue ?? defaultQueue;
+  const reconcileMs = deps.reconcileMs ?? 60_000;
+  const reconcilePollMs = deps.reconcilePollMs ?? 2_000;
 
   return async (req, res) => {
     try {
@@ -140,6 +155,33 @@ export function createRewindRoute(
       }
     }
   };
+
+  /**
+   * After a timed-out rewind call: poll the snapshot list until the target
+   * snapshot is gone (`landed`), the window closes with it still there
+   * (`pending`), or the daemon never answered (`unreachable`).
+   */
+  async function rewindLanded(
+    sessionId: string,
+    promptId: string,
+    windowMs: number,
+    pollMs: number,
+  ): Promise<'landed' | 'pending' | 'unreachable'> {
+    const deadline = Date.now() + windowMs;
+    let answered = false;
+    for (;;) {
+      try {
+        const { snapshots } = await daemon.getRewindSnapshots(sessionId);
+        answered = true;
+        if (!snapshots.some((s) => s.promptId === promptId)) return 'landed';
+      } catch {
+        // Busy or briefly unreachable while the rewind finishes: keep polling.
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+    return answered ? 'pending' : 'unreachable';
+  }
 
   async function handleRewind(
     req: Parameters<RequestHandler>[0],
@@ -299,6 +341,10 @@ export function createRewindRoute(
       // Set only when the daemon is actually called. The tip case truncates
       // nothing and never reaches the daemon, so it has no file outcome.
       let fileOutcome: { changed: number; failed: number } | undefined;
+      // Set once the rewind call is dispatched; names the snapshot to look
+      // for after an SDK fetch timeout.
+      let dispatchedPromptId: string | undefined;
+      let reconciledAfterTimeout = false;
       try {
         if (targetTurnIndex < addressableTurnCount) {
           // 3a. Ensure the session is owned by its workspace daemon before
@@ -346,6 +392,7 @@ export function createRewindRoute(
             });
             return;
           }
+          dispatchedPromptId = snapshot.promptId;
           const result = await daemon.rewindSession(
             sessionId,
             snapshot.promptId,
@@ -370,10 +417,39 @@ export function createRewindRoute(
             .json({ error: 'Rewind in progress', code: 'rewind_in_progress' });
           return;
         }
-        res
-          .status(502)
-          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
-        return;
+        // The SDK gives every call a 30s fetch timeout and the daemon cannot
+        // cancel a rewind it has dispatched, so a slow rewind (a big file
+        // restore) can succeed after the gateway gave up. A timeout is an
+        // unknown outcome, not a failure: ask the daemon whether the target
+        // snapshot is gone before answering. Landed -> commit as normal, so
+        // the marker, audit row and push are not lost.
+        if (dispatchedPromptId !== undefined && isTimeoutError(err)) {
+          const outcome = await rewindLanded(
+            sessionId,
+            dispatchedPromptId,
+            reconcileMs,
+            reconcilePollMs,
+          );
+          if (outcome === 'landed') {
+            reconciledAfterTimeout = true;
+          } else {
+            res.status(outcome === 'pending' ? 504 : 502).json(
+              outcome === 'pending'
+                ? {
+                    error:
+                      'Rewind timed out; the daemon may still apply it - reload before retrying',
+                    code: 'rewind_timeout',
+                  }
+                : { error: 'Daemon unavailable', code: 'daemon_unavailable' },
+            );
+            return;
+          }
+        } else {
+          res
+            .status(502)
+            .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+          return;
+        }
       }
 
       const rewoundAt = now().toISOString();
@@ -454,6 +530,7 @@ export function createRewindRoute(
           toTurn: targetTurnIndex,
           truncatedEventId,
           ...(fileOutcome ? { files: fileOutcome } : {}),
+          ...(reconciledAfterTimeout ? { reconciledAfterTimeout: true } : {}),
         },
       });
       void notifier?.notify(
@@ -471,6 +548,13 @@ export function createRewindRoute(
       release();
     }
   }
+}
+
+/** The SDK aborts a call that outlives its fetch timeout with a
+ * `TimeoutError` DOMException (an `AbortError` when a caller signal fired). */
+function isTimeoutError(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'TimeoutError' || name === 'AbortError';
 }
 
 /**
