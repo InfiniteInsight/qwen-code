@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, isAbsolute, resolve } from 'node:path';
@@ -19,6 +20,27 @@ import { join, isAbsolute, resolve } from 'node:path';
 export function sanitizeCwd(cwd: string): string {
   const normalized = process.platform === 'win32' ? cwd.toLowerCase() : cwd;
   return normalized.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
+ * Canonicalises a workspace path the way the daemon does before it derives the
+ * project segment (acp-bridge `canonicalizeWorkspace`, which `Config` and the
+ * serve routes use): `path.resolve` (absolutise, fold `.`/`..` and a trailing
+ * slash), then `realpathSync.native` when the path exists, so a symlinked
+ * spelling lands on the directory the daemon actually wrote under. A path that
+ * does not exist keeps its resolved form instead of throwing.
+ *
+ * Without this, `--cwd=.`, `--cwd=/ws/` and a symlinked cwd each sanitised to a
+ * DIFFERENT project segment than the daemon's, so `search`, `sessions` and
+ * `reindex` read an empty directory.
+ */
+export function canonicalWorkspaceRoot(cwd: string): string {
+  const resolved = resolve(cwd);
+  try {
+    return (realpathSync.native ?? realpathSync)(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 /**
@@ -75,19 +97,28 @@ export function runtimeBaseDir(
  * The chats dir for a workspace: `<runtimeBaseDir>/projects/<sanitizeCwd>/chats`
  * — byte-identical to core's `Storage#getProjectDir()` + `'chats'`.
  *
+ * `cwd` is canonicalised first ({@link canonicalWorkspaceRoot}) so every
+ * spelling of one directory maps to the daemon's project segment.
+ *
  * `cwd` may come from request input (e.g. `GET /rc/sessions?cwd=`, or
  * `/workspace/:cwd/sessions`), not only the trusted
  * `daemon.capabilities().workspaceCwd`. That is safe only because `sanitizeCwd`
  * flattens every non-alphanumeric character (including `/`, `.`, `\`) to `-`,
  * so no path separator or traversal sequence ever survives into the
- * filesystem path built below. Any future caller of this function MUST keep
+ * filesystem path built below (canonicalisation only reads the filesystem to
+ * resolve links; its result is still sanitised). Any future caller of this function MUST keep
  * routing untrusted `cwd` values through `sanitizeCwd` — do not bypass it.
  */
 export function resolveChatsDir(
   cwd: string,
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return join(runtimeBaseDir(env), 'projects', sanitizeCwd(cwd), 'chats');
+  return join(
+    runtimeBaseDir(env),
+    'projects',
+    sanitizeCwd(canonicalWorkspaceRoot(cwd)),
+    'chats',
+  );
 }
 
 /**
@@ -119,7 +150,7 @@ export function resolveSearchIndexDir(
   return join(
     runtimeBaseDir(env),
     'projects',
-    sanitizeCwd(cwd),
+    sanitizeCwd(canonicalWorkspaceRoot(cwd)),
     'search-index',
   );
 }

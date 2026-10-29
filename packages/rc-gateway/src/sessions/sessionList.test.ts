@@ -193,6 +193,18 @@ describe('listSessions', () => {
     expect(sessions.map((s) => s.sessionId)).toEqual([ID(1), ID(2), ID(3)]);
   });
 
+  it('keeps the NEWEST transcripts when over the cap, not the lexically first', async () => {
+    // ID(1)..ID(5): the lexically first three are the OLDEST; ID(5) is newest.
+    for (let i = 1; i <= 5; i++) {
+      await write(ID(i));
+      const t = new Date(Date.UTC(2025, 0, i));
+      await utimes(join(dir, `${ID(i)}.jsonl`), t, t);
+    }
+    const { sessions, truncated } = await listSessions(dir, { max: 3 });
+    expect(truncated).toBe(true);
+    expect(sessions.map((s) => s.sessionId)).toEqual([ID(5), ID(4), ID(3)]);
+  });
+
   it('exposes a positive default cap', () => {
     expect(MAX_LIST_SESSIONS).toBeGreaterThan(0);
   });
@@ -513,6 +525,45 @@ describe('readFirstUserMessage', () => {
 
   it('returns null for an empty file', async () => {
     await writeFile(join(dir, `${ID(1)}.jsonl`), '');
+    expect(await readFirstUserMessage(dir, ID(1))).toBeNull();
+  });
+
+  it('finds a user message past the 20th line', async () => {
+    const filler = Array.from({ length: 30 }, (_, i) =>
+      JSON.stringify({ type: 'system', n: i }),
+    );
+    const lines = [
+      ...filler,
+      JSON.stringify({
+        type: 'user',
+        message: { parts: [{ text: 'late prompt' }] },
+      }),
+    ].join('\n');
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
+    expect(await readFirstUserMessage(dir, ID(1))).toBe('late prompt');
+  });
+
+  it('finds a user message after a record larger than 64 KiB', async () => {
+    const lines = [
+      JSON.stringify({ type: 'system', blob: 'x'.repeat(200 * 1024) }),
+      JSON.stringify({
+        type: 'user',
+        message: { parts: [{ text: 'after the blob' }] },
+      }),
+    ].join('\n');
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
+    expect(await readFirstUserMessage(dir, ID(1))).toBe('after the blob');
+  });
+
+  it('still stops at a bounded number of bytes', async () => {
+    const lines = [
+      JSON.stringify({ type: 'system', blob: 'x'.repeat(3 * 1024 * 1024) }),
+      JSON.stringify({
+        type: 'user',
+        message: { parts: [{ text: 'too far' }] },
+      }),
+    ].join('\n');
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines);
     expect(await readFirstUserMessage(dir, ID(1))).toBeNull();
   });
 
