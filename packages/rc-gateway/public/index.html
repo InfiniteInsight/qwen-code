@@ -2485,6 +2485,318 @@
           bottom: 52px;
         }
       }
+      /* #110. The agents chip: "2 agents", in the status line's own 44px
+         row after the status button, so it costs no height and no transcript
+         row moves when it comes or goes (the #177/#190 rule). A tap opens the
+         Agents sheet. */
+      #agents-chip {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 44px;
+        min-width: 44px;
+        padding: 0 12px;
+        border: 0;
+        border-left: 1px solid var(--g1-line);
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-link);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      #agents-chip[hidden] {
+        display: none;
+      }
+      #agents-chip .dot {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--g1-link);
+        animation: ag-pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes ag-pulse {
+        50% {
+          opacity: 0.35;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #agents-chip .dot {
+          animation: none;
+        }
+      }
+      /* #110. The Agents sheet: at the foot of the screen over a scrim, the
+         shape of the Fork question's sheet, so the list and the trace's Stop
+         are in the thumb zone. One card, two views: the roster, and one
+         agent's trace with its Stop pinned under the steps. */
+      #agents-sheet {
+        position: fixed;
+        inset: 0;
+        z-index: 80;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        background: rgba(1, 4, 9, 0.6);
+      }
+      #agents-sheet[hidden] {
+        display: none;
+      }
+      #agents-sheet .ag-card {
+        display: flex;
+        flex-direction: column;
+        box-sizing: border-box;
+        max-height: 85%;
+        min-height: 40%;
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-edge);
+        border-radius: 16px 16px 0 0;
+        color: var(--g1-ink);
+      }
+      #agents-sheet .ag-head {
+        flex: none;
+        height: 56px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--g1-line);
+        color: var(--g1-ink-hi);
+      }
+      #agents-sheet .ag-head > button {
+        width: 44px;
+        height: 44px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: inherit;
+      }
+      /* The way back keeps its place when there is nowhere to go back to, so
+         the title stays centred. */
+      #agents-sheet .ag-head > button[hidden] {
+        display: flex;
+        visibility: hidden;
+      }
+      #agents-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        text-align: center;
+        font-size: 16px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #agents-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 4px 0 16px;
+      }
+      #agents-foot {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #agents-foot[hidden] {
+        display: none;
+      }
+      #agent-stop-note {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      #agent-stop,
+      #agents-sheet .ag-stop {
+        flex: none;
+        min-width: 64px;
+        min-height: 44px;
+        padding: 0 16px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        color: #ff7b72;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      #agent-stop[hidden],
+      #agents-sheet .ag-stop[hidden] {
+        display: none;
+      }
+      #agents-sheet .ag-grp {
+        padding: 14px 16px 6px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      #agents-sheet .ag-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding-right: 12px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #agents-sheet .ag-open {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 56px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        padding: 6px 4px 6px 16px;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        text-align: left;
+      }
+      #agents-sheet .ag-l1 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        max-width: 100%;
+        white-space: nowrap;
+      }
+      #agents-sheet .ag-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-weight: 600;
+      }
+      #agents-sheet .ag-st,
+      #agents-sheet .ag-clock {
+        flex: none;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+      }
+      #agents-sheet .ag-l2,
+      #agents-sheet .ag-l3 {
+        max-width: 100%;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #agents-sheet .ag-l2:empty,
+      #agents-sheet .ag-l3:empty {
+        display: none;
+      }
+      #agents-sheet .ag-dot {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--g1-ink-dim);
+      }
+      #agents-sheet .ag-dot[data-state='running'] {
+        background: var(--g1-link);
+      }
+      #agents-sheet .ag-dot[data-state='completed'] {
+        background: #3fb950;
+      }
+      #agents-sheet .ag-dot[data-state='failed'] {
+        background: #f85149;
+      }
+      #agents-sheet .ag-dot[data-state='cancelled'],
+      #agents-sheet .ag-dot[data-state='paused'] {
+        background: var(--g1-warn);
+      }
+      #agents-sheet .ag-empty {
+        padding: 16px;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+      }
+      #agents-sheet .ag-sum {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px 16px 4px;
+        font-size: 14px;
+        overflow-wrap: anywhere;
+      }
+      #agents-sheet .ag-sum .ag-l1 {
+        font-size: 14px;
+      }
+      #agents-sheet .ag-warn {
+        color: var(--g1-warn);
+      }
+      #agents-sheet .ag-task {
+        white-space: pre-wrap;
+        color: var(--g1-ink);
+      }
+      #agents-sheet .ag-more {
+        align-self: flex-start;
+        min-height: 36px;
+        padding: 0 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 8px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+        font-size: 13px;
+      }
+      #agents-sheet .ag-steps {
+        list-style: none;
+        margin: 0;
+        padding: 0 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      #agents-sheet .ag-step {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 14px;
+        overflow-wrap: anywhere;
+      }
+      #agents-sheet .ag-step.tool,
+      #agents-sheet .ag-step.act {
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+        color: var(--g1-ink-hi);
+      }
+      #agents-sheet .ag-step .st {
+        color: var(--g1-ink-mid);
+      }
+      #agents-sheet .ag-step.msg {
+        padding-left: 10px;
+        border-left: 2px solid #3a4a7a;
+        color: var(--g1-ink);
+      }
+      #agents-sheet .ag-step.msg .tx {
+        white-space: pre-wrap;
+      }
+      /* #110. On the laptop layout the sheet is the chat column's, as the
+         Fork question's is: the panes beside it stay where they are. */
+      @media (min-width: 1100px) {
+        #agents-sheet {
+          left: var(--h1-left);
+          right: var(--h1-right);
+        }
+        #agents-sheet .ag-card {
+          width: 100%;
+          max-width: 80ch;
+          align-self: center;
+        }
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -2637,6 +2949,13 @@
             </button>
             <button type="button" class="row" data-panel="queue">
               <span class="lbl">Prompt queue</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <!-- #110. Opens the Agents sheet over the chat (More shuts, as
+                 Find does). Hidden on a gateway or daemon without the agent
+                 reads. -->
+            <button type="button" class="row" id="more-agents" data-action="agents" hidden>
+              <span class="lbl">Agents</span><span class="val" id="more-agents-val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
             <button type="button" class="row" id="more-find" data-action="find" disabled>
@@ -3688,6 +4007,29 @@
           </div>
         </div>
       </div>
+      <!-- #110. The Agents sheet. The list view is the conversation's agents,
+           running first, each row 56px with its Stop at 44px; a row opens the
+           trace view: that agent's steps in order, newest at the bottom,
+           followed while it runs, with Stop pinned in the thumb zone under
+           them. Filled by renderAgentSheet. -->
+      <div id="agents-sheet" role="dialog" aria-modal="true" aria-labelledby="agents-title" hidden>
+        <div class="ag-card">
+          <div class="ag-head">
+            <button id="agents-back" type="button" aria-label="Back to all agents" hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+            </button>
+            <strong id="agents-title">Agents</strong>
+            <button id="agents-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div id="agents-body"></div>
+          <div id="agents-foot" hidden>
+            <span id="agent-stop-note"></span>
+            <button id="agent-stop" type="button">Stop</button>
+          </div>
+        </div>
+      </div>
       <!-- #185 (h1). The List screen, drawn to List.dc.html: the bar (back
            to the chat, Conversations, search), the folder line, the rows of
            the folder's conversations with a ⋯ each, Archived (n) at the end,
@@ -3860,6 +4202,19 @@
             <span class="f" id="h1-mode"></span>
             <span class="sp"></span>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <!-- #110. "2 agents": shown while the conversation has agents
+               running, and only when the gateway and the daemon both serve
+               the agent reads. It sits in this row rather than in a band of
+               its own, so nothing over the transcript changes height. -->
+          <button
+            id="agents-chip"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="agents-sheet"
+            hidden
+          >
+            <span class="dot" aria-hidden="true"></span><span id="agents-chip-text"></span>
           </button>
           <!-- issue #48: hidden by default; self-heal shows it when the retry
                budget is exhausted, and any fresh watch / Unwatch hides it -->
@@ -6340,6 +6695,10 @@
             void doCancelSubagent(watchedSessionId, item),
           onCostSubagent: (item) =>
             void doCostSubagent(watchedSessionId, item),
+          // #110: the block's trace opens that child in the Agents sheet,
+          // offered only where the gateway and daemon serve the agent reads.
+          onTraceSubagent: (item) => openAgentTrace(item && item.toolCallId),
+          canTraceSubagent: () => agentsOn(),
           // May still be null if the boot read has not landed; the view then
           // starts in its own default and applyStampZone corrects it below.
           stampZone,
@@ -7572,6 +7931,7 @@
         h1Text($('h1-tokens'), fillText());
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
+        agentsOnStatus(running); // #110: the chip, and a read as a turn starts or ends
         syncPromptPlaceholder();
         if (running && !runClock) {
           runClock = setInterval(renderStatusLine, 1000);
@@ -10859,6 +11219,1037 @@
         return show(false, fmtK(b.totalTokens) + ' tok' + split);
       }
 
+      // ---- The conversation's agents (issue #110) --------------------------
+      // The ask, verbatim: "I want and need subagent control and visibility!"
+      // Three surfaces over one state:
+      //  - #agents-chip, "2 agents", at the end of the status line while the
+      //    conversation has agents running. It is in the status line's own 44px
+      //    row, so it costs no height and no transcript row moves when it
+      //    comes or goes (#177 and #190 keep a reader's rows where they are).
+      //  - the Agents sheet (More > This conversation > Agents, or the chip):
+      //    the roster, running first, then paused, then finished, each with
+      //    its Stop while it runs.
+      //  - one agent's trace (a row, or the trace button on the inline
+      //    subagent block): its steps in order, newest at the bottom, followed
+      //    while it runs, with Stop under them in the thumb zone.
+      // Where each fact comes from, because the daemon's routes are not shaped
+      // the way the screen is:
+      //  - GET /session/:id/agents is the roster. A running agent comes from
+      //    the daemon's registry with live stats and its last ten activities; a
+      //    finished one is read back off its sidecar, which carries neither.
+      //    No row names a model, so none is drawn.
+      //  - GET /session/:id/agent-trace is lineage only, who spawned whom. It
+      //    carries no steps. The steps are the stream's: the child frames the
+      //    transcript model already keeps on each Agent tool row (the child's
+      //    words and tool calls, in the order they came). For an agent this
+      //    page never saw stream, the daemon's recent activities stand in.
+      //  - Stop is the write-scoped subagent cancel the inline block uses.
+      // All of it is gated on the gateway's sessionAgents flag AND the
+      // daemon's session_agents tag, so an old gateway or daemon shows none
+      // of it and is never asked.
+      const AGENTS_POLL_OPEN_MS = 3000; // the sheet is open and something runs
+      const AGENTS_POLL_MS = 5000; // the sheet is shut and something runs
+      const AGENT_MSG_CLIP = 600; // characters of one message shown unopened
+      const AGENT_TASK_CLIP = 200;
+      // var, not const: renderStatusLine calls agentsOnStatus, and a call that
+      // reached it before this line ran would otherwise throw on the binding.
+      var agentsState = {
+        sessionId: null,
+        rows: null, // the last roster's agent rows, null before one answered
+        readAt: 0, // this page's clock when that roster was read
+        now: 0, // the daemon's clock in that roster (its own `now`)
+        err: '',
+        reading: false,
+        timer: null,
+        gen: 0,
+        wasLive: false,
+        // ref -> { busy, note } for a Stop, kept per agent so a row redrawn
+        // by the next read still shows that its stop is in flight.
+        stops: new Map(),
+        // parent tool call id -> the tool row whose child frames the model
+        // keeps, for every Agent row on the page, running or settled.
+        stream: new Map(),
+      };
+      var agentSheet = {
+        open: false,
+        view: 'list',
+        key: null, // the agent the trace view shows
+        opener: null, // what had focus when the sheet opened
+        lineage: null, // { key, nodes } from the last lineage read
+        lineageErr: '',
+        lineageAt: 0,
+        usage: new Map(), // ref -> the inspect read's line, for a finished agent
+        expanded: new Set(), // the messages and task shown whole
+        followed: null, // the key the trace last scrolled to the end for
+        clock: null,
+        renderTimer: null,
+        // A finger or button held down in the sheet: a redraw then would
+        // replace the button under it and the tap would land on nothing, so
+        // redraws wait for the release.
+        holding: false,
+      };
+
+      function agentsOn() {
+        return (
+          !!(
+            caps &&
+            caps.remoteControl &&
+            caps.remoteControl.sessionAgents === true
+          ) && daemonHasFeature('session_agents')
+        );
+      }
+      function agentLineageOn() {
+        return agentsOn() && daemonHasFeature('session_agent_trace');
+      }
+      // A reader's token cannot stop anything; an old gateway does not say,
+      // and then the button is offered and the gateway's refusal is printed.
+      function agentsWritable() {
+        return !(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.writeScope === false
+        );
+      }
+      // The cancel route matches a reference against the agent's own id or
+      // the parent tool call that launched it; the tool call is preferred, so
+      // a Stop here and the inline block's cancel name the same agent alike.
+      function agentRef(row) {
+        return (row && (row.toolUseId || row.id)) || '';
+      }
+      function agentStreamItem(ref) {
+        return (ref && agentsState.stream.get(ref)) || null;
+      }
+
+      // The stream's half: which Agent rows the model holds, kept as the model
+      // changes rather than by walking every row on every redraw.
+      function agentsRescanStream() {
+        agentsState.stream.clear();
+        for (const it of transcriptModel.items) {
+          if (it && it.kind === 'tool' && it.sub && it.toolCallId) {
+            agentsState.stream.set(it.toolCallId, it);
+          }
+        }
+      }
+      transcriptModel.subscribe((ev) => {
+        if (!ev) return;
+        if (ev.type === 'reset') {
+          agentsRescanStream();
+          agentsSoon(null);
+          return;
+        }
+        const it = ev.item;
+        if (!it || it.kind !== 'tool' || !it.sub || !it.toolCallId) return;
+        agentsState.stream.set(it.toolCallId, it);
+        agentsSoon(it);
+      });
+
+      // One agent as the screen draws it, from its roster row, its stream row,
+      // or both. The stream is live and the roster is up to a poll old, so a
+      // stream that has settled the child wins over a roster still saying it
+      // runs; a stream row from a turn that is over (a replay that never saw
+      // the settle) yields to the roster.
+      function agentView(row, item) {
+        const sub = item && item.sub;
+        const now = Date.now();
+        let state;
+        if (sub && sub.done) {
+          state =
+            row && row.status !== 'running' && row.status !== 'paused'
+              ? row.status
+              : sub.failed
+                ? 'failed'
+                : 'completed';
+        } else if (sub && turnRunning()) {
+          state = 'running';
+        } else if (row) {
+          state = row.status;
+        } else {
+          state = 'completed';
+        }
+        const running = state === 'running';
+        // How long it ran or has been running. The roster's runtimeMs is the
+        // daemon's own subtraction, so no clock skew reaches it; a running one
+        // grows from the moment it was read. The stream's own times stand in
+        // where the roster has no row, or disagrees because it is behind.
+        const subMs = sub
+          ? (sub.done && sub.endedAt != null ? sub.endedAt : now) - sub.startedAt
+          : 0;
+        const rowMs =
+          row && typeof row.runtimeMs === 'number' ? row.runtimeMs : 0;
+        let ms;
+        if (!row) ms = subMs;
+        else if (running && row.status === 'running')
+          ms = rowMs + (now - agentsState.readAt);
+        else if (running || (sub && row.status === 'running')) ms = subMs;
+        else ms = rowMs;
+        const ref = agentRef(row) || (item && item.toolCallId) || '';
+        return {
+          key: ref,
+          ref,
+          id: (row && row.id) || '',
+          toolUseId: (row && row.toolUseId) || (item && item.toolCallId) || '',
+          row,
+          item,
+          name:
+            (row && strOr(row.subagentType, '')) ||
+            (sub && sub.type) ||
+            'agent',
+          desc: row
+            ? strOr(row.description, '') || strOr(row.label, '')
+            : strOr(item && item.label, ''),
+          state,
+          running,
+          ms: Math.max(0, ms),
+          // A running clock is drawn from this base and this instant, so the
+          // tick needs no read: base + (now - at).
+          clockAt: now,
+        };
+      }
+      // The roster and the stream's running children the roster has not
+      // listed yet (it is up to a poll behind), in the sheet's order.
+      function agentViews() {
+        const out = [];
+        const seen = new Set();
+        for (const r of agentsState.rows || []) {
+          if (r.toolUseId) seen.add(r.toolUseId);
+          if (r.id) seen.add(r.id);
+          out.push(agentView(r, agentStreamItem(r.toolUseId)));
+        }
+        if (turnRunning()) {
+          for (const [ref, it] of agentsState.stream) {
+            if (seen.has(ref) || !it.sub || it.sub.done) continue;
+            out.push(agentView(null, it));
+          }
+        }
+        const rank = (v) =>
+          v.state === 'running' ? 0 : v.state === 'paused' ? 1 : 2;
+        const start = (v) =>
+          v.row && typeof v.row.startTime === 'number'
+            ? v.row.startTime
+            : Number.MAX_SAFE_INTEGER;
+        const end = (v) =>
+          v.row
+            ? typeof v.row.endTime === 'number'
+              ? v.row.endTime
+              : v.row.startTime || 0
+            : 0;
+        // Running: the longest-running first, so the order holds still while
+        // new ones join at the bottom. Paused and finished: the latest first.
+        return out
+          .map((v, i) => ({ v, i }))
+          .sort(
+            (a, b) =>
+              rank(a.v) - rank(b.v) ||
+              (rank(a.v) === 0
+                ? start(a.v) - start(b.v)
+                : end(b.v) - end(a.v)) ||
+              a.i - b.i,
+          )
+          .map((x) => x.v);
+      }
+      function agentsRunningCount() {
+        let n = 0;
+        for (const v of agentViews()) if (v.running) n += 1;
+        return n;
+      }
+      function agentFind(key) {
+        if (!key) return null;
+        for (const r of agentsState.rows || []) {
+          if (r.toolUseId === key || r.id === key) {
+            return agentView(r, agentStreamItem(r.toolUseId));
+          }
+        }
+        const it = agentStreamItem(key);
+        if (it) return agentView(null, it);
+        // A nested agent known only from the lineage read.
+        const node =
+          agentSheet.lineage &&
+          agentSheet.lineage.nodes.find(
+            (n) => n.agentId === key || n.toolUseId === key,
+          );
+        if (!node) return null;
+        return {
+          key,
+          ref: node.toolUseId || node.agentId,
+          id: node.agentId,
+          toolUseId: node.toolUseId || '',
+          row: null,
+          item: null,
+          node,
+          name: strOr(node.agentType, '') || 'agent',
+          desc: strOr(node.description, ''),
+          state: strOr(node.status, '') || 'unknown',
+          running: node.status === 'running',
+          ms: 0,
+          clockAt: Date.now(),
+        };
+      }
+
+      // ---- Reading the roster ----------------------------------------------
+      // While anything runs (a turn, or an agent the roster still lists as
+      // running, which a background agent can be long after the turn), the
+      // roster is read every few seconds: 3 with the sheet open, 5 without.
+      // Idle, nothing is read; the turn starting or ending, a watch, the sheet
+      // opening and a Stop each read once. A hidden page reads nothing.
+      function agentsLive() {
+        return turnRunning() || agentsRunningCount() > 0;
+      }
+      function agentsSchedule(ms) {
+        if (agentsState.timer) clearTimeout(agentsState.timer);
+        agentsState.timer = null;
+        if (!watchedSessionId || !agentsOn()) return;
+        agentsState.timer = setTimeout(() => {
+          agentsState.timer = null;
+          void agentsRead();
+        }, ms);
+      }
+      async function agentsRead() {
+        syncAgentsForSession();
+        const sid = watchedSessionId;
+        if (!sid || !agentsOn() || !token()) return;
+        if (document.hidden) {
+          if (agentsLive()) agentsSchedule(AGENTS_POLL_MS);
+          return;
+        }
+        if (agentsState.reading) return;
+        agentsState.reading = true;
+        const gen = agentsState.gen;
+        const r = await rcCall('/session/' + encodeURIComponent(sid) + '/agents');
+        agentsState.reading = false;
+        if (gen !== agentsState.gen || sid !== watchedSessionId) return;
+        if (!r.ok) {
+          agentsState.err = r.code;
+        } else {
+          const b = r.body || {};
+          agentsState.err = '';
+          agentsState.rows = (Array.isArray(b.tasks) ? b.tasks : []).filter(
+            (t) =>
+              t && typeof t === 'object' && t.kind === 'agent' && t.id,
+          );
+          agentsState.readAt = Date.now();
+          agentsState.now = typeof b.now === 'number' ? b.now : 0;
+        }
+        renderAgents();
+        if (agentsLive()) {
+          agentsSchedule(agentSheet.open ? AGENTS_POLL_OPEN_MS : AGENTS_POLL_MS);
+        }
+      }
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && agentsState.sessionId && agentsLive()) {
+          agentsSchedule(0);
+        }
+      });
+      // A switch takes the last conversation's agents off screen at once and
+      // reads this one's; a re-watch of the same conversation keeps them.
+      function syncAgentsForSession() {
+        const sid = watchedSessionId || null;
+        if (agentsState.sessionId === sid) return;
+        agentsState.sessionId = sid;
+        agentsState.gen += 1;
+        agentsState.rows = null;
+        agentsState.err = '';
+        agentsState.reading = false;
+        agentsState.stops.clear();
+        agentsState.wasLive = false;
+        agentSheet.usage.clear();
+        agentSheet.lineage = null;
+        if (agentSheet.open) closeAgentsSheet(false);
+        renderAgents();
+        if (sid && agentsOn()) agentsSchedule(0);
+        else agentsSchedule(-1);
+      }
+      // Called by renderStatusLine, which runs whenever the turn starts, ends
+      // or ticks: a change of turn state reads the roster once at once.
+      function agentsOnStatus(running) {
+        if (!agentsState || !agentsOn()) return;
+        syncAgentsForSession();
+        if (running !== agentsState.wasLive) {
+          agentsState.wasLive = running;
+          if (watchedSessionId) agentsSchedule(running ? 0 : 400);
+        }
+        renderAgentsChrome();
+      }
+      // A stream change redraws soon, and only what it changed: the chip and
+      // the More row always, the list when the set of running agents moved,
+      // the trace when the frames were its agent's. Several frames a second
+      // must not each rebuild the sheet.
+      var agentsSoonTimer = null;
+      var agentsTouched = new Set();
+      var agentsRunSig = '';
+      function agentsRunningSig() {
+        return agentViews()
+          .filter((v) => v.running)
+          .map((v) => v.key)
+          .join('|');
+      }
+      function agentsSoon(item) {
+        if (!agentsOn()) return;
+        agentsTouched.add(item && item.toolCallId ? item.toolCallId : '*');
+        if (agentsSoonTimer) return;
+        agentsSoonTimer = setTimeout(() => {
+          agentsSoonTimer = null;
+          const touched = new Set(agentsTouched);
+          agentsTouched.clear();
+          const sig = agentsRunningSig();
+          const moved = sig !== agentsRunSig;
+          agentsRunSig = sig;
+          renderAgentsChrome();
+          if (!agentSheet.open) return;
+          if (moved || touched.has('*')) return renderAgentSheetSoon();
+          if (agentSheet.view !== 'trace') return;
+          const v = agentFind(agentSheet.key);
+          if (v && (touched.has(v.toolUseId) || touched.has(v.key))) {
+            renderAgentSheetSoon();
+          }
+        }, 150);
+      }
+
+      // ---- Drawing ---------------------------------------------------------
+      function agentsChipText(n) {
+        return n === 1 ? '1 agent' : n + ' agents';
+      }
+      function renderAgentsChrome() {
+        const on = agentsOn();
+        const sid = watchedSessionId;
+        const n = on && sid ? agentsRunningCount() : 0;
+        const chip = $('agents-chip');
+        if (chip) {
+          if (chip.hidden !== !(n > 0)) chip.hidden = !(n > 0);
+          h1Text($('agents-chip-text'), n > 0 ? agentsChipText(n) : '');
+          chip.setAttribute(
+            'aria-label',
+            agentsChipText(n) + ' running: open the agents',
+          );
+        }
+        const row = $('more-agents');
+        if (row) {
+          if (row.hidden !== !on) row.hidden = !on;
+          row.disabled = !sid;
+          const total = (agentsState.rows || []).length;
+          h1Text(
+            $('more-agents-val'),
+            n > 0 ? n + ' running' : total ? String(total) : '',
+          );
+        }
+      }
+      function renderAgents() {
+        renderAgentsChrome();
+        if (agentSheet.open) renderAgentSheetSoon();
+      }
+      function renderAgentSheetSoon() {
+        if (agentSheet.renderTimer) return;
+        agentSheet.renderTimer = setTimeout(() => {
+          agentSheet.renderTimer = null;
+          if (agentSheet.holding) {
+            agentSheet.pending = true;
+            return;
+          }
+          renderAgentSheet();
+        }, 60);
+      }
+      function agentEl(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+      }
+      function agentDuration(v) {
+        return h1Clock(Math.floor(v.ms / 1000));
+      }
+      // A running clock carries its own base, so the 1s tick rewrites the
+      // text without reading or rebuilding anything.
+      function agentClock(v) {
+        const c = agentEl('span', 'ag-clock', agentDuration(v));
+        if (v.running) {
+          c.dataset.base = String(v.ms);
+          c.dataset.at = String(v.clockAt);
+        }
+        return c;
+      }
+      function agentsTick() {
+        const now = Date.now();
+        for (const c of document.querySelectorAll(
+          '#agents-sheet .ag-clock[data-base]',
+        )) {
+          const ms = Number(c.dataset.base) + (now - Number(c.dataset.at));
+          h1Text(c, h1Clock(Math.floor(Math.max(0, ms) / 1000)));
+        }
+      }
+      function agentStateWord(v) {
+        if (v.state === 'running') return 'running';
+        if (v.state === 'paused') return 'paused';
+        if (v.state === 'failed') return 'failed';
+        if (v.state === 'cancelled') return 'stopped';
+        if (v.state === 'completed') return 'done';
+        return v.state || '';
+      }
+      // What the row says under its name: what it used, if the daemon said,
+      // and whose child it is. Absent is not zero: a finished agent's sidecar
+      // carries no stats, and that row says nothing rather than 0 tok.
+      function agentFacts(v) {
+        const bits = [];
+        const st = v.row && v.row.stats;
+        if (st && typeof st.totalTokens === 'number') {
+          bits.push(fmtK(st.totalTokens) + ' tok');
+        }
+        if (st && typeof st.toolUses === 'number') {
+          bits.push(st.toolUses + (st.toolUses === 1 ? ' tool' : ' tools'));
+        }
+        if (v.row && v.row.parentName) bits.push('from ' + v.row.parentName);
+        if (v.row && v.row.isBackgrounded) bits.push('background');
+        return bits.join(' · ');
+      }
+      function agentStopNote(ref) {
+        const s = agentsState.stops.get(ref);
+        return s ? s.note : '';
+      }
+      function agentStopBusy(ref) {
+        const s = agentsState.stops.get(ref);
+        return !!(s && s.busy);
+      }
+      function agentLine1(v) {
+        const l1 = agentEl('span', 'ag-l1');
+        const dot = agentEl('span', 'ag-dot');
+        dot.dataset.state = v.state;
+        l1.appendChild(dot);
+        l1.appendChild(agentEl('span', 'ag-name', v.name));
+        l1.appendChild(agentEl('span', 'ag-st', agentStateWord(v)));
+        l1.appendChild(agentClock(v));
+        return l1;
+      }
+      function agentListBody(body) {
+        if (agentsState.rows === null && !agentsState.err) {
+          body.appendChild(agentEl('div', 'ag-empty', 'Reading the agents...'));
+          return;
+        }
+        if (agentsState.err) {
+          body.appendChild(
+            agentEl(
+              'div',
+              'ag-empty ag-warn',
+              'Could not read the agents: ' + agentsState.err,
+            ),
+          );
+        }
+        const views = agentViews();
+        if (!views.length) {
+          if (!agentsState.err) {
+            body.appendChild(
+              agentEl('div', 'ag-empty', 'No agents in this conversation yet.'),
+            );
+          }
+          return;
+        }
+        const groups = [
+          ['running', 'Running'],
+          ['paused', 'Paused'],
+          ['done', 'Finished'],
+        ];
+        for (const [g, label] of groups) {
+          const list = views.filter((v) =>
+            g === 'done'
+              ? v.state !== 'running' && v.state !== 'paused'
+              : v.state === g,
+          );
+          if (!list.length) continue;
+          body.appendChild(agentEl('div', 'ag-grp', label + ' (' + list.length + ')'));
+          for (const v of list) {
+            const row = agentEl('div', 'ag-row');
+            row.dataset.key = v.key;
+            row.dataset.state = v.state;
+            const open = agentEl('button', 'ag-open');
+            open.type = 'button';
+            open.dataset.key = v.key;
+            open.setAttribute('aria-label', v.name + ', ' + agentStateWord(v) + ': open its trace');
+            open.appendChild(agentLine1(v));
+            open.appendChild(agentEl('span', 'ag-l2', v.desc));
+            const note = agentStopNote(v.ref);
+            open.appendChild(
+              agentEl('span', 'ag-l3', note ? note : agentFacts(v)),
+            );
+            row.appendChild(open);
+            if (v.running && v.ref && agentsWritable()) {
+              const stop = agentEl('button', 'ag-stop', 'Stop');
+              stop.type = 'button';
+              stop.dataset.ref = v.ref;
+              stop.dataset.name = v.name;
+              stop.disabled = agentStopBusy(v.ref);
+              stop.setAttribute('aria-label', 'Stop ' + v.name);
+              row.appendChild(stop);
+            }
+            body.appendChild(row);
+          }
+        }
+      }
+
+      // The steps of one agent, oldest first. The stream's record interleaves
+      // the child's words with its tool calls by where each call started in
+      // the words (the model's textAt); a record from before that was kept
+      // puts the words after the calls, which is all it can say.
+      function agentSteps(v) {
+        const steps = [];
+        const sub = v.item && v.item.sub;
+        if (sub) {
+          const text = sub.text || '';
+          let at = 0;
+          const words = (from, to) => {
+            const t = text.slice(from, to);
+            if (t.trim()) steps.push({ kind: 'msg', text: t.trim() });
+          };
+          for (const t of sub.tools || []) {
+            if (typeof t.textAt === 'number' && t.textAt > at) {
+              words(at, Math.min(t.textAt, text.length));
+              at = Math.min(t.textAt, text.length);
+            }
+            steps.push({ kind: 'tool', label: t.label || 'tool', status: t.status || '' });
+          }
+          words(at, text.length);
+        }
+        if (steps.length) return { steps, from: 'stream' };
+        const acts = v.row && Array.isArray(v.row.recentActivities)
+          ? v.row.recentActivities
+          : [];
+        for (const a of acts) {
+          if (!a || typeof a !== 'object') continue;
+          steps.push({
+            kind: 'act',
+            label: strOr(a.name, 'tool'),
+            desc: strOr(a.description, ''),
+            at: typeof a.at === 'number' ? a.at : null,
+          });
+        }
+        return { steps, from: steps.length ? 'daemon' : '' };
+      }
+      // How long ago, on the daemon's own clock: its `now` against its own
+      // `at`, so a phone whose clock is off by minutes still reads it right.
+      function agentAgo(at) {
+        if (at == null || !agentsState.now) return '';
+        const secs = Math.max(
+          0,
+          Math.floor((agentsState.now + (Date.now() - agentsState.readAt) - at) / 1000),
+        );
+        return h1Clock(secs) + ' ago';
+      }
+      function agentClipped(text, key, clip) {
+        const wrap = agentEl('div', 'ag-clip');
+        const whole = agentSheet.expanded.has(key);
+        if (text.length <= clip || whole) {
+          wrap.appendChild(agentEl('span', 'tx', text));
+          return wrap;
+        }
+        // The end of a message is the part still being written, so the
+        // clipped view keeps the end and offers the rest above it.
+        const more = agentEl('button', 'ag-more', 'show all ' + text.length + ' characters');
+        more.type = 'button';
+        more.dataset.expand = key;
+        wrap.appendChild(more);
+        wrap.appendChild(agentEl('span', 'tx', '…' + text.slice(-clip)));
+        return wrap;
+      }
+      function agentTraceBody(body, v) {
+        const sum = agentEl('div', 'ag-sum');
+        sum.appendChild(agentLine1(v));
+        if (v.desc) sum.appendChild(agentEl('div', null, v.desc));
+        const facts = agentFacts(v);
+        if (facts) sum.appendChild(agentEl('div', 'ag-l3', facts));
+        const usage = agentSheet.usage.get(v.ref);
+        if (usage && !(v.row && v.row.stats)) {
+          sum.appendChild(agentEl('div', 'ag-l3', usage));
+        }
+        const err = v.row && strOr(v.row.error, '');
+        if (err) sum.appendChild(agentEl('div', 'ag-warn', 'error: ' + err));
+        const blocked = v.row && strOr(v.row.resumeBlockedReason, '');
+        if (blocked) {
+          sum.appendChild(agentEl('div', 'ag-warn', 'cannot resume: ' + blocked));
+        }
+        const task = v.row && strOr(v.row.prompt, '');
+        if (task) {
+          const t = agentEl('div', 'ag-task');
+          t.appendChild(agentEl('div', 'ag-k', 'Task'));
+          if (task.length > AGENT_TASK_CLIP && !agentSheet.expanded.has('task')) {
+            t.appendChild(agentEl('span', null, task.slice(0, AGENT_TASK_CLIP) + '… '));
+            const more = agentEl('button', 'ag-more', 'show the whole task');
+            more.type = 'button';
+            more.dataset.expand = 'task';
+            t.appendChild(more);
+          } else {
+            t.appendChild(agentEl('span', null, task));
+          }
+          sum.appendChild(t);
+        }
+        body.appendChild(sum);
+        // Lineage: who spawned this agent and what it spawned, from the
+        // daemon's trace. A child is a row of its own, opening its trace.
+        const lin = agentSheet.lineage;
+        const node =
+          lin &&
+          lin.nodes.find(
+            (n) =>
+              (v.id && n.agentId === v.id) ||
+              (v.toolUseId && n.toolUseId === v.toolUseId),
+          );
+        if (node) {
+          const parent =
+            node.parentAgentId &&
+            lin.nodes.find((n) => n.agentId === node.parentAgentId);
+          if (node.parentAgentId) {
+            body.appendChild(
+              agentEl(
+                'div',
+                'ag-sum ag-l3',
+                'spawned by ' +
+                  (parent ? strOr(parent.agentType, 'an agent') : 'an agent no longer listed'),
+              ),
+            );
+          }
+          if (node.lineageState && node.lineageState !== 'complete') {
+            body.appendChild(
+              agentEl('div', 'ag-sum ag-warn', 'lineage ' + node.lineageState),
+            );
+          }
+          const kids = lin.nodes.filter((n) => n.parentAgentId === node.agentId);
+          if (kids.length) {
+            body.appendChild(agentEl('div', 'ag-grp', 'Spawned (' + kids.length + ')'));
+            for (const k of kids) {
+              const row = agentEl('div', 'ag-row');
+              const open = agentEl('button', 'ag-open');
+              open.type = 'button';
+              open.dataset.key = k.toolUseId || k.agentId;
+              const l1 = agentEl('span', 'ag-l1');
+              const dot = agentEl('span', 'ag-dot');
+              dot.dataset.state = strOr(k.status, '');
+              l1.appendChild(dot);
+              l1.appendChild(agentEl('span', 'ag-name', strOr(k.agentType, 'agent')));
+              l1.appendChild(agentEl('span', 'ag-st', strOr(k.status, '')));
+              open.appendChild(l1);
+              open.appendChild(agentEl('span', 'ag-l2', strOr(k.description, '')));
+              row.appendChild(open);
+              body.appendChild(row);
+            }
+          }
+        } else if (agentSheet.lineageErr) {
+          body.appendChild(
+            agentEl('div', 'ag-sum ag-l3', 'lineage: ' + agentSheet.lineageErr),
+          );
+        }
+        const { steps, from } = agentSteps(v);
+        body.appendChild(agentEl('div', 'ag-grp', 'Steps (' + steps.length + ')'));
+        if (!steps.length) {
+          body.appendChild(
+            agentEl(
+              'div',
+              'ag-empty',
+              v.running
+                ? 'No steps yet.'
+                : 'This page holds no steps for this agent, and the daemon reports them only while an agent runs.',
+            ),
+          );
+          return;
+        }
+        if (from === 'daemon') {
+          body.appendChild(
+            agentEl(
+              'div',
+              'ag-sum ag-l3',
+              'its last ' + steps.length + ' tool calls, as the daemon reports them',
+            ),
+          );
+        }
+        const ol = agentEl('ol', 'ag-steps');
+        steps.forEach((st, i) => {
+          const li = agentEl('li', 'ag-step ' + st.kind);
+          li.dataset.kind = st.kind;
+          if (st.kind === 'msg') {
+            li.appendChild(agentClipped(st.text, 'msg-' + i, AGENT_MSG_CLIP));
+          } else if (st.kind === 'tool') {
+            li.appendChild(agentEl('span', null, '\u{1F527} ' + st.label));
+            if (st.status) li.appendChild(agentEl('span', 'st', st.status));
+          } else {
+            li.appendChild(
+              agentEl('span', null, '\u{1F527} ' + st.label + (st.desc ? ': ' + st.desc : '')),
+            );
+            const ago = agentAgo(st.at);
+            if (ago) li.appendChild(agentEl('span', 'st', ago));
+          }
+          ol.appendChild(li);
+        });
+        body.appendChild(ol);
+      }
+      function renderAgentSheet() {
+        if (!agentSheet.open) return;
+        const body = $('agents-body');
+        const trace = agentSheet.view === 'trace';
+        const v = trace ? agentFind(agentSheet.key) : null;
+        // Follow the newest step while the reader is at the end; leave them be
+        // once they have scrolled up to read something.
+        const atEnd =
+          body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+        const fresh = trace && agentSheet.followed !== agentSheet.key;
+        const keepTop = body.scrollTop;
+        // A keyboard reader's place: the control with focus is rebuilt, so
+        // the one that stands for the same thing takes the focus back.
+        const had = body.contains(document.activeElement)
+          ? document.activeElement
+          : null;
+        const hadSel = had
+          ? had.dataset.ref
+            ? '.ag-stop[data-ref="' + CSS.escape(had.dataset.ref) + '"]'
+            : had.dataset.key
+              ? '.ag-open[data-key="' + CSS.escape(had.dataset.key) + '"]'
+              : had.dataset.expand
+                ? '[data-expand="' + CSS.escape(had.dataset.expand) + '"]'
+                : ''
+          : '';
+        agentSheet.pending = false;
+        body.textContent = '';
+        $('agents-back').hidden = !trace;
+        h1Text($('agents-title'), trace ? (v ? v.name : 'Agent') : 'Agents');
+        if (!trace) {
+          agentListBody(body);
+        } else if (!v) {
+          body.appendChild(
+            agentEl('div', 'ag-empty', 'This agent is no longer listed.'),
+          );
+        } else {
+          agentTraceBody(body, v);
+        }
+        const foot = $('agents-foot');
+        const stoppable = !!(v && v.running && v.ref && agentsWritable());
+        const note = v ? agentStopNote(v.ref) : '';
+        foot.hidden = !(trace && v && (stoppable || note));
+        $('agent-stop').hidden = !stoppable;
+        $('agent-stop').disabled = !!(v && agentStopBusy(v.ref));
+        h1Text($('agent-stop-note'), note);
+        if (trace && (fresh || (atEnd && v && v.running))) {
+          body.scrollTop = body.scrollHeight;
+          agentSheet.followed = agentSheet.key;
+        } else {
+          body.scrollTop = keepTop;
+        }
+        if (hadSel) {
+          const again = body.querySelector(hadSel);
+          if (again) again.focus({ preventScroll: true });
+        }
+      }
+
+      // ---- Opening, closing, stopping --------------------------------------
+      function openAgentsSheet(view, key) {
+        if (!agentsOn() || !watchedSessionId) return;
+        syncAgentsForSession();
+        const sheet = $('agents-sheet');
+        if (!agentSheet.open) {
+          agentSheet.opener = document.activeElement;
+          agentSheet.open = true;
+          sheet.hidden = false;
+          agentSheet.clock = setInterval(agentsTick, 1000);
+        }
+        closeH1Menu(false);
+        agentSheet.view = view;
+        agentSheet.key = key || null;
+        agentSheet.expanded.clear();
+        agentSheet.followed = null;
+        renderAgentSheet();
+        void agentsRead();
+        if (view === 'trace') void agentTraceOpened(agentSheet.key);
+        $('agents-close').focus({ preventScroll: true });
+      }
+      function closeAgentsSheet(refocus) {
+        if (!agentSheet.open) return;
+        agentSheet.open = false;
+        $('agents-sheet').hidden = true;
+        $('agents-body').textContent = '';
+        if (agentSheet.clock) clearInterval(agentSheet.clock);
+        agentSheet.clock = null;
+        const back = agentSheet.opener;
+        agentSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+        // The poll falls back to its closed-sheet pace on its next turn.
+      }
+      function openAgentTrace(key) {
+        if (!key) return;
+        openAgentsSheet('trace', key);
+      }
+      // What a trace reads as it opens: the lineage (who spawned it, what it
+      // spawned), and for a finished agent whose sidecar carries no usage, the
+      // one inspect read that does.
+      async function agentTraceOpened(key) {
+        const sid = watchedSessionId;
+        const gen = agentsState.gen;
+        const v0 = agentFind(key);
+        if (v0 && !v0.running && v0.ref && !(v0.row && v0.row.stats) && !agentSheet.usage.has(v0.ref)) {
+          agentSheet.usage.set(v0.ref, 'reading what it used...');
+          void (async () => {
+            const r = await rcCall(
+              '/session/' + encodeURIComponent(sid) + '/subagents/' + encodeURIComponent(v0.ref),
+            );
+            if (gen !== agentsState.gen) return;
+            const b = (r && r.body) || {};
+            agentSheet.usage.set(
+              v0.ref,
+              !r.ok
+                ? 'usage: ' + r.code
+                : typeof b.totalTokens === 'number'
+                  ? 'used ' +
+                    fmtK(b.totalTokens) +
+                    ' tok' +
+                    (typeof b.inputTokens === 'number' && typeof b.outputTokens === 'number'
+                      ? ' (' + fmtK(b.inputTokens) + ' in / ' + fmtK(b.outputTokens) + ' out)'
+                      : '')
+                  : 'the daemon named no usage',
+            );
+            renderAgentSheetSoon();
+          })();
+        }
+        await agentReadLineage(key);
+      }
+      // The lineage read, narrowed on the daemon to the tree this agent is in
+      // when the roster can name that tree's root, and read whole otherwise
+      // (an agent the roster does not list, or whose ancestor it dropped).
+      async function agentReadLineage(key) {
+        if (!agentLineageOn()) return;
+        const sid = watchedSessionId;
+        const gen = agentsState.gen;
+        const v = agentFind(key);
+        let root = '';
+        if (v && v.row && v.row.id) {
+          const byId = new Map((agentsState.rows || []).map((r) => [r.id, r]));
+          let cur = v.row;
+          for (let i = 0; i < 32 && cur.parentAgentId && byId.has(cur.parentAgentId); i++) {
+            cur = byId.get(cur.parentAgentId);
+          }
+          root = cur.parentAgentId ? '' : cur.id;
+        }
+        const path = '/session/' + encodeURIComponent(sid) + '/agent-trace';
+        const has = (body) =>
+          body &&
+          Array.isArray(body.nodes) &&
+          body.nodes.some(
+            (n) =>
+              n &&
+              ((v && v.id && n.agentId === v.id) ||
+                n.agentId === key ||
+                (n.toolUseId && n.toolUseId === key)),
+          );
+        let r = await rcCall(root ? path + '?rootAgentId=' + encodeURIComponent(root) : path);
+        if (r.ok && root && !has(r.body)) r = await rcCall(path);
+        if (gen !== agentsState.gen) return;
+        agentSheet.lineageAt = Date.now();
+        if (!r.ok) {
+          agentSheet.lineageErr = r.code;
+          renderAgentSheetSoon();
+          return;
+        }
+        agentSheet.lineageErr = '';
+        agentSheet.lineage = {
+          key,
+          nodes: (Array.isArray(r.body.nodes) ? r.body.nodes : []).filter(
+            (n) => n && typeof n === 'object' && typeof n.agentId === 'string',
+          ),
+        };
+        renderAgentSheetSoon();
+      }
+      function setAgentStop(ref, busy, note) {
+        agentsState.stops.set(ref, { busy, note });
+        // The inline block names the same child, so it says the same thing.
+        const it = agentStreamItem(ref);
+        if (it && it.sub) {
+          it.sub.cancelBusy = busy;
+          it.sub.cancelNote = note;
+          transcriptModel.touch(it);
+        }
+        renderAgents();
+      }
+      async function stopAgent(ref, name) {
+        const sid = watchedSessionId;
+        if (!sid || !ref || agentStopBusy(ref)) return;
+        const pick = await askChoice(
+          'Stop ' + (name || 'this agent') + '?',
+          'The rest of the turn keeps running.',
+          [['stop', 'Stop this agent']],
+        );
+        if (pick !== 'stop' || sid !== watchedSessionId) return;
+        setAgentStop(ref, true, 'stopping...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sid) +
+            '/subagents/' +
+            encodeURIComponent(ref) +
+            '/cancel',
+          { method: 'POST' },
+        );
+        if (sid !== watchedSessionId) return;
+        // The daemon's verdict, not the status code: a 200 can carry
+        // cancelled false, and that is not a stop.
+        setAgentStop(
+          ref,
+          false,
+          !r.ok
+            ? 'stop failed: ' + r.code
+            : r.body && r.body.cancelled === true
+              ? 'stopped'
+              : 'the daemon did not stop it',
+        );
+        agentsSchedule(600);
+      }
+
+      $('agents-sheet').addEventListener('pointerdown', () => {
+        agentSheet.holding = true;
+      });
+      const agentsRelease = () => {
+        if (!agentSheet.holding) return;
+        agentSheet.holding = false;
+        // After the click has been dispatched on the button that was pressed.
+        if (agentSheet.pending) setTimeout(renderAgentSheetSoon, 0);
+      };
+      document.addEventListener('pointerup', agentsRelease, true);
+      document.addEventListener('pointercancel', agentsRelease, true);
+      $('agents-chip').addEventListener('click', () => openAgentsSheet('list'));
+      $('more-agents').addEventListener('click', () => {
+        // As Find does: More shuts, and the sheet is over the chat.
+        setMoreOpen(false);
+        openAgentsSheet('list');
+      });
+      $('agents-close').addEventListener('click', () => closeAgentsSheet(true));
+      $('agents-back').addEventListener('click', () => {
+        agentSheet.view = 'list';
+        agentSheet.key = null;
+        renderAgentSheet();
+        $('agents-close').focus({ preventScroll: true });
+      });
+      $('agent-stop').addEventListener('click', () => {
+        const v = agentFind(agentSheet.key);
+        if (v) void stopAgent(v.ref, v.name);
+      });
+      $('agents-sheet').addEventListener('click', (e) => {
+        if (e.target === $('agents-sheet')) return closeAgentsSheet(true);
+        const t = e.target.closest('button');
+        if (!t || !$('agents-body').contains(t)) return;
+        if (t.dataset.expand) {
+          agentSheet.expanded.add(t.dataset.expand);
+          renderAgentSheet();
+          return;
+        }
+        if (t.classList.contains('ag-stop') && t.dataset.ref) {
+          void stopAgent(t.dataset.ref, t.dataset.name);
+          return;
+        }
+        if (t.classList.contains('ag-open') && t.dataset.key) {
+          agentSheet.view = 'trace';
+          agentSheet.key = t.dataset.key;
+          agentSheet.expanded.clear();
+          agentSheet.followed = null;
+          renderAgentSheet();
+          void agentTraceOpened(t.dataset.key);
+          $('agents-back').focus({ preventScroll: true });
+        }
+      });
+      $('agents-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeAgentsSheet(true);
+      });
+
       const token = () => localStorage.getItem(TOKEN_KEY);
 
       // Validate any stored token against the gateway before revealing
@@ -12310,6 +13701,7 @@
         dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments();
         syncStoredForSession();
+        syncAgentsForSession(); // #110: its agents go with it
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
         // the switcher was drawn against the conversation being left. Redrawn here,
         // after the clear, or the control stays on screen offering a folder this
@@ -12346,6 +13738,7 @@
         dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments(); // #201: nothing watched, nothing staged
         syncStoredForSession();
+        syncAgentsForSession(); // #110: nothing watched, no agents
         // #50: redrawn after the clear for the same reason as in
         // forgetGoneSession. Unwatch is the path a reader takes on purpose to
         // leave a conversation, so a switcher still naming that folder here would
@@ -16738,6 +18131,8 @@
         // -- the question was typed and costs a model call, so a swipe must not
         // spend another one behind the reader's back.
         syncBtwForSession();
+        // #110: the agents roster names a conversation too.
+        syncAgentsForSession();
         // #134: an armed handover belongs to the conversation that was on
         // screen when it was armed, so a switch disarms it -- otherwise the next
         // press hands over whatever conversation the reader swiped to, which is
