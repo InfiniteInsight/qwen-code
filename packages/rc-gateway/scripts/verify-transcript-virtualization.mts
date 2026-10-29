@@ -23723,6 +23723,38 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P321 the typed-path field has room in the 280px pane (its own line there) and keeps one line with Start here at 390',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {}, { '/p321': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p321'));
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await page.click('#list-new');
+      await page.waitForFunction(`!document.getElementById('dir-picker').hidden`);
+      await h190Settle(page);
+      const r = (await page.evaluate(`(() => {
+        const f = document.getElementById('new-session-cwd').getBoundingClientRect();
+        const b = document.getElementById('new-session').getBoundingClientRect();
+        return { w: Math.round(f.width), fTop: Math.round(f.top), bTop: Math.round(b.top) };
+      })()`)) as { w: number; fTop: number; bTop: number };
+      if (size.width >= 1100) {
+        expect(r.w >= 220, `1100: the field is ${r.w}px wide in the pane`);
+      } else {
+        expect(r.fTop === r.bTop && r.w >= 200, `390: the field (${r.w}px at ${r.fTop}) and Start here (at ${r.bTop}) are not one line`);
+      }
+      await page.evaluate(`document.getElementById('dir-picker').querySelector('.scr-body').scrollTop = 1e6`);
+      await shot(page, `p321-typed-${size.width}`);
+      await page.click('#dir-back');
+      lines.push(`${size.width}: field ${r.w}px${r.fTop === r.bTop ? ', beside Start here' : ', on its own line'}`);
+    }
+    return lines.join('; ');
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
