@@ -24434,6 +24434,491 @@ PAGE_SCENARIOS.push({
 });
 
 
+// ---- #138 find in conversation ----------------------------------------------
+
+/**
+ * `turns` turns of a question and a ~220 character answer, with `marks[n]`
+ * added to turn n's answer. Turn n's question reads "f138 question n", so a
+ * hit can be named by its turn.
+ */
+function f138Frames(marks: Record<number, string>, turns = 120): Frame[] {
+  const f = new Frames();
+  for (let i = 1; i <= turns; i++) {
+    f.user(`f138 question ${i}`);
+    f.asst(
+      `Answer ${i}: the build is green again after the lockfile was regenerated and the cache was cleared on the host.${marks[i] ? ' ' + marks[i] : ''}`,
+    );
+    f.done();
+  }
+  return f.list;
+}
+const F138_JS = String.raw`(() => {
+  const box = document.getElementById('transcript').getBoundingClientRect();
+  const h = findState.hits[findState.pos];
+  const row = h ? document.querySelector('#transcript .vrow[data-id="' + h.id + '"]') : null;
+  const b = row ? row.getBoundingClientRect() : null;
+  const act = CSS.highlights.get('rc-find-active');
+  const all = CSS.highlights.get('rc-find');
+  return {
+    count: document.getElementById('find-count').textContent,
+    n: findState.hits.length,
+    pos: findState.pos,
+    id: h ? h.id : null,
+    text: h ? String(h.item.text || h.item.label || '') : '',
+    mounted: !!row,
+    inView: !!b && b.top >= box.top - 1 && b.bottom <= box.bottom + 1,
+    top: b ? b.top - box.top : null,
+    ring: !!row && row.classList.contains('find-active'),
+    marks: act ? Array.from(act).map(String) : [],
+    others: all ? Array.from(all).length : 0,
+    scrollTop: document.getElementById('transcript').scrollTop,
+    open: !document.getElementById('find-bar').hidden,
+  };
+})()`;
+type F138State = {
+  count: string;
+  n: number;
+  pos: number;
+  id: number | null;
+  text: string;
+  mounted: boolean;
+  inView: boolean;
+  top: number | null;
+  ring: boolean;
+  marks: string[];
+  others: number;
+  scrollTop: number;
+  open: boolean;
+};
+async function f138State(page: Page): Promise<F138State> {
+  return (await page.evaluate(F138_JS)) as F138State;
+}
+/** Waits for the view to settle after a step, then reads the search. */
+async function f138Read(page: Page): Promise<F138State> {
+  await settlePage(page, 300);
+  return f138State(page);
+}
+async function f138Boot(page: Page, viewer: { sessionId: string }, frames: Frame[]): Promise<void> {
+  await watch(page, viewer.sessionId);
+  await waitForFrame(page, frames.length, 60_000);
+  await settlePage(page, 300);
+}
+/** More, then its Find in conversation row: the way a phone reaches it. */
+async function f138OpenFromMore(page: Page): Promise<void> {
+  if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
+  await page.click('#more-find');
+  await page.waitForSelector('#find-bar', { state: 'visible' });
+}
+async function f138Search(page: Page, q: string, count: string): Promise<F138State> {
+  await page.fill('#find-q', q);
+  await page.waitForFunction(`document.getElementById('find-count').textContent === ${JSON.stringify(count)}`, null, { timeout: 5_000 });
+  return f138Read(page);
+}
+const f138Turn = (s: F138State): number => Number((/question (\d+)|Answer (\d+)/.exec(s.text) ?? [])[1] ?? (/Answer (\d+)/.exec(s.text) ?? [])[1] ?? -1);
+
+PAGE_SCENARIOS.push({
+  name: 'P350 More > This conversation > Find in conversation finds a word in a row far above that is not mounted, scrolls to it and marks it, at 390x844',
+  frames: () => f138Frames({ 7: 'The kumquat crate is in the hall.' }),
+  run: async ({ page, viewer }) => {
+    const frames = f138Frames({ 7: 'The kumquat crate is in the hall.' });
+    await f138Boot(page, viewer, frames);
+    const pre = (await page.evaluate(String.raw`(() => {
+      const hit = transcriptModel.items.find((i) => i.text && i.text.includes('kumquat'));
+      return {
+        id: hit ? hit.id : null,
+        mounted: hit ? !!document.querySelector('#transcript .vrow[data-id="' + hit.id + '"]') : null,
+        items: transcriptModel.items.length,
+        rows: document.querySelectorAll('#transcript .vrow').length,
+        disabledBefore: document.getElementById('more-find').disabled,
+      };
+    })()`)) as { id: number | null; mounted: boolean | null; items: number; rows: number; disabledBefore: boolean };
+    expect(pre.id !== null && pre.mounted === false, `the kumquat row is mounted at the end (${JSON.stringify(pre)}), so a far row was not tested`);
+    expect(pre.rows < pre.items / 4, `${pre.rows} of ${pre.items} rows are mounted, so the list is not virtualized here`);
+    // The control: a 48px row of the This conversation group, enabled once a conversation is on.
+    await page.click('#h1-more');
+    const row = (await page.evaluate(String.raw`(() => {
+      const r = document.getElementById('more-find');
+      const g = r.closest('.mgrp');
+      const b = r.getBoundingClientRect();
+      return { group: g.querySelector('.grp').textContent, label: r.querySelector('.lbl').textContent, h: b.height, disabled: r.disabled, shown: b.width > 0 };
+    })()`)) as { group: string; label: string; h: number; disabled: boolean; shown: boolean };
+    expect(row.group === 'This conversation' && row.label === 'Find in conversation', `the row is "${row.label}" in "${row.group}"`);
+    expect(Math.abs(row.h - 48) <= 1 && !row.disabled && row.shown, `the row is ${row.h}px tall, disabled ${row.disabled}`);
+    await shot(page, 'p350-more-390');
+    await page.click('#more-find');
+    await page.waitForSelector('#find-bar', { state: 'visible' });
+    const opened = (await page.evaluate(String.raw`({
+      moreHidden: document.getElementById('more-screen').hidden,
+      focus: document.activeElement && document.activeElement.id,
+    })`)) as { moreHidden: boolean; focus: string };
+    expect(opened.moreHidden && opened.focus === 'find-q', `after the row More is ${opened.moreHidden ? 'shut' : 'open'} and focus is on "${opened.focus}"`);
+    // Case-insensitive: typed in capitals, found in lower case.
+    const hit = await f138Search(page, 'KUMQUAT', '1 of 1');
+    expect(hit.mounted && hit.inView && hit.ring, `the hit row is mounted ${hit.mounted}, in view ${hit.inView}, ringed ${hit.ring}`);
+    expect(hit.text.includes('kumquat') && f138Turn(hit) === 7, `the active row is "${hit.text.slice(0, 40)}"`);
+    expect(hit.marks.length === 1 && hit.marks[0]!.toLowerCase() === 'kumquat', `the mark is ${JSON.stringify(hit.marks)}`);
+    expect(hit.top !== null && hit.top >= 0 && hit.top <= 200, `the hit row is ${hit.top}px under the top edge`);
+    // The bar is in the thumb zone, over the composer, with 44px buttons, and the composer stays on the fold.
+    const g = (await page.evaluate(String.raw`(() => {
+      const r = (id) => document.getElementById(id).getBoundingClientRect();
+      const bar = r('find-bar');
+      return {
+        bar: [bar.top, bar.bottom, bar.height],
+        composer: [r('composer').top, r('composer').bottom],
+        btn: ['find-prev', 'find-next', 'find-close'].map((id) => [r(id).width, r(id).height]),
+        vh: window.innerHeight,
+        field: r('find-q').height,
+        fontPx: parseFloat(getComputedStyle(document.getElementById('find-q')).fontSize),
+      };
+    })()`)) as { bar: number[]; composer: number[]; btn: number[][]; vh: number; field: number; fontPx: number };
+    expect(g.bar[1]! <= g.composer[0]! + 1, `the bar ends at ${g.bar[1]}, the composer starts at ${g.composer[0]}`);
+    expect(g.composer[1]! <= g.vh, `composerUnderFold is ${g.composer[1]! - g.vh} with the bar open`);
+    expect(g.btn.every(([w, h]) => w! >= 44 && h! >= 44) && g.field >= 44 && g.fontPx >= 16, `buttons ${JSON.stringify(g.btn)}, field ${g.field}px at ${g.fontPx}px`);
+    await shot(page, 'p350-find-390');
+    return `row "${row.label}" ${Math.round(row.h)}px in "${row.group}"; "KUMQUAT" -> ${hit.count} in turn 7 of ${pre.items} rows (${pre.rows} mounted), ${Math.round(hit.top!)}px under the edge, bar ${Math.round(g.bar[2]!)}px over the composer`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P351 next and previous step through the hits and wrap at both ends: Enter, Shift+Enter and the two 44px buttons, at 390x844',
+  frames: () => f138Frames({ 5: 'quince one', 60: 'quince two', 110: 'quince three' }),
+  run: async ({ page, viewer }) => {
+    const frames = f138Frames({ 5: 'quince one', 60: 'quince two', 110: 'quince three' });
+    await f138Boot(page, viewer, frames);
+    await f138OpenFromMore(page);
+    const first = await f138Search(page, 'quince', '3 of 3');
+    // A reader at the end of the conversation starts on the newest hit.
+    expect(f138Turn(first) === 110 && first.inView, `the first hit is turn ${f138Turn(first)}, in view ${first.inView}`);
+    const steps: string[] = [];
+    const turnOf = async (want: number, count: string, how: string) => {
+      const s = await f138Read(page);
+      expect(s.count === count && f138Turn(s) === want, `${how}: ${s.count} on turn ${f138Turn(s)}, wanted ${count} on turn ${want}`);
+      expect(s.mounted && s.inView && s.ring && s.marks.length === 1, `${how}: turn ${want} mounted ${s.mounted}, in view ${s.inView}, ringed ${s.ring}, marks ${s.marks.length}`);
+      steps.push(`${how} ${count}`);
+    };
+    await page.click('#find-next');
+    await turnOf(5, '1 of 3', 'next button wraps to the top');
+    await page.click('#find-prev');
+    await turnOf(110, '3 of 3', 'previous button wraps to the end');
+    await page.focus('#find-q');
+    await page.keyboard.press('Enter');
+    await turnOf(5, '1 of 3', 'Enter wraps');
+    await page.keyboard.press('Enter');
+    await turnOf(60, '2 of 3', 'Enter');
+    await page.keyboard.press('Shift+Enter');
+    await turnOf(5, '1 of 3', 'Shift+Enter');
+    await page.keyboard.press('Shift+Enter');
+    await turnOf(110, '3 of 3', 'Shift+Enter wraps');
+    await shot(page, 'p351-wrap-390');
+    // Typing again starts over from where the reader was, not from the last hit.
+    const again = await f138Search(page, 'quince t', '2 of 2');
+    steps.push('retype ' + again.count);
+    return steps.join(', ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P352 painting a hit changes no row height, the list height or the reader\'s place, over plain text and rendered markdown',
+  frames: () => {
+    const f = new Frames();
+    for (let i = 1; i <= 100; i++) {
+      f.user(`f138 question ${i}`);
+      f.asst(`Answer ${i}: plain words about the cache.`);
+      f.done();
+    }
+    f.user('f138 quince question');
+    f.asst('Use **quince** and `quince` here:\n\n- one quince\n- two quince\n\n```\nquince = 1\n```\n\nA table:\n\n| a | b |\n|---|---|\n| quince | 2 |');
+    f.done();
+    f.user('a quince in the question too');
+    f.asst('and a Quince in the answer');
+    f.done();
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    const n = 100 * 3 + 6;
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, n, 60_000);
+    await settlePage(page, 300);
+    await f138OpenFromMore(page);
+    const s = await f138Search(page, 'quince', '4 of 4');
+    expect(s.mounted && s.others >= 6 && s.marks.length === 1, `marks painted: active ${s.marks.length}, others ${s.others}`);
+    const measure = String.raw`(() => {
+      const o = {};
+      document.querySelectorAll('#transcript .vrow').forEach((el) => { o[el.getAttribute('data-id')] = el.getBoundingClientRect().height; });
+      const t = document.getElementById('transcript');
+      return { rows: o, scrollHeight: t.scrollHeight, scrollTop: t.scrollTop, rings: document.querySelectorAll('#transcript .vrow.find-hit').length, nodes: t.querySelectorAll('*').length };
+    })()`;
+    type M = { rows: Record<string, number>; scrollHeight: number; scrollTop: number; rings: number; nodes: number };
+    const withMarks = (await page.evaluate(measure)) as M;
+    await shot(page, 'p352-marked-390');
+    await page.evaluate(`transcriptView.setFind(null)`);
+    await settlePage(page, 300);
+    const without = (await page.evaluate(measure)) as M;
+    const ids = Object.keys(withMarks.rows).filter((k) => k in without.rows);
+    const diff = ids.filter((k) => without.rows[k] !== withMarks.rows[k]);
+    expect(withMarks.rings >= 2 && without.rings === 0, `rings with ${withMarks.rings}, without ${without.rings}`);
+    expect(ids.length >= 4 && diff.length === 0, `${diff.length} of ${ids.length} rows changed height: ${diff.map((k) => `${k}: ${withMarks.rows[k]} -> ${without.rows[k]}`).join(', ')}`);
+    expect(withMarks.nodes === without.nodes, `${withMarks.nodes} nodes with marks, ${without.nodes} without`);
+    expect(withMarks.scrollHeight === without.scrollHeight && withMarks.scrollTop === without.scrollTop, `list ${withMarks.scrollHeight}@${withMarks.scrollTop} with marks, ${without.scrollHeight}@${without.scrollTop} without`);
+    return `${ids.length} mounted rows (${withMarks.rings} ringed) measured the same with the marks on and off, list ${withMarks.scrollHeight}px, ${withMarks.nodes} nodes`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P353 closing the search puts the reader back where they were, at the end or mid-list, unless they scrolled since the last hit; the field, count and marks are cleared',
+  frames: () => f138Frames({ 5: 'quince one', 110: 'quince two' }),
+  run: async ({ page, viewer }) => {
+    const frames = f138Frames({ 5: 'quince one', 110: 'quince two' });
+    await f138Boot(page, viewer, frames);
+    const lines: string[] = [];
+    const cleared = async (how: string) => {
+      const c = (await page.evaluate(String.raw`({
+        hidden: document.getElementById('find-bar').hidden,
+        value: document.getElementById('find-q').value,
+        count: document.getElementById('find-count').textContent,
+        rings: document.querySelectorAll('#transcript .vrow.find-hit, #transcript .vrow.find-active').length,
+        reg: CSS.highlights.has('rc-find') || CSS.highlights.has('rc-find-active'),
+      })`)) as { hidden: boolean; value: string; count: string; rings: number; reg: boolean };
+      expect(c.hidden && c.value === '' && c.count === '' && c.rings === 0 && !c.reg, `${how}: ${JSON.stringify(c)}`);
+    };
+    const anchor = String.raw`(() => {
+      const a = transcriptView.readerAnchor();
+      return a.item ? { id: a.item.id, top: a.top } : { end: !!a.end };
+    })()`;
+    // 1. Mid-list: Escape from the field returns to the same row at the same offset.
+    await page.evaluate(`document.getElementById('transcript').scrollTop = 3000`);
+    await settlePage(page, 400);
+    const was = (await page.evaluate(anchor)) as { id: number; top: number };
+    await f138OpenFromMore(page);
+    await f138Search(page, 'quince', '2 of 2');
+    const s1 = await f138Search(page, 'quince one', '1 of 1');
+    expect(Math.abs(s1.scrollTop - 3000) > 400 && f138Turn(s1) === 5, `the search did not move the reader to turn 5 (scrollTop ${s1.scrollTop})`);
+    await page.keyboard.press('Escape');
+    await settlePage(page, 500);
+    const back = (await page.evaluate(`(() => { const r = document.querySelector('#transcript .vrow[data-id="${was.id}"]'); return r ? r.getBoundingClientRect().top - document.getElementById('transcript').getBoundingClientRect().top : null; })()`)) as number | null;
+    expect(back !== null && Math.abs(back - was.top) <= 2, `mid-list: the reader is back at ${back}, was at ${was.top}`);
+    await cleared('mid-list');
+    lines.push(`mid-list ${Math.round(was.top)}px -> turn 5 (scrollTop ${Math.round(s1.scrollTop)}) -> ${Math.round(back!)}px`);
+    // 2. At the end: back at the end, with the jump pill still away.
+    await page.evaluate(`transcriptView.scrollToEnd()`);
+    await settlePage(page, 400);
+    await f138OpenFromMore(page);
+    await f138Search(page, 'quince one', '1 of 1');
+    await page.click('#find-close');
+    await settlePage(page, 500);
+    const end = (await page.evaluate(String.raw`({ gap: __pg.gap(), pill: document.getElementById('jump-bottom').hidden })`)) as { gap: number; pill: boolean };
+    expect(end.gap <= 2 && end.pill, `at the end: gap ${end.gap}, jump pill hidden ${end.pill}`);
+    await cleared('at the end');
+    lines.push(`at the end: gap ${Math.round(end.gap)}`);
+    // 3. Scrolled since the last hit: the reader is reading there on purpose, so they stay.
+    await page.evaluate(`document.getElementById('transcript').scrollTop = 3000`);
+    await settlePage(page, 400);
+    await f138OpenFromMore(page);
+    await f138Search(page, 'quince one', '1 of 1');
+    await page.evaluate(String.raw`(() => {
+      const t = document.getElementById('transcript');
+      t.dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true }));
+      t.scrollTop += 40;
+    })()`);
+    await settlePage(page, 400);
+    const stay = (await page.evaluate(`document.getElementById('transcript').scrollTop`)) as number;
+    await page.keyboard.press('Escape');
+    await settlePage(page, 500);
+    const stayed = (await page.evaluate(`document.getElementById('transcript').scrollTop`)) as number;
+    expect(Math.abs(stayed - stay) <= 2 && Math.abs(stayed - 3000) > 400, `scrolled since the hit: ${stay} then ${stayed} after closing`);
+    await cleared('scrolled since');
+    lines.push(`scrolled since the hit: stays at ${Math.round(stayed)}`);
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P354 Ctrl+F and Cmd+F open the find bar on the 1100 layout when the composer is not focused, and are left to the browser in the composer and below 1100',
+  frames: () => f138Frames({ 9: 'saffron here', 100: 'saffron again' }, 110),
+  run: async ({ page, viewer }) => {
+    const frames = f138Frames({ 9: 'saffron here', 100: 'saffron again' }, 110);
+    await f138Boot(page, viewer, frames);
+    // Below 1100 the phone layout is the layout: the key is the browser's.
+    const phone = (await page.evaluate(String.raw`(() => {
+      const e = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(e);
+      return { prevented: e.defaultPrevented, open: !document.getElementById('find-bar').hidden };
+    })()`)) as { prevented: boolean; open: boolean };
+    expect(!phone.prevented && !phone.open, `at 390 Ctrl+F was ${phone.prevented ? 'taken' : 'left'}, bar open ${phone.open}`);
+    await page.setViewportSize({ width: 1100, height: 810 });
+    await settlePage(page, 400);
+    await page.evaluate(`document.activeElement && document.activeElement.blur()`);
+    await page.keyboard.press('Control+f');
+    await page.waitForSelector('#find-bar', { state: 'visible' });
+    const at = (await page.evaluate(String.raw`(() => {
+      const r = (id) => document.getElementById(id).getBoundingClientRect();
+      const chat = document.getElementById('pane-chat');
+      return {
+        focus: document.activeElement && document.activeElement.id,
+        inChat: chat.contains(document.getElementById('find-bar')),
+        bar: [r('find-bar').left, r('find-bar').right],
+        composer: [r('composer').left, r('composer').right],
+        tx: [r('transcript').left, r('transcript').right],
+        barBottom: r('find-bar').bottom,
+        composerTop: r('composer').top,
+      };
+    })()`)) as { focus: string; inChat: boolean; bar: number[]; composer: number[]; tx: number[]; barBottom: number; composerTop: number };
+    expect(at.focus === 'find-q' && at.inChat, `Ctrl+F put focus on "${at.focus}", bar in the chat column ${at.inChat}`);
+    expect(Math.abs(at.bar[0]! - at.composer[0]!) <= 1 && Math.abs(at.bar[1]! - at.composer[1]!) <= 1, `the bar spans ${at.bar} and the composer ${at.composer}`);
+    expect(at.barBottom <= at.composerTop + 1, 'the bar is not over the composer');
+    await page.keyboard.type('SAFFRON');
+    await page.waitForFunction(`document.getElementById('find-count').textContent === '2 of 2'`, null, { timeout: 5_000 });
+    const hit = await f138Read(page);
+    expect(f138Turn(hit) === 100 && hit.mounted && hit.inView, `at 1100 the hit is turn ${f138Turn(hit)}, in view ${hit.inView}`);
+    await page.keyboard.press('Shift+Enter');
+    const prev = await f138Read(page);
+    expect(prev.count === '1 of 2' && f138Turn(prev) === 9 && prev.inView, `Shift+Enter: ${prev.count}, turn ${f138Turn(prev)}`);
+    await shot(page, 'p354-find-1100');
+    // The same key with the field focused only selects it again.
+    await page.keyboard.press('Control+f');
+    const again = (await page.evaluate(`({ focus: document.activeElement.id, sel: document.getElementById('find-q').selectionEnd - document.getElementById('find-q').selectionStart })`)) as { focus: string; sel: number };
+    expect(again.focus === 'find-q' && again.sel === 7, `a second Ctrl+F left focus on ${again.focus}, ${again.sel} characters selected`);
+    await page.keyboard.press('Escape');
+    await settlePage(page, 400);
+    const shut = (await page.evaluate(`document.getElementById('find-bar').hidden`)) as boolean;
+    expect(shut, 'Escape did not close the bar');
+    // Cmd+F too (a Mac laptop), and nothing taken in the composer.
+    await page.evaluate(`document.activeElement && document.activeElement.blur()`);
+    const mac = (await page.evaluate(String.raw`(() => {
+      const e = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(e);
+      return { prevented: e.defaultPrevented, open: !document.getElementById('find-bar').hidden };
+    })()`)) as { prevented: boolean; open: boolean };
+    expect(mac.prevented && mac.open, `Cmd+F: taken ${mac.prevented}, open ${mac.open}`);
+    await page.keyboard.press('Escape');
+    await page.focus('#prompt');
+    const composer = (await page.evaluate(String.raw`(() => {
+      const e = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+      document.getElementById('prompt').dispatchEvent(e);
+      return { prevented: e.defaultPrevented, open: !document.getElementById('find-bar').hidden };
+    })()`)) as { prevented: boolean; open: boolean };
+    expect(!composer.prevented && !composer.open, `in the composer Ctrl+F was ${composer.prevented ? 'taken' : 'left'}, bar open ${composer.open}`);
+    // The More pane at this width reaches the same control.
+    await page.evaluate(`document.activeElement && document.activeElement.blur()`);
+    await page.click('#h1-more');
+    await page.click('#more-find');
+    await page.waitForSelector('#find-bar', { state: 'visible' });
+    const viaMore = (await page.evaluate(`({ more: document.getElementById('more-screen').hidden, focus: document.activeElement.id })`)) as { more: boolean; focus: string };
+    expect(viaMore.more && viaMore.focus === 'find-q', `More pane shut ${viaMore.more}, focus ${viaMore.focus}`);
+    return `390: Ctrl+F left to the browser; 1100: Ctrl+F opens in the chat column over the composer (${Math.round(at.bar[0]!)}-${Math.round(at.bar[1]!)}), "SAFFRON" ${hit.count}, Shift+Enter ${prev.count}, Cmd+F opens, composer keeps the key, More pane row opens it`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P355 the hit list grows as a live turn adds rows, keeps the hit being looked at, and does not scroll the reader',
+  frames: () => f138Frames({ 5: 'quince early', 110: 'quince late' }),
+  run: async ({ page, viewer }) => {
+    const frames = f138Frames({ 5: 'quince early', 110: 'quince late' });
+    await f138Boot(page, viewer, frames);
+    await f138OpenFromMore(page);
+    await f138Search(page, 'quince', '2 of 2');
+    await page.click('#find-prev');
+    const early = await f138Read(page);
+    expect(f138Turn(early) === 5 && early.count === '1 of 2', `before the turn: ${early.count} on turn ${f138Turn(early)}`);
+    // A live turn adds an answer and a tool call that both hold the word,
+    // while the reader is up at turn 5.
+    expect(early.inView, 'turn 5 is not in view before the turn arrives');
+    await page.evaluate(String.raw`(() => {
+      __pg.update({ sessionUpdate: 'agent_message_chunk', content: { text: 'a quince answer' } });
+      __pg.update({ sessionUpdate: 'tool_call', toolCallId: 'tc-quince', title: 'grep quince', status: 'in_progress' });
+    })()`);
+    await page.waitForFunction(`document.getElementById('find-count').textContent === '1 of 4'`, null, { timeout: 5_000 });
+    const grown = await f138Read(page);
+    expect(grown.id === early.id && grown.inView, `the hit being looked at moved: ${early.id} -> ${grown.id}, in view ${grown.inView}`);
+    expect(Math.abs(grown.scrollTop - early.scrollTop) <= 2, `the reader was moved ${grown.scrollTop - early.scrollTop}px by new rows`);
+    // And forward through all four, the new rows included, wrapping.
+    const turns: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      await page.click('#find-next');
+      const s = await f138Read(page);
+      expect(s.mounted && s.inView, `step ${i + 1}: ${s.count} not in view`);
+      turns.push(s.count);
+    }
+    await shot(page, 'p355-live-390');
+    return `2 hits, one live turn later 4; the looked-at hit held ${early.count} -> ${grown.count} with the reader still at ${Math.round(grown.scrollTop)}; stepped ${turns.join(', ')}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P356 a thought is searched only once it is open, a tool by its title, and its call and result only once it is open',
+  frames: () => {
+    const f = new Frames();
+    f.user('f138 question one');
+    f.thought('weighing the zeppelin against the balloon');
+    f.upd({ sessionUpdate: 'tool_call', toolCallId: 'tc-q', title: 'Read quokka.txt', status: 'completed', rawInput: { path: '/srv/ocelot-notes.txt' } });
+    f.upd({ sessionUpdate: 'tool_call_update', toolCallId: 'tc-q', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'the file says narwhal' } }] });
+    f.asst('Done reading.');
+    f.done();
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 30_000);
+    await settlePage(page, 300);
+    await f138OpenFromMore(page);
+    const none = async (q: string) => {
+      await page.fill('#find-q', q);
+      await page.waitForFunction(`document.getElementById('find-count').textContent === 'No match'`, null, { timeout: 5_000 });
+    };
+    await none('zeppelin');
+    await none('ocelot');
+    await none('narwhal');
+    const tool = await f138Search(page, 'QUOKKA', '1 of 1');
+    expect(tool.mounted && tool.ring && tool.marks.length === 1, `the tool row: mounted ${tool.mounted}, ringed ${tool.ring}, marks ${tool.marks.length}`);
+    // Open the thought and the tool the way a reader does, and the words in them are found.
+    await page.fill('#find-q', 'zeppelin');
+    await page.click('#transcript .thought-head');
+    await page.waitForFunction(`document.getElementById('find-count').textContent === '1 of 1'`, null, { timeout: 5_000 });
+    const thought = await f138Read(page);
+    expect(thought.mounted && thought.ring && thought.marks.length === 1, `the open thought: mounted ${thought.mounted}, ringed ${thought.ring}, marks ${thought.marks.length}`);
+    await page.fill('#find-q', 'narwhal');
+    await page.click('#transcript .tool-head');
+    await page.waitForFunction(`document.getElementById('find-count').textContent === '1 of 1'`, null, { timeout: 5_000 });
+    const result = await f138Read(page);
+    expect(result.mounted && result.ring && result.marks.length === 1 && result.marks[0] === 'narwhal', `the open tool result: marks ${JSON.stringify(result.marks)}`);
+    await page.fill('#find-q', 'ocelot');
+    await page.waitForFunction(`document.getElementById('find-count').textContent === '1 of 1'`, null, { timeout: 5_000 });
+    // Closing the thought takes its hit away again.
+    await page.click('#transcript .thought-head');
+    await page.fill('#find-q', 'zeppelin');
+    await page.waitForFunction(`document.getElementById('find-count').textContent === 'No match'`, null, { timeout: 5_000 });
+    await shot(page, 'p356-tool-390');
+    return 'zeppelin (thought), ocelot (call) and narwhal (result) find nothing while shut, one row each once open; QUOKKA finds the tool by its title';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P357 with the keyboard up at 390x480 the find bar and the composer stay above the keys and the transcript keeps room',
+  keyboard: true,
+  frames: () => f138Frames({ 9: 'saffron here' }, 60),
+  run: async ({ page, viewer }) => {
+    const frames = f138Frames({ 9: 'saffron here' }, 60);
+    await f138Boot(page, viewer, frames);
+    await f138OpenFromMore(page);
+    const vis = await keyboardUp(page, KEYBOARD_KEYS, '#find-q');
+    await page.fill('#find-q', 'saffron');
+    await page.waitForFunction(`document.getElementById('find-count').textContent === '1 of 1'`, null, { timeout: 5_000 });
+    await settlePage(page, 300);
+    const g = (await page.evaluate(String.raw`(() => {
+      const r = (id) => document.getElementById(id).getBoundingClientRect();
+      return { bar: [r('find-bar').top, r('find-bar').bottom], composer: [r('composer').top, r('composer').bottom], wrap: r('transcript-wrap').height, vis: window.visualViewport.offsetTop + window.visualViewport.height };
+    })()`)) as { bar: number[]; composer: number[]; wrap: number; vis: number };
+    const hit = await f138State(page);
+    expect(g.composer[1]! <= vis + 1 && g.bar[1]! <= g.composer[0]! + 1, `bar ${g.bar}, composer ${g.composer} over visible ${vis}`);
+    expect(g.wrap >= 120, `the transcript has ${g.wrap}px`);
+    expect(hit.mounted && hit.inView, `the hit is mounted ${hit.mounted}, in view ${hit.inView}`);
+    await shot(page, 'p357-find-keys-390');
+    await keyboardDown(page);
+    return `visible ${Math.round(vis)}px: bar ${Math.round(g.bar[0]!)}-${Math.round(g.bar[1]!)}, composer ${Math.round(g.composer[0]!)}-${Math.round(g.composer[1]!)}, transcript ${Math.round(g.wrap)}px, hit in view`;
+  },
+});
+
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];
