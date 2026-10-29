@@ -1070,6 +1070,9 @@
       placeFork: placeFork,
       clearFork: clearFork,
       userTurns: userTurns,
+      search: function (query) {
+        return searchItems(items, query);
+      },
       cutAtUserTurn: cutAtUserTurn,
       touch: touch,
       clear: clear,
@@ -1082,6 +1085,131 @@
         return out;
       },
     };
+  }
+
+  // ---- Find in conversation (#138) --------------------------------------------
+  // The search runs on the model, not on the DOM: the view mounts only a window
+  // of the list, so a search of what is mounted would miss most of a long
+  // conversation. A hit is a row. What counts as that row's text is what the
+  // reader can read in it: the words of a message, a tool's title, a thought's
+  // body once it is open, a tool's call and result once it is open (a collapsed
+  // row does not show them, so a match in one would be a hit the reader cannot
+  // find on arrival). The tool detail is capped at what the view draws.
+  var FIND_DETAIL_MAX = 4000;
+  function findDetailText(v) {
+    var s;
+    if (Array.isArray(v)) {
+      s = v.map(findContentText).join('\n');
+    } else if (typeof v === 'string') {
+      s = v;
+    } else {
+      s = findJsonish(v);
+    }
+    return s.length > FIND_DETAIL_MAX ? s.slice(0, FIND_DETAIL_MAX) : s;
+  }
+  function findJsonish(v) {
+    try {
+      return JSON.stringify(v, null, 1);
+    } catch {
+      return String(v);
+    }
+  }
+  function findContentText(c) {
+    if (typeof c === 'string') return c;
+    if (!c || typeof c !== 'object') return findJsonish(c);
+    if (c.type === 'content') {
+      var inner = c.content;
+      if (inner && inner.type === 'text' && typeof inner.text === 'string')
+        return inner.text;
+      return '[' + ((inner && inner.type) || 'content') + ']';
+    }
+    if (c.type === 'diff') {
+      return (
+        String(c.path || '') +
+        '\n-' +
+        (typeof c.oldText === 'string' ? c.oldText : '') +
+        '\n+' +
+        (typeof c.newText === 'string' ? c.newText : '')
+      );
+    }
+    if (c.type === 'terminal') return '[terminal]';
+    return findJsonish(c);
+  }
+  // The searchable fields of one row, as [name, text] pairs.
+  function searchFields(item) {
+    var out = [];
+    if (!item) return out;
+    switch (item.kind) {
+      case 'user':
+        if (item.text) out.push(['text', item.text]);
+        (item.parts || []).forEach(function (p) {
+          if (p && p.name) out.push(['part', String(p.name)]);
+        });
+        break;
+      case 'asst':
+        if (item.text) out.push(['text', item.text]);
+        break;
+      case 'thought':
+        if (item.expanded && item.text) out.push(['text', item.text]);
+        break;
+      case 'tool':
+        if (item.label) out.push(['label', String(item.label)]);
+        if (item.expanded) {
+          if (item.input !== undefined)
+            out.push(['input', findDetailText(item.input)]);
+          if (item.result !== undefined)
+            out.push(['result', findDetailText(item.result)]);
+        }
+        break;
+      default:
+        break;
+    }
+    return out;
+  }
+  // The normal form of a query: a stray space from a phone keyboard's
+  // suggestion must not make every hit vanish. Empty means no search.
+  function searchNeedle(query) {
+    return String(query == null ? '' : query)
+      .trim()
+      .toLowerCase();
+  }
+  function countOccurrences(hay, needle) {
+    var n = 0;
+    var at = hay.indexOf(needle);
+    while (at >= 0) {
+      n++;
+      at = hay.indexOf(needle, at + needle.length);
+    }
+    return n;
+  }
+  // Rows of `items` that hold `query`, case-insensitively, in list order:
+  // [{ item, id, index, fields: [names that matched], count: occurrences }].
+  function searchItems(items, query) {
+    var needle = searchNeedle(query);
+    var hits = [];
+    if (!needle || !items) return hits;
+    for (var i = 0; i < items.length; i++) {
+      var fields = searchFields(items[i]);
+      var names = [];
+      var count = 0;
+      for (var f = 0; f < fields.length; f++) {
+        var c = countOccurrences(fields[f][1].toLowerCase(), needle);
+        if (c > 0) {
+          names.push(fields[f][0]);
+          count += c;
+        }
+      }
+      if (count > 0) {
+        hits.push({
+          item: items[i],
+          id: items[i].id,
+          index: i,
+          fields: names,
+          count: count,
+        });
+      }
+    }
+    return hits;
   }
 
   // ---- Stored history (GET /session/:id/transcript) --------------------------
@@ -1246,5 +1374,8 @@
     turnErrorText: turnErrorText,
     userPartOf: userPartOf,
     userBlockOf: userBlockOf,
+    searchItems: searchItems,
+    searchFields: searchFields,
+    searchNeedle: searchNeedle,
   };
 })();

@@ -370,6 +370,13 @@
     // A restorePlace() request: { item, top }, applied by the next pass that
     // runs while the scroller is rendered (see goToPlace).
     var pendingPlace = null;
+    // #138. Find in conversation: { needle, ids: Set of item ids, active: item
+    // | null } while a search is open, else null. The page owns the search (the
+    // model finds the rows); the view only marks what is mounted.
+    var find = null;
+    var findStale = false; // a mounted row changed since the marks were drawn
+    var findFirst = null; // the active row's first mark, for pendingFocus
+    var pendingFocus = null; // revealItem(): bring this row's mark into view
     var quiet = false; // the current model event is that toggle's own touch
     // The zone THIS view renders message times in. Per-view rather than shared,
     // because the preference is the reader's and two views on one page can read
@@ -1016,6 +1023,7 @@
     };
 
     function build(m, now) {
+      if (find) findStale = true;
       var old = m.bubble;
       m.shape = shapeOf(m.item);
       var make = BUILD[m.shape] || buildSystem;
@@ -1026,6 +1034,7 @@
     }
 
     function patch(m, now) {
+      if (find) findStale = true;
       if (shapeOf(m.item) !== m.shape) return build(m, now);
       switch (m.shape) {
         case 'user':
@@ -1091,6 +1100,7 @@
       var m = mounted.get(id);
       mounted.delete(id);
       dirty.delete(id);
+      if (find) findStale = true;
       m.row.remove();
     }
 
@@ -1610,6 +1620,121 @@
     scroller.addEventListener('touchend', onTouchEnd, { passive: true });
     scroller.addEventListener('touchcancel', onTouchEnd, { passive: true });
 
+    // ---- Find in conversation (#138) ---------------------------------------
+    // Marks are painted, never built: the CSS Custom Highlight API puts a
+    // background behind ranges of the text that is already there, so no node is
+    // added or split and no row changes height. A browser without it still gets
+    // the row-level classes (a ring on the active row, a thin one on the rest),
+    // which are box-shadows and move nothing either. A mark is best-effort: it
+    // is drawn for the rows mounted now and again whenever one is built or
+    // patched, and a match that spans two text nodes (a phrase across a bold
+    // span) has its row marked but no range.
+    var FIND_HIT = 'rc-find';
+    var FIND_NOW = 'rc-find-active';
+    var FIND_MAX_RANGES = 100; // per row
+    function highlightRegistry() {
+      try {
+        return typeof CSS !== 'undefined' &&
+          CSS &&
+          CSS.highlights &&
+          typeof Highlight === 'function'
+          ? CSS.highlights
+          : null;
+      } catch {
+        return null;
+      }
+    }
+    function findNeedle(q) {
+      return String(q == null ? '' : q)
+        .trim()
+        .toLowerCase();
+    }
+    function findRanges(root, needle) {
+      var out = [];
+      if (!root || !needle) return out;
+      var walker = document.createTreeWalker(root, 4); // SHOW_TEXT
+      for (var node = walker.nextNode(); node; node = walker.nextNode()) {
+        var p = node.parentNode;
+        // The role line and its time, the turn actions and the controls are
+        // not the conversation's words; collapsed bodies are not drawn.
+        if (
+          p &&
+          p.closest &&
+          p.closest('.role, .turn-acts, button, [hidden], .not-sent')
+        )
+          continue;
+        var data = node.data;
+        var lower = data.toLowerCase();
+        if (lower.length !== data.length) continue; // offsets would not line up
+        for (
+          var at = lower.indexOf(needle);
+          at >= 0 && out.length < FIND_MAX_RANGES;
+          at = lower.indexOf(needle, at + needle.length)
+        ) {
+          var r = document.createRange();
+          r.setStart(node, at);
+          r.setEnd(node, at + needle.length);
+          out.push(r);
+        }
+        if (out.length >= FIND_MAX_RANGES) break;
+      }
+      return out;
+    }
+    function setRowClass(row, cls, on) {
+      if (row.classList.contains(cls) !== on) row.classList.toggle(cls, on);
+    }
+    function paintFind() {
+      findStale = false;
+      findFirst = null;
+      var reg = highlightRegistry();
+      var all = [];
+      var now = [];
+      mounted.forEach(function (m) {
+        var hit = !!find && find.ids.has(m.item.id);
+        var active = hit && find.active === m.item;
+        setRowClass(m.row, 'find-hit', hit);
+        setRowClass(m.row, 'find-active', active);
+        if (!hit || !reg) return;
+        var ranges = findRanges(m.bubble, find.needle);
+        for (var i = 0; i < ranges.length; i++) {
+          if (active && i === 0) {
+            now.push(ranges[i]);
+            findFirst = ranges[i];
+          } else {
+            all.push(ranges[i]);
+          }
+        }
+      });
+      if (!reg) return;
+      if (all.length) reg.set(FIND_HIT, new Highlight(...all));
+      else reg.delete(FIND_HIT);
+      if (now.length) reg.set(FIND_NOW, new Highlight(...now));
+      else reg.delete(FIND_NOW);
+    }
+    // A row wholly inside the scroller's visible box.
+    function rowInView(m) {
+      var edge = scroller.getBoundingClientRect();
+      var b = m.row.getBoundingClientRect();
+      return b.top >= edge.top && b.bottom <= edge.bottom;
+    }
+    // revealItem() brought the row to the top; a tall row can still have its
+    // mark off screen, so the first mark is brought into the box too.
+    var FIND_MARGIN = 64;
+    function refineFocus() {
+      var item = pendingFocus;
+      var m = mounted.get(item.id);
+      if (!m) return; // not mounted yet: a later pass
+      pendingFocus = null;
+      if (!findFirst || !findFirst.startContainer.isConnected) return;
+      var edge = scroller.getBoundingClientRect();
+      var b = findFirst.getBoundingClientRect();
+      if (b.top >= edge.top + 8 && b.bottom <= edge.bottom - 8) return;
+      var drift = b.top - edge.top - FIND_MARGIN;
+      if (virtualizer) virtualizer.scrollToOffset(scroller.scrollTop + drift);
+      else scroller.scrollTop += drift;
+      refreshNearBottom();
+    }
+
     var structural = true;
     // The part of the last edge correction that a whole-pixel write could not
     // carry, and the element it was measured on.
@@ -1744,7 +1869,12 @@
           if (nearBottom && gapPx() > 1) toEnd();
         }
         if (virtualizer && gapPx() <= 1) dropPendingCorrection();
+        if (pendingFocus) {
+          if (findStale || !findFirst) paintFind();
+          refineFocus();
+        }
       }
+      if (findStale) paintFind();
       hold = null;
     }
 
@@ -2044,6 +2174,41 @@
         pendingTop = true;
         schedule();
       },
+      // #138. Marks the rows of a search: spec is { query, ids, active } (the
+      // rows that hold the query, as item ids, and the one being looked at),
+      // or null to clear. Painting only; where the reader is does not change.
+      setFind: function (spec) {
+        if (destroyed) return;
+        if (!spec || !findNeedle(spec.query)) {
+          find = null;
+          pendingFocus = null;
+        } else {
+          find = {
+            needle: findNeedle(spec.query),
+            ids: new Set(spec.ids || []),
+            active: spec.active || null,
+          };
+        }
+        findStale = true;
+        schedule();
+      },
+      // #138. Puts a row where the reader will see it: left alone when it is
+      // already wholly in view, else `top` px under the top edge (the existing
+      // restorePlace path, so an unmounted row far away is reached the way a
+      // reload reaches it), then its first mark is brought into view if the row
+      // is taller than the box.
+      revealItem: function (item, top) {
+        if (destroyed || !item || items.indexOf(item) < 0) return;
+        pendingFocus = item;
+        var m = mounted.get(item.id);
+        if (!(m && rowInView(m))) {
+          pendingPlace = {
+            item: item,
+            top: typeof top === 'number' && isFinite(top) ? top : FIND_MARGIN,
+          };
+        }
+        schedule();
+      },
       mountedCount: function () {
         return mounted.size;
       },
@@ -2067,6 +2232,8 @@
         if (tailTimer !== null) clearTimeout(tailTimer);
         tailTimer = null;
         unsubscribe();
+        find = null;
+        paintFind();
         scroller.removeEventListener('scroll', onScroll);
         if (boxResizeObserver) {
           boxResizeObserver.unobserve(scroller);
