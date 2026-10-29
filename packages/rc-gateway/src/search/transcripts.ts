@@ -53,12 +53,6 @@ export interface SearchOptions {
   /** Restrict to a single session. */
   sessionId?: string;
   /**
-   * When present, restrict hits to the fork lineage of the given session id.
-   * Computed in-process by the search handler; the scanner ignores it (lineage
-   * filtering requires session records unavailable to the transcript scanner).
-   */
-  lineage?: string;
-  /**
    * Explicit visible-session set for non-owner callers (permission filtering).
    * `undefined` = owner scope = no restriction applied.
    * An empty Set = caller can see nothing = 0 hits.

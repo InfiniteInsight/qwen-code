@@ -29,7 +29,6 @@ export type RankedSearch = (
   opts: {
     kind?: string;
     sessionId?: string;
-    lineage?: string;
     limit?: number;
     since?: number;
     until?: number;
@@ -146,12 +145,18 @@ export function createSearchRoute(
       ? Math.min(Math.max(1, Math.trunc(parsedLimit)), 200)
       : 50;
 
-    // Optional lineage filter: restrict to a session's fork lineage (ancestors +
-    // descendants + self). The handler resolves the actual session set inline via
-    // walkLineage; the route just reads the raw parameter and passes it through.
+    // `?lineage=` (restrict to a session's fork lineage) is NOT implemented: no
+    // search engine here filters on it, and accepting it while returning
+    // unfiltered hits would read as a scoped result that is not one. Reject it
+    // loudly until a lineage-set filter exists for both the scan and the index.
     const rawLineage = req.query.lineage;
-    const lineage =
-      typeof rawLineage === 'string' && rawLineage ? rawLineage : undefined;
+    if (typeof rawLineage === 'string' && rawLineage) {
+      res.status(400).json({
+        error: 'The lineage filter is not supported',
+        code: 'lineage_unsupported',
+      });
+      return;
+    }
 
     // Optional inclusive ISO-8601 time bounds (cycle 79). A present-but-
     // unparseable value is a 400 (mirrors invalid_kind); absent → no bound.
@@ -233,7 +238,6 @@ export function createSearchRoute(
         const ranked = await opts.ranked(q, {
           kind,
           sessionId,
-          lineage,
           limit,
           since: since.ms,
           until: until.ms,
@@ -253,7 +257,6 @@ export function createSearchRoute(
         result = await searchTranscriptsDetailed(dir, q, {
           kind,
           sessionId,
-          lineage,
           limit,
           since: since.ms,
           until: until.ms,
