@@ -33,6 +33,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { olmStoreDir, OLM_STORE_MISSING_LOG } from './e2ee.js';
 import { senderPowerLevel, type NormalizedMatrixReaction } from './dispatch.js';
+import { promptTextOf } from './normalize.js';
 import type { MatrixInbound } from './runner.js';
 
 /**
@@ -191,12 +192,13 @@ export async function createMatrixCryptoAdapter(
     // and re-emits the plaintext as `room.message` (MatrixClient processSync:
     // decrypt → fall through to the m.room.message emit), so this one handler
     // covers BOTH cleartext and decrypted encrypted-room messages — no manual
-    // decryptRoomEvent needed.
+    // decryptRoomEvent needed. The same filter as the fetch path (#168): only
+    // m.text, and never an m.replace edit of an earlier prompt.
     client.on('room.message', (roomId: string, event: unknown) => {
-      const e = event as { sender?: string; content?: { body?: string } };
-      if (typeof e.content?.body !== 'string') return;
+      const e = event as { sender?: string; content?: unknown };
+      const body = promptTextOf(e.content);
+      if (body === undefined) return;
       const sender = e.sender ?? '';
-      const body = e.content.body;
       void (async () => {
         const powerLevel = await resolvePower(roomId, sender);
         await deps.onMessage({ roomId, sender, body, powerLevel });
