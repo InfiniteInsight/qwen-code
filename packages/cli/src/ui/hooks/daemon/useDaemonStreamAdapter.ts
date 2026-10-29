@@ -18,9 +18,11 @@
  * display + the permission prompt binding are a following slice.
  */
 import { useContext } from 'react';
-import type { useLlmStream } from '../use-llm-stream.js';
 import { useDaemonStream } from './useDaemonStream.js';
-import { DaemonStreamContext } from './DaemonStreamContext.js';
+import {
+  DaemonStreamContext,
+  type DaemonAwareStreamHook,
+} from './DaemonStreamContext.js';
 
 /** Flatten a `submitQuery` argument (string | Part | Part[]) to plain text. */
 function toText(query: unknown): string {
@@ -42,7 +44,7 @@ function toText(query: unknown): string {
   return '';
 }
 
-export const useDaemonStreamAdapter: typeof useLlmStream = (
+export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   _geminiClient,
   _history,
   addItem,
@@ -76,5 +78,7 @@ export const useDaemonStreamAdapter: typeof useLlmStream = (
     loopDetectionConfirmationRequest: ds.loopDetectionConfirmationRequest,
     streamingResponseLengthRef: ds.streamingResponseLengthRef,
     isReceivingContent: ds.isReceivingContent,
+    daemonModelId: ds.daemonModelId,
+    daemonApprovalMode: ds.daemonApprovalMode,
   };
 };

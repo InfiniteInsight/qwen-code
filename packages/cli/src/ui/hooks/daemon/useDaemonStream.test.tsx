@@ -34,6 +34,8 @@ function makeFakeDriver(
     replayDegraded?: boolean;
     hasActivePrompt?: boolean;
     lastEventId?: number;
+    /** The load response's ACP state (`models`, `modes`). */
+    state?: { models?: unknown; modes?: unknown };
     /** Shared ordering log: `subscribe` is pushed when events() starts. */
     log?: string[];
   } = {},
@@ -67,6 +69,7 @@ function makeFakeDriver(
     };
   } = {
     clientId: opts.clientId,
+    state: opts.state,
     get replaySnapshot() {
       return replay;
     },
@@ -498,6 +501,96 @@ describe('useDaemonStream', () => {
       ]),
     );
     expect(result.current.initError).toBeNull();
+  });
+
+  describe('model and approval mode follow the daemon', () => {
+    const loadState = {
+      models: { currentModelId: 'flint(openai)', availableModels: [] },
+      modes: { currentModeId: 'default', availableModes: [] },
+    };
+
+    it('starts from the load response state', () => {
+      const driver = makeFakeDriver({ clientId: 'c1', state: loadState });
+      const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+      expect(result.current.daemonModelId).toBe('flint(openai)');
+      expect(result.current.daemonApprovalMode).toBe('default');
+    });
+
+    it('has neither before the daemon says anything', () => {
+      const driver = makeFakeDriver({ clientId: 'c1' });
+      const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+      expect(result.current.daemonModelId).toBeUndefined();
+      expect(result.current.daemonApprovalMode).toBeUndefined();
+    });
+
+    it('follows a model_switched frame', async () => {
+      const driver = makeFakeDriver({ clientId: 'c1', state: loadState });
+      const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+      act(() => {
+        driver.push({
+          id: 5,
+          type: 'model_switched',
+          data: { sessionId: 's1', modelId: 'qwen3-coder(openai)' },
+          originatorClientId: 'phone',
+        });
+      });
+      await waitFor(() =>
+        expect(result.current.daemonModelId).toBe('qwen3-coder(openai)'),
+      );
+    });
+
+    it('follows an approval_mode_changed frame', async () => {
+      const driver = makeFakeDriver({ clientId: 'c1', state: loadState });
+      const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+      act(() => {
+        driver.push({
+          id: 6,
+          type: 'approval_mode_changed',
+          data: { previous: 'default', next: 'yolo', persisted: false },
+        });
+      });
+      await waitFor(() =>
+        expect(result.current.daemonApprovalMode).toBe('yolo'),
+      );
+    });
+
+    it('lets the load state win over older replayed frames', () => {
+      const driver = makeFakeDriver({
+        clientId: 'c1',
+        state: loadState,
+        replay: {
+          compactedReplay: [
+            { id: 1, type: 'model_switched', data: { modelId: 'ancient' } },
+            {
+              id: 2,
+              type: 'approval_mode_changed',
+              data: { next: 'plan' },
+            },
+          ],
+          liveJournal: [],
+        },
+      });
+      const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+      expect(result.current.daemonModelId).toBe('flint(openai)');
+      expect(result.current.daemonApprovalMode).toBe('default');
+    });
+
+    it('falls back to replayed frames when the load state names nothing', () => {
+      const driver = makeFakeDriver({
+        clientId: 'c1',
+        state: {},
+        replay: {
+          compactedReplay: [
+            { id: 1, type: 'model_switched', data: { modelId: 'replayed' } },
+          ],
+          liveJournal: [],
+        },
+      });
+      const { result } = renderHook(() => useDaemonStream(driver, vi.fn()));
+      expect(result.current.daemonModelId).toBe('replayed');
+    });
   });
 
   describe('attach-time history (replay snapshot from load)', () => {

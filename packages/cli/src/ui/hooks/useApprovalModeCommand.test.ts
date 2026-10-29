@@ -114,4 +114,58 @@ describe('useApprovalModeCommand', () => {
     expect(addItem).not.toHaveBeenCalled();
     expect(result.current.isApprovalModeDialogOpen).toBe(false);
   });
+
+  describe('attached to a daemon session', () => {
+    it('sets the daemon mode and leaves the local config and settings alone', async () => {
+      const daemonSet = vi.fn().mockResolvedValue({});
+      const { result } = renderHook(() =>
+        useApprovalModeCommand(settings, config, addItem, {
+          setApprovalMode: daemonSet,
+        }),
+      );
+      act(() => result.current.openApprovalModeDialog());
+
+      selectMode(result, ApprovalMode.YOLO);
+
+      expect(daemonSet).toHaveBeenCalledWith(ApprovalMode.YOLO);
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(setValue).not.toHaveBeenCalled();
+      expect(result.current.isApprovalModeDialogOpen).toBe(false);
+    });
+
+    it('reports the daemon refusal', async () => {
+      const daemonSet = vi
+        .fn()
+        .mockRejectedValue(new Error('untrusted folder'));
+      const { result } = renderHook(() =>
+        useApprovalModeCommand(settings, config, addItem, {
+          setApprovalMode: daemonSet,
+        }),
+      );
+
+      selectMode(result, ApprovalMode.YOLO);
+
+      await vi.waitFor(() =>
+        expect(addItem).toHaveBeenCalledWith(
+          { type: MessageType.ERROR, text: 'untrusted folder' },
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('does nothing when the dialog is cancelled', () => {
+      const daemonSet = vi.fn();
+      const { result } = renderHook(() =>
+        useApprovalModeCommand(settings, config, addItem, {
+          setApprovalMode: daemonSet,
+        }),
+      );
+      act(() => result.current.openApprovalModeDialog());
+
+      selectMode(result, undefined);
+
+      expect(daemonSet).not.toHaveBeenCalled();
+      expect(result.current.isApprovalModeDialogOpen).toBe(false);
+    });
+  });
 });

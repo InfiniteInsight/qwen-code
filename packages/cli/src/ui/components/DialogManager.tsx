@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useContext } from 'react';
 import { Box, Text } from 'ink';
 import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
@@ -25,6 +26,9 @@ import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { DaemonModelDialog } from './DaemonModelDialog.js';
+import { DaemonStreamContext } from '../hooks/daemon/DaemonStreamContext.js';
+import { readDaemonModels } from '../hooks/daemon/daemon-session-state.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -37,7 +41,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { AuthState } from '../types.js';
+import { AuthState, MessageType } from '../types.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
@@ -78,6 +82,8 @@ export const DialogManager = ({
 
   const uiState = useUIState();
   const uiActions = useUIActions();
+  // Non-null only in a tab attached to a daemon session.
+  const daemon = useContext(DaemonStreamContext);
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
@@ -267,6 +273,42 @@ export const DialogManager = ({
       </Box>
     );
   }
+  const isAuxModelMode =
+    uiState.isFastModelMode ||
+    uiState.isAdvisorModelMode ||
+    uiState.isVoiceModelMode ||
+    uiState.isVisionModelMode ||
+    uiState.isCompactionModelMode ||
+    uiState.isImageModelMode;
+  if (uiState.isModelDialogOpen && daemon && !isAuxModelMode) {
+    // The session runs on the daemon's model, so pick from, and switch, THAT.
+    // The footer follows the daemon's `model_switched` frame.
+    return (
+      <Box flexDirection="column">
+        <DaemonModelDialog
+          models={readDaemonModels(daemon.state).availableModels}
+          currentModelId={uiState.currentModel}
+          onSelect={(modelId) => {
+            uiActions.closeModelDialog();
+            if (!modelId || modelId === uiState.currentModel) return;
+            const report = (text: string) =>
+              addItem({ type: MessageType.ERROR, text }, Date.now());
+            if (!daemon.setModel) {
+              report(
+                t(
+                  'This daemon does not support switching the model from a terminal.',
+                ),
+              );
+              return;
+            }
+            daemon.setModel(modelId).catch((e: unknown) => {
+              report((e as Error)?.message ?? String(e));
+            });
+          }}
+        />
+      </Box>
+    );
+  }
   if (uiState.isModelDialogOpen) {
     return (
       <ModelDialog
@@ -343,7 +385,10 @@ export const DialogManager = ({
     );
   }
   if (uiState.isApprovalModeDialogOpen) {
-    const currentMode = config.getApprovalMode();
+    // Attached: the daemon's mode, which the footer indicator tracks.
+    const currentMode = daemon
+      ? uiState.showAutoAcceptIndicator
+      : config.getApprovalMode();
     return (
       <Box flexDirection="column">
         <ApprovalModeDialog

@@ -7,6 +7,7 @@
 import {
   useMemo,
   useState,
+  useContext,
   useCallback,
   useEffect,
   useRef,
@@ -187,6 +188,11 @@ import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLlmStream, type CancelSubmitInfo } from './hooks/use-llm-stream.js';
+import {
+  DaemonStreamContext,
+  type DaemonAwareStreamHook,
+} from './hooks/daemon/DaemonStreamContext.js';
+import { readDaemonModels } from './hooks/daemon/daemon-session-state.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import {
@@ -818,7 +824,7 @@ interface AppContainerProps {
    * but tools execute in the daemon. MUST be a stable reference per mounted
    * container (never flip between renders, or hook order breaks).
    */
-  useStream?: typeof useLlmStream;
+  useStream?: DaemonAwareStreamHook;
   initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
   /**
@@ -853,7 +859,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Defaulted stream hook (see AppContainerProps.useStream). Stable per mount:
   // `startInteractiveUI` never passes it (→ in-process), `DaemonAppContainer`
   // always passes the daemon adapter.
-  const useStream = props.useStream ?? useLlmStream;
+  const useStream: DaemonAwareStreamHook = props.useStream ?? useLlmStream;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
@@ -979,7 +985,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [],
   );
 
-  const [currentModel, setCurrentModel] = useState(() => config.getModel());
+  // Non-null only in a tab attached to a daemon session (DaemonAppContainer).
+  // There the daemon, not this process's Config, decides which model the
+  // session runs on, so it wins over `config.getModel()` from the first frame.
+  const daemonDriver = useContext(DaemonStreamContext);
+  const [currentModel, setCurrentModel] = useState(
+    () =>
+      readDaemonModels(daemonDriver?.state).currentModelId ?? config.getModel(),
+  );
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
@@ -1754,6 +1767,10 @@ export const AppContainer = (props: AppContainerProps) => {
   // and the Static remount happen together — no full-history flash.
   const lastNotifiedModelRef = useRef(currentModel);
   useEffect(() => {
+    // Attached: the in-process Config is not what the session runs on, so its
+    // changes (an auth refresh, say) must not move the footer; the daemon's
+    // `model_switched` does, through `daemonModelId` below.
+    if (daemonDriver) return;
     const unsubscribe = config.onModelChange((model) => {
       if (lastNotifiedModelRef.current === model) {
         return;
@@ -1763,7 +1780,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setCurrentModel(model);
     });
     return unsubscribe;
-  }, [config, refreshStatic]);
+  }, [config, refreshStatic, daemonDriver]);
 
   const {
     isThemeDialogOpen,
@@ -1782,7 +1799,12 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config, historyManager.addItem);
+  } = useApprovalModeCommand(
+    settings,
+    config,
+    historyManager.addItem,
+    daemonDriver,
+  );
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
@@ -2520,6 +2542,8 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
+    daemonModelId,
+    daemonApprovalMode,
     // `useStream` is a stable, unconditional hook call (defaulted prop, fixed
     // per mounted container) - see AppContainerProps.useStream.
   } = useStream(
@@ -2551,6 +2575,21 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
+
+  // Attached tab: follow the model the daemon reports (a `model_switched` from
+  // the phone, or from this tab's own /model, which the daemon echoes back).
+  // Same shape as the config.onModelChange handler above: refreshStatic and
+  // setCurrentModel run in the same task so they land in ONE commit (#3899),
+  // and the ref guard de-dupes repeats. The initial value needs none of this:
+  // `currentModel` was seeded from the load state.
+  useEffect(() => {
+    if (!daemonModelId || lastNotifiedModelRef.current === daemonModelId) {
+      return;
+    }
+    lastNotifiedModelRef.current = daemonModelId;
+    refreshStatic();
+    setCurrentModel(daemonModelId);
+  }, [daemonModelId, refreshStatic]);
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -2654,6 +2693,8 @@ export const AppContainer = (props: AppContainerProps) => {
     onApprovalModeChange: handleApprovalModeChange,
     shouldBlockTab: () => hasTabConsumer,
     disabled: agentViewState.activeView !== 'main',
+    daemon: daemonDriver,
+    daemonMode: daemonApprovalMode,
   });
 
   const {

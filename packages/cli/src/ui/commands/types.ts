@@ -30,6 +30,7 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { DaemonSessionControl } from '../hooks/daemon/daemon-session-state.js';
 import type { PeerMessaging } from '../../peerMessaging/peer-messaging.js';
 
 export interface NonInteractiveSlashCommandPolicy {
@@ -71,6 +72,13 @@ export interface CommandContext {
      * bound; `/peers` treats null as "the feature is off".
      */
     peerMessaging?: PeerMessaging | null;
+    /**
+     * Present only when this tab is attached to a daemon-hosted session
+     * (`--attach-daemon`). The daemon, not the tab's own `config`, then owns
+     * the session's model and approval mode, so `/model` and `/approval-mode`
+     * go through it instead of changing the local config.
+     */
+    daemon?: DaemonSessionControl | null;
   };
   // UI state and history management
   ui: {

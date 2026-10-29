@@ -9,6 +9,7 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js'
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
+import type { DaemonSessionControl } from './daemon/daemon-session-state.js';
 
 interface UseApprovalModeCommandReturn {
   isApprovalModeDialogOpen: boolean;
@@ -23,6 +24,12 @@ export const useApprovalModeCommand = (
   loadedSettings: LoadedSettings,
   config: Config,
   addItem?: (item: HistoryItemWithoutId, baseTimestamp: number) => void,
+  /**
+   * Set when this tab is attached to a daemon session. The daemon owns the
+   * session's mode, so a pick goes to it; the tab's own config and the user's
+   * settings files are not touched.
+   */
+  daemon?: Pick<DaemonSessionControl, 'setApprovalMode'> | null,
 ): UseApprovalModeCommandReturn => {
   const [isApprovalModeDialogOpen, setIsApprovalModeDialogOpen] =
     useState(false);
@@ -37,6 +44,22 @@ export const useApprovalModeCommand = (
         if (!mode) {
           // User cancelled the dialog
           setIsApprovalModeDialogOpen(false);
+          return;
+        }
+
+        if (daemon) {
+          const report = (message: string) =>
+            addItem?.({ type: MessageType.ERROR, text: message }, Date.now());
+          if (!daemon.setApprovalMode) {
+            report(
+              'This daemon does not support changing the approval mode from a terminal.',
+            );
+            return;
+          }
+          // The footer follows the daemon's `approval_mode_changed` frame.
+          daemon.setApprovalMode(mode).catch((e: unknown) => {
+            report((e as Error)?.message ?? String(e));
+          });
           return;
         }
 
@@ -70,7 +93,7 @@ export const useApprovalModeCommand = (
         setIsApprovalModeDialogOpen(false);
       }
     },
-    [config, loadedSettings, addItem],
+    [config, loadedSettings, addItem, daemon],
   );
 
   return {

@@ -725,4 +725,103 @@ describe('useAutoAcceptIndicator', () => {
       value: originalPlatform,
     });
   });
+
+  describe('attached to a daemon session', () => {
+    const shiftTab = () =>
+      act(() => {
+        capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+      });
+
+    it('shows the daemon mode over the local config mode', () => {
+      mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+      const { result, rerender } = renderHook(
+        (props: { mode?: string }) =>
+          useAutoAcceptIndicator({
+            config: mockConfigInstance as unknown as ActualConfigType,
+            addItem: vi.fn(),
+            daemon: { setApprovalMode: vi.fn() },
+            daemonMode: props.mode,
+          }),
+        { initialProps: { mode: 'yolo' } as { mode?: string } },
+      );
+      expect(result.current).toBe(ApprovalMode.YOLO);
+
+      rerender({ mode: 'plan' });
+      expect(result.current).toBe(ApprovalMode.PLAN);
+    });
+
+    it('falls back to the local mode until the daemon names one', () => {
+      mockConfigInstance.getApprovalMode.mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const { result } = renderHook(() =>
+        useAutoAcceptIndicator({
+          config: mockConfigInstance as unknown as ActualConfigType,
+          addItem: vi.fn(),
+          daemon: { setApprovalMode: vi.fn() },
+          daemonMode: undefined,
+        }),
+      );
+      expect(result.current).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
+    it('ignores a daemon mode this build does not know', () => {
+      mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+      const { result } = renderHook(() =>
+        useAutoAcceptIndicator({
+          config: mockConfigInstance as unknown as ActualConfigType,
+          addItem: vi.fn(),
+          daemon: { setApprovalMode: vi.fn() },
+          daemonMode: 'some-future-mode',
+        }),
+      );
+      expect(result.current).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('Shift+Tab asks the daemon for the next mode and leaves the local config alone', () => {
+      mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+      const setApprovalMode = vi.fn().mockResolvedValue({});
+      const onApprovalModeChange = vi.fn();
+      renderHook(() =>
+        useAutoAcceptIndicator({
+          config: mockConfigInstance as unknown as ActualConfigType,
+          addItem: vi.fn(),
+          onApprovalModeChange,
+          daemon: { setApprovalMode },
+          daemonMode: 'default',
+        }),
+      );
+
+      shiftTab();
+
+      // default -> auto-edit is the order APPROVAL_MODES cycles in.
+      expect(setApprovalMode).toHaveBeenCalledWith(ApprovalMode.AUTO_EDIT);
+      expect(mockConfigInstance.setApprovalMode).not.toHaveBeenCalled();
+      expect(onApprovalModeChange).not.toHaveBeenCalled();
+    });
+
+    it('reports a daemon refusal as a message', async () => {
+      mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+      const addItem = vi.fn();
+      const setApprovalMode = vi
+        .fn()
+        .mockRejectedValue(new Error('untrusted folder'));
+      renderHook(() =>
+        useAutoAcceptIndicator({
+          config: mockConfigInstance as unknown as ActualConfigType,
+          addItem,
+          daemon: { setApprovalMode },
+          daemonMode: 'default',
+        }),
+      );
+
+      shiftTab();
+      await vi.waitFor(() => expect(addItem).toHaveBeenCalled());
+
+      expect(addItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'untrusted folder' },
+        expect.any(Number),
+      );
+    });
+  });
 });
