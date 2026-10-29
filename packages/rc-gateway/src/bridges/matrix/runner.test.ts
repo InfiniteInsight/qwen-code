@@ -232,6 +232,7 @@ describe('MatrixBridge runner — sync loop', () => {
       { next_batch: 's2', ...textMsg('!r:h', '@alice:h', 'run the tests') },
     ]);
     await h.bridge.start(h.ac.signal);
+    await waitFor(() => h.prompts.length === 1); // dispatch runs off the loop (#159)
     expect(h.prompts).toEqual(['run the tests']);
   });
 
@@ -488,6 +489,7 @@ describe('MatrixBridge runner, a failed dispatch (#155)', () => {
       },
     );
     await h.bridge.start(h.ac.signal); // resolves: the loop reached the end
+    await waitFor(() => prompts.length === 1); // dispatch runs off the loop (#159)
     expect(prompts).toEqual(['second']);
     expect(logs.some((l) => l.includes('fetch failed'))).toBe(true);
   });
@@ -587,5 +589,148 @@ describe('MatrixBridge.dispatchReaction (E2EE vote routing seam)', () => {
       key: '👍',
     });
     expect(h.votes).toEqual([]);
+  });
+});
+
+const reactionEvent = (
+  roomId: string,
+  sender: string,
+  targetEventId: string,
+  key: string,
+) => ({
+  rooms: {
+    join: {
+      [roomId]: {
+        timeline: {
+          events: [
+            {
+              type: 'm.reaction',
+              sender,
+              content: {
+                'm.relates_to': {
+                  rel_type: 'm.annotation',
+                  event_id: targetEventId,
+                  key,
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+  },
+});
+
+describe('MatrixBridge, prompts dispatched off the sync loop (#159)', () => {
+  it('a sendPrompt that never resolves does not stop the next sync, and a reaction mid-turn casts the vote', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    const h = harness(
+      [
+        { next_batch: 's1' }, // initial (skipped)
+        { next_batch: 's2', ...textMsg('!r:h', '@alice:h', 'do X') },
+        {
+          next_batch: 's3',
+          ...reactionEvent('!r:h', '@alice:h', '$evt_1', '👍'),
+        },
+      ],
+      { sendPrompt: () => new Promise(() => {}) },
+    );
+    // The permission_request the turn is waiting on, already in the room.
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req1',
+        bridgeHints: {
+          argsSummaryShort: 'run ls',
+          recommendedSurface: 'inline',
+        },
+      },
+    } as never);
+    await waitFor(() => h.sent.length === 1);
+    await h.bridge.start(h.ac.signal); // resolves: the loop was never parked on the turn
+    expect(h.syncCalls()).toBeGreaterThanOrEqual(3);
+    expect(h.votes).toEqual([
+      {
+        sessionId: 'sess_q',
+        requestId: 'req1',
+        outcome: 'allow_once',
+        subActor: 'matrix:@alice:h',
+      },
+    ]);
+  });
+
+  it('keeps per-room order: a second message waits for the running turn, other rooms do not', async () => {
+    await rooms.bind('!a:h', 'sess_a');
+    await rooms.bind('!b:h', 'sess_b');
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const both = {
+      rooms: {
+        join: {
+          ...textMsg('!a:h', '@alice:h', 'one').rooms.join,
+          ...textMsg('!b:h', '@bob:h', 'other').rooms.join,
+        },
+      },
+    };
+    // Two messages for room A in one batch: splice a second event into it.
+    both.rooms.join['!a:h'].timeline.events.push({
+      type: 'm.room.message',
+      sender: '@alice:h',
+      content: { msgtype: 'm.text', body: 'two' },
+    });
+    const h = harness([{ next_batch: 's1' }, { next_batch: 's2', ...both }], {
+      sendPrompt: (_s, prompt) => {
+        started.push(prompt);
+        return new Promise((resolve) =>
+          releases.set(prompt, () => resolve({ ok: true, status: 200 })),
+        );
+      },
+    });
+    await h.bridge.start(h.ac.signal);
+    await waitFor(() => started.includes('other'));
+    expect(started).toEqual(['one', 'other']); // 'two' queued behind 'one'
+    releases.get('one')!();
+    await waitFor(() => started.includes('two'));
+    expect(started).toEqual(['one', 'other', 'two']);
+  });
+
+  it('a rejected prompt is logged, and the room queue carries on to the next message', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    const logs: string[] = [];
+    const prompts: string[] = [];
+    const batch = textMsg('!r:h', '@alice:h', 'first');
+    batch.rooms.join['!r:h'].timeline.events.push({
+      type: 'm.room.message',
+      sender: '@alice:h',
+      content: { msgtype: 'm.text', body: 'second' },
+    });
+    const h = harness([{ next_batch: 's1' }, { next_batch: 's2', ...batch }], {
+      sendPrompt: async (_s, prompt) => {
+        if (prompt === 'first') throw new TypeError('fetch failed');
+        prompts.push(prompt);
+        return { ok: true, status: 200 };
+      },
+      log: (m) => logs.push(m),
+    });
+    await h.bridge.start(h.ac.signal);
+    await waitFor(() => prompts.length === 1);
+    expect(prompts).toEqual(['second']);
+    expect(logs.some((l) => l.includes('fetch failed'))).toBe(true);
+  });
+
+  it('a 429 on a backgrounded prompt still posts the slow-down notice to the room', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    const h = harness(
+      [
+        { next_batch: 's1' },
+        { next_batch: 's2', ...textMsg('!r:h', '@alice:h', 'spam') },
+      ],
+      {
+        sendPrompt: async () => ({ ok: false, status: 429, retryAfterSec: 9 }),
+      },
+    );
+    await h.bridge.start(h.ac.signal);
+    await waitFor(() => h.sent.length === 1);
+    expect(JSON.stringify(h.sent[0].content)).toContain('9 seconds');
   });
 });

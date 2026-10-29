@@ -250,7 +250,12 @@ export async function startBridge(
     log,
   });
   // Now that the runner exists, point the adapter's callbacks at its dispatch.
-  sink.onMessage = (m) => runner.dispatchDecryptedMessage(m, m.powerLevel);
+  // Not awaited: a prompt's dispatch lasts the whole turn, and the adapter's
+  // sync loop must keep running to deliver the reaction that approves a tool
+  // call (#159). dispatchDecryptedMessage never rejects (it logs).
+  sink.onMessage = (m) => {
+    void runner.dispatchDecryptedMessage(m, m.powerLevel);
+  };
   sink.onReaction = (r) => runner.dispatchReaction(r);
   launch(runner);
 

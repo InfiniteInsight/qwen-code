@@ -72,6 +72,13 @@ export interface DispatchDeps {
    * the daemon (which would 404/conflict).
    */
   resolvedRequests?: Set<string>;
+  /**
+   * Called with an error `handleUpdate` swallowed (a rejected gateway call).
+   * The update is still dropped; this only makes the failure visible (#159:
+   * message updates now run off the poll loop, so a swallowed error would
+   * otherwise leave no trace at all).
+   */
+  onError?: (err: unknown) => void;
 }
 
 /**
@@ -92,8 +99,9 @@ export async function handleUpdate(
     } else if (update.callback_query) {
       await handleCallback(update.callback_query, deps);
     }
-  } catch {
+  } catch (err) {
     // Swallow — the poll loop continues with the next update.
+    deps.onError?.(err);
   }
 }
 
