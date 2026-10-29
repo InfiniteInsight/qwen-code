@@ -227,6 +227,13 @@ export function createCapabilityRoute(deps: {
       // instead of queueing a second tab when one is already attached. An old
       // gateway answers 202 every time, so the page can tell the two apart.
       hostTerminalAlreadyMirrored: true,
+      // #150: whether this token holds WRITE, which POST /session/:id/resume
+      // requires. A watch that 412s past the WAL horizon recovers by resuming
+      // the conversation, and the page asks only when this says it may.
+      writeScope: hasScope(
+        Array.isArray(req.rcClient.scopes) ? (req.rcClient.scopes as string[]) : [],
+        WRITE,
+      ),
       // #194 slice D: a terminal on this host can start a conversation the
       // phone then sees (`qwen-rc attach`). The route itself is loopback-only
       // and never reachable from the phone; the flag is here so the page can

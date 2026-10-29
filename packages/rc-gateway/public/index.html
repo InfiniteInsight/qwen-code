@@ -11305,15 +11305,46 @@
       // An unreadable body or a null earliestAvailableId (reason 'no_wal',
       // nothing left on disk) falls back to the old null cursor rather than
       // inventing one.
-      async function replayCursorFromBody(res) {
-        let body;
-        try {
-          body = await res.json();
-        } catch {
-          return null;
-        }
-        const earliest = body && body.data && body.data.earliestAvailableId;
+      // #150: from the 412 body's `data`, read once by its caller.
+      function replayCursorFromData(data) {
+        const earliest = data && data.earliestAvailableId;
         return Number.isFinite(earliest) && earliest >= 0 ? earliest - 1 : null;
+      }
+
+      // #150. A 412 past the WAL horizon can say `recovery: 'reload'`: the
+      // conversation is intact on disk, so instead of retrying from the oldest
+      // id the WAL keeps (and showing a transcript with its start missing) the
+      // page resumes it, which draws the whole history from the resume's own
+      // frames and watches from the resume's watermark, already in the
+      // gateway's numbering. Only with the folder the resume needs, a token
+      // that may call it (WRITE, `writeScope` from /rc/capabilities), and once
+      // per conversation per page load: a resumed watch that 412s again takes
+      // the retry, so the two cannot loop.
+      const walReloaded = new Set();
+      function tokenCanResume() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.writeScope === true
+        );
+      }
+      // The retry the 412 always had, from the oldest id the WAL keeps, and a
+      // word that what is older is not on screen.
+      function retryPastWalHorizon(data) {
+        lastSeenEventId = replayCursorFromData(data);
+        scheduleWatchRetry(412);
+        setStatus(
+          'earlier history is not displayed: it is older than the gateway keeps',
+        );
+      }
+      async function reloadPastWalHorizon(id, cwd, title, data) {
+        walReloaded.add(id);
+        const at =
+          Number.isFinite(data.lastEventId) && data.lastEventId >= 0
+            ? data.lastEventId
+            : null;
+        const ok = await resumeConversation(id, cwd, title, { walReloadFrom: at });
+        if (!ok && watchedSessionId === id) retryPastWalHorizon(data);
       }
 
       function scheduleWatchRetry(status) {
@@ -15132,8 +15163,15 @@
       // request there would open a tab on every recovery, and a resync storm
       // would open one per resync. The ask belongs to the tap, not to the
       // hand-off. Default off, so a new caller cannot inherit it by accident.
+      // Resolves true once the resume answered 200 and its watch started.
+      // #150: opts.walReloadFrom (a number, or null) is the 412's lastEventId
+      // on the WAL reload path, used when an older daemon's answer has no
+      // watermark or no frames.
       async function resumeConversation(sessionId, cwd, title, opts) {
-        if (!token()) return setStatus('pair first');
+        if (!token()) {
+          setStatus('pair first');
+          return false;
+        }
         // #172: a resume is a switch asked for, so it moves the number at the
         // tap. A cold A then a warm B used to end on A, because A's answer
         // landed last, cleared B's transcript and aborted B's watch. The
@@ -15154,10 +15192,10 @@
               body: JSON.stringify({ cwd }),
             },
           );
-          if (gen !== switchGen) return;
+          if (gen !== switchGen) return false;
           if (res.status === 200) {
             const j = await res.json();
-            if (gen !== switchGen) return;
+            if (gen !== switchGen) return false;
             lastSeenEventId = null;
             // Resume is a conversation SWITCH, not a reconnect: startWatch
             // only self-clears when fromEventId is null (which would skip the
@@ -15205,7 +15243,22 @@
             // this resume and noReplayResynced stops a second from-0
             // attempt (a loop) — the watermark watch plus the status poll
             // still recover the card.
-            if (replay.length === 0 && !noReplayResynced.has(j.sessionId)) {
+            const walReload =
+              !!opts && Object.prototype.hasOwnProperty.call(opts, 'walReloadFrom');
+            if (
+              walReload &&
+              (typeof j.lastEventId !== 'number' || replay.length === 0)
+            ) {
+              // #150: never from 0 here, which is the cursor that just 412'd:
+              // the 412's own lastEventId, or with none (an empty WAL) the
+              // newest frame drawn, or no cursor when nothing was.
+              if (typeof opts.walReloadFrom === 'number') {
+                from = opts.walReloadFrom;
+              }
+            } else if (
+              replay.length === 0 &&
+              !noReplayResynced.has(j.sessionId)
+            ) {
               from = 0;
               noReplayFallbackSessionId = j.sessionId;
             }
@@ -15218,6 +15271,7 @@
             // tap failed to open. Still best-effort in the #49 sense, which is
             // non-blocking rather than silent: requestHostTerminal reports why.
             if (opts && opts.hostTerminal) void requestHostTerminal(j.sessionId);
+            return true;
           } else if (res.status === 400) {
             setStatus('invalid workspace — pick a valid folder');
           } else if (res.status === 404) {
@@ -15230,9 +15284,10 @@
             setStatus('resume failed (' + res.status + ')');
           }
         } catch (e) {
-          if (gen !== switchGen) return;
+          if (gen !== switchGen) return false;
           setStatus('resume failed: ' + e);
         }
+        return false;
       }
 
       async function deletePastConversation(sessionId, title, cwd) {
@@ -15724,9 +15779,34 @@
               // stream and clearTranscript() blanked a conversation that is
               // intact on disk. Retry from the boundary replayFrom vouches
               // for instead.
-              if (res.status === 412)
-                lastSeenEventId = await replayCursorFromBody(res);
-              scheduleWatchRetry(res.status);
+              if (res.status === 412) {
+                let body = null;
+                try {
+                  body = await res.json();
+                } catch {
+                  body = null;
+                }
+                const data =
+                  body && body.data && typeof body.data === 'object'
+                    ? body.data
+                    : {};
+                const cwd = watchedSessionCwd;
+                if (
+                  data.recovery === 'reload' &&
+                  cwd &&
+                  tokenCanResume() &&
+                  !walReloaded.has(id) &&
+                  watchedSessionId === id
+                ) {
+                  // Its watch starts after an await, so this teardown is done
+                  // with the shared state by the time it runs.
+                  void reloadPastWalHorizon(id, cwd, title, data);
+                } else {
+                  retryPastWalHorizon(data);
+                }
+              } else {
+                scheduleWatchRetry(res.status);
+              }
             }
             // issue #46: a failed stream connect must not strand a pending
             // question — the status fetch still redraws the card the

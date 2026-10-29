@@ -23384,6 +23384,167 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #150 (the gateway side is #174's). A watch whose cursor is older than the
+// WAL keeps answers 412, and a gateway that can recover says
+// `recovery: 'reload'`: the page resumes the conversation, which draws its
+// whole history from the resume's frames and watches from the resume's
+// watermark. Once per conversation, so a resumed watch that 412s again takes
+// the retry rather than looping. The stub serves frames whatever the cursor,
+// so every claim here is read off the requests on the wire.
+const h150Truncated = (over: Record<string, unknown> = {}) => ({
+  type: 'replay_truncated',
+  data: { reason: 'older_than_wal_horizon', earliestAvailableId: 500, recovery: 'reload', lastEventId: 742, ...over },
+});
+const h150Frame = (id: number, sessionUpdate: string, text: string) => ({
+  id,
+  v: 1,
+  type: 'session_update',
+  data: { update: { sessionUpdate, content: { type: 'text', text } } },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P315 a 412 that says recovery reload resumes the conversation, draws its history and watches from the resume watermark; a second 412 takes the retry instead of looping, and an older daemon is watched from the 412 lastEventId, never 0',
+  waitView: false,
+  frames: () => new Frames().user('p315 live').asst('p315 live answer').done().list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const cursors: Array<string | null> = [];
+    const resumes: Array<Record<string, unknown>> = [];
+    let older = false; // phase two: the resume answers as an older daemon would
+    await page.route(/\/session\/[^/]+\/events$/, async (route) => {
+      const cur = route.request().headers()['last-event-id'] ?? null;
+      cursors.push(cur);
+      if (cur === '5' || cur === '742' || cur === '6') {
+        await route.fulfill({ status: 412, contentType: 'application/json', body: JSON.stringify(h150Truncated()) });
+        return;
+      }
+      if (cur === '499') {
+        await route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"gone"}' });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route(/\/session\/[^/]+\/resume$/, async (route) => {
+      resumes.push(JSON.parse(route.request().postData() || '{}') as Record<string, unknown>);
+      const body = older
+        ? { sessionId: sid }
+        : {
+            sessionId: sid,
+            compactedReplay: [
+              h150Frame(1, 'user_message_chunk', 'p315 from the very start'),
+              h150Frame(2, 'agent_message_chunk', 'p315 the first answer'),
+            ],
+            liveJournal: [],
+            lastEventId: 742,
+          };
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    await page.waitForFunction('caps && caps.remoteControl', null, { timeout: 15_000 });
+    const writes = (await page.evaluate('caps.remoteControl.writeScope')) as unknown;
+    expect(writes === true, `the owner token's capabilities say writeScope ${JSON.stringify(writes)}`);
+    await page.evaluate((id) => {
+      watchedSessionId = id;
+      watchedSessionCwd = '/p315/proj';
+      lastSeenEventId = 5;
+      void startWatch(id, 5, 'p315');
+    }, sid);
+    const until = async (pred: () => boolean, ms: number) => {
+      const end = Date.now() + ms;
+      while (!pred() && Date.now() < end) await page.waitForTimeout(100);
+    };
+    // The resume, then the watch from its watermark, which 412s again.
+    await until(() => cursors.includes('742'), 10_000);
+    expect(resumes.length === 1 && resumes[0]!.cwd === '/p315/proj', `the 412 resumed ${resumes.length} times (${JSON.stringify(resumes)})`);
+    expect(cursors.indexOf('742') === cursors.indexOf('5') + 1, `the resumed watch asked for ${JSON.stringify(cursors)}, not 742 next`);
+    const rows = (await page.evaluate(`transcriptModel.items.filter((i) => i.kind === 'user' || i.kind === 'asst').map((i) => i.text)`)) as string[];
+    expect(rows[0] === 'p315 from the very start' && rows[1] === 'p315 the first answer', `the resume's history is not drawn: ${JSON.stringify(rows)}`);
+    // The second 412 takes the retry from 500 - 1, with no second resume.
+    await until(() => cursors.includes('499'), 10_000);
+    const status = (await page.evaluate(`document.getElementById('status').textContent || ''`)) as string;
+    expect(resumes.length === 1 && cursors.includes('499'), `after a second 412 the page resumed ${resumes.length} times and asked ${JSON.stringify(cursors)}`);
+    // Phase two: an older daemon (no watermark, no frames) on another visit.
+    older = true;
+    const n0 = cursors.length;
+    await page.evaluate((id) => {
+      walReloaded.clear();
+      watchedSessionId = id;
+      watchedSessionCwd = '/p315/proj';
+      lastSeenEventId = 6;
+      void startWatch(id, 6, 'p315');
+    }, sid);
+    await until(() => resumes.length === 2 && cursors.length >= n0 + 2, 10_000);
+    const after = cursors.slice(n0);
+    expect(resumes.length === 2 && after[0] === '6' && after[1] === '742', `an older daemon's resume was watched from ${JSON.stringify(after[1])}, not the 412's 742 (${JSON.stringify(after)})`);
+    expect(!cursors.includes('0'), `a watch asked for cursor 0 (${JSON.stringify(cursors)})`);
+    return `412 at 5 resumed once (cwd /p315/proj), drew the history and watched from 742; its 412 retried from 499 (${JSON.stringify(status)}); an older daemon's resume watched from 742; cursors ${JSON.stringify(cursors)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P316 a 412 the page cannot reload from (no reload, no folder, or a read-only token) retries from the oldest id the WAL keeps and says earlier history is not displayed',
+  waitView: false,
+  frames: () => new Frames().asst('p316 on disk').done().list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const cursors: Array<string | null> = [];
+    let resumed = 0;
+    let body: unknown = h150Truncated({ recovery: undefined });
+    await page.route(/\/session\/[^/]+\/events$/, async (route) => {
+      const cur = route.request().headers()['last-event-id'] ?? null;
+      cursors.push(cur);
+      if (cur === '5') {
+        await route.fulfill({ status: 412, contentType: 'application/json', body: JSON.stringify(body) });
+        return;
+      }
+      await route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"gone"}' });
+    });
+    await page.route(/\/session\/[^/]+\/resume$/, async (route) => {
+      resumed++;
+      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' });
+    });
+    await page.waitForFunction('caps && caps.remoteControl', null, { timeout: 15_000 });
+    const cases: Array<[string, unknown, string | null, boolean]> = [
+      ['no recovery word', h150Truncated({ recovery: undefined }), '/p316', true],
+      ['no folder', h150Truncated(), null, true],
+      ['a read-only token', h150Truncated(), '/p316', false],
+    ];
+    const lines: string[] = [];
+    for (const [what, b, cwd, writes] of cases) {
+      body = b;
+      cursors.length = 0;
+      await page.evaluate(
+        ({ id, cwd: c, writes: w }) => {
+          walReloaded.clear();
+          caps.remoteControl.writeScope = w;
+          watchedSessionId = id;
+          watchedSessionCwd = c;
+          lastSeenEventId = 5;
+          void startWatch(id, 5, 'p316');
+        },
+        { id: sid, cwd, writes },
+      );
+      const end = Date.now() + 10_000;
+      while (!cursors.includes('499') && Date.now() < end) await page.waitForTimeout(100);
+      const status = (await page.evaluate(`document.getElementById('status').textContent || ''`)) as string;
+      expect(resumed === 0, `${what}: the page resumed (${resumed})`);
+      expect(cursors[1] === '499', `${what}: the retry asked for ${JSON.stringify(cursors)}, not 499`);
+      lines.push(`${what}: retried at 499 (${JSON.stringify(status.slice(0, 40))})`);
+    }
+    // The status line names the gap at the 412 itself.
+    body = h150Truncated({ recovery: undefined });
+    cursors.length = 0;
+    await page.evaluate((id) => {
+      walReloaded.clear();
+      watchedSessionId = id;
+      lastSeenEventId = 5;
+      void startWatch(id, 5, 'p316');
+    }, sid);
+    await page.waitForFunction(`(document.getElementById('status').textContent || '').includes('earlier history is not displayed')`, null, { timeout: 5_000 });
+    await shot(page, 'p316-status-390');
+    return lines.join('; ') + '; the status line says earlier history is not displayed';
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

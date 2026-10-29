@@ -510,6 +510,19 @@ describe('#165 the response is scoped by token', () => {
     expect(text).not.toContain('build.internal');
   });
 
+  // #150: the page resumes a conversation whose watch fell past the WAL
+  // horizon only when the token may call resume.
+  it.each([
+    ['owner', { id: 'o', scopes: ['owner'] }, true],
+    ['write', { id: 'w', scopes: ['write', 'session:read'] }, true],
+    ['read-only', { id: 'r', scopes: ['session:read'] }, false],
+    ['approve-only', { id: 'a', scopes: ['approve'] }, false],
+    ['no scopes', { id: 'x' }, false],
+  ])('says whether a %s token holds write', async (_name, client, want) => {
+    const { rc } = await capsAs(client);
+    expect(rc.writeScope).toBe(want);
+  });
+
   it('fails closed for a client with no scopes array', async () => {
     const { text } = await capsAs({ id: 'x' });
     expect(text).not.toContain('/home/evan');
