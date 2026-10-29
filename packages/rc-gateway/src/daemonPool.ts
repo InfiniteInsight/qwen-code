@@ -368,7 +368,7 @@ export interface SessionDaemon {
    *
    * The response is the REPLACEMENT's create-shape body, so it carries a
    * different `sessionId` from the one passed in, and the pool has to learn
-   * that new id or nothing downstream can address it: `daemonForSession`
+   * that new id or nothing downstream can address it: `ownerEntry`
    * raises `UnknownSessionError` for any id it has never recorded, which would
    * make the very call that releases the minted client id fail before it
    * reached the daemon. The implementation therefore rebinds the replacement to
@@ -619,13 +619,16 @@ export interface SessionDaemon {
 }
 
 export interface DaemonPoolOptions {
-  /** The boot daemon, already running, used when a create omits cwd. */
+  /** The boot daemon, already running, used when a create omits cwd. The
+   * pool never stops it. Once it dies, the default workspace is served by a
+   * replacement from `spawn(defaultWorkspaceCwd)` instead (#163). */
   defaultDaemon: DaemonClient;
   defaultWorkspaceCwd: string;
   /** Endpoint of the boot daemon, used for terminal requests against the
    * default workspace (issue #49). Absent → those requests are refused. */
   defaultEndpoint?: DaemonEndpoint;
-  /** Spawn a NEW daemon bound to `cwd`; returns once it is reachable. */
+  /** Spawn a NEW daemon bound to `cwd`; returns once it is reachable. Also
+   * used to replace the boot daemon after it dies, with the default cwd. */
   spawn: (cwd: string) => Promise<PooledDaemonSpawn>;
   maxDaemons?: number; // default 3
   idleReapMs?: number; // default 15*60_000
@@ -751,7 +754,7 @@ export interface RecoveryStateProvider {
  */
 export class DaemonPool implements SessionDaemon {
   private readonly byWorkspace = new Map<string, Entry>();
-  private readonly spawning = new Map<string, Promise<DaemonClient>>();
+  private readonly spawning = new Map<string, Promise<Entry>>();
   /** sessionId -> owning workspace key (`defaultWorkspaceCwd` for sessions
    * created on the default daemon). */
   private readonly ownerOf = new Map<string, string>();
@@ -787,9 +790,27 @@ export class DaemonPool implements SessionDaemon {
    * construction — the orchestrator depends on this pool, so it cannot be
    * passed in the options. Absent → `recoveryState` reports `'idle'`. */
   private recoveryProvider: RecoveryStateProvider | undefined;
-  /** Boot-daemon death idempotency flag — the default daemon has no Entry
-   * to carry the `dead` flag, so its double-trigger guard lives here. */
-  private defaultDead = false;
+  /**
+   * The daemon serving the default workspace (#163). It starts as the boot
+   * daemon the pool was handed, whose lifecycle belongs to whoever
+   * constructed the pool, so the pool never stops it. Once that daemon dies,
+   * the next call for the default workspace spawns a replacement through
+   * `opts.spawn`, the same way a pooled workspace respawns after a death, and
+   * that replacement the pool owns and stops.
+   *
+   * Never in `byWorkspace`: the default takes no cap slot, is never reaped
+   * or evicted, and is not listed by `workspaces()`. Every daemon that serves
+   * it gets its own record, so `dead` is the idempotency guard for THAT
+   * daemon's death and a replacement starts clean. A single pool-wide flag
+   * used to latch on the first death and swallow every later one.
+   */
+  private defaultEntry: Entry;
+  /** The boot daemon's own record, kept so its exit (`handleDaemonExit`)
+   * can only ever mark the boot daemon dead, never a replacement. */
+  private readonly bootEntry: Entry;
+  /** The in-flight respawn of the default workspace's daemon, shared by
+   * every caller that finds the current one dead. */
+  private defaultSpawning: Promise<Entry> | undefined;
 
   /** Wire the audit recorder in (add-mid-turn-recovery: `daemon_died`
    * rows). Called by cli.ts after the gateway app is constructed. */
@@ -818,6 +839,13 @@ export class DaemonPool implements SessionDaemon {
     this.idleReapMs = opts.idleReapMs ?? DEFAULT_IDLE_REAP_MS;
     this.probeTimeoutMs = opts.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
     this.defaultWorkspaceCwd = this.normalizeCwd(opts.defaultWorkspaceCwd);
+    this.bootEntry = this.newEntry({
+      client: opts.defaultDaemon,
+      // Not the pool's to stop: see `defaultEntry`.
+      stop: async () => {},
+      endpoint: opts.defaultEndpoint,
+    });
+    this.defaultEntry = this.bootEntry;
     this.reapTimer = setInterval(() => {
       // The timer does not wait on the daemon's answers; the next tick, or a
       // create at the cap, picks up whatever this round settled.
@@ -847,21 +875,81 @@ export class DaemonPool implements SessionDaemon {
     entry.touches++;
   }
 
-  /** The live entry's client or the in-flight spawn for `key`, if either. */
-  private lookup(
-    key: string,
-  ): DaemonClient | Promise<DaemonClient> | undefined {
+  /** The pool's key for `cwd`: the default workspace's own key when `cwd` is
+   * omitted, empty, or names the default workspace. */
+  private keyFor(cwd?: string): string {
+    return this.isDefault(cwd)
+      ? this.defaultWorkspaceCwd
+      : this.normalizeCwd(cwd!);
+  }
+
+  private newEntry(s: {
+    client: DaemonClient;
+    stop: () => Promise<void>;
+    endpoint?: DaemonEndpoint;
+  }): Entry {
+    return {
+      client: s.client,
+      stop: s.stop,
+      sessions: new Set(),
+      lastUsed: this.now(),
+      endpoint: s.endpoint,
+      dead: false,
+      touches: 0,
+    };
+  }
+
+  /** The live entry or the in-flight spawn for `key`, if either. */
+  private lookup(key: string): Entry | Promise<Entry> | undefined {
     const existing = this.byWorkspace.get(key);
     if (existing) {
       this.touch(existing);
-      return existing.client;
+      return existing;
     }
     return this.spawning.get(key);
   }
 
-  /** Reachable daemon for `cwd` (spawn if new). Empty/undefined → default. */
+  /** Reachable daemon for `cwd` (spawn if new). Empty/undefined → the
+   * default workspace's daemon, respawned first if the one serving it died. */
   async getOrSpawn(cwd?: string): Promise<DaemonClient> {
-    if (this.isDefault(cwd)) return this.opts.defaultDaemon;
+    return (await this.resolveEntry(cwd)).client;
+  }
+
+  /** The default workspace's daemon, or the respawn that replaces it when
+   * the current one is dead (#163). Concurrent callers share one respawn. */
+  private liveDefaultEntry(): Entry | Promise<Entry> {
+    if (!this.defaultEntry.dead) return this.defaultEntry;
+    if (this.defaultSpawning) return this.defaultSpawning;
+    const key = this.defaultWorkspaceCwd;
+    const p = (async () => {
+      const s = await this.opts.spawn(key);
+      const entry = this.newEntry(s);
+      if (this.stopped) {
+        // Same reason as the pooled spawn below: nothing would stop it later.
+        await s.stop().catch(() => {});
+        return entry;
+      }
+      // Identity-guarded like a pooled entry: a late exit of this daemon
+      // after it, too, was replaced cannot kill its successor.
+      s.onExit = (info) => this.markDead(key, info, entry);
+      this.defaultEntry = entry;
+      return entry;
+    })();
+    this.defaultSpawning = p;
+    // Cleared as a reaction rather than in a `finally` inside the closure, so
+    // it can never run before the assignment above, and a failed respawn is
+    // retried by the next caller instead of poisoning the default.
+    const clear = () => {
+      if (this.defaultSpawning === p) this.defaultSpawning = undefined;
+    };
+    p.then(clear, clear);
+    return p;
+  }
+
+  /** `getOrSpawn`, answering with the entry itself so a caller can mark
+   * exactly the daemon it talked to dead (see `callOn`). */
+  private async resolveEntry(cwd?: string): Promise<Entry> {
+    if (this.isDefault(cwd)) return this.liveDefaultEntry();
     const key = this.normalizeCwd(cwd!);
     const known = this.lookup(key);
     if (known) return known;
@@ -898,23 +986,15 @@ export class DaemonPool implements SessionDaemon {
     const p = (async () => {
       try {
         const s = await this.opts.spawn(key);
+        const entry = this.newEntry(s);
         if (this.stopped) {
           // `stopAll()` ran while this spawn was in flight — the pool's
           // maps are already cleared and the gateway is shutting down.
           // Registering this entry now would leak a daemon (children are
           // spawned `detached`) that nothing will ever stop again.
           await s.stop().catch(() => {});
-          return s.client;
+          return entry;
         }
-        const entry: Entry = {
-          client: s.client,
-          stop: s.stop,
-          sessions: new Set(),
-          lastUsed: this.now(),
-          endpoint: s.endpoint,
-          dead: false,
-          touches: 0,
-        };
         // Identity-guarded exit wiring (see `markDead`'s `expectedEntry`):
         // the callback captures THIS entry so a stale exit of a superseded
         // entry (same key re-spawned after a death) can't kill the new one.
@@ -923,7 +1003,7 @@ export class DaemonPool implements SessionDaemon {
         // in this microtask.
         s.onExit = (info) => this.markDead(key, info, entry);
         this.byWorkspace.set(key, entry);
-        return s.client;
+        return entry;
       } finally {
         // Runs on both success AND rejection — a failed spawn must not
         // leave a stuck entry in `spawning` that poisons this cwd forever;
@@ -1105,12 +1185,23 @@ export class DaemonPool implements SessionDaemon {
 
   /**
    * Report the exit of the boot (default) daemon by workspace cwd. The pool
-   * never pools the default daemon, so its death arrives here rather than
+   * did not spawn the boot daemon, so its death arrives here rather than
    * through a pooled entry's `onExit`. Normalizes `workspaceCwd` so the
    * caller can pass the raw configured value.
+   *
+   * For the default workspace this marks the BOOT daemon dead and nothing
+   * else: when a transport error already reported that death and a
+   * replacement now serves the workspace, the boot child's own exit arriving
+   * afterwards must not kill the replacement (#163). A replacement reports
+   * its own exit through the `onExit` the pool wired at its spawn.
    */
   handleDaemonExit(workspaceCwd: string, info: DaemonExitInfo): void {
-    this.markDead(this.normalizeCwd(workspaceCwd), info);
+    const key = this.normalizeCwd(workspaceCwd);
+    this.markDead(
+      key,
+      info,
+      key === this.defaultWorkspaceCwd ? this.bootEntry : undefined,
+    );
   }
 
   /**
@@ -1131,9 +1222,17 @@ export class DaemonPool implements SessionDaemon {
    *   orchestrator; absent → the sessions are simply dropped, 404s as
    *   today — the audit row is still written).
    *
-   * `expectedEntry` (set by the pool's own exit wiring in `getOrSpawn`)
-   * guards against a STALE exit: if the same key was re-spawned after a
-   * death, the old entry's exit event must not kill the new entry.
+   * `expectedEntry` (set by the pool's own exit wiring at spawn, by
+   * `handleDaemonExit` for the boot daemon, and by `callOn` for the daemon a
+   * call actually reached) guards against a STALE trigger: if the same key
+   * was re-spawned after a death, the old daemon's exit event or a late
+   * transport error from a call made to it must not kill the new one.
+   *
+   * The default workspace's daemon is marked dead in place rather than
+   * removed (it never sits in `byWorkspace`); the next call for that
+   * workspace respawns it (see `liveDefaultEntry`). The idempotency guard is
+   * the per-daemon `dead` flag, so the replacement's own death is reported
+   * like the first one was (#163).
    */
   private markDead(
     key: string,
@@ -1141,26 +1240,17 @@ export class DaemonPool implements SessionDaemon {
     expectedEntry?: Entry,
   ): void {
     if (this.stopped) return; // shutdown: no audit, no hook
-    const entry = this.byWorkspace.get(key);
-    let exit: DaemonExitInfo & { atMs: number };
-    if (entry === undefined) {
-      // The default daemon is never pooled: its death arrives via
-      // `handleDaemonExit` (or a transport error on a default-routed call).
-      // A NON-default key with no entry is a late exit of an entry already
-      // reaped/evicted/stopped — no audit, no hook.
-      if (key !== this.defaultWorkspaceCwd) return;
-      if (this.defaultDead) return;
-      this.defaultDead = true;
-      exit = { code: info.code, signal: info.signal, atMs: this.now() };
-    } else {
-      if (entry.dead) return;
-      if (expectedEntry !== undefined && entry !== expectedEntry) return;
-      entry.dead = true;
-      exit = { code: info.code, signal: info.signal, atMs: this.now() };
-      entry.exit = exit;
-      this.byWorkspace.delete(key);
-    }
-    const affected = new Set<string>(entry ? entry.sessions : []);
+    const isDefaultKey = key === this.defaultWorkspaceCwd;
+    const entry = isDefaultKey ? this.defaultEntry : this.byWorkspace.get(key);
+    // A NON-default key with no entry is a late exit of an entry already
+    // reaped/evicted/stopped: no audit, no hook.
+    if (entry === undefined || entry.dead) return;
+    if (expectedEntry !== undefined && entry !== expectedEntry) return;
+    entry.dead = true;
+    const exit = { code: info.code, signal: info.signal, atMs: this.now() };
+    entry.exit = exit;
+    if (!isDefaultKey) this.byWorkspace.delete(key);
+    const affected = new Set<string>(entry.sessions);
     for (const [sid, k] of this.ownerOf) {
       if (k === key) affected.add(sid);
     }
@@ -1178,77 +1268,69 @@ export class DaemonPool implements SessionDaemon {
     this.opts.onDaemonDeath?.(key, [...affected], exit);
   }
 
-  /** Transport trigger for a session-keyed call that threw: if it was a
-   * transport-level death error, the owning daemon is dead (covers races
-   * where the exit handler has not fired yet). */
-  private noteTransportDeath(sessionId: string, err: unknown): void {
-    const key = this.ownerOf.get(sessionId);
-    if (key !== undefined) this.noteTransportDeathByKey(key, err);
-  }
-
-  /** Transport trigger for a workspace-keyed call (create/resume/default
-   * routes) — same check, key supplied directly. */
-  private noteTransportDeathByKey(key: string, err: unknown): void {
+  /** Transport trigger: if `err` is a transport-level death error, the
+   * daemon behind `entry` is dead (covers races where the exit handler has
+   * not fired yet). Transport errors carry no exit info; if the exit trigger
+   * fires later it is a no-op on this same death. Only `entry` itself can be
+   * marked: a replacement that took `key` while the call was out is left
+   * alone. */
+  private noteTransportDeath(key: string, entry: Entry, err: unknown): void {
     if (isTransportDeathError(err)) {
-      // Transport errors carry no exit info; if the exit trigger fires
-      // later it is a no-op on this same death.
-      this.markDead(key, { code: null, signal: null });
+      this.markDead(key, { code: null, signal: null }, entry);
     }
   }
 
-  /** Run a session-keyed pool call, marking the owning workspace dead on a
-   * transport-level error (then rethrow; routes keep their 502 mapping).
-   * The client resolves OUTSIDE the try so an `UnknownSessionError` (the
-   * 404 mapping) never touches the death trigger. */
+  /** Run `call` against `entry`'s daemon, marking that daemon dead on a
+   * transport-level error (then rethrow; routes keep their 502 mapping). */
+  private async callOn<T>(
+    key: string,
+    entry: Entry,
+    call: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await call(entry.client);
+    } catch (err) {
+      this.noteTransportDeath(key, entry, err);
+      throw err;
+    }
+  }
+
+  /** Run a session-keyed pool call against the session's owning daemon (see
+   * `callOn`). The owner resolves BEFORE the call so an
+   * `UnknownSessionError` (the 404 mapping) never touches the death
+   * trigger. */
   private async withSessionDeathTrigger<T>(
     sessionId: string,
     call: (client: DaemonClient) => Promise<T>,
   ): Promise<T> {
-    const client = this.daemonForSession(sessionId);
-    try {
-      return await call(client);
-    } catch (err) {
-      this.noteTransportDeath(sessionId, err);
-      throw err;
-    }
+    const { key, entry } = this.ownerEntry(sessionId);
+    return this.callOn(key, entry, call);
   }
 
-  /** Run a default-daemon call, marking the boot workspace dead on a
-   * transport-level error (then rethrow). */
-  private async withDefaultDeathTrigger<T>(call: () => Promise<T>): Promise<T> {
-    try {
-      return await call();
-    } catch (err) {
-      this.noteTransportDeathByKey(this.defaultWorkspaceCwd, err);
-      throw err;
-    }
+  /** Run a call against the default workspace's daemon, respawning it first
+   * if the one serving it died (#163). */
+  private withDefaultDeathTrigger<T>(
+    call: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> {
+    return this.withWorkspaceDeathTrigger(undefined, call);
   }
 
   /** Run a workspace-scoped pool call (rc-workspace-scoping, #28) against
-   * the target workspace's daemon — the default/boot daemon when
+   * the target workspace's daemon: the default workspace's daemon when
    * `workspaceCwd` is omitted/empty/normalizes to the default workspace,
    * otherwise the pooled daemon for that cwd (spawned on demand via
    * `getOrSpawn`, exactly like session creation — a controllable workspace
-   * does not need a live session). Marks that workspace dead on a
-   * transport-level error (then rethrow; routes keep their 502 mapping) —
-   * for the default target this is byte-for-byte the
-   * `withDefaultDeathTrigger` behavior. A `WorkspacePoolFullError` from
-   * `getOrSpawn` is not a transport death: it propagates untouched for the
-   * route's 503 mapping. */
+   * does not need a live session). Marks that daemon dead on a
+   * transport-level error (then rethrow; routes keep their 502 mapping). A
+   * `WorkspacePoolFullError` or a failed spawn from `getOrSpawn` is not a
+   * transport death: it propagates untouched for the route's mapping. */
   private async withWorkspaceDeathTrigger<T>(
     workspaceCwd: string | undefined,
     call: (client: DaemonClient) => Promise<T>,
   ): Promise<T> {
-    const key = this.isDefault(workspaceCwd)
-      ? this.defaultWorkspaceCwd
-      : this.normalizeCwd(workspaceCwd!);
-    try {
-      const client = await this.getOrSpawn(workspaceCwd);
-      return await call(client);
-    } catch (err) {
-      this.noteTransportDeathByKey(key, err);
-      throw err;
-    }
+    const key = this.keyFor(workspaceCwd);
+    const entry = await this.resolveEntry(workspaceCwd);
+    return this.callOn(key, entry, call);
   }
 
   // -- Session routing ------------------------------------------------
@@ -1259,18 +1341,23 @@ export class DaemonPool implements SessionDaemon {
     return this.recoveryProvider?.recoveryState(sessionId) ?? 'idle';
   }
 
-  /** Resolve the owning daemon for a session id. Bumps the entry's
+  /** Resolve the owning daemon for a session id. Bumps a pooled entry's
    * `lastUsed` (a live-referenced session never looks idle). Throws
    * `UnknownSessionError` for an unrecorded id, or one whose owning
-   * daemon has since been reaped. */
-  private daemonForSession(id: string): DaemonClient {
+   * daemon has since been reaped or has died. */
+  private ownerEntry(id: string): { key: string; entry: Entry } {
     const key = this.ownerOf.get(id);
     if (key === undefined) throw new UnknownSessionError(id);
-    if (key === this.defaultWorkspaceCwd) return this.opts.defaultDaemon;
+    if (key === this.defaultWorkspaceCwd) {
+      // A death scrubs the dead daemon's ids, so this is normally live; the
+      // check covers a registration that raced the death.
+      if (this.defaultEntry.dead) throw new UnknownSessionError(id);
+      return { key, entry: this.defaultEntry };
+    }
     const e = this.byWorkspace.get(key);
     if (!e) throw new UnknownSessionError(id); // daemon was reaped
     this.touch(e);
-    return e.client;
+    return { key, entry: e };
   }
 
   /**
@@ -1279,21 +1366,17 @@ export class DaemonPool implements SessionDaemon {
    * undefined when the owning daemon was registered without endpoint material
    * (a stub spawner in tests, or a boot daemon the gateway cannot authenticate
    * to) — callers refuse the request rather than hand a terminal a URL it
-   * cannot use. Throws `UnknownSessionError` like `daemonForSession`.
+   * cannot use. Throws `UnknownSessionError` like `ownerEntry`. A session on
+   * a respawned default daemon gets that daemon's endpoint, not the dead boot
+   * daemon's.
    */
   daemonEndpointForSession(sessionId: string): DaemonEndpoint | undefined {
-    const key = this.ownerOf.get(sessionId);
-    if (key === undefined) throw new UnknownSessionError(sessionId);
-    if (key === this.defaultWorkspaceCwd) {
-      const ep = this.opts.defaultEndpoint;
-      return ep ? { ...ep, workspaceCwd: key } : undefined;
-    }
-    const e = this.byWorkspace.get(key);
-    if (!e) throw new UnknownSessionError(sessionId); // daemon was reaped
-    this.touch(e);
+    const { key, entry } = this.ownerEntry(sessionId);
     // The pool's key is the canonicalized cwd, so it wins over whatever the
     // spawner recorded — a terminal must `cd` to the same path the daemon binds.
-    return e.endpoint ? { ...e.endpoint, workspaceCwd: key } : undefined;
+    return entry.endpoint
+      ? { ...entry.endpoint, workspaceCwd: key }
+      : undefined;
   }
 
   private removeSession(id: string): void {
@@ -1346,16 +1429,15 @@ export class DaemonPool implements SessionDaemon {
       this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
     }
     try {
-      const client = await this.getOrSpawn(req.workspaceCwd);
-      const session = await client.createOrAttachSession(req, clientId);
+      const entry = await this.resolveEntry(req.workspaceCwd);
+      const session = await this.callOn(key, entry, (client) =>
+        client.createOrAttachSession(req, clientId),
+      );
       this.trackSession(key, session.sessionId);
       // The session is live again (add-mid-turn-recovery): clear any stale
       // recovery outcome so the events route attaches normally.
       this.recoveryProvider?.sessionLive?.(session.sessionId);
       return session;
-    } catch (err) {
-      this.noteTransportDeathByKey(key, err);
-      throw err;
     } finally {
       if (tracksPending) {
         const n = (this.pendingCreates.get(key) ?? 1) - 1;
@@ -1401,20 +1483,17 @@ export class DaemonPool implements SessionDaemon {
       this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
     }
     try {
-      const client = await this.getOrSpawn(req.workspaceCwd);
+      const entry = await this.resolveEntry(req.workspaceCwd);
       // `load`, not `resume`: see the doc above -- the history travels in the
       // load response (in-band frames + lastEventId), not the bus ring.
-      const restored = await client.loadSession(sessionId, {
-        workspaceCwd: key,
-      });
+      const restored = await this.callOn(key, entry, (client) =>
+        client.loadSession(sessionId, { workspaceCwd: key }),
+      );
       this.trackSession(key, sessionId);
       // The session is live again (add-mid-turn-recovery): clear any stale
       // recovery outcome so the events route attaches normally.
       this.recoveryProvider?.sessionLive?.(sessionId);
       return restored;
-    } catch (err) {
-      this.noteTransportDeathByKey(key, err);
-      throw err;
     } finally {
       if (tracksPending) {
         const n = (this.pendingCreates.get(key) ?? 1) - 1;
@@ -1467,7 +1546,8 @@ export class DaemonPool implements SessionDaemon {
     sessionId: string,
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
-    const client = this.daemonForSession(sessionId);
+    const { key, entry } = this.ownerEntry(sessionId);
+    const client = entry.client;
     let evicted = false;
     try {
       for await (const event of client.subscribeEvents(sessionId, opts)) {
@@ -1484,7 +1564,7 @@ export class DaemonPool implements SessionDaemon {
         isTransportDeathError(err) &&
         (await this.probeConfirmsDeath(client))
       ) {
-        this.noteTransportDeath(sessionId, err);
+        this.noteTransportDeath(key, entry, err);
       }
       throw err;
     }
@@ -1594,7 +1674,7 @@ export class DaemonPool implements SessionDaemon {
     );
     // The transfer moved the checkout to a session with a new id on the SAME
     // daemon, so the replacement inherits the original's workspace key. Without
-    // this the replacement is unaddressable through the pool: `daemonForSession`
+    // this the replacement is unaddressable through the pool: `ownerEntry`
     // throws `UnknownSessionError` for an id it never recorded, and the release
     // that keeps the replacement from leaking would fail before reaching the
     // daemon. Recorded after the call, because a failed transfer produced no
@@ -1992,19 +2072,20 @@ export class DaemonPool implements SessionDaemon {
 
   // -- Daemon-global (default daemon) ----------------------------------
 
+  // These answer from whichever daemon serves the default workspace now: the
+  // boot daemon, or its replacement once it has died (#163).
+
   health(): Promise<{ status: string }> {
-    return this.withDefaultDeathTrigger(() => this.opts.defaultDaemon.health());
+    return this.withDefaultDeathTrigger((client) => client.health());
   }
 
   capabilities(): Promise<DaemonCapabilities> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.capabilities(),
-    );
+    return this.withDefaultDeathTrigger((client) => client.capabilities());
   }
 
   listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]> {
-    return this.withDefaultDeathTrigger(() =>
-      this.opts.defaultDaemon.listWorkspaceSessions(workspaceCwd),
+    return this.withDefaultDeathTrigger((client) =>
+      client.listWorkspaceSessions(workspaceCwd),
     );
   }
 
@@ -2013,38 +2094,30 @@ export class DaemonPool implements SessionDaemon {
     // target has to be resolved here rather than passed through: the route
     // cannot name a workspace it does not know the canonical path of, and
     // asking `capabilities()` for it would add a round trip to every poll.
-    const key = this.isDefault(workspaceCwd)
-      ? this.defaultWorkspaceCwd
-      : this.normalizeCwd(workspaceCwd!);
+    const key = this.keyFor(workspaceCwd);
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.getWorkspaceSessionLiveState(key),
     );
   }
 
   async peekSessionLiveState(workspaceCwd?: string): Promise<unknown> {
-    // The default daemon is always running, so it answers like the spawning
-    // read does.
-    if (this.isDefault(workspaceCwd)) {
-      return this.withDefaultDeathTrigger(() =>
-        this.opts.defaultDaemon.getWorkspaceSessionLiveState(
-          this.defaultWorkspaceCwd,
-        ),
-      );
-    }
-    const key = this.normalizeCwd(workspaceCwd!);
-    // A spawn still in flight is not an entry yet: answering would mean
-    // waiting on it, and this read must cost a folder with no daemon nothing.
-    const entry = this.byWorkspace.get(key);
+    const key = this.keyFor(workspaceCwd);
+    // The default workspace always has a daemon unless the one serving it
+    // just died; in that gap this read answers like any folder without one,
+    // because it never spawns (the next spawning call, or the recovery saga,
+    // brings the default back). A spawn still in flight is not an entry yet:
+    // answering would mean waiting on it, and this read must cost a folder
+    // with no daemon nothing.
+    const entry = this.isDefault(workspaceCwd)
+      ? this.defaultEntry
+      : this.byWorkspace.get(key);
     if (!entry || entry.dead) return undefined;
     // No `touch`: the list asks this of every recent folder on every refresh,
     // and bumping `lastUsed` would keep each folder's idle daemon from ever
     // being reaped, which is the cost this read exists to avoid.
-    try {
-      return await entry.client.getWorkspaceSessionLiveState(key);
-    } catch (err) {
-      this.noteTransportDeathByKey(key, err);
-      throw err;
-    }
+    return this.callOn(key, entry, (client) =>
+      client.getWorkspaceSessionLiveState(key),
+    );
   }
 
   // -- Workspace control (rc-workspace-permissions, scoped per #28) -----
@@ -2320,9 +2393,11 @@ export class DaemonPool implements SessionDaemon {
   /**
    * Stop the pool: cancel the background reaper and stop EVERY pooled
    * workspace daemon so none is orphaned when the gateway process exits.
-   * The default/boot daemon is NOT touched here — its lifecycle belongs to
+   * The boot daemon is NOT touched here: its lifecycle belongs to
    * whoever constructed the pool (cli.ts stops it separately via its own
-   * `handle.stop()`, alongside this call). Tolerates an individual entry's
+   * `handle.stop()`, alongside this call). A replacement the pool spawned
+   * for the default workspace after the boot daemon died is the pool's own
+   * and is stopped like a pooled one (#163). Tolerates an individual entry's
    * `stop()` rejecting (`Promise.allSettled`) — one stuck daemon must not
    * block the others from being asked to stop. Intended for shutdown; not
    * safe to call mid-lifetime (any in-flight session routing is dropped).
@@ -2337,6 +2412,7 @@ export class DaemonPool implements SessionDaemon {
     this.stopped = true;
     clearInterval(this.reapTimer);
     const entries = [...this.byWorkspace.values()];
+    if (this.defaultEntry !== this.bootEntry) entries.push(this.defaultEntry);
     await Promise.allSettled(entries.map((e) => e.stop()));
     // Drain the spawns that were in flight when shutdown began. Each one stops
     // the daemon it just created once it sees `stopped`, but that cleanup only
@@ -2345,6 +2421,7 @@ export class DaemonPool implements SessionDaemon {
     // race and the detached daemon keeps its port and its token. Bounded by the
     // probe knob: a wedged spawn must not hang shutdown.
     const inFlight = [...this.spawning.values()];
+    if (this.defaultSpawning) inFlight.push(this.defaultSpawning);
     if (inFlight.length > 0) {
       await Promise.allSettled(
         inFlight.map((p) => settleWithin(p, this.probeTimeoutMs, undefined)),
