@@ -21827,7 +21827,72 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
-  // @@NEXT-P-SCENARIO@@
+  // #173. The stored-attachment preview minted a same-origin blob with the
+  // mime type the daemon reported, so an uploaded .html or .svg opened in a new
+  // tab ran on the gateway's origin with the page's storage. saveArtifact
+  // already forces application/octet-stream for this reason.
+  PAGE_SCENARIOS.push({
+    name: 'P259 a stored attachment opens as a blob that cannot run: only a raster image keeps its type, html and svg come out as octet-stream',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const kinds: Record<string, string> = {
+        'a.png': 'image/png',
+        'b.html': 'text/html',
+        'c.svg': 'image/svg+xml',
+        'd.txt': 'text/plain',
+      };
+      await page.route(/\/session\/[^/]+\/attachments\/[^/?]+$/, (route) => {
+        const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop() ?? '');
+        return json(route, { data: Buffer.from('<script>1</script>').toString('base64'), mimeType: kinds[name] });
+      });
+      await go(page, A);
+      const typeOf = async (name: string): Promise<string> => {
+        await page.evaluate(`void openStored({ attachmentId: ${JSON.stringify(name)} })`);
+        await page.waitForFunction(`storedPreviewUrl && storedPreviewName === ${JSON.stringify(name)}`, null, { timeout: 10_000 });
+        return (await page.evaluate(`fetch(storedPreviewUrl).then((r) => r.blob()).then((b) => b.type)`)) as string;
+      };
+      const got: Record<string, string> = {};
+      for (const name of Object.keys(kinds)) got[name] = await typeOf(name);
+      expect(got['a.png'] === 'image/png', `a png came out as ${got['a.png']}`);
+      for (const name of ['b.html', 'c.svg', 'd.txt']) {
+        expect(got[name] === 'application/octet-stream', `${name} (${kinds[name]}) came out as ${got[name]}, a type a tab will run or render on the gateway's origin`);
+      }
+      return `blob types ${JSON.stringify(got)}`;
+    },
+  });
+
+  // #173. renderFooter rebuilt the whole sheet on every usage frame, so the mode
+  // buttons and the keep-this-mode box under the reader's finger were replaced
+  // mid-tap and a focused one lost its focus.
+  PAGE_SCENARIOS.push({
+    name: 'P260 a usage frame redraws the context line but leaves the mode buttons and the keep-this-mode box in place, with their focus',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => json(route, context('x')),
+      );
+      await go(page, A);
+      await page.waitForFunction(`document.getElementById('footer-mode-persist')`, null, { timeout: 10_000 });
+      // The sheet is where the controls can be focused, so it is open.
+      await openSheet(page);
+      await page.evaluate(`window.__keep = document.getElementById('footer-mode-persist'); window.__seg = document.querySelector('#session-footer .seg button'); window.__keep.focus();`);
+      // What a usage frame does: the fill changes, then the footer is redrawn.
+      await page.evaluate(`ctxUsage = { total: 1234, window: 100000 }; renderFooter()`);
+      const r = (await page.evaluate(`({
+        keepSame: document.getElementById('footer-mode-persist') === window.__keep,
+        segSame: document.querySelector('#session-footer .seg button') === window.__seg,
+        focus: document.activeElement === window.__keep,
+        fill: document.getElementById('session-footer').textContent.includes('1,234') || /1\\.2k|1234|1%/.test(document.getElementById('session-footer').textContent),
+      })`)) as { keepSame: boolean; segSame: boolean; focus: boolean; fill: boolean };
+      expect(r.keepSame && r.segSame, `the mode controls were replaced by a redraw (${JSON.stringify(r)})`);
+      expect(r.focus, 'the focused keep-this-mode box lost its focus to a redraw');
+      expect(r.fill, 'the context line did not take the new fill');
+      return 'the mode buttons and the box are the same nodes after a redraw, focus kept, fill updated';
+    },
+  });
 }
 
 // #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD

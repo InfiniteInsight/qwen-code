@@ -6672,6 +6672,7 @@
       // buttons drive the same select and the same changeApprovalMode the
       // drawer's select did; the select stays in the box, unshown, as that
       // handler's input. Export moved to the ⋯ menu.
+      let footerModeCache = null; // { sig, col, keep }, see renderFooter
       function renderFooter() {
         const f = $('session-footer');
         renderStatusLine();
@@ -6688,7 +6689,13 @@
         const hasModels =
           Array.isArray(ctxInfo.availableModels) &&
           ctxInfo.availableModels.length > 1;
+        // #173: what had focus in the sheet, to give it back if the redraw
+        // keeps that very node.
+        const hadFocus = f.contains(document.activeElement)
+          ? document.activeElement
+          : null;
         f.innerHTML = '';
+        if (!hasModes) footerModeCache = null;
         let keep = null; // the keep-this-mode box, drawn after the folder
         const row = (label, ...kids) => {
           const r = document.createElement('div');
@@ -6736,64 +6743,82 @@
           const shown = known(ctxInfo.currentModeId)
             ? ctxInfo.currentModeId
             : chosen;
-          const sel = document.createElement('select');
-          sel.id = 'footer-mode';
-          sel.hidden = true;
-          sel.setAttribute('aria-hidden', 'true');
-          sel.tabIndex = -1;
-          const seg = document.createElement('div');
-          seg.className = 'seg';
-          seg.setAttribute('role', 'group');
-          seg.setAttribute('aria-label', 'Approval mode');
-          for (const m of ctxInfo.availableModes) {
-            const o = document.createElement('option');
-            o.value = m.id;
-            o.textContent = m.name;
-            if (m.id === shown) o.selected = true;
-            sel.appendChild(o);
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.dataset.mode = m.id;
-            b.textContent = m.name;
-            b.setAttribute('aria-pressed', String(m.id === shown));
-            b.addEventListener('click', () => {
-              if (m.id === sel.value) return;
-              sel.value = m.id;
-              void changeApprovalMode(sel, cb);
-            });
-            seg.appendChild(b);
+          // #173: the mode buttons and the keep-this-mode box are built once
+          // per state of the mode (the modes offered, the one shown, the note).
+          // A usage frame redraws this sheet to move the fill, and replacing
+          // the controls under a finger dropped the tap and the focus.
+          const modeSig = JSON.stringify([
+            ctxInfo.availableModes.map((m) => [m.id, m.name]),
+            shown,
+            chosen && known(ctxInfo.currentModeId) && chosen !== shown
+              ? known(chosen).name
+              : '',
+            watchedSessionId,
+          ]);
+          if (footerModeCache && footerModeCache.sig === modeSig) {
+            f.append(footerModeCache.col);
+            keep = footerModeCache.keep;
+          } else {
+            const sel = document.createElement('select');
+            sel.id = 'footer-mode';
+            sel.hidden = true;
+            sel.setAttribute('aria-hidden', 'true');
+            sel.tabIndex = -1;
+            const seg = document.createElement('div');
+            seg.className = 'seg';
+            seg.setAttribute('role', 'group');
+            seg.setAttribute('aria-label', 'Approval mode');
+            for (const m of ctxInfo.availableModes) {
+              const o = document.createElement('option');
+              o.value = m.id;
+              o.textContent = m.name;
+              if (m.id === shown) o.selected = true;
+              sel.appendChild(o);
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.dataset.mode = m.id;
+              b.textContent = m.name;
+              b.setAttribute('aria-pressed', String(m.id === shown));
+              b.addEventListener('click', () => {
+                if (m.id === sel.value) return;
+                sel.value = m.id;
+                void changeApprovalMode(sel, cb);
+              });
+              seg.appendChild(b);
+            }
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.id = 'footer-mode-persist';
+            cb.title = 'persist this mode for future sessions in this workspace';
+            // #182: the box is rebuilt with the sheet on every render, so its
+            // state has to come from somewhere other than the old node.
+            cb.checked = uiRead(MODE_PERSIST_NAME, (v) => v === true) === true;
+            cb.addEventListener('change', () =>
+              uiWrite(MODE_PERSIST_NAME, cb.checked ? true : undefined),
+            );
+            const note = document.createElement('span');
+            note.id = 'footer-mode-note';
+            if (chosen && known(ctxInfo.currentModeId) && chosen !== shown) {
+              note.textContent = 'last set here: ' + known(chosen).name;
+            }
+            // Kept as the select's own change path too, so anything that sets
+            // the select the old way still reaches the same handler.
+            sel.addEventListener('change', () => changeApprovalMode(sel, cb));
+            const col = document.createElement('div');
+            col.className = 'sh-col';
+            const l = document.createElement('span');
+            l.className = 'sh-lbl';
+            l.textContent = 'Mode';
+            col.append(l, seg, note, sel);
+            f.append(col);
+            keep = document.createElement('label');
+            keep.className = 'keep';
+            keep.append(
+              cb,
+              document.createTextNode(' Keep this mode for new conversations here'),
+            );
+            footerModeCache = { sig: modeSig, col, keep };
           }
-          const cb = document.createElement('input');
-          cb.type = 'checkbox';
-          cb.id = 'footer-mode-persist';
-          cb.title = 'persist this mode for future sessions in this workspace';
-          // #182: the box is rebuilt with the sheet on every render, so its
-          // state has to come from somewhere other than the old node.
-          cb.checked = uiRead(MODE_PERSIST_NAME, (v) => v === true) === true;
-          cb.addEventListener('change', () =>
-            uiWrite(MODE_PERSIST_NAME, cb.checked ? true : undefined),
-          );
-          const note = document.createElement('span');
-          note.id = 'footer-mode-note';
-          if (chosen && known(ctxInfo.currentModeId) && chosen !== shown) {
-            note.textContent = 'last set here: ' + known(chosen).name;
-          }
-          // Kept as the select's own change path too, so anything that sets
-          // the select the old way still reaches the same handler.
-          sel.addEventListener('change', () => changeApprovalMode(sel, cb));
-          const col = document.createElement('div');
-          col.className = 'sh-col';
-          const l = document.createElement('span');
-          l.className = 'sh-lbl';
-          l.textContent = 'Mode';
-          col.append(l, seg, note, sel);
-          f.append(col);
-          keep = document.createElement('label');
-          keep.className = 'keep';
-          keep.append(
-            cb,
-            document.createTextNode(' Keep this mode for new conversations here'),
-          );
         } else if (ctxInfo.modeName) {
           // The mode name renders as text only when there is no control (a
           // single available mode).
@@ -6848,6 +6873,9 @@
         f.append(hostActsSheet);
         if (keep) f.append(keep);
         f.style.display = '';
+        if (hadFocus && hadFocus.isConnected && document.activeElement !== hadFocus) {
+          hadFocus.focus({ preventScroll: true });
+        }
       }
 
       // #184. The status line: a dot and a word for what the conversation is
@@ -12486,10 +12514,17 @@
           typeof body.mimeType === 'string' && body.mimeType.length > 0
             ? body.mimeType
             : 'application/octet-stream';
-        const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        // #173: the blob lives on the gateway's origin, so a type a tab will
+        // run (html, svg, xml) would run an uploaded file with this page's
+        // storage. Only a raster image keeps its type; everything else is
+        // served as bytes, as saveArtifact does.
+        const blobType = /^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(mime)
+          ? mime.toLowerCase()
+          : 'application/octet-stream';
+        const url = URL.createObjectURL(new Blob([bytes], { type: blobType }));
         if (storedPreviewUrl) URL.revokeObjectURL(storedPreviewUrl);
         storedPreviewUrl = url;
-        storedPreviewMime = mime;
+        storedPreviewMime = blobType;
         storedPreviewName = entry.attachmentId;
         storedPreviewNote = '';
         renderStoredPreview();
