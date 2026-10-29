@@ -183,6 +183,8 @@ describe('GET /rc/capabilities', () => {
       expect(rc.liveStateNoSpawn).toBe(true);
       // #194: one host tab per session.
       expect(rc.hostTerminalAlreadyMirrored).toBe(true);
+      // #130: the resumable attachment-uploads routes are mounted.
+      expect(rc.resumableAttachmentUploads).toBe(true);
     } finally {
       await close();
     }

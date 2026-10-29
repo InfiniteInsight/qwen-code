@@ -254,6 +254,10 @@ export function createCapabilityRoute(deps: {
                 : await deps.maxAttachmentBytes(),
           }
         : {}),
+      // #130: the attachment-uploads routes (begin, chunks, status, complete,
+      // cancel) are mounted, so a phone can resume a dropped upload. An old
+      // gateway omits this and the page uses the single POST.
+      resumableAttachmentUploads: true,
       // #190: the host's name and $HOME, for the list's folder line (`on
       // lovelace`, `~/projects`). Host facts, so owner and write only, as the
       // paths below (#165).
