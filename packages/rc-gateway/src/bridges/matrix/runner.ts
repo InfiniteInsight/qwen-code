@@ -5,6 +5,7 @@
  */
 
 import type { BridgeClient, BridgeEvent } from '../client.js';
+import { BanCache } from '../banCache.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 import type { CursorStore } from '../cursorStore.js';
@@ -147,7 +148,8 @@ const MATRIX_BRIDGE_ID = 'matrix';
 export class MatrixBridge {
   private readonly cfg: MatrixBridgeConfig;
   private readonly commandPrefix: string;
-  private readonly bans = new Set<string>();
+  /** Expiring, bounded mirror of gateway bans (#168). */
+  private readonly bans = new BanCache();
   private readonly encryptedRooms = new Set<string>();
   private readonly subscribed = new Set<string>();
   /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */

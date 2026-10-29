@@ -5,6 +5,7 @@
  */
 
 import type { BridgeClient, BridgeEvent } from '../client.js';
+import { BanCache } from '../banCache.js';
 import type { TelegramBotApi } from './botApi.js';
 import type { TelegramChatStore } from './chatStore.js';
 import {
@@ -72,7 +73,8 @@ const TELEGRAM_BRIDGE_ID = 'telegram';
 
 export class TelegramBridge {
   private readonly cfg: TelegramBridgeConfig;
-  private readonly bans = new Set<string>();
+  /** Expiring, bounded mirror of gateway bans (#168). */
+  private readonly bans = new BanCache();
   private readonly subscribed = new Set<string>();
   /**
    * sessionId → highest SSE frame id seen (in-memory mirror of the durable

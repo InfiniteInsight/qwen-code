@@ -20,6 +20,13 @@ import {
 } from './dispatch.js';
 import type { WriteResult } from '../client.js';
 
+/** The gateway's answer to a write by a banned sub-actor. */
+const BANNED: WriteResult = {
+  ok: false,
+  status: 403,
+  body: { error: 'Sub-actor is banned', code: 'sub_actor_banned' },
+};
+
 let dir: string;
 let rooms: MatrixRoomStore;
 beforeEach(async () => {
@@ -136,7 +143,7 @@ describe('matrix dispatch — message → prompt', () => {
     await handleMessage(msg({ body: 'go' }), f.deps);
     expect(turns).toEqual(['sess_xyz']);
 
-    f.setPromptResult({ ok: false, status: 403 });
+    f.setPromptResult(BANNED);
     await handleMessage(
       msg({ body: 'x', sender: '@alice:home.example.com' }),
       f.deps,
@@ -164,7 +171,7 @@ describe('matrix dispatch — message → prompt', () => {
     expect(banned.prompts).toHaveLength(0);
 
     const f = deps();
-    f.setPromptResult({ ok: false, status: 403 });
+    f.setPromptResult(BANNED);
     await handleMessage(msg(), f.deps);
     expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(true);
   });
@@ -175,6 +182,19 @@ describe('matrix dispatch — message → prompt', () => {
     f.setPromptResult({ ok: false, status: 429, retryAfterSec: 9 });
     await handleMessage(msg(), f.deps);
     expect(f.sent[0].body).toContain('9 seconds');
+  });
+
+  it('a 403 that is not a ban caches nothing and is reported (#168)', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    f.setPromptResult({
+      ok: false,
+      status: 403,
+      body: { code: 'scope_required' },
+    });
+    await handleMessage(msg(), f.deps);
+    expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(false);
+    expect(f.sent[0].body).toContain('403 scope_required');
   });
 
   it('reports a prompt answered 502, 503 or 504 to the room (#168)', async () => {
@@ -447,7 +467,7 @@ describe('matrix dispatch — reaction → vote', () => {
       ],
     ]);
     const f = deps({ tracked });
-    f.setVoteResult({ ok: false, status: 403 });
+    f.setVoteResult(BANNED);
     await handleReaction(react(), f.deps);
     expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(true);
   });

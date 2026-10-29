@@ -9,6 +9,7 @@ import type { MatrixRestResult } from './restApi.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { subActorOf, voteForReaction, outcomeFor } from './render.js';
 import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
  * Pure inbound dispatch for the Matrix bridge (`add-matrix-bridge`): given a
@@ -89,8 +90,8 @@ export interface MatrixDispatchDeps {
   rooms: MatrixRoomStore;
   /** This bridge's stable id (for the invite-redeem route path). */
   bridgeId: string;
-  /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
-  bans: Set<string>;
+  /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
+  bans: BanCacheLike;
   /** Rooms detected as E2EE → attach refused, messages can't be read. */
   encryptedRooms: Set<string>;
   /** eventId → tracked permission_request (for reaction → vote resolution). */
@@ -186,7 +187,7 @@ export async function handleMessage(
   if (deps.bans.has(subActor)) return;
 
   const r = await deps.bridge.sendPrompt(sessionId, body, subActor);
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     return;
   }
@@ -344,7 +345,7 @@ export async function handleReaction(
     outcomeFor(vote),
     subActor,
   );
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     return;
   }

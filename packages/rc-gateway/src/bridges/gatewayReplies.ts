@@ -5,6 +5,7 @@
  */
 
 import type { WriteResult } from './client.js';
+import { isSubActorBan } from './banCache.js';
 
 /**
  * What a chat user is told when the gateway does not take their prompt or
@@ -32,11 +33,12 @@ function statusText(r: WriteResult): string {
 /**
  * The chat notice for a prompt the gateway did not take, or undefined when the
  * chat should stay quiet: on success (the reply streams back over SSE), on a
- * 403 (a ban is dropped silently, per the bridge specs) and on a 429 (each
- * dispatcher posts its own slow-down notice with the retry window).
+ * ban (dropped silently, per the bridge specs) and on a 429 (each dispatcher
+ * posts its own slow-down notice with the retry window). A 403 that is not a
+ * ban (`scope_required`, `session_locked`) is reported like any refusal.
  */
 export function promptFailureNotice(r: WriteResult): string | undefined {
-  if (r.ok || r.status === 403 || r.status === 429) return undefined;
+  if (r.ok || isSubActorBan(r) || r.status === 429) return undefined;
   const tag = `(${statusText(r)})`;
   switch (codeOf(r)) {
     case 'queue_timeout':
@@ -54,10 +56,10 @@ export function promptFailureNotice(r: WriteResult): string | undefined {
 
 /**
  * The reply for a vote the gateway did not take, or undefined when it was
- * counted. A 403 is left to the caller (it caches the ban and says "blocked").
+ * counted. A ban is left to the caller (it caches it and says "blocked").
  */
 export function voteFailureNotice(r: WriteResult): string | undefined {
-  if (r.ok || r.status === 403) return undefined;
+  if (r.ok || isSubActorBan(r)) return undefined;
   if (r.status === 404 || r.status === 409)
     return 'Vote failed: this request is no longer pending.';
   if (r.status === 429)

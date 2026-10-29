@@ -10,6 +10,7 @@ import type { TelegramUpdate } from './botApi.js';
 import type { TelegramChatStore } from './chatStore.js';
 import { subActorOf, parseCallbackData, outcomeFor } from './render.js';
 import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /** The bridge-client surface the dispatcher needs (subset → easy to mock). */
 export interface PromptVoter {
@@ -59,8 +60,8 @@ export interface DispatchDeps {
   chats: TelegramChatStore;
   /** This bridge's stable id (for the invite-redeem route path). */
   bridgeId: string;
-  /** Local ban cache (sub-actor ids) — mirrors gateway 403s to avoid re-hitting. */
-  bans: Set<string>;
+  /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
+  bans: BanCacheLike;
   /**
    * Map of requestId → sent messages (for editing on permission_resolved).
    * When provided, `handleCallback` records the sent message id from the
@@ -151,7 +152,7 @@ async function handleMessage(
   if (deps.bans.has(subActor)) return; // locally banned → silent drop
 
   const r = await deps.bridge.sendPrompt(sessionId, text, subActor);
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor); // gateway banned this sub-actor → cache + drop
     return;
   }
@@ -203,7 +204,7 @@ async function handleCallback(
     outcomeFor(parsed.action),
     subActor,
   );
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     await deps.tg.answerCallbackQuery(cbq.id, 'You are blocked.');
     return;

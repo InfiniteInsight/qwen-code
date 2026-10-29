@@ -10,7 +10,13 @@ import { promptFailureNotice, voteFailureNotice } from './gatewayReplies.js';
 describe('promptFailureNotice (#168)', () => {
   it('stays quiet on success, a ban and a 429 (handled by the dispatcher)', () => {
     expect(promptFailureNotice({ ok: true, status: 200 })).toBeUndefined();
-    expect(promptFailureNotice({ ok: false, status: 403 })).toBeUndefined();
+    expect(
+      promptFailureNotice({
+        ok: false,
+        status: 403,
+        body: { code: 'sub_actor_banned' },
+      }),
+    ).toBeUndefined();
     expect(promptFailureNotice({ ok: false, status: 429 })).toBeUndefined();
   });
 
@@ -31,10 +37,28 @@ describe('promptFailureNotice (#168)', () => {
   });
 });
 
+describe('a 403 that is not a ban (#168)', () => {
+  it('is reported like any other refusal, for prompts and votes', () => {
+    const scope = {
+      ok: false,
+      status: 403,
+      body: { code: 'scope_required' },
+    } as const;
+    expect(promptFailureNotice(scope)).toContain('403 scope_required');
+    expect(voteFailureNotice(scope)).toContain('403 scope_required');
+  });
+});
+
 describe('voteFailureNotice (#168)', () => {
   it('is undefined for a counted vote and for a 403 (the caller says blocked)', () => {
     expect(voteFailureNotice({ ok: true, status: 200 })).toBeUndefined();
-    expect(voteFailureNotice({ ok: false, status: 403 })).toBeUndefined();
+    expect(
+      voteFailureNotice({
+        ok: false,
+        status: 403,
+        body: { code: 'sub_actor_banned' },
+      }),
+    ).toBeUndefined();
   });
 
   it('explains 404/409, 429 and anything else', () => {

@@ -9,6 +9,7 @@ import type { DiscordRestResult } from './restApi.js';
 import type { DiscordChannelStore } from './channelStore.js';
 import { subActorOf, parseCustomId, outcomeFor } from './render.js';
 import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
  * Pure inbound dispatch for the Discord bridge (`add-discord-bridge`): given a
@@ -70,8 +71,8 @@ export interface DiscordDispatchDeps {
   channels: DiscordChannelStore;
   /** This bridge's stable id (for the invite-redeem route path). */
   bridgeId: string;
-  /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
-  bans: Set<string>;
+  /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
+  bans: BanCacheLike;
   /**
    * Called when a NEW inbound prompt is accepted for a session — a turn boundary
    * (spec: "the next inbound user prompt"). The runner uses it to end the prior
@@ -131,7 +132,7 @@ export async function handleMessage(
   if (deps.bans.has(subActor)) return; // locally banned → silent drop
 
   const r = await deps.bridge.sendPrompt(sessionId, content, subActor);
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor); // gateway banned this sub-actor → cache + drop
     return;
   }
@@ -242,7 +243,7 @@ export async function handleComponent(
     outcomeFor(parsed.action),
     subActor,
   );
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     await replyOrFallback(deps, comp, 'You are blocked.');
     return;
