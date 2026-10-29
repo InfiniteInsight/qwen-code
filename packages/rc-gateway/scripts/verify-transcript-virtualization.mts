@@ -22695,6 +22695,41 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  PAGE_SCENARIOS.push({
+    name: 'P305 every chat-screen control has a name a touch reader can read, not a title: symbol-only buttons carry an aria-label, and the fork and share selects are dark',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const r = (await page.evaluate(`(() => {
+        const unnamed = [];
+        for (const b of document.querySelectorAll('#h1-bar button, #h1-statusline button, #composer button, #h1-tools button, #tx-top button, #h1-menu button')) {
+          const label = (b.getAttribute('aria-label') || '').trim();
+          const text = (b.textContent || '').trim();
+          const words = /[A-Za-z]{3,}/.test(text);
+          if (!label && !words) unnamed.push(b.id || b.className || b.tagName);
+        }
+        return { unnamed };
+      })()`)) as { unnamed: string[] };
+      expect(r.unnamed.length === 0, `symbol-only controls without an aria-label: ${JSON.stringify(r.unnamed)}`);
+      await openMore(page);
+      const dark: string[] = [];
+      for (const [panel, sel] of [
+        ['fork', '#fork-mode'],
+        ['share', '#share-scope'],
+      ] as const) {
+        await page.click(`#more-screen .row[data-panel="${panel}"]`);
+        await g177Settle(page);
+        const bg = (await page.evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(sel)})).backgroundColor`)) as string;
+        const m = /rgba?\((\d+), (\d+), (\d+)/.exec(bg);
+        const lum = m ? (Number(m[1]) + Number(m[2]) + Number(m[3])) / 3 : 255;
+        if (lum > 90) dark.push(`${sel} ${bg}`);
+        if (panel === 'fork') await shot(page, 'p305-fork-select');
+        await page.click('#panel-back');
+      }
+      expect(dark.length === 0, `light selects on the dark page: ${JSON.stringify(dark)}`);
+      return 'every bar, status, composer, tools and pill button is named; the fork and share selects are dark';
+    },
+  });
 }
 
 
