@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -324,8 +325,9 @@ describe('TelegramBridge — cursor persistence', () => {
     // Yield so reconcileSubscriptions fires and eventCb is captured.
     await new Promise((r) => setTimeout(r, 0));
     eventCb?.({ id: 42, type: 'session_update', data: {} });
-    // Allow the async persist to settle.
-    await new Promise((r) => setTimeout(r, 10));
+    // Wait for the async persist to land: a fixed 10ms lost the race under
+    // load, and afterEach's rm then hit the half-written temp file (ENOTEMPTY).
+    await waitFor(() => existsSync(join(dir, 'cursors.json')));
     await startDone;
     const entry = cursors.get('tok_b', 'sess-q');
     expect(entry?.lastEventId).toBe(42);
