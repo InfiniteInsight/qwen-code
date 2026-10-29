@@ -4305,6 +4305,67 @@ const PAGE_SCENARIOS: PageScenario[] = [
     },
   },
   {
+    // #194 slice C. The page asks for a host terminal on every pick of a
+    // conversation, so the gateway now answers 200 alreadyMirrored when a tab is
+    // already attached to it. The page must say so, and must not fall back to the
+    // "opening on the host" promise, which would claim a window that will never
+    // come. The 202 handling stays for an old gateway and for the first request.
+    name: 'P190 a host-terminal request the gateway answers as already mirrored says already open on the host',
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      const answer = async (status: number, body: string) => {
+        await page.unrouteAll();
+        await page.route('**/rc/terminals', (route) =>
+          route.fulfill({
+            status,
+            contentType: 'application/json',
+            body,
+          }),
+        );
+        await page.evaluate(() => {
+          setStatus('sent: stop');
+          return requestHostTerminal('sess-1');
+        });
+      };
+      // Waited for, as in P21: the failure is a branch not taken, which leaves
+      // the sentinel above in place for an immediate read to pass on.
+      const say = async (needle: string) => {
+        await page.waitForFunction(
+          (n: string) =>
+            (
+              document.getElementById('status') as HTMLDivElement
+            ).textContent?.includes(n) === true,
+          needle,
+          { timeout: 8_000 },
+        );
+        return page.evaluate(
+          () => document.getElementById('status')!.textContent ?? '',
+        );
+      };
+
+      await answer(200, '{"alreadyMirrored":true,"sessionId":"sess-1"}');
+      const already = await say('already open on the host');
+      expect(
+        !already.includes('opening') && !already.includes('no terminal'),
+        `an already-mirrored answer was reported as something else: ${JSON.stringify(already)}`,
+      );
+
+      // The 202 path is unchanged beside it.
+      await answer(
+        202,
+        '{"requestId":"r1","launcherState":"live","launcherSeenMsAgo":1500}',
+      );
+      const opening = await say('opening on the host');
+      expect(
+        !opening.includes('already'),
+        `a queued request read as already open: ${JSON.stringify(opening)}`,
+      );
+
+      return `200 alreadyMirrored -> ${JSON.stringify(already)}; 202 live -> ${JSON.stringify(opening)}`;
+    },
+  },
+  {
     // #71. The indicator was armed at send and disarmed by the first prose or
     // thought chunk, so it could not cover the rest of the turn, which is the
     // reported "long periods of time, maybe after tool calls" with no sign of

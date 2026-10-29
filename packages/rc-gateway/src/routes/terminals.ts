@@ -7,6 +7,7 @@
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { isSessionMirrored } from '../hostMirrors.js';
 import {
   planTerminalCommand,
   type TerminalPlanOptions,
@@ -55,6 +56,11 @@ export const LAUNCHER_STALE_MS = 3 * LAUNCHER_POLL_MS;
  * than fetching it, which is why this is the only HTTP surface the feature
  * needs.
  *
+ * When a terminal is already attached to the session on this host (a live
+ * process whose argv carries `--attach-session <id>`, see `hostMirrors.ts`) the
+ * route answers 200 `{ alreadyMirrored: true, sessionId }` and writes nothing:
+ * no request, no audit record. A tab attached to a dead daemon still counts.
+ *
  * Audit records the session id and request id only — no paths, no tokens.
  */
 export function createTerminalOpenRoute(
@@ -62,6 +68,8 @@ export function createTerminalOpenRoute(
   requests: TerminalRequestLog,
   audit?: AuditRecorder,
   planOpts: TerminalPlanOptions = {},
+  isMirrored: (sessionId: string) => Promise<boolean> = (id) =>
+    isSessionMirrored(id),
 ): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { sessionId?: unknown };
@@ -104,6 +112,22 @@ export function createTerminalOpenRoute(
         error: 'No credentials for this session daemon',
         code: 'daemon_unavailable',
       });
+      return;
+    }
+
+    // One tab per session (#194): a terminal already attached to this
+    // conversation is the answer, not a reason to open a second. Checked after
+    // the session and its credentials are known good, so every refusal above
+    // reads the same as before. A check that throws is treated as "none":
+    // a missing tab is worse than a rare duplicate one.
+    let mirrored = false;
+    try {
+      mirrored = await isMirrored(sessionId);
+    } catch {
+      mirrored = false;
+    }
+    if (mirrored) {
+      res.status(200).json({ alreadyMirrored: true, sessionId });
       return;
     }
 
