@@ -72,7 +72,7 @@ import {
   type DaemonWorkspaceAgentsStatus,
 } from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
-import { isSessionLevelGone } from './daemonHttpError.js';
+import { asDaemonHttpError, isSessionLevelGone } from './daemonHttpError.js';
 
 /**
  * Per-id outcome of `POST /sessions/delete`. Named here because the SDK
@@ -2378,8 +2378,10 @@ function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 
 // -- Transport-death classification (add-mid-turn-recovery) ------------
 
-/** Socket codes (found anywhere in the `cause` chain) that mean the daemon
- * transport is gone — the process is dead or the socket was torn down. */
+/** Socket codes (found on an error or its `cause` chain) that mean the daemon
+ * transport is gone: the process is dead or the socket was torn down. Node's
+ * "socket hang up" carries `ECONNRESET` and undici's "other side closed"
+ * carries `UND_ERR_SOCKET`, so the codes cover both without reading text. */
 const TRANSPORT_DEATH_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
@@ -2387,13 +2389,16 @@ const TRANSPORT_DEATH_CODES = new Set([
   'UND_ERR_SOCKET',
 ]);
 
-/** Node/undici socket-teardown messages (no stable `code` property). */
-const TRANSPORT_DEATH_MESSAGE = /socket hang up|other side closed/i;
-
 /** True when `err` is a transport-level "the daemon is gone" error: the
- * SDK's own stream-terminal error, a socket code anywhere in the `cause`
- * chain (`fetch` wraps the socket error under a `TypeError: fetch failed`),
- * or a socket-teardown message. Walks at most 8 `cause` hops. */
+ * SDK's own stream-terminal error, or a socket code on the error or its
+ * `cause` chain (`fetch` wraps the socket error under a `TypeError: fetch
+ * failed`). Walks at most 8 `cause` hops.
+ *
+ * Classified on each link's own type and `code`, never on message text
+ * (#163): a daemon that answers a 500 whose body echoes an upstream "socket
+ * hang up" is a live process, and a regex over the chain read it as dead. For
+ * the same reason a `DaemonHttpError` (a numeric `status`: the daemon
+ * answered) ends the walk as "not a death", whatever its message or cause. */
 function isTransportDeathError(err: unknown): boolean {
   let cur: unknown = err;
   for (
@@ -2402,12 +2407,12 @@ function isTransportDeathError(err: unknown): boolean {
     depth++
   ) {
     if (cur instanceof DaemonTransportClosedError) return true;
-    if (cur instanceof Error) {
-      // The name check covers an SDK loaded from a second copy of the
-      // package, where `instanceof` would fail.
-      if (cur.name === 'DaemonTransportClosedError') return true;
-      if (TRANSPORT_DEATH_MESSAGE.test(cur.message)) return true;
+    // The name check covers an SDK loaded from a second copy of the package,
+    // where `instanceof` would fail.
+    if ((cur as { name?: unknown }).name === 'DaemonTransportClosedError') {
+      return true;
     }
+    if (asDaemonHttpError(cur) !== undefined) return false;
     const code = (cur as { code?: unknown }).code;
     if (typeof code === 'string' && TRANSPORT_DEATH_CODES.has(code)) {
       return true;

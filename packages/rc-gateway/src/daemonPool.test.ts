@@ -1076,6 +1076,61 @@ describe('DaemonPool death detection', () => {
     expect(h.auditRows).toHaveLength(0);
   });
 
+  // #163: the classifier used to regex every message in the cause chain, so a
+  // daemon that ANSWERED with a 500 whose text echoed an upstream socket error
+  // was read as a dead process. An HTTP status means a live process answered.
+  it('a DaemonHttpError whose message echoes a socket error is an answer, not a death', async () => {
+    const h = makeDeathHarness({
+      client: (cwd) => ({
+        ...fakeClient(cwd, `${cwd}-s`),
+        async prompt() {
+          throw new DaemonHttpError(
+            500,
+            { error: 'upstream: socket hang up' },
+            'POST /session/x/prompt: upstream: socket hang up',
+          );
+        },
+        async sessionContext() {
+          throw new DaemonHttpError(
+            502,
+            { error: 'other side closed' },
+            'GET /session/x/context: other side closed',
+          );
+        },
+      }),
+    });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(h.pool.prompt(s.sessionId, { prompt: [] })).rejects.toThrow(
+      /socket hang up/,
+    );
+    await expect(h.pool.sessionContext(s.sessionId)).rejects.toThrow(
+      /other side closed/,
+    );
+    expect(h.pool.size()).toBe(1);
+    expect(h.deaths).toHaveLength(0);
+    expect(h.auditRows).toHaveLength(0);
+  });
+
+  it('a socket error message without a socket code is not a death; the code is', async () => {
+    let withCode = false;
+    const h = makeDeathHarness({
+      client: (cwd) => ({
+        ...fakeClient(cwd, `${cwd}-s`),
+        async prompt() {
+          throw withCode
+            ? Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+            : new Error('tool output: socket hang up');
+        },
+      }),
+    });
+    const s = await h.pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await expect(h.pool.prompt(s.sessionId, { prompt: [] })).rejects.toThrow();
+    expect(h.deaths).toHaveLength(0);
+    withCode = true;
+    await expect(h.pool.prompt(s.sessionId, { prompt: [] })).rejects.toThrow();
+    expect(h.deaths).toHaveLength(1);
+  });
+
   it('boot daemon death flows through the same path: handleDaemonExit scrubs its sessions and writes the row', async () => {
     const h = makeDeathHarness();
     const s = await h.pool.createOrAttachSession({}); // on the default daemon
