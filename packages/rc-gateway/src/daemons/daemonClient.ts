@@ -61,7 +61,12 @@ export interface DaemonRequestOptions {
   path: string;
   /** JSON request body (sets Content-Type: application/json). */
   body?: unknown;
-  /** Default 10 000 ms. */
+  /**
+   * Default 10 000 ms. Bounds the wait for the response headers, and then
+   * every silence while the body is read: an idle timeout, re-armed on each
+   * chunk, so a large body that keeps arriving is never cut off but a daemon
+   * that stalls after its headers cannot hang the command (#163).
+   */
   timeoutMs?: number;
   /**
    * Skip TLS certificate verification (self-signed local daemons). Sets
@@ -90,35 +95,41 @@ export async function daemonRequest(
   const headers: Record<string, string> = {};
   if (target.token) headers['Authorization'] = `Bearer ${target.token}`;
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
-  const timer = setTimeout(
-    () =>
-      controller.abort(
-        new Error(`timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS} ms`),
-      ),
-    opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (reason: string): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(new Error(reason)), timeoutMs);
+  };
+  arm(`timed out after ${timeoutMs} ms`);
   let res: Response;
+  let text: string;
   try {
-    res = await fetch(url, {
-      method: opts.method,
-      headers,
-      ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
-      signal: controller.signal,
-      redirect: 'manual',
-    });
-  } catch (err) {
-    if (
-      err instanceof Error &&
-      (err.name === 'AbortError' || err.name === 'TimeoutError')
-    ) {
+    try {
+      res = await fetch(url, {
+        method: opts.method,
+        headers,
+        ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+        signal: controller.signal,
+        redirect: 'manual',
+      });
+    } catch (err) {
       throw new DaemonUnreachableError(url.href, err);
     }
-    throw new DaemonUnreachableError(url.href, err);
+    try {
+      text = await readBody(res, () => arm(`no data for ${timeoutMs} ms`));
+    } catch (err) {
+      // An abort errors the body stream; name the stall rather than the
+      // stream's own wording for it.
+      throw new DaemonUnreachableError(
+        url.href,
+        controller.signal.aborted ? controller.signal.reason : err,
+      );
+    }
   } finally {
     clearTimeout(timer);
   }
-  const text = await res.text();
   let json: unknown = text;
   if (text) {
     try {
@@ -131,6 +142,28 @@ export async function daemonRequest(
     throw new DaemonHttpError(res.status, json);
   }
   return { status: res.status, json };
+}
+
+/**
+ * Read `res`'s body as UTF-8 text, calling `onProgress` once the headers are
+ * in and again on every chunk, so the caller can keep an idle timer armed.
+ */
+async function readBody(
+  res: Response,
+  onProgress: () => void,
+): Promise<string> {
+  onProgress();
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onProgress();
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
 }
 
 export type HealthStatus = 'ok' | 'unreachable' | 'error';
