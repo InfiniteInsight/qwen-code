@@ -21055,6 +21055,869 @@ function solidPng(w: number, h: number): Buffer {
       return `upload on A, B's send bare, A's strip back and its send carried ${A}-a-notes.txt; a late upload for A stayed off B and rode A's next send (${prompts.length} prompts)`;
     },
   });
+
+  // #173. startWatch(id) with no cursor clears the transcript and sends no
+  // Last-Event-ID, so the daemon replays nothing: a conversation that was
+  // intact on disk came back empty and marked "streaming". The stub replays
+  // every frame whatever the header says, so "rows came back" proves nothing;
+  // what these three read is the header each events request really carries.
+  const lastEventIds = (page: Page, id: string): (string | null)[] => {
+    const seen: (string | null)[] = [];
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname === `/session/${id}/events`) {
+        seen.push(r.headers()['last-event-id'] ?? null);
+      }
+    });
+    return seen;
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P240 after a rewind the re-watch of the same conversation asks for a replay (a Last-Event-ID) instead of connecting bare onto an empty stream',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(`**/session/${A}/rewind`, (route) => json(route, { toTurn: 1 }));
+      const sent = lastEventIds(page, A);
+      await go(page, A);
+      expect(sent.length === 1 && sent[0] === null, `the first watch asked ${JSON.stringify(sent)}`);
+      await page.evaluate(
+        `window.confirm = () => true; document.getElementById('rewind-chat').onclick(); void document.getElementById('rewind-pick-btn').onclick()`,
+      );
+      await poll(() => sent.length >= 2, 'the rewind never re-watched the conversation');
+      expect(sent[1] !== null, `the re-watch after the rewind sent no Last-Event-ID (${JSON.stringify(sent)}), so the daemon replays nothing`);
+      await onAir(page, A);
+      return `the re-watch after a rewind asked for Last-Event-ID ${sent[1]}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P241 the Watch button, pressed on a conversation whose stream ended, re-attaches from the last event seen and keeps the rows on screen',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const sent = lastEventIds(page, A);
+      await go(page, A);
+      const seenBefore = (await page.evaluate('lastSeenEventId')) as number | null;
+      expect(seenBefore !== null && seenBefore > 0, `no event id was seen (${seenBefore})`);
+      // The stream drops without the reader leaving the conversation.
+      await page.evaluate('controller.abort()');
+      await page.waitForFunction("!document.getElementById('watch').disabled", null, { timeout: 10_000 });
+      expect(((await page.evaluate('transcriptModel.items.length')) as number) > 0, 'the rows went with the stream');
+      await page.evaluate("document.getElementById('watch').click()");
+      await poll(() => sent.length >= 2, 'Watch never reconnected');
+      expect(
+        sent[1] === String(seenBefore),
+        `Watch asked for Last-Event-ID ${JSON.stringify(sent[1])}, wanted the last event seen (${seenBefore})`,
+      );
+      return `Watch re-attached at Last-Event-ID ${sent[1]}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P242 Open on a search hit from this gateway asks for a replay from 0 and does not unwatch the conversation first",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(/\/rc\/search\?/, (route) =>
+        json(route, { hits: [{ sessionId: B, eventId: 'e1', kind: 'user', ts: '2026-01-01T00:00:00Z', snippet: 'p242 snippet' }], elapsedMs: 1 }),
+      );
+      const sentB = lastEventIds(page, B);
+      await go(page, A);
+      await page.evaluate(`document.getElementById('search-q').value = 'p242'; void runSearch()`);
+      await page.waitForFunction("document.querySelector('#search-results .search-row button')", null, { timeout: 10_000 });
+      await page.evaluate("document.querySelector('#search-results .search-row button').click()");
+      await poll(() => sentB.length >= 1, 'Open never watched the hit');
+      expect(sentB[0] === '0', `Open connected with Last-Event-ID ${JSON.stringify(sentB[0])}, wanted 0 (a replay)`);
+      await onAir(page, B);
+      return 'the hit opened with Last-Event-ID 0';
+    },
+  });
+
+  // #173. Dictation's auto-send called $('send').onclick() directly, which
+  // ignores the disabled state a click honours: a second POST went out while a
+  // turn was in flight, and Send was re-enabled mid-turn with its label stuck.
+  PAGE_SCENARIOS.push({
+    name: 'P243 dictation auto-send goes through the guarded Send: held while a turn is in flight (text kept, no second POST), sent once Send is free',
+    waitView: false,
+    frames: frames172,
+    stub: { promptDelayMs: 2_500 },
+    before: async (page) => {
+      await page.addInitScript({
+        content: `window.SpeechRecognition = function () {
+          window.__rec = this;
+          this.start = function () {};
+          this.stop = function () { if (this.onend) this.onend(); };
+        };`,
+      });
+    },
+    run: async ({ page }) => {
+      const posts: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'POST' && /\/session\/[^/]+\/prompt$/.test(new URL(r.url()).pathname)) {
+          posts.push(r.postData() ?? '');
+        }
+      });
+      const speak = async (words: string): Promise<void> => {
+        await page.evaluate(`document.getElementById('dictate').click()`);
+        await page.evaluate(
+          `window.__rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: ${JSON.stringify(words)} }], { isFinal: true })] }); window.__rec.onend()`,
+        );
+      };
+      await go(page, A);
+      await page.evaluate(`document.getElementById('dictate-autosend').checked = true`);
+      await page.fill('#prompt', 'p243 first');
+      await page.click('#send');
+      await poll(() => posts.length === 1, 'the first send never reached the wire');
+
+      await speak('p243 spoken mid turn');
+      await page.waitForTimeout(500);
+      const held = await page.evaluate(`({
+        disabled: document.getElementById('send').disabled,
+        label: document.getElementById('send').querySelector('.lbl').textContent,
+        box: document.getElementById('prompt').value,
+      })`) as { disabled: boolean; label: string; box: string };
+      expect(posts.length === 1, `dictation sent ${posts.length - 1} extra prompt(s) while a turn was in flight`);
+      expect(held.disabled && held.label === 'waiting…', `Send was freed mid-turn (${JSON.stringify(held)})`);
+      expect(held.box.includes('p243 spoken mid turn'), `the dictated text was not kept in the composer (${JSON.stringify(held.box)})`);
+
+      // Once the turn ends and Send is free, the same path sends.
+      await page.waitForFunction(`!document.getElementById('send').disabled`, null, { timeout: 10_000 });
+      await page.evaluate(`document.getElementById('prompt').value = ''`);
+      await speak('p243 spoken after');
+      await poll(() => posts.length === 2, 'dictation did not send once Send was free');
+      expect(posts[1]!.includes('p243 spoken after'), `the second send carried ${posts[1]}`);
+      return 'auto-send held while Send was disabled (text kept, one POST) and sent once it was free';
+    },
+  });
+
+  // #173. Open on a search hit from another daemon watched that id on THIS
+  // gateway (a 404) after tearing down the current watch. The other daemon's
+  // own page is where that conversation lives, and the deep link is how a page
+  // is told which conversation to open.
+  const OTHER = 'http://127.0.0.1:9';
+  const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
+  const otherDaemon = async (page: Page, viewerUrl: string): Promise<void> => {
+    await page.evaluate(
+      `localStorage.setItem('qwen-rc:clients', ${JSON.stringify(JSON.stringify({ daemons: [{ name: 'here', url: viewerUrl, default: true }, { name: 'elsewhere', url: OTHER }] }))})`,
+    );
+  };
+  const otherLanding = async (page: Page, landed: string[]): Promise<void> => {
+    await page.route(`${OTHER}/**`, async (route) => {
+      const u = new URL(route.request().url());
+      if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS });
+      if (u.pathname === '/rc/search') {
+        return route.fulfill({
+          status: 200,
+          headers: CORS,
+          contentType: 'application/json',
+          body: JSON.stringify({ hits: [{ sessionId: 'otherdaemon-session-1', eventId: 'e', kind: 'user', ts: '2026-01-01T00:00:00Z', snippet: 'p244 over there' }], elapsedMs: 1 }),
+        });
+      }
+      if (u.pathname === '/rc/sessions') {
+        return route.fulfill({
+          status: 200,
+          headers: CORS,
+          contentType: 'application/json',
+          body: JSON.stringify({ sessions: [{ sessionId: 'otherdaemon-session-1', title: 'p245 over there', updatedAt: '2026-01-01T00:00:00Z' }] }),
+        });
+      }
+      landed.push(u.pathname + u.search);
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>other gateway</title>' });
+    });
+  };
+
+  PAGE_SCENARIOS.push({
+    name: "P244 Open on a search hit from another daemon takes the page to that daemon's /ui/?session= and leaves this gateway's watch alone",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page, viewer }) => {
+      const landed: string[] = [];
+      await otherDaemon(page, viewer.url);
+      await otherLanding(page, landed);
+      await page.route(
+        (u) => u.origin === new URL(viewer.url).origin && u.pathname === '/rc/search',
+        (route) => json(route, { hits: [], elapsedMs: 1 }),
+      );
+      const streams = streamsOf(page, 'otherdaemon-session-1');
+      let aborted = false;
+      await go(page, A);
+      await page.exposeFunction('__p244Unwatched', () => {
+        aborted = true;
+      });
+      await page.evaluate(
+        `document.getElementById('stop').addEventListener('click', () => window.__p244Unwatched()); document.getElementById('search-q').value = 'p244'; document.getElementById('search-all-daemons').checked = true; void runSearch()`,
+      );
+      await page.waitForFunction("document.querySelector('#search-results .daemon-pill')", null, { timeout: 10_000 });
+      await page.evaluate("document.querySelector('#search-results .search-row button').click()");
+      await page.waitForURL(`${OTHER}/**`, { timeout: 10_000 });
+      expect(
+        landed.some((l) => l === '/ui/?session=otherdaemon-session-1'),
+        `the page went to ${JSON.stringify(landed)}, not the other daemon's /ui/?session=`,
+      );
+      expect(streams.length === 0, `this gateway was asked for the other daemon's session ${streams.length} time(s)`);
+      expect(!aborted, "the current watch was torn down before the other daemon's page opened");
+      return `went to ${OTHER}${landed[0]}; no stream asked of this gateway; the watch of A was not torn down first`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P245 a row in the all-daemons session list opens its conversation at that daemon's /ui/?session=, and in place for this gateway's own rows",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page, viewer }) => {
+      const landed: string[] = [];
+      await otherDaemon(page, viewer.url);
+      await otherLanding(page, landed);
+      await page.route(
+        // The list's own read has no folder; the open's probe of a folder does.
+        (u) => u.origin === new URL(viewer.url).origin && u.pathname === '/rc/sessions' && !u.searchParams.has('cwd'),
+        (route) => json(route, { sessions: [{ sessionId: B, title: 'p245 here', updatedAt: '2026-01-02T00:00:00Z' }] }),
+      );
+      await go(page, A);
+      await page.evaluate("void runAggregatedSessions()");
+      await page.waitForFunction("document.querySelectorAll('#daemons-sessions .agg-session-row').length === 2", null, { timeout: 10_000 });
+      // This gateway's own row opens in place (no reload onto a path it does not serve).
+      await page.evaluate("Array.from(document.querySelectorAll('#daemons-sessions .agg-session-row')).find((r) => r.textContent.includes('p245 here')).querySelector('.open').click()");
+      await onAir(page, B);
+      // The other daemon's row goes to its page.
+      await page.evaluate("Array.from(document.querySelectorAll('#daemons-sessions .agg-session-row')).find((r) => r.textContent.includes('p245 over there')).querySelector('.open').click()");
+      await page.waitForURL(`${OTHER}/**`, { timeout: 10_000 });
+      expect(
+        landed.some((l) => l === '/ui/?session=otherdaemon-session-1'),
+        `the other daemon's row went to ${JSON.stringify(landed)}`,
+      );
+      return `own row opened in place; the other daemon's row went to ${OTHER}${landed[0]}`;
+    },
+  });
+
+  // #173. When /rc/push/subscribe failed, the browser kept the subscription it
+  // had just made. The page then said "enabled", and every later boot returned
+  // early on "already enabled", so the gateway never learned of it and no push
+  // ever arrived. The stand-in registration below keeps its one subscription in
+  // localStorage, which is how a real browser keeps it across a reload.
+  const p246 = { status: 500, posts: [] as number[] };
+  PAGE_SCENARIOS.push({
+    name: 'P246 a push subscribe the gateway refuses is undone in the browser, said on the page, and tried again on the next boot',
+    waitView: false,
+    before: async (page) => {
+      // Routed before the load: the boot subscribes on its own.
+      await page.route('**/rc/push/vapid', (route) =>
+        json(route, { applicationServerKey: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' }),
+      );
+      await page.route('**/rc/push/subscribe', (route) => {
+        p246.posts.push(p246.status);
+        return json(route, p246.status === 201 ? { id: 'p246' } : { error: 'nope' }, p246.status);
+      });
+      await page.addInitScript({
+        content: `(function () {
+          var KEY = 'p246-sub';
+          function current() {
+            if (!localStorage.getItem(KEY)) return null;
+            return {
+              endpoint: 'https://push.example/p246',
+              toJSON: function () { return { endpoint: 'https://push.example/p246', keys: {} }; },
+              unsubscribe: function () { localStorage.removeItem(KEY); return Promise.resolve(true); },
+            };
+          }
+          var reg = {
+            pushManager: {
+              getSubscription: function () { return Promise.resolve(current()); },
+              subscribe: function () { localStorage.setItem(KEY, '1'); return Promise.resolve(current()); },
+            },
+          };
+          window.PushManager = window.PushManager || function () {};
+          Object.defineProperty(Notification, 'permission', { get: function () { return 'granted'; } });
+          navigator.serviceWorker.register = function () { return Promise.resolve(reg); };
+          navigator.serviceWorker.getRegistration = function () { return Promise.resolve(reg); };
+        })();`,
+      });
+    },
+    run: async ({ page }) => {
+      const posts = p246.posts;
+      const read = (): Promise<{ stored: string | null; state: string; status: string }> =>
+        page.evaluate(`({
+          stored: localStorage.getItem('p246-sub'),
+          state: document.getElementById('notif-state').textContent,
+          status: document.getElementById('status').textContent,
+        })`) as Promise<{ stored: string | null; state: string; status: string }>;
+      await poll(() => posts.length >= 1, 'the boot never tried to subscribe');
+      await page.waitForTimeout(500);
+      const refused = await read();
+      expect(refused.stored === null, 'the browser kept the subscription the gateway refused');
+      expect(!refused.state.startsWith('enabled'), `the page said ${JSON.stringify(refused.state)} for a subscription the gateway refused`);
+      expect(
+        refused.state.includes('subscribe failed (500)') && refused.status.includes('subscribe failed (500)'),
+        `the refusal was not said (state ${JSON.stringify(refused.state)}, status ${JSON.stringify(refused.status)})`,
+      );
+
+      // The next boot starts over, and this time the gateway takes it.
+      p246.status = 201;
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await poll(() => posts.length >= 2, 'the next boot did not try again');
+      await page.waitForFunction(`document.getElementById('notif-state').textContent.startsWith('enabled')`, null, { timeout: 10_000 });
+      return `a 500 on subscribe left no browser subscription and read ${JSON.stringify(refused.state)}; the next boot subscribed and read enabled`;
+    },
+  });
+
+  // #173. The workspace MCP card. Enabling a server wrote the five-field status
+  // subset over the whole workspace entry (env, headers, oauth, timeout, trust
+  // and the tool lists went with it), disabling removed the entry on one tap,
+  // and the add/edit form could not be hidden (hidden plus an inline display),
+  // so an edit opened for one workspace posted to another.
+  const mcpFixture = (disabled: boolean): unknown => ({
+    initialized: true,
+    version: 'v1',
+    servers: [
+      {
+        name: 'srv',
+        configOrigin: 'workspace_settings',
+        disabled,
+        ...(disabled ? { disabledReason: 'config' } : {}),
+        mcpStatus: disabled ? 'disabled' : 'connected',
+        transport: 'stdio',
+        config: { command: 'srv-cmd', args: ['--a'] },
+      },
+    ],
+  });
+  const STORED_SRV = {
+    command: 'srv-cmd',
+    args: ['--a'],
+    env: { API_TOKEN: '__redacted__' },
+    headers: { Authorization: '__redacted__' },
+    timeout: 5000,
+    trust: true,
+    includeTools: ['alpha'],
+    excludeTools: ['beta'],
+  };
+  const mcpRoutes = async (page: Page, disabled: boolean): Promise<{ sets: Record<string, unknown>[]; reloads: number }> => {
+    const seen = { sets: [] as Record<string, unknown>[], reloads: 0 };
+    await page.route('**/rc/workspace/mcp', (route) => json(route, mcpFixture(disabled)));
+    await page.route('**/rc/workspace/mcp/reload', (route) => {
+      seen.reloads += 1;
+      return json(route, { accepted: true });
+    });
+    await page.route('**/rc/workspace/mcp/servers', (route) => {
+      seen.sets.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
+      return json(route, {});
+    });
+    await page.route('**/rc/workspace/settings*', (route) =>
+      json(route, { settings: [{ key: 'mcpServers', values: { workspace: { srv: STORED_SRV } } }] }),
+    );
+    return seen;
+  };
+  const mcpButton = (page: Page, label: string): Promise<void> =>
+    page.evaluate(
+      `Array.from(document.querySelectorAll('#ws-mcp-body button')).find((b) => b.textContent === ${JSON.stringify(label)}).click()`,
+    ) as Promise<void>;
+
+  PAGE_SCENARIOS.push({
+    name: 'P247 enabling an MCP server sends the whole stored entry with the status fields over it, not the five-field subset, and says so when the server is still disabled',
+    waitView: false,
+    run: async ({ page }) => {
+      const seen = await mcpRoutes(page, true);
+      await page.evaluate('void loadWorkspaceMcp(false)');
+      await page.waitForFunction("Array.from(document.querySelectorAll('#ws-mcp-body button')).some((b) => b.textContent === 'enable')", null, { timeout: 10_000 });
+      await mcpButton(page, 'enable');
+      await poll(() => seen.sets.length === 1, 'enable never wrote the server');
+      const sent = seen.sets[0]!;
+      expect(sent['operation'] === 'set' && sent['name'] === 'srv', `the write was ${JSON.stringify(sent)}`);
+      const config = sent['config'] as Record<string, unknown>;
+      expect(
+        JSON.stringify(Object.keys(config).sort()) === JSON.stringify(Object.keys(STORED_SRV).sort()),
+        `enable wrote ${JSON.stringify(config)}, not the stored entry ${JSON.stringify(STORED_SRV)}`,
+      );
+      expect(JSON.stringify(config['env']) === JSON.stringify(STORED_SRV.env) && config['timeout'] === 5000 && config['trust'] === true, 'env, timeout or trust did not survive the enable');
+      await poll(() => seen.reloads === 1, 'the reload after the write never ran');
+      await page.waitForFunction("document.getElementById('ws-mcp-status').textContent.includes('still disabled')", null, { timeout: 10_000 });
+      return `enable wrote ${Object.keys(config).sort().join(',')}; a server that stayed disabled said so`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P248 disabling an MCP server asks first, naming the server, and removes nothing when the reader says no',
+    waitView: false,
+    run: async ({ page }) => {
+      const seen = await mcpRoutes(page, false);
+      await page.evaluate('void loadWorkspaceMcp(false)');
+      await page.waitForFunction("Array.from(document.querySelectorAll('#ws-mcp-body button')).some((b) => b.textContent === 'disable')", null, { timeout: 10_000 });
+      // The verifier dismisses a dialog unless a scenario says otherwise.
+      await mcpButton(page, 'disable');
+      await page.waitForTimeout(600);
+      expect(seen.sets.length === 0, `disable removed the server without a yes (${JSON.stringify(seen.sets)})`);
+      await page.evaluate(`window.__asked = []; window.confirm = (m) => { window.__asked.push(m); return true; }`);
+      await mcpButton(page, 'disable');
+      await poll(() => seen.sets.length === 1, 'a yes did not remove the server');
+      expect(seen.sets[0]!['operation'] === 'remove' && seen.sets[0]!['name'] === 'srv', `the write was ${JSON.stringify(seen.sets[0])}`);
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      expect(asked.length === 1 && asked[0]!.includes('srv'), `the question was ${JSON.stringify(asked)}`);
+      return `a dismissed confirm removed nothing; a yes removed srv after asking ${JSON.stringify(asked[0])}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P249 the MCP add/edit form is out of sight until opened, and switching the workspace it acts on closes and empties it',
+    waitView: false,
+    run: async ({ page }) => {
+      await mcpRoutes(page, false);
+      const display = (): Promise<{ display: string; kids: number }> =>
+        page.evaluate(`(() => {
+          const f = document.getElementById('ws-mcp-form');
+          return { display: getComputedStyle(f).display, kids: f.children.length };
+        })()`) as Promise<{ display: string; kids: number }>;
+      await page.evaluate('void loadWorkspaceMcp(false)');
+      await page.waitForFunction("Array.from(document.querySelectorAll('#ws-mcp-body button')).some((b) => b.textContent === 'edit config')", null, { timeout: 10_000 });
+      const shut = await display();
+      expect(shut.display === 'none', `the form is drawn before it is opened (${JSON.stringify(shut)})`);
+      await mcpButton(page, 'edit config');
+      await page.waitForFunction("document.getElementById('ws-mcp-form').children.length > 0");
+      const open = await display();
+      expect(open.display !== 'none' && open.kids > 0, `the form did not open (${JSON.stringify(open)})`);
+      // The reader moves the controls to another workspace: the edit for the
+      // old one must not stay up to be saved against the new one.
+      await page.evaluate(`setWsTarget('/p249/other')`);
+      const after = await display();
+      expect(after.display === 'none' && after.kids === 0, `the form stayed up for the old workspace (${JSON.stringify(after)})`);
+      return 'closed at rest, open on edit, closed and emptied by a workspace switch';
+    },
+  });
+
+  // #173. The workspace controls follow the conversation on screen, but only
+  // while no target was chosen: after the first conversation outside the boot
+  // workspace the target was set and nothing moved it again, so the Settings
+  // controls stuck to that first workspace. A target the reader chose by hand
+  // is still never taken over.
+  PAGE_SCENARIOS.push({
+    name: 'P250 the workspace controls follow each conversation opened (a folder, another folder, back to the boot workspace) but never take over a target the reader picked',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const ctxFor: Record<string, string> = {};
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => {
+          const cwd = ctxFor[sidOf(route)] ?? '/stub/workspace';
+          const c = context('x') as { workspaceCwd: string };
+          return json(route, { ...c, workspaceCwd: cwd });
+        },
+      );
+      ctxFor[A] = '/p250/a';
+      ctxFor[B] = '/p250/b';
+      const target = (): Promise<string | null> => page.evaluate('wsTargetCwd') as Promise<string | null>;
+      const follows = async (want: string | null, what: string): Promise<void> => {
+        await page.waitForFunction(`wsTargetCwd === ${JSON.stringify(want)}`, null, { timeout: 5_000 }).catch(() => {});
+        const got = await target();
+        expect(got === want, `${what}: the controls act on ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
+      };
+      await go(page, A);
+      await follows('/p250/a', 'a conversation outside the boot workspace');
+      await go(page, B);
+      await follows('/p250/b', 'the next conversation, in another folder');
+      await go(page, '66666666-7777-8888-9999-000000000000');
+      await follows(null, 'a conversation in the boot workspace');
+      // A hand-picked target is the reader's.
+      await page.evaluate(`setWsTarget('/p250/manual')`);
+      await go(page, A);
+      await page.waitForTimeout(600);
+      await follows('/p250/manual', 'after the reader picked a target by hand');
+      return 'a -> b -> boot workspace followed; a hand-picked target held through the next conversation';
+    },
+  });
+
+  // #173. Every stream (re)connect ran loadPermRules(false), which replaced the
+  // rules lists the reader was editing with the daemon's copy and dropped
+  // whatever was added or removed and not yet saved.
+  PAGE_SCENARIOS.push({
+    name: 'P251 unsaved edits to the permission rules survive a background reload (a stream reconnect), and an explicit refresh discards them',
+    waitView: false,
+    noConsoleErrors: true,
+    frames: frames172,
+    stub: {
+      workspacePermissionsResult: {
+        v: 1,
+        version: 'p251',
+        user: { path: '/home/tester/.qwen/settings.json', rules: { allow: [], ask: [], deny: [] } },
+        workspace: { path: '/proj', rules: { allow: ['Read(./docs/**)'], ask: [], deny: [] } },
+        merged: { allow: [], ask: [], deny: [] },
+        isTrusted: true,
+      },
+    },
+    run: async ({ page }) => {
+      // The conversation is in the boot workspace, so opening it moves no
+      // target (a different workspace's rules rightly replace these).
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => json(route, { ...(context('x') as object), workspaceCwd: '/stub/workspace' }),
+      );
+      const rules = (): Promise<string> =>
+        page.evaluate(`JSON.stringify(permRules.workspace.rules.allow)`) as Promise<string>;
+      await openPanel(page, 'perms');
+      await page.waitForFunction(() => !document.getElementById('perm-rules-body')!.textContent!.includes('loading'));
+      await page.evaluate(`(() => {
+        const inp = Array.from(document.querySelectorAll('#perm-rules-body input')).find((i) => i.placeholder.startsWith('allow rule'));
+        inp.value = 'Bash(p251:*)';
+        Array.from(inp.parentNode.querySelectorAll('button')).find((b) => b.textContent === 'add').click();
+      })()`);
+      expect((await rules()).includes('Bash(p251:*)'), `the rule was not added (${await rules()})`);
+      // What a stream (re)connect does.
+      await go(page, A);
+      await page.evaluate('loadPermRules(false)');
+      await page.waitForTimeout(500);
+      const kept = await rules();
+      expect(kept.includes('Bash(p251:*)'), `a background reload dropped the unsaved rule (${kept})`);
+      const drawn = await page.evaluate(`document.getElementById('perm-rules-body').textContent`) as string;
+      expect(drawn.includes('Bash(p251:*)'), 'the unsaved rule left the panel');
+      // The reader's own Refresh is a decision to discard.
+      await page.evaluate('loadPermRules(true)');
+      await page.waitForFunction(`!JSON.stringify(permRules.workspace.rules.allow).includes('p251')`, null, { timeout: 5_000 });
+      return 'a reload on reconnect kept the unsaved rule; Refresh dropped it';
+    },
+  });
+
+  // #173. The list is the current folder's conversations plus the recent
+  // folders'. A conversation opened by a deep link into a folder the page had
+  // never listed left that folder out, so the list showed $HOME's rows and not
+  // the folder of the conversation on screen.
+  PAGE_SCENARIOS.push({
+    name: "P252 the list includes the folder of the conversation on screen, even one opened without ever browsing or creating there",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const FOLDER = '/p252/proj';
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === FOLDER && !u.searchParams.has('archiveState'),
+        (route) => json(route, { sessions: [{ sessionId: 'p252-row', title: 'p252 in proj', updatedAt: '2026-01-01T00:00:00Z' }], truncated: false }),
+      );
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => json(route, { ...(context('x') as object), workspaceCwd: FOLDER }),
+      );
+      const before = (await page.evaluate('listFolders()')) as string[];
+      expect(!before.includes(FOLDER), `the folder was listed before anything was opened (${JSON.stringify(before)})`);
+      await go(page, A);
+      await page.waitForFunction(`pastConvos.some((s) => s.sessionId === 'p252-row')`, null, { timeout: 10_000 }).catch(() => {});
+      const folders = (await page.evaluate('listFolders()')) as string[];
+      const rows = (await page.evaluate(`pastConvos.map((s) => s.sessionId)`)) as string[];
+      expect(folders.includes(FOLDER), `the list does not span the watched folder (${JSON.stringify(folders)})`);
+      expect(rows.includes('p252-row'), `the folder's conversation is not in the list (${JSON.stringify(rows)})`);
+      return `the list spans ${JSON.stringify(folders)} and holds p252-row`;
+    },
+  });
+
+  // #173. A /rc/sessions read that failed drew an empty folder and emptied the
+  // list, which reads as "no conversations" and not as "could not read".
+  PAGE_SCENARIOS.push({
+    name: "P253 a failed read of the current folder keeps the last list on screen and says it could not read, instead of drawing an empty folder",
+    waitView: false,
+    run: async ({ page }) => {
+      const FOLDER = '/p253/dir';
+      let failing = false;
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === FOLDER && !u.searchParams.has('archiveState'),
+        (route) =>
+          failing
+            ? route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"disk"}' })
+            : json(route, { sessions: [{ sessionId: 'p253-row', title: 'p253 row', updatedAt: '2026-01-01T00:00:00Z' }], truncated: false }),
+      );
+      const ids = (): Promise<string[]> => page.evaluate(`pastConvos.map((s) => s.sessionId)`) as Promise<string[]>;
+      // As if the reader had browsed there, once the boot's own browse is in.
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd === curDirPath', null, { timeout: 10_000 });
+      await page.evaluate(`curDirPath = ${JSON.stringify(FOLDER)}; void refreshPastConversations(${JSON.stringify(FOLDER)})`);
+      await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(FOLDER)} && pastConvos.length === 1`, null, { timeout: 10_000 });
+      failing = true;
+      await page.evaluate(`void refreshPastConversations(${JSON.stringify(FOLDER)})`);
+      await page.waitForTimeout(800);
+      expect((await ids()).join() === 'p253-row', `the failed read emptied the list (${JSON.stringify(await ids())})`);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(/could not read/i.test(status), `the failure was not said (${JSON.stringify(status)})`);
+      return 'a failed read kept p253-row and said it could not read the folder';
+    },
+  });
+
+  // #173. Token Revoke, share revoke, CORS Remove, push Unsubscribe and the
+  // queue's drop each fired a DELETE on one tap, and the token list did not say
+  // which row was the token this page signs in with. Each now asks first; the
+  // verifier dismisses a dialog unless a scenario says yes.
+  PAGE_SCENARIOS.push({
+    name: 'P254 token revoke, share revoke, CORS remove, push unsubscribe and queue drop each ask before they delete, and the token list marks the page\'s own token',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const deletes: string[] = [];
+      const ok = (route: Route, body: unknown): Promise<void> => {
+        if (route.request().method() === 'DELETE') {
+          deletes.push(new URL(route.request().url()).pathname);
+          return route.fulfill({ status: 204 });
+        }
+        return json(route, body);
+      };
+      await page.route(/\/rc\/tokens(\/[^/]+)?$/, (route) =>
+        ok(route, [
+          { id: 'tok-own', label: 'web', scopes: ['owner'] },
+          { id: 'tok-other', label: 'phone', scopes: ['write'] },
+        ]),
+      );
+      await page.route(/\/rc\/share(\/[^/]+)?$/, (route) =>
+        ok(route, { shares: [{ id: 'sh-1', label: 'link', scopes: ['view'], sessionLockId: 'x', usesRemaining: 1, maxUses: 1 }] }),
+      );
+      await page.route(/\/rc\/cors(\/.+)?$/, (route) => ok(route, { origins: [{ origin: 'https://p254.example', source: 'runtime' }] }));
+      await page.route(/\/rc\/push\/subscriptions(\/[^/?]+)?(\?.*)?$/, (route) =>
+        ok(route, { subscriptions: [{ id: 'ps-1', createdAt: '2026-01-01T00:00:00Z', endpoint: 'https://push.example/x' }] }),
+      );
+      await page.route(/\/session\/[^/]+\/pending-prompts(\/[^/]+)?$/, (route) =>
+        ok(route, { pendingPrompts: [{ promptId: 'pp-1', state: 'queued', text: 'p254 queued' }] }),
+      );
+      await go(page, A);
+      await page.evaluate(`localStorage.setItem('qwen-rc-token-id', 'tok-own')`);
+      const rows: { name: string; open: string; button: string }[] = [
+        { name: 'token', open: `$('list-tokens').onclick()`, button: `#tokens .token-row:last-child button` },
+        { name: 'share', open: `$('list-shares').onclick()`, button: `#shares-list button` },
+        { name: 'cors', open: `listCorsOrigins()`, button: `#cors-out button` },
+        { name: 'push', open: `$('list-subs').onclick()`, button: `#subs button:last-of-type` },
+        { name: 'queue', open: `$('prompt-queue-list').onclick()`, button: `#prompt-queue-body button` },
+      ];
+      const asked: string[] = [];
+      await page.exposeFunction('__p254Asked', (m: string) => asked.push(m));
+      for (const r of rows) {
+        await page.evaluate(`window.confirm = () => false; ${r.open}`);
+        await page.waitForFunction(`document.querySelector(${JSON.stringify(r.button)})`, null, { timeout: 10_000 });
+        const before = deletes.length;
+        await page.evaluate(`document.querySelector(${JSON.stringify(r.button)}).click()`);
+        await page.waitForTimeout(400);
+        expect(deletes.length === before, `${r.name}: one tap deleted without asking (${JSON.stringify(deletes)})`);
+        await page.evaluate(`window.confirm = (m) => { window.__p254Asked(m); return true; }; document.querySelector(${JSON.stringify(r.button)}).click()`);
+        await poll(() => deletes.length === before + 1, `${r.name}: a yes did not delete`);
+      }
+      expect(asked.length === 5, `${asked.length} questions for 5 deletes (${JSON.stringify(asked)})`);
+      // The token list names the page's own token and warns on revoking it.
+      await page.evaluate(`window.confirm = () => false; $('list-tokens').onclick()`);
+      await page.waitForFunction(`document.querySelectorAll('#tokens .token-row').length === 2`, null, { timeout: 10_000 });
+      const own = (await page.evaluate(`Array.from(document.querySelectorAll('#tokens .token-row')).map((r) => r.textContent)`)) as string[];
+      expect(own[0]!.includes('this device') && !own[1]!.includes('this device'), `the token list reads ${JSON.stringify(own)}`);
+      const tokenQuestion = asked[0]!;
+      expect(!/this device|sign/i.test(tokenQuestion), 'the other token\'s question was not the plain one');
+      await page.evaluate(`window.confirm = (m) => { window.__p254Asked(m); return false; }; document.querySelector('#tokens .token-row button').click()`);
+      await poll(() => asked.length === 6, 'the own token\'s revoke asked nothing');
+      expect(/this device|sign/i.test(asked[5]!), `revoking the page's own token asked ${JSON.stringify(asked[5])}`);
+      return `5 deletes each asked first; the own token is marked and its question says it signs this page out`;
+    },
+  });
+
+  // #173. The auth gate's success path loads the reader's stamp zone and turns
+  // notifications on; doPair (the code, and the QR link) did neither, so a
+  // freshly paired phone had an empty timezone select and no push until a
+  // reload.
+  const p255 = { vapid: 0, prefs: 0 };
+  PAGE_SCENARIOS.push({
+    name: 'P255 pairing with a code loads the saved time zone and turns notifications on, as the page does on a load with a token',
+    waitView: false,
+    before: async (page) => {
+      await page.addInitScript({
+        content: `(function () {
+          // The harness's real token is held back and handed out by the
+          // redeem, so the rest of the page's calls are authorized.
+          var real = localStorage.getItem('qwen-rc-token');
+          localStorage.removeItem('qwen-rc-token');
+          var realFetch = window.fetch;
+          window.fetch = function (u) {
+            if (String(u).indexOf('/rc/pair/redeem') >= 0) {
+              return Promise.resolve(new Response(JSON.stringify({ id: 'tok-255', token: real, scopes: ['owner'] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+            }
+            return realFetch.apply(this, arguments);
+          };
+          var reg = { pushManager: {
+            getSubscription: function () { return Promise.resolve(null); },
+            subscribe: function () { return Promise.resolve({ endpoint: 'https://push.example/p255', toJSON: function () { return { endpoint: 'https://push.example/p255' }; }, unsubscribe: function () { return Promise.resolve(true); } }); },
+          } };
+          window.PushManager = window.PushManager || function () {};
+          Object.defineProperty(Notification, 'permission', { get: function () { return 'granted'; } });
+          navigator.serviceWorker.register = function () { return Promise.resolve(reg); };
+          navigator.serviceWorker.getRegistration = function () { return Promise.resolve(reg); };
+        })();`,
+      });
+      await page.route('**/rc/ui-prefs', (route) => {
+        p255.prefs += 1;
+        return json(route, { stampZone: 'Pacific/Auckland' });
+      });
+      await page.route('**/rc/push/vapid', (route) => {
+        p255.vapid += 1;
+        return json(route, { error: 'not configured' }, 404);
+      });
+    },
+    run: async ({ page }) => {
+      await page.waitForFunction("!document.getElementById('auth-gate').hidden", null, { timeout: 10_000 });
+      expect(p255.prefs === 0 && p255.vapid === 0, 'the gate itself loaded the zone or subscribed');
+      await page.evaluate(`document.getElementById('code').value = 'ABC123'; document.getElementById('pair').click()`);
+      await page.waitForFunction("!document.getElementById('app-body').hidden", null, { timeout: 10_000 });
+      await poll(() => p255.prefs >= 1, 'pairing never loaded the saved time zone');
+      await poll(() => p255.vapid >= 1, 'pairing never turned notifications on');
+      await page.waitForFunction("stampZoneSelect.value === 'Pacific/Auckland'", null, { timeout: 10_000 });
+      return 'after Pair the zone select read Pacific/Auckland and notifications were attempted';
+    },
+  });
+
+  // #173. The fallback model (transcript-model.js did not load) answered every
+  // unknown key with a function, so `transcriptModel.planItem` was truthy and the
+  // to-do strip drew a plan that does not exist.
+  PAGE_SCENARIOS.push({
+    name: 'P256 with the model script missing the to-do strip stays away: the stand-in model has no plan (null), not a function',
+    waitView: false,
+    before: async (page) => {
+      await page.route('**/ui/transcript-model.js', (route) => route.abort());
+    },
+    run: async ({ page }) => {
+      const r = (await page.evaluate(`(() => {
+        renderPlanStrip();
+        return { plan: typeof transcriptModel.planItem, hidden: document.getElementById('plan').hidden, cur: typeof transcriptModel.curAsst, fork: typeof transcriptModel.forkItem };
+      })()`)) as { plan: string; hidden: boolean; cur: string; fork: string };
+      expect(r.plan === 'object' && r.hidden, `the stand-in model's planItem is a ${r.plan} and the strip ${r.hidden ? 'is' : 'is not'} hidden`);
+      expect(r.cur === 'object' && r.fork === 'object', `curAsst is a ${r.cur}, forkItem a ${r.fork}`);
+      return 'planItem, curAsst and forkItem are null on the stand-in; the strip stays hidden';
+    },
+  });
+
+  // #173. "This window joined ... from another window" was never put away: it
+  // stayed over every conversation the reader moved on to.
+  PAGE_SCENARIOS.push({
+    name: 'P257 the note that this window joined a conversation is put away by the switch to another conversation',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await go(page, A);
+      await page.evaluate(`showJoinedNote('p257', '/p257')`);
+      const shown = (await page.evaluate(`!document.getElementById('joined-note').hidden`)) as boolean;
+      expect(shown, 'the joined note did not show');
+      await go(page, B);
+      const after = (await page.evaluate(`document.getElementById('joined-note').hidden`)) as boolean;
+      expect(after, 'the joined note stayed over the next conversation');
+      return 'shown on the joined conversation, hidden by the switch to the next';
+    },
+  });
+
+  // #173. Findings about the old rail and tab bar and the composer, checked
+  // against the H1 layout that replaced them: the rail and the tab bar are
+  // gone, the composer field fits its box, and the crash banner sits above the
+  // transcript where the load-earlier pill cannot cover it.
+  PAGE_SCENARIOS.push({
+    name: 'P258 no sticky rail or tab bar is left to overlap, the composer field fits its box at 390px, and the crash banner is clear of the load-earlier pill',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await go(page, A);
+      const r = (await page.evaluate(`(() => {
+        const rect = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right, t: b.top, b: b.bottom }; };
+        const field = document.querySelector('#composer .field');
+        const prompt = document.getElementById('prompt');
+        showCrashBanner(true);
+        const pill = document.getElementById('load-earlier');
+        pill.hidden = false;
+        const banner = document.getElementById('crash-banner');
+        const bb = rect(banner), pb = rect(pill);
+        return {
+          rail: !!document.getElementById('rail'),
+          tabs: document.querySelectorAll('[role="tab"], [role="tablist"]').length,
+          field: rect(field), prompt: rect(prompt),
+          overlap: !(bb.b <= pb.t || pb.b <= bb.t || bb.r <= pb.l || pb.r <= bb.l),
+          bannerShown: !banner.hidden,
+        };
+      })()`)) as { rail: boolean; tabs: number; field: { l: number; r: number }; prompt: { l: number; r: number }; overlap: boolean; bannerShown: boolean };
+      expect(!r.rail && r.tabs === 0, `a rail (${r.rail}) or ${r.tabs} tab roles are still in the page`);
+      expect(r.prompt.r <= r.field.r + 0.5 && r.prompt.l >= r.field.l - 0.5, `the composer textarea (${r.prompt.l}-${r.prompt.r}) overflows its field (${r.field.l}-${r.field.r})`);
+      expect(r.bannerShown && !r.overlap, `the crash banner (shown ${r.bannerShown}) overlaps the load-earlier pill`);
+      return 'no rail or tab roles; the textarea sits inside its field; the banner and the pill do not overlap';
+    },
+  });
+
+  // #173. The stored-attachment preview minted a same-origin blob with the
+  // mime type the daemon reported, so an uploaded .html or .svg opened in a new
+  // tab ran on the gateway's origin with the page's storage. saveArtifact
+  // already forces application/octet-stream for this reason.
+  PAGE_SCENARIOS.push({
+    name: 'P259 a stored attachment opens as a blob that cannot run: only a raster image keeps its type, html and svg come out as octet-stream',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const kinds: Record<string, string> = {
+        'a.png': 'image/png',
+        'b.html': 'text/html',
+        'c.svg': 'image/svg+xml',
+        'd.txt': 'text/plain',
+      };
+      await page.route(/\/session\/[^/]+\/attachments\/[^/?]+$/, (route) => {
+        const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop() ?? '');
+        return json(route, { data: Buffer.from('<script>1</script>').toString('base64'), mimeType: kinds[name] });
+      });
+      await go(page, A);
+      const typeOf = async (name: string): Promise<string> => {
+        await page.evaluate(`void openStored({ attachmentId: ${JSON.stringify(name)} })`);
+        await page.waitForFunction(`storedPreviewUrl && storedPreviewName === ${JSON.stringify(name)}`, null, { timeout: 10_000 });
+        return (await page.evaluate(`fetch(storedPreviewUrl).then((r) => r.blob()).then((b) => b.type)`)) as string;
+      };
+      const got: Record<string, string> = {};
+      for (const name of Object.keys(kinds)) got[name] = await typeOf(name);
+      expect(got['a.png'] === 'image/png', `a png came out as ${got['a.png']}`);
+      for (const name of ['b.html', 'c.svg', 'd.txt']) {
+        expect(got[name] === 'application/octet-stream', `${name} (${kinds[name]}) came out as ${got[name]}, a type a tab will run or render on the gateway's origin`);
+      }
+      return `blob types ${JSON.stringify(got)}`;
+    },
+  });
+
+  // #173. renderFooter rebuilt the whole sheet on every usage frame, so the mode
+  // buttons and the keep-this-mode box under the reader's finger were replaced
+  // mid-tap and a focused one lost its focus.
+  PAGE_SCENARIOS.push({
+    name: 'P260 a usage frame redraws the context line but leaves the mode buttons and the keep-this-mode box in place, with their focus',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => json(route, context('x')),
+      );
+      await go(page, A);
+      await page.waitForFunction(`document.getElementById('footer-mode-persist')`, null, { timeout: 10_000 });
+      // The sheet is where the controls can be focused, so it is open.
+      await openSheet(page);
+      await page.evaluate(`window.__keep = document.getElementById('footer-mode-persist'); window.__seg = document.querySelector('#session-footer .seg button'); window.__keep.focus();`);
+      // What a usage frame does: the fill changes, then the footer is redrawn.
+      await page.evaluate(`ctxUsage = { total: 1234, window: 100000 }; renderFooter()`);
+      const r = (await page.evaluate(`({
+        keepSame: document.getElementById('footer-mode-persist') === window.__keep,
+        segSame: document.querySelector('#session-footer .seg button') === window.__seg,
+        focus: document.activeElement === window.__keep,
+        fill: document.getElementById('session-footer').textContent.includes('1,234') || /1\\.2k|1234|1%/.test(document.getElementById('session-footer').textContent),
+      })`)) as { keepSame: boolean; segSame: boolean; focus: boolean; fill: boolean };
+      expect(r.keepSame && r.segSame, `the mode controls were replaced by a redraw (${JSON.stringify(r)})`);
+      expect(r.focus, 'the focused keep-this-mode box lost its focus to a redraw');
+      expect(r.fill, 'the context line did not take the new fill');
+      return 'the mode buttons and the box are the same nodes after a redraw, focus kept, fill updated';
+    },
+  });
+
+  // #173. A fork opened with startWatch(id) and no cursor, which clears the
+  // transcript and sends no Last-Event-ID, so the daemon replayed nothing and a
+  // fork of a long conversation opened blank. The fork route returns no cursor,
+  // so the fork is opened the way a rewind is: cleared, then replayed from 0.
+  PAGE_SCENARIOS.push({
+    name: 'P261 a fork opens with its transcript: the new conversation is watched with a replay from event 0, not bare onto a stream that replays nothing',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const FORK = '77777777-8888-9999-aaaa-bbbbbbbbbbbb';
+      await page.route(`**/session/${A}/fork`, (route) => json(route, { sessionId: FORK }));
+      const sent = lastEventIds(page, FORK);
+      await page.evaluate(`window.confirm = () => true; window.prompt = () => ''`);
+      await go(page, A);
+      const forkRow = `transcriptModel.items.find((i) => i.kind === 'fork')`;
+      await page.evaluate(`void turnAct('fork', ${forkRow})`);
+      await page.waitForFunction(`!document.getElementById('h1-ask').hidden`, null, { timeout: 10_000 });
+      await page.evaluate(`document.querySelector('#h1-ask button[data-value="include"]').click()`);
+      await poll(() => sent.length >= 1, 'the fork was never watched');
+      expect(sent[0] === '0', `the fork connected with Last-Event-ID ${JSON.stringify(sent[0])}, wanted 0 (a replay)`);
+      await onAir(page, FORK);
+      return 'the fork was watched with Last-Event-ID 0 and its rows drew';
+    },
+  });
 }
 
 // #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD

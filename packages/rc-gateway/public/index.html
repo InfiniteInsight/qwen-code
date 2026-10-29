@@ -1218,6 +1218,18 @@
       }
       /* Bands that come and go above the transcript keep the column's gutter
          now that the column itself has none. */
+      /* #173. The MCP add/edit form is a column when open. Its layout lives
+         here rather than inline: an inline display beats the hidden
+         attribute, so the form could not be put away. */
+      #ws-mcp-form {
+        margin-top: 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #ws-mcp-form[hidden] {
+        display: none;
+      }
       #pane-chat > #joined-note,
       #pane-chat > #lineage,
       #pane-chat > #crash-banner {
@@ -2921,16 +2933,7 @@
                   gap: 8px;
                 "
               ></div>
-              <div
-                id="ws-mcp-form"
-                hidden
-                style="
-                  margin-top: 6px;
-                  display: flex;
-                  flex-direction: column;
-                  gap: 6px;
-                "
-              ></div>
+              <div id="ws-mcp-form" hidden></div>
             </section>
             <!-- #124. What ONE live conversation has loaded: its skills and the MCP
                  servers its own manager holds. Deliberately not the workspace view.
@@ -4816,7 +4819,16 @@
               : '',
           createTranscriptModel: () =>
             new Proxy(
-              { items: [], curAsst: null, forkItem: null, userTurns: () => [] },
+              // #173: every property the page reads off the model is named
+              // here, because anything else comes back as a function, which
+              // is truthy (planItem read as a plan that is not there).
+              {
+                items: [],
+                curAsst: null,
+                forkItem: null,
+                planItem: null,
+                userTurns: () => [],
+              },
               { get: (model, key) => (key in model ? model[key] : () => {}) },
             ),
         };
@@ -4825,6 +4837,10 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
+      // #173: the id the gateway gave this page's token when it paired, so the
+      // token list can say which row is this device. A page paired before this
+      // was kept has none, and its list marks nothing rather than guessing.
+      const TOKEN_ID_KEY = 'qwen-rc-token-id';
       const WATCHED_KEY = 'qwen-rc:watched-session';
       // #50. Which conversation THIS window is on, per-window, so a second window
       // can hold a second conversation. WATCHED_KEY stays what it was, the last
@@ -5472,6 +5488,7 @@
                 localStorage.getItem(TOKEN_KEY) === tokenAtRequest
               ) {
                 localStorage.removeItem(TOKEN_KEY);
+                localStorage.removeItem(TOKEN_ID_KEY);
                 showAuthGate();
               }
             } catch {
@@ -6655,6 +6672,7 @@
       // buttons drive the same select and the same changeApprovalMode the
       // drawer's select did; the select stays in the box, unshown, as that
       // handler's input. Export moved to the ⋯ menu.
+      let footerModeCache = null; // { sig, col, keep }, see renderFooter
       function renderFooter() {
         const f = $('session-footer');
         renderStatusLine();
@@ -6671,7 +6689,13 @@
         const hasModels =
           Array.isArray(ctxInfo.availableModels) &&
           ctxInfo.availableModels.length > 1;
+        // #173: what had focus in the sheet, to give it back if the redraw
+        // keeps that very node.
+        const hadFocus = f.contains(document.activeElement)
+          ? document.activeElement
+          : null;
         f.innerHTML = '';
+        if (!hasModes) footerModeCache = null;
         let keep = null; // the keep-this-mode box, drawn after the folder
         const row = (label, ...kids) => {
           const r = document.createElement('div');
@@ -6719,64 +6743,82 @@
           const shown = known(ctxInfo.currentModeId)
             ? ctxInfo.currentModeId
             : chosen;
-          const sel = document.createElement('select');
-          sel.id = 'footer-mode';
-          sel.hidden = true;
-          sel.setAttribute('aria-hidden', 'true');
-          sel.tabIndex = -1;
-          const seg = document.createElement('div');
-          seg.className = 'seg';
-          seg.setAttribute('role', 'group');
-          seg.setAttribute('aria-label', 'Approval mode');
-          for (const m of ctxInfo.availableModes) {
-            const o = document.createElement('option');
-            o.value = m.id;
-            o.textContent = m.name;
-            if (m.id === shown) o.selected = true;
-            sel.appendChild(o);
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.dataset.mode = m.id;
-            b.textContent = m.name;
-            b.setAttribute('aria-pressed', String(m.id === shown));
-            b.addEventListener('click', () => {
-              if (m.id === sel.value) return;
-              sel.value = m.id;
-              void changeApprovalMode(sel, cb);
-            });
-            seg.appendChild(b);
+          // #173: the mode buttons and the keep-this-mode box are built once
+          // per state of the mode (the modes offered, the one shown, the note).
+          // A usage frame redraws this sheet to move the fill, and replacing
+          // the controls under a finger dropped the tap and the focus.
+          const modeSig = JSON.stringify([
+            ctxInfo.availableModes.map((m) => [m.id, m.name]),
+            shown,
+            chosen && known(ctxInfo.currentModeId) && chosen !== shown
+              ? known(chosen).name
+              : '',
+            watchedSessionId,
+          ]);
+          if (footerModeCache && footerModeCache.sig === modeSig) {
+            f.append(footerModeCache.col);
+            keep = footerModeCache.keep;
+          } else {
+            const sel = document.createElement('select');
+            sel.id = 'footer-mode';
+            sel.hidden = true;
+            sel.setAttribute('aria-hidden', 'true');
+            sel.tabIndex = -1;
+            const seg = document.createElement('div');
+            seg.className = 'seg';
+            seg.setAttribute('role', 'group');
+            seg.setAttribute('aria-label', 'Approval mode');
+            for (const m of ctxInfo.availableModes) {
+              const o = document.createElement('option');
+              o.value = m.id;
+              o.textContent = m.name;
+              if (m.id === shown) o.selected = true;
+              sel.appendChild(o);
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.dataset.mode = m.id;
+              b.textContent = m.name;
+              b.setAttribute('aria-pressed', String(m.id === shown));
+              b.addEventListener('click', () => {
+                if (m.id === sel.value) return;
+                sel.value = m.id;
+                void changeApprovalMode(sel, cb);
+              });
+              seg.appendChild(b);
+            }
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.id = 'footer-mode-persist';
+            cb.title = 'persist this mode for future sessions in this workspace';
+            // #182: the box is rebuilt with the sheet on every render, so its
+            // state has to come from somewhere other than the old node.
+            cb.checked = uiRead(MODE_PERSIST_NAME, (v) => v === true) === true;
+            cb.addEventListener('change', () =>
+              uiWrite(MODE_PERSIST_NAME, cb.checked ? true : undefined),
+            );
+            const note = document.createElement('span');
+            note.id = 'footer-mode-note';
+            if (chosen && known(ctxInfo.currentModeId) && chosen !== shown) {
+              note.textContent = 'last set here: ' + known(chosen).name;
+            }
+            // Kept as the select's own change path too, so anything that sets
+            // the select the old way still reaches the same handler.
+            sel.addEventListener('change', () => changeApprovalMode(sel, cb));
+            const col = document.createElement('div');
+            col.className = 'sh-col';
+            const l = document.createElement('span');
+            l.className = 'sh-lbl';
+            l.textContent = 'Mode';
+            col.append(l, seg, note, sel);
+            f.append(col);
+            keep = document.createElement('label');
+            keep.className = 'keep';
+            keep.append(
+              cb,
+              document.createTextNode(' Keep this mode for new conversations here'),
+            );
+            footerModeCache = { sig: modeSig, col, keep };
           }
-          const cb = document.createElement('input');
-          cb.type = 'checkbox';
-          cb.id = 'footer-mode-persist';
-          cb.title = 'persist this mode for future sessions in this workspace';
-          // #182: the box is rebuilt with the sheet on every render, so its
-          // state has to come from somewhere other than the old node.
-          cb.checked = uiRead(MODE_PERSIST_NAME, (v) => v === true) === true;
-          cb.addEventListener('change', () =>
-            uiWrite(MODE_PERSIST_NAME, cb.checked ? true : undefined),
-          );
-          const note = document.createElement('span');
-          note.id = 'footer-mode-note';
-          if (chosen && known(ctxInfo.currentModeId) && chosen !== shown) {
-            note.textContent = 'last set here: ' + known(chosen).name;
-          }
-          // Kept as the select's own change path too, so anything that sets
-          // the select the old way still reaches the same handler.
-          sel.addEventListener('change', () => changeApprovalMode(sel, cb));
-          const col = document.createElement('div');
-          col.className = 'sh-col';
-          const l = document.createElement('span');
-          l.className = 'sh-lbl';
-          l.textContent = 'Mode';
-          col.append(l, seg, note, sel);
-          f.append(col);
-          keep = document.createElement('label');
-          keep.className = 'keep';
-          keep.append(
-            cb,
-            document.createTextNode(' Keep this mode for new conversations here'),
-          );
         } else if (ctxInfo.modeName) {
           // The mode name renders as text only when there is no control (a
           // single available mode).
@@ -6831,6 +6873,9 @@
         f.append(hostActsSheet);
         if (keep) f.append(keep);
         f.style.display = '';
+        if (hadFocus && hadFocus.isConnected && document.activeElement !== hadFocus) {
+          hadFocus.focus({ preventScroll: true });
+        }
       }
 
       // #184. The status line: a dot and a word for what the conversation is
@@ -7192,6 +7237,10 @@
       // daemon the gateway was started in); otherwise a cwd string sent as
       // the `workspace` query/body field on every /rc/workspace/* call.
       let wsTargetCwd = null;
+      // #173: true while the target is one the page chose for the conversation
+      // on screen, false once the reader picked it (or it is the default).
+      // Only an automatic target is moved when the next conversation opens.
+      let wsTargetAuto = false;
       // Non-default cwds the pool currently holds (from GET /rc/workspaces),
       // merged with cwds of sessions opened in this tab so the selector can
       // offer workspaces before the first control call has spawned one.
@@ -7277,8 +7326,9 @@
       // Switch which workspace the sections act on. Resets every cached
       // snapshot and re-seeds each section with its Load placeholder so no
       // section can display another workspace's data.
-      function setWsTarget(cwd) {
+      function setWsTarget(cwd, auto) {
         cwd = cwd || null;
+        wsTargetAuto = !!auto && cwd !== null;
         if (cwd === wsTargetCwd) return;
         wsTargetCwd = cwd;
         if (cwd && !wsKnownWorkspaces.includes(cwd))
@@ -7290,9 +7340,12 @@
         wsLastData.files = null;
         wsLastData.perms = null;
         wsFilesPath = '.';
+        permRulesDirty = false; // another workspace's rules replace these
         renderWsTargetLabels();
-        const form = $('ws-mcp-form');
-        if (form) form.hidden = true;
+        // #173: closed AND emptied. An edit opened for the old workspace posts
+        // its set to wsTargetBody(), which is the new one by the time it is
+        // saved.
+        if ($('ws-mcp-form')) hideMcpServerForm();
         renderWsSectionPlaceholder('ws-trust-body', 'Load', (n) =>
           loadWorkspaceTrust(n),
         );
@@ -7392,6 +7445,7 @@
             x.style.marginLeft = '4px';
             x.addEventListener('click', () => {
               rules.splice(i, 1);
+              permRulesDirty = true;
               renderPermRulesSection();
             });
             chip.appendChild(x);
@@ -7418,6 +7472,7 @@
             const v = inp.value.trim();
             if (!v) return;
             rules.push(v);
+            permRulesDirty = true;
             renderPermRulesSection();
           });
           const save = document.createElement('button');
@@ -7436,8 +7491,15 @@
         }
       }
 
+      // #173: set while the lists on screen hold an add or a remove that was not
+      // saved. A background load (a stream connect, a switch of conversation)
+      // leaves them alone; the reader's own Refresh, a save and a switch of
+      // workspace replace them.
+      let permRulesDirty = false;
       async function loadPermRules(notify) {
         if (!permRulesGate()) return;
+        if (permRulesDirty && !notify) return;
+        if (notify) permRulesDirty = false;
         try {
           const res = await fetch(wsTargetQuery('/rc/workspace/permissions'), {
             headers: { Authorization: 'Bearer ' + token() },
@@ -7491,6 +7553,7 @@
             const body = await res.json().catch(() => ({}));
             if (res.status === 409 && body.code === 'stale_base') {
               st.textContent = 'conflict — rules changed, reloading…';
+              permRulesDirty = false; // the reload is what the reader reviews
               await loadPermRules(false);
               st.textContent = 'rules changed — review and retry';
               setStatus(
@@ -7512,6 +7575,7 @@
             return;
           }
           permRules = await res.json();
+          permRulesDirty = false;
           st.textContent = 'saved';
           renderPermRulesSection();
         } catch (err) {
@@ -8272,17 +8336,50 @@
             btn.disabled = false;
             return;
           }
-          // 'set' re-assigns the server from its (non-secret-rendered) status
-          // config; 'remove' deletes the named entry. The daemon rewrites the
-          // whole mcpServers map, so a reload follows.
-          const payload = !server.disabled
-            ? { operation: 'remove', name: server.name, ...wsTargetBody() }
-            : {
-                operation: 'set',
-                name: server.name,
-                config: server.config || {},
-                ...wsTargetBody(),
-              };
+          // 'set' re-assigns the server; 'remove' deletes the named entry. The
+          // daemon rewrites the whole mcpServers map, so a reload follows.
+          let payload;
+          if (!server.disabled) {
+            // #173: removing drops the entry and its env, headers and secrets
+            // with it, so it is asked first, by name.
+            if (
+              !window.confirm(
+                'Disable "' +
+                  server.name +
+                  '"? Its entry is removed from the workspace settings, ' +
+                  'including its env, headers and tool lists.',
+              )
+            ) {
+              btn.disabled = false;
+              return;
+            }
+            payload = {
+              operation: 'remove',
+              name: server.name,
+              ...wsTargetBody(),
+            };
+          } else {
+            // #173: the status config is a five-field subset, and 'set'
+            // replaces the whole entry, so sending it alone deleted the env,
+            // headers, oauth, timeout, trust and tool lists. The stored entry
+            // (secrets still redacted, which the daemon restores when saved
+            // unchanged) is what the status fields are laid over.
+            const stored = await fetchMcpServerConfig(server.name);
+            if (stored.source === 'none') {
+              status.textContent =
+                'could not read the current config of "' +
+                server.name +
+                '", so nothing was written (enable would replace it with a partial copy); use edit config';
+              btn.disabled = false;
+              return;
+            }
+            payload = {
+              operation: 'set',
+              name: server.name,
+              config: { ...(server.config || {}), ...stored.config },
+              ...wsTargetBody(),
+            };
+          }
           // Send the version from the last GET so the gateway can reject a
           // stale write (another writer changed the server list in the
           // window) instead of silently clobbering it.
@@ -8314,6 +8411,22 @@
             return;
           }
           await reloadMcpServers();
+          // #173: enabling writes the server's entry; it does not touch the
+          // exclusion list, so a server listed there stays off. Said rather
+          // than left looking like a success.
+          if (server.disabled && wsLastData.mcp) {
+            const after = (wsLastData.mcp.servers || []).find(
+              (x) => x && x.name === server.name,
+            );
+            if (after && after.disabled) {
+              wsSectionStatusEl('ws-mcp-status').textContent =
+                '"' +
+                server.name +
+                '" is still disabled: it is switched off by a setting this page does not edit (' +
+                (after.disabledReason || 'unknown reason') +
+                ')';
+            }
+          }
         } catch (err) {
           status.textContent = 'change failed: ' + err.message;
           btn.disabled = false;
@@ -9097,18 +9210,26 @@
           if (gen !== switchGen) return;
           ctxInfo = parseContext(body);
           renderFooter();
+          // #173: the list spans the current folder and the recent ones, so
+          // the folder of the conversation on screen has to be among them, or
+          // a conversation opened by a deep link into a folder never listed
+          // shows $HOME's rows and not its own.
+          if (ctxInfo.cwd) noteWatchedFolder(ctxInfo.cwd);
           // rc-workspace-scoping (#28): watching a session in a non-default
-          // workspace targets the workspace controls at it — but only when
-          // nothing is explicitly selected (never hijack a manual choice)
-          // and the session cwd actually differs from the boot workspace.
+          // workspace targets the workspace controls at it, but never over a
+          // target the reader picked. #173: a target the page itself chose
+          // for the last conversation is followed on, to this one's folder or
+          // back to the boot workspace, instead of sticking to the first.
           if (
-            wsTargetCwd === null &&
+            (wsTargetCwd === null || wsTargetAuto) &&
             ctxInfo.cwd &&
             caps &&
-            caps.workspaceCwd &&
-            ctxInfo.cwd !== caps.workspaceCwd
+            caps.workspaceCwd
           ) {
-            setWsTarget(ctxInfo.cwd);
+            setWsTarget(
+              ctxInfo.cwd !== caps.workspaceCwd ? ctxInfo.cwd : null,
+              true,
+            );
           }
         } catch {
           /* transient; leave footer as-is */
@@ -9906,8 +10027,12 @@
           // then run the standard watch hand-off (no freeform id field
           // anymore, so the hand-off is a direct startWatch call).
           if ($('watch').disabled) $('stop').onclick();
+          // #173: the fork route returns no cursor, so this is the rewind's
+          // move: clear, then replay from 0. With no cursor startWatch sent no
+          // Last-Event-ID and the fork opened blank.
           lastSeenEventId = null;
-          startWatch(data.sessionId);
+          clearTranscript(data.sessionId);
+          startWatch(data.sessionId, 0);
         } catch (e) {
           if (gen !== switchGen) return show(false, '');
           show(false, 'fork error: ' + e);
@@ -10261,6 +10386,12 @@
           }
           const data = await res.json();
           localStorage.setItem(TOKEN_KEY, data.token);
+          try {
+            if (data.id) localStorage.setItem(TOKEN_ID_KEY, String(data.id));
+            else localStorage.removeItem(TOKEN_ID_KEY);
+          } catch {
+            /* private mode: the list just marks nothing */
+          }
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
           // Task #27: authGate() ran before any token existed, so fetch the
@@ -10295,6 +10426,11 @@
           // tokens reveal the daemon switcher + the "all daemons" search
           // toggle (add-multi-workspace-client task 4.1).
           void loadDaemonManifest();
+          // #173: the two things the load-with-a-token path does that this one
+          // skipped, so a freshly paired phone had an empty time zone select
+          // and no push until a reload.
+          void loadStampZone();
+          void autoEnableNotifications();
           // A fresh device may arrive via a push deep link (#40) and pair
           // from the auth gate: authGate() won't re-run after pairing, so
           // handle any surviving ?session= param here (no-op if absent).
@@ -12382,10 +12518,17 @@
           typeof body.mimeType === 'string' && body.mimeType.length > 0
             ? body.mimeType
             : 'application/octet-stream';
-        const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        // #173: the blob lives on the gateway's origin, so a type a tab will
+        // run (html, svg, xml) would run an uploaded file with this page's
+        // storage. Only a raster image keeps its type; everything else is
+        // served as bytes, as saveArtifact does.
+        const blobType = /^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(mime)
+          ? mime.toLowerCase()
+          : 'application/octet-stream';
+        const url = URL.createObjectURL(new Blob([bytes], { type: blobType }));
         if (storedPreviewUrl) URL.revokeObjectURL(storedPreviewUrl);
         storedPreviewUrl = url;
-        storedPreviewMime = mime;
+        storedPreviewMime = blobType;
         storedPreviewName = entry.attachmentId;
         storedPreviewNote = '';
         renderStoredPreview();
@@ -14604,6 +14747,28 @@
         });
       }
 
+      // #173: files the folder of the conversation on screen with the recent
+      // ones, and reads the list again when that adds a folder to it.
+      function noteWatchedFolder(cwd) {
+        const folder = normalizeWorkspacePath(cwd);
+        if (!folder) return;
+        if (listFolders().includes(folder)) return;
+        // Added at the foot, not pushed to the front: opening a conversation
+        // is not choosing a folder to start in, so it must not reorder the
+        // folders the reader chose. When the set is full the last one makes
+        // room.
+        const list = loadRecentWorkspaces();
+        if (list.includes(folder)) return;
+        list.splice(Math.min(list.length, MAX_RECENT - 1), MAX_RECENT, folder);
+        try {
+          localStorage.setItem(WORKSPACES_KEY, JSON.stringify(list.slice(0, MAX_RECENT)));
+        } catch {
+          /* storage full/unavailable: best effort */
+        }
+        renderRecentWorkspaces();
+        if (curDirPath) void refreshPastConversations(curDirPath);
+      }
+
       // GET /rc/sessions?cwd=<cwd> (Bearer/OWNER). Renders only if `cwd` is
       // STILL the folder browser's current path by the time the response
       // lands — guards a slow response from an earlier browse arriving AFTER
@@ -14731,6 +14896,8 @@
       // the merge. The current folder unreadable is drawn empty, as it always
       // was; another folder unreadable keeps its last read, so a blip on one
       // folder does not blank its rows until the next tick.
+      // #173: the folder whose last read failed, so the failure is said once.
+      let folderReadFailedFor = null;
       async function refreshPastConversations(cwd) {
         if (!token()) {
           renderPastConversations([], cwd);
@@ -14746,11 +14913,28 @@
           if (f === cwd) mine = reads[i];
           else if (reads[i]) folderRows.set(f, reads[i]);
         });
-        renderPastConversations(
-          mine ? mine.sessions : [],
-          cwd,
-          mine ? mine.truncated : false,
-        );
+        // #173: a failed read of the current folder is not an empty folder.
+        // The last read of it stays on screen, and the failure is said once
+        // (not on every 30 s tick it goes on failing).
+        if (!mine) {
+          const last = folderRows.get(cwd);
+          if (folderReadFailedFor !== cwd) {
+            folderReadFailedFor = cwd;
+            setStatus(
+              'could not read the conversations in ' +
+                cwd +
+                (last ? ', showing the last list' : ''),
+            );
+          }
+          renderPastConversations(
+            last ? last.sessions : [],
+            cwd,
+            last ? last.truncated : false,
+          );
+          return;
+        }
+        folderReadFailedFor = null;
+        renderPastConversations(mine.sessions, cwd, mine.truncated);
       }
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
@@ -15283,6 +15467,9 @@
         // composer alone.
         const switching = id !== watchedSessionId;
         if (switching) {
+          // #173: the note says this window joined the conversation it is
+          // leaving, so it goes with it.
+          hideJoinedNote();
           saveDraft();
           // The reader's place in the conversation being left is saved now,
           // while its rows are still the ones on screen.
@@ -15568,8 +15755,11 @@
         // New-conversation button), which runs its own watch hand-off.
         if (!watchedSessionId)
           return setStatus('pick a conversation from the list first');
-        lastSeenEventId = null;
-        startWatch(watchedSessionId);
+        // #173: the rows are still on screen (Watch is only live once the
+        // stream has ended), so this is the Reconnect button's move: carry on
+        // from the last event seen. With no cursor startWatch cleared the
+        // transcript and the daemon replayed nothing.
+        startWatch(watchedSessionId, lastSeenEventId ?? 0, watchedSessionTitle);
       };
 
       // issue #48: notifications are on by default. The Settings toggle
@@ -15577,6 +15767,9 @@
       // pushManager); boot auto-enables unless the user opted out
       // (localStorage flag, set when the toggle is switched off).
       let notifSwReg = null;
+      // #173: why the last attempt to turn notifications on did not take, so the
+      // Settings row can say it while the toggle reads off.
+      let notifError = '';
 
       const pushSupported = () =>
         'serviceWorker' in navigator &&
@@ -15618,7 +15811,8 @@
           Notification.permission === 'denied'
             ? 'disabled — browser permission denied (re-allow it in the site settings)'
             : Notification.permission === 'granted'
-              ? 'disabled'
+              ? 'disabled' +
+                (notifError ? ': ' + notifError + ', will retry on the next load' : '')
               : 'disabled — browser permission not asked yet';
       }
 
@@ -15639,20 +15833,39 @@
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(applicationServerKey),
         });
-        const subRes = await fetch('/rc/push/subscribe', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + token(),
-          },
-          body: JSON.stringify({
-            subscription: sub.toJSON ? sub.toJSON() : sub,
-          }),
-        });
-        idbPutToken(token());
-        if (subRes.status !== 201) {
-          throw new Error('subscribe failed (' + subRes.status + ')');
+        // #173: the browser keeps the subscription the moment subscribe()
+        // returns, whether or not the gateway ever hears of it. Left in place
+        // after a refusal it read as "enabled" and made every boot return early
+        // on "already enabled", so no push could arrive. A failure of any kind
+        // here gives it back, so the next boot starts over.
+        let failure = '';
+        try {
+          const subRes = await fetch('/rc/push/subscribe', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({
+              subscription: sub.toJSON ? sub.toJSON() : sub,
+            }),
+          });
+          idbPutToken(token());
+          if (subRes.status !== 201) {
+            failure = 'subscribe failed (' + subRes.status + ')';
+          }
+        } catch (e) {
+          failure = 'subscribe failed (' + ((e && e.message) || e) + ')';
         }
+        if (failure) {
+          try {
+            await sub.unsubscribe();
+          } catch (e) {
+            /* the browser may already have dropped it */
+          }
+          throw new Error(failure);
+        }
+        notifError = '';
       }
 
       // Returns 'ok' | 'denied' | 'not-granted' (prompt never showed) |
@@ -15732,14 +15945,23 @@
             // The browser will not prompt without a user gesture; try
             // again on the first click.
             const onFirstClick = () => {
-              void enableNotifications().then((r2) => {
-                if (r2 === 'ok') void refreshNotifToggle();
-              });
+              void enableNotifications()
+                .then((r2) => {
+                  if (r2 === 'ok') void refreshNotifToggle();
+                })
+                .catch((e2) => {
+                  notifError = String((e2 && e2.message) || e2);
+                  setStatus('notifications: ' + notifError);
+                  void refreshNotifToggle();
+                });
             };
             document.addEventListener('click', onFirstClick, { once: true });
           }
         } catch (e) {
-          /* best-effort at boot — the Settings toggle is the manual path */
+          // Best-effort at boot, and the Settings toggle is the manual path,
+          // but a refusal is said (#173): silence read as notifications on.
+          notifError = String((e && e.message) || e);
+          setStatus('notifications: ' + notifError);
         } finally {
           void refreshNotifToggle();
         }
@@ -15934,6 +16156,16 @@
       // textContent (a server-set `label`/`scopes` can't inject markup) —
       // mirrors renderPermissionCard, never innerHTML. Self-contained.
       async function revokeToken(id, row, btn) {
+        // #173: the page's own token is the one it signs in with.
+        const own = id === localStorage.getItem(TOKEN_ID_KEY);
+        if (
+          !window.confirm(
+            own
+              ? 'Revoke the token this device signs in with? This page is signed out and has to pair again.'
+              : 'Revoke token ' + id + '? Whatever uses it stops working.',
+          )
+        )
+          return;
         btn.disabled = true;
         try {
           const res = await fetch('/rc/tokens/' + encodeURIComponent(id), {
@@ -15983,7 +16215,10 @@
               '  [' +
               (t.scopes || []).join(',') +
               ']  ' +
-              t.id;
+              t.id +
+              (t.id === localStorage.getItem(TOKEN_ID_KEY)
+                ? '  (this device)'
+                : '');
             const btn = document.createElement('button');
             btn.textContent = 'Revoke';
             btn.onclick = () => revokeToken(t.id, row, btn);
@@ -16546,12 +16781,18 @@
               .slice(0, 16)
               .replace('T', ' ') +
             ')';
-          // Spec 4.5: clicking a session navigates to that daemon's
-          // /ui/session/<sid> (full navigation to the source daemon).
-          open.onclick = () =>
-            location.assign(
-              u.base + '/ui/session/' + encodeURIComponent(u.s.sessionId),
-            );
+          // Spec 4.5: clicking a session navigates to that daemon. #173: to its
+          // /ui/?session= deep link (the gateway serves no /ui/session/<sid>,
+          // so the old target was a 404), and in place for this gateway's own
+          // rows, which need no reload.
+          open.onclick = () => {
+            if (new URL(u.base).origin === location.origin) {
+              noteConversationSwitch();
+              void openConversationById(String(u.s.sessionId));
+              return;
+            }
+            location.assign(openOnDaemonUrl(u.base, u.s.sessionId));
+          };
           row.appendChild(open);
           out.appendChild(row);
         }
@@ -16748,6 +16989,48 @@
       // stale/invalid stored token would still fire these eagerly before the
       // auth gate has validated it. See restoreWatchedSession(), used there.
 
+      // #173: open a conversation known only by its id (a push deep link, a
+      // search hit). The folder is not known, so the recent folders are probed
+      // for it and the match is resumed, which loads the transcript in-band; if
+      // none lists it the watch replays from 0 so a persisted transcript
+      // rebuilds. A watch with no cursor would clear the rows and replay
+      // nothing. `ready` is a promise to wait on before the switch (the deep
+      // link's pending-card read).
+      async function openConversationById(id, ready) {
+        // #172: the probe can take a folder's worth of reads, and a reader
+        // who taps another conversation meanwhile has answered it. Without
+        // this the probe's resume landed last and took the page back.
+        const gen = switchGen;
+        for (const cwd of loadRecentWorkspaces()) {
+          try {
+            const res = await fetch(
+              '/rc/sessions?cwd=' + encodeURIComponent(cwd),
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            if (gen !== switchGen) return;
+            if (!res.ok) continue;
+            const body = await res.json();
+            if (gen !== switchGen) return;
+            const s = (body.sessions || []).find((x) => x && x.sessionId === id);
+            if (s) {
+              if (ready) await ready;
+              if (gen !== switchGen) return;
+              void resumeConversation(id, cwd, strOr(s.title, ''), {
+                hostTerminal: true,
+              });
+              return;
+            }
+          } catch {
+            /* unreachable workspace: keep probing */
+          }
+        }
+        // No recent workspace listed it: replay from 0, like
+        // restoreWatchedSession, so a persisted transcript rebuilds.
+        if (ready) await ready;
+        if (gen !== switchGen) return;
+        void startWatch(id, 0);
+      }
+
       // Turn-end push deep link (#40): a push notification's URL is
       // /ui/?session=<id>. The push payload is metadata-only — it carries
       // NO cwd — so the session's workspace is resolved by probing the
@@ -16793,42 +17076,7 @@
           refreshPendingCards(id, true),
           new Promise((r) => setTimeout(r, 1500)),
         ]);
-        void (async () => {
-          // #172: the probe can take a folder's worth of reads, and a reader
-          // who taps another conversation meanwhile has answered it. Without
-          // this the probe's resume landed last and took the page back.
-          const gen = switchGen;
-          for (const cwd of loadRecentWorkspaces()) {
-            try {
-              const res = await fetch(
-                '/rc/sessions?cwd=' + encodeURIComponent(cwd),
-                { headers: { Authorization: 'Bearer ' + token() } },
-              );
-              if (gen !== switchGen) return;
-              if (!res.ok) continue;
-              const body = await res.json();
-              if (gen !== switchGen) return;
-              const s = (body.sessions || []).find(
-                (x) => x && x.sessionId === id,
-              );
-              if (s) {
-                await pinned;
-                if (gen !== switchGen) return;
-                void resumeConversation(id, cwd, strOr(s.title, ''), {
-                  hostTerminal: true,
-                });
-                return;
-              }
-            } catch {
-              /* unreachable workspace — keep probing */
-            }
-          }
-          // No recent workspace listed it: replay from 0, like
-          // restoreWatchedSession, so a persisted transcript rebuilds.
-          await pinned;
-          if (gen !== switchGen) return;
-          void startWatch(id, 0);
-        })();
+        void openConversationById(id, pinned);
         return true;
       }
 
@@ -17006,6 +17254,12 @@
       // sync before the await, collapse the row to text on success (destroys
       // the detached buttons -> no dangling handler), re-enable on error.
       async function unsubscribeSub(id, row, btn) {
+        if (
+          !window.confirm(
+            'Unsubscribe ' + id + '? That device stops getting notifications.',
+          )
+        )
+          return;
         btn.disabled = true;
         try {
           const res = await fetch(
@@ -17113,7 +17367,18 @@
       // recency sort, timeout). THE riskiest line is rendering hit.snippet —
       // it is arbitrary transcript text (user/model/tool), so it goes through
       // textContent ONLY (never innerHTML), like every other server field.
-      function searchHitRow(h, daemonName) {
+      // #173: where another daemon opens a conversation named by id: its own
+      // page, on the deep link (/ui/ serves no per-session path).
+      function openOnDaemonUrl(daemonUrl, sessionId) {
+        return (
+          daemonUrl.replace(/\/+$/, '') +
+          '/ui/?session=' +
+          encodeURIComponent(sessionId)
+        );
+      }
+      // #173: `daemon` is the manifest entry the hit came from, or undefined
+      // for this gateway's own.
+      function searchHitRow(h, daemon) {
         const row = document.createElement('div');
         // Dedicated column layout (not .token-row's space-between flex) so the
         // snippet sits BENEATH the header and a long unbroken snippet wraps.
@@ -17122,7 +17387,7 @@
         // Multi-daemon fan-out (spec 4.7): tag each hit with its source
         // daemon. Omitted for the local (origin) daemon — its results stay
         // authoritative and render exactly as before.
-        if (daemonName) head.appendChild(daemonPill(daemonName));
+        if (daemon) head.appendChild(daemonPill(daemon.name));
         const label = document.createElement('span');
         label.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
         // Open (cycle 65): reuse the existing watch panel — hand straight to
@@ -17130,11 +17395,22 @@
         const open = document.createElement('button');
         open.textContent = 'Open';
         open.onclick = () => {
-          // If a stream is already active, abort it first (else the new watch
-          // overwrites the module-level controller and orphans the old stream).
-          if ($('watch').disabled) $('stop').onclick();
-          lastSeenEventId = null;
-          startWatch(h.sessionId);
+          // #173: the hit names no folder, so the open goes the way a deep link
+          // does (find the folder and resume, else replay from 0) rather than
+          // startWatch with no cursor, which blanked the transcript and
+          // replayed nothing. Nothing is torn down first: startWatch replaces
+          // the live stream itself, and a stop here left the page empty while
+          // the probe was still reading.
+          if (daemon) {
+            // Another daemon's conversation lives on that daemon: this page
+            // would watch the id on THIS gateway (a 404) after tearing down
+            // the current watch. Its own page opens it from the deep link.
+            location.assign(openOnDaemonUrl(daemon.url, h.sessionId));
+            return;
+          }
+          if (!token()) return setStatus('pair first');
+          noteConversationSwitch();
+          void openConversationById(h.sessionId);
         };
         head.appendChild(label);
         head.appendChild(open);
@@ -17273,7 +17549,7 @@
                   continue;
                 }
                 for (const h2 of v.hits)
-                  out.appendChild(searchHitRow(h2, v.d.name));
+                  out.appendChild(searchHitRow(h2, v.d));
               }
               // …then one footer note per failed / empty daemon (spec 4.7:
               // a daemon's absence must NOT fail the modal).
@@ -17451,6 +17727,12 @@
       // revoke (story L3). Mirrors cycle-56 token management; ShareInfo carries
       // NO token value. textContent/createElement only.
       async function revokeShare(id, row, btn) {
+        if (
+          !window.confirm(
+            'Revoke share ' + id + '? The link stops working for whoever holds it.',
+          )
+        )
+          return;
         btn.disabled = true;
         try {
           const res = await fetch('/rc/share/' + encodeURIComponent(id), {
@@ -18156,8 +18438,14 @@
           'rewound to turn ' + r.body.toTurn + ' — re-syncing transcript',
         );
         // Re-sync: re-watch from event 0 so the transcript reflects the
-        // truncation (startWatch clears and replays the shortened history).
-        void startWatch(id);
+        // truncation. #173: with no cursor startWatch sends no Last-Event-ID,
+        // so the daemon replays nothing and the conversation came back empty
+        // and marked streaming. Asking for the replay is what rebuilds it; the
+        // rows are cleared here first because a cursor watch keeps what is on
+        // screen, and the discarded turns must not stay under the replay.
+        lastSeenEventId = null;
+        clearTranscript(id);
+        void startWatch(id, 0, watchedSessionTitle);
       };
 
       // #184: Rewind to here, under a turn's answer. The same picker and the
@@ -18511,6 +18799,14 @@
           btn.textContent = 'drop';
           btn.style.marginLeft = '6px';
           btn.onclick = async () => {
+            if (
+              !window.confirm(
+                p.state === 'queued'
+                  ? 'Drop this queued message? It will not run.'
+                  : 'Cancel the turn that is running?',
+              )
+            )
+              return;
             btn.disabled = true;
             const c = await rcCall(
               '/session/' +
@@ -19571,6 +19867,12 @@
             const btn = document.createElement('button');
             btn.textContent = 'Remove';
             btn.onclick = async () => {
+              if (
+                !window.confirm(
+                  'Remove ' + o.origin + '? Pages on it can no longer call this gateway.',
+                )
+              )
+                return;
               btn.disabled = true;
               try {
                 const res = await fetch(
@@ -19943,7 +20245,18 @@
             const shouldSend =
               $('dictate-autosend').checked && gotFinal && !errored;
             reset();
-            if (shouldSend) $('send').onclick();
+            if (shouldSend) {
+              // #173: through the press, as drainOutbox does, not a direct call
+              // of the handler: a click honours the disabled state, a direct
+              // call does not. A second POST went out mid-turn and Send came
+              // back enabled with its label stuck on "waiting...". The words
+              // stay in the composer when Send is held.
+              if ($('send').disabled) {
+                setStatus('voice: a send is in flight, the words stay in the composer');
+              } else {
+                $('send').click();
+              }
+            }
           };
           try {
             rec.start();
