@@ -21573,6 +21573,66 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. The list is the current folder's conversations plus the recent
+  // folders'. A conversation opened by a deep link into a folder the page had
+  // never listed left that folder out, so the list showed $HOME's rows and not
+  // the folder of the conversation on screen.
+  PAGE_SCENARIOS.push({
+    name: "P252 the list includes the folder of the conversation on screen, even one opened without ever browsing or creating there",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const FOLDER = '/p252/proj';
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === FOLDER && !u.searchParams.has('archiveState'),
+        (route) => json(route, { sessions: [{ sessionId: 'p252-row', title: 'p252 in proj', updatedAt: '2026-01-01T00:00:00Z' }], truncated: false }),
+      );
+      await page.route(
+        (u) => contextRoute(u),
+        (route) => json(route, { ...(context('x') as object), workspaceCwd: FOLDER }),
+      );
+      const before = (await page.evaluate('listFolders()')) as string[];
+      expect(!before.includes(FOLDER), `the folder was listed before anything was opened (${JSON.stringify(before)})`);
+      await go(page, A);
+      await page.waitForFunction(`pastConvos.some((s) => s.sessionId === 'p252-row')`, null, { timeout: 10_000 }).catch(() => {});
+      const folders = (await page.evaluate('listFolders()')) as string[];
+      const rows = (await page.evaluate(`pastConvos.map((s) => s.sessionId)`)) as string[];
+      expect(folders.includes(FOLDER), `the list does not span the watched folder (${JSON.stringify(folders)})`);
+      expect(rows.includes('p252-row'), `the folder's conversation is not in the list (${JSON.stringify(rows)})`);
+      return `the list spans ${JSON.stringify(folders)} and holds p252-row`;
+    },
+  });
+
+  // #173. A /rc/sessions read that failed drew an empty folder and emptied the
+  // list, which reads as "no conversations" and not as "could not read".
+  PAGE_SCENARIOS.push({
+    name: "P253 a failed read of the current folder keeps the last list on screen and says it could not read, instead of drawing an empty folder",
+    waitView: false,
+    run: async ({ page }) => {
+      const FOLDER = '/p253/dir';
+      let failing = false;
+      await page.route(
+        (u) => u.pathname === '/rc/sessions' && u.searchParams.get('cwd') === FOLDER && !u.searchParams.has('archiveState'),
+        (route) =>
+          failing
+            ? route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"disk"}' })
+            : json(route, { sessions: [{ sessionId: 'p253-row', title: 'p253 row', updatedAt: '2026-01-01T00:00:00Z' }], truncated: false }),
+      );
+      const ids = (): Promise<string[]> => page.evaluate(`pastConvos.map((s) => s.sessionId)`) as Promise<string[]>;
+      // As if the reader had browsed there, once the boot's own browse is in.
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd === curDirPath', null, { timeout: 10_000 });
+      await page.evaluate(`curDirPath = ${JSON.stringify(FOLDER)}; void refreshPastConversations(${JSON.stringify(FOLDER)})`);
+      await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(FOLDER)} && pastConvos.length === 1`, null, { timeout: 10_000 });
+      failing = true;
+      await page.evaluate(`void refreshPastConversations(${JSON.stringify(FOLDER)})`);
+      await page.waitForTimeout(800);
+      expect((await ids()).join() === 'p253-row', `the failed read emptied the list (${JSON.stringify(await ids())})`);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(/could not read/i.test(status), `the failure was not said (${JSON.stringify(status)})`);
+      return 'a failed read kept p253-row and said it could not read the folder';
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 

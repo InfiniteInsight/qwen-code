@@ -9168,6 +9168,11 @@
           if (gen !== switchGen) return;
           ctxInfo = parseContext(body);
           renderFooter();
+          // #173: the list spans the current folder and the recent ones, so
+          // the folder of the conversation on screen has to be among them, or
+          // a conversation opened by a deep link into a folder never listed
+          // shows $HOME's rows and not its own.
+          if (ctxInfo.cwd) noteWatchedFolder(ctxInfo.cwd);
           // rc-workspace-scoping (#28): watching a session in a non-default
           // workspace targets the workspace controls at it, but never over a
           // target the reader picked. #173: a target the page itself chose
@@ -14678,6 +14683,28 @@
         });
       }
 
+      // #173: files the folder of the conversation on screen with the recent
+      // ones, and reads the list again when that adds a folder to it.
+      function noteWatchedFolder(cwd) {
+        const folder = normalizeWorkspacePath(cwd);
+        if (!folder) return;
+        if (listFolders().includes(folder)) return;
+        // Added at the foot, not pushed to the front: opening a conversation
+        // is not choosing a folder to start in, so it must not reorder the
+        // folders the reader chose. When the set is full the last one makes
+        // room.
+        const list = loadRecentWorkspaces();
+        if (list.includes(folder)) return;
+        list.splice(Math.min(list.length, MAX_RECENT - 1), MAX_RECENT, folder);
+        try {
+          localStorage.setItem(WORKSPACES_KEY, JSON.stringify(list.slice(0, MAX_RECENT)));
+        } catch {
+          /* storage full/unavailable: best effort */
+        }
+        renderRecentWorkspaces();
+        if (curDirPath) void refreshPastConversations(curDirPath);
+      }
+
       // GET /rc/sessions?cwd=<cwd> (Bearer/OWNER). Renders only if `cwd` is
       // STILL the folder browser's current path by the time the response
       // lands — guards a slow response from an earlier browse arriving AFTER
@@ -14805,6 +14832,8 @@
       // the merge. The current folder unreadable is drawn empty, as it always
       // was; another folder unreadable keeps its last read, so a blip on one
       // folder does not blank its rows until the next tick.
+      // #173: the folder whose last read failed, so the failure is said once.
+      let folderReadFailedFor = null;
       async function refreshPastConversations(cwd) {
         if (!token()) {
           renderPastConversations([], cwd);
@@ -14820,11 +14849,28 @@
           if (f === cwd) mine = reads[i];
           else if (reads[i]) folderRows.set(f, reads[i]);
         });
-        renderPastConversations(
-          mine ? mine.sessions : [],
-          cwd,
-          mine ? mine.truncated : false,
-        );
+        // #173: a failed read of the current folder is not an empty folder.
+        // The last read of it stays on screen, and the failure is said once
+        // (not on every 30 s tick it goes on failing).
+        if (!mine) {
+          const last = folderRows.get(cwd);
+          if (folderReadFailedFor !== cwd) {
+            folderReadFailedFor = cwd;
+            setStatus(
+              'could not read the conversations in ' +
+                cwd +
+                (last ? ', showing the last list' : ''),
+            );
+          }
+          renderPastConversations(
+            last ? last.sessions : [],
+            cwd,
+            last ? last.truncated : false,
+          );
+          return;
+        }
+        folderReadFailedFor = null;
+        renderPastConversations(mine.sessions, cwd, mine.truncated);
       }
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
