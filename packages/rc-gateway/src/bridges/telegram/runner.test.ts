@@ -24,7 +24,34 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function fakes(updateBatches: TelegramUpdate[][]) {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+function fakes(
+  updateBatches: TelegramUpdate[][],
+  opts: {
+    sendPrompt?: (
+      sessionId: string,
+      prompt: string,
+      subActor: string,
+    ) => Promise<unknown>;
+    log?: (msg: string) => void;
+  } = {},
+) {
+  const votes: Array<{
+    sessionId: string;
+    requestId: string;
+    outcome: string;
+  }> = [];
+  let pollCalls = 0;
   const sent: Array<{ chatId: number; text: string; keyboard?: unknown }> = [];
   const edited: Array<{
     chatId: number;
@@ -39,6 +66,7 @@ function fakes(updateBatches: TelegramUpdate[][]) {
 
   const botApi = {
     getUpdates: async () => {
+      pollCalls++;
       const b = updateBatches[batch] ?? [];
       batch++;
       if (batch > updateBatches.length) ac.abort(); // stop after scripted batches
@@ -74,8 +102,11 @@ function fakes(updateBatches: TelegramUpdate[][]) {
         ? { ok: true, status: 200, sessionId: 'sess-q' }
         : { ok: false, status: 400, body: { error: 'bad' } },
     heartbeat: async () => ({ ok: true, status: 200 }),
-    sendPrompt: async () => ({ ok: true, status: 200 }),
-    vote: async () => ({ ok: true, status: 200 }),
+    sendPrompt: opts.sendPrompt ?? (async () => ({ ok: true, status: 200 })),
+    vote: async (sessionId: string, requestId: string, outcome: string) => {
+      votes.push({ sessionId, requestId, outcome });
+      return { ok: true, status: 200 };
+    },
     subscribeEvents: async (sessionId: string) => {
       subscribed.push(sessionId);
     },
@@ -86,6 +117,8 @@ function fakes(updateBatches: TelegramUpdate[][]) {
     sent,
     edited,
     subscribed,
+    votes,
+    pollCalls: () => pollCalls,
     isRegistered: () => registered,
     bridge: new TelegramBridge({
       botApi,
@@ -93,6 +126,7 @@ function fakes(updateBatches: TelegramUpdate[][]) {
       chats,
       baseUrl: 'http://127.0.0.1:4170',
       pollTimeoutSec: 0,
+      ...(opts.log ? { log: opts.log } : {}),
     }),
   };
 }
@@ -109,8 +143,9 @@ describe('TelegramBridge runner', () => {
     ]);
     await f.bridge.start(f.ac.signal);
     expect(f.isRegistered()).toBe(true);
+    // The message runs off the poll loop (#159), so the bind lands just after.
+    await waitFor(() => f.subscribed.includes('sess-q'));
     expect(chats.sessionFor(7)).toBe('sess-q'); // bound to the redeemed session
-    expect(f.subscribed).toContain('sess-q'); // reconcile picked up the binding
   });
 
   it('deliverEvent renders a permission_request to every bound chat', async () => {
@@ -282,5 +317,97 @@ describe('TelegramBridge — cursor persistence', () => {
     await startDone;
     const entry = cursors.get('tok_b', 'sess-q');
     expect(entry?.lastEventId).toBe(42);
+  });
+});
+
+const msgUpdate = (id: number, chatId: number, text: string, from = 5) => ({
+  update_id: id,
+  message: { message_id: id, chat: { id: chatId }, text, from: { id: from } },
+});
+
+describe('TelegramBridge, prompts dispatched off the poll loop (#159)', () => {
+  it('a sendPrompt that never resolves does not stop the next poll, and an Approve tap mid-turn is cast', async () => {
+    await chats.bind(7, 'sess-q');
+    const f = fakes(
+      [
+        [msgUpdate(1, 7, 'do X')],
+        [
+          {
+            update_id: 2,
+            callback_query: {
+              id: 'cb1',
+              from: { id: 5 },
+              message: { message_id: 50, chat: { id: 7 } },
+              data: 'vote:approve:req1',
+            },
+          },
+        ],
+      ],
+      { sendPrompt: () => new Promise(() => {}) },
+    );
+    await f.bridge.start(f.ac.signal); // resolves: the loop was never parked on the turn
+    expect(f.pollCalls()).toBeGreaterThanOrEqual(2);
+    expect(f.votes).toEqual([
+      { sessionId: 'sess-q', requestId: 'req1', outcome: 'allow_once' },
+    ]);
+  });
+
+  it('keeps per-chat order: a second message waits for the running turn, other chats do not', async () => {
+    await chats.bind(7, 'sess-q');
+    await chats.bind(8, 'sess-r');
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const f = fakes(
+      [
+        [
+          msgUpdate(1, 7, 'one'),
+          msgUpdate(2, 7, 'two'),
+          msgUpdate(3, 8, 'other'),
+        ],
+      ],
+      {
+        sendPrompt: (_s, prompt) => {
+          started.push(prompt);
+          return new Promise((resolve) =>
+            releases.set(prompt, () => resolve({ ok: true, status: 200 })),
+          );
+        },
+      },
+    );
+    await f.bridge.start(f.ac.signal);
+    await waitFor(() => started.includes('other'));
+    expect(started).toEqual(['one', 'other']); // 'two' queued behind 'one'
+    releases.get('one')!();
+    await waitFor(() => started.includes('two'));
+    expect(started).toEqual(['one', 'other', 'two']);
+  });
+
+  it('a rejected prompt is logged, and the chat queue carries on to the next message', async () => {
+    await chats.bind(7, 'sess-q');
+    const logs: string[] = [];
+    const prompts: string[] = [];
+    const f = fakes([[msgUpdate(1, 7, 'first'), msgUpdate(2, 7, 'second')]], {
+      sendPrompt: async (_s, prompt) => {
+        if (prompt === 'first') throw new TypeError('fetch failed');
+        prompts.push(prompt);
+        return { ok: true, status: 200 };
+      },
+      log: (m) => logs.push(m),
+    });
+    await f.bridge.start(f.ac.signal);
+    await waitFor(() => prompts.length === 1);
+    expect(prompts).toEqual(['second']);
+    expect(logs.some((l) => l.includes('fetch failed'))).toBe(true);
+  });
+
+  it('a 429 on a backgrounded prompt still posts the slow-down notice to the chat', async () => {
+    await chats.bind(7, 'sess-q');
+    const f = fakes([[msgUpdate(1, 7, 'spam')]], {
+      sendPrompt: async () => ({ ok: false, status: 429, retryAfterSec: 9 }),
+    });
+    await f.bridge.start(f.ac.signal);
+    await waitFor(() => f.sent.length === 1);
+    expect(f.sent[0]).toMatchObject({ chatId: 7 });
+    expect(f.sent[0].text).toContain('9 seconds');
   });
 });

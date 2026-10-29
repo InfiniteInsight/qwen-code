@@ -10931,6 +10931,11 @@
       // answer that happens to land last.
       function noteConversationSwitch() {
         switchGen += 1;
+        // #201: an upload's progress note belongs to the conversation it was
+        // for. The files themselves are kept per conversation and the strip is
+        // redrawn for the new one once watchedSessionId has moved.
+        pendingNote = '';
+        renderPendingAttachments();
         // A page of history in flight is for the visit being left and is
         // dropped when it lands, so the one-at-a-time flag it holds goes now.
         transcriptPaging = false;
@@ -11367,7 +11372,10 @@
         showSessionTitle(null);
         watchedSessionTitle = null;
         noteConversationSwitch(); // #172: nothing for the gone one lands now
+        // #201: its files can never be sent, the session is gone.
+        pendingAttachmentsBySession.delete(watchedSessionId);
         watchedSessionId = null;
+        renderPendingAttachments();
         syncStoredForSession();
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
         // the switcher was drawn against the conversation being left. Redrawn here,
@@ -11400,6 +11408,7 @@
         // Unwatch that left it set kept polling the daemon every 5s (#59).
         noteConversationSwitch(); // #172: nor anything asked for it before
         watchedSessionId = null;
+        renderPendingAttachments(); // #201: nothing watched, nothing staged
         syncStoredForSession();
         // #50: redrawn after the clear for the same reason as in
         // forgetGoneSession. Unwatch is the path a reader takes on purpose to
@@ -11870,7 +11879,16 @@
       // the daemon's own validator reads `attachmentId`, `size` and `mimeType`
       // off exactly what was returned
       // (packages/cli/src/serve/routes/session.ts:357-408).
-      let pendingAttachments = [];
+      //
+      // #201: kept per conversation, keyed by the session id the file was
+      // uploaded to (the daemon's attachment ids are per session, so a
+      // reference is only good in the session that issued it). The strip shows
+      // the watched conversation's entry and nothing else, a send takes only
+      // that entry, and an upload that finishes after the reader left lands in
+      // the entry of the conversation it was posted to.
+      const pendingAttachmentsBySession = new Map();
+      const pendingFor = (sessionId) =>
+        (sessionId && pendingAttachmentsBySession.get(sessionId)) || [];
       let pendingNote = '';
 
       const formatBytes = (n) =>
@@ -11885,7 +11903,9 @@
         const list = $('pending-list');
         if (!box || !list) return;
         list.textContent = '';
-        for (const entry of pendingAttachments) {
+        const shownFor = watchedSessionId;
+        const shown = pendingFor(shownFor);
+        for (const entry of shown) {
           const row = document.createElement('span');
           row.style.display = 'block';
           row.style.marginTop = '4px';
@@ -11901,7 +11921,9 @@
           // /session/:id/attachments/:attachmentId, a different action on a
           // different thing than "do not send this one".
           drop.onclick = () => {
-            pendingAttachments = pendingAttachments.filter((e) => e !== entry);
+            const left = pendingFor(shownFor).filter((e) => e !== entry);
+            if (left.length) pendingAttachmentsBySession.set(shownFor, left);
+            else pendingAttachmentsBySession.delete(shownFor);
             renderPendingAttachments();
           };
           row.appendChild(label);
@@ -11909,7 +11931,7 @@
           list.appendChild(row);
         }
         $('pending-note').textContent = pendingNote;
-        box.hidden = pendingAttachments.length === 0 && pendingNote === '';
+        box.hidden = shown.length === 0 && pendingNote === '';
       }
 
       const setPendingNote = (m) => {
@@ -12053,6 +12075,17 @@
           setPendingNote('watch a session first');
           return;
         }
+        // #201: the conversation this file is for, fixed before the first
+        // await. Shrinking and the upload both outlive a swipe, and
+        // watchedSessionId is whatever is on screen when they finish.
+        const target = watchedSessionId;
+        const gen = switchGen;
+        // A note about this upload is only true while its conversation is the
+        // one on screen; after a switch it would read as B's.
+        const setPendingNote = (m) => {
+          if (gen === switchGen) pendingNote = m;
+          if (gen === switchGen) renderPendingAttachments();
+        };
         let file = picked;
         const limit = attachmentLimit();
         let reduced = '';
@@ -12102,7 +12135,7 @@
         try {
           res = await fetch(
             '/session/' +
-              encodeURIComponent(watchedSessionId) +
+              encodeURIComponent(target) +
               '/attachments?name=' +
               encodeURIComponent(file.name),
             {
@@ -12127,12 +12160,18 @@
           setPendingNote(file.name + ': refused (' + code + ')');
           return;
         }
-        pendingAttachments.push({ name: file.name, reference: body.attachment });
+        // Filed under the conversation it was uploaded to, not the one on
+        // screen now.
+        pendingAttachmentsBySession.set(target, [
+          ...pendingFor(target),
+          { name: file.name, reference: body.attachment },
+        ]);
         // The reason this upload started is now spent. Left in place it reads
-        // as still-running forever beside a file that is plainly listed.
-        pendingNote = '';
+        // as still-running forever beside a file that is plainly listed. After
+        // a switch the note is not this upload's to clear.
+        if (gen === switchGen) pendingNote = '';
         renderPendingAttachments();
-        if (reduced) setStatus(reduced);
+        if (reduced && gen === switchGen) setStatus(reduced);
       }
 
       $('attach').onclick = () => {
@@ -13028,8 +13067,12 @@
         // cleared on dispatch for the same reason the text is: a send whose
         // socket dies must not leave a file staged that the reader already
         // counts as sent.
-        const sentAttachments = pendingAttachments.map((entry) => entry.reference);
-        pendingAttachments = [];
+        // #201: only the watched conversation's own files; another one's
+        // stay filed under it.
+        const sentAttachments = pendingFor(watchedSessionId).map(
+          (entry) => entry.reference,
+        );
+        pendingAttachmentsBySession.delete(watchedSessionId);
         renderPendingAttachments();
         // Echo locally for the immediate feedback, and queue the text so the
         // daemon's echo of THIS prompt is recognised and not drawn twice
@@ -15222,6 +15265,9 @@
           noteConversationSwitch();
         }
         watchedSessionId = id;
+        // #201: the strip follows the conversation, so A's files come back
+        // when A is watched again.
+        renderPendingAttachments();
         if (switching) {
           $('prompt').value = loadDraft(id);
           autoGrowPrompt();
