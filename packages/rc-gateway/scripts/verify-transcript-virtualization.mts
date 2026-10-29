@@ -21755,6 +21755,78 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. The fallback model (transcript-model.js did not load) answered every
+  // unknown key with a function, so `transcriptModel.planItem` was truthy and the
+  // to-do strip drew a plan that does not exist.
+  PAGE_SCENARIOS.push({
+    name: 'P256 with the model script missing the to-do strip stays away: the stand-in model has no plan (null), not a function',
+    waitView: false,
+    before: async (page) => {
+      await page.route('**/ui/transcript-model.js', (route) => route.abort());
+    },
+    run: async ({ page }) => {
+      const r = (await page.evaluate(`(() => {
+        renderPlanStrip();
+        return { plan: typeof transcriptModel.planItem, hidden: document.getElementById('plan').hidden, cur: typeof transcriptModel.curAsst, fork: typeof transcriptModel.forkItem };
+      })()`)) as { plan: string; hidden: boolean; cur: string; fork: string };
+      expect(r.plan === 'object' && r.hidden, `the stand-in model's planItem is a ${r.plan} and the strip ${r.hidden ? 'is' : 'is not'} hidden`);
+      expect(r.cur === 'object' && r.fork === 'object', `curAsst is a ${r.cur}, forkItem a ${r.fork}`);
+      return 'planItem, curAsst and forkItem are null on the stand-in; the strip stays hidden';
+    },
+  });
+
+  // #173. "This window joined ... from another window" was never put away: it
+  // stayed over every conversation the reader moved on to.
+  PAGE_SCENARIOS.push({
+    name: 'P257 the note that this window joined a conversation is put away by the switch to another conversation',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await go(page, A);
+      await page.evaluate(`showJoinedNote('p257', '/p257')`);
+      const shown = (await page.evaluate(`!document.getElementById('joined-note').hidden`)) as boolean;
+      expect(shown, 'the joined note did not show');
+      await go(page, B);
+      const after = (await page.evaluate(`document.getElementById('joined-note').hidden`)) as boolean;
+      expect(after, 'the joined note stayed over the next conversation');
+      return 'shown on the joined conversation, hidden by the switch to the next';
+    },
+  });
+
+  // #173. Findings about the old rail and tab bar and the composer, checked
+  // against the H1 layout that replaced them: the rail and the tab bar are
+  // gone, the composer field fits its box, and the crash banner sits above the
+  // transcript where the load-earlier pill cannot cover it.
+  PAGE_SCENARIOS.push({
+    name: 'P258 no sticky rail or tab bar is left to overlap, the composer field fits its box at 390px, and the crash banner is clear of the load-earlier pill',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await go(page, A);
+      const r = (await page.evaluate(`(() => {
+        const rect = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right, t: b.top, b: b.bottom }; };
+        const field = document.querySelector('#composer .field');
+        const prompt = document.getElementById('prompt');
+        showCrashBanner(true);
+        const pill = document.getElementById('load-earlier');
+        pill.hidden = false;
+        const banner = document.getElementById('crash-banner');
+        const bb = rect(banner), pb = rect(pill);
+        return {
+          rail: !!document.getElementById('rail'),
+          tabs: document.querySelectorAll('[role="tab"], [role="tablist"]').length,
+          field: rect(field), prompt: rect(prompt),
+          overlap: !(bb.b <= pb.t || pb.b <= bb.t || bb.r <= pb.l || pb.r <= bb.l),
+          bannerShown: !banner.hidden,
+        };
+      })()`)) as { rail: boolean; tabs: number; field: { l: number; r: number }; prompt: { l: number; r: number }; overlap: boolean; bannerShown: boolean };
+      expect(!r.rail && r.tabs === 0, `a rail (${r.rail}) or ${r.tabs} tab roles are still in the page`);
+      expect(r.prompt.r <= r.field.r + 0.5 && r.prompt.l >= r.field.l - 0.5, `the composer textarea (${r.prompt.l}-${r.prompt.r}) overflows its field (${r.field.l}-${r.field.r})`);
+      expect(r.bannerShown && !r.overlap, `the crash banner (shown ${r.bannerShown}) overlaps the load-earlier pill`);
+      return 'no rail or tab roles; the textarea sits inside its field; the banner and the pill do not overlap';
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 

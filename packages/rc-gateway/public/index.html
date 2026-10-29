@@ -4819,7 +4819,16 @@
               : '',
           createTranscriptModel: () =>
             new Proxy(
-              { items: [], curAsst: null, forkItem: null, userTurns: () => [] },
+              // #173: every property the page reads off the model is named
+              // here, because anything else comes back as a function, which
+              // is truthy (planItem read as a plan that is not there).
+              {
+                items: [],
+                curAsst: null,
+                forkItem: null,
+                planItem: null,
+                userTurns: () => [],
+              },
               { get: (model, key) => (key in model ? model[key] : () => {}) },
             ),
         };
@@ -15419,6 +15428,9 @@
         // composer alone.
         const switching = id !== watchedSessionId;
         if (switching) {
+          // #173: the note says this window joined the conversation it is
+          // leaving, so it goes with it.
+          hideJoinedNote();
           saveDraft();
           // The reader's place in the conversation being left is saved now,
           // while its rows are still the ones on screen.
