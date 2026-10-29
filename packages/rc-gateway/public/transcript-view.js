@@ -366,6 +366,7 @@
     // A user expand/collapse of a thought: { item, top } where `top` is the
     // clicked header's offset in the viewport. The next pass keeps it there.
     var hold = null;
+    var topInset = 0; // see setTopInset
     // A restorePlace() request: { item, top }, applied by the next pass that
     // runs while the scroller is rendered (see goToPlace).
     var pendingPlace = null;
@@ -1928,6 +1929,26 @@
       },
       isNearBottom: function () {
         return nearBottom;
+      },
+      // #177. Room above the first row, for controls the page floats over the
+      // top of the scroller (the load-earlier pill). The rows start `px` lower
+      // than they did, so at the top of the list nothing is under the pill.
+      // A reader further down keeps their row where it was.
+      setTopInset: function (px) {
+        var next = Math.max(0, Math.round(Number(px) || 0));
+        if (next === topInset || destroyed) return;
+        topInset = next;
+        if (virtualizer) {
+          if (scroller.scrollTop > 0) {
+            var place = readerPlace();
+            if (place.end) pendingEnd = true;
+            else if (place.item) hold = place;
+          }
+          vopts.paddingStart = 8 + topInset;
+        } else {
+          host.style.paddingTop = topInset + 'px';
+        }
+        schedule();
       },
       mountedCount: function () {
         return mounted.size;

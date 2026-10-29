@@ -7985,7 +7985,7 @@ PAGE_SCENARIOS.push({
       () => {
         const f = document.getElementById('session-footer');
         const t = f ? f.textContent ?? '' : '';
-        return t.includes('65.5k/262.1k') ? t : null;
+        return t.includes('65.5k of 262.1k tokens') ? t : null;
       },
       null,
       { timeout: 15_000 },
@@ -22413,6 +22413,324 @@ PAGE_SCENARIOS.push({
     return `the picture and its caption drew as one row (${JSON.stringify(users[0])}) after ${asked.length} reads`;
   },
 });
+
+
+// #177. The G1 findings that were still open after the dark shell, read against
+// the H1 page that replaced the rail, the drawer and the tab bar. Each
+// scenario names the finding, runs at 390x844 and, where the layout differs,
+// at 1100x810, and saves a shot when SHOTS names a directory.
+{
+  const G177_SIZES = [
+    { width: 390, height: 844 },
+    { width: 1100, height: 810 },
+  ] as const;
+  const g177Frames = (): Frame[] => {
+    const f = new Frames();
+    for (let i = 1; i <= 14; i++) {
+      f.user(`p300 question ${i}`).asst(
+        `p300 answer ${i} ` + 'lorem ipsum dolor sit amet consectetur '.repeat(6),
+      ).done();
+    }
+    return f.list;
+  };
+  const g177Settle = async (page: Page): Promise<void> => {
+    await page.waitForTimeout(250);
+    await frames3(page);
+  };
+  const g177Ready = async (page: Page, viewer: Viewer): Promise<void> => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 14 * 3, 30_000);
+    await page.waitForFunction('ctxInfo && ctxUsage', null, { timeout: 15_000 });
+    await settlePage(page);
+  };
+
+  const openMore = async (page: Page): Promise<void> => {
+    if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
+  };
+  const closeMore = (page: Page): Promise<void> => openPanel(page, 'chat');
+
+  PAGE_SCENARIOS.push({
+    name: 'P300 the inspector sheet reads in words: the context fill says tokens and of, the folder and the keep-this-mode box carry labels, at 390 and 1100',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        await openSheet(page);
+        await g177Settle(page);
+        const r = (await page.evaluate(`(() => {
+          const f = document.getElementById('session-footer');
+          const rows = Array.from(f.querySelectorAll('.sh-row')).map((row) => ({
+            label: (row.querySelector('.sh-lbl') || {}).textContent || '',
+            text: row.textContent || '',
+          }));
+          const box = document.getElementById('footer-mode-persist');
+          return {
+            rows,
+            text: f.textContent || '',
+            keepLabel: box && box.labels && box.labels[0] ? box.labels[0].textContent.trim() : '',
+            seg: f.querySelector('.seg') ? f.querySelector('.seg').getAttribute('aria-label') : '',
+            bare: /[0-9][kKmM]?\\/[0-9]/.test(f.textContent || ''),
+          };
+        })()`)) as { rows: { label: string; text: string }[]; text: string; keepLabel: string; seg: string | null; bare: boolean };
+        const ctx = r.rows.find((x) => x.label === 'Context');
+        expect(
+          !!ctx && /65\.5k of 262\.1k tokens/.test(ctx.text),
+          `${size.width}: the Context row reads ${JSON.stringify(ctx && ctx.text)}, not the fill in words ("65.5k of 262.1k tokens")`,
+        );
+        expect(!r.bare, `${size.width}: a bare n/n fill is left in the sheet (${JSON.stringify(r.text)})`);
+        expect(
+          r.rows.some((x) => x.label === 'Folder on host' && x.text.length > 'Folder on host'.length),
+          `${size.width}: no Folder on host row with a path (${JSON.stringify(r.rows)})`,
+        );
+        expect(
+          /new conversations here/.test(r.keepLabel) && r.seg === 'Approval mode',
+          `${size.width}: the persist checkbox is labelled ${JSON.stringify(r.keepLabel)} and the mode group ${JSON.stringify(r.seg)}`,
+        );
+        await shot(page, `p300-sheet-${size.width}`);
+        lines.push(`${size.width}: Context "${ctx!.text}"`);
+        await page.click('#h1-status');
+      }
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P301 no rail and no tab roles are left beside the panels: a panel is the whole screen at 390 and the 320px right pane at 1100, with nothing else drawn over its edge',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        await openMore(page);
+        await page.click('#more-screen .row[data-panel="usage"]');
+        await g177Settle(page);
+        const r = (await page.evaluate(`(() => {
+          const p = document.getElementById('panel-screen').getBoundingClientRect();
+          const hits = [0.1, 0.5, 0.9].map((fy) => {
+            const e = document.elementFromPoint(p.left + 4, p.top + p.height * fy);
+            return !!e && document.getElementById('panel-screen').contains(e);
+          });
+          return {
+            rail: !!document.getElementById('rail'),
+            tabs: document.querySelectorAll('[role="tab"], [role="tablist"]').length,
+            left: p.left, width: p.width,
+            hits,
+            wide: document.documentElement.scrollWidth,
+          };
+        })()`)) as { rail: boolean; tabs: number; left: number; width: number; hits: boolean[]; wide: number };
+        const wantW = size.width >= 1100 ? RIGHT_PANE : size.width;
+        expect(!r.rail && r.tabs === 0, `${size.width}: a rail (${r.rail}) or ${r.tabs} tab roles remain`);
+        expect(
+          Math.abs(r.width - wantW) < 1 && Math.abs(r.left + r.width - size.width) < 1,
+          `${size.width}: the panel is ${r.width}px wide at x ${r.left}, not ${wantW}px against the right edge`,
+        );
+        expect(r.hits.every(Boolean), `${size.width}: something else is drawn over the panel's edge (${JSON.stringify(r.hits)})`);
+        expect(r.wide <= size.width, `${size.width}: the document is ${r.wide}px wide`);
+        await shot(page, `p301-panel-${size.width}`);
+        lines.push(`${size.width}: panel ${Math.round(r.width)}px at x ${Math.round(r.left)}`);
+        await page.click('#panel-back');
+        await closeMore(page);
+      }
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P302 the More rows and the status line take Enter and Space, and the arrow keys, Home and End move between More rows, at 390 and 1100',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      const focused = (): Promise<string> =>
+        page.evaluate(`(() => { const a = document.activeElement; return a && a.dataset && a.dataset.panel ? a.dataset.panel : (a ? a.id || a.tagName : ''); })()`) as Promise<string>;
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        // The status line is a button: Enter and Space open the sheet and shut it.
+        await page.focus('#h1-status');
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        expect(await page.isVisible('#h1-sheet'), `${size.width}: Enter on the status line did not open the sheet`);
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        expect(!(await page.isVisible('#h1-sheet')), `${size.width}: a second Enter on the status line did not shut the sheet`);
+        await page.keyboard.press('Space');
+        await g177Settle(page);
+        expect(await page.isVisible('#h1-sheet'), `${size.width}: Space on the status line did not open the sheet`);
+        await page.keyboard.press('Space');
+        await g177Settle(page);
+        // More: the rows, in the order they are drawn.
+        await page.focus('#h1-more');
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        const rows = (await page.evaluate(
+          `Array.from(document.querySelectorAll('#more-screen .row')).filter((r) => r.getClientRects().length && !r.disabled).map((r) => r.dataset.panel)`,
+        )) as string[];
+        expect(rows.length >= 4, `${size.width}: only ${rows.length} visible More rows`);
+        expect((await focused()) === rows[0], `${size.width}: More opened with focus on ${await focused()}, not ${rows[0]}`);
+        await page.keyboard.press('ArrowDown');
+        expect((await focused()) === rows[1], `${size.width}: ArrowDown moved focus to ${await focused()}, not ${rows[1]}`);
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('ArrowUp');
+        expect((await focused()) === rows[1], `${size.width}: ArrowUp moved focus to ${await focused()}, not ${rows[1]}`);
+        await page.keyboard.press('End');
+        expect((await focused()) === rows[rows.length - 1], `${size.width}: End moved focus to ${await focused()}, not ${rows[rows.length - 1]}`);
+        await page.keyboard.press('ArrowDown');
+        expect((await focused()) === rows[rows.length - 1], `${size.width}: ArrowDown past the last row moved focus to ${await focused()}`);
+        await page.keyboard.press('Home');
+        expect((await focused()) === rows[0], `${size.width}: Home moved focus to ${await focused()}, not ${rows[0]}`);
+        await shot(page, `p302-more-${size.width}`);
+        // Enter opens the row's panel, Escape comes back onto the row, Space opens it again.
+        await page.keyboard.press('ArrowDown');
+        const second = rows[1]!;
+        await page.keyboard.press('Enter');
+        await g177Settle(page);
+        expect(
+          await page.evaluate(`openPanelKey`) === second && (await page.isVisible('#panel-screen')),
+          `${size.width}: Enter on the ${second} row did not open its panel`,
+        );
+        await page.keyboard.press('Escape');
+        await g177Settle(page);
+        expect((await focused()) === second, `${size.width}: Escape from the panel left focus on ${await focused()}, not the ${second} row`);
+        await page.keyboard.press('Space');
+        await g177Settle(page);
+        expect(
+          await page.evaluate(`openPanelKey`) === second && (await page.isVisible('#panel-screen')),
+          `${size.width}: Space on the ${second} row did not open its panel`,
+        );
+        await page.keyboard.press('Escape');
+        await closeMore(page);
+        lines.push(`${size.width}: ${rows.length} rows, Enter/Space/arrows/Home/End`);
+      }
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P303 the load-earlier pill does not cover the first transcript line or the crash banner: the list top reserves the pills row, at 390 and 1100',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        await page.waitForSelector('#load-earlier', { state: 'visible' });
+        await page.evaluate(`showCrashBanner(true); document.getElementById('transcript').scrollTop = 0;`);
+        await g177Settle(page);
+        const read = (): Promise<{ pill: { t: number; b: number; l: number; r: number }; rows: { t: number; b: number; l: number; r: number; text: string }[]; banner: { t: number; b: number } | null }> =>
+          page.evaluate(`(() => {
+            const rc = (el) => { const b = el.getBoundingClientRect(); return { t: b.top, b: b.bottom, l: b.left, r: b.right }; };
+            const banner = document.getElementById('crash-banner');
+            return {
+              pill: rc(document.getElementById('load-earlier')),
+              rows: Array.from(document.querySelectorAll('#transcript .vrow')).map((r) => Object.assign(rc(r), { text: (r.textContent || '').slice(0, 30) })),
+              banner: banner && !banner.hidden ? rc(banner) : null,
+            };
+          })()`) as never;
+        const r = await read();
+        const hit = (a: { t: number; b: number; l: number; r: number }, c: { t: number; b: number; l: number; r: number }) =>
+          !(a.b <= c.t || c.b <= a.t || a.r <= c.l || c.r <= a.l);
+        const covered = r.rows.filter((row) => row.b > 0 && hit(r.pill, row));
+        expect(covered.length === 0, `${size.width}: the pill (${Math.round(r.pill.t)}-${Math.round(r.pill.b)}) covers ${covered.length} row(s): ${JSON.stringify(covered[0])}`);
+        expect(!!r.banner && !hit(r.pill, { ...r.banner, l: 0, r: size.width }), `${size.width}: the pill overlaps the crash banner (${JSON.stringify(r.banner)})`);
+        await shot(page, `p303-pill-${size.width}`);
+        // The reader's place does not move when the pill goes (the history is
+        // all loaded), nor when it comes back.
+        await page.evaluate(`document.getElementById('transcript').scrollTop = 600`);
+        await g177Settle(page);
+        const mark = (): Promise<number> =>
+          page.evaluate(`(() => {
+            const edge = document.getElementById('transcript').getBoundingClientRect().top;
+            const first = Array.from(document.querySelectorAll('#transcript .vrow')).find((r) => r.getBoundingClientRect().bottom > edge + 4);
+            return first ? first.getBoundingClientRect().top : -1;
+          })()`) as Promise<number>;
+        const before = await mark();
+        await page.evaluate(`transcriptExhausted = true; renderLoadEarlier()`);
+        await g177Settle(page);
+        const gone = await mark();
+        await page.evaluate(`transcriptExhausted = false; renderLoadEarlier()`);
+        await g177Settle(page);
+        const back = await mark();
+        expect(
+          Math.abs(gone - before) <= 1.5 && Math.abs(back - before) <= 1.5,
+          `${size.width}: the reader's row moved from ${before} to ${gone} when the pill went and ${back} when it came back`,
+        );
+        // And with the pill gone at the top, the first row sits where it always did.
+        await page.evaluate(`transcriptExhausted = true; renderLoadEarlier(); document.getElementById('transcript').scrollTop = 0`);
+        await g177Settle(page);
+        const bare = await read();
+        const topRow = Math.min(...bare.rows.map((x) => x.t));
+        const wrapTop = (await page.evaluate(`document.getElementById('transcript').getBoundingClientRect().top`)) as number;
+        expect(topRow - wrapTop <= 12, `${size.width}: with no pill the first row is ${topRow - wrapTop}px below the top, space reserved for nothing`);
+        await page.evaluate(`transcriptExhausted = false; renderLoadEarlier(); showCrashBanner(false)`);
+        lines.push(`${size.width}: pill ${Math.round(r.pill.b)} above first row ${Math.round(Math.min(...r.rows.map((x) => x.t)))}`);
+      }
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P304 the bar is one 56px row at 360x780, and the page does not scroll at 1280x720 (the sticky rail that added 100px is gone)',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      await page.setViewportSize({ width: 360, height: 780 });
+      await g177Settle(page);
+      const bar = (await page.evaluate(`document.getElementById('h1-bar').getBoundingClientRect().height`)) as number;
+      const wide = (await page.evaluate(`document.documentElement.scrollWidth`)) as number;
+      await shot(page, 'p304-bar-360');
+      expect(bar === 56 && wide <= 360, `the bar is ${bar}px tall and the document ${wide}px wide at 360`);
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await g177Settle(page);
+      const doc = (await page.evaluate(`({ h: document.documentElement.scrollHeight, v: window.innerHeight })`)) as { h: number; v: number };
+      await shot(page, 'p304-page-1280');
+      expect(doc.h <= doc.v, `the document is ${doc.h}px in a ${doc.v}px window at 1280x720`);
+      return `bar ${bar}px at 360; document ${doc.h}px in ${doc.v}px at 1280x720`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P305 every chat-screen control has a name a touch reader can read, not a title: symbol-only buttons carry an aria-label, and the fork and share selects are dark',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const r = (await page.evaluate(`(() => {
+        const unnamed = [];
+        for (const b of document.querySelectorAll('#h1-bar button, #h1-statusline button, #composer button, #h1-tools button, #tx-top button, #h1-menu button')) {
+          const label = (b.getAttribute('aria-label') || '').trim();
+          const text = (b.textContent || '').trim();
+          const words = /[A-Za-z]{3,}/.test(text);
+          if (!label && !words) unnamed.push(b.id || b.className || b.tagName);
+        }
+        return { unnamed };
+      })()`)) as { unnamed: string[] };
+      expect(r.unnamed.length === 0, `symbol-only controls without an aria-label: ${JSON.stringify(r.unnamed)}`);
+      await openMore(page);
+      const dark: string[] = [];
+      for (const [panel, sel] of [
+        ['fork', '#fork-mode'],
+        ['share', '#share-scope'],
+      ] as const) {
+        await page.click(`#more-screen .row[data-panel="${panel}"]`);
+        await g177Settle(page);
+        const bg = (await page.evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(sel)})).backgroundColor`)) as string;
+        const m = /rgba?\((\d+), (\d+), (\d+)/.exec(bg);
+        const lum = m ? (Number(m[1]) + Number(m[2]) + Number(m[3])) / 3 : 255;
+        if (lum > 90) dark.push(`${sel} ${bg}`);
+        if (panel === 'fork') await shot(page, 'p305-fork-select');
+        await page.click('#panel-back');
+      }
+      expect(dark.length === 0, `light selects on the dark page: ${JSON.stringify(dark)}`);
+      return 'every bar, status, composer, tools and pill button is named; the fork and share selects are dark';
+    },
+  });
+}
 
 
 async function runPageSection(): Promise<Result[]> {
