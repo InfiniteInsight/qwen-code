@@ -189,6 +189,8 @@ export interface StubDaemon {
   lastSendMidTurnMessagesNowSessionId: string | undefined;
   /** Workspace the most recent GET .../sessions/live-state named, decoded. */
   lastLiveStateWorkspace: string | undefined;
+  /** #132: every POST /sessions/catalog body, in order. */
+  catalogRequests: unknown[];
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -684,6 +686,23 @@ export interface StubDaemonOptions {
   liveStateStatus?: number;
   liveStateErrorBody?: unknown;
   liveStateResult?: unknown;
+  /**
+   * #132: the workspaces this daemon has registered, each with what POST
+   * /sessions/catalog answers for it: its rows (`DaemonSessionSummary`, any
+   * order; the stub sorts them the way the daemon does), its group records,
+   * or a member error to answer instead of a page. Keyed by absolute cwd. A
+   * selection naming any other workspace gets the daemon's per-member 404
+   * `workspace_not_found`. Left unset, the route is not mounted, which is an
+   * older daemon: a bare 404.
+   */
+  catalog?: Record<
+    string,
+    {
+      sessions?: DaemonSessionSummary[];
+      groups?: unknown[];
+      error?: { code: string; message: string; status: number };
+    }
+  >;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -774,6 +793,7 @@ export async function startStubDaemon(
       | undefined,
     lastSendMidTurnMessagesNowSessionId: undefined as string | undefined,
     lastLiveStateWorkspace: undefined as string | undefined,
+    catalogRequests: [] as unknown[],
   };
   const app = express();
   // The same arrangement the gateway uses, for the same reason: an attachment
@@ -2481,6 +2501,215 @@ export async function startStubDaemon(
     );
   });
 
+  // #132: the daemon's session catalog batch, after
+  // cli/src/serve/routes/session-catalog.ts. A strict body (the daemon's zod
+  // schema is `.strict()`), one page or one error per selection in selection
+  // order, a per-member 404 for a workspace this daemon has not registered,
+  // and the paged order and keyset cursor of the merged-pagination path
+  // (session-list.ts): pinned first only in the organized view, activity
+  // descending, session id ascending. Rows carry `groupId` only in the
+  // organized view, as the metadata path never applies the organization store.
+  if (opts.catalog) {
+    const registered = opts.catalog;
+    const COLOR_OPTIONS = [
+      'red',
+      'orange',
+      'yellow',
+      'green',
+      'blue',
+      'purple',
+    ];
+    app.post('/sessions/catalog', (req, res) => {
+      state.catalogRequests.push(req.body);
+      const invalid = (error = 'Invalid session catalog request.') =>
+        res
+          .status(400)
+          .json({ code: 'invalid_session_catalog_request', error });
+      const body = req.body as Record<string, unknown> | undefined;
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Object.keys(body).some(
+          (k) => !['workspaces', 'options', 'includeGroups'].includes(k),
+        )
+      ) {
+        return invalid();
+      }
+      const o = (body['options'] ?? {}) as Record<string, unknown>;
+      if (
+        typeof o !== 'object' ||
+        Object.keys(o).some(
+          (k) =>
+            ![
+              'size',
+              'archiveState',
+              'view',
+              'group',
+              'parentSessionId',
+              'sourceType',
+              'sourceId',
+            ].includes(k),
+        )
+      ) {
+        return invalid();
+      }
+      const size = o['size'] ?? 20;
+      if (
+        typeof size !== 'number' ||
+        !Number.isInteger(size) ||
+        size < 1 ||
+        size > 100
+      ) {
+        return invalid();
+      }
+      const organized = o['view'] === 'organized';
+      if (o['group'] !== undefined && !organized) {
+        return invalid(
+          'Group filters require organized view; parent filters cannot use it.',
+        );
+      }
+      const selections =
+        body['workspaces'] === 'all'
+          ? Object.keys(registered).map((workspace) => ({ workspace }))
+          : body['workspaces'];
+      if (
+        !Array.isArray(selections) ||
+        selections.length < 1 ||
+        selections.length > 20
+      ) {
+        return invalid();
+      }
+      type Key = [number, number, string];
+      const keyOf = (s: DaemonSessionSummary): Key => {
+        const t = Date.parse((s.updatedAt ?? s.createdAt) as string);
+        return [
+          organized && s.isPinned === true ? 1 : 0,
+          Number.isFinite(t) ? t : 0,
+          s.sessionId,
+        ];
+      };
+      const cmp = (a: Key, b: Key) =>
+        b[0] - a[0] || b[1] - a[1] || a[2].localeCompare(b[2]);
+      const workspaces = (
+        selections as Array<{ workspace: string; cursor?: string }>
+      ).map((sel) => {
+        const cwd = String(sel.workspace).replace(/\/+$/, '') || '/';
+        const entry = registered[cwd];
+        if (!entry) {
+          return {
+            workspace: sel.workspace,
+            error: {
+              code: 'workspace_not_found',
+              message: 'Workspace is not registered with this daemon.',
+              status: 404,
+            },
+          };
+        }
+        const identity = {
+          workspace: sel.workspace,
+          workspaceId: 'stub:' + cwd,
+          cwd,
+        };
+        if (entry.error) return { ...identity, error: entry.error };
+        const group = o['group'];
+        const rows = [...(entry.sessions ?? [])]
+          .filter(
+            (s) =>
+              group === undefined ||
+              group === 'all' ||
+              (group === 'pinned'
+                ? s.isPinned === true
+                : group === 'ungrouped'
+                  ? s.groupId == null && s.color == null
+                  : s.color == null && s.groupId === group),
+          )
+          .map((s) => ({ s, k: keyOf(s) }))
+          .sort((a, b) => cmp(a.k, b.k));
+        let start = 0;
+        if (sel.cursor !== undefined) {
+          let last: Key | undefined;
+          try {
+            const p = JSON.parse(
+              Buffer.from(sel.cursor, 'base64url').toString('utf8'),
+            ) as {
+              last?: {
+                isPinned?: boolean;
+                activityTime?: unknown;
+                sessionId?: unknown;
+              };
+            };
+            if (
+              typeof p.last?.activityTime === 'number' &&
+              typeof p.last.sessionId === 'string'
+            ) {
+              last = [
+                p.last.isPinned ? 1 : 0,
+                p.last.activityTime,
+                p.last.sessionId,
+              ];
+            }
+          } catch {
+            last = undefined;
+          }
+          if (!last) {
+            return {
+              ...identity,
+              error: {
+                code: 'invalid_cursor',
+                message: `Invalid cursor: "${sel.cursor}" is not a valid metadata cursor`,
+                status: 400,
+              },
+            };
+          }
+          const from = last;
+          start = rows.findIndex((r) => cmp(r.k, from) > 0);
+          if (start === -1) start = rows.length;
+        }
+        const page = rows.slice(start, start + size);
+        const lastRow = page[page.length - 1];
+        const nextCursor =
+          start + size < rows.length && lastRow
+            ? Buffer.from(
+                JSON.stringify({
+                  catalogKind: organized ? 'organized' : 'metadata',
+                  paginateMerged: true,
+                  archiveState: o['archiveState'] ?? 'active',
+                  last: {
+                    ...(organized ? { isPinned: lastRow.k[0] === 1 } : {}),
+                    activityTime: lastRow.k[1],
+                    sessionId: lastRow.k[2],
+                  },
+                }),
+                'utf8',
+              ).toString('base64url')
+            : undefined;
+        return {
+          ...identity,
+          sessions: page.map(({ s }) => {
+            const row: Record<string, unknown> = { ...s, workspaceCwd: cwd };
+            if (!organized) {
+              delete row['groupId'];
+              delete row['color'];
+              delete row['isPinned'];
+              delete row['pinnedAt'];
+            }
+            return row;
+          }),
+          ...(nextCursor ? { nextCursor } : {}),
+          ...(body['includeGroups'] === true
+            ? {
+                groups: {
+                  groups: entry.groups ?? [],
+                  colorOptions: COLOR_OPTIONS,
+                },
+              }
+            : {}),
+        };
+      });
+      res.status(200).json({ workspaces });
+    });
+  }
+
   app.get('/session/:id/rewind/snapshots', (_req, res) => {
     res.json({ snapshots: opts.rewindSnapshots ?? [] });
   });
@@ -2806,6 +3035,9 @@ export async function startStubDaemon(
     },
     get lastLiveStateWorkspace() {
       return state.lastLiveStateWorkspace;
+    },
+    get catalogRequests() {
+      return state.catalogRequests;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
