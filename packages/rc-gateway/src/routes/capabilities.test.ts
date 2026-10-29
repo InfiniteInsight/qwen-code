@@ -173,6 +173,25 @@ describe('GET /rc/capabilities', () => {
     }
   });
 
+  // #194 slice D: `qwen-rc attach` on the host. The flag says the loopback
+  // route is mounted, so it is only true when the gateway wired it.
+  it('reports hostAttach true only when the route is wired', async () => {
+    const wired = await mount({ hostAttach: true });
+    try {
+      const body = await (await fetch(`${wired.base}/rc/capabilities`)).json();
+      expect(body.remoteControl.hostAttach).toBe(true);
+    } finally {
+      await wired.close();
+    }
+    const bare = await mount({});
+    try {
+      const body = await (await fetch(`${bare.base}/rc/capabilities`)).json();
+      expect(body.remoteControl.hostAttach).toBe(false);
+    } finally {
+      await bare.close();
+    }
+  });
+
   it('always reports the static workspaceControl block', async () => {
     const { base, close } = await mount({});
     try {

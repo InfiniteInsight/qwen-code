@@ -215,6 +215,7 @@ import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { createHookIngestRoute } from './routes/hookIngest.js';
+import { createHostAttachRoutes } from './routes/hostAttach.js';
 import { WorkflowRunRegistry } from './workflows/workflowRegistry.js';
 import {
   createStartWorkflowRoute,
@@ -446,6 +447,18 @@ export interface GatewayDeps {
     ingestToken: string;
     bucketCapacity?: number;
     bucketRefillPerSec?: number;
+  };
+  /**
+   * Host attach (#194 slice D, `qwen-rc attach`). When set, `POST
+   * /rc/host/attach` and `POST /rc/host/attach/:sessionId` mount:
+   * loopback-only, authenticated by the persistent host-attach `token` (NOT a
+   * TokenStore token), and mounted BEFORE `bearerResolve` like the hook
+   * ingest route. The routes need `daemon.daemonEndpointForSession` (a
+   * `DaemonPool`) and answer 501 without it. Omitted: the routes do not mount
+   * and `/rc/capabilities` reports `hostAttach: false`.
+   */
+  hostAttach?: {
+    token: string;
   };
   /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
   workflows?: {
@@ -705,6 +718,24 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         bucketRefillPerSec: deps.hookIngest.bucketRefillPerSec,
       }),
     );
+  }
+
+  // Host attach (#194 slice D): a terminal on this machine starts or
+  // re-attaches a conversation the phone can then pick up. Mounted BEFORE
+  // bearerResolve for the same reason as the hook ingest route: the
+  // host-attach token is a dedicated host-local secret, so a phone's
+  // TokenStore token never opens these routes and this token never reaches
+  // a phone route. Same `QWEN_RC_TERMINAL_QWEN` argv as /rc/terminals, so
+  // both hand out one command shape.
+  if (deps.hostAttach) {
+    const hostAttach = createHostAttachRoutes({
+      daemon: deps.daemon,
+      token: deps.hostAttach.token,
+      audit,
+      planOpts: { qwenArgv: deps.terminalQwenArgv },
+    });
+    app.post('/rc/host/attach', hostAttach.create);
+    app.post('/rc/host/attach/:sessionId', hostAttach.attach);
   }
 
   const webRoot =
@@ -1280,6 +1311,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         : undefined,
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
+      hostAttach: deps.hostAttach !== undefined,
       // #96: the daemon's own flag list, read per request. The gateway block
       // above stays whatever the gateway itself promises; this is the daemon's
       // answer, so the UI can finally tell the two apart.

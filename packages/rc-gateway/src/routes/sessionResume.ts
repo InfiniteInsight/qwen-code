@@ -6,7 +6,11 @@
 
 import type { RequestHandler } from 'express';
 import { stat } from 'node:fs/promises';
-import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
+import {
+  UnknownSessionError,
+  WorkspacePoolFullError,
+  type SessionDaemon,
+} from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
@@ -154,10 +158,13 @@ export function createSessionResumeRoute(
  * daemon_unavailable`. `DaemonHttpError` (thrown by `DaemonClient`) carries a
  * numeric `status`; a plain 404 there is unambiguous. Otherwise fall back to
  * a case-insensitive "not found" match in the error message, which is what
- * both `DaemonHttpError`'s formatted message and `UnknownSessionError`
- * (thrown by `DaemonPool` for a session id it has no record of) produce.
+ * `DaemonHttpError`'s formatted message produces. `UnknownSessionError`
+ * (thrown by `DaemonPool` for a session id it has no record of) is matched by
+ * type: its message reads "Unknown session", which the text match misses.
+ * Exported so routes/hostAttach.ts draws the same 404 line on its resume.
  */
-function isSessionNotFoundError(err: unknown): boolean {
+export function isSessionNotFoundError(err: unknown): boolean {
+  if (err instanceof UnknownSessionError) return true;
   const status = (err as { status?: unknown } | undefined)?.status;
   if (status === 404) return true;
   const message = err instanceof Error ? err.message : String(err);
