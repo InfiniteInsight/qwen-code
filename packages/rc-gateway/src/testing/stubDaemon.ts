@@ -1629,33 +1629,35 @@ export async function startStubDaemon(
       v: 1,
       sessionId: String(req.params.id),
       events: [
-        // Stored events are DaemonEvent envelopes, the same shape a live SSE
-        // frame carries. Serving a made-up type here would let a caller that
-        // only understands session_update reduce the page to nothing and still
-        // see a 200 with two events.
+        // Stored events as the daemon serves them (checked against a live
+        // daemon, #202): the ACP update spread onto `data`, its clock at
+        // `data._meta.timestamp` (epoch ms, the record's own time) beside the
+        // record id, and nothing on the envelope. The live stream and the WAL
+        // are the ones that stamp the envelope (`_meta.serverTimestamp`); a
+        // fixture that did the same here hid the missing-times bug in #171.
         {
-          id: 1,
           v: 1,
           type: 'session_update',
           data: {
-            update: {
-              sessionUpdate: 'user_message_chunk',
-              content: { type: 'text', text: 'first record' },
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'first record' },
+            _meta: {
+              timestamp: 1_767_225_600_000,
+              'qwen.session.recordId': 'rec-1',
             },
           },
-          _meta: { serverTimestamp: 1_767_225_600_000 },
         },
         {
-          id: 2,
           v: 1,
           type: 'session_update',
           data: {
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'second record' },
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'second record' },
+            _meta: {
+              timestamp: 1_767_225_601_000,
+              'qwen.session.recordId': 'rec-2',
             },
           },
-          _meta: { serverTimestamp: 1_767_225_601_000 },
         },
       ],
       nextCursor: 'eyJyZWNvcmRJZCI6IjIifQ',

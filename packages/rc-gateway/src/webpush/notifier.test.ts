@@ -19,7 +19,7 @@ import { PushCoalescer } from './coalescer.js';
 import { PushDigest } from './digest.js';
 import type { PushPayload } from './payload.js';
 import { ApnsStore } from '../nativePush/apnsStore.js';
-import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
+import { SESSION_READ, APPROVE, SHARE, OWNER, WRITE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
 import { WorkingDeviceTracker } from '../routing/workingDevice.js';
 import { compileRouting, loadRoutingConfig } from '../routing/rules.js';
@@ -285,6 +285,45 @@ describe('PushNotifier', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].endpoint).toBe('https://push.example.com/owner');
     expect(sent[0].payload.kind).toBe('task.completed');
+  });
+
+  it('honours scope implication: an owner token gets permission.required, a write token gets task.completed', async () => {
+    const owner = await tokens.issue([OWNER], 'owner');
+    const writer = await tokens.issue([WRITE], 'writer');
+    await store.add(owner.id, {
+      endpoint: 'https://push.example.com/owner',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    await store.add(writer.id, {
+      endpoint: 'https://push.example.com/writer',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifier = new PushNotifier(tokens, store, sender);
+
+    // owner implies approve; write does not.
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(sent.map((x) => x.endpoint)).toEqual([
+      'https://push.example.com/owner',
+    ]);
+
+    // write implies session:read, which task.completed needs.
+    sent.length = 0;
+    await notifier.notifyToken(writer.id, {
+      v: 1,
+      kind: 'task.completed',
+      sessionId: 's1',
+      summary: 'done',
+      url: '/ui/?session=s1',
+    });
+    expect(sent.map((x) => x.endpoint)).toEqual([
+      'https://push.example.com/writer',
+    ]);
   });
 
   it('suppresses the whole fan-out once when snoozed for all, auditing push_suppressed', async () => {
@@ -845,7 +884,8 @@ rules:
   });
 
   it('notifyToken skips a token lacking the required scope (no audit noise)', async () => {
-    const t = await tokens.issue([APPROVE], 'no-session-read');
+    // approve implies session:read, so use a marker scope that implies nothing.
+    const t = await tokens.issue([SHARE], 'no-session-read');
     await store.add(t.id, {
       endpoint: 'https://push.example.com/t',
       keys: { p256dh: 'p', auth: 'a' },

@@ -9500,14 +9500,14 @@
       // Turn a relayed daemon frame into transcript UI. Permission cards are
       // handled separately (in #cards); noise frames are suppressed here and
       // remain visible via the raw-JSON toggle.
-      // The send time rides the frame ENVELOPE. The EventBus stamps
+      // The send time normally rides the frame ENVELOPE. The EventBus stamps
       // `_meta.serverTimestamp` when it publishes, and the WAL keeps it, so a
-      // replay from cursor 0 reports the same value the live row did. The inner
-      // ACP payload has its own `_meta` (usage, parenting) and no clock at all,
-      // so reading it here would find nothing.
+      // replay from cursor 0 reports the same value the live row did. The
+      // daemon's own replay can instead stamp the update itself, as
+      // `_meta.timestamp`; the model reads both, in the order it reads a stored
+      // page's frames (#202).
       function frameStamp(ev) {
-        const t = ev && ev._meta && ev._meta.serverTimestamp;
-        return typeof t === 'number' && Number.isFinite(t) ? t : undefined;
+        return TranscriptModel.frameStamp(ev);
       }
       function renderFrame(ev) {
         if (!ev || typeof ev !== 'object') return;

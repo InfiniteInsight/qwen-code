@@ -5,7 +5,7 @@
  */
 
 import type { RcScope } from '../scopes.js';
-import { APPROVE, SESSION_READ } from '../scopes.js';
+import { APPROVE, SESSION_READ, hasScope } from '../scopes.js';
 import type { TokenStore } from '../tokenStore.js';
 import type { PushStore } from '../pushStore.js';
 import type { AuditRecorder } from '../auditLog.js';
@@ -309,7 +309,7 @@ export class PushNotifier {
     await Promise.all(
       this.store.listAll().map(async (r) => {
         const scopes = this.tokens.scopesFor(r.tokenId);
-        if (!scopes || !scopes.includes(need)) return;
+        if (!scopes || !hasScope(scopes, need)) return;
         // Session-lock confinement: a share token is locked to one session and
         // must never receive another session's notification metadata via push.
         // (scopesFor already drops expired tokens, so an expired share is gone.)
@@ -524,7 +524,7 @@ export class PushNotifier {
     await Promise.all(
       apns.store.listAll().map(async (rec) => {
         const scopes = this.tokens.scopesFor(rec.tokenId);
-        if (!scopes || !scopes.includes(need)) return; // scope gate (silent)
+        if (!scopes || !hasScope(scopes, need)) return; // scope gate (silent)
         const lock = this.tokens.sessionLockFor(rec.tokenId);
         if (lock !== undefined && lock !== ctx.sessionId) return; // session-lock
         const perSubDrop = routing?.firstDropForSubscription?.(
@@ -592,7 +592,7 @@ export class PushNotifier {
     const need = KIND_SCOPE[payload.kind];
     if (!need) return;
     const scopes = this.tokens.scopesFor(tokenId);
-    if (!scopes || !scopes.includes(need)) return;
+    if (!scopes || !hasScope(scopes, need)) return;
     await Promise.all(
       this.store.listFor(tokenId).map((r) => this.sender.send(r, payload)),
     );
