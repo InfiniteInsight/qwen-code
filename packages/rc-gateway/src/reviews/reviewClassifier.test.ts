@@ -701,3 +701,64 @@ describe('classifyReviewToolCall: gh is never auto-approved (#169)', () => {
     ).toBe('escalate');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #169 (follow-up): a write under `.git/` is code execution, not an edit.
+// `.git/config` inside the workspace passed edit confinement, and an
+// auto-approved `git status` / `git diff` then ran whatever `core.fsmonitor` or
+// `diff.external` named. Any edit touching `.git` escalates to a human. This
+// is the string-level layer; the bridge repeats it on real paths.
+// ---------------------------------------------------------------------------
+describe('classifyReviewToolCall: writes under .git always escalate (#169)', () => {
+  const FIX: ReviewPolicy = { ...AUTO, autofix: true };
+  const edit = (rawInput: Record<string, unknown>) => ({
+    kind: 'edit',
+    rawInput,
+  });
+
+  it('escalates an edit to .git/config, a hook, or a worktree .git file', () => {
+    for (const file_path of [
+      '.git/config',
+      '.git/hooks/pre-commit',
+      '.qwen/tmp/review-pr-7/.git', // a linked worktree's gitdir pointer
+      'sub/.git/info/attributes',
+      '.GIT/config', // case-insensitive filesystems
+      '/proj/worktree/.git/config', // absolute form
+      'src/../.git/config', // normalised before the check
+    ]) {
+      expect([
+        file_path,
+        classifyReviewToolCall(edit({ file_path }), FIX),
+      ]).toEqual([file_path, 'escalate']);
+    }
+  });
+
+  it('escalates when ANY path field touches .git (decoy alongside a plain file)', () => {
+    expect(
+      classifyReviewToolCall(
+        edit({ file_path: 'src/a.ts', path: '.git/config' }),
+        FIX,
+      ),
+    ).toBe('escalate');
+  });
+
+  it('control: a plain file, and a name merely containing ".git", still approve', () => {
+    for (const file_path of [
+      'src/a.ts',
+      '.gitignore',
+      'docs/x.git',
+      '.github/x.yml',
+    ]) {
+      expect([
+        file_path,
+        classifyReviewToolCall(edit({ file_path }), FIX),
+      ]).toEqual([file_path, 'approve']);
+    }
+  });
+
+  it('escalates a mkdir under .git even with a .qwen segment', () => {
+    expect(
+      classifyReviewToolCall(shell('mkdir -p .git/.qwen/hooks'), AUTO),
+    ).toBe('escalate');
+  });
+});

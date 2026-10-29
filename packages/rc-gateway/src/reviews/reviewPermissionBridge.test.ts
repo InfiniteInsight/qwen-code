@@ -396,3 +396,125 @@ describe('ReviewPermissionBridge — Guard 2 realpath edit confinement', () => {
     expect(escalated).toEqual(['s']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #169 (follow-up): any edit that lands in git metadata escalates, judged
+// on the REAL path. The classifier refuses a `.git` segment in the string it
+// is given; these cases use paths it approves (symlink aliases, a gitdir under
+// another name, a `.git` file's pointer) to prove the bridge layer on its own.
+// ---------------------------------------------------------------------------
+describe('ReviewPermissionBridge: git metadata is never auto-edited (#169)', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'rpb-git-'));
+    await makeGitDir(join(root, '.git'));
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'a.ts'), 'x');
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /** A directory git itself would accept as a git dir (HEAD, objects, refs). */
+  async function makeGitDir(dir: string): Promise<void> {
+    await mkdir(join(dir, 'objects'), { recursive: true });
+    await mkdir(join(dir, 'refs'), { recursive: true });
+    await mkdir(join(dir, 'hooks'), { recursive: true });
+    await writeFile(join(dir, 'HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(join(dir, 'config'), '[core]\n');
+  }
+
+  async function runEdit(rawInput: Record<string, unknown>) {
+    const { daemon, votes } = fakeDaemon([
+      permFrame('e1', { kind: 'edit', rawInput }),
+    ]);
+    const escalated: string[] = [];
+    const bridge = new ReviewPermissionBridge({
+      daemon,
+      onEscalate: (sid) => escalated.push(sid),
+    });
+    await bridge.open('s', {
+      autoApprove: true,
+      autofix: true,
+      comment: false,
+      worktreeRoot: root,
+    });
+    await bridge.drain('s');
+    return { voted: votes.length > 0, escalated: escalated.length > 0 };
+  }
+
+  const ESCALATED = { voted: false, escalated: true };
+  const VOTED = { voted: true, escalated: false };
+
+  it('control: a plain file in the repository is still auto-approved', async () => {
+    expect(await runEdit({ file_path: 'src/a.ts' })).toEqual(VOTED);
+    expect(await runEdit({ file_path: 'src/new.ts' })).toEqual(VOTED);
+  });
+
+  it('escalates .git/config, directly and through an in-tree symlink alias', async () => {
+    expect(await runEdit({ file_path: '.git/config' })).toEqual(ESCALATED);
+    await symlink(join(root, '.git', 'config'), join(root, 'innocent'));
+    expect(await runEdit({ file_path: 'innocent' })).toEqual(ESCALATED);
+  });
+
+  it('escalates a new .git/hooks/pre-commit, directly and through a dir alias', async () => {
+    expect(await runEdit({ file_path: '.git/hooks/pre-commit' })).toEqual(
+      ESCALATED,
+    );
+    await symlink(join(root, '.git', 'hooks'), join(root, 'hk'));
+    expect(await runEdit({ file_path: 'hk/pre-commit' })).toEqual(ESCALATED);
+  });
+
+  it('escalates a linked worktree .git file, and a new .git file anywhere', async () => {
+    const wt = join(root, '.qwen', 'tmp', 'review-pr-7');
+    await mkdir(join(wt, 'src'), { recursive: true });
+    await makeGitDir(join(root, '.git', 'worktrees', 'review-pr-7'));
+    await writeFile(
+      join(wt, '.git'),
+      `gitdir: ${join(root, '.git', 'worktrees', 'review-pr-7')}\n`,
+    );
+    await writeFile(join(wt, 'src', 'b.ts'), 'x');
+    const rel = '.qwen/tmp/review-pr-7';
+    expect(await runEdit({ file_path: `${rel}/.git` })).toEqual(ESCALATED);
+    await symlink(join(wt, '.git'), join(root, 'wtptr'));
+    expect(await runEdit({ file_path: 'wtptr' })).toEqual(ESCALATED);
+    // Creating a .git file would point a directory at a gitdir of one's choice.
+    expect(await runEdit({ file_path: 'src/.git' })).toEqual(ESCALATED);
+    // Control: the worktree's own source files stay approvable.
+    expect(await runEdit({ file_path: `${rel}/src/b.ts` })).toEqual(VOTED);
+  });
+
+  it('escalates inside the gitdir a .git file points at, whatever it is named', async () => {
+    // `.git` FILE -> `gitdir: ./meta`: no `.git` segment anywhere in the path,
+    // and `meta` is not even a complete git dir, so only the pointer says so.
+    const wt = join(root, 'wt2');
+    await mkdir(join(wt, 'meta'), { recursive: true });
+    await writeFile(join(wt, 'meta', 'config'), '[core]\n');
+    await writeFile(join(wt, '.git'), 'gitdir: ./meta\n');
+    await writeFile(join(wt, 'a.ts'), 'x');
+    expect(await runEdit({ file_path: 'wt2/meta/config' })).toEqual(ESCALATED);
+    expect(await runEdit({ file_path: 'wt2/meta/hooks/pre-commit' })).toEqual(
+      ESCALATED,
+    );
+    expect(await runEdit({ file_path: 'wt2/a.ts' })).toEqual(VOTED);
+  });
+
+  it('escalates inside any directory git would treat as a git dir', async () => {
+    // A separate git dir under an ordinary name (`--separate-git-dir=store`).
+    await makeGitDir(join(root, 'store'));
+    expect(await runEdit({ file_path: 'store/config' })).toEqual(ESCALATED);
+    expect(await runEdit({ file_path: 'store/hooks/post-checkout' })).toEqual(
+      ESCALATED,
+    );
+  });
+
+  it('escalates when a .git file on the path cannot be read as a pointer', async () => {
+    const wt = join(root, 'wt3');
+    await mkdir(wt);
+    await writeFile(join(wt, '.git'), 'not a gitdir line\n');
+    await writeFile(join(wt, 'a.ts'), 'x');
+    expect(await runEdit({ file_path: 'wt3/a.ts' })).toEqual(ESCALATED);
+  });
+});

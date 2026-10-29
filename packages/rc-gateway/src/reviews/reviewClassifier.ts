@@ -357,7 +357,9 @@ function classifyMkdir(argv: string[], ctx: ShellContext): ReviewDecision {
     if (segs.includes('..')) return 'escalate'; // traversal escapes .qwen
     if (!segs.includes('.qwen')) return 'escalate'; // must be under a real .qwen
     // out-of-tree target (a relative path resolves from the shell directory)
-    if (!isInsideRoot(rootAbs, resolve(cwdAbs, p))) return 'escalate';
+    const abs = resolve(cwdAbs, p);
+    if (!isInsideRoot(rootAbs, abs)) return 'escalate';
+    if (hasGitSegment(abs)) return 'escalate'; // never under git metadata
   }
   return 'approve';
 }
@@ -452,6 +454,20 @@ export const EDIT_PATH_FIELDS = [
   'absolute_path',
 ] as const;
 
+/**
+ * True when any segment of the absolute path `abs` is `.git` (compared
+ * case-insensitively, for case-insensitive filesystems) (#169). Git metadata
+ * is code, not content: an edit to `.git/config` (`core.fsmonitor`,
+ * `diff.external`), to `.git/hooks/*`, or to a linked worktree's `.git`
+ * pointer turns the next auto-approved `git status` / `git diff` into
+ * arbitrary execution. Exported so the permission bridge applies the SAME rule
+ * to the realpath'd target (an in-tree symlink alias hides the segment from
+ * this string-level check).
+ */
+export function hasGitSegment(abs: string): boolean {
+  return abs.split(/[\\/]/).some((s) => s.toLowerCase() === '.git');
+}
+
 /** True iff `p` resolves (string-level only) inside `rootAbs`. */
 function isInsideRoot(rootAbs: string, p: string): boolean {
   const targetAbs = resolve(rootAbs, p);
@@ -467,7 +483,8 @@ function isInsideRoot(rootAbs: string, p: string): boolean {
  * resolves inside the review worktree. EVERY present path field is confined —
  * not first-wins — so a divergent decoy (`{file_path:'src/a.ts',
  * path:'/etc/passwd'}`) cannot slip through. Escalate if no path field is
- * present, or if any present one is non-string/empty or resolves outside.
+ * present, or if any present one is non-string/empty, resolves outside, or
+ * has a `.git` segment (see {@link hasGitSegment}).
  *
  * SECURITY CAVEAT — STRING-LEVEL ONLY: this uses `path.resolve` and does NOT
  * resolve symlinks. A symlink committed *inside* the worktree (e.g.
@@ -494,6 +511,8 @@ function classifyEdit(
     sawPath = true;
     if (typeof v !== 'string' || v.length === 0) return 'escalate';
     if (!isInsideRoot(rootAbs, v)) return 'escalate';
+    // In tree but git metadata: a human decides (#169).
+    if (hasGitSegment(resolve(rootAbs, v))) return 'escalate';
   }
   if (!sawPath) return 'escalate'; // no path to confine
   return 'approve';
