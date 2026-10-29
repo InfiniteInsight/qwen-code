@@ -1218,6 +1218,18 @@
       }
       /* Bands that come and go above the transcript keep the column's gutter
          now that the column itself has none. */
+      /* #173. The MCP add/edit form is a column when open. Its layout lives
+         here rather than inline: an inline display beats the hidden
+         attribute, so the form could not be put away. */
+      #ws-mcp-form {
+        margin-top: 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #ws-mcp-form[hidden] {
+        display: none;
+      }
       #pane-chat > #joined-note,
       #pane-chat > #lineage,
       #pane-chat > #crash-banner {
@@ -2921,16 +2933,7 @@
                   gap: 8px;
                 "
               ></div>
-              <div
-                id="ws-mcp-form"
-                hidden
-                style="
-                  margin-top: 6px;
-                  display: flex;
-                  flex-direction: column;
-                  gap: 6px;
-                "
-              ></div>
+              <div id="ws-mcp-form" hidden></div>
             </section>
             <!-- #124. What ONE live conversation has loaded: its skills and the MCP
                  servers its own manager holds. Deliberately not the workspace view.
@@ -7291,8 +7294,10 @@
         wsLastData.perms = null;
         wsFilesPath = '.';
         renderWsTargetLabels();
-        const form = $('ws-mcp-form');
-        if (form) form.hidden = true;
+        // #173: closed AND emptied. An edit opened for the old workspace posts
+        // its set to wsTargetBody(), which is the new one by the time it is
+        // saved.
+        if ($('ws-mcp-form')) hideMcpServerForm();
         renderWsSectionPlaceholder('ws-trust-body', 'Load', (n) =>
           loadWorkspaceTrust(n),
         );
@@ -8272,17 +8277,50 @@
             btn.disabled = false;
             return;
           }
-          // 'set' re-assigns the server from its (non-secret-rendered) status
-          // config; 'remove' deletes the named entry. The daemon rewrites the
-          // whole mcpServers map, so a reload follows.
-          const payload = !server.disabled
-            ? { operation: 'remove', name: server.name, ...wsTargetBody() }
-            : {
-                operation: 'set',
-                name: server.name,
-                config: server.config || {},
-                ...wsTargetBody(),
-              };
+          // 'set' re-assigns the server; 'remove' deletes the named entry. The
+          // daemon rewrites the whole mcpServers map, so a reload follows.
+          let payload;
+          if (!server.disabled) {
+            // #173: removing drops the entry and its env, headers and secrets
+            // with it, so it is asked first, by name.
+            if (
+              !window.confirm(
+                'Disable "' +
+                  server.name +
+                  '"? Its entry is removed from the workspace settings, ' +
+                  'including its env, headers and tool lists.',
+              )
+            ) {
+              btn.disabled = false;
+              return;
+            }
+            payload = {
+              operation: 'remove',
+              name: server.name,
+              ...wsTargetBody(),
+            };
+          } else {
+            // #173: the status config is a five-field subset, and 'set'
+            // replaces the whole entry, so sending it alone deleted the env,
+            // headers, oauth, timeout, trust and tool lists. The stored entry
+            // (secrets still redacted, which the daemon restores when saved
+            // unchanged) is what the status fields are laid over.
+            const stored = await fetchMcpServerConfig(server.name);
+            if (stored.source === 'none') {
+              status.textContent =
+                'could not read the current config of "' +
+                server.name +
+                '", so nothing was written (enable would replace it with a partial copy); use edit config';
+              btn.disabled = false;
+              return;
+            }
+            payload = {
+              operation: 'set',
+              name: server.name,
+              config: { ...(server.config || {}), ...stored.config },
+              ...wsTargetBody(),
+            };
+          }
           // Send the version from the last GET so the gateway can reject a
           // stale write (another writer changed the server list in the
           // window) instead of silently clobbering it.
@@ -8314,6 +8352,22 @@
             return;
           }
           await reloadMcpServers();
+          // #173: enabling writes the server's entry; it does not touch the
+          // exclusion list, so a server listed there stays off. Said rather
+          // than left looking like a success.
+          if (server.disabled && wsLastData.mcp) {
+            const after = (wsLastData.mcp.servers || []).find(
+              (x) => x && x.name === server.name,
+            );
+            if (after && after.disabled) {
+              wsSectionStatusEl('ws-mcp-status').textContent =
+                '"' +
+                server.name +
+                '" is still disabled: it is switched off by a setting this page does not edit (' +
+                (after.disabledReason || 'unknown reason') +
+                ')';
+            }
+          }
         } catch (err) {
           status.textContent = 'change failed: ' + err.message;
           btn.disabled = false;

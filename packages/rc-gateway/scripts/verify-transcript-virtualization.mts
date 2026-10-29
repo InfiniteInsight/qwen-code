@@ -21359,6 +21359,128 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. The workspace MCP card. Enabling a server wrote the five-field status
+  // subset over the whole workspace entry (env, headers, oauth, timeout, trust
+  // and the tool lists went with it), disabling removed the entry on one tap,
+  // and the add/edit form could not be hidden (hidden plus an inline display),
+  // so an edit opened for one workspace posted to another.
+  const mcpFixture = (disabled: boolean): unknown => ({
+    initialized: true,
+    version: 'v1',
+    servers: [
+      {
+        name: 'srv',
+        configOrigin: 'workspace_settings',
+        disabled,
+        ...(disabled ? { disabledReason: 'config' } : {}),
+        mcpStatus: disabled ? 'disabled' : 'connected',
+        transport: 'stdio',
+        config: { command: 'srv-cmd', args: ['--a'] },
+      },
+    ],
+  });
+  const STORED_SRV = {
+    command: 'srv-cmd',
+    args: ['--a'],
+    env: { API_TOKEN: '__redacted__' },
+    headers: { Authorization: '__redacted__' },
+    timeout: 5000,
+    trust: true,
+    includeTools: ['alpha'],
+    excludeTools: ['beta'],
+  };
+  const mcpRoutes = async (page: Page, disabled: boolean): Promise<{ sets: Record<string, unknown>[]; reloads: number }> => {
+    const seen = { sets: [] as Record<string, unknown>[], reloads: 0 };
+    await page.route('**/rc/workspace/mcp', (route) => json(route, mcpFixture(disabled)));
+    await page.route('**/rc/workspace/mcp/reload', (route) => {
+      seen.reloads += 1;
+      return json(route, { accepted: true });
+    });
+    await page.route('**/rc/workspace/mcp/servers', (route) => {
+      seen.sets.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
+      return json(route, {});
+    });
+    await page.route('**/rc/workspace/settings*', (route) =>
+      json(route, { settings: [{ key: 'mcpServers', values: { workspace: { srv: STORED_SRV } } }] }),
+    );
+    return seen;
+  };
+  const mcpButton = (page: Page, label: string): Promise<void> =>
+    page.evaluate(
+      `Array.from(document.querySelectorAll('#ws-mcp-body button')).find((b) => b.textContent === ${JSON.stringify(label)}).click()`,
+    ) as Promise<void>;
+
+  PAGE_SCENARIOS.push({
+    name: 'P247 enabling an MCP server sends the whole stored entry with the status fields over it, not the five-field subset, and says so when the server is still disabled',
+    waitView: false,
+    run: async ({ page }) => {
+      const seen = await mcpRoutes(page, true);
+      await page.evaluate('void loadWorkspaceMcp(false)');
+      await page.waitForFunction("Array.from(document.querySelectorAll('#ws-mcp-body button')).some((b) => b.textContent === 'enable')", null, { timeout: 10_000 });
+      await mcpButton(page, 'enable');
+      await poll(() => seen.sets.length === 1, 'enable never wrote the server');
+      const sent = seen.sets[0]!;
+      expect(sent['operation'] === 'set' && sent['name'] === 'srv', `the write was ${JSON.stringify(sent)}`);
+      const config = sent['config'] as Record<string, unknown>;
+      expect(
+        JSON.stringify(Object.keys(config).sort()) === JSON.stringify(Object.keys(STORED_SRV).sort()),
+        `enable wrote ${JSON.stringify(config)}, not the stored entry ${JSON.stringify(STORED_SRV)}`,
+      );
+      expect(JSON.stringify(config['env']) === JSON.stringify(STORED_SRV.env) && config['timeout'] === 5000 && config['trust'] === true, 'env, timeout or trust did not survive the enable');
+      await poll(() => seen.reloads === 1, 'the reload after the write never ran');
+      await page.waitForFunction("document.getElementById('ws-mcp-status').textContent.includes('still disabled')", null, { timeout: 10_000 });
+      return `enable wrote ${Object.keys(config).sort().join(',')}; a server that stayed disabled said so`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P248 disabling an MCP server asks first, naming the server, and removes nothing when the reader says no',
+    waitView: false,
+    run: async ({ page }) => {
+      const seen = await mcpRoutes(page, false);
+      await page.evaluate('void loadWorkspaceMcp(false)');
+      await page.waitForFunction("Array.from(document.querySelectorAll('#ws-mcp-body button')).some((b) => b.textContent === 'disable')", null, { timeout: 10_000 });
+      // The verifier dismisses a dialog unless a scenario says otherwise.
+      await mcpButton(page, 'disable');
+      await page.waitForTimeout(600);
+      expect(seen.sets.length === 0, `disable removed the server without a yes (${JSON.stringify(seen.sets)})`);
+      await page.evaluate(`window.__asked = []; window.confirm = (m) => { window.__asked.push(m); return true; }`);
+      await mcpButton(page, 'disable');
+      await poll(() => seen.sets.length === 1, 'a yes did not remove the server');
+      expect(seen.sets[0]!['operation'] === 'remove' && seen.sets[0]!['name'] === 'srv', `the write was ${JSON.stringify(seen.sets[0])}`);
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      expect(asked.length === 1 && asked[0]!.includes('srv'), `the question was ${JSON.stringify(asked)}`);
+      return `a dismissed confirm removed nothing; a yes removed srv after asking ${JSON.stringify(asked[0])}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P249 the MCP add/edit form is out of sight until opened, and switching the workspace it acts on closes and empties it',
+    waitView: false,
+    run: async ({ page }) => {
+      await mcpRoutes(page, false);
+      const display = (): Promise<{ display: string; kids: number }> =>
+        page.evaluate(`(() => {
+          const f = document.getElementById('ws-mcp-form');
+          return { display: getComputedStyle(f).display, kids: f.children.length };
+        })()`) as Promise<{ display: string; kids: number }>;
+      await page.evaluate('void loadWorkspaceMcp(false)');
+      await page.waitForFunction("Array.from(document.querySelectorAll('#ws-mcp-body button')).some((b) => b.textContent === 'edit config')", null, { timeout: 10_000 });
+      const shut = await display();
+      expect(shut.display === 'none', `the form is drawn before it is opened (${JSON.stringify(shut)})`);
+      await mcpButton(page, 'edit config');
+      await page.waitForFunction("document.getElementById('ws-mcp-form').children.length > 0");
+      const open = await display();
+      expect(open.display !== 'none' && open.kids > 0, `the form did not open (${JSON.stringify(open)})`);
+      // The reader moves the controls to another workspace: the edit for the
+      // old one must not stay up to be saved against the new one.
+      await page.evaluate(`setWsTarget('/p249/other')`);
+      const after = await display();
+      expect(after.display === 'none' && after.kids === 0, `the form stayed up for the old workspace (${JSON.stringify(after)})`);
+      return 'closed at rest, open on edit, closed and emptied by a workspace switch';
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 
