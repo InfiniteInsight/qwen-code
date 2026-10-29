@@ -405,6 +405,7 @@ interface VtModel {
   upsertSubagentTool(u: Record<string, unknown>, parentId: string): void;
   finishSubagent(parentId: string, status: string): void;
   touch(item: VtItem): void;
+  search(query: string): Array<{ item: VtItem; id: number; index: number; count: number }>;
 }
 interface VtView {
   scrollToEnd(): void;
@@ -412,6 +413,11 @@ interface VtView {
   isNearBottom(): boolean;
   mountedCount(): number;
   revealHeader(): void;
+  /** #138 */
+  setFind(spec: { query: string; ids: number[]; active: VtItem | null } | null): void;
+  revealItem(item: VtItem, top?: number): void;
+  readerAnchor(): { end?: boolean; item?: VtItem; top?: number };
+  restorePlace(item: VtItem, top: number): void;
   destroy(): void;
 }
 declare const __vt: {
@@ -2232,6 +2238,235 @@ const VIEW_SCENARIOS: Scenario[] = [
         );
         expect(r.jumped <= 1 && r.same <= 1 && r.nearAfter, `${mode}: jump-to-bottom left a gap of ${r.jumped}px (${r.same}px in the same frame)`);
         out.push(`${mode}: gaps ${r.gaps.join(',')}; jumps ${r.jumped}/${r.same}`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V19 revealItem (#138) takes a row far above, never mounted, to the margin under the top edge, and leaves a row already wholly in view where it is',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(150, 300, 0);
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          const target = __vt.model.items[40]!;
+          const mountedBefore = !!__vt.row(target.id);
+          const mountedCount = __vt.view.mountedCount();
+          __vt.view.revealItem(target);
+          await __vt.settle(300);
+          const box = __vt.rowBox(target.id);
+          const nextBox = __vt.rowBox(__vt.model.items[41]!.id);
+          const top0 = __vt.scroller.scrollTop;
+          __vt.view.revealItem(__vt.model.items[41]!);
+          await __vt.settle(300);
+          return {
+            mountedBefore,
+            mountedCount,
+            box,
+            nextVisible: !!nextBox && nextBox.top >= 0 && nextBox.bottom <= __vt.scroller.clientHeight,
+            moved: Math.abs(__vt.scroller.scrollTop - top0),
+            nearBottom: __vt.view.isNearBottom(),
+          };
+        }, virtual);
+        if (virtual) expect(!r.mountedBefore, 'the row was mounted before the reveal, so a far row was not tested');
+        expect(r.box !== null && Math.abs(r.box.top - 64) <= 2, `${mode}: the revealed row sits at ${r.box?.top} px, not the 64 px margin`);
+        expect(r.nextVisible, `${mode}: the next row is not wholly in view, so the already-visible case was not tested`);
+        expect(r.moved <= 1, `${mode}: a row already wholly in view moved the list by ${r.moved}px`);
+        expect(!r.nearBottom, `${mode}: the view still reports the end after a reveal far above it`);
+        out.push(`${mode}: far row at ${Math.round(r.box!.top)}px (${r.mountedCount} mounted before), visible row moved ${Math.round(r.moved)}px`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V20 setFind (#138) rings the hit rows and paints their words without adding a node or changing any row height or the list height',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          for (let i = 0; i < 120; i++) {
+            __vt.model.addUser(__vt.text(300, 2 * i));
+            __vt.model.appendAssistant(i % 20 === 17 ? __vt.text(300, 2 * i + 1) + ' ZebraCorn and a zebracorn' : __vt.text(300, 2 * i + 1));
+          }
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          // The last hit is mounted at the end; the first is far above.
+          const hits = __vt.model.search('zebracorn');
+          const before: Record<number, number> = {};
+          __vt.scroller.querySelectorAll('.vrow').forEach((el) => {
+            before[Number(el.getAttribute('data-id'))] = el.getBoundingClientRect().height;
+          });
+          const nodesBefore = __vt.scroller.querySelectorAll('*').length;
+          const sizeBefore = __vt.scroller.scrollHeight;
+          const topBefore = __vt.scroller.scrollTop;
+          const last = hits[hits.length - 1]!.item;
+          __vt.view.setFind({ query: 'zebracorn', ids: hits.map((h) => h.id), active: last });
+          await __vt.settle(300);
+          const after: Record<number, number> = {};
+          __vt.scroller.querySelectorAll('.vrow').forEach((el) => {
+            after[Number(el.getAttribute('data-id'))] = el.getBoundingClientRect().height;
+          });
+          const reg = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
+          const state = {
+            same: Object.keys(before).every((k) => after[Number(k)] === before[Number(k)]),
+            n: Object.keys(before).length,
+            nodesSame: __vt.scroller.querySelectorAll('*').length === nodesBefore,
+            sizeSame: __vt.scroller.scrollHeight === sizeBefore,
+            topSame: __vt.scroller.scrollTop === topBefore,
+            hitRows: __vt.scroller.querySelectorAll('.vrow.find-hit').length,
+            activeRows: __vt.scroller.querySelectorAll('.vrow.find-active').length,
+            hitsMounted: hits.filter((h) => !!__vt.row(h.id)).length,
+            active: [...(reg.get('rc-find-active') ?? [])].map((x) => String(x)),
+            rest: [...(reg.get('rc-find') ?? [])].map((x) => String(x)),
+            total: hits.length,
+          };
+          // Rows mounted later by scrolling are painted when they arrive.
+          __vt.scroller.scrollTop = 0;
+          await __vt.settle(300);
+          const first = __vt.model.search('zebracorn')[0]!;
+          __vt.view.revealItem(first.item);
+          await __vt.settle(300);
+          const later = {
+            firstRung: !!__vt.row(first.id)?.classList.contains('find-hit'),
+            ranges: [...(reg.get('rc-find') ?? [])].length,
+          };
+          __vt.view.setFind(null);
+          await __vt.settle(200);
+          const cleared = {
+            hit: __vt.scroller.querySelectorAll('.vrow.find-hit, .vrow.find-active').length,
+            reg: reg.has('rc-find') || reg.has('rc-find-active'),
+          };
+          return { state, later, cleared };
+        }, virtual);
+        expect(r.state.same && r.state.nodesSame, `${mode}: painting changed a row height or the node count`);
+        expect(r.state.sizeSame && r.state.topSame, `${mode}: painting changed the list height or the reader's place`);
+        expect(r.state.total === 6, `${mode}: ${r.state.total} hit rows, not 6`);
+        expect(
+          r.state.hitRows === r.state.hitsMounted && r.state.activeRows === 1,
+          `${mode}: ${r.state.hitRows} rows ringed of ${r.state.hitsMounted} hit rows mounted, ${r.state.activeRows} active`,
+        );
+        expect(
+          r.state.active.length === 1 && r.state.active[0]!.toLowerCase() === 'zebracorn' && r.state.rest.length >= 1,
+          `${mode}: the active mark is ${JSON.stringify(r.state.active)}, the rest ${r.state.rest.length}`,
+        );
+        expect(r.later.firstRung && r.later.ranges >= 2, `${mode}: a hit row mounted after the scroll was not painted (${JSON.stringify(r.later)})`);
+        expect(r.cleared.hit === 0 && !r.cleared.reg, `${mode}: clearing left ${r.cleared.hit} rings (registry ${r.cleared.reg})`);
+        out.push(`${mode}: ${r.state.n} rows mounted, heights and node count unchanged, ${r.state.hitRows} ringed, active "${r.state.active[0]}"`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V21 revealItem (#138) on a row taller than the box brings its first mark into the box, not just the row start',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(40, 300, 0);
+          let tall = '';
+          for (let i = 0; i < 160; i++) tall += 'line ' + i + (i === 130 ? ' the Marmalade is here' : '') + '\n';
+          __vt.model.addUser('a long answer please');
+          __vt.model.appendAssistant(tall);
+          __vt.addTurns(40, 300, 100);
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          const hits = __vt.model.search('marmalade');
+          const item = hits[0]!.item;
+          __vt.view.setFind({ query: 'marmalade', ids: [item.id], active: item });
+          __vt.view.revealItem(item);
+          await __vt.settle(400);
+          const mark = [...((CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights.get('rc-find-active') ?? [])][0];
+          const edge = __vt.scroller.getBoundingClientRect();
+          const b = mark ? mark.getBoundingClientRect() : null;
+          const rowBox = __vt.rowBox(item.id);
+          return {
+            hits: hits.length,
+            markTop: b ? b.top - edge.top : null,
+            markBottom: b ? b.bottom - edge.top : null,
+            box: edge.height,
+            rowTop: rowBox ? rowBox.top : null,
+            rowHeight: rowBox ? rowBox.bottom - rowBox.top : null,
+          };
+        }, virtual);
+        expect(r.hits === 1 && r.markTop !== null, `${mode}: no active mark was painted (${JSON.stringify(r)})`);
+        expect(r.rowHeight! > r.box, `${mode}: the row (${r.rowHeight}px) is not taller than the box (${r.box}px), so a tall row was not tested`);
+        expect(
+          r.markTop! >= 0 && r.markBottom! <= r.box,
+          `${mode}: the mark is at ${Math.round(r.markTop!)}..${Math.round(r.markBottom!)} in a box of ${Math.round(r.box)}px`,
+        );
+        out.push(`${mode}: ${Math.round(r.rowHeight!)}px row in a ${Math.round(r.box)}px box, mark at ${Math.round(r.markTop!)}px`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V22 a place read before a search and restored after it puts the reader back, and a row that grows into a hit is painted when the page asks again',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(150, 300, 0);
+          for (let i = 0; i < 2; i++) {
+            __vt.model.addUser('plain');
+            __vt.model.appendAssistant('plain too');
+          }
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          __vt.scroller.scrollTop = 4000;
+          await __vt.settle(400);
+          const place = __vt.view.readerAnchor();
+          const was = { id: place.item!.id, top: place.top! };
+          __vt.model.items[20]!.text = __vt.model.items[20]!.text + ' Quince';
+          __vt.model.touch(__vt.model.items[20]!);
+          const hits = __vt.model.search('quince');
+          __vt.view.setFind({ query: 'quince', ids: hits.map((h) => h.id), active: hits[0]!.item });
+          __vt.view.revealItem(hits[0]!.item);
+          await __vt.settle(400);
+          const away = __vt.scroller.scrollTop;
+          __vt.view.setFind(null);
+          __vt.view.restorePlace(__vt.model.items.find((i) => i.id === was.id)!, was.top);
+          await __vt.settle(500);
+          const back = __vt.rowBox(was.id);
+          // A row that grows into a hit: the page asks again and it is painted.
+          const last = __vt.model.items[__vt.model.items.length - 1]!;
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          __vt.view.setFind({ query: 'quince', ids: hits.map((h) => h.id), active: null });
+          await __vt.settle(200);
+          const ringsBefore = __vt.scroller.querySelectorAll('.vrow.find-hit').length;
+          __vt.model.appendAssistant(' and a quince');
+          const now = __vt.model.search('quince');
+          __vt.view.setFind({ query: 'quince', ids: now.map((h) => h.id), active: null });
+          await __vt.settle(300);
+          const lastRow = __vt.row(last.id);
+          return {
+            was,
+            away,
+            backTop: back ? back.top : null,
+            ringsBefore,
+            grown: !!lastRow && lastRow.classList.contains('find-hit'),
+            lastIsAsst: last.kind === 'asst',
+            marks: [...((CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights.get('rc-find') ?? [])].length,
+          };
+        }, virtual);
+        expect(Math.abs(r.away - 4000) > 300, `${mode}: the search never moved the reader (${r.away})`);
+        expect(r.backTop !== null && Math.abs(r.backTop - r.was.top) <= 2, `${mode}: the reader came back to ${r.backTop}px, not ${Math.round(r.was.top)}px`);
+        expect(r.lastIsAsst && r.grown && r.marks >= 1, `${mode}: a row that grew into a hit was not painted (${JSON.stringify({ grown: r.grown, marks: r.marks })})`);
+        out.push(`${mode}: moved to ${Math.round(r.away)}, back at ${Math.round(r.backTop!)} (was ${Math.round(r.was.top)}), a grown row painted`);
       }
       return out.join('; ');
     },
