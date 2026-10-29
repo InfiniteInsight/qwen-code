@@ -5,7 +5,9 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, readFile, stat } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
 import { NON_OWNER_WRITE_MASK } from './policy/permissions.js';
 
 /**
@@ -55,17 +57,56 @@ export interface HostAction {
 /**
  * Runs one argv with a time cap and reports how it exited. `code` is the exit
  * status, or null when there is none to report: killed on the cap, killed by
- * a signal, or never started at all. Injected so tests and the page harness
- * never run a real program.
+ * a signal, or never started at all. `error` is set only for that last case,
+ * a program the OS could not spawn, and is the errno code (`ENOENT`,
+ * `EACCES`): it is how a missing program differs from one that ran and failed
+ * (#198). Injected so tests and the page harness never run a real program.
  */
 export type HostActionRunner = (
   argv: readonly string[],
   timeoutMs: number,
-) => Promise<{ code: number | null }>;
+) => Promise<{ code: number | null; error?: string }>;
+
+/**
+ * What a status probe found. `error` is present only when the probe program
+ * could not be spawned, as `<errno>: <program basename>`: never the argv and
+ * never a path, because the page and the audit log both show it.
+ */
+export interface HostActionProbe {
+  running: boolean;
+  error?: string;
+}
 
 export type HostActionStartOutcome =
   | { ok: true; running: boolean }
-  | { ok: false; code: number | null };
+  | {
+      ok: false;
+      code: number | null;
+      /** Set when the start program could not be spawned at all. */
+      spawn?: { code: string; error: string };
+    };
+
+/**
+ * Whether a bare program name resolves to an executable on `pathEnv`, the way
+ * `execFile` would look it up. The gateway usually runs as a systemd user unit
+ * whose PATH is not the login shell's, so a name that works at a prompt (a
+ * WSL interop `powershell.exe`) can be missing here (#198).
+ */
+export async function findOnPath(
+  program: string,
+  pathEnv: string | undefined,
+): Promise<boolean> {
+  for (const dir of (pathEnv ?? '').split(delimiter)) {
+    if (dir.length === 0) continue;
+    try {
+      await access(join(dir, program), constants.X_OK);
+      return true;
+    } catch {
+      // not in this directory
+    }
+  }
+  return false;
+}
 
 /** The file is present but cannot be used; the message says why, in one line. */
 export class HostActionsConfigError extends Error {
@@ -140,7 +181,8 @@ export function parseHostActions(raw: unknown): HostAction[] {
 
 /**
  * The real runner, over `execFile`. It never rejects: a program that is
- * missing, refused or killed resolves with `code: null`.
+ * missing, refused or killed resolves with `code: null`, and one the OS could
+ * not spawn also carries the errno as `error`.
  *
  * It settles on the child's `exit` rather than on `execFile`'s callback,
  * because the callback waits for the child's output pipes to close, and a
@@ -153,10 +195,10 @@ export function parseHostActions(raw: unknown): HostAction[] {
 export const execFileRunner: HostActionRunner = (argv, timeoutMs) =>
   new Promise((resolve) => {
     let settled = false;
-    const settle = (code: number | null) => {
+    const settle = (code: number | null, error?: string) => {
       if (settled) return;
       settled = true;
-      resolve({ code });
+      resolve(error === undefined ? { code } : { code, error });
     };
     try {
       const child = execFile(
@@ -167,7 +209,9 @@ export const execFileRunner: HostActionRunner = (argv, timeoutMs) =>
         // execFile collects (and bounds) output nobody reads.
         () => {},
       );
-      child.once('error', () => settle(null));
+      child.once('error', (err) =>
+        settle(null, (err as NodeJS.ErrnoException).code ?? 'ERROR'),
+      );
       child.once('exit', (code) => {
         child.stdout?.destroy();
         child.stderr?.destroy();
@@ -176,7 +220,7 @@ export const execFileRunner: HostActionRunner = (argv, timeoutMs) =>
     } catch {
       // execFile throws synchronously on an argument it cannot pass (a NUL
       // byte, say); that is a program that never started.
-      settle(null);
+      settle(null, 'ERR_SPAWN');
     }
   });
 
@@ -266,6 +310,7 @@ export class HostActions {
     path: string,
     log: (line: string) => void,
     run: HostActionRunner = execFileRunner,
+    pathEnv: string | undefined = process.env['PATH'],
   ): Promise<HostActions | undefined> {
     try {
       const store = await HostActions.open(path, run);
@@ -275,6 +320,7 @@ export class HostActions {
           `host-actions: ${names.length} from ${path}` +
             (names.length ? ` (${names.join(', ')})` : ''),
         );
+        await store.warnUnresolvable(path, log, pathEnv);
       }
       return store;
     } catch (err) {
@@ -282,6 +328,32 @@ export class HostActions {
         `host-actions: ${path} not loaded, the routes stay unmounted: ${(err as Error).message}`,
       );
       return undefined;
+    }
+  }
+
+  /**
+   * One warning line per action whose status or start names a bare program
+   * (no `/`) that is not on `pathEnv`. It does not resolve anything: the
+   * operator fixes the file (an absolute path), the gateway never searches
+   * for the program itself.
+   */
+  private async warnUnresolvable(
+    file: string,
+    log: (line: string) => void,
+    pathEnv: string | undefined,
+  ): Promise<void> {
+    for (const a of this.byName.values()) {
+      const missing: string[] = [];
+      for (const prog of [a.status[0]!, a.start[0]!]) {
+        if (prog.includes('/') || missing.includes(prog)) continue;
+        if (!(await findOnPath(prog, pathEnv))) missing.push(prog);
+      }
+      if (missing.length === 0) continue;
+      log(
+        `host-actions: WARNING ${a.name}: ${missing.join(', ')} is not on the gateway's PATH ` +
+          `(the unit's PATH does not include it), so this action will fail to spawn; ` +
+          `use an absolute path in ${file}`,
+      );
     }
   }
 
@@ -299,11 +371,22 @@ export class HostActions {
 
   /** Whether the action's program is running: its status argv exited 0. */
   async probe(name: string): Promise<boolean> {
-    const { code } = await this.runCapped(
+    return (await this.check(name)).running;
+  }
+
+  /**
+   * {@link probe} with the reason when the status program could not be
+   * spawned, so a missing program reads as a failed probe rather than as
+   * "not running".
+   */
+  async check(name: string): Promise<HostActionProbe> {
+    const { code, error } = await this.runCapped(
       this.get(name).status,
       STATUS_TIMEOUT_MS,
     );
-    return code === 0;
+    return error === undefined
+      ? { running: code === 0 }
+      : { running: false, error: error.error };
   }
 
   /**
@@ -317,7 +400,13 @@ export class HostActions {
     const pending = this.starting.get(name);
     if (pending) return pending;
     const p = (async (): Promise<HostActionStartOutcome> => {
-      const { code } = await this.runCapped(action.start, START_TIMEOUT_MS);
+      const { code, error } = await this.runCapped(
+        action.start,
+        START_TIMEOUT_MS,
+      );
+      if (error !== undefined) {
+        return { ok: false, code: null, spawn: error };
+      }
       if (code !== 0) return { ok: false, code };
       return { ok: true, running: await this.probe(name) };
     })().finally(() => this.starting.delete(name));
@@ -339,10 +428,23 @@ export class HostActions {
   private async runCapped(
     argv: readonly string[],
     timeoutMs: number,
-  ): Promise<{ code: number | null }> {
+  ): Promise<{
+    code: number | null;
+    error?: { code: string; error: string };
+  }> {
     try {
       const out = await this.run(argv, timeoutMs);
-      return { code: typeof out?.code === 'number' ? out.code : null };
+      const code = typeof out?.code === 'number' ? out.code : null;
+      if (code === null && typeof out?.error === 'string') {
+        // The errno code is cut to a plain token and the program to its
+        // basename, so nothing from the argv's arguments or directories
+        // reaches the page or the audit log.
+        const errno =
+          out.error.replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'ERROR';
+        const base = (argv[0] ?? '').split(/[\\/]/).pop()!.slice(0, 80);
+        return { code, error: { code: errno, error: `${errno}: ${base}` } };
+      }
+      return { code };
     } catch {
       return { code: null };
     }
