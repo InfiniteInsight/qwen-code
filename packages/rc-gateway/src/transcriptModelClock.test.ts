@@ -53,6 +53,7 @@ interface Api {
   createTranscriptModel(opts?: { now?: () => number }): Model;
   replayStoredPage(events: unknown[]): Item[];
   userBlockOf(content: unknown): Part | null;
+  frameStamp(ev: unknown): number | undefined;
 }
 
 let api: Api;
@@ -147,5 +148,32 @@ describe('the clock of a stored page (#171)', () => {
       }),
     ]);
     expect(rows[0].time).toBe(Date.parse('2026-01-01T00:00:00.000Z'));
+  });
+});
+
+describe('frameStamp reads the clock where stampOf does (#202)', () => {
+  it('finds the stored timestamp on data, on data.update, and on the envelope', () => {
+    expect(
+      api.frameStamp(flat('user_message_chunk', text('q'), 1_700_000_000_000)),
+    ).toBe(1_700_000_000_000);
+    expect(
+      api.frameStamp(
+        nested('user_message_chunk', text('q'), 1_700_000_001_000),
+      ),
+    ).toBe(1_700_000_001_000);
+    expect(
+      api.frameStamp({
+        type: 'session_update',
+        data: {},
+        _meta: { serverTimestamp: 1_700_000_002_000 },
+      }),
+    ).toBe(1_700_000_002_000);
+  });
+
+  it('is undefined for a frame with no clock', () => {
+    expect(
+      api.frameStamp(flat('user_message_chunk', text('q'))),
+    ).toBeUndefined();
+    expect(api.frameStamp(null)).toBeUndefined();
   });
 });
