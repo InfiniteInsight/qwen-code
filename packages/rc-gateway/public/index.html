@@ -529,6 +529,13 @@
         max-width: 100%;
         box-sizing: border-box;
       }
+      /* #190: a button a panel draws once its data has loaded (a row's
+         Revoke, Remove, Withdraw, ...) is as tall as the card's own controls,
+         not the ~30px the old pane's rows were. */
+      #panel-body .ops-card button {
+        min-height: 40px;
+        box-sizing: border-box;
+      }
       /* 16px: iOS zooms the page into any field under 16px when it takes
          focus, and these are the fields a phone types into. */
       #panel-screen :where(input, select, textarea) {

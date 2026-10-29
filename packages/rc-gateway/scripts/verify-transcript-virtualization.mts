@@ -23891,6 +23891,32 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P327 a button a panel draws once its data has loaded is 40px, as tall as the card controls',
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openPanel(page, 'devices');
+    await page.click('#list-tokens');
+    await page.waitForFunction(`!!document.querySelector('#tokens .token-row button')`, null, { timeout: 10_000 });
+    // A row the way the page draws one, with a short label: a long one wraps
+    // and the row is tall anyway, which is how the real rows hid the size.
+    await page.evaluate(`(() => {
+      const row = document.createElement('div');
+      row.className = 'token-row';
+      const info = document.createElement('span');
+      info.textContent = 'p327';
+      const btn = document.createElement('button');
+      btn.textContent = 'Revoke';
+      row.append(info, btn);
+      document.getElementById('tokens').appendChild(row);
+    })()`);
+    const hs = (await page.evaluate(`Array.from(document.querySelectorAll('#tokens button')).map((b) => Math.round(b.getBoundingClientRect().height))`)) as number[];
+    expect(hs.length > 0 && hs.every((h) => h >= 40), `the drawn Revoke buttons are ${JSON.stringify(hs)}px`);
+    await shot(page, 'p327-tokens-390');
+    await openPanel(page, 'chat');
+    return `${hs.length} drawn Revoke button(s) at ${JSON.stringify(hs)}px`;
+  },
+});
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
