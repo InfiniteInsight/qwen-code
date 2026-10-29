@@ -23390,6 +23390,10 @@ PAGE_SCENARIOS.push({
       `the user rows read ${JSON.stringify(rows)}: the message the turn took is not drawn (or another conversation's is)`,
     );
     expect(after === mid.users, `the injected message counted as a new turn (${mid.users} -> ${after})`);
+    // Rewind and fork number turns from the user rows, and the daemon does not
+    // count a mid-turn message as one, so neither may the page.
+    const turns = (await page.evaluate('transcriptModel.userTurns().map((i) => i.text)')) as string[];
+    expect(turns.join('|') === 'the turn is running', `the rewind picker would count ${JSON.stringify(turns)} as turns`);
     const still = (await page.evaluate('turnRunning()')) as boolean;
     expect(still, 'drawing the injected message ended the turn');
     await shot(page, 'p314-injected-390');

@@ -303,6 +303,17 @@
       resetTurn();
       return push(newItem('user', { text: clean(text), time: time }));
     }
+    // #190. A message that joined the running turn through the mid-turn
+    // route. It is drawn as the reader's message, and the answer after it is
+    // a bubble of its own, but it is not a turn: the daemon's rewind index and
+    // the gateway's turn resolver skip `mid_turn_user_message`, so userTurns
+    // (and every rewind and fork number built on it) skips it too.
+    function addMidTurnUser(text, time) {
+      resetTurn();
+      return push(
+        newItem('user', { text: clean(text), time: time, midTurn: true }),
+      );
+    }
     // #197. One attachment of a user message. It joins the user row it belongs
     // to - the one just above, once the processing row is set aside - so a
     // text-and-picture message is one row, not two, and the rows that count
@@ -718,7 +729,7 @@
     // ---- Whole-transcript operations -------------------------------------
     function userTurns() {
       return items.filter(function (i) {
-        return i.kind === 'user';
+        return i.kind === 'user' && !i.midTurn;
       });
     }
 
@@ -1037,6 +1048,7 @@
       },
       subscribe: subscribe,
       addUser: addUser,
+      addMidTurnUser: addMidTurnUser,
       addUserPart: addUserPart,
       addUserChunk: addUserChunk,
       appendAssistant: appendAssistant,
@@ -1164,6 +1176,15 @@
       return;
     }
     if (su === 'user_message_chunk') {
+      // #190: the record of a message that joined a running turn.
+      if (
+        u._meta &&
+        u._meta.source === 'mid_turn_message_injected' &&
+        typeof text === 'string' &&
+        text
+      ) {
+        return m.addMidTurnUser(text, sentAt);
+      }
       var part = userBlockOf(u.content);
       if (part) return m.addUserPart(part, sentAt);
       // A frame with nothing to say draws nothing (it was an empty bubble).

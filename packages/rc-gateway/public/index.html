@@ -9499,6 +9499,19 @@
         // boundary. Drawn unless it is this window's own echo (#114), which
         // the send path already put on screen at the moment you typed it.
         if (su === 'user_message_chunk') {
+          // #190: a message that joined a running turn (the resume's replay
+          // marks its record so) is a row of that turn, not a new one: no turn
+          // is counted for it and the turn above it is not closed.
+          if (
+            u._meta &&
+            u._meta.source === 'mid_turn_message_injected' &&
+            typeof text === 'string' &&
+            text
+          ) {
+            transcriptModel.addMidTurnUser(text, sentAt);
+            scrollTranscript();
+            return;
+          }
           // #197: a picture or file the sender attached is not text, and drawn
           // as text it was an empty bubble. It joins the message above it when
           // there is one, so it is not a second turn.
@@ -9803,7 +9816,7 @@
               const text = typeof m === 'string' ? clean(m) : '';
               if (!text.trim()) continue;
               transcriptModel.finishThought();
-              transcriptModel.addUser(text, at);
+              transcriptModel.addMidTurnUser(text, at);
             }
             if (said.length) scrollTranscript();
             return;
@@ -9880,6 +9893,7 @@
         const items = transcriptModel.items;
         for (let i = items.length - 1, n = 0; i >= 0 && n < 400; i--, n++) {
           const k = items[i].kind;
+          if (k === 'user' && items[i].midTurn) continue; // #190: same turn
           if (k === 'fork' || k === 'user') return;
           if (k === 'asst') return markTurnEnd(items[i], true);
         }
@@ -9892,7 +9906,7 @@
         let closed = !!first && first.kind === 'user';
         for (let i = rows.length - 1; i >= 0; i--) {
           const k = rows[i].kind;
-          if (k === 'user') closed = true;
+          if (k === 'user' && !rows[i].midTurn) closed = true;
           else if (k === 'asst') {
             if (closed) rows[i].turnEnd = true;
             closed = false;
@@ -9947,7 +9961,9 @@
         const items = transcriptModel.items;
         const at = items.lastIndexOf(src);
         let n = 0;
-        for (let i = 0; i < at; i++) if (items[i].kind === 'user') n++;
+        for (let i = 0; i < at; i++) {
+          if (items[i].kind === 'user' && !items[i].midTurn) n++;
+        }
         return n;
       }
       // The whole answer of the turn the asst row ends: every answer row since
@@ -9957,7 +9973,7 @@
         const items = transcriptModel.items;
         const parts = [];
         for (let i = items.lastIndexOf(asst); i >= 0; i--) {
-          if (items[i].kind === 'user') break;
+          if (items[i].kind === 'user' && !items[i].midTurn) break;
           if (items[i].kind === 'asst' && items[i].text) parts.unshift(items[i].text);
         }
         return parts.join('\n\n');
