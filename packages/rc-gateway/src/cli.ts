@@ -2058,12 +2058,15 @@ export async function stopBootOwnedDaemon(timeoutMs = 5000): Promise<boolean> {
  * phone's conversations onto a second daemon the terminal never sees, both
  * writing the same workspace. The loss is reported instead, and the pool
  * picks the terminal's daemon up again once it answers. A daemon this
- * gateway spawned keeps the respawn #163 added.
+ * gateway spawned keeps the respawn #163 added, and the pool may stop it
+ * once a replacement is up, so one wrongly marked dead does not keep running
+ * beside it. The shutdown path still stops it too; a second stop is a no-op.
  */
 export function bootDaemonPoolOptions(
   handle: Pick<DaemonHandle, 'attached' | 'stop'>,
-): Pick<DaemonPoolOptions, 'respawnDefaultDaemon'> {
-  return { respawnDefaultDaemon: !handle.attached };
+): Pick<DaemonPoolOptions, 'respawnDefaultDaemon' | 'stopDefaultDaemon'> {
+  if (handle.attached) return { respawnDefaultDaemon: false };
+  return { respawnDefaultDaemon: true, stopDefaultDaemon: handle.stop };
 }
 
 /**

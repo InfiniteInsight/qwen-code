@@ -212,10 +212,11 @@ describe('boot daemon pool options (#203)', () => {
     });
   });
 
-  it('a daemon this gateway spawned is respawned after it dies', () => {
+  it('a daemon this gateway spawned is respawned after it dies, and the pool may stop it once replaced', () => {
     const { handle } = fakeHandle();
-    expect(bootDaemonPoolOptions(handle)).toMatchObject({
+    expect(bootDaemonPoolOptions(handle)).toEqual({
       respawnDefaultDaemon: true,
+      stopDefaultDaemon: handle.stop,
     });
   });
 });
