@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -99,12 +105,13 @@ function base(
 describe('up', () => {
   it('starts the stack and returns connect info + QR + bootstrap code', async () => {
     const d = mkdir();
-    writeFileSync(join(d, 'owner-bootstrap.code'), 'ABCD-1234\n');
     let starts = 0;
     const run = base(
       () => starts > 0,
       () => {
         starts++;
+        // the freshly started gateway mints and writes its code
+        writeFileSync(join(d, 'owner-bootstrap.code'), 'ABCD-1234\n');
       },
     ); // inactive until started
     const res = await up(DEPS(d, run));
@@ -308,14 +315,14 @@ describe('bootstrap code polling', () => {
   // `bootstrapTimeoutMs: 50, bootstrapPollMs: 5` so none of this incurs a
   // real multi-second wait.
 
-  it('returns the code immediately when the file is already present (first attempt, no sleep)', async () => {
+  it('returns the code immediately when the gateway has already written it at start (no sleep)', async () => {
     const d = mkdir();
-    writeFileSync(join(d, 'owner-bootstrap.code'), 'READY-1\n');
     let starts = 0;
     const run = base(
       () => starts > 0,
       () => {
         starts++;
+        writeFileSync(join(d, 'owner-bootstrap.code'), 'READY-1\n');
       },
     );
     const res = await up(DEPS(d, run));
@@ -389,12 +396,11 @@ describe('down', () => {
       },
     );
     const deps = DEPS(d, run);
-    writeFileSync(join(d, 'owner-bootstrap.code'), 'PRIOR-CODE\n');
-    await up(deps); // writes state + records the unit that was started
+    await up(deps);
+    writeFileSync(join(d, 'owner-bootstrap.code'), 'PRIOR-CODE\n'); // writes state + records the unit that was started
     expect(readState(d)).not.toBeNull(); // sanity: state exists before down
-    // Sanity: the code file is still present right up to the moment `down`
-    // runs — `up` reads it, it doesn't consume/delete it. So the removal
-    // asserted below is attributable to `down`, not to anything upstream.
+    // Sanity: the code file is present right up to the moment `down` runs, so
+    // the removal asserted below is attributable to `down`.
     expect(existsSync(join(d, 'owner-bootstrap.code'))).toBe(true);
 
     const res = await down(deps);
@@ -436,5 +442,86 @@ describe('status', () => {
     const s = await status(DEPS(d, run));
     expect(s.running).toBe(true);
     expect(s.url).toBe('https://laptop-wsl.tn.ts.net:8443/ui/');
+  });
+});
+
+describe('stale owner-bootstrap.code (#167)', () => {
+  const FILE = 'owner-bootstrap.code';
+
+  it('does not print a leftover code from a previous boot when the unit is not active (reboot case)', async () => {
+    const d = mkdir();
+    writeFileSync(join(d, FILE), 'DEAD-FROM-LAST-BOOT\n');
+    let starts = 0;
+    const run = base(
+      () => starts > 0,
+      () => {
+        starts++;
+        // the new gateway writes its fresh code a moment after systemd-run returns
+        setTimeout(() => writeFileSync(join(d, FILE), 'FRESH-NOW\n'), 20);
+      },
+    );
+    const res = await up({
+      ...DEPS(d, run),
+      bootstrapTimeoutMs: 500,
+      bootstrapPollMs: 5,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.bootstrapCode).toBe('FRESH-NOW');
+  });
+
+  it('returns no code (rather than the dead one) when the new gateway never writes one', async () => {
+    const d = mkdir();
+    writeFileSync(join(d, FILE), 'DEAD-FROM-LAST-BOOT\n');
+    let starts = 0;
+    const run = base(
+      () => starts > 0,
+      () => {
+        starts++;
+      },
+    );
+    const res = await up(DEPS(d, run));
+    expect(res.bootstrapCode).toBeUndefined();
+  });
+
+  it('against an already-active unit with no pending code, says so and prints no code', async () => {
+    const d = mkdir();
+    const res = await up(DEPS(d, base(() => true)));
+    expect(res.ok).toBe(true);
+    expect(res.alreadyRunning).toBe(true);
+    expect(res.bootstrapCode).toBeUndefined();
+    expect(res.hint).toMatch(/already running/i);
+    expect(res.hint).toMatch(/down/);
+    expect(upJson(res)['hint']).toMatch(/already running/i);
+  });
+
+  it('against an active unit does not wait out the poll timeout', async () => {
+    const d = mkdir();
+    const t0 = Date.now();
+    await up({
+      ...DEPS(d, base(() => true)),
+      bootstrapTimeoutMs: 5000,
+      bootstrapPollMs: 50,
+    });
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('against an active unit still prints a pending (unexpired) code', async () => {
+    const d = mkdir();
+    writeFileSync(join(d, FILE), 'LIVE-1\n');
+    const res = await up(DEPS(d, base(() => true)));
+    expect(res.alreadyRunning).toBe(true);
+    expect(res.bootstrapCode).toBe('LIVE-1');
+  });
+
+  it('against an active unit treats a code file older than the bootstrap TTL as dead and removes it', async () => {
+    const d = mkdir();
+    const p = join(d, FILE);
+    writeFileSync(p, 'EXPIRED-1\n');
+    const old = new Date(Date.now() - 31 * 60 * 1000);
+    utimesSync(p, old, old);
+    const res = await up(DEPS(d, base(() => true)));
+    expect(res.bootstrapCode).toBeUndefined();
+    expect(existsSync(p)).toBe(false);
+    expect(res.hint).toMatch(/already running/i);
   });
 });

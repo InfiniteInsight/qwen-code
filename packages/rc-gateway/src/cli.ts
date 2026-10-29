@@ -6,7 +6,12 @@
 
 import { watch, readFileSync, type FSWatcher } from 'node:fs';
 import { createPrivateKey, createHash } from 'node:crypto';
-import { writeBootstrapCode, displayHint } from './bootstrap.js';
+import {
+  writeBootstrapCode,
+  removeBootstrapCode,
+  displayHint,
+  OWNER_BOOTSTRAP_TTL_MS,
+} from './bootstrap.js';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
@@ -553,7 +558,6 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // bootstrap.ts already documents an intended distinct bootstrap TTL that was
   // never wired. Give it a bounded 30-minute window; the code remains
   // single-use (redeem consumes it) and stays in the 0600 file.
-  const OWNER_BOOTSTRAP_TTL_MS = 30 * 60 * 1000;
   const pairing = new PairingService(Date.now, OWNER_BOOTSTRAP_TTL_MS);
   const vapid = await VapidStore.open(
     join(homedir(), '.qwen', 'rc', 'vapid.json'),
@@ -1455,6 +1459,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // only the path to stdout — never the code (pairing-auth spec invariant).
     const rcDir = join(homedir(), '.qwen', 'rc');
     const { path: bootstrapPath } = writeBootstrapCode(rcDir, code);
+    // The file mirrors a single-use, time-bounded code: drop it the moment the
+    // code is redeemed or lapses, so a later `qwen-rc up` never prints a dead
+    // one. (Content-matched, so it never removes a newer boot's file.)
+    pairing.onConsumed = (consumed) => {
+      if (consumed === code) removeBootstrapCode(rcDir, code);
+    };
+    const expiryTimer = setTimeout(
+      () => removeBootstrapCode(rcDir, code),
+      Math.max(0, expiresAt - Date.now()),
+    );
+    expiryTimer.unref();
     const banner = [
       `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
       `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
