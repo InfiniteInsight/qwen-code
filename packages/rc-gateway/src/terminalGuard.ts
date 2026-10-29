@@ -96,8 +96,8 @@ export function terminalGoneReason(
 
 /** The slice of `process` the guard listens on; a test seam. */
 export interface SignalSource {
-  on(signal: 'SIGHUP', listener: () => void): unknown;
-  off(signal: 'SIGHUP', listener: () => void): unknown;
+  on(signal: 'SIGHUP' | 'SIGTERM', listener: () => void): unknown;
+  off(signal: 'SIGHUP' | 'SIGTERM', listener: () => void): unknown;
 }
 
 export interface TerminalGuardDeps {
@@ -271,6 +271,8 @@ export interface SpawnTuiDeps {
   killGraceMs?: number;
   /** How often the tree is looked at while it is being ended. */
   killPollMs?: number;
+  /** Where SIGTERM is heard while the TUI runs; the default is `process`. */
+  signals?: SignalSource;
 }
 
 /**
@@ -280,6 +282,12 @@ export interface SpawnTuiDeps {
  * comment: a blocked event loop cannot notice the terminal going. Resolves with
  * the child's exit status or signal; when the terminal went, only once the
  * whole tree is gone (or twice the grace has passed). Never rejects.
+ *
+ * A SIGTERM to this process while the TUI runs (someone killing an orphaned
+ * wrapper by hand) is forwarded the same way: without it the default action
+ * would kill the wrapper and leave the TUI behind. It resolves as signal
+ * SIGTERM, so the wrapper exits 143 and the re-attach loop does not run again.
+ * SIGINT stays with the TUI (see `shieldParentSignals`).
  */
 export function spawnTui(
   command: string,
@@ -294,6 +302,7 @@ export function spawnTui(
       nodeSpawn(c, a, { stdio: 'inherit', cwd: o.cwd }));
   const grace = deps.killGraceMs ?? CHILD_KILL_GRACE_MS;
   const pollMs = deps.killPollMs ?? 50;
+  const signals: SignalSource = deps.signals ?? process;
   return new Promise<TuiResult>((resolve) => {
     let child: ChildProcess;
     try {
@@ -304,6 +313,7 @@ export function spawnTui(
     }
     let done = false;
     let ending = false;
+    let terminated = false;
     let childResult: TuiResult | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: TuiResult): void => {
@@ -311,7 +321,12 @@ export function spawnTui(
       done = true;
       if (timer !== undefined) clearTimeout(timer);
       undo();
-      resolve(result);
+      signals.off('SIGTERM', onTerm);
+      resolve(
+        terminated && !result.error
+          ? { status: null, signal: 'SIGTERM' }
+          : result,
+      );
     };
     const end = (): void => {
       const pid = child.pid;
@@ -351,6 +366,11 @@ export function spawnTui(
       timer = setTimeout(tick, pollMs);
     };
     const undo = guard.onGone(end);
+    const onTerm = (): void => {
+      terminated = true;
+      end();
+    };
+    signals.on('SIGTERM', onTerm);
     child.on('error', (error) => finish({ status: null, signal: null, error }));
     child.on('close', (status, signal) => {
       childResult = { status, signal };

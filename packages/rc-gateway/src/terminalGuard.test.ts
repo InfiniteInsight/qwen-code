@@ -317,3 +317,74 @@ describe('spawnTui ends the whole tree (#207: the TUI is two processes)', () => 
     }
   });
 });
+
+describe('spawnTui forwards SIGTERM to the TUI tree', () => {
+  function termSource() {
+    const listeners = new Set<() => void>();
+    const signals: SignalSource = {
+      on: (_s, l) => void listeners.add(l),
+      off: (_s, l) => void listeners.delete(l),
+    };
+    return {
+      signals,
+      term: () => [...listeners].forEach((l) => l()),
+      listeners,
+    };
+  }
+
+  it('ends the tree and resolves as SIGTERM, then stops listening', async () => {
+    const { guard } = guardGoneOnDemand();
+    const src = termSource();
+    let pid = 0;
+    const run = spawnTui('sleep', ['5'], {}, guard, {
+      signals: src.signals,
+      spawn: (c, a) => {
+        const child = spawn(c, a, { stdio: 'ignore' });
+        pid = child.pid ?? 0;
+        return child;
+      },
+    });
+    expect(src.listeners.size).toBe(1);
+    setTimeout(src.term, 50);
+    const r = await run;
+    expect(r).toEqual({ status: null, signal: 'SIGTERM' });
+    expect(isRunning(pid)).toBe(false);
+    expect(src.listeners.size).toBe(0);
+  });
+
+  it('SIGKILLs after the grace period when the TUI ignores SIGTERM, and reports SIGTERM', async () => {
+    const { guard } = guardGoneOnDemand();
+    const src = termSource();
+    let pid = 0;
+    const run = spawnTui(
+      'sh',
+      ['-c', 'trap "" TERM; sleep 5; sleep 5'],
+      {},
+      guard,
+      {
+        killGraceMs: 300,
+        signals: src.signals,
+        spawn: (c, a) => {
+          const child = spawn(c, a, { stdio: 'ignore' });
+          pid = child.pid ?? 0;
+          return child;
+        },
+      },
+    );
+    setTimeout(src.term, 200);
+    const started = Date.now();
+    expect((await run).signal).toBe('SIGTERM');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(400);
+    expect(isRunning(pid)).toBe(false);
+  });
+
+  it('a child that exits on its own is reported as it exited and SIGTERM is released', async () => {
+    const { guard } = guardGoneOnDemand();
+    const src = termSource();
+    const r = await spawnTui('sh', ['-c', 'exit 3'], {}, guard, {
+      signals: src.signals,
+    });
+    expect(r.status).toBe(3);
+    expect(src.listeners.size).toBe(0);
+  });
+});
