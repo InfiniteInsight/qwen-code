@@ -36,7 +36,12 @@ import {
   BRIDGE,
 } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
-import { AuditLog, type AuditRecorder } from './auditLog.js';
+import {
+  AuditLog,
+  parseAuditEnvNumber,
+  type AuditRecorder,
+} from './auditLog.js';
+import { PeerAuditThrottle } from './auditThrottle.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import {
   createListCorsOriginsRoute,
@@ -284,6 +289,16 @@ export interface GatewayDeps {
   terminalRcArgv?: string[];
   /** Audit log path; defaults to ~/.qwen/rc/audit.log. */
   auditPath?: string;
+  /**
+   * Days of audit files kept (#165). Falls back to the
+   * `QWEN_RC_AUDIT_RETENTION_DAYS` env, then 30. 0 keeps everything.
+   */
+  auditRetentionDays?: number;
+  /**
+   * Ceiling on all audit files together, in bytes (#165). Falls back to the
+   * `QWEN_RC_AUDIT_MAX_BYTES` env, then 1 GiB. 0 = no ceiling.
+   */
+  auditMaxTotalBytes?: number;
   /** Static web-client root; defaults to the package's public/ dir. */
   webRoot?: string;
   /** Gateway-owned VAPID keypair. Push routes mount only when both this and pushStore are set. */
@@ -609,8 +624,22 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const audit = new AuditLog(
     deps.auditPath ?? join(homedir(), '.qwen', 'rc', 'audit.log'),
     undefined,
-    { onRecord: (record) => ownerEvents.publish({ type: 'audit', record }) },
+    {
+      onRecord: (record) => ownerEvents.publish({ type: 'audit', record }),
+      // #165: bounded on disk. Unset or unparseable falls back to the
+      // defaults (30 days, 1 GiB); 0 turns that bound off.
+      retentionDays:
+        deps.auditRetentionDays ??
+        parseAuditEnvNumber(process.env.QWEN_RC_AUDIT_RETENTION_DAYS),
+      maxTotalBytes:
+        deps.auditMaxTotalBytes ??
+        parseAuditEnvNumber(process.env.QWEN_RC_AUDIT_MAX_BYTES),
+    },
   );
+  // #165: rows that unauthenticated traffic can cause (401s, refused CORS
+  // preflights) are written once per peer per minute with a count, through
+  // this one shared throttle, instead of once per request.
+  const unauthAudit = new PeerAuditThrottle(audit);
 
   // ---------------------------------------------------------------------------
   // CORS allowlist — built from persisted db origins + config overrides.
@@ -644,7 +673,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     if (decision.allowed) {
       res.status(204).end();
     } else {
-      void audit.record({
+      unauthAudit.record(req.socket?.remoteAddress, {
         action: 'cors_denied',
         detail: {
           origin: decision.origin,
@@ -822,7 +851,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   if (deps.clientsManifestReadToml) {
     app.get(
       '/ui/clients-manifest.json',
-      bearerResolve(deps.store, audit),
+      bearerResolve(deps.store, audit, unauthAudit),
       requireScope(OWNER, audit),
       createClientsManifestRoute({
         readToml: deps.clientsManifestReadToml,
@@ -833,7 +862,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
-  app.use(bearerResolve(deps.store, audit));
+  app.use(bearerResolve(deps.store, audit, unauthAudit));
   // Reject a non-bridge authenticated token that sends X-RC-SubActor (would
   // otherwise silently pollute attribution). Must follow bearerResolve.
   app.use(enforceSubActorScope());

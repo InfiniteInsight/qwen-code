@@ -1977,6 +1977,56 @@ describe('CORS preflight and actual-request middleware', () => {
   });
 });
 
+describe('#165 unauthenticated traffic cannot grow the audit log per request', () => {
+  it('a flood of refused CORS preflights from one peer writes one row', async () => {
+    const { url, auditPath } = await boot();
+    for (let i = 0; i < 25; i++) {
+      const r = await fetch(`${url}/rc/tokens`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'https://evil.example',
+          'Access-Control-Request-Method': 'POST',
+        },
+      });
+      expect(r.status).toBe(403);
+    }
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'cors_denied'),
+    );
+    // Give any stray per-request rows time to land before counting.
+    await new Promise((r) => setTimeout(r, 100));
+    const denied = readAudit(auditPath).filter(
+      (x) => x.action === 'cors_denied',
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]!.detail).toMatchObject({
+      origin: 'https://evil.example',
+      phase: 'preflight',
+      count: 1,
+    });
+  });
+
+  it('a flood of bad bearer tokens from one peer writes one row', async () => {
+    const { url, auditPath } = await boot();
+    for (let i = 0; i < 25; i++) {
+      const r = await fetch(`${url}/rc/tokens`, {
+        headers: { Authorization: 'Bearer qwk_wrong' },
+      });
+      expect(r.status).toBe(401);
+    }
+    await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'auth_failed'),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    const failed = readAudit(auditPath).filter(
+      (x) => x.action === 'auth_failed',
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.detail).toMatchObject({ count: 1 });
+  });
+});
+
 describe('#165 model-call routes are rate limited per token', () => {
   const SID = '11111111-1111-1111-1111-111111111111';
   async function tokenFor(

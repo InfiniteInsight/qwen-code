@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import type { TokenStore } from './tokenStore.js';
 import { BRIDGE, hasScope, type RcScope } from './scopes.js';
 import type { AuditRecorder } from './auditLog.js';
+import { PeerAuditThrottle } from './auditThrottle.js';
 import type { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import type { SubActorBanStore } from './bridges/subActorBans.js';
 import './types.js';
@@ -80,10 +81,20 @@ export function enforceSubActorScope(): RequestHandler {
   };
 }
 
-/** Resolve the bearer token to `req.rcClient`, or 401 (+ audit auth_failed). */
+/**
+ * Resolve the bearer token to `req.rcClient`, or 401 (+ audit auth_failed).
+ *
+ * The 401 rows go through a per-peer throttle (#165): anyone who can reach
+ * the port can send a bad token, so one row per request let unauthenticated
+ * traffic grow the disk without bound. The first failure from a peer is
+ * still written at once; the rest of its minute is counted into the next
+ * row's `detail.count`. Pass the gateway's shared throttle so every mount
+ * counts into the same windows; without one, this middleware keeps its own.
+ */
 export function bearerResolve(
   store: TokenStore,
   audit?: AuditRecorder,
+  unauthAudit: PeerAuditThrottle = new PeerAuditThrottle(audit),
 ): RequestHandler {
   return (req, res, next) => {
     const header = req.headers.authorization ?? '';
@@ -93,8 +104,9 @@ export function bearerResolve(
       : { ok: false as const, reason: 'not_found' as const };
 
     if (!result.ok) {
+      const peer = req.socket?.remoteAddress;
       if (result.reason === 'token_expired_max_age') {
-        void audit?.record({
+        unauthAudit.record(peer, {
           action: 'token_expired_max_age',
           detail: { path: req.path },
         });
@@ -103,7 +115,7 @@ export function bearerResolve(
           code: 'token_expired_max_age',
         });
       } else {
-        void audit?.record({
+        unauthAudit.record(peer, {
           action: 'auth_failed',
           detail: { path: req.path },
         });

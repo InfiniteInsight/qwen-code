@@ -24,6 +24,7 @@ import { SESSION_READ, APPROVE, WRITE, BRIDGE, OWNER } from './scopes.js';
 import { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import { SubActorBanStore } from './bridges/subActorBans.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
+import { PeerAuditThrottle } from './auditThrottle.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   const calls: AuditEntry[] = [];
@@ -130,6 +131,47 @@ describe('auth middleware', () => {
       detail: { path: '/rc/tokens' },
     });
     expect(audit.calls[0].actorTokenId).toBeUndefined();
+  });
+
+  it('#165 a flood of bad tokens from one peer writes one row per minute with a count', () => {
+    const audit = fakeAudit();
+    let now = 0;
+    const throttle = new PeerAuditThrottle(audit, {
+      now: () => now,
+      autoFlush: false,
+    });
+    const mw = bearerResolve(store, audit, throttle);
+    const req = {
+      headers: { authorization: 'Bearer qwk_nope' },
+      path: '/rc/tokens',
+      socket: { remoteAddress: '203.0.113.50' },
+    } as unknown as Request;
+    for (let i = 0; i < 50; i++) {
+      const res = fakeRes();
+      mw(req, res, () => {});
+      expect(res._status).toBe(401);
+    }
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'auth_failed',
+      detail: { path: '/rc/tokens', peer: '203.0.113.50', count: 1 },
+    });
+    now = 60_000;
+    mw(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(2);
+    expect(audit.calls[1]!.detail).toMatchObject({ count: 50 });
+  });
+
+  it('#165 without an explicit throttle bearerResolve still throttles per peer', () => {
+    const audit = fakeAudit();
+    const mw = bearerResolve(store, audit);
+    const req = {
+      headers: {},
+      path: '/rc/tokens',
+      socket: { remoteAddress: '203.0.113.51' },
+    } as unknown as Request;
+    for (let i = 0; i < 20; i++) mw(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(1);
   });
 
   it('does not record when auth succeeds', async () => {

@@ -37,6 +37,7 @@
 import { createHash } from 'node:crypto';
 import {
   closeSync,
+  createReadStream,
   existsSync,
   mkdirSync,
   openSync,
@@ -45,10 +46,37 @@ import {
   readdirSync,
   statSync,
   truncateSync,
+  unlinkSync,
   writeSync,
 } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
+
+/** Days of `audit-YYYY-MM-DD.log` files kept by default (#165). 0 = forever. */
+export const DEFAULT_AUDIT_RETENTION_DAYS = 30;
+/**
+ * Default ceiling on all audit files together (#165). Older days are removed,
+ * oldest first, to stay under it; the file being written is never removed.
+ * 0 = no ceiling.
+ */
+export const DEFAULT_AUDIT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
+/** How many bytes may be appended between two size checks. */
+const DEFAULT_PRUNE_CHECK_BYTES = 8 * 1024 * 1024;
+const DAY_MS = 86_400_000;
+const DATED_FILE_RE = /^audit-(\d{4}-\d{2}-\d{2})\.log$/;
+
+/**
+ * Parse a non-negative integer from an env var (`QWEN_RC_AUDIT_RETENTION_DAYS`,
+ * `QWEN_RC_AUDIT_MAX_BYTES`). Anything else reads as unset, so a typo falls
+ * back to the default instead of to 0 (which would disable pruning).
+ */
+export function parseAuditEnvNumber(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined || !/^\d+$/.test(raw.trim())) return undefined;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) ? n : undefined;
+}
 
 export type AuditAction =
   | 'pairing_redeemed'
@@ -404,7 +432,9 @@ function dateKey(d: Date): string {
  * inside that directory.
  *
  * `record()` is async and fire-and-forget safe (never throws).
- * `query()` reads all `audit-*.log` files in the directory.
+ * `query()` streams `audit-*.log` files newest day first and stops once it
+ * has `limit` rows. Days past retention, or past the size ceiling, are
+ * removed whole when a file is opened (#165).
  */
 export class AuditLog implements AuditRecorder, AuditReader {
   /** Base directory where `audit-YYYY-MM-DD.log` files are written. */
@@ -440,6 +470,12 @@ export class AuditLog implements AuditRecorder, AuditReader {
    */
   private chainPrevHash = '';
 
+  private readonly retentionDays: number;
+  private readonly maxTotalBytes: number;
+  private readonly pruneCheckBytes: number;
+  /** Bytes appended since the last size check. */
+  private bytesSincePrune = 0;
+
   constructor(
     filePath: string,
     nowFn: () => number = Date.now,
@@ -451,12 +487,34 @@ export class AuditLog implements AuditRecorder, AuditReader {
       maxBytes?: number;
       /** @deprecated - no longer used; daily rotation replaces size rotation. */
       maxFiles?: number;
+      /**
+       * Days of dated files to keep (#165). A file is removed once its day is
+       * more than this many days before the day being written. Default
+       * {@link DEFAULT_AUDIT_RETENTION_DAYS}; 0 keeps everything.
+       */
+      retentionDays?: number;
+      /**
+       * Ceiling on all `audit-*.log` bytes together (#165). Default
+       * {@link DEFAULT_AUDIT_MAX_TOTAL_BYTES}; 0 = no ceiling.
+       */
+      maxTotalBytes?: number;
+      /** Bytes appended between size checks (test seam). */
+      pruneCheckBytes?: number;
     } = {},
   ) {
     this.dir = dirname(filePath);
     this.nowMs = nowFn;
     this.nowDateOverride = opts.nowDate;
     this.onRecord = opts.onRecord;
+    this.retentionDays = Math.max(
+      0,
+      Math.trunc(opts.retentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS),
+    );
+    this.maxTotalBytes = Math.max(
+      0,
+      Math.trunc(opts.maxTotalBytes ?? DEFAULT_AUDIT_MAX_TOTAL_BYTES),
+    );
+    this.pruneCheckBytes = opts.pruneCheckBytes ?? DEFAULT_PRUNE_CHECK_BYTES;
     // Best-effort: create the audit dir (mode 0700 per spec). Swallow errors
     // so callers whose dir path is a file (the "never throws" test case)
     // do not see a constructor throw. The actual write failure is caught in
@@ -502,6 +560,14 @@ export class AuditLog implements AuditRecorder, AuditReader {
       }
       // Advance the chain: hash covers the line bytes minus the trailing newline.
       this.chainPrevHash = sha256Hex(buf.subarray(0, buf.length - 1));
+      // A day can grow past the size ceiling on its own; recheck as it does.
+      this.bytesSincePrune += buf.length;
+      if (
+        this.maxTotalBytes > 0 &&
+        this.bytesSincePrune >= this.pruneCheckBytes
+      ) {
+        this.prune(key);
+      }
       // Broadcast ONLY after a successful append.
       if (this.onRecord) {
         try {
@@ -559,59 +625,108 @@ export class AuditLog implements AuditRecorder, AuditReader {
     // Mode 0600 per spec.
     this.fd = openSync(filePath, 'a', 0o600);
     this.openDateKey = key;
+    // A new file means a new day (or a restart): the moment to drop old days.
+    this.prune(key);
     return this.fd;
   }
 
+  /**
+   * Remove dated audit files that fall outside retention or the size ceiling
+   * (#165). Only whole `audit-YYYY-MM-DD.log` files are removed, and never the
+   * one for `todayKey`, so every surviving file's chain stays intact. A day
+   * after `todayKey` (a clock that went backwards) is never removed for age.
+   * Best-effort: a failure here must not stop the write.
+   */
+  private prune(todayKey: string): void {
+    this.bytesSincePrune = 0;
+    try {
+      const dated: Array<{ name: string; key: string }> = [];
+      for (const name of readdirSync(this.dir)) {
+        const m = DATED_FILE_RE.exec(name);
+        if (m) dated.push({ name, key: m[1]! });
+      }
+      dated.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+
+      let kept = dated;
+      if (this.retentionDays > 0) {
+        const todayMs = Date.parse(todayKey + 'T00:00:00Z');
+        if (Number.isFinite(todayMs)) {
+          const cutoff = dateKey(
+            new Date(todayMs - this.retentionDays * DAY_MS),
+          );
+          kept = [];
+          for (const f of dated) {
+            if (f.key < cutoff && f.key !== todayKey) {
+              this.unlinkQuietly(f.name);
+            } else {
+              kept.push(f);
+            }
+          }
+        }
+      }
+
+      if (this.maxTotalBytes > 0) {
+        const sized = kept.map((f) => {
+          let size = 0;
+          try {
+            size = statSync(join(this.dir, f.name)).size;
+          } catch {
+            // vanished: counts as nothing
+          }
+          return { ...f, size };
+        });
+        let total = sized.reduce((n, f) => n + f.size, 0);
+        for (const f of sized) {
+          if (total <= this.maxTotalBytes) break;
+          if (f.key >= todayKey) continue; // never today's or a later day
+          if (this.unlinkQuietly(f.name)) {
+            total -= f.size;
+            // eslint-disable-next-line no-console
+            console.warn(
+              `audit: removed ${f.name} to stay under ${this.maxTotalBytes} bytes`,
+            );
+          }
+        }
+      }
+    } catch {
+      // dir unreadable: nothing to prune
+    }
+  }
+
+  private unlinkQuietly(name: string): boolean {
+    try {
+      unlinkSync(join(this.dir, name));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Newest rows first, at most `limit` of them. Files are read newest day
+   * first and streamed line by line (#165): each file keeps at most about
+   * `2 * limit` matching rows in memory, and once `limit` rows are in hand no
+   * older day is opened at all. Older days hold older rows because a file is
+   * named for the day its rows were written.
+   */
   async query(q: AuditQuery = {}): Promise<AuditRecord[]> {
-    // Collect all audit-*.log files in the dir, sorted lexicographically
-    // (date order). Read all, accumulate rows, then filter/sort/slice.
+    const limit = clampLimit(q.limit);
     let fileNames: string[] = [];
     try {
       fileNames = readdirSync(this.dir)
         .filter((f) => /^audit-.*\.log$/.test(f))
-        .sort();
+        .sort()
+        .reverse();
     } catch {
       // dir does not exist yet (or is a file - the "never throws" scenario)
     }
-    const rows: AuditRecord[] = [];
+    const out: AuditRecord[] = [];
     for (const name of fileNames) {
-      const filePath = join(this.dir, name);
-      let text: string;
-      try {
-        text = await readFile(filePath, 'utf8');
-      } catch {
-        continue; // missing/unreadable file - skip
-      }
-      for (const line of text.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const obj = JSON.parse(trimmed) as AuditRecord;
-          if (obj && typeof obj.ts === 'number') rows.push(obj);
-        } catch {
-          // skip corrupt line
-        }
-      }
+      if (out.length >= limit) break;
+      out.push(...(await scanFile(join(this.dir, name), q, limit)));
     }
-    let out = rows;
-    if (q.since !== undefined) out = out.filter((r) => r.ts >= q.since!);
-    if (q.action !== undefined) out = out.filter((r) => r.action === q.action);
-    if (q.actor !== undefined)
-      out = out.filter((r) => r.actorTokenId === q.actor);
-    if (q.shareId !== undefined)
-      out = out.filter(
-        (r) =>
-          r.shareId === q.shareId ||
-          r.actorTokenId === q.shareId ||
-          (typeof r.detail?.shareId === 'string' &&
-            r.detail.shareId === q.shareId),
-      );
-    if (q.tool !== undefined)
-      out = out.filter((r) => r.detail?.tool === q.tool);
-    if (q.rule !== undefined)
-      out = out.filter((r) => r.detail?.ruleId === q.rule);
     out.sort((a, b) => b.ts - a.ts);
-    return out.slice(0, clampLimit(q.limit));
+    return out.slice(0, limit);
   }
 
   /**
@@ -715,6 +830,68 @@ export class AuditLog implements AuditRecorder, AuditReader {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/** True when `r` passes every filter in `q` except `limit`. */
+function matchesQuery(r: AuditRecord, q: AuditQuery): boolean {
+  if (q.since !== undefined && !(r.ts >= q.since)) return false;
+  if (q.action !== undefined && r.action !== q.action) return false;
+  if (q.actor !== undefined && r.actorTokenId !== q.actor) return false;
+  if (
+    q.shareId !== undefined &&
+    !(
+      r.shareId === q.shareId ||
+      r.actorTokenId === q.shareId ||
+      (typeof r.detail?.shareId === 'string' && r.detail.shareId === q.shareId)
+    )
+  ) {
+    return false;
+  }
+  if (q.tool !== undefined && r.detail?.tool !== q.tool) return false;
+  if (q.rule !== undefined && r.detail?.ruleId !== q.rule) return false;
+  return true;
+}
+
+/**
+ * Stream one audit file and return its newest `limit` matching rows (by ts).
+ * Memory stays at about `2 * limit` rows however long the file is. A missing
+ * or unreadable file yields whatever was read before the error; a corrupt
+ * line is skipped.
+ */
+async function scanFile(
+  filePath: string,
+  q: AuditQuery,
+  limit: number,
+): Promise<AuditRecord[]> {
+  let kept: AuditRecord[] = [];
+  const trim = (): void => {
+    kept.sort((a, b) => b.ts - a.ts);
+    kept = kept.slice(0, limit);
+  };
+  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let obj: AuditRecord;
+      try {
+        obj = JSON.parse(trimmed) as AuditRecord;
+      } catch {
+        continue; // skip corrupt line
+      }
+      if (!obj || typeof obj.ts !== 'number' || !matchesQuery(obj, q)) continue;
+      kept.push(obj);
+      if (kept.length >= limit * 2) trim();
+    }
+  } catch {
+    // missing/unreadable file - keep what was read
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  trim();
+  return kept;
+}
 
 /**
  * Determine the byte offset at which `filePath` should be truncated so it
