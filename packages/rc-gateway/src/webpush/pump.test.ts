@@ -580,3 +580,110 @@ describe('SessionEventPump', () => {
     });
   });
 });
+
+describe('SessionEventPump routing context and session name (issue #166)', () => {
+  const frame = (rawInput: Record<string, unknown> = {}) => ({
+    id: 7,
+    type: 'permission_request',
+    data: {
+      requestId: 'r1',
+      toolCall: {
+        toolCallId: 'tc1',
+        title: 'humanized',
+        kind: 'execute',
+        rawInput,
+      },
+      options: [{ optionId: 'ok', kind: 'allow_once' }],
+    },
+  });
+
+  it('stamps a fall-through prompt with policy.action=prompt, decisionSource=fallthrough', async () => {
+    const calls: Array<{ ctx: unknown }> = [];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [frame()],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          calls.push({ ctx });
+        },
+      },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        enforcer: new PolicyEnforcer(daemon, {
+          defaults: { action: 'prompt', requireScope: 'approve' },
+          rules: [],
+        }),
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => calls.length >= 1)).toBe(true);
+    expect(calls[0].ctx).toMatchObject({
+      sessionId: 's1',
+      routing: { policyAction: 'prompt', policyDecisionSource: 'fallthrough' },
+    });
+  });
+
+  it('stamps a rule-caused prompt with decisionSource=rule', async () => {
+    const calls: Array<{ ctx: unknown }> = [];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [frame()],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          calls.push({ ctx });
+        },
+      },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        enforcer: new PolicyEnforcer(daemon, {
+          defaults: { action: 'prompt', requireScope: 'approve' },
+          rules: [{ id: 'p', match: { tool: 'execute' }, action: 'prompt' }],
+        }),
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => calls.length >= 1)).toBe(true);
+    expect(calls[0].ctx).toMatchObject({
+      routing: { policyAction: 'prompt', policyDecisionSource: 'rule' },
+    });
+  });
+
+  it('carries no routing context without an enforcer or on a non-permission event', async () => {
+    const calls: Array<{ ctx: Record<string, unknown> }> = [];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [frame(), { id: 8, type: 'session_update', data: {} }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          calls.push({ ctx: ctx as Record<string, unknown> });
+        },
+      },
+      { pollMs: 20, reconnectMs: 0, sleep: async () => {} },
+    );
+    await pump.start();
+    expect(await waitFor(() => calls.length >= 2)).toBe(true);
+    expect(calls.every((c) => !('routing' in c.ctx))).toBe(true);
+  });
+});

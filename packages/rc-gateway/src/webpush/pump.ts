@@ -11,6 +11,10 @@ import type {
 } from '@qwen-code/sdk';
 import type { PolicyEnforcer } from '../policy/enforcer.js';
 import { isGoneSessionError } from '../daemonPool.js';
+import {
+  routingContextFromPolicy,
+  type RoutingEventContext,
+} from '../routing/rules.js';
 
 /**
  * The subset of `PushNotifier` the pump drives. Kept structural so tests
@@ -19,7 +23,11 @@ import { isGoneSessionError } from '../daemonPool.js';
 export interface PumpNotifier {
   notify(
     event: { type: string; data: unknown },
-    ctx: { sessionId: string; sessionName?: string },
+    ctx: {
+      sessionId: string;
+      sessionName?: string;
+      routing?: RoutingEventContext;
+    },
   ): Promise<void>;
 }
 
@@ -256,6 +264,7 @@ export class SessionEventPump {
           // auto-handled (voted) event is suppressed from push; everything else
           // — non-permission events and prompt/fail-safe decisions — still
           // notifies, identical to pre-policy behavior.
+          let routing: RoutingEventContext | undefined;
           if (this.enforcer && ev.type === 'permission_request') {
             const outcome = await this.enforcer.decidePermission(s.sessionId, {
               type: ev.type,
@@ -267,10 +276,17 @@ export class SessionEventPump {
             }
             // A human is actually needed now: let the consumers see it.
             this.emitEvent(s.sessionId, ev);
+            // Stamp the routing event with the decision so `policy.action` /
+            // `policy.decisionSource` rules can match it (issue #166).
+            routing = routingContextFromPolicy(outcome);
           }
           await this.notifier?.notify(
             { type: ev.type, data: ev.data },
-            { sessionId: s.sessionId, sessionName: name },
+            {
+              sessionId: s.sessionId,
+              sessionName: name,
+              ...(routing ? { routing } : {}),
+            },
           );
           this.onDispatch?.(s.sessionId, ev);
         }

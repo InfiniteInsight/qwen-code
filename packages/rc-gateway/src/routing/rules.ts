@@ -44,22 +44,29 @@ export interface RoutingRuleMatch {
   /**
    * Per-event: the scope of the token that originated the client request which
    * triggered this event (e.g. `'owner'`/`'write'`/`'share'`/…). Exact
-   * string or list membership. Absent → matches any scope.
+   * string or list membership. NOTE: no event source sets this yet (the push
+   * pump has no originating client), so a rule using it never matches; the
+   * loader warns about that (see {@link NEVER_CARRIED_MATCH_FIELDS}).
    */
   originatingClientScope?: string | string[];
   /**
-   * Per-event: the policy decision source (e.g. `'file'`/`'default'`/`'api'`).
-   * Exact string or list membership. Absent → matches any source.
+   * Per-event: where the policy decision came from: `'rule'` (a rule matched)
+   * or `'fallthrough'` (no rule matched, the policy default applied). Exact
+   * string or list membership. Only events that went through the policy
+   * enforcer (`permission.required`) carry it; on any other kind it never
+   * matches.
    */
   'policy.decisionSource'?: string | string[];
   /**
-   * Per-event: the policy action (`'allow'`/`'deny'`/`'ask'`). Exact string or
-   * list membership. Absent → matches any action.
+   * Per-event: the policy action (`'allow'`/`'deny'`/`'prompt'`). Exact string
+   * or list membership. Carried only by events that went through the policy
+   * enforcer (`permission.required`); on any other kind it never matches.
    */
   'policy.action'?: string | string[];
   /**
    * Per-event: the sub-actor identifier (bridge delegate id). Exact string or
-   * list membership. Absent (or event carries no sub-actor) → not constrained.
+   * list membership. NOTE: no event source sets this yet, so a rule using it
+   * never matches; the loader warns about that.
    */
   subActor?: string | string[];
   /**
@@ -139,12 +146,45 @@ export interface RoutingEvent {
   sessionName?: string;
   /** Scope of the token that originated the request (for originatingClientScope). */
   originatingClientScope?: string;
-  /** Policy decision source (`'file'`/`'default'`/`'api'`). */
+  /** Policy decision source: `'rule'` or `'fallthrough'`. */
   policyDecisionSource?: string;
-  /** Policy action (`'allow'`/`'deny'`/`'ask'`). */
+  /** Policy action: `'allow'`, `'deny'` or `'prompt'`. */
   policyAction?: string;
   /** Sub-actor identifier (bridge delegate). */
   subActor?: string;
+}
+
+/**
+ * The per-event routing fields a notification source may attach beyond what the
+ * notifier derives itself (`kind`, `sessionName`). The pump fills the policy
+ * pair from the enforcer's decision; `originatingClientScope` and `subActor`
+ * are accepted here so a source that knows them can pass them, but none does
+ * today (see {@link NEVER_CARRIED_MATCH_FIELDS}).
+ */
+export type RoutingEventContext = Pick<
+  RoutingEvent,
+  | 'originatingClientScope'
+  | 'policyDecisionSource'
+  | 'policyAction'
+  | 'subActor'
+>;
+
+/**
+ * Map the policy enforcer's outcome to routing fields: `source: 'policy'` is a
+ * matched rule (`'rule'`), `'default'` the fall-through (`'fallthrough'`).
+ * `undefined` when the enforcer reached no decision.
+ */
+export function routingContextFromPolicy(outcome: {
+  action?: string;
+  source?: 'policy' | 'default';
+}): RoutingEventContext | undefined {
+  if (outcome.action === undefined || outcome.source === undefined) {
+    return undefined;
+  }
+  return {
+    policyAction: outcome.action,
+    policyDecisionSource: outcome.source === 'policy' ? 'rule' : 'fallthrough',
+  };
 }
 
 /** A compiled, pure decision over the fields the notifier has. */
@@ -198,6 +238,20 @@ const MATCH_HONORED = new Set([
 ]);
 const ROUTE_HONORED = new Set(['drop']);
 
+/**
+ * Match fields the loader accepts but NO event source ever sets, so a rule
+ * using one can never match (a `drop` rule on it never drops, and a rule
+ * written to silence something silently does not). Warned at load instead of
+ * accepted silently (issue #166). Remove a field from here when a source starts
+ * setting it on {@link RoutingEvent}.
+ */
+export const NEVER_CARRIED_MATCH_FIELDS: readonly string[] = [
+  'originatingClientScope',
+  'subActor',
+];
+
+const warnedNeverCarried = new Set<string>();
+
 let warnedDeferred = false;
 
 /**
@@ -208,7 +262,10 @@ let warnedDeferred = false;
  * are ignored (forward-compat); a once-per-process warning fires if a rule uses
  * a match/route field this slice does not yet honor.
  */
-export function loadRoutingConfig(text: string): RoutingConfig {
+export function loadRoutingConfig(
+  text: string,
+  opts: { warn?: (msg: string) => void } = {},
+): RoutingConfig {
   const doc = parse(text) ?? {};
   if (!isPlainObject(doc)) {
     throw new RoutingError('routing document must be a mapping');
@@ -332,6 +389,21 @@ export function loadRoutingConfig(text: string): RoutingConfig {
         throw new RoutingError(`rule[${i}].route.drop must be a boolean`);
       }
       route.drop = routeRaw['drop'];
+    }
+
+    // A field that is honored but that no event ever carries is just as inert.
+    for (const k of NEVER_CARRIED_MATCH_FIELDS) {
+      if (matchRaw[k] === undefined) continue;
+      // An injected warn always fires (tests, callers that route it); the
+      // default console path warns once per field per process.
+      if (!opts.warn && warnedNeverCarried.has(k)) continue;
+      warnedNeverCarried.add(k);
+      // eslint-disable-next-line no-console
+      (opts.warn ?? console.warn)(
+        `[routing] rule ${raw['id'] === undefined ? `[${i}]` : `'${String(raw['id'])}'`}: ` +
+          `match.${k} is never set on any event in this version, so the rule ` +
+          `can never match`,
+      );
     }
 
     // Forward-compat: surface (once) any match/route field we don't yet honor,
