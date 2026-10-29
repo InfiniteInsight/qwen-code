@@ -14050,6 +14050,7 @@ PAGE_SCENARIOS.push({
       rmSync(top, { recursive: true, force: true });
       mkdirSync(inner, { recursive: true });
       try {
+        const home = (await page.evaluate('curDirPath')) as string;
         await openList(page);
         await page.click('#list-new');
 
@@ -14148,6 +14149,10 @@ PAGE_SCENARIOS.push({
         // Nothing is watched yet, so arriving in it is a change of
         // conversation, and the screens opened to get there shut behind it.
         await page.click('#dir-back');
+        // #190: backing out puts the list back on the folder it was on, so
+        // the rows are planted once that has landed.
+        await page.waitForFunction(`curDirPath === ${JSON.stringify(home)} && pastConvosCwd === ${JSON.stringify(home)}`, null, { timeout: 5_000 });
+        await page.waitForTimeout(300);
         await page.evaluate(
           `renderPastConversations([{ sessionId: ${JSON.stringify(viewer.sessionId)}, title: 'resume me from the list' }], curDirPath, false)`,
         );
@@ -23807,6 +23812,33 @@ PAGE_SCENARIOS.push({
       }
     }
     return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P324 browsing in the folder screen and backing out puts the list back on its folder, so that folder stays in All folders',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190ListFixture(page, {
+      '/p324/home': [{ sessionId: '32400000-0000-0000-0000-000000000001', title: 'kept', updatedAt: h190Now }],
+    }, {
+      '/p324/home': { parent: '/p324', entries: [] },
+      '/p324': { parent: null, entries: ['home', 'other'] },
+      '/p324/other': { parent: '/p324', entries: [] },
+    });
+    await page.evaluate(h190At('/p324/home'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`);
+    await openList(page);
+    await page.click('#list-new');
+    await page.evaluate(`browseTo('/p324/other')`);
+    await page.waitForFunction(`curDirPath === '/p324/other'`);
+    await page.click('#dir-back');
+    await page.waitForFunction(`curDirPath === '/p324/home'`, null, { timeout: 5_000 });
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`, null, { timeout: 5_000 });
+    const titles = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
+    expect(titles.join('|') === 'kept', `after backing out the list shows ${JSON.stringify(titles)}`);
+    return `browsed to /p324/other and back out: the list is on /p324/home again with its row`;
   },
 });
 

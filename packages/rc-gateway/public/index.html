@@ -13895,16 +13895,25 @@
       // Opening puts focus on its way back, so a keyboard reader lands in
       // what they opened; shutting it from inside hands focus back to New
       // conversation.
+      // #190: browsing here moves the list's current folder (renderDirList),
+      // and a folder that is not recent then fell out of All folders. The
+      // screen remembers where the list was and goes back there as it shuts,
+      // unless a conversation started (the folder it started in is recent).
+      let dirPickerFrom = null;
       function setDirPickerOpen(open, refocus) {
         const picker = $('dir-picker');
         if (picker.hidden === !open) return;
         picker.hidden = !open;
         $('list-new').setAttribute('aria-expanded', String(open));
         if (open) {
+          dirPickerFrom = curDirPath;
           setFolderMenuOpen(false);
           $('dir-back').focus({ preventScroll: true });
           return;
         }
+        const from = dirPickerFrom;
+        dirPickerFrom = null;
+        if (from && curDirPath !== from) void browseTo(from, true);
         if (refocus && listShown()) $('list-new').focus({ preventScroll: true });
       }
       $('list-folder').addEventListener('click', () =>
