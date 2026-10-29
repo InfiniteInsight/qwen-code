@@ -13,7 +13,7 @@ import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import type { RcScope } from '../scopes.js';
-import { SESSION_READ, WRITE } from '../scopes.js';
+import { OWNER, SESSION_READ, WRITE } from '../scopes.js';
 import {
   createSupportedCommandsRoute,
   createSessionCommandInvokeRoute,
@@ -100,6 +100,20 @@ describe('GET /session/:id/supported-commands', () => {
       'clear',
     ]);
     expect(body.availableCommands[0]?._meta?.sourceLabel).toBe('Built-in');
+    expect(body.invocableByYou).toBe(true);
+  });
+
+  it('an owner-only token is told invocableByYou true', async () => {
+    stub = await startStubDaemon({ supportedCommands: sessionCommands });
+    const app = express();
+    app.get(
+      '/session/:id/supported-commands',
+      fakeClient([OWNER]),
+      createSupportedCommandsRoute(new DaemonClient({ baseUrl: stub.baseUrl })),
+    );
+    const url = await listen(app);
+    const res = await fetch(`${url}/session/${SID}/supported-commands`);
+    const body = (await res.json()) as { invocableByYou: boolean };
     expect(body.invocableByYou).toBe(true);
   });
 

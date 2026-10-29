@@ -8,7 +8,13 @@ import { createHash } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { SESSION_READ, WRITE, APPROVE, type RcScope } from '../scopes.js';
+import {
+  SESSION_READ,
+  WRITE,
+  APPROVE,
+  hasScope,
+  type RcScope,
+} from '../scopes.js';
 import type { CommandLoader, CommandScope } from '../commands/loader.js';
 import { substitute } from '../commands/parse.js';
 
@@ -69,7 +75,7 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
       args: c.args ?? null,
       source: c.source,
       invocableByYou:
-        s.includes(WRITE) && s.includes(mapDeclaredScope(c.scope)) && !c.tool,
+        hasScope(s, WRITE) && hasScope(s, mapDeclaredScope(c.scope)) && !c.tool,
     }));
 
     // Strong validator = hash of the exact bytes we'd return (design D1/D2):
@@ -124,7 +130,7 @@ export function createInvokeCommandRoute(
 
     const s = req.rcClient?.scopes ?? [];
     const required = mapDeclaredScope(cmd.scope);
-    if (!s.includes(required)) {
+    if (!hasScope(s, required)) {
       void audit?.record({
         action: 'scope_denied',
         actorTokenId: req.rcClient?.id,

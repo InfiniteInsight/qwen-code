@@ -8,7 +8,7 @@ import type { RequestHandler } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
-import { WRITE } from '../scopes.js';
+import { WRITE, hasScope } from '../scopes.js';
 
 /**
  * GET /session/:id/supported-commands — relay the daemon's per-session slash
@@ -51,7 +51,7 @@ export function createSupportedCommandsRoute(
       const status = await daemon.sessionSupportedCommands(sessionId);
       res.status(200).json({
         ...status,
-        invocableByYou: (req.rcClient?.scopes ?? []).includes(WRITE),
+        invocableByYou: hasScope(req.rcClient?.scopes ?? [], WRITE),
       });
     } catch {
       res
