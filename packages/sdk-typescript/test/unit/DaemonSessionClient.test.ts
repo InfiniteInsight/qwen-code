@@ -4330,3 +4330,28 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(session.clientId).toBe('client-2');
   });
 });
+
+describe('DaemonSessionClient.setApprovalMode', () => {
+  it('posts the mode to the session route with this client id', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { mode: 'yolo', previous: 'default' }),
+    );
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.setApprovalMode('yolo')).resolves.toMatchObject({
+      mode: 'yolo',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/approval-mode');
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+});

@@ -15,6 +15,7 @@ import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import type { DaemonSessionControl } from './daemon/daemon-session-state.js';
 
 const AUTO_MODE_FIRST_TIME_MESSAGE_KEY = 'auto_mode.entry_notice';
 const AUTO_MODE_FIRST_TIME_MESSAGE_FALLBACK =
@@ -38,7 +39,19 @@ export interface UseAutoAcceptIndicatorArgs {
   shouldBlockTab?: () => boolean;
   /** When true, the keyboard handler is disabled (e.g. agent tab is active). */
   disabled?: boolean;
+  /**
+   * Set when this tab is attached to a daemon session. The daemon owns the
+   * session's approval mode: the indicator shows `daemonMode`, and Shift+Tab
+   * asks the daemon for the next mode instead of changing the tab's own config
+   * (which would show nothing and change nothing the session runs under).
+   */
+  daemon?: Pick<DaemonSessionControl, 'setApprovalMode'> | null;
+  /** The mode the daemon reports for the session (its `approval_mode_changed`). */
+  daemonMode?: string;
 }
+
+const asApprovalMode = (value: string | undefined): ApprovalMode | undefined =>
+  APPROVAL_MODES.find((mode) => mode === value);
 
 export function useAutoAcceptIndicator({
   config,
@@ -47,6 +60,8 @@ export function useAutoAcceptIndicator({
   onApprovalModeChange,
   shouldBlockTab,
   disabled,
+  daemon,
+  daemonMode,
 }: UseAutoAcceptIndicatorArgs): ApprovalMode {
   const currentConfigValue = config.getApprovalMode();
   const [showAutoAcceptIndicator, setShowAutoAcceptIndicator] =
@@ -95,6 +110,27 @@ export function useAutoAcceptIndicator({
           return;
         }
 
+        if (daemon) {
+          const from = asApprovalMode(daemonMode) ?? config.getApprovalMode();
+          const next =
+            APPROVAL_MODES[
+              (APPROVAL_MODES.indexOf(from) + 1) % APPROVAL_MODES.length
+            ]!;
+          // The footer follows the daemon's `approval_mode_changed` frame.
+          const reportFailure = (message: string) =>
+            addItem?.({ type: MessageType.INFO, text: message }, Date.now());
+          if (!daemon.setApprovalMode) {
+            reportFailure(
+              'This daemon does not support changing the approval mode from a terminal.',
+            );
+            return;
+          }
+          daemon.setApprovalMode(next).catch((e: unknown) => {
+            reportFailure((e as Error)?.message ?? String(e));
+          });
+          return;
+        }
+
         const currentMode = config.getApprovalMode();
         const currentIndex = APPROVAL_MODES.indexOf(currentMode);
         const nextIndex =
@@ -130,7 +166,10 @@ export function useAutoAcceptIndicator({
     { isActive: !disabled },
   );
 
-  return showAutoAcceptIndicator;
+  // The daemon, once it has named a mode, is the source of truth.
+  return (
+    (daemon ? asApprovalMode(daemonMode) : undefined) ?? showAutoAcceptIndicator
+  );
 }
 
 /**

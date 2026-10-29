@@ -67,6 +67,38 @@ export const approvalModeCommand: SlashCommand = {
       };
     }
 
+    // Attached to a daemon session: the daemon owns the mode the session
+    // runs under, so ask it; the tab's own config changes nothing there. The
+    // footer follows the `approval_mode_changed` frame the daemon publishes.
+    const { daemon } = context.services;
+    if (daemon) {
+      if (!daemon.setApprovalMode) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'This daemon does not support changing the approval mode from a terminal.',
+          ),
+        };
+      }
+      try {
+        await daemon.setApprovalMode(mode);
+      } catch (e) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: (e as Error).message,
+        };
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Approval mode set to "{{mode}}"', {
+          mode: formatApprovalModeName(mode),
+        }),
+      };
+    }
+
     // Set the mode for current session only (not persisted)
     const { config, settings } = context.services;
     let priorMode: ApprovalMode | undefined;

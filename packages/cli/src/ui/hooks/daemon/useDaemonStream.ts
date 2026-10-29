@@ -65,10 +65,17 @@ import {
   projectReplaySnapshot,
   thoughtOf,
   type DaemonFrame,
+  type DaemonProjectionState,
   type DaemonReplaySnapshotFrames,
   type PendingPermission,
 } from './projectDaemonEvent.js';
 import { buildDaemonConfirmation } from './daemonConfirmation.js';
+import {
+  readDaemonModels,
+  readDaemonModes,
+  type DaemonSessionControl,
+  type DaemonSessionStateLike,
+} from './daemon-session-state.js';
 
 /**
  * A vote on a daemon permission request. The `outcome` is itself an object
@@ -84,7 +91,7 @@ export interface DaemonPermissionResponse {
  * The minimal slice of `DaemonSessionClient` this hook drives. An attached
  * `DaemonSessionClient` satisfies it structurally (no import needed).
  */
-export interface DaemonSessionDriver {
+export interface DaemonSessionDriver extends DaemonSessionControl {
   /** This client's daemon clientId; required so the daemon's self-echo is dropped. */
   readonly clientId?: string;
   /**
@@ -138,6 +145,10 @@ export interface UseDaemonStreamResult {
   /** Daemon-mode permission gate + vote (the interactive wiring binds these). */
   activePermission: PendingPermission | undefined;
   respondToPermission: (optionId: string | null) => Promise<void>;
+  /** The model the daemon runs this session on; undefined until it says. */
+  daemonModelId: string | undefined;
+  /** The session's approval mode as the daemon reports it. */
+  daemonApprovalMode: string | undefined;
   // --- contract stubs not yet wired for daemon mode (interactive pass) ---
   retryLastPrompt: () => Promise<void>;
   handleApprovalModeChange: () => Promise<void>;
@@ -146,6 +157,25 @@ export interface UseDaemonStreamResult {
 }
 
 const now = () => Date.now();
+
+/**
+ * Overlay the load response's model and mode onto a projection. The load state
+ * is newer than any replayed frame (the transcript is a record of what already
+ * happened; the state is what is true now), so it wins; when the state names
+ * nothing, whatever the replayed frames set is kept.
+ */
+function withLoadState(
+  base: DaemonProjectionState,
+  loadState: DaemonSessionStateLike | undefined,
+): DaemonProjectionState {
+  const modelId = readDaemonModels(loadState).currentModelId ?? base.modelId;
+  const approvalMode =
+    readDaemonModes(loadState).currentModeId ?? base.approvalMode;
+  if (modelId === base.modelId && approvalMode === base.approvalMode) {
+    return base;
+  }
+  return { ...base, modelId, approvalMode };
+}
 
 export function useDaemonStream(
   driver: DaemonSessionDriver,
@@ -156,7 +186,9 @@ export function useDaemonStream(
   // turn and falls back to projecting it — double-rendering our input (local
   // echo + daemon echo). `DaemonSessionClient.createOrAttach` always resolves a
   // clientId, so the wiring must await attach before rendering this hook.
-  const stateRef = useRef(initialDaemonProjectionState(driver.clientId));
+  const stateRef = useRef(
+    withLoadState(initialDaemonProjectionState(driver.clientId), driver.state),
+  );
   const [snapshot, setSnapshot] = useState(stateRef.current);
   const [initError, setInitError] = useState<string | null>(null);
   const streamingResponseLengthRef = useRef(0);
@@ -228,10 +260,11 @@ export function useDaemonStream(
         dbg(
           `replay seed compacted=${replay.compactedReplay.length} live=${replay.liveJournal.length} committed=${committed.length} -> state=${state.streamingState} lastEventId=${state.lastEventId ?? '∅'}`,
         );
-        stateRef.current = state;
+        const seeded = withLoadState(state, driver.state);
+        stateRef.current = seeded;
         for (const item of committed) addItemRef.current(item, now());
-        streamingResponseLengthRef.current = state.pendingText.length;
-        setSnapshot(state);
+        streamingResponseLengthRef.current = seeded.pendingText.length;
+        setSnapshot(seeded);
         // The raw wire events are in history now; let the client drop them.
         driver.consumeReplaySnapshot?.();
       }
@@ -361,6 +394,8 @@ export function useDaemonStream(
     streamingResponseLengthRef,
     activePermission,
     respondToPermission,
+    daemonModelId: snapshot.modelId,
+    daemonApprovalMode: snapshot.approvalMode,
     // Stubs — these in-process behaviors are wired in the interactive pass.
     retryLastPrompt: async () => {},
     handleApprovalModeChange: async () => {},

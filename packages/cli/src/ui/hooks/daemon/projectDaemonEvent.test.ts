@@ -902,3 +902,89 @@ describe('projectReplaySnapshot', () => {
     expect(state.ownClientId).toBe(SELF);
   });
 });
+
+describe('model and approval-mode frames', () => {
+  it('model_switched sets modelId and commits nothing', () => {
+    const { state, committed } = projectDaemonEvent(
+      initialDaemonProjectionState(SELF),
+      {
+        id: 3,
+        type: 'model_switched',
+        data: { sessionId: 's1', modelId: 'flint(openai)' },
+        originatorClientId: PHONE,
+      },
+    );
+    expect(state.modelId).toBe('flint(openai)');
+    expect(committed).toEqual([]);
+  });
+
+  it('applies model_switched that this client itself originated', () => {
+    const { state } = projectDaemonEvent(initialDaemonProjectionState(SELF), {
+      type: 'model_switched',
+      data: { modelId: 'qwen3' },
+      originatorClientId: SELF,
+    });
+    expect(state.modelId).toBe('qwen3');
+  });
+
+  it('ignores a model_switched frame with no usable modelId', () => {
+    const start = { ...initialDaemonProjectionState(SELF), modelId: 'keep' };
+    for (const data of [{}, { modelId: '' }, { modelId: 7 }]) {
+      const { state } = projectDaemonEvent(start, {
+        type: 'model_switched',
+        data,
+      });
+      expect(state.modelId).toBe('keep');
+    }
+  });
+
+  it('approval_mode_changed sets approvalMode from data.next', () => {
+    const { state, committed } = projectDaemonEvent(
+      initialDaemonProjectionState(SELF),
+      {
+        type: 'approval_mode_changed',
+        data: { sessionId: 's1', previous: 'default', next: 'yolo' },
+      },
+    );
+    expect(state.approvalMode).toBe('yolo');
+    expect(committed).toEqual([]);
+  });
+
+  it('ignores an approval_mode_changed frame with no next', () => {
+    const start = {
+      ...initialDaemonProjectionState(SELF),
+      approvalMode: 'plan',
+    };
+    const { state } = projectDaemonEvent(start, {
+      type: 'approval_mode_changed',
+      data: { previous: 'plan' },
+    });
+    expect(state.approvalMode).toBe('plan');
+  });
+
+  it('does not disturb an in-flight turn', () => {
+    let state = initialDaemonProjectionState(SELF);
+    state = projectDaemonEvent(
+      state,
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'partial' },
+      }),
+    ).state;
+    const next = projectDaemonEvent(state, {
+      type: 'model_switched',
+      data: { modelId: 'm2' },
+    }).state;
+    expect(next.streamingState).toBe(StreamingState.Responding);
+    expect(next.pendingText).toBe('partial');
+    expect(next.modelId).toBe('m2');
+  });
+
+  it('a replayed model_switched seeds modelId through projectReplaySnapshot', () => {
+    const { state } = projectReplaySnapshot({
+      compactedReplay: [{ type: 'model_switched', data: { modelId: 'old' } }],
+      liveJournal: [],
+    });
+    expect(state.modelId).toBe('old');
+  });
+});

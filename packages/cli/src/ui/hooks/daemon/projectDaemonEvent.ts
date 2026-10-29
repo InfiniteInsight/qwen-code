@@ -126,6 +126,13 @@ export interface DaemonProjectionState {
    * already-seen frames. Locally-synthesized frames (no `id`) are never deduped.
    */
   lastEventId?: number;
+  /**
+   * The model the daemon says this session runs (`model_switched.modelId`, or
+   * the load response's `models.currentModelId`). Unset until the daemon says.
+   */
+  modelId?: string;
+  /** The session's approval mode (`approval_mode_changed.next`, or load state). */
+  approvalMode?: string;
 }
 
 export interface ProjectionResult {
@@ -489,6 +496,26 @@ function projectFrame(
         },
         committed: flushed.committed,
       };
+    }
+
+    // The daemon is the source of truth for the model and mode in an attached
+    // tab. Both frames are broadcast to every client, including the one that
+    // asked for the change, so origin is deliberately not consulted: the
+    // requester learns the outcome the same way the phone does.
+    case 'model_switched': {
+      const modelId = data['modelId'];
+      if (typeof modelId !== 'string' || modelId.length === 0) {
+        return { state, committed: [] };
+      }
+      return { state: { ...state, modelId }, committed: [] };
+    }
+
+    case 'approval_mode_changed': {
+      const next = data['next'];
+      if (typeof next !== 'string' || next.length === 0) {
+        return { state, committed: [] };
+      }
+      return { state: { ...state, approvalMode: next }, committed: [] };
     }
 
     // `replay_complete` and unknown frame types are inert for this slice.

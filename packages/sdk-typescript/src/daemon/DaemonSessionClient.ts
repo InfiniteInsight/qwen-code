@@ -21,6 +21,8 @@ import {
 } from './DaemonClient.js';
 import { parseDaemonBackgroundTurn } from './types.js';
 import type {
+  DaemonApprovalMode,
+  DaemonApprovalModeResult,
   DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
@@ -967,6 +969,22 @@ export class DaemonSessionClient {
 
   setModel(modelId: string): Promise<SetModelResult> {
     return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
+  }
+
+  /**
+   * Change this session's approval mode. The daemon applies it and publishes
+   * `approval_mode_changed` to every client of the session, this one included.
+   * Session-local unless `opts.persist` is set (see
+   * `DaemonClient.setSessionApprovalMode`).
+   */
+  setApprovalMode(
+    mode: DaemonApprovalMode,
+    opts?: { persist?: boolean; planMode?: boolean },
+  ): Promise<DaemonApprovalModeResult> {
+    return this.client.setSessionApprovalMode(this.sessionId, mode, {
+      ...opts,
+      clientId: this.clientId,
+    });
   }
 
   setConfigOption(

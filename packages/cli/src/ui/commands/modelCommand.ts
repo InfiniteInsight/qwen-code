@@ -12,6 +12,11 @@ import type {
   SubmitPromptActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
+import {
+  readDaemonModels,
+  resolveDaemonModelArg,
+  type DaemonSessionControl,
+} from '../hooks/daemon/daemon-session-state.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
@@ -239,6 +244,87 @@ async function switchMainModel(
     );
   }
   return modelArg;
+}
+
+async function switchDaemonModel(
+  daemon: DaemonSessionControl,
+  args: string,
+  opts: { hasScopeFlag: boolean },
+): Promise<OpenDialogActionReturn | MessageActionReturn> {
+  const trimmed = args.trim();
+  if (!trimmed) {
+    return { type: 'dialog', dialog: 'model' };
+  }
+  if (opts.hasScopeFlag) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'Scope flags do not apply here: the model is switched for the daemon session, not saved to settings.',
+      ),
+    };
+  }
+  const firstSpace = trimmed.search(/\s/);
+  const modelName = firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
+  if (firstSpace !== -1) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        "Inline one-shot override isn't supported in a daemon-attached tab. Run '/model {{model}}' first, then send your prompt.",
+        { model: modelName },
+      ),
+    };
+  }
+  if (!daemon.setModel) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'This daemon does not support switching the model from a terminal.',
+      ),
+    };
+  }
+  const { availableModels } = readDaemonModels(daemon.state);
+  const resolved = resolveDaemonModelArg(availableModels, modelName);
+  if (resolved.kind === 'ambiguous') {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t("Model '{{model}}' is ambiguous. Use one of: {{matches}}", {
+        model: modelName,
+        matches: resolved.matches.join(', '),
+      }),
+    };
+  }
+  if (resolved.kind === 'unknown') {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        "Model '{{model}}' is not available on the daemon. Available models: {{models}}",
+        {
+          model: modelName,
+          models:
+            availableModels.map((m) => m.modelId).join(', ') || t('(none)'),
+        },
+      ),
+    };
+  }
+  try {
+    await daemon.setModel(resolved.modelId);
+  } catch (e) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: (e as Error).message,
+    };
+  }
+  return {
+    type: 'message',
+    messageType: 'info',
+    content: t('Model') + ': ' + resolved.modelId,
+  };
 }
 
 function formatUnavailableModelMessage(
@@ -1134,6 +1220,16 @@ export const modelCommand: SlashCommand = {
         messageType: 'info',
         content: t('Image Model') + ': ' + modelName + scopeSuffix,
       };
+    }
+
+    // Attached to a daemon session: the session runs on the daemon's model, so
+    // list and switch THAT one. `config.switchModel` here would only change the
+    // tab's own (unused) client and leave the daemon, and the phone, untouched.
+    // The footer follows the `model_switched` frame the daemon publishes.
+    if (context.services.daemon) {
+      return switchDaemonModel(context.services.daemon, args, {
+        hasScopeFlag: hasProject || hasGlobal,
+      });
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();

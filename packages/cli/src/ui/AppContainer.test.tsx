@@ -78,6 +78,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
+import { DaemonStreamContext } from './hooks/daemon/DaemonStreamContext.js';
+import type { DaemonSessionDriver } from './hooks/daemon/useDaemonStream.js';
 import { renderHook } from '@testing-library/react';
 import * as interactiveMods from '../services/interactive-mod-session.js';
 import { ModSession } from '../services/mod-session.js';
@@ -7728,6 +7730,83 @@ describe('AppContainer State Management', () => {
       await flushEffects();
 
       expect(trigger.activeCount()).toBe(0);
+    });
+  });
+
+  describe('attached to a daemon session', () => {
+    const flush = async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+    const driver = (modelId?: string, modeId?: string) =>
+      ({
+        state: {
+          ...(modelId ? { models: { currentModelId: modelId } } : {}),
+          ...(modeId ? { modes: { currentModeId: modeId } } : {}),
+        },
+      }) as unknown as DaemonSessionDriver;
+
+    it("shows the daemon's model, not the local config's, from the first frame", async () => {
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('local-default');
+      mockStdout.write.mockClear();
+
+      render(
+        <DaemonStreamContext.Provider value={driver('flint(openai)')}>
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />
+        </DaemonStreamContext.Provider>,
+      );
+      await flush();
+
+      expect(capturedUIState.currentModel).toBe('flint(openai)');
+      // Seeded, not switched: no Static remount for the initial value.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
+    it('does not follow in-process model changes', async () => {
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('local-default');
+      const onModelChange = vi.fn(() => () => {});
+      (
+        mockConfig as unknown as { onModelChange: typeof onModelChange }
+      ).onModelChange = onModelChange;
+
+      render(
+        <DaemonStreamContext.Provider value={driver('flint(openai)')}>
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />
+        </DaemonStreamContext.Provider>,
+      );
+      await flush();
+
+      expect(onModelChange).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the local model when the daemon names none', async () => {
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('local-default');
+
+      render(
+        <DaemonStreamContext.Provider value={driver()}>
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />
+        </DaemonStreamContext.Provider>,
+      );
+      await flush();
+
+      expect(capturedUIState.currentModel).toBe('local-default');
     });
   });
 

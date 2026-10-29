@@ -187,4 +187,68 @@ describe('approvalModeCommand', () => {
   it('should not have completion function', () => {
     expect(approvalModeCommand.completion).toBeUndefined();
   });
+
+  describe('attached to a daemon session', () => {
+    let daemonSetApprovalMode: ReturnType<typeof vi.fn>;
+    let attached: CommandContext;
+
+    beforeEach(() => {
+      daemonSetApprovalMode = vi.fn().mockResolvedValue({});
+      attached = createMockCommandContext({
+        services: {
+          config: {
+            getApprovalMode: () => 'default',
+            setApprovalMode: mockSetApprovalMode,
+          },
+          daemon: { setApprovalMode: daemonSetApprovalMode },
+        },
+      } as never);
+    });
+
+    it('changes the daemon session mode, not the local config', async () => {
+      const result = (await approvalModeCommand.action?.(
+        attached,
+        'yolo',
+      )) as MessageActionReturn;
+
+      expect(daemonSetApprovalMode).toHaveBeenCalledWith('yolo');
+      expect(mockSetApprovalMode).not.toHaveBeenCalled();
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('YOLO');
+    });
+
+    it('surfaces the daemon refusal (e.g. the folder trust gate)', async () => {
+      daemonSetApprovalMode.mockRejectedValue(new Error('untrusted folder'));
+      const result = (await approvalModeCommand.action?.(
+        attached,
+        'yolo',
+      )) as MessageActionReturn;
+
+      expect(result.messageType).toBe('error');
+      expect(result.content).toContain('untrusted folder');
+    });
+
+    it('still rejects an invalid mode without calling the daemon', async () => {
+      const result = (await approvalModeCommand.action?.(
+        attached,
+        'bogus',
+      )) as MessageActionReturn;
+
+      expect(result.messageType).toBe('error');
+      expect(daemonSetApprovalMode).not.toHaveBeenCalled();
+    });
+
+    it('says so when the daemon exposes no mode control', async () => {
+      (
+        attached.services.daemon as { setApprovalMode?: unknown }
+      ).setApprovalMode = undefined;
+      const result = (await approvalModeCommand.action?.(
+        attached,
+        'plan',
+      )) as MessageActionReturn;
+
+      expect(result.messageType).toBe('error');
+      expect(mockSetApprovalMode).not.toHaveBeenCalled();
+    });
+  });
 });

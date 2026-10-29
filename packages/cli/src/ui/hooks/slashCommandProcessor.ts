@@ -11,12 +11,14 @@ import {
   useEffect,
   useRef,
   useState,
+  useContext,
   type MutableRefObject,
 } from 'react';
 import { type PartListUnion } from '@google/genai';
 import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
+import { DaemonStreamContext } from './daemon/DaemonStreamContext.js';
 import { usePeerMessaging } from '../../peerMessaging/PeerMessagingContext.js';
 import {
   type Logger,
@@ -257,6 +259,9 @@ export const useSlashCommandProcessor = (
   // Null unless cross-session messaging is enabled and bound; `/peers`
   // reads that as "the feature is off" rather than as an error.
   const peerMessaging = usePeerMessaging();
+
+  // Non-null only in a tab attached to a daemon session (DaemonAppContainer).
+  const daemon = useContext(DaemonStreamContext);
 
   // Ref avoids adding `history` to the commandContext useMemo deps,
   // which would cause a full context rebuild on every history append.
@@ -534,6 +539,7 @@ export const useSlashCommandProcessor = (
         logger,
         extensionRefreshState: activeExtensionRefreshState,
         peerMessaging,
+        daemon,
       },
       ui: {
         get history() {
@@ -600,6 +606,7 @@ export const useSlashCommandProcessor = (
       isIdleRef,
       activeExtensionRefreshState,
       peerMessaging,
+      daemon,
     ],
   );
 
