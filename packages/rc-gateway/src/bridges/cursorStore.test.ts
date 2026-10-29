@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CursorStore } from './cursorStore.js';
+import { CursorStore, cursorPartitionOf } from './cursorStore.js';
 
 let dir: string;
 beforeEach(async () => {
@@ -98,6 +98,32 @@ describe('CursorStore', () => {
     expect(() => JSON.parse(raw)).not.toThrow();
   });
 
+  it('serializes writes and folds a burst into one more write, ending at the latest value (#168)', async () => {
+    // Once wired, every SSE frame sets the cursor; each set used to start its
+    // own racing write (temp + rename), so a stream meant a disk write per
+    // frame and an older snapshot could land last.
+    const writes: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const fs = await import('node:fs/promises');
+    const store = await CursorStore.open(PATH(), {
+      writeFile: async (path, data) => {
+        writes.push(String(data));
+        if (writes.length === 1) await gate; // hold the first write open
+        await fs.writeFile(path, data);
+      },
+    });
+    const done = [store.setLastEventId('tok1', 's', 1)];
+    for (let i = 2; i <= 50; i++)
+      done.push(store.setLastEventId('tok1', 's', i));
+    release();
+    await Promise.all(done);
+    expect(writes).toHaveLength(2); // the held one, then one carrying 2..50
+    expect(JSON.parse(writes[1])['tok1/s'].lastEventId).toBe(50);
+    const reopened = await CursorStore.open(PATH());
+    expect(reopened.get('tok1', 's')?.lastEventId).toBe(50);
+  });
+
   it('silently ignores a corrupt file and starts empty', async () => {
     const p = PATH();
     await rm(dir, { recursive: true, force: true });
@@ -107,5 +133,25 @@ describe('CursorStore', () => {
     await import('node:fs/promises').then((fs) => fs.writeFile(p, 'NOT JSON'));
     const store = await CursorStore.open(p);
     expect(store.get('tok1', 'sess-a')).toBeUndefined();
+  });
+});
+
+describe('cursorPartitionOf (#168)', () => {
+  const token = 'qwk_' + 'A'.repeat(43);
+
+  it('is stable per token, differs between tokens, and is not the token', () => {
+    const id = cursorPartitionOf(token);
+    expect(id).toBe(cursorPartitionOf(token));
+    expect(id).not.toBe(cursorPartitionOf('qwk_' + 'B'.repeat(43)));
+    expect(id).not.toContain('qwk_');
+    expect(token).not.toContain(id);
+  });
+
+  it('keeps the bearer token out of cursors.json', async () => {
+    const store = await CursorStore.open(PATH());
+    await store.setLastEventId(cursorPartitionOf(token), 'sess-a', 7);
+    const raw = await readFile(PATH(), 'utf8');
+    expect(raw).not.toContain(token);
+    expect(raw).not.toContain('qwk_');
   });
 });
