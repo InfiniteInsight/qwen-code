@@ -11,7 +11,11 @@ import type { PushStore } from '../pushStore.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { SnoozeStore } from '../routing/snooze.js';
 import type { WorkingDeviceTracker } from '../routing/workingDevice.js';
-import type { RoutingMatcher, RoutingEvent } from '../routing/rules.js';
+import type {
+  RoutingMatcher,
+  RoutingEvent,
+  RoutingEventContext,
+} from '../routing/rules.js';
 import { parseTimeOfDay, isWithinTimeOfDay } from '../policy/conditions.js';
 import type { PushSender } from './sender.js';
 import {
@@ -36,9 +40,11 @@ import type { OwnerEventBus } from '../ownerEvents.js';
 export const SNOOZE_BYPASS_KINDS = new Set([
   'session.died',
   'policy.deny',
-  // A blocked agent needs a human — quiet-hours/snooze bypass (design:
-  // "agent_blocked is a candidate critical kind").
-  'agent.blocked',
+  // `agent.blocked` is deliberately NOT here (issue #166). It once bypassed
+  // snooze and quiet hours as a "candidate critical kind", but the
+  // permission.required push for the same request honours both, so the bypass
+  // only paged a snoozed operator a second time. The lifecycle now raises it
+  // only when policy did not auto-handle the request (a human really is needed).
 ]);
 
 /**
@@ -216,7 +222,15 @@ export class PushNotifier {
    */
   async notify(
     event: { type: string; data: unknown },
-    ctx: { sessionId: string; sessionName?: string },
+    ctx: {
+      sessionId: string;
+      sessionName?: string;
+      /**
+       * Per-event routing fields the source knows (the pump stamps the policy
+       * decision here). Absent fields simply never match a rule on them.
+       */
+      routing?: RoutingEventContext;
+    },
     now: Date = new Date(),
   ): Promise<void> {
     const payload = buildPayload(event, ctx);
@@ -264,6 +278,7 @@ export class PushNotifier {
     const routingEv: RoutingEvent = {
       kind: payload.kind,
       sessionName: ctx.sessionName,
+      ...ctx.routing,
     };
     const dropRuleId = routing?.firstDrop(routingEv);
     // Emit routing_decision SSE event (before any send or return)
@@ -308,8 +323,9 @@ export class PushNotifier {
         // reason token as the global drop, discriminated by subscriptionId.
         // Optional method → a matcher without it performs no per-sub drop.
         const perSubDrop = routing?.firstDropForSubscription?.(
-          { kind: payload.kind, sessionName: ctx.sessionName },
+          routingEv,
           { tokenId: r.tokenId, scopes },
+          this.workingDevice?.isWorking(r.tokenId) ?? false,
         );
         if (perSubDrop) {
           void this.audit?.record({
@@ -466,7 +482,7 @@ export class PushNotifier {
     // Second transport: fan the same payload out to APNs device subscriptions
     // (add-native-mobile-shells), under the same global gates already applied
     // above (snooze, routing drop) plus the token-level gates re-checked per sub.
-    await this.notifyApns(payload, ctx, routing, need, now);
+    await this.notifyApns(payload, ctx, routingEv, routing, need, now);
   }
 
   /**
@@ -476,7 +492,9 @@ export class PushNotifier {
    *
    *  - **scope + session-lock** — confinement, MUST apply (a share token locked to
    *    one session must never receive another session's metadata via APNs);
-   *  - **per-subscription routing drop** — an operator rule by token scopes/id;
+   *  - **per-subscription routing drop**: an operator rule by token scopes/id
+   *    (including an explicit `suppressIfWorkingDevice` rule, which is the
+   *    operator's own opt-in and gets the real working-device state);
    *  - **coalescing (D6)** — reuse the shared coalescer keyed by the APNs sub id.
    *
    * Intentionally NOT applied:
@@ -496,6 +514,7 @@ export class PushNotifier {
   private async notifyApns(
     payload: PushPayload,
     ctx: { sessionId: string; sessionName?: string },
+    routingEv: RoutingEvent,
     routing: RoutingMatcher | undefined,
     need: RcScope,
     now: Date,
@@ -509,8 +528,9 @@ export class PushNotifier {
         const lock = this.tokens.sessionLockFor(rec.tokenId);
         if (lock !== undefined && lock !== ctx.sessionId) return; // session-lock
         const perSubDrop = routing?.firstDropForSubscription?.(
-          { kind: payload.kind, sessionName: ctx.sessionName },
+          routingEv,
           { tokenId: rec.tokenId, scopes },
+          this.workingDevice?.isWorking(rec.tokenId) ?? false,
         );
         if (perSubDrop) {
           void this.audit?.record({

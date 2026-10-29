@@ -117,8 +117,19 @@ export class PermissionOverlayStore {
   policyFor(sessionId: string, nowMs: number = Date.now()): Policy {
     this.prune(nowMs);
     const rules: PolicyRule[] = [];
-    for (const ov of this.overlays.values()) {
-      if (ov.sessionId !== undefined && ov.sessionId !== sessionId) continue;
+    // The evaluator breaks equal-specificity ties by rule order, and the Map
+    // iterates in insertion order, so an older all-sessions allow used to beat a
+    // newer session-only deny. Order so the narrower binding wins (session-bound
+    // before all-sessions), then the newer overlay (issue #166). Specificity of
+    // the match itself (a named tool) still outranks this order.
+    const applicable = [...this.overlays.values()]
+      .filter((ov) => ov.sessionId === undefined || ov.sessionId === sessionId)
+      .sort(
+        (a, b) =>
+          Number(b.sessionId !== undefined) -
+            Number(a.sessionId !== undefined) || b.createdAt - a.createdAt,
+      );
+    for (const ov of applicable) {
       rules.push({
         id: ov.id,
         match: ov.tool ? { tool: ov.tool } : {},

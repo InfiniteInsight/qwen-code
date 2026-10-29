@@ -25,11 +25,25 @@
  * as a pairing code with `bootstrapTtlSec`); this module only owns the file.
  */
 
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 
 /** Fixed filename inside the rc directory (pairing-auth: bootstrap file). */
 export const BOOTSTRAP_CODE_FILENAME = 'owner-bootstrap.code';
+
+/**
+ * How long the owner bootstrap code stays redeemable (a human first run: scan
+ * the QR, install the PWA, type a case-sensitive code on a phone). The gateway
+ * mints with this TTL and the launcher uses it to tell a dead code file from a
+ * live one.
+ */
+export const OWNER_BOOTSTRAP_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Write the one-time owner bootstrap code to `<dir>/owner-bootstrap.code`.
@@ -54,6 +68,23 @@ export function writeBootstrapCode(
   // Re-assert on overwrite: writeFileSync's mode applies only at creation.
   chmodSync(path, 0o600);
   return { path };
+}
+
+/**
+ * Remove `<dir>/owner-bootstrap.code` when it still holds `code`. Called when
+ * the code is redeemed or expires so a later `qwen-rc up` never prints a dead
+ * code. Content-matched so a late timer from one gateway boot cannot delete the
+ * file a newer boot wrote. Returns whether a file was removed.
+ */
+export function removeBootstrapCode(dir: string, code: string): boolean {
+  const path = join(dir, BOOTSTRAP_CODE_FILENAME);
+  try {
+    if (readFileSync(path, 'utf8').trim() !== code) return false;
+    rmSync(path, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

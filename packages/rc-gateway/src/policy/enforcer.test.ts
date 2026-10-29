@@ -773,3 +773,42 @@ describe('PolicyEnforcer', () => {
     });
   });
 });
+
+describe('PolicyEnforcer.decidePermission (issue #166)', () => {
+  it('reports the action and source alongside handled', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const ev = permissionEvent('execute', {}, { requestId: 'r1' });
+
+    expect(
+      await new PolicyEnforcer(daemon, allowExecute).decidePermission('s1', ev),
+    ).toEqual({ handled: true, action: 'allow', source: 'policy' });
+    expect(
+      await new PolicyEnforcer(daemon, denyExecute).decidePermission('s1', ev),
+    ).toEqual({ handled: true, action: 'deny', source: 'policy' });
+    expect(
+      await new PolicyEnforcer(daemon, emptyPolicy).decidePermission('s1', ev),
+    ).toEqual({ handled: false, action: 'prompt', source: 'default' });
+  });
+
+  it('an allow that could not be voted (no requestId) is unhandled but still reports allow', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const out = await new PolicyEnforcer(daemon, allowExecute).decidePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: null }),
+    );
+    expect(out).toEqual({ handled: false, action: 'allow', source: 'policy' });
+  });
+
+  it('a non-permission event reports nothing decided', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    expect(
+      await new PolicyEnforcer(daemon, allowExecute).decidePermission('s1', {
+        type: 'session_update',
+        data: {},
+      }),
+    ).toEqual({ handled: false });
+  });
+});

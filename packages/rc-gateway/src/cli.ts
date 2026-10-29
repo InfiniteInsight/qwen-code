@@ -4,14 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { watch, readFileSync, type FSWatcher } from 'node:fs';
+import {
+  existsSync,
+  statSync,
+  watch,
+  readFileSync,
+  type FSWatcher,
+} from 'node:fs';
 import { createPrivateKey, createHash } from 'node:crypto';
-import { writeBootstrapCode, displayHint } from './bootstrap.js';
+import {
+  writeBootstrapCode,
+  removeBootstrapCode,
+  displayHint,
+  OWNER_BOOTSTRAP_TTL_MS,
+} from './bootstrap.js';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
 import { join, basename } from 'node:path';
-import { createInterface } from 'node:readline';
+import { askLine, confirmPrompt } from './cliPrompt.js';
+import {
+  USAGE_TEXT,
+  resolveTopLevel,
+  isRunAsCli,
+  parseAuditVerifyArgs,
+} from './cliUsage.js';
 import {
   isLoopbackHost,
   resolveBindSecurity,
@@ -553,7 +570,6 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // bootstrap.ts already documents an intended distinct bootstrap TTL that was
   // never wired. Give it a bounded 30-minute window; the code remains
   // single-use (redeem consumes it) and stays in the 0600 file.
-  const OWNER_BOOTSTRAP_TTL_MS = 30 * 60 * 1000;
   const pairing = new PairingService(Date.now, OWNER_BOOTSTRAP_TTL_MS);
   const vapid = await VapidStore.open(
     join(homedir(), '.qwen', 'rc', 'vapid.json'),
@@ -1455,6 +1471,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // only the path to stdout — never the code (pairing-auth spec invariant).
     const rcDir = join(homedir(), '.qwen', 'rc');
     const { path: bootstrapPath } = writeBootstrapCode(rcDir, code);
+    // The file mirrors a single-use, time-bounded code: drop it the moment the
+    // code is redeemed or lapses, so a later `qwen-rc up` never prints a dead
+    // one. (Content-matched, so it never removes a newer boot's file.)
+    pairing.onConsumed = (consumed) => {
+      if (consumed === code) removeBootstrapCode(rcDir, code);
+    };
+    const expiryTimer = setTimeout(
+      () => removeBootstrapCode(rcDir, code),
+      Math.max(0, expiresAt - Date.now()),
+    );
+    expiryTimer.unref();
     const banner = [
       `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
       `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
@@ -1663,6 +1690,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   let pump: SessionEventPump | undefined;
   if (notifier || usageIngester || agentLifecycle || reviewLifecycle) {
     pump = new SessionEventPump(handle.daemon, notifier, {
+      sessionName: (s) => s.displayName,
       enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
       // Idle suggestions previously rode on the push pump (they only ran when a
       // notifier was present). Keep that coupling: a cost-only pump (push off) must
@@ -1961,17 +1989,7 @@ async function loadBonjourFactory(): Promise<BonjourFactory | null> {
 }
 
 /** Prompt the operator for a y/N confirmation on stdin (prune without --yes). */
-async function confirm(question: string): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await new Promise<string>((resolve) =>
-      rl.question(question, resolve),
-    );
-    return /^y(es)?$/i.test(answer.trim());
-  } finally {
-    rl.close();
-  }
-}
+const confirm = confirmPrompt;
 
 // Entrypoint: `qwen-rc serve`
 /**
@@ -3020,20 +3038,9 @@ if (process.argv[2] === 'serve') {
             process.exit(2);
             return;
           }
-          const rl = createInterface({
-            input: process.stdin,
-            output: process.stdout,
-          });
-          try {
-            code = await new Promise<string>((resolve) =>
-              rl.question(
-                `Pairing code for ${a.name} (shown by qwen-rc serve): `,
-                resolve,
-              ),
-            );
-          } finally {
-            rl.close();
-          }
+          code = await askLine(
+            `Pairing code for ${a.name} (shown by qwen-rc serve): `,
+          );
         }
         const redeem = await daemonRequest(
           { url: base },
@@ -3343,22 +3350,29 @@ if (process.argv[2] === 'serve') {
   // deliberately OMITS the one-time owner pairing code (see upJson below);
   // only the human-readable terminal path prints that code.
   void (async () => {
-    const { up, down, status, upJson } = await import(
+    const { up, down, status, upJson, formatUpHuman } = await import(
       './launcher/orchestrator.js'
     );
     const { realRunCommand } = await import('./launcher/exec.js');
-    const wantJson = process.argv.includes('--json');
-    const portFlag = (() => {
-      const i = process.argv.indexOf('--port');
-      return i >= 0 ? Number(process.argv[i + 1]) : undefined;
-    })();
-    // A missing/non-numeric --port (NaN) must fall back to the default, not
-    // propagate into the URL / persisted state / serve argv as "NaN".
-    const port = Number.isFinite(portFlag) ? (portFlag as number) : 8443;
+    const { parseLauncherArgs } = await import('./launcher/args.js');
+    let launcherArgs;
+    try {
+      launcherArgs = parseLauncherArgs(process.argv.slice(3));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `qwen-rc ${process.argv[2]}: ${(err as Error).message}\nusage: qwen-rc ${process.argv[2]} [--json]${process.argv[2] === 'up' ? ' [--port <n>]' : ''}`,
+      );
+      process.exit(2);
+    }
+    const wantJson = launcherArgs.json;
+    // --port is `--port <n>` or `--port=<n>`; absent means the 8443 default.
+    const port = launcherArgs.port ?? 8443;
     const deps = {
       run: realRunCommand,
       dir: join(homedir(), '.qwen', 'rc'),
       port,
+      portExplicit: launcherArgs.port !== undefined,
       unit: 'qwen-rc-gateway',
       // PATH-independent self-invocation: [node, this cli.js] so the systemd
       // --user unit can exec qwen-rc even when it isn't on PATH.
@@ -3375,9 +3389,7 @@ if (process.argv[2] === 'serve') {
         console.log(JSON.stringify(upJson(r)));
       } else if (r.ok) {
         // eslint-disable-next-line no-console
-        console.log(
-          `\nConnect from your phone:\n  ${r.url}\n\nPairing code: ${r.bootstrapCode ?? '(see gateway logs)'}\n\n${r.qr ?? ''}`,
-        );
+        console.log(formatUpHuman(r));
       } else {
         // eslint-disable-next-line no-console
         console.error(`qwen-rc up: ${r.hint}`);
@@ -3385,10 +3397,17 @@ if (process.argv[2] === 'serve') {
       process.exit(r.ok ? 0 : 1);
     } else if (cmd === 'down') {
       const r = await down(deps);
+      if (!r.ok) {
+        // The unit is still running: do not claim "stopped".
+        if (wantJson)
+          console.log(JSON.stringify({ status: 'error', hint: r.hint })); // eslint-disable-line no-console
+        else console.error(`qwen-rc down: ${r.hint}`); // eslint-disable-line no-console
+        process.exit(1);
+      }
       if (wantJson)
         console.log(JSON.stringify({ status: 'stopped' })); // eslint-disable-line no-console
       else console.log('qwen-rc: stopped'); // eslint-disable-line no-console
-      process.exit(r.ok ? 0 : 1);
+      process.exit(0);
     } else {
       const r = await status(deps);
       if (wantJson)
@@ -3409,15 +3428,32 @@ if (process.argv[2] === 'serve') {
   // Exits 0 when all chains are intact, 1 when any chain is broken (with a
   // human-readable report on stdout), 2 on a usage error. Daemon-free and
   // read-only: the verify pass never modifies any file.
-  const argv = process.argv.slice(4);
-  const dirFlag = argv.find((a) => a.startsWith('--dir='));
-  const auditDir = dirFlag
-    ? dirFlag.slice('--dir='.length)
-    : join(homedir(), '.qwen', 'rc');
+  let auditDir: string;
+  try {
+    auditDir =
+      parseAuditVerifyArgs(process.argv.slice(4)).dir ??
+      join(homedir(), '.qwen', 'rc');
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `audit verify: ${(err as Error).message}\nusage: qwen-rc audit verify [--dir <path>]`,
+    );
+    process.exit(2);
+  }
+  // A directory that is not there has nothing to verify; reporting OK for it
+  // (as verifyChain does for a library caller) made a typo'd --dir look like a
+  // passing tamper check.
+  if (!existsSync(auditDir) || !statSync(auditDir).isDirectory()) {
+    // eslint-disable-next-line no-console
+    console.error(`audit verify: not a directory: ${auditDir}`);
+    process.exit(2);
+  }
   const result = AuditLog.verifyChain(auditDir);
   if (result.ok) {
     // eslint-disable-next-line no-console
-    console.log(`audit verify: OK (directory: ${auditDir})`);
+    console.log(
+      `audit verify: OK (${result.filesChecked} file(s) checked, directory: ${auditDir})`,
+    );
     process.exit(0);
   } else {
     // eslint-disable-next-line no-console
@@ -3429,5 +3465,27 @@ if (process.argv[2] === 'serve') {
       console.error(`  ${file}:${line}`);
     }
     process.exit(1);
+  }
+} else if (isRunAsCli(process.argv[1], import.meta.url)) {
+  // Nothing above claimed argv: bare `qwen-rc`, `help`, `--version`, a typo, or
+  // a command missing its subcommand (`policy`, `audit`). It used to fall off
+  // the end and exit 0 silently, so a typo'd tamper check looked like success.
+  // Only when run as the CLI: index.ts imports this module as a library.
+  const action = resolveTopLevel(process.argv[2], process.argv[3]);
+  if (action.kind === 'help') {
+    // eslint-disable-next-line no-console
+    console.log(USAGE_TEXT);
+    process.exit(0);
+  } else if (action.kind === 'version') {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    // eslint-disable-next-line no-console
+    console.log(pkg.version);
+    process.exit(0);
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(`qwen-rc: ${action.message}\n\n${USAGE_TEXT}`);
+    process.exit(2);
   }
 }

@@ -11,6 +11,10 @@ import type {
 } from '@qwen-code/sdk';
 import type { PolicyEnforcer } from '../policy/enforcer.js';
 import { isGoneSessionError } from '../daemonPool.js';
+import {
+  routingContextFromPolicy,
+  type RoutingEventContext,
+} from '../routing/rules.js';
 
 /**
  * The subset of `PushNotifier` the pump drives. Kept structural so tests
@@ -19,7 +23,11 @@ import { isGoneSessionError } from '../daemonPool.js';
 export interface PumpNotifier {
   notify(
     event: { type: string; data: unknown },
-    ctx: { sessionId: string; sessionName?: string },
+    ctx: {
+      sessionId: string;
+      sessionName?: string;
+      routing?: RoutingEventContext;
+    },
   ): Promise<void>;
 }
 
@@ -38,8 +46,10 @@ export interface SessionEventPumpOptions {
   /** Test hook: called after each event is dispatched to the notifier. */
   onDispatch?: (sessionId: string, event: DaemonEvent) => void;
   /**
-   * Called for EVERY event seen (before policy/notify branches), independent of
-   * push. The subscriber-independent ingestion hook for cost tracking
+   * Called for every event seen (before policy/notify branches), independent of
+   * push. The one exception: with an `enforcer` wired, a `permission_request`
+   * is delivered only if the enforcer did NOT auto-handle it (a human is
+   * actually needed), and after its decision rather than before. The subscriber-independent ingestion hook for cost tracking
    * (`add-cost-tracking`: "subscribe to every emitted session_update"). Must be
    * total — invoked inside the loop's try, but should never throw.
    */
@@ -66,6 +76,13 @@ export interface SessionEventPumpOptions {
 interface Loop {
   active: boolean;
   ctrl: AbortController;
+  /**
+   * The newest summary reconcile has seen for this session. The display name is
+   * resolved from it per event, not once when the loop starts: a session that
+   * is auto-titled later would otherwise keep its first (unset) name for the
+   * life of the loop, and `sessionTag` routing rules never match it (#166).
+   */
+  summary: DaemonSessionSummary;
   lastEventId?: number;
 }
 
@@ -176,7 +193,9 @@ export class SessionEventPump {
     if (this.stopped) return;
     const ids = new Set(list.map((s) => s.sessionId));
     for (const s of list) {
-      if (!this.loops.has(s.sessionId) && !this.refused.has(s.sessionId)) {
+      const existing = this.loops.get(s.sessionId);
+      if (existing) existing.summary = s;
+      if (!existing && !this.refused.has(s.sessionId)) {
         this.spawnLoop(s);
       }
       this.detectIdleEdge(s);
@@ -220,7 +239,11 @@ export class SessionEventPump {
   }
 
   private spawnLoop(s: DaemonSessionSummary): void {
-    const loop: Loop = { active: true, ctrl: new AbortController() };
+    const loop: Loop = {
+      active: true,
+      ctrl: new AbortController(),
+      summary: s,
+    };
     this.loops.set(s.sessionId, loop);
     void this.runLoop(s, loop);
   }
@@ -232,7 +255,6 @@ export class SessionEventPump {
    * and never reconnects. Never rethrows.
    */
   private async runLoop(s: DaemonSessionSummary, loop: Loop): Promise<void> {
-    const name = this.sessionName?.(s);
     while (loop.active && !this.stopped) {
       try {
         for await (const ev of this.daemon.subscribeEvents(s.sessionId, {
@@ -242,32 +264,41 @@ export class SessionEventPump {
           // Advance the resume cursor first, before any handling branch, so a
           // reconnect never re-delivers an event we already auto-voted on.
           if (typeof ev.id === 'number') loop.lastEventId = ev.id;
-          // Subscriber-independent ingestion (cost tracking): see EVERY event,
-          // before policy/notify. Guarded so it never breaks the loop.
-          if (this.onEvent) {
-            try {
-              this.onEvent(s.sessionId, ev);
-            } catch {
-              /* ingestion is best-effort; never break the subscribe loop */
-            }
-          }
+          // With an enforcer wired, a permission_request is NOT yet a "human
+          // needed" signal: policy may vote it away in the next few lines. The
+          // agent lifecycle reads that signal off onEvent, so hold the event back
+          // until the enforcer has said it did not handle it (issue #166);
+          // otherwise every auto-approved request marked the agent blocked and
+          // pushed agent.blocked.
+          const deferEvent = this.enforcer && ev.type === 'permission_request';
+          if (!deferEvent) this.emitEvent(s.sessionId, ev);
           // Consult the policy enforcer for permission_request events. An
           // auto-handled (voted) event is suppressed from push; everything else
           // — non-permission events and prompt/fail-safe decisions — still
           // notifies, identical to pre-policy behavior.
+          let routing: RoutingEventContext | undefined;
           if (this.enforcer && ev.type === 'permission_request') {
-            const handled = await this.enforcer.handlePermission(s.sessionId, {
+            const outcome = await this.enforcer.decidePermission(s.sessionId, {
               type: ev.type,
               data: ev.data,
             });
-            if (handled) {
+            if (outcome.handled) {
               this.onDispatch?.(s.sessionId, ev);
               continue;
             }
+            // A human is actually needed now: let the consumers see it.
+            this.emitEvent(s.sessionId, ev);
+            // Stamp the routing event with the decision so `policy.action` /
+            // `policy.decisionSource` rules can match it (issue #166).
+            routing = routingContextFromPolicy(outcome);
           }
           await this.notifier?.notify(
             { type: ev.type, data: ev.data },
-            { sessionId: s.sessionId, sessionName: name },
+            {
+              sessionId: s.sessionId,
+              sessionName: this.sessionName?.(loop.summary),
+              ...(routing ? { routing } : {}),
+            },
           );
           this.onDispatch?.(s.sessionId, ev);
         }
@@ -283,6 +314,19 @@ export class SessionEventPump {
       }
       if (!loop.active || this.stopped) break;
       await this.sleep(this.reconnectMs);
+    }
+  }
+
+  /**
+   * Hand one event to {@link SessionEventPumpOptions.onEvent}. Guarded: ingestion
+   * is best-effort and must never break the subscribe loop.
+   */
+  private emitEvent(sessionId: string, ev: DaemonEvent): void {
+    if (!this.onEvent) return;
+    try {
+      this.onEvent(sessionId, ev);
+    } catch {
+      /* ingestion is best-effort; never break the subscribe loop */
     }
   }
 

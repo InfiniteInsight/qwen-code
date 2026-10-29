@@ -26,7 +26,6 @@ afterEach(() => {
 describe('cli launcher e2e (up -> status -> down, orchestrator wired to a stubbed run)', () => {
   it('up -> status(running) -> down -> status(stopped)', async () => {
     dir = mkdtempSync(join(tmpdir(), 'launcher-e2e-'));
-    writeFileSync(join(dir, 'owner-bootstrap.code'), 'PAIR-9\n');
     let active = false;
     const run: RunCommand = async (argv) => {
       const k = argv.join(' ');
@@ -36,6 +35,7 @@ describe('cli launcher e2e (up -> status -> down, orchestrator wired to a stubbe
         return { code: 0, stdout: '', stderr: '' };
       if (argv[0] === 'systemd-run') {
         active = true;
+        writeFileSync(join(dir!, 'owner-bootstrap.code'), 'PAIR-9\n');
         return { code: 0, stdout: '', stderr: '' };
       }
       if (k.startsWith('systemctl --user is-active'))
