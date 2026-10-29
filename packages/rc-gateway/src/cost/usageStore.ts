@@ -63,6 +63,12 @@ export interface SessionTotals {
   tokensInTotal: number;
   tokensOutTotal: number;
   tokensCachedTotal: number;
+  /** #190: rows recorded for the session, and how many of them the rate table
+   * could not price (`cost_microcents` NULL). Both 0 for a session with no
+   * rows. A reader that sees `unpricedEventsTotal === eventsTotal` knows the
+   * cost total is 0 because nothing was priced, not because it was free. */
+  eventsTotal: number;
+  unpricedEventsTotal: number;
 }
 
 export type GroupBy = 'session' | 'client' | 'sub_actor' | 'model';
@@ -75,6 +81,8 @@ export interface AggregateQuery {
   attributionTokenId?: string;
   /** When set, only rows with this exact sub_actor (the CLI `--sub-actor`). */
   subActor?: string;
+  /** #190: when set, only rows for this session (the page's own figure). */
+  sessionId?: string;
 }
 
 export interface AggregateRow {
@@ -84,6 +92,10 @@ export interface AggregateRow {
   tokensCached: number;
   /** Sum of cost in microcents for this group. */
   costMicrocents: number;
+  /** #190: rows in the group, and how many of them have no price (NULL cost,
+   * a rate-table miss), so 0 cost can be told from nothing priced. */
+  events: number;
+  unpricedEvents: number;
 }
 
 const GROUP_COLUMN: Record<GroupBy, string> = {
@@ -290,7 +302,9 @@ export class UsageStore {
            COALESCE(SUM(cost_microcents), 0) AS cost,
            COALESCE(SUM(tokens_in), 0) AS tin,
            COALESCE(SUM(tokens_out), 0) AS tout,
-           COALESCE(SUM(tokens_cached), 0) AS tcached
+           COALESCE(SUM(tokens_cached), 0) AS tcached,
+           COUNT(*) AS n,
+           COALESCE(SUM(cost_microcents IS NULL), 0) AS unpriced
          FROM usage_events WHERE session_id = ?`,
       )
       .get(sessionId) as {
@@ -298,12 +312,16 @@ export class UsageStore {
       tin: number;
       tout: number;
       tcached: number;
+      n: number;
+      unpriced: number;
     };
     return {
       costMicrocentsSesTotal: r.cost,
       tokensInTotal: r.tin,
       tokensOutTotal: r.tout,
       tokensCachedTotal: r.tcached,
+      eventsTotal: r.n,
+      unpricedEventsTotal: r.unpriced,
     };
   }
 
@@ -324,6 +342,10 @@ export class UsageStore {
       where += ' AND sub_actor = ?';
       params.push(q.subActor);
     }
+    if (q.sessionId !== undefined) {
+      where += ' AND session_id = ?';
+      params.push(q.sessionId);
+    }
     const rows = this.db
       .prepare(
         `SELECT
@@ -331,7 +353,9 @@ export class UsageStore {
            COALESCE(SUM(tokens_in), 0) AS tin,
            COALESCE(SUM(tokens_out), 0) AS tout,
            COALESCE(SUM(tokens_cached), 0) AS tcached,
-           COALESCE(SUM(cost_microcents), 0) AS cost
+           COALESCE(SUM(cost_microcents), 0) AS cost,
+           COUNT(*) AS n,
+           COALESCE(SUM(cost_microcents IS NULL), 0) AS unpriced
          FROM usage_events
          WHERE ${where}
          GROUP BY ${col}
@@ -343,6 +367,8 @@ export class UsageStore {
       tout: number;
       tcached: number;
       cost: number;
+      n: number;
+      unpriced: number;
     }>;
     return rows.map((r) => ({
       key: r.key ?? '',
@@ -350,6 +376,8 @@ export class UsageStore {
       tokensOut: r.tout,
       tokensCached: r.tcached,
       costMicrocents: r.cost,
+      events: r.n,
+      unpricedEvents: r.unpriced,
     }));
   }
 

@@ -48,6 +48,25 @@ describe('UsageStore record + sessionTotals (microcents)', () => {
       tokensInTotal: 2000,
       tokensOutTotal: 1000,
       tokensCachedTotal: 0,
+      eventsTotal: 2,
+      unpricedEventsTotal: 0,
+    });
+  });
+
+  // #190: a cost of 0 is either free or not priced at all; the counts say which.
+  it('counts the rows and the unpriced rows of a session', () => {
+    store.record(row({ costMicrocents: 2 * MICRO }));
+    store.record(row({ costMicrocents: null, ts: 2000 }));
+    store.record(row({ costMicrocents: null, ts: 3000 }));
+    store.record(row({ sessionId: 'other', costMicrocents: null }));
+    expect(store.sessionTotals('sess_1')).toMatchObject({
+      costMicrocentsSesTotal: 2 * MICRO,
+      eventsTotal: 3,
+      unpricedEventsTotal: 2,
+    });
+    expect(store.sessionTotals('none')).toMatchObject({
+      eventsTotal: 0,
+      unpricedEventsTotal: 0,
     });
   });
 
@@ -172,6 +191,31 @@ describe('UsageStore aggregate (microcents)', () => {
       groupBy: 'session',
     });
     expect(rows.find((r) => r.key === 'old')).toBeUndefined();
+  });
+
+  // #190: the page reads its own conversation's figure without every row.
+  it('narrows to one session and says how many of its rows were unpriced', () => {
+    store.record(row({ sessionId: 's1', attributionTokenId: 't1', costMicrocents: null }));
+    const rows = store.aggregate({
+      sinceMs: 0,
+      untilMs: 9999,
+      groupBy: 'session',
+      sessionId: 's1',
+    });
+    expect(rows).toEqual([
+      {
+        key: 's1',
+        tokensIn: 2000,
+        tokensOut: 1000,
+        tokensCached: 0,
+        costMicrocents: 5 * MICRO,
+        events: 2,
+        unpricedEvents: 1,
+      },
+    ]);
+    expect(
+      store.aggregate({ sinceMs: 0, untilMs: 9999, groupBy: 'session', sessionId: 'nope' }),
+    ).toEqual([]);
   });
 
   it('scope-filters by attribution token id', () => {

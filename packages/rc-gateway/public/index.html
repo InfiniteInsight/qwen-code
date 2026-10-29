@@ -5200,14 +5200,12 @@
         sessions: null,
         bridges: null,
         tokens: null,
-        costs: null,
-        costSince: '',
       };
       function renderMoreValues() {
         const v = {};
         if (storedFiles.length) v.files = String(storedFiles.length);
-        const cost = sessionCostText();
-        if (cost) v.usage = cost;
+        const used = sessionUsageParts();
+        if (used) v.usage = used.tokens + (used.cost ? ' \u00b7 ' + used.cost : '');
         if (permRules) {
           let n = 0;
           for (const sc of ['user', 'workspace']) {
@@ -5266,17 +5264,97 @@
         $('more-host').textContent = host ? ' \u00b7 ' + host : '';
       }
 
-      // #187. The watched conversation's cost, for More's Usage row and the
-      // sheet's context line. It comes from the Usage panel's own read, when
-      // that read was grouped by session and the watched conversation has a
-      // row in its window. Nothing polls for it: until the reader has loaded
-      // Usage the page does not know the number, and says nothing.
-      function sessionCostText() {
-        const costs = moreFacts.costs;
-        if (!costs || !watchedSessionId || !costs.has(watchedSessionId)) {
-          return '';
+      // #190. The watched conversation's own usage, for More's Usage row and
+      // the sheet's context line: its tokens, and its cost when the gateway's
+      // rate table priced it. Read once as the conversation opens (/rc/usage
+      // narrowed to the session, all time; #187 waited for the reader to load
+      // the Usage panel) and kept current by the stream's usage_tick frames.
+      // Nothing polls. Rows the rate table could not price are counted by the
+      // gateway, so a cost of 0 for them reads `no price`, not $0.00, and a
+      // cost that covers only some of the rows carries a `+`. A gateway with no
+      // usage store (404) leaves both places empty.
+      let sessionUsage = null; // { id, tokens, cents, events, unpriced }
+      let sessionUsageGen = 0;
+      let sessionUsageTicked = false; // a tick landed while the read was out
+      const USAGE_SINCE = '1970-01-01T00:00:00Z';
+      function usageCount(v) {
+        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+      }
+      async function loadSessionUsage(id) {
+        const gen = ++sessionUsageGen;
+        sessionUsageTicked = false;
+        // A re-watch of the same conversation keeps its figure until the read
+        // lands; another conversation's is gone at once.
+        if (sessionUsage && sessionUsage.id !== id) sessionUsage = null;
+        if (!id || !token()) return;
+        let body = null;
+        try {
+          const q = new URLSearchParams({
+            group_by: 'session',
+            session: id,
+            since: USAGE_SINCE,
+          });
+          const res = await fetch('/rc/usage?' + q, {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (gen !== sessionUsageGen || watchedSessionId !== id) return;
+          if (!res.ok) {
+            sessionUsage = null;
+            return renderSessionUsage();
+          }
+          body = await res.json();
+        } catch {
+          return;
         }
-        return '$' + (costs.get(watchedSessionId) / 100).toFixed(2);
+        if (gen !== sessionUsageGen || watchedSessionId !== id) return;
+        // A ticked figure that landed while this read was out is newer.
+        if (sessionUsageTicked) return;
+        const rows = body && Array.isArray(body.rows) ? body.rows : [];
+        const row = rows.find((r) => r && r.key === id);
+        sessionUsage = {
+          id,
+          tokens: row ? (row.tokensIn || 0) + (row.tokensOut || 0) : 0,
+          cents: row && typeof row.costCents === 'number' ? row.costCents : 0,
+          events: row ? usageCount(row.events) : 0,
+          unpriced: row ? usageCount(row.unpricedEvents) : 0,
+        };
+        renderSessionUsage();
+      }
+      function noteUsageTick(t) {
+        if (!t || typeof t !== 'object' || t.sessionId !== watchedSessionId) {
+          return;
+        }
+        sessionUsageTicked = true;
+        sessionUsage = {
+          id: t.sessionId,
+          tokens: (t.tokensInTotal || 0) + (t.tokensOutTotal || 0),
+          cents: (t.costMicrocentsSesTotal || 0) / 1000000,
+          events: usageCount(t.eventsTotal),
+          unpriced: usageCount(t.unpricedEventsTotal),
+        };
+        renderSessionUsage();
+      }
+      function renderSessionUsage() {
+        if (ctxInfo) renderFooter();
+        if (!$('more-screen').hidden) renderMoreValues();
+      }
+      // { tokens: '12.3k tokens', cost: '$0.42' | '$0.42+' | 'no price' | '' },
+      // or null while there is nothing to say.
+      function sessionUsageParts() {
+        const u = sessionUsage;
+        if (!u || u.id !== watchedSessionId || !(u.tokens > 0)) return null;
+        const counted = u.events !== null && u.unpriced !== null;
+        let cost = '';
+        if (counted && u.events > 0 && u.unpriced >= u.events) {
+          cost = 'no price';
+        } else if (u.cents > 0 || (counted && u.events > 0)) {
+          cost =
+            (u.cents > 0 && u.cents < 1
+              ? '<$0.01'
+              : '$' + (u.cents / 100).toFixed(2)) +
+            (counted && u.unpriced > 0 ? '+' : '');
+        }
+        return { tokens: fmtK(u.tokens) + ' tokens', cost };
       }
 
       // #187. Install as app. The manifest asks for display: standalone, and
@@ -6837,9 +6915,12 @@
           f.append(row('Mode', t));
         }
         const fill = fillWords();
-        // #187: the conversation's cost beside its fill, once Usage has read
-        // it (sessionCostText); before that the line is the fill alone.
-        const cost = sessionCostText();
+        // #190: what the conversation has spent beside its fill
+        // (sessionUsageParts); with nothing recorded the line is the fill.
+        const used = sessionUsageParts();
+        const cost = used
+          ? 'spent ' + used.tokens + (used.cost ? ', ' + used.cost : '')
+          : '';
         if (fill || cost) {
           const col = document.createElement('div');
           col.className = 'sh-col';
@@ -6851,9 +6932,13 @@
             c.id = 'footer-cost';
             c.textContent = cost;
             c.title =
-              'cost of this conversation since ' +
-              moreFacts.costSince +
-              ', from Usage';
+              'tokens and cost this conversation has used, from the ' +
+              "gateway's usage store" +
+              (used.cost === 'no price'
+                ? '; the rate table has no price for its model'
+                : used.cost.endsWith('+')
+                  ? '; some of it has no price in the rate table'
+                  : '');
             if (fill) v.append(' \u00b7 ');
             v.append(c);
           }
@@ -9703,8 +9788,11 @@
             // written to the WAL and can never come back as a replayed boundary.
             insideReplay = false;
             return;
+          // #190: the conversation's running usage, for the sheet and More.
+          case 'usage_tick':
+            return noteUsageTick(ev.data);
           // suppressed noise (still in raw JSON): client_joined, client_left,
-          // usage_tick, permission_* (rendered as cards)
+          // permission_* (rendered as cards)
           default:
             return;
         }
@@ -11105,6 +11193,9 @@
       // answer that happens to land last.
       function noteConversationSwitch() {
         switchGen += 1;
+        // #190: the usage figure names the conversation being left.
+        sessionUsage = null;
+        sessionUsageGen += 1;
         // #201: an upload's progress note belongs to the conversation it was
         // for. The files themselves are kept per conversation and the strip is
         // redrawn for the new one once watchedSessionId has moved.
@@ -15635,6 +15726,7 @@
           renderLoadEarlier();
           void fetchContext(id);
           void fetchContextUsage(id);
+          void loadSessionUsage(id); // #190
           void renderLineage(id);
           void refreshIdleToggle();
           void loadPermRules(false); // task #27: refresh the rules for this workspace
@@ -19702,18 +19794,6 @@
         );
         if (!body) return;
         const rows = Array.isArray(body.rows) ? body.rows : [];
-        // #187. Grouped by session, a row's key is the session id, so this
-        // read is also each conversation's cost in the window: kept for the
-        // sheet's context line and More's Usage row, and redrawn there now.
-        if ($('usage-group').value === 'session') {
-          moreFacts.costs = new Map(
-            rows
-              .filter((r) => typeof r.costCents === 'number')
-              .map((r) => [String(r.key), r.costCents]),
-          );
-          moreFacts.costSince = $('usage-since').value.trim() || '24h';
-          renderFooter();
-        }
         out.textContent = '';
         if (rows.length === 0) {
           out.textContent = '(no rows in that window)';

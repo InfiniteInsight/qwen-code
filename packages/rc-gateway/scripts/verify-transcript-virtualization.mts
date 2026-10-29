@@ -19166,22 +19166,14 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P168 the sheet carries the session cost once Usage has read it, More shows it on Usage and cost, and nothing polls for it',
+    // #190: the figure is the page's own read of the conversation (P312, P313)
+    // rather than the Usage panel's window, so what is left of #187's claim is
+    // that the panel's reads, whatever they are grouped by, do not move it.
+    name: 'P168 the sheet carries the session cost from the page own read, and the Usage panel reads by session or by model leave it as it is',
     run: async ({ page, viewer }) => {
       const sid = viewer.sessionId;
       let rows: Record<string, unknown>[] = [];
-      let asked = 0;
-      await page.route(
-        (u) => u.pathname === '/rc/usage',
-        (route) => {
-          asked++;
-          return route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ rows }),
-          });
-        },
-      );
+      const asked: string[] = [];
       const row = (key: string, cents: number) => ({
         key,
         displayLabel: key.slice(0, 8),
@@ -19190,8 +19182,24 @@ PAGE_SCENARIOS.push({
         tokensCached: 0,
         costMicrocents: cents * 1_000_000,
         costCents: cents,
+        events: 1,
+        unpricedEvents: 0,
         efficiency: { costCentsPer1kOutputTokens: 1, tokensPerDollar: 1 },
       });
+      await page.route(
+        (u) => u.pathname === '/rc/usage',
+        (route) => {
+          const q = new URL(route.request().url()).searchParams;
+          asked.push(q.toString());
+          // The page's own read names the session; the panel's does not.
+          const body = q.get('session') ? { rows: [row(sid, 42)] } : { rows };
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(body),
+          });
+        },
+      );
       await watch(page, sid);
       await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
       await page.setViewportSize({ width: 390, height: 844 });
@@ -19210,13 +19218,6 @@ PAGE_SCENARIOS.push({
         await page.click('#h1-status');
         return r;
       };
-      const moreValue = async () => {
-        await openPanel(page, 'chat');
-        await page.click('#h1-more');
-        const v = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="usage"] .val').textContent`)) as string;
-        await page.click('#more-back');
-        return v;
-      };
       // A sentinel in the output, so each read is waited for and not only
       // the first.
       const load = async (group: string) => {
@@ -19229,35 +19230,25 @@ PAGE_SCENARIOS.push({
           return !t.includes('p168 waiting') && !t.includes('loading');
         })()`);
       };
-
-      const fresh = await sheet();
-      expect(fresh.cost === null, `the sheet showed a cost before Usage was read (${JSON.stringify(fresh)})`);
-      expect((await moreValue()) === '', 'More showed a cost before Usage was read');
-
-      rows = [row(sid, 42), row('99999999-0000-0000-0000-000000000000', 7)];
-      await load('session');
-      const served = await sheet();
+      const want = 'spent 1.4k tokens, $0.42';
+      const own = await sheet();
       expect(
-        served.cost === '$0.42' && served.rowLabel === 'Context' && served.shown,
-        `the sheet's context line does not carry the session's cost (${JSON.stringify(served)})`,
+        own.cost === want && own.rowLabel === 'Context' && own.shown,
+        `the sheet's context line does not carry the conversation's own figure (${JSON.stringify(own)})`,
       );
-      expect((await moreValue()) === '$0.42', 'More does not show the session cost on Usage and cost');
-
-      // A read grouped by model has no session keys, so it says nothing
-      // about this conversation and leaves the last answer standing.
+      rows = [row(sid, 7), row('99999999-0000-0000-0000-000000000000', 9)];
+      await load('session');
+      expect((await sheet()).cost === want, 'a by-session read of the Usage panel changed the figure');
       rows = [row('qwen3-coder', 99)];
       await load('model');
-      expect((await sheet()).cost === '$0.42', 'a by-model read changed the session cost');
-
-      // A by-session read the conversation is absent from takes it away.
-      rows = [row('99999999-0000-0000-0000-000000000000', 7)];
+      expect((await sheet()).cost === want, 'a by-model read of the Usage panel changed the figure');
+      rows = [];
       await load('session');
-      expect((await sheet()).cost === null, 'a read without this conversation left its old cost on the sheet');
-
-      const presses = asked;
+      expect((await sheet()).cost === want, 'a by-session read without this conversation took the figure away');
+      const presses = asked.length;
       await page.waitForTimeout(2500);
-      expect(asked === presses && presses === 3, `/rc/usage was asked ${asked} times for 3 presses, so something polls it`);
-      return "no cost before Usage was read; $0.42 on the sheet's Context line and on More's Usage and cost once it was; a by-model read left it, a by-session read without the conversation took it away; 3 reads for 3 presses";
+      expect(asked.length === presses && presses === 4, `/rc/usage was asked ${asked.length} times for one open and 3 presses, so something polls it`);
+      return `"${want}" from the page's own read; three Usage panel reads (by session, by model, by session without it) left it; ${presses} reads in all`;
     },
   });
 
@@ -23206,6 +23197,135 @@ PAGE_SCENARIOS.push({
       lines.push(`${size.width}: recap ${Math.round(recapH)}px answered and shut under row ${before.text} without moving it; ⋯ opened it at ${Math.round(shown.rTop)}px; end gap ${end.gap}`);
     }
     return lines.join('; ');
+  },
+});
+
+// #190. The conversation's own usage on the sheet's context line and on More's
+// Usage and cost row: its tokens, and the cost when the rate table priced it.
+// The page reads it once as the conversation opens (`/rc/usage` narrowed to
+// the session, all time) and keeps it current from the stream's usage_tick
+// frames; nothing polls.
+const h190UsageRow = (sid: string, over: Record<string, unknown> = {}) => ({
+  key: sid,
+  displayLabel: sid.slice(0, 8),
+  tokensIn: 9000,
+  tokensOut: 3300,
+  tokensCached: 0,
+  costMicrocents: 42 * 1_000_000,
+  costCents: 42,
+  events: 3,
+  unpricedEvents: 0,
+  efficiency: { costCentsPer1kOutputTokens: 1, tokensPerDollar: 1 },
+  ...over,
+});
+// The sheet's cost span (and the Context row it sits in) and More's Usage value.
+const h190UsageRead = async (page: Page): Promise<{ sheet: string | null; row: string | null; more: string }> => {
+  await openPanel(page, 'chat');
+  await openSheet(page);
+  await h190Settle(page);
+  const s = (await page.evaluate(`(() => {
+    const c = document.getElementById('footer-cost');
+    const row = c ? c.closest('.sh-row') : null;
+    return { sheet: c && c.getClientRects().length ? c.textContent : null, row: row ? row.querySelector('.sh-lbl').textContent : null };
+  })()`)) as { sheet: string | null; row: string | null };
+  await page.click('#h1-status');
+  await page.click('#h1-more');
+  await h190Settle(page);
+  const more = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="usage"] .val').textContent`)) as string;
+  await page.click('#more-back');
+  return { ...s, more };
+};
+
+PAGE_SCENARIOS.push({
+  name: 'P312 the sheet context line and More Usage and cost carry the conversation tokens and cost from one read as it opens, at 390 and 1100',
+  frames: h190Frames,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const asked: string[] = [];
+    await page.route(
+      (u) => u.pathname === '/rc/usage',
+      (route) => {
+        asked.push(new URL(route.request().url()).search);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ rows: [h190UsageRow(sid)] }),
+        });
+      },
+    );
+    await h190Ready(page, viewer);
+    await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await h190Settle(page);
+      const r = await h190UsageRead(page);
+      expect(
+        r.sheet === 'spent 12.3k tokens, $0.42' && r.row === 'Context',
+        `${size.width}: the sheet's context line reads ${JSON.stringify(r)}`,
+      );
+      expect(r.more === '12.3k tokens · $0.42', `${size.width}: More's Usage and cost reads ${JSON.stringify(r.more)}`);
+      await openPanel(page, 'chat');
+      await openSheet(page);
+      await h190Settle(page);
+      await shot(page, `p312-sheet-${size.width}`);
+      await page.click('#h1-status');
+      await page.click('#h1-more');
+      await h190Settle(page);
+      await shot(page, `p312-more-${size.width}`);
+      await page.click('#more-back');
+      lines.push(`${size.width}: sheet "${r.sheet}", More "${r.more}"`);
+    }
+    const q = new URLSearchParams(asked[0] ?? '');
+    expect(
+      asked.length === 1 && q.get('group_by') === 'session' && q.get('session') === sid && !!q.get('since'),
+      `the page read /rc/usage ${asked.length} times (${JSON.stringify(asked)}), not once for this conversation`,
+    );
+    return `${lines.join('; ')}; one read ${asked[0]}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P313 a usage_tick updates the figure in place with no read: no price when the rate table priced nothing, a + when it priced part, and another conversation tick changes nothing',
+  frames: h190Frames,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    let asked = 0;
+    await page.route(
+      (u) => u.pathname === '/rc/usage',
+      (route) => {
+        asked++;
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ rows: [] }) });
+      },
+    );
+    await h190Ready(page, viewer);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+    const none = await h190UsageRead(page);
+    expect(none.sheet === null && none.more === '', `with no usage yet the page shows ${JSON.stringify(none)}`);
+    const tick = (data: Record<string, unknown>) =>
+      page.evaluate(`renderFrame(${JSON.stringify({ type: 'usage_tick', data })})`);
+    await tick({ sessionId: sid, costMicrocentsSesTotal: 0, costMicrocentsPromptTotal: 0, tokensInTotal: 1000, tokensOutTotal: 200, eventsTotal: 1, unpricedEventsTotal: 1 });
+    const unpriced = await h190UsageRead(page);
+    expect(
+      unpriced.sheet === 'spent 1.2k tokens, no price' && unpriced.more === '1.2k tokens · no price',
+      `an unpriced tick reads ${JSON.stringify(unpriced)}`,
+    );
+    await openPanel(page, 'chat');
+    await openSheet(page);
+    await h190Settle(page);
+    await shot(page, 'p313-noprice-sheet-390');
+    await page.click('#h1-status');
+    await tick({ sessionId: sid, costMicrocentsSesTotal: 5_000_000, costMicrocentsPromptTotal: 5_000_000, tokensInTotal: 3000, tokensOutTotal: 600, eventsTotal: 2, unpricedEventsTotal: 1 });
+    const part = await h190UsageRead(page);
+    expect(part.sheet === 'spent 3.6k tokens, $0.05+' && part.more === '3.6k tokens · $0.05+', `a part-priced tick reads ${JSON.stringify(part)}`);
+    await tick({ sessionId: '99999999-0000-0000-0000-000000000000', costMicrocentsSesTotal: 9_000_000, costMicrocentsPromptTotal: 0, tokensInTotal: 1, tokensOutTotal: 1, eventsTotal: 1, unpricedEventsTotal: 0 });
+    await tick({ sessionId: sid, costMicrocentsSesTotal: 7_000_000, costMicrocentsPromptTotal: 2_000_000, tokensInTotal: 4000, tokensOutTotal: 900, eventsTotal: 3, unpricedEventsTotal: 0 });
+    const priced = await h190UsageRead(page);
+    expect(priced.sheet === 'spent 4.9k tokens, $0.07' && priced.more === '4.9k tokens · $0.07', `a priced tick after another conversation's reads ${JSON.stringify(priced)}`);
+    await page.waitForTimeout(2500);
+    expect(asked === 1, `/rc/usage was read ${asked} times: once as the conversation opened is all`);
+    return `none at first; "${unpriced.sheet}", "${part.sheet}", "${priced.sheet}" from ticks; ${asked} read`;
   },
 });
 

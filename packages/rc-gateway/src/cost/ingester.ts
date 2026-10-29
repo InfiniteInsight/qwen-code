@@ -62,6 +62,11 @@ export interface UsageTick {
   costMicrocentsPromptTotal: number;
   tokensInTotal: number;
   tokensOutTotal: number;
+  /** #190: the session's rows, and how many the rate table could not price,
+   * so a page can say `no price` rather than show $0.00 for them. Optional
+   * so a tick built elsewhere without them still types. */
+  eventsTotal?: number;
+  unpricedEventsTotal?: number;
 }
 
 function num(v: unknown): number {
@@ -280,6 +285,8 @@ export class UsageIngester {
       costMicrocentsPromptTotal: promptTotal,
       tokensInTotal: totals.tokensInTotal,
       tokensOutTotal: totals.tokensOutTotal,
+      eventsTotal: totals.eventsTotal,
+      unpricedEventsTotal: totals.unpricedEventsTotal,
     });
     return costMicrocents;
   }
