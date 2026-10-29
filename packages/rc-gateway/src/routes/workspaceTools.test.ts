@@ -215,7 +215,7 @@ describe('GET /rc/workspace/tools', () => {
     });
   }
 
-  it('write token → 200 with the daemon catalog, unchanged', async () => {
+  it("write token → 200 with the daemon catalog plus each tool's state", async () => {
     const ctx = await setup();
     const res = await getCatalog(ctx, ctx.writeToken);
     expect(res.status).toBe(200);
@@ -227,12 +227,14 @@ describe('GET /rc/workspace/tools', () => {
           displayName: 'Web Fetch',
           disabled: false,
           source: 'builtin',
+          state: 'on',
         },
         {
           name: 'write_file',
           displayName: 'Write File',
           disabled: true,
           source: 'builtin',
+          state: 'disabled',
         },
       ],
     });
@@ -259,7 +261,7 @@ describe('GET /rc/workspace/tools', () => {
     expect(res.status).toBe(401);
   });
 
-  it('custom catalog (MCP entry) passes through unchanged', async () => {
+  it('custom catalog (MCP entry) passes through with its state', async () => {
     const ctx = await setup({
       workspaceToolsResult: {
         v: 1,
@@ -270,7 +272,14 @@ describe('GET /rc/workspace/tools', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       v: 1,
-      tools: [{ name: 'mcp__search__lookup', disabled: true, source: 'mcp' }],
+      tools: [
+        {
+          name: 'mcp__search__lookup',
+          disabled: true,
+          source: 'mcp',
+          state: 'disabled',
+        },
+      ],
     });
   });
 
@@ -297,6 +306,203 @@ describe('GET /rc/workspace/tools', () => {
       (r) => r.action === 'workspace_tool_enabled',
     );
     expect(rows).toHaveLength(0);
+  });
+});
+
+/**
+ * #141. `todo_write` and `list_directory` are opt-in built-ins: registered
+ * only when `tools.todoWrite.enabled` / `tools.listDirectory.enabled` is
+ * true, so the `tools.disabled` list cannot turn them on. The listing names
+ * the gate and the enable route writes it.
+ */
+describe('opt-in built-in tools (#141)', () => {
+  const entry = (name: string, disabled = false) => ({
+    name,
+    displayName: name,
+    disabled,
+    source: 'builtin' as const,
+  });
+  const settingsOf = (todo: boolean, ls: boolean) => ({
+    v: 1,
+    settings: [
+      { key: 'tools.todoWrite.enabled', values: { effective: todo } },
+      { key: 'tools.listDirectory.enabled', values: { effective: ls } },
+    ],
+    disabledTools: [],
+  });
+  const fixture = (over: {
+    todo?: boolean;
+    ls?: boolean;
+    todoDisabled?: boolean;
+  }) => ({
+    workspaceToolsResult: {
+      v: 1,
+      tools: [
+        entry('list_directory'),
+        entry('todo_write', over.todoDisabled ?? false),
+        entry('web_fetch'),
+        entry('write_file', true),
+      ],
+    },
+    workspaceSettingsResult: settingsOf(over.todo ?? false, over.ls ?? true),
+  });
+
+  async function getTools(ctx: Ctx) {
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/tools`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      tools: Array<{
+        name: string;
+        state: string;
+        optIn?: { setting: string; enabled: boolean };
+      }>;
+    };
+  }
+
+  it('listing marks todo_write opt-in with its setting path; a plain tool is on, a listed one disabled', async () => {
+    const ctx = await setup(fixture({}));
+    const { tools } = await getTools(ctx);
+    const by = Object.fromEntries(tools.map((t) => [t.name, t]));
+    expect(by.todo_write.state).toBe('optIn');
+    expect(by.todo_write.optIn).toEqual({
+      setting: 'tools.todoWrite.enabled',
+      enabled: false,
+    });
+    expect(by.web_fetch.state).toBe('on');
+    expect(by.web_fetch.optIn).toBeUndefined();
+    expect(by.write_file.state).toBe('disabled');
+  });
+
+  it('an opt-in tool whose setting is on reads on and still names its setting', async () => {
+    const ctx = await setup(fixture({}));
+    const { tools } = await getTools(ctx);
+    const ls = tools.find((t) => t.name === 'list_directory')!;
+    expect(ls.state).toBe('on');
+    expect(ls.optIn).toEqual({
+      setting: 'tools.listDirectory.enabled',
+      enabled: true,
+    });
+  });
+
+  it('a workspace-disabled opt-in tool reads disabled, whatever its setting', async () => {
+    const ctx = await setup(fixture({ todoDisabled: true }));
+    const { tools } = await getTools(ctx);
+    const todo = tools.find((t) => t.name === 'todo_write')!;
+    expect(todo.state).toBe('disabled');
+    expect(todo.optIn?.enabled).toBe(false);
+  });
+
+  it('a settings read that fails fails the listing instead of calling a gated tool on', async () => {
+    const ctx = await setup({ ...fixture({}), workspaceSettingsStatus: 500 });
+    const res = await fetch(`${ctx.baseUrl}/rc/workspace/tools`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('daemon_unavailable');
+  });
+
+  it('enabling todo_write writes tools.todoWrite.enabled=true at workspace scope, alone, and says new conversations', async () => {
+    const ctx = await setup(fixture({}));
+    const res = await toggle(ctx.baseUrl, ctx.ownerToken, 'todo_write', true);
+    expect(res.status).toBe(200);
+    expect(ctx.stub.setSettingBodies).toEqual([
+      { scope: 'workspace', key: 'tools.todoWrite.enabled', value: true },
+    ]);
+    // Not in the disabled list, so that list is not touched.
+    expect(ctx.stub.lastToolToggleBody).toBeUndefined();
+    const body = await res.json();
+    expect(body).toMatchObject({
+      toolName: 'todo_write',
+      enabled: true,
+      optIn: {
+        setting: 'tools.todoWrite.enabled',
+        appliesTo: 'new_sessions',
+        daemonReloadRequired: false,
+      },
+    });
+    expect(typeof body.optIn.note).toBe('string');
+    expect(body.optIn.note).toMatch(/new conversation/i);
+    const rows = (await auditRows()).filter(
+      (r) => r.action === 'workspace_tool_enabled',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].detail).toEqual({
+      toolName: 'todo_write',
+      enabled: true,
+      setting: 'tools.todoWrite.enabled',
+    });
+  });
+
+  it('enabling an opt-in tool that is also in the disabled list clears the list as well', async () => {
+    const ctx = await setup(fixture({ todoDisabled: true }));
+    const res = await toggle(ctx.baseUrl, ctx.ownerToken, 'todo_write', true);
+    expect(res.status).toBe(200);
+    expect(ctx.stub.lastToolToggleName).toBe('todo_write');
+    expect(ctx.stub.lastToolToggleBody).toEqual({ enabled: true });
+    expect(ctx.stub.setSettingBodies).toEqual([
+      { scope: 'workspace', key: 'tools.todoWrite.enabled', value: true },
+    ]);
+  });
+
+  it('disabling an opt-in tool flips the setting back to false and leaves the disabled list alone', async () => {
+    const ctx = await setup(fixture({ todo: true }));
+    const res = await toggle(ctx.baseUrl, ctx.ownerToken, 'todo_write', false);
+    expect(res.status).toBe(200);
+    expect(ctx.stub.setSettingBodies).toEqual([
+      { scope: 'workspace', key: 'tools.todoWrite.enabled', value: false },
+    ]);
+    expect(ctx.stub.lastToolToggleBody).toBeUndefined();
+    expect((await res.json()).enabled).toBe(false);
+  });
+
+  it('list_directory is gated by tools.listDirectory.enabled the same way', async () => {
+    const ctx = await setup(fixture({ ls: false }));
+    const res = await toggle(
+      ctx.baseUrl,
+      ctx.ownerToken,
+      'list_directory',
+      true,
+    );
+    expect(res.status).toBe(200);
+    expect(ctx.stub.setSettingBodies).toEqual([
+      { scope: 'workspace', key: 'tools.listDirectory.enabled', value: true },
+    ]);
+  });
+
+  it('a plain built-in still goes only through the disabled list: no settings write, same body', async () => {
+    const ctx = await setup(fixture({}));
+    const res = await toggle(ctx.baseUrl, ctx.ownerToken, 'web_fetch', false);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ toolName: 'web_fetch', enabled: false });
+    expect(ctx.stub.lastToolToggleBody).toEqual({ enabled: false });
+    expect(ctx.stub.setSettingBodies).toEqual([]);
+  });
+
+  it('a daemon refusal of the settings write passes through with its code', async () => {
+    const ctx = await setup({
+      ...fixture({}),
+      setWorkspaceSettingStatus: 403,
+      setWorkspaceSettingBody: {
+        code: 'untrusted_workspace',
+        error: 'Workspace is not trusted.',
+      },
+    });
+    const res = await toggle(ctx.baseUrl, ctx.ownerToken, 'todo_write', true);
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe('untrusted_workspace');
+    const rows = (await auditRows()).filter(
+      (r) => r.action === 'workspace_tool_enabled',
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('an under-scoped caller never reaches the settings write', async () => {
+    const ctx = await setup(fixture({}));
+    const res = await toggle(ctx.baseUrl, ctx.writeToken, 'todo_write', true);
+    expect(res.status).toBe(403);
+    expect(ctx.stub.setSettingBodies).toEqual([]);
   });
 });
 
@@ -386,6 +592,9 @@ describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
         },
         async workspaceToolsCatalog() {
           return { v: 1, tools: [] };
+        },
+        async workspaceSettings() {
+          return { v: 1, settings: [], disabledTools: [] };
         },
       } as unknown as DaemonClient,
       defaultWorkspaceCwd: '/home/evan',

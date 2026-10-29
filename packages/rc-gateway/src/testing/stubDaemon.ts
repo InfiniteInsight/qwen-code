@@ -83,6 +83,8 @@ export interface StubDaemon {
    * without inspecting the raw value.
    */
   lastSetSettingBody: unknown;
+  /** Every POST /workspace/settings body, in order (#141: one write, not two). */
+  setSettingBodies: unknown[];
   /** Body of the most recent POST /workspace/tools/:name/enable request. */
   lastToolToggleBody: unknown;
   /**
@@ -717,6 +719,7 @@ export async function startStubDaemon(
     lastPermissionRulesBody: undefined as unknown,
     lastTrustRequestBody: undefined as unknown,
     lastSetSettingBody: undefined as unknown,
+    setSettingBodies: [] as unknown[],
     lastToolToggleBody: undefined as unknown,
     lastToolToggleName: undefined as string | undefined,
     lastMcpReloadBody: undefined as unknown,
@@ -1271,6 +1274,7 @@ export async function startStubDaemon(
 
   app.post('/workspace/settings', (req, res) => {
     state.lastSetSettingBody = req.body;
+    state.setSettingBodies.push(req.body);
     const status = opts.setWorkspaceSettingStatus ?? 200;
     if (status !== 200) {
       res
@@ -2709,6 +2713,9 @@ export async function startStubDaemon(
     },
     get lastSetSettingBody() {
       return state.lastSetSettingBody;
+    },
+    get setSettingBodies() {
+      return state.setSettingBodies;
     },
     get lastToolToggleBody() {
       return state.lastToolToggleBody;
