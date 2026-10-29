@@ -178,12 +178,7 @@ export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
 
     // Spawned. The prompt's eventual settlement drives completed/failed.
     // (If it already resolved — 'settled' — these handlers fire immediately.)
-    void promptPromise
-      .then(
-        () => deps.lifecycle.onPromptSettled(record.agentId, 'completed'),
-        () => deps.lifecycle.onPromptSettled(record.agentId, 'failed'),
-      )
-      .catch(() => {});
+    void deps.lifecycle.watchPrompt(record.agentId, promptPromise);
 
     deps.lifecycle.emit('agent_spawned', deps.registry.get(record.agentId)!);
     void deps.audit?.record({
@@ -294,12 +289,10 @@ export function createAgentMessageRoute(deps: AgentRoutesDeps): RequestHandler {
     // behind any in-flight prompt for this session (spawn's initial prompt
     // or a prior steer) so daemon.prompt() is never called concurrently for
     // the same session.
-    void sendSerializedPrompt(deps, rec.sessionId, body.content)
-      .then(
-        () => deps.lifecycle.onPromptSettled(rec.agentId, 'completed'),
-        () => deps.lifecycle.onPromptSettled(rec.agentId, 'failed'),
-      )
-      .catch(() => {});
+    void deps.lifecycle.watchPrompt(
+      rec.agentId,
+      sendSerializedPrompt(deps, rec.sessionId, body.content),
+    );
     void deps.audit?.record({
       action: 'agent_message_sent',
       actorTokenId: req.rcClient?.id,
