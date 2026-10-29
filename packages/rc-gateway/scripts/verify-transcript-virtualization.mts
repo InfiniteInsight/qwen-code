@@ -25709,6 +25709,641 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// -- #123: workspace file writes (P410 to P419) ------------------------------
+// Every scenario here runs the whole chain: the page, the gateway's own write
+// routes, a bare DaemonClient, and the stub's file store, which reads back
+// what was written and checks a replace against the hash of what is there.
+// Nothing below fakes a gateway answer except P418, whose point is a gateway
+// that predates the routes.
+
+const WSF_TAGS = [
+  'workspace_file_read',
+  'workspace_file_write',
+  'workspace_file_upload',
+  'workspace_file_delete',
+];
+
+/** The sha256 content hash the daemon (and the stub) put on a read. */
+async function wsfHash(text: string): Promise<string> {
+  const { createHash } = await import('node:crypto');
+  return `sha256:${createHash('sha256').update(text, 'utf-8').digest('hex')}`;
+}
+
+/** Open Files and artifacts and load the workspace listing at the root. */
+async function wsfOpenListing(page: Page): Promise<void> {
+  await openPanel(page, 'files');
+  await page.waitForSelector('#ws-files:not([hidden])', { timeout: 15_000 });
+  await page.click('#ws-files-body button');
+  await page.waitForFunction(
+    () => /README\.md/.test(document.getElementById('ws-files-body')?.textContent || ''),
+    null,
+    { timeout: 15_000 },
+  );
+}
+
+/** Tap a listing row (or any control in the browser) by its exact text. */
+async function wsfTap(page: Page, label: string): Promise<void> {
+  const hit = await page.evaluate((text) => {
+    const b = Array.from(document.querySelectorAll('#ws-files-body button')).find(
+      (x) => (x.textContent || '') === text,
+    ) as HTMLButtonElement | undefined;
+    if (!b) return false;
+    b.click();
+    return true;
+  }, label);
+  expect(hit, `no control reading ${JSON.stringify(label)} in the file browser`);
+}
+
+/** Open README.md in the file view and wait for its Edit control. */
+async function wsfOpenReadme(page: Page): Promise<void> {
+  await wsfTap(page, 'README.md');
+  await page.waitForSelector('#ws-files-view [data-wsf=edit]', { timeout: 15_000 });
+}
+
+/** Every POST the page makes to a write route, with what it carried. */
+function wsfCapture(page: Page): Array<{ path: string; query: string; body: string; type: string; bytes: number }> {
+  const out: Array<{ path: string; query: string; body: string; type: string; bytes: number }> = [];
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (r.method() !== 'POST' || !u.pathname.startsWith('/rc/workspace/file/')) return;
+    const buf = r.postDataBuffer();
+    out.push({
+      path: u.pathname,
+      query: u.search,
+      body: u.pathname.endsWith('/upload') ? '' : (r.postData() ?? ''),
+      type: r.headers()['content-type'] ?? '',
+      bytes: buf ? buf.length : 0,
+    });
+  });
+  return out;
+}
+
+/** Read a file back through the gateway, as a second client would. */
+async function wsfReadBack(page: Page, path: string): Promise<{ status: number; content: string | null }> {
+  return page.evaluate(async (p) => {
+    const res = await fetch('/rc/workspace/file?path=' + encodeURIComponent(p), {
+      headers: { Authorization: 'Bearer ' + token() },
+    });
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, content: typeof body.content === 'string' ? body.content : null };
+  }, path);
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P410 New file asks for a name in a sheet, creates the file empty through write, and opens it in the editor',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page }) => {
+    const posts = wsfCapture(page);
+    await wsfOpenListing(page);
+    await page.click('#ws-files-body [data-wsf=new]');
+    await page.waitForSelector('#wsf-ask:not([hidden]) input', { timeout: 10_000 });
+    const sheet = await page.evaluate(() => ({
+      title: document.querySelector('#wsf-ask .ask-title')?.textContent || '',
+      where: document.querySelector('#wsf-ask [data-wsf=path]')?.textContent || '',
+      focused: document.activeElement === document.querySelector('#wsf-ask input'),
+    }));
+    expect(sheet.title === 'New file', `the sheet is titled ${JSON.stringify(sheet.title)}`);
+    expect(sheet.where === '/stub/workspace/', `the sheet names the folder as ${JSON.stringify(sheet.where)}`);
+    expect(sheet.focused, 'the name field does not have the focus');
+
+    // An empty name and a path are refused in the sheet, before any request.
+    await page.click('#wsf-ask [data-wsf=go]');
+    const empty = await page.textContent('#wsf-ask .wsf-note');
+    expect(/Type a name/.test(empty || ''), `an empty name said ${JSON.stringify(empty)}`);
+    await page.fill('#wsf-ask input', 'a/b.md');
+    await page.click('#wsf-ask [data-wsf=go]');
+    const slash = await page.textContent('#wsf-ask .wsf-note');
+    expect(/not a path/.test(slash || ''), `a path said ${JSON.stringify(slash)}`);
+    expect(posts.length === 0, `a refused name still posted: ${JSON.stringify(posts)}`);
+
+    await page.fill('#wsf-ask input', 'notes.md');
+    await page.press('#wsf-ask input', 'Enter');
+    await page.waitForSelector('#wsf-editor:not([hidden])', { timeout: 15_000 });
+    expect(posts.length === 1, `${posts.length} writes were posted for one new file`);
+    const sent = JSON.parse(posts[0].body) as Record<string, unknown>;
+    expect(
+      posts[0].path === '/rc/workspace/file/write' &&
+        sent.path === 'notes.md' &&
+        sent.content === '' &&
+        sent.mode === 'create' &&
+        sent.expectedHash === undefined,
+      `the create carried ${posts[0].path} ${posts[0].body}`,
+    );
+    const ed = await page.evaluate(() => ({
+      path: document.getElementById('wsf-editor-path')?.textContent || '',
+      text: (document.getElementById('wsf-text') as HTMLTextAreaElement).value,
+      note: document.getElementById('ws-files-write-note')?.textContent || '',
+    }));
+    expect(ed.path === 'notes.md', `the editor opened on ${JSON.stringify(ed.path)}`);
+    expect(ed.text === '', `the new file opened with ${JSON.stringify(ed.text)}`);
+    expect(ed.note.includes('created notes.md'), `the listing note says ${JSON.stringify(ed.note)}`);
+    // The file is really there: a second read through the gateway finds it.
+    const back = await wsfReadBack(page, 'notes.md');
+    expect(back.status === 200 && back.content === '', `notes.md reads back ${JSON.stringify(back)}`);
+    return 'the name sheet refused an empty name and a path, then one create with mode create and no content made notes.md, which reads back empty and is open in the editor';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P411 Edit opens the text in a full-height monospace editor with Save in the thumb zone, and Save replaces the file carrying the hash it was read at',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page }) => {
+    const posts = wsfCapture(page);
+    await wsfOpenListing(page);
+    await wsfOpenReadme(page);
+    await page.click('#ws-files-view [data-wsf=edit]');
+    await page.waitForSelector('#wsf-editor:not([hidden])', { timeout: 15_000 });
+    const geo = await page.evaluate(() => {
+      const ta = document.getElementById('wsf-text') as HTMLTextAreaElement;
+      const save = document.getElementById('wsf-save')!.getBoundingClientRect();
+      const cancel = document.getElementById('wsf-cancel')!.getBoundingClientRect();
+      const t = ta.getBoundingClientRect();
+      return {
+        value: ta.value,
+        font: getComputedStyle(ta).fontFamily,
+        taH: t.height,
+        vh: window.innerHeight,
+        saveH: save.height,
+        cancelH: cancel.height,
+        saveBottom: save.bottom,
+        cancelLeftOfSave: cancel.right <= save.left,
+        dirty: document.getElementById('wsf-editor-dirty')?.textContent || '',
+      };
+    });
+    expect(geo.value === '# hello\n', `the editor holds ${JSON.stringify(geo.value)}`);
+    expect(/monospace/.test(geo.font), `the editor font is ${geo.font}`);
+    expect(geo.taH > geo.vh * 0.5, `the field is ${geo.taH}px of a ${geo.vh}px screen`);
+    expect(geo.saveH >= 44 && geo.cancelH >= 44, `Save ${geo.saveH}px, Cancel ${geo.cancelH}px tall`);
+    expect(geo.vh - geo.saveBottom < 40, `Save ends ${geo.vh - geo.saveBottom}px above the bottom, not in the thumb zone`);
+    expect(geo.cancelLeftOfSave, 'Cancel is not before Save');
+    expect(geo.dirty === '', `an untouched file reads ${JSON.stringify(geo.dirty)}`);
+
+    await page.fill('#wsf-text', '# hello\nedited on the phone\n');
+    const dirty = await page.textContent('#wsf-editor-dirty');
+    expect(dirty === 'unsaved changes', `after typing the head reads ${JSON.stringify(dirty)}`);
+    await page.click('#wsf-save');
+    await page.waitForSelector('#wsf-editor', { state: 'hidden', timeout: 15_000 });
+    const writes = posts.filter((p) => p.path === '/rc/workspace/file/write');
+    expect(writes.length === 1, `${writes.length} writes for one save`);
+    const sent = JSON.parse(writes[0].body) as Record<string, unknown>;
+    const opened = await wsfHash('# hello\n');
+    expect(
+      sent.path === 'README.md' &&
+        sent.mode === 'replace' &&
+        sent.content === '# hello\nedited on the phone\n' &&
+        sent.expectedHash === opened,
+      `the save carried ${writes[0].body}`,
+    );
+    expect(posts.every((p) => p.path !== '/rc/workspace/file/edit'), 'the save went through edit');
+    // The view re-reads the saved file.
+    await page.waitForFunction(
+      () => /edited on the phone/.test(document.getElementById('ws-files-view')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const status = await page.textContent('#status');
+    expect(/saved README\.md/.test(status || ''), `the status line reads ${JSON.stringify(status)}`);
+    return `one replace carrying ${opened.slice(0, 15)}..., the hash README.md was opened at; the view re-read the saved text`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P412 a save over a file changed on the host since it was opened is refused by the daemon hash check, says so, and keeps the text',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page }) => {
+    await wsfOpenListing(page);
+    await wsfOpenReadme(page);
+    await page.click('#ws-files-view [data-wsf=edit]');
+    await page.waitForSelector('#wsf-editor:not([hidden])', { timeout: 15_000 });
+    // Another client (the agent, a terminal) replaces the file meanwhile.
+    const opened = await wsfHash('# hello\n');
+    const other = await page.evaluate(async (h) => {
+      const res = await fetch('/rc/workspace/file/write', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'README.md', content: 'changed on the host\n', mode: 'replace', expectedHash: h }),
+      });
+      return res.status;
+    }, opened);
+    expect(other === 200, `the other client's write answered ${other}`);
+
+    await page.fill('#wsf-text', 'my phone edit\n');
+    await page.click('#wsf-save');
+    await page.waitForFunction(
+      () => (document.getElementById('wsf-editor-status')?.textContent || '').startsWith('Not saved'),
+      null,
+      { timeout: 15_000 },
+    );
+    const after = await page.evaluate(() => ({
+      open: !document.getElementById('wsf-editor')!.hidden,
+      status: document.getElementById('wsf-editor-status')?.textContent || '',
+      tone: document.getElementById('wsf-editor-status')?.dataset.tone || '',
+      text: (document.getElementById('wsf-text') as HTMLTextAreaElement).value,
+      saveEnabled: !(document.getElementById('wsf-save') as HTMLButtonElement).disabled,
+    }));
+    expect(after.open, 'the editor closed on a refused save');
+    expect(/changed on the host after you opened it/.test(after.status), `the refusal reads ${JSON.stringify(after.status)}`);
+    expect(after.tone === 'error', 'the refusal is not drawn as an error');
+    expect(after.text === 'my phone edit\n', `the reader's text became ${JSON.stringify(after.text)}`);
+    expect(after.saveEnabled, 'Save stayed disabled after the refusal');
+    const back = await wsfReadBack(page, 'README.md');
+    expect(back.content === 'changed on the host\n', `the host copy is now ${JSON.stringify(back.content)}`);
+    return 'the daemon answered 409 hash_mismatch, the host copy kept the other client\'s text, and the editor stayed open with the reader\'s text and the reason';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P413 Upload uses the file picker, posts each file on its own with a progress line, and names the file a taken name was numbered to',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page }) => {
+    const posts = wsfCapture(page);
+    await wsfOpenListing(page);
+    // Every text the progress lines take, so a percentage between 0 and 100
+    // is seen even if it lasts one frame.
+    await page.evaluate(() => {
+      (window as unknown as { __wsfLines: string[] }).__wsfLines = [];
+      new MutationObserver(() => {
+        for (const l of Array.from(document.querySelectorAll('#ws-files-write-note [data-wsf=upload-line]')))
+          (window as unknown as { __wsfLines: string[] }).__wsfLines.push(l.textContent || '');
+      }).observe(document.getElementById('ws-files')!, { subtree: true, childList: true, characterData: true });
+    });
+    const big = Buffer.alloc(3 * 1024 * 1024, 7);
+    const pick = async (files: Array<{ name: string; mimeType: string; buffer: Buffer }>) => {
+      const [chooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 10_000 }),
+        page.click('#ws-files-body [data-wsf=upload]'),
+      ]);
+      expect(chooser.isMultiple(), 'the picker takes one file at a time');
+      await chooser.setFiles(files);
+    };
+    await pick([
+      { name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('first') },
+      { name: 'photo.jpg', mimeType: 'image/jpeg', buffer: big },
+    ]);
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById('ws-files-write-note')?.textContent || '';
+        return /a\.txt uploaded/.test(t) && /photo\.jpg uploaded/.test(t);
+      },
+      null,
+      { timeout: 30_000 },
+    );
+    const ups = posts.filter((p) => p.path === '/rc/workspace/file/upload');
+    expect(ups.length === 2, `${ups.length} upload posts for two files`);
+    expect(
+      ups[0].query === '?path=a.txt' && ups[1].query === '?path=photo.jpg',
+      `the uploads went to ${ups.map((u) => u.query).join(', ')}`,
+    );
+    expect(ups.every((u) => u.type === 'application/octet-stream'), `content types ${ups.map((u) => u.type).join(', ')}`);
+    // Every byte arrived: the daemon's own stat of the photo, through the
+    // gateway's stat route.
+    const photo = await page.evaluate(async () => {
+      const res = await fetch('/rc/workspace/stat?path=photo.jpg', {
+        headers: { Authorization: 'Bearer ' + token() },
+      });
+      return res.json();
+    });
+    expect(photo.sizeBytes === big.length, `the photo landed as ${photo.sizeBytes} of ${big.length} bytes`);
+    const seen = await page.evaluate(() => (window as unknown as { __wsfLines: string[] }).__wsfLines);
+    const pcts = seen
+      .map((t) => /^photo\.jpg (\d+)% \(3\.0 MB\)$/.exec(t))
+      .filter((m): m is RegExpExecArray => !!m)
+      .map((m) => Number(m[1]));
+    expect(pcts.length > 0, `no progress line for the photo among ${JSON.stringify(seen.slice(0, 8))}`);
+    expect(pcts.some((p) => p > 0), `the photo's progress never moved past 0%: ${JSON.stringify(pcts)}`);
+
+    // The same name again: the daemon never overwrites, and the line says
+    // which name the file got.
+    await pick([{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('second') }]);
+    await page.waitForFunction(
+      () => /a\.txt uploaded as a \(1\)\.txt/.test(document.getElementById('ws-files-write-note')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const first = await wsfReadBack(page, 'a.txt');
+    const second = await wsfReadBack(page, 'a (1).txt');
+    expect(first.content === 'first' && second.content === 'second', `the two a.txt read back ${JSON.stringify([first, second])}`);
+    return `two posts for two files, the photo's progress read ${pcts.join('%, ')}%, and a second a.txt landed as a (1).txt with the first untouched`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P414 an upload over the #196 limit is refused with the size and the limit, before sending when the page knows it and from the gateway answer when it does not',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  // The page is told a larger limit than the gateway enforces (8 MB here: the
+  // stub advertises no per-file cap), so the second file gets past the
+  // page's own check and is refused by the gateway's.
+  before: async (page) => {
+    await page.route('**/rc/capabilities', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.remoteControl.maxAttachmentBytes = 64 * 1024 * 1024;
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    const posts = wsfCapture(page);
+    await wsfOpenListing(page);
+    const pick = async (name: string, buffer: Buffer) => {
+      const [chooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 10_000 }),
+        page.click('#ws-files-body [data-wsf=upload]'),
+      ]);
+      await chooser.setFiles([{ name, mimeType: 'application/octet-stream', buffer }]);
+    };
+    // 1. The page's own check: the limit it knows is lowered to 1 KB.
+    await page.evaluate(() => {
+      (caps as { remoteControl: { maxAttachmentBytes: number } }).remoteControl.maxAttachmentBytes = 1024;
+    });
+    await pick('two-k.bin', Buffer.alloc(2048, 1));
+    await page.waitForFunction(
+      () => /over the/.test(document.getElementById('ws-files-write-note')?.textContent || ''),
+      null,
+      { timeout: 10_000 },
+    );
+    const local = await page.textContent('#ws-files-write-note');
+    expect(local === 'two-k.bin: 2.0 KB is over the 1.0 KB limit', `the page's refusal reads ${JSON.stringify(local)}`);
+    expect(posts.length === 0, `a file over the known limit was still sent: ${JSON.stringify(posts.map((p) => p.query))}`);
+
+    // 2. The gateway's: the page believes 64 MB, the gateway enforces 8 MB.
+    await page.evaluate(() => {
+      (caps as { remoteControl: { maxAttachmentBytes: number } }).remoteControl.maxAttachmentBytes = 64 * 1024 * 1024;
+    });
+    await pick('nine-mb.bin', Buffer.alloc(9 * 1024 * 1024, 2));
+    await page.waitForFunction(
+      () => /nine-mb\.bin: .* limit/.test(document.getElementById('ws-files-write-note')?.textContent || ''),
+      null,
+      { timeout: 30_000 },
+    );
+    const remote = await page.textContent('#ws-files-write-note');
+    expect(remote === 'nine-mb.bin: 9.0 MB is over the 8.0 MB limit', `the gateway refusal reads ${JSON.stringify(remote)}`);
+    expect(posts.length === 1 && posts[0].query === '?path=nine-mb.bin', `posts: ${JSON.stringify(posts.map((p) => p.query))}`);
+    const back = await wsfReadBack(page, 'nine-mb.bin');
+    expect(back.content === '# hello\n', 'the refused file reached the stub store');
+    return `"${local}" with nothing sent, then "${remote}" from the gateway's 413 and its maxBytes`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P415 Delete asks in a sheet that names the full path and the size, Cancel first and focused, Delete a 44px destructive button, and only Delete calls the route',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page }) => {
+    const posts = wsfCapture(page);
+    const stats: string[] = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname === '/rc/workspace/stat') stats.push(u.search);
+    });
+    await wsfOpenListing(page);
+    await wsfOpenReadme(page);
+    const ask = async () => {
+      await page.evaluate(() => {
+        const b = Array.from(document.querySelectorAll('#ws-files-view button')).find((x) => x.textContent === 'Delete') as HTMLButtonElement;
+        b.click();
+      });
+      await page.waitForSelector('#wsf-ask:not([hidden]) [data-wsf=go]', { timeout: 10_000 });
+    };
+    await ask();
+    const sheet = await page.evaluate(() => {
+      const acts = Array.from(document.querySelectorAll('#wsf-ask .wsf-acts button')) as HTMLButtonElement[];
+      const del = document.querySelector('#wsf-ask [data-wsf=go]') as HTMLButtonElement;
+      const r = del.getBoundingClientRect();
+      return {
+        title: document.querySelector('#wsf-ask .ask-title')?.textContent || '',
+        path: document.querySelector('#wsf-ask [data-wsf=path]')?.textContent || '',
+        sub: document.querySelector('#wsf-ask [data-wsf=sub]')?.textContent || '',
+        order: acts.map((b) => b.textContent),
+        focused: (document.activeElement as HTMLElement | null)?.textContent || '',
+        delClass: del.className,
+        delH: r.height,
+        delBg: getComputedStyle(del).backgroundColor,
+        dialog: document.getElementById('wsf-ask')!.getAttribute('role'),
+      };
+    });
+    expect(sheet.title === 'Delete this file?', `titled ${JSON.stringify(sheet.title)}`);
+    expect(sheet.path === '/stub/workspace/README.md', `the sheet names ${JSON.stringify(sheet.path)}`);
+    expect(/Size 8 B \(8 bytes\)/.test(sheet.sub), `the size line reads ${JSON.stringify(sheet.sub)}`);
+    expect(stats.length === 1 && stats[0] === '?path=README.md', `stat calls: ${JSON.stringify(stats)}`);
+    expect(JSON.stringify(sheet.order) === '["Cancel","Delete"]', `tab order ${JSON.stringify(sheet.order)}`);
+    expect(sheet.focused === 'Cancel', `focus starts on ${JSON.stringify(sheet.focused)}`);
+    expect(sheet.delClass === 'danger' && sheet.delBg === 'rgb(243, 139, 168)', `Delete is ${sheet.delClass} on ${sheet.delBg}`);
+    expect(sheet.delH >= 44, `Delete is ${sheet.delH}px tall`);
+    expect(sheet.dialog === 'dialog', 'the sheet is not a dialog');
+
+    // Cancel: nothing is deleted.
+    await page.click('#wsf-ask [data-wsf=cancel]');
+    await page.waitForSelector('#wsf-ask', { state: 'hidden' });
+    expect(posts.length === 0, `Cancel still posted ${JSON.stringify(posts)}`);
+    expect((await wsfReadBack(page, 'README.md')).status === 200, 'README.md went on Cancel');
+
+    // Delete: one post naming the path, and the file is gone.
+    await ask();
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(() => /deleted README\.md/.test(document.getElementById('status')?.textContent || ''), null, { timeout: 15_000 });
+    expect(posts.length === 1 && posts[0].path === '/rc/workspace/file/delete', `posts: ${JSON.stringify(posts)}`);
+    expect(JSON.parse(posts[0].body).path === 'README.md', `the delete carried ${posts[0].body}`);
+    const gone = await wsfReadBack(page, 'README.md');
+    expect(gone.status === 404, `README.md still reads ${gone.status}`);
+    expect(!(await page.$('#ws-files-view')), 'the deleted file is still on screen');
+    return 'the sheet named /stub/workspace/README.md and 8 bytes, Cancel sent nothing, Delete sent one post and the file reads 404';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P416 closing the editor with unsaved text asks first: keep editing keeps it, Discard closes without a write, and an untouched file closes at once',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page }) => {
+    const posts = wsfCapture(page);
+    await wsfOpenListing(page);
+    await wsfOpenReadme(page);
+    const openEditor = async () => {
+      await page.click('#ws-files-view [data-wsf=edit]');
+      await page.waitForSelector('#wsf-editor:not([hidden])', { timeout: 15_000 });
+    };
+    // Untouched: Cancel closes with no question.
+    await openEditor();
+    await page.click('#wsf-cancel');
+    await page.waitForSelector('#wsf-editor', { state: 'hidden', timeout: 5_000 });
+    expect(!(await page.isVisible('#wsf-ask')), 'an untouched file asked before closing');
+
+    await openEditor();
+    await page.fill('#wsf-text', 'half a thought');
+    await page.click('#wsf-cancel');
+    await page.waitForSelector('#wsf-ask:not([hidden])', { timeout: 5_000 });
+    const q = await page.evaluate(() => ({
+      title: document.querySelector('#wsf-ask .ask-title')?.textContent || '',
+      go: document.querySelector('#wsf-ask [data-wsf=go]')?.textContent || '',
+    }));
+    expect(q.title === 'Discard your changes?' && q.go === 'Discard', `the question reads ${JSON.stringify(q)}`);
+    await page.click('#wsf-ask [data-wsf=cancel]');
+    const kept = await page.evaluate(() => ({
+      open: !document.getElementById('wsf-editor')!.hidden,
+      text: (document.getElementById('wsf-text') as HTMLTextAreaElement).value,
+    }));
+    expect(kept.open && kept.text === 'half a thought', `keep editing left ${JSON.stringify(kept)}`);
+
+    // Escape asks the same question.
+    await page.focus('#wsf-text');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#wsf-ask:not([hidden])', { timeout: 5_000 });
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForSelector('#wsf-editor', { state: 'hidden', timeout: 5_000 });
+    expect(posts.length === 0, `closing posted ${JSON.stringify(posts)}`);
+    expect((await wsfReadBack(page, 'README.md')).content === '# hello\n', 'the file changed though nothing was saved');
+    return 'an untouched file closed at once; with text typed, Cancel and Escape both asked, keep editing kept the text, Discard closed with no write';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P417 a read-only share token sees none of the write controls, and the gateway refuses its write with 403',
+  waitView: false,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  run: async ({ page, viewer }) => {
+    // A share token, minted by the harness's owner token the way the Share
+    // panel mints one (view and approve, never write), then put in place of
+    // the owner token for the next load.
+    const minted = await page.evaluate(async (sid) => {
+      const res = await fetch('/rc/share', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, ttlSec: 600, scope: 'approve', label: 'guest' }),
+      });
+      return { status: res.status, token: (await res.json()).token as string };
+    }, viewer.sessionId);
+    expect(minted.status === 201 && !!minted.token, `minting a share answered ${minted.status}`);
+    await page.addInitScript((t) => localStorage.setItem('qwen-rc-token', t), minted.token);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof startWatch === 'function');
+    await page.waitForFunction(() => !!(caps && caps.remoteControl), null, { timeout: 15_000 });
+    const gate = await page.evaluate(() => ({
+      writeScope: caps.remoteControl.writeScope,
+      flag: caps.remoteControl.workspaceFileWrites,
+      gates: ['workspace_file_write', 'workspace_file_upload', 'workspace_file_delete'].map((t) => wsfGate(t)),
+    }));
+    expect(gate.writeScope === false && gate.flag === true, `the guest's capabilities read ${JSON.stringify(gate)}`);
+    expect(gate.gates.every((g) => g === false), `a gate opened for the guest: ${JSON.stringify(gate.gates)}`);
+    // Even with the daemon's tags put in front of the page, the token's
+    // missing write keeps every gate shut: writeScope is the gate doing it.
+    const forced = await page.evaluate((tags) => {
+      caps.remoteControl.daemon = { available: true, features: tags };
+      return ['workspace_file_write', 'workspace_file_upload', 'workspace_file_delete'].map((t) => wsfGate(t));
+    }, WSF_TAGS);
+    expect(forced.every((g) => g === false), `with the tags present a gate opened for the guest: ${JSON.stringify(forced)}`);
+
+    // Draw a listing and a file view as if the reads had answered: neither
+    // carries a write control.
+    await openPanel(page, 'files');
+    const drawn = await page.evaluate(() => {
+      document.getElementById('ws-files')!.hidden = false;
+      renderWorkspaceListing({
+        kind: 'list',
+        path: '.',
+        entries: [{ name: 'README.md', kind: 'file', ignored: false }],
+        truncated: false,
+      });
+      void openWorkspaceFile('README.md');
+      const labels = Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent);
+      return { labels, marked: document.querySelectorAll('#ws-files-body [data-wsf]').length };
+    });
+    await page.waitForFunction(
+      () => /requires write scope/.test(document.getElementById('ws-files-view')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const after = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent),
+    );
+    for (const label of ['New file', 'Upload', 'Edit', 'Delete']) {
+      expect(!drawn.labels.includes(label) && !after.includes(label), `a reader sees ${label}: ${JSON.stringify(after)}`);
+    }
+    expect(drawn.marked === 0, `${drawn.marked} write controls drawn for a reader`);
+
+    const refused = await page.evaluate(async () => {
+      const res = await fetch('/rc/workspace/file/write', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'x.md', content: '', mode: 'create' }),
+      });
+      return { status: res.status, code: (await res.json()).code };
+    });
+    expect(refused.status === 403 && refused.code === 'scope_required', `the reader's write answered ${JSON.stringify(refused)}`);
+    return `writeScope false, every gate shut, no New file, Upload, Edit or Delete drawn, and a direct write answered 403 ${refused.code}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P418 a gateway that does not report workspaceFileWrites gets none of the write controls, though the daemon advertises every tag',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSF_TAGS },
+  before: async (page) => {
+    await page.route('**/rc/capabilities', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      delete body.remoteControl.workspaceFileWrites;
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    await wsfOpenListing(page);
+    await wsfTap(page, 'README.md');
+    await page.waitForFunction(
+      () => /# hello/.test(document.getElementById('ws-files-view')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const seen = await page.evaluate(() => ({
+      flag: caps.remoteControl.workspaceFileWrites,
+      features: caps.remoteControl.daemon.features,
+      marked: document.querySelectorAll('#ws-files-body [data-wsf]').length,
+      labels: Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent),
+    }));
+    expect(seen.flag === undefined, `the flag survived the strip: ${String(seen.flag)}`);
+    expect(seen.features.includes('workspace_file_write'), 'the daemon tags are missing, so this is not the old-gateway case');
+    expect(seen.marked === 0, `${seen.marked} write controls on an old gateway: ${JSON.stringify(seen.labels)}`);
+    return `with every daemon tag but no gateway flag, the listing and README.md drew ${JSON.stringify(seen.labels)} and nothing to write with`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P419 each control follows its own daemon tag: a daemon that advertises reads and uploads only gets Upload, and no New file, Edit or Delete',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: ['workspace_file_read', 'workspace_file_upload'] },
+  run: async ({ page }) => {
+    await wsfOpenListing(page);
+    await wsfTap(page, 'README.md');
+    await page.waitForFunction(
+      () => /# hello/.test(document.getElementById('ws-files-view')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const marks = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body [data-wsf]')).map((b) => (b as HTMLElement).dataset.wsf),
+    );
+    const labels = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent),
+    );
+    expect(JSON.stringify(marks) === '["upload"]', `controls drawn: ${JSON.stringify(marks)}`);
+    expect(!labels.includes('Delete') && !labels.includes('Edit'), `the file view offers ${JSON.stringify(labels)}`);
+    return 'Upload alone, with no New file, Edit or Delete, for a daemon advertising workspace_file_upload without write or delete';
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
