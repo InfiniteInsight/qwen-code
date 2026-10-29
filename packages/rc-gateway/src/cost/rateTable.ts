@@ -141,17 +141,115 @@ export function parseRateTable(text: string): RateTable {
   };
 }
 
+/**
+ * Drop one trailing `(provider)` group from a model id. The live daemon names
+ * models `flint(openai)` / `qwen3.8-flash-next-trtllm(openai)`: the base id plus
+ * the auth/provider it was reached through. Returns the id unchanged when there is
+ * no such suffix, or when stripping would leave nothing.
+ */
+export function stripProviderSuffix(modelId: string): string {
+  const stripped = modelId.replace(/\s*\([^()]*\)\s*$/, '');
+  return stripped.length > 0 ? stripped : modelId;
+}
+
+/** Which pass of {@link lookupRateMatch} found the entry. */
+export type RateMatchKind = 'exact' | 'stripped';
+
+export interface RateMatch {
+  entry: RateEntry;
+  /** `<modelServiceId>/<modelId>` of the table entry that matched. */
+  rateKey: string;
+  via: RateMatchKind;
+}
+
+/**
+ * Find the entry for `(modelServiceId, modelId)`, applying the default service.
+ * Pass 1 is an exact match on the id as given; pass 2 retries with the
+ * `(provider)` suffix stripped, so one table entry (`flint`) prices every
+ * provider spelling of that model. The result says which pass matched.
+ */
+export function lookupRateMatch(
+  table: RateTable,
+  modelServiceId: string | undefined,
+  modelId: string,
+): RateMatch | undefined {
+  const service = modelServiceId || table.defaultModelServiceId;
+  if (!service || !modelId) return undefined;
+  const exact = table.models.find(
+    (m) => m.modelServiceId === service && m.modelId === modelId,
+  );
+  if (exact) {
+    return {
+      entry: exact,
+      rateKey: `${exact.modelServiceId}/${exact.modelId}`,
+      via: 'exact',
+    };
+  }
+  const base = stripProviderSuffix(modelId);
+  if (base === modelId) return undefined;
+  const hit = table.models.find(
+    (m) => m.modelServiceId === service && m.modelId === base,
+  );
+  return hit
+    ? {
+        entry: hit,
+        rateKey: `${hit.modelServiceId}/${hit.modelId}`,
+        via: 'stripped',
+      }
+    : undefined;
+}
+
 /** Find the entry for `(modelServiceId, modelId)`, applying the default service. */
 export function lookupRate(
   table: RateTable,
   modelServiceId: string | undefined,
   modelId: string,
 ): RateEntry | undefined {
-  const service = modelServiceId || table.defaultModelServiceId;
-  if (!service) return undefined;
-  return table.models.find(
-    (m) => m.modelServiceId === service && m.modelId === modelId,
-  );
+  return lookupRateMatch(table, modelServiceId, modelId)?.entry;
+}
+
+/** Token counts exactly as the daemon reports them (`inputTokens` INCLUDES cached). */
+export interface ReportedTokens {
+  tokensIn: number;
+  tokensOut: number;
+  tokensCached: number;
+}
+
+export interface PricedUsage {
+  costMicrocents: number;
+  rateKey: string;
+  rateMatch: RateMatchKind;
+}
+
+/**
+ * Price a usage block as the daemon reports it, or `null` on a lookup miss.
+ *
+ * The daemon's `inputTokens` is `promptTokenCount`, which already CONTAINS the
+ * cached subset, so the input rate applies to `inputTokens - cachedReadTokens` and
+ * the cached rate to the cached part: charging the full input AND the cached read
+ * would bill those tokens twice. Clamped at zero because a malformed frame could
+ * report more cached than input, and a negative bill is worse than a zero one.
+ * Shared by the live ingester and `qwen-rc usage reprice` so there is one formula.
+ */
+export function priceUsage(
+  table: RateTable,
+  modelServiceId: string | undefined,
+  modelId: string,
+  tokens: ReportedTokens,
+): PricedUsage | null {
+  const match = lookupRateMatch(table, modelServiceId, modelId);
+  if (!match) return null;
+  const pricedIn = Math.max(0, tokens.tokensIn - tokens.tokensCached);
+  const e = match.entry;
+  return {
+    costMicrocents: Math.round(
+      pricedIn * e.inputPerMTok +
+        tokens.tokensOut * e.outputPerMTok +
+        tokens.tokensCached * e.cachedReadPerMTok,
+    ),
+    rateKey: match.rateKey,
+    rateMatch: match.via,
+  };
 }
 
 /**

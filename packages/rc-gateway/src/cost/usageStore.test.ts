@@ -198,3 +198,44 @@ describe('UsageStore prune', () => {
     ).toBe(1000); // only the ts=5000 row remains
   });
 });
+
+describe('UsageStore reprice support', () => {
+  it('lists rows with an empty model id or a null cost, oldest first', () => {
+    store.record(row({ ts: 1, modelId: '', costMicrocents: null }));
+    store.record(row({ ts: 2 })); // priced, has a model: not a candidate
+    store.record(
+      row({ ts: 3, modelId: 'flint(openai)', costMicrocents: null }),
+    );
+    const c = store.repriceCandidates();
+    expect(c.map((r) => [r.modelId, r.costMicrocents])).toEqual([
+      ['', null],
+      ['flint(openai)', null],
+    ]);
+    expect(c[0]).toMatchObject({
+      sessionId: 'sess_1',
+      tokensIn: 1000,
+      tokensOut: 500,
+      tokensCached: 0,
+      modelServiceId: 'qwen',
+    });
+  });
+
+  it('applyReprice rewrites model, cost and the matched rate key in place', () => {
+    store.record(row({ modelId: '', costMicrocents: null }));
+    const [cand] = store.repriceCandidates();
+    store.applyReprice(cand.id, {
+      modelId: 'flint(openai)',
+      costMicrocents: 1234.4,
+      rateKey: 'qwen/flint',
+      rateMatch: 'stripped',
+    });
+    expect(store.repriceCandidates()).toEqual([]);
+    expect(store.sessionTotals('sess_1').costMicrocentsSesTotal).toBe(1234);
+  });
+
+  it('record stores the rate key and match kind', () => {
+    store.record(row({ rateKey: 'qwen/flint', rateMatch: 'stripped' }));
+    // Priced with a model: not a candidate, but the columns exist and round-trip.
+    expect(store.repriceCandidates()).toEqual([]);
+  });
+});

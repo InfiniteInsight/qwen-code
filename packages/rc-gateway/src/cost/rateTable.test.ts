@@ -12,6 +12,9 @@ import {
   parseRateTable,
   computeCostCents,
   lookupRate,
+  lookupRateMatch,
+  stripProviderSuffix,
+  priceUsage,
   rateTablePath,
   RateTableHolder,
   createRateTableReloader,
@@ -189,5 +192,100 @@ describe('createRateTableReloader', () => {
     expect(errors).toHaveLength(1);
     expect(holder.current().currencyLabel).toBe('USD'); // retained
     reloader.stop();
+  });
+});
+
+describe('stripProviderSuffix', () => {
+  it('drops a trailing (provider) group', () => {
+    expect(stripProviderSuffix('flint(openai)')).toBe('flint');
+    expect(stripProviderSuffix('qwen3.8-flash-next-trtllm(openai)')).toBe(
+      'qwen3.8-flash-next-trtllm',
+    );
+    expect(stripProviderSuffix('flint (openai)')).toBe('flint');
+  });
+  it('leaves an id with no suffix alone', () => {
+    expect(stripProviderSuffix('qwen3-coder-plus')).toBe('qwen3-coder-plus');
+    expect(stripProviderSuffix('')).toBe('');
+  });
+  it('never strips an id down to nothing', () => {
+    expect(stripProviderSuffix('(openai)')).toBe('(openai)');
+  });
+});
+
+describe('lookupRateMatch', () => {
+  const t = parseRateTable(`
+currencyLabel: USD
+defaultModelServiceId: qwen
+models:
+  - modelServiceId: qwen
+    modelId: flint
+    inputPerMTok: 10
+    outputPerMTok: 20
+    cachedReadPerMTok: 1
+  - modelServiceId: qwen
+    modelId: flint(openai)
+    inputPerMTok: 99
+    outputPerMTok: 99
+    cachedReadPerMTok: 9
+`);
+
+  it('prefers an exact match over the stripped one', () => {
+    const m = lookupRateMatch(t, undefined, 'flint(openai)');
+    expect(m?.via).toBe('exact');
+    expect(m?.entry.inputPerMTok).toBe(99);
+    expect(m?.rateKey).toBe('qwen/flint(openai)');
+  });
+
+  it('falls back to the id with the (provider) suffix stripped, and says so', () => {
+    const m = lookupRateMatch(t, undefined, 'flint(vllm)');
+    expect(m?.via).toBe('stripped');
+    expect(m?.entry.inputPerMTok).toBe(10);
+    expect(m?.rateKey).toBe('qwen/flint');
+  });
+
+  it('misses when neither pass matches', () => {
+    expect(lookupRateMatch(t, undefined, 'other(openai)')).toBeUndefined();
+    expect(lookupRateMatch(t, undefined, '')).toBeUndefined();
+  });
+
+  it('lookupRate agrees with lookupRateMatch', () => {
+    expect(lookupRate(t, undefined, 'flint(vllm)')?.modelId).toBe('flint');
+  });
+});
+
+describe('priceUsage', () => {
+  const t = parseRateTable(YAML); // in 200, out 800, cached 20 per MTok
+
+  it('prices the uncached remainder at the input rate and the cached part at the cached rate', () => {
+    const p = priceUsage(t, undefined, 'qwen3-coder-plus', {
+      tokensIn: 1000,
+      tokensOut: 500,
+      tokensCached: 400,
+    });
+    // (1000-400)*200 + 500*800 + 400*20
+    expect(p).toEqual({
+      costMicrocents: 600 * 200 + 500 * 800 + 400 * 20,
+      rateKey: 'qwen/qwen3-coder-plus',
+      rateMatch: 'exact',
+    });
+  });
+
+  it('clamps cached above input so the input part never goes negative', () => {
+    const p = priceUsage(t, undefined, 'qwen3-coder-plus', {
+      tokensIn: 100,
+      tokensOut: 0,
+      tokensCached: 300,
+    });
+    expect(p?.costMicrocents).toBe(300 * 20);
+  });
+
+  it('returns null on a miss', () => {
+    expect(
+      priceUsage(t, undefined, '', {
+        tokensIn: 1,
+        tokensOut: 1,
+        tokensCached: 0,
+      }),
+    ).toBeNull();
   });
 });

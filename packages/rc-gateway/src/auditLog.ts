@@ -107,6 +107,7 @@ export type AuditAction =
   | 'bridge_stale_deregistered'
   | 'rate_table_parse_failed'
   | 'rate_table_miss'
+  | 'usage_model_unresolved'
   | 'apns_registered'
   | 'apns_subscription_removed'
   | 'push_routed'
@@ -225,6 +226,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'bridge_stale_deregistered',
   'rate_table_parse_failed',
   'rate_table_miss',
+  'usage_model_unresolved',
   'apns_registered',
   'apns_subscription_removed',
   'push_routed',
