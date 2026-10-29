@@ -23,7 +23,7 @@
 import type { RequestHandler } from 'express';
 import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 export interface FsBrowseRouteOptions {
   /** Path used when the `path` query param is absent. Defaults to `$HOME`. */
@@ -65,8 +65,22 @@ export function createFsBrowseRoute(
       }
 
       const dirents = await readdir(resolvedPath, { withFileTypes: true });
+      // `Dirent.isDirectory()` is false for a symlink, so a symlinked
+      // directory (a symlinked ~/projects) would never appear. Follow each
+      // link once; a dangling link or one to a file is not a directory.
+      const isDir = await Promise.all(
+        dirents.map(async (d) => {
+          if (d.isDirectory()) return true;
+          if (!d.isSymbolicLink()) return false;
+          try {
+            return (await stat(join(resolvedPath, d.name))).isDirectory();
+          } catch {
+            return false;
+          }
+        }),
+      );
       const entries = dirents
-        .filter((d) => d.isDirectory())
+        .filter((_d, i) => isDir[i])
         .map((d) => ({ name: d.name, isDir: true }));
 
       const parent =
