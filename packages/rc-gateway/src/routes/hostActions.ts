@@ -15,12 +15,17 @@ import type { HostActions } from '../hostActions.js';
  *
  * - `GET  /rc/host/actions` -> `{ actions: [{ name, label, running }] }`, each
  *   `running` a live probe. The probes run side by side, so the read takes as
- *   long as the slowest one (capped at 10s) rather than their sum.
+ *   long as the slowest one (capped at 10s) rather than their sum. A probe
+ *   program the OS could not spawn (#198) reads `running: false` with
+ *   `status: 'unknown'` and `error: 'ENOENT: powershell.exe'` (errno and the
+ *   program's basename, never the argv).
  * - `POST /rc/host/actions/:name/start` -> `{ name, running }` once the start
  *   argv has exited 0 and the action has been probed again; 404
  *   `host_action_unknown` for a name the file does not hold; 502
  *   `host_action_failed` with `exitCode` (null when there was none: killed at
- *   the cap, or never started) when the start argv did not exit 0.
+ *   the cap, or never started) when the start argv did not exit 0; 502
+ *   `spawn_failed` with an `error` naming the errno and the program when the
+ *   start command could not be spawned at all (#198).
  *
  * A start that exits 0 but leaves the probe reading not running is a 200
  * with `running: false`, not an error: the start argv did what it was asked,
@@ -43,11 +48,18 @@ export function createHostActionRoutes(
   const list: RequestHandler = async (_req, res) => {
     try {
       const actions = await Promise.all(
-        store.list().map(async (a) => ({
-          name: a.name,
-          label: a.label,
-          running: await store.probe(a.name),
-        })),
+        store.list().map(async (a) => {
+          const found = await store.check(a.name);
+          return found.error === undefined
+            ? { name: a.name, label: a.label, running: found.running }
+            : {
+                name: a.name,
+                label: a.label,
+                running: false,
+                status: 'unknown',
+                error: found.error,
+              };
+        }),
       );
       res.json({ actions });
     } catch {
@@ -84,8 +96,17 @@ export function createHostActionRoutes(
         outcome: outcome.ok ? 'ok' : 'failed',
         detail: outcome.ok
           ? { name, running: outcome.running }
-          : { name, exitCode: outcome.code },
+          : outcome.spawn
+            ? { name, exitCode: null, spawnError: outcome.spawn.code }
+            : { name, exitCode: outcome.code },
       });
+      if (!outcome.ok && outcome.spawn) {
+        res.status(502).json({
+          error: `The start command could not be run (${outcome.spawn.error})`,
+          code: 'spawn_failed',
+        });
+        return;
+      }
       if (!outcome.ok) {
         res.status(502).json({
           error:

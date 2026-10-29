@@ -1152,8 +1152,14 @@
         gap: 10px;
         margin-left: auto;
       }
-      #h1-host-acts .ha-state[data-running='true'] {
+      #h1-host-acts .ha-state[data-running='true'],
+      #h1-host-acts .ha-state[data-failed='true'] {
         color: var(--g1-ink-mid);
+      }
+      #h1-host-acts .ha-state[data-failed='true'] {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        text-align: right;
       }
       #h1-host-acts button {
         min-height: 36px;
@@ -6488,6 +6494,11 @@
             typeof a.label === 'string' &&
             typeof a.running === 'boolean',
         );
+        // #198: a probe whose program could not be spawned carries
+        // error: 'ENOENT: powershell.exe'; anything else is not trusted.
+        for (const a of hostActs.list) {
+          if (typeof a.error !== 'string') delete a.error;
+        }
         renderHostActions();
       }
       // Start shows "starting…" for as long as the gateway takes (its start
@@ -6514,6 +6525,15 @@
               body && typeof body.code === 'string'
                 ? body.code
                 : 'http ' + res.status;
+            if (
+              body &&
+              body.code === 'spawn_failed' &&
+              typeof body.error === 'string'
+            ) {
+              // #198: the command could not be spawned; the message names
+              // the errno and the program, which is what the reader can act on.
+              failed = body.error;
+            }
             if (body && typeof body.exitCode === 'number') {
               failed += ' (exit ' + body.exitCode + ')';
             }
@@ -6572,10 +6592,15 @@
             hostGroup.append(el.more);
           }
           const busy = hostActs.busy.has(a.name);
-          const state = a.running ? 'running' : 'not running';
+          const state = a.running
+            ? 'running'
+            : a.error
+              ? 'probe failed: ' + a.error
+              : 'not running';
           h1Text(el.lbl, a.label);
           h1Text(el.state, state);
           el.state.dataset.running = String(a.running);
+          el.state.dataset.failed = String(!a.running && !!a.error);
           el.btn.hidden = a.running;
           el.btn.disabled = busy;
           h1Text(el.btn, busy ? 'starting…' : 'Start');

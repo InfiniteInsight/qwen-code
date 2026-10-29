@@ -19713,6 +19713,68 @@ PAGE_SCENARIOS.push({
       return `toast: ${r.toast}; the row back to not running and pressable`;
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P191 a host action whose probe program could not be spawned reads "probe failed: ENOENT: powershell.exe" in muted ink in the sheet and in More, and a start the gateway answers spawn_failed says so in the status line',
+    // #198. The gateway used to settle a missing program as "not running" and
+    // log nothing. Its answers now carry `status: 'unknown'` and an `error`
+    // (errno and program basename), and the start route answers 502
+    // `spawn_failed`. The harness's fake never fails to spawn, so both
+    // answers are the gateway's own shapes served in its place.
+    waitView: false,
+    stub: { hostActions: true },
+    before: async (page) => {
+      await page.route('**/rc/host/actions', (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            actions: [
+              { name: 'launcher', label: HOST_ACTION_LABEL, running: false, status: 'unknown', error: 'ENOENT: powershell.exe' },
+            ],
+          }),
+        }),
+      );
+      await page.route('**/rc/host/actions/launcher/start', (route) =>
+        route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'The start command could not be run (ENOENT: powershell.exe)', code: 'spawn_failed' }),
+        }),
+      );
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+      await page.click('#h1-status');
+      await page.waitForFunction(`/probe failed/.test((document.querySelector('#h1-host-acts .ha-state') || {}).textContent || '')`);
+      const r = (await page.evaluate(String.raw`(() => {
+        const st = document.querySelector('#h1-host-acts .ha-state');
+        const btn = document.querySelector('#h1-host-acts button');
+        return {
+          state: st.textContent,
+          stateInk: getComputedStyle(st).color,
+          mutedInk: getComputedStyle(document.querySelector('#session-footer .sh-lbl')).color,
+          more: document.querySelector('#more-screen .row[data-host-act="launcher"] .val').textContent,
+          btn: btn.textContent,
+          btnShown: btn.getClientRects().length > 0,
+        };
+      })()`)) as { state: string; stateInk: string; mutedInk: string; more: string; btn: string; btnShown: boolean };
+      expect(r.state === 'probe failed: ENOENT: powershell.exe', `the sheet reads ${JSON.stringify(r.state)}`);
+      expect(r.more === 'probe failed: ENOENT: powershell.exe', `More > Host reads ${JSON.stringify(r.more)}`);
+      expect(r.stateInk === r.mutedInk, `"probe failed" is ${r.stateInk}, not the muted ${r.mutedInk}`);
+      expect(r.btnShown && r.btn === 'Start', `Start is ${JSON.stringify({ text: r.btn, shown: r.btnShown })}, not offered`);
+      await page.click('#h1-host-acts button');
+      await page.waitForFunction(`/did not start/.test(document.getElementById('status').textContent)`);
+      const note = await page.evaluate(`document.getElementById('status').textContent`);
+      expect(
+        note === `${HOST_ACTION_LABEL} did not start: The start command could not be run (ENOENT: powershell.exe)`,
+        `the status line reads ${JSON.stringify(note)}`,
+      );
+      return `sheet and More read ${r.state} in muted ink; Start's 502 said ${note}`;
+    },
+  });
 }
 
 /**
