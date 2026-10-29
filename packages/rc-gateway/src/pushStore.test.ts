@@ -58,6 +58,30 @@ describe('PushStore', () => {
     expect(reopened.listAll()).toHaveLength(0);
   });
 
+  it('removeByTokens drops every subscription of the given tokens in one persist (#205)', async () => {
+    const path = tempPath();
+    const store = await PushStore.open(path);
+    const a1 = await store.add('tokA', SUB_A);
+    const a2 = await store.add('tokA', {
+      endpoint: 'https://push/2',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const b1 = await store.add('tokB', SUB_A);
+    const c1 = await store.add('tokC', SUB_A);
+
+    const removed = await store.removeByTokens(['tokA', 'tokB', 'tokNone']);
+    expect(removed.map((r) => r.id).sort()).toEqual(
+      [a1.id, a2.id, b1.id].sort(),
+    );
+    expect(store.listAll().map((r) => r.id)).toEqual([c1.id]);
+    // Persisted, and idempotent: nothing left to remove the second time.
+    expect((await PushStore.open(path)).listAll().map((r) => r.id)).toEqual([
+      c1.id,
+    ]);
+    expect(await store.removeByTokens(['tokA', 'tokB'])).toEqual([]);
+    expect(await store.removeByTokens([])).toEqual([]);
+  });
+
   it('setPrefs sets, clears (removes the field), reports missing, and persists', async () => {
     const path = tempPath();
     const store = await PushStore.open(path);

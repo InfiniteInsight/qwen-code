@@ -210,6 +210,23 @@ export class PushStore {
   }
 
   /**
+   * Remove every subscription bound to any of `tokenIds` in ONE persist (#205
+   * revoke cascade) and return the removed records, so the caller can free each
+   * one's in-memory state (rate window, coalescer, digest) and count them.
+   * Persists only if something changed.
+   */
+  async removeByTokens(
+    tokenIds: Iterable<string>,
+  ): Promise<PushSubscriptionRecord[]> {
+    const doomed = new Set(tokenIds);
+    const removed = this.records.filter((r) => doomed.has(r.tokenId));
+    if (removed.length === 0) return [];
+    this.records = this.records.filter((r) => !doomed.has(r.tokenId));
+    await this.persist();
+    return removed;
+  }
+
+  /**
    * Temp-and-rename (#165), with the body built when the write starts, so a
    * burst of adds coalesces into at most two whole-file writes rather than
    * one per add. Each write is still the whole file; the per-token cap in

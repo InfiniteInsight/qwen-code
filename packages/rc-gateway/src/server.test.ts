@@ -2090,3 +2090,237 @@ describe('#165 model-call routes are rate limited per token', () => {
     expect(third.code).toBe('rate_limited');
   });
 });
+
+describe('#205 token revoke cascade (web push, APNs, digest, audit)', () => {
+  const SUB = (n: number) => ({
+    endpoint: `https://push.example.com/${n}`,
+    keys: { p256dh: 'p', auth: 'a' },
+  });
+
+  async function setup() {
+    const apnsDir = mkdtempSync(join(tmpdir(), 'rc-rev205-'));
+    const apnsStore = await ApnsStore.open(join(apnsDir, 'apns.json'));
+    const booted = await boot(undefined, { apnsStore });
+    const { store, pushStore } = booted;
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const victim = await store.issue([SESSION_READ, APPROVE], 'victim');
+    const bystander = await store.issue([SESSION_READ, APPROVE], 'bystander');
+    const device = (tokenId: string, n: number) =>
+      apnsStore.register({
+        tokenId,
+        deviceToken: `${n}`.padStart(64, 'a'),
+        bundleId: 'dev.qwen.rc',
+        shellVersion: '1.0.0',
+      });
+    return {
+      ...booted,
+      apnsStore,
+      pushStore,
+      owner,
+      victim,
+      bystander,
+      device,
+      cleanup: () => rmSync(apnsDir, { recursive: true, force: true }),
+    };
+  }
+
+  it('DELETE /rc/tokens/:id removes the token web push subscriptions and APNs devices, and nothing else', async () => {
+    const s = await setup();
+    const v1 = await s.pushStore.add(s.victim.id, SUB(1));
+    await s.pushStore.add(s.victim.id, SUB(2));
+    await s.pushStore.add(s.bystander.id, SUB(3));
+    await s.device(s.victim.id, 1);
+    await s.device(s.bystander.id, 2);
+    expect(v1).toBeDefined();
+
+    const res = await fetch(`${s.url}/rc/tokens/${s.victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s.owner.token}` },
+    });
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe('');
+
+    expect(s.pushStore.listFor(s.victim.id)).toHaveLength(0);
+    expect(s.pushStore.listFor(s.bystander.id)).toHaveLength(1);
+    expect(s.apnsStore.listForToken(s.victim.id)).toHaveLength(0);
+    expect(s.apnsStore.listForToken(s.bystander.id)).toHaveLength(1);
+    s.cleanup();
+  });
+
+  it('writes one token_revoked row carrying subscription and device counts, no endpoints', async () => {
+    const s = await setup();
+    await s.pushStore.add(s.victim.id, SUB(1));
+    await s.pushStore.add(s.victim.id, SUB(2));
+    await s.device(s.victim.id, 1);
+
+    await fetch(`${s.url}/rc/tokens/${s.victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s.owner.token}` },
+    });
+    const rows = await pollAudit(s.auditPath, (r) =>
+      r.some((x) => x.action === 'token_revoked'),
+    );
+    const revoked = rows.filter((x) => x.action === 'token_revoked');
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]!.target).toBe(s.victim.id);
+    expect(revoked[0]!.detail).toEqual({ subscriptions: 2, devices: 1 });
+    expect(JSON.stringify(rows)).not.toContain('push.example.com');
+    // The cascade does not add a second, per-store row for the same revoke.
+    expect(
+      rows.filter((x) => x.action === 'apns_subscription_removed'),
+    ).toEqual([]);
+    s.cleanup();
+  });
+
+  it("drops the revoked token's quiet-hours digest entries and leaves other tokens' alone", async () => {
+    const s = await setup();
+    const vs = await s.pushStore.add(s.victim.id, SUB(1));
+    const bs = await s.pushStore.add(s.bystander.id, SUB(2));
+    for (const sub of [vs, bs]) {
+      await s.pushStore.setQuietHours(sub.id, {
+        from: '00:00',
+        to: '23:59',
+        timezone: 'UTC',
+      });
+    }
+    await s.notifier!.notify(
+      { type: 'permission_request', data: { requestId: 'r1' } },
+      { sessionId: 's1' },
+      new Date('2026-06-12T12:00:00Z'),
+    );
+    expect(
+      s
+        .notifier!.digestSummary()
+        .map((d) => d.subscriptionId)
+        .sort(),
+    ).toEqual([vs.id, bs.id].sort());
+
+    await fetch(`${s.url}/rc/tokens/${s.victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s.owner.token}` },
+    });
+    expect(s.notifier!.digestSummary().map((d) => d.subscriptionId)).toEqual([
+      bs.id,
+    ]);
+    s.cleanup();
+  });
+
+  it('POST /rc/tokens/revoke-all removes every subscription and device of the revoked tokens', async () => {
+    const s = await setup();
+    await s.pushStore.add(s.victim.id, SUB(1));
+    await s.pushStore.add(s.bystander.id, SUB(2));
+    await s.pushStore.add(s.owner.id, SUB(3));
+    await s.device(s.victim.id, 1);
+    await s.device(s.bystander.id, 2);
+    await s.device(s.owner.id, 3);
+
+    const res = await fetch(`${s.url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s.owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revokedIds: string[] };
+    expect(Object.keys(body)).toEqual(['revokedIds']);
+    expect(body.revokedIds.sort()).toEqual(
+      [s.victim.id, s.bystander.id].sort(),
+    );
+
+    expect(s.pushStore.listAll().map((r) => r.tokenId)).toEqual([s.owner.id]);
+    expect(s.apnsStore.listAll().map((r) => r.tokenId)).toEqual([s.owner.id]);
+
+    const rows = await pollAudit(
+      s.auditPath,
+      (r) => r.filter((x) => x.action === 'token_revoked').length >= 2,
+    );
+    const byTarget = new Map(
+      rows
+        .filter((x) => x.action === 'token_revoked')
+        .map((x) => [x.target, x.detail] as const),
+    );
+    expect(byTarget.get(s.victim.id)).toEqual({ subscriptions: 1, devices: 1 });
+    expect(byTarget.get(s.bystander.id)).toEqual({
+      subscriptions: 1,
+      devices: 1,
+    });
+    s.cleanup();
+  });
+
+  it('revoke-all without except removes the owner own subscriptions and devices too', async () => {
+    const s = await setup();
+    await s.pushStore.add(s.owner.id, SUB(3));
+    await s.device(s.owner.id, 3);
+    const res = await fetch(`${s.url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s.owner.token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(s.pushStore.listAll()).toHaveLength(0);
+    expect(s.apnsStore.listAll()).toHaveLength(0);
+    s.cleanup();
+  });
+
+  it('DELETE /rc/share/:id removes the revoked share link push subscription and device, counts on share_revoked', async () => {
+    const s = await setup();
+    const mint = await fetch(`${s.url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s.owner.token}`,
+      },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: 3600 }),
+    });
+    expect(mint.status).toBe(201);
+    const share = (await mint.json()) as { id: string };
+    await s.pushStore.add(share.id, SUB(1));
+    await s.pushStore.add(s.bystander.id, SUB(2));
+    await s.device(share.id, 1);
+
+    const res = await fetch(`${s.url}/rc/share/${share.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s.owner.token}` },
+    });
+    expect(res.status).toBe(204);
+    expect(s.pushStore.listFor(share.id)).toHaveLength(0);
+    expect(s.apnsStore.listForToken(share.id)).toHaveLength(0);
+    expect(s.pushStore.listFor(s.bystander.id)).toHaveLength(1);
+
+    const rows = await pollAudit(s.auditPath, (r) =>
+      r.some((x) => x.action === 'share_revoked'),
+    );
+    const revoked = rows.filter((x) => x.action === 'share_revoked');
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]!.detail).toMatchObject({
+      shareId: share.id,
+      subscriptions: 1,
+      devices: 1,
+    });
+    expect(JSON.stringify(rows)).not.toContain('push.example.com');
+    s.cleanup();
+  });
+
+  it('still revokes with no APNs store wired and nothing to remove (counts are zero)', async () => {
+    const { url, store, auditPath } = await boot();
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const victim = await store.issue([SESSION_READ], 'victim');
+    const res = await fetch(`${url}/rc/tokens/${victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(res.status).toBe(204);
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'token_revoked'),
+    );
+    expect(rows.find((x) => x.action === 'token_revoked')!.detail).toEqual({
+      subscriptions: 0,
+      devices: 0,
+    });
+  });
+});

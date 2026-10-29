@@ -10,6 +10,7 @@ import type { TokenStore } from '../tokenStore.js';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
 import { SHARE, SESSION_READ, APPROVE } from '../scopes.js';
 import type { AuditRecorder } from '../auditLog.js';
+import type { TokenRevokedHook } from './tokens.js';
 
 /** Lower/upper bound on a share's redemption count (design table). */
 const MAX_USES_MIN = 1;
@@ -56,6 +57,7 @@ export function createShareRouter(
   store: TokenStore,
   registry: ConnectionRegistry,
   audit?: AuditRecorder,
+  onTokenRevoked?: TokenRevokedHook,
 ): Router {
   const router = Router();
 
@@ -134,13 +136,17 @@ export function createShareRouter(
     }
     await store.revoke(id);
     registry.evict(id);
+    // #205: a share link is a token, so it goes through the same cascade as a
+    // token revoke; the counts ride on the existing share_revoked row.
+    const counts = onTokenRevoked ? await onTokenRevoked([id]) : undefined;
+    const cascade = counts ? counts.get(id) : undefined;
     void audit?.record({
       action: 'share_revoked',
       actorTokenId: req.rcClient?.id,
       target: id,
       shareId: id,
       shareLabel: rec.label,
-      detail: { shareId: id },
+      detail: { shareId: id, ...cascade },
     });
     res.status(204).end();
   });

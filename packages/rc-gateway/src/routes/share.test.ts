@@ -16,6 +16,7 @@ import { TokenStore } from '../tokenStore.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
 import { SHARE, SESSION_READ, APPROVE } from '../scopes.js';
 import { createShareRouter, createShareWhoamiHandler } from './share.js';
+import type { TokenRevokedHook } from './tokens.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -50,7 +51,7 @@ beforeEach(async () => {
 });
 
 /** Mount the share router behind a stub that injects an OWNER rcClient. */
-async function mount(): Promise<string> {
+async function mount(onTokenRevoked?: TokenRevokedHook): Promise<string> {
   const inject: RequestHandler = (req, _res, next) => {
     req.rcClient = { id: 'owner-1', scopes: ['owner'] };
     next();
@@ -58,7 +59,10 @@ async function mount(): Promise<string> {
   const app = express();
   app.use(express.json());
   app.use(inject);
-  app.use('/rc/share', createShareRouter(store, registry, audit));
+  app.use(
+    '/rc/share',
+    createShareRouter(store, registry, audit, onTokenRevoked),
+  );
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
   });
@@ -182,6 +186,40 @@ describe('/rc/share routes', () => {
     expect(revoked!.shareId).toBe(id);
     expect(revoked!.shareLabel).toBe('share'); // default label
     expect(revoked!.detail).toMatchObject({ shareId: id });
+  });
+
+  it('DELETE runs the revoke cascade once with the share id and puts the counts on share_revoked (#205)', async () => {
+    const calls: string[][] = [];
+    const url = await mount(async (ids) => {
+      calls.push([...ids]);
+      return new Map([[ids[0]!, { subscriptions: 1, devices: 0 }]]);
+    });
+    const created = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: 3600 }),
+    });
+    const { id } = (await created.json()) as { id: string };
+    const res = await fetch(`${url}/rc/share/${id}`, { method: 'DELETE' });
+    expect(res.status).toBe(204);
+    expect(calls).toEqual([[id]]);
+    const revoked = audit.calls.filter((c) => c.action === 'share_revoked');
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]!.detail).toEqual({
+      shareId: id,
+      subscriptions: 1,
+      devices: 0,
+    });
+  });
+
+  it('DELETE an unknown share id never runs the cascade (#205)', async () => {
+    let ran = false;
+    const url = await mount(async () => {
+      ran = true;
+    });
+    const res = await fetch(`${url}/rc/share/nope`, { method: 'DELETE' });
+    expect(res.status).toBe(404);
+    expect(ran).toBe(false);
   });
 
   it('DELETE an unknown share id → 404', async () => {
