@@ -40,15 +40,17 @@ import type { AuditRecorder } from '../auditLog.js';
  * Adding multipart would mean a second encoding of the same file in the path
  * between the phone and the daemon.
  *
- * WHY THE SIZE CAP IS THE SDK'S, ENFORCED EARLY
+ * WHY THE SIZE CAP IS ENFORCED EARLY
  *
- * `uploadSessionAttachment` throws a bare `RangeError` above 8 MiB, which is
- * not an HTTP status, so a route that let it through would surface as a 500
- * for what is really a too-large upload. The same number is therefore applied
- * as the raw parser's `limit`, so the request is refused at the boundary with
- * a 413 and the bytes are never buffered. The boundaries agree: the client
- * rejects strictly above 8 MiB and `limit` rejects strictly above it too, so a
- * file of exactly 8 MiB is accepted by both.
+ * `uploadSessionAttachment` throws a bare `RangeError` above its own cap,
+ * which is not an HTTP status, so a route that let it through would surface as
+ * a 5xx for what is really a too-large upload. The limit (configurable since
+ * #196, see {@link effectiveAttachmentLimit}) is therefore applied as the raw
+ * parser's `limit`, so the request is refused at the boundary with a 413 and
+ * the bytes are never buffered. The boundaries agree: the client rejects
+ * strictly above its cap and `limit` rejects strictly above its own too, so a
+ * file of exactly the limit is accepted by both. A `RangeError` that still
+ * gets through is answered as a 413 as well.
  *
  * WHY THE REFUSAL IS RELAYED
  *
@@ -68,8 +70,67 @@ import type { AuditRecorder } from '../auditLog.js';
  * carried from #107 is that paths stay out of records.
  */
 
-/** The client's cap is 8 MiB; `limit` is inclusive of that exact size. */
-const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+/** Default for `--max-attachment-bytes`: a phone photo is 3 to 12 MB (#196). */
+export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Ceiling for `--max-attachment-bytes`: the daemon's own per-session budget for
+ * queued inline attachments (`MAX_QUEUED_INLINE_ATTACHMENT_BYTES`,
+ * packages/acp-bridge/src/session-control-plane.ts), so an operator cannot ask
+ * for a limit no session could ever hold.
+ */
+export const MAX_CONFIGURABLE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+/**
+ * The daemon's PER-FILE cap, which is a different number from the 100 MiB
+ * per-session budget above. `DaemonClient.uploadSessionAttachment` throws a
+ * `RangeError` above it (packages/sdk-typescript/src/daemon/DaemonClient.ts)
+ * and the daemon's own store refuses it too
+ * (`SESSION_ATTACHMENT_MAX_ITEM_BYTES`, packages/acp-bridge/src/
+ * sessionAttachments.ts). The gateway cannot edit either, so a configured limit
+ * above this would accept bytes that are then refused one layer down. The
+ * effective limit is therefore the smaller of the two; when the daemon side is
+ * raised, change this one constant.
+ */
+export const DAEMON_ATTACHMENT_ITEM_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Validates one `--max-attachment-bytes` / `QWEN_RC_MAX_ATTACHMENT_BYTES`
+ * value: a plain positive integer not above
+ * {@link MAX_CONFIGURABLE_ATTACHMENT_BYTES}. Unset stays `undefined` so the
+ * default stands. `name` is what the error should call the setting.
+ */
+export function parseMaxAttachmentBytes(
+  name: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (
+    !Number.isSafeInteger(n) ||
+    n < 1 ||
+    n > MAX_CONFIGURABLE_ATTACHMENT_BYTES
+  ) {
+    throw new Error(
+      `${name}: expected a positive integer of bytes not above ${MAX_CONFIGURABLE_ATTACHMENT_BYTES}, got "${raw}"`,
+    );
+  }
+  return n;
+}
+
+/**
+ * The limit the route enforces and `/rc/capabilities` reports: the configured
+ * one (default {@link DEFAULT_MAX_ATTACHMENT_BYTES}) held to what the daemon
+ * will actually accept per file.
+ */
+export function effectiveAttachmentLimit(
+  configured: number | undefined,
+): number {
+  return Math.min(
+    configured ?? DEFAULT_MAX_ATTACHMENT_BYTES,
+    DAEMON_ATTACHMENT_ITEM_BYTES,
+  );
+}
 
 interface FsErrorBody {
   errorKind?: unknown;
@@ -99,6 +160,15 @@ function readFsError(err: unknown): {
  */
 export function sendAttachmentError(res: Response, err: unknown): void {
   if (res.headersSent) return;
+  // The SDK's own size guard throws a bare RangeError, not an HTTP status;
+  // it means "too large", so it is answered as such.
+  if (err instanceof RangeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'attachment_too_large',
+    });
+    return;
+  }
   const { status, kind, message, hint } = readFsError(err);
   if (typeof status === 'number' && status >= 400 && status < 500) {
     // A 404 with no fs envelope is not "that attachment is not here" - it is a
@@ -152,30 +222,38 @@ export function gateJsonBody(json: RequestHandler): RequestHandler {
  * Express's default HTML error page, so they are answered in the envelope the
  * rest of this file uses.
  */
-const attachmentBodyGuard: ErrorRequestHandler = (err, _req, res, next) => {
-  if (res.headersSent) return next(err);
-  if ((err as { type?: unknown }).type === 'entity.too.large') {
-    res.status(413).json({
-      error: `Attachments must not exceed ${MAX_ATTACHMENT_BYTES} bytes`,
-      code: 'attachment_too_large',
+function attachmentBodyGuard(maxBytes: number): ErrorRequestHandler {
+  return (err, _req, res, next) => {
+    if (res.headersSent) return next(err);
+    if ((err as { type?: unknown }).type === 'entity.too.large') {
+      res.status(413).json({
+        error: `Attachments must not exceed ${maxBytes} bytes`,
+        code: 'attachment_too_large',
+      });
+      return;
+    }
+    res.status(400).json({
+      error: 'Could not read the upload body',
+      code: 'invalid_body',
     });
-    return;
-  }
-  res.status(400).json({
-    error: 'Could not read the upload body',
-    code: 'invalid_body',
-  });
-};
+  };
+}
 
 /**
- * Reads the uploaded file. Mounted per-route rather than globally: this is the
- * only family that takes a body that is not a request the gateway itself
- * invented.
+ * Reads the uploaded file, refusing anything strictly above `maxBytes` with a
+ * 413 before it is buffered. Mounted per-route rather than globally: this is
+ * the only family that takes a body that is not a request the gateway itself
+ * invented. The same number feeds the parser's `limit` and the 413 text, and
+ * `/rc/capabilities` reports it, so the page can size an image to fit.
  */
-export const rawAttachmentBody: Array<RequestHandler | ErrorRequestHandler> = [
-  express.raw({ type: () => true, limit: MAX_ATTACHMENT_BYTES }),
-  attachmentBodyGuard,
-];
+export function createRawAttachmentBody(
+  maxBytes: number = effectiveAttachmentLimit(undefined),
+): Array<RequestHandler | ErrorRequestHandler> {
+  return [
+    express.raw({ type: () => true, limit: maxBytes }),
+    attachmentBodyGuard(maxBytes),
+  ];
+}
 
 /**
  * POST /session/:id/attachments?name=<file name> - one file, sent as the raw

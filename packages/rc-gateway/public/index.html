@@ -4147,6 +4147,59 @@
             max-height: 240px;
             object-fit: contain;
           }
+          /* An attachment on a message you sent (#197): a stored picture is
+             fetched with the token and drawn as a thumbnail (the 240px cap is
+             what estimate() in transcript-view.js assumes for a row it has not
+             measured); anything else is a chip with its name, type and size.
+             The box keeps a height while the picture loads, and the row is
+             measured again when it lands. */
+          #transcript .user .att-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 6px;
+          }
+          #transcript .user .att-list[hidden] {
+            display: none;
+          }
+          #transcript .user .att-image.att-loading {
+            min-height: 96px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 8px;
+          }
+          #transcript .user .att-link {
+            display: block;
+            line-height: 0;
+          }
+          #transcript .user .att-thumb {
+            display: block;
+            max-width: 100%;
+            max-height: 240px;
+            object-fit: contain;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.25);
+          }
+          #transcript .user .att-name,
+          #transcript .user .att-note {
+            margin-top: 4px;
+            font-size: 0.8rem;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+          }
+          #transcript .user .att-chip {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.28);
+            font-size: 0.85rem;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+          }
+          #transcript .user .att-chip-meta {
+            font-size: 0.75rem;
+          }
           #transcript .image .image-note {
             padding: 8px 10px;
             font-size: 0.85rem;
@@ -5726,6 +5779,62 @@
         $('jump-bottom').hidden = transcriptView.isNearBottom();
         applyStampZone();
       }
+      // #197. A picture attached to a message is stored in the session, so its
+      // thumbnail is fetched with the token (an <img src> cannot carry one) and
+      // handed to the row as a blob: URL, which is also what the full-size tap
+      // opens. Only a raster type is let through, whatever the daemon says it
+      // holds: a blob: document runs on this origin, so an SVG must never get
+      // here. The urls are kept per session and bounded; one let go is asked
+      // for again by the row that still shows it.
+      const ATTACHMENT_THUMB_TYPES = /^image\/(png|jpe?g|gif|webp|avif|bmp)$/;
+      const ATTACHMENT_URL_CAP = 24;
+      const attachmentUrls = new Map();
+      function loadAttachmentThumb(attachmentId) {
+        const sid = watchedSessionId;
+        if (!sid || !attachmentId) return Promise.resolve(null);
+        const key = sid + '/' + attachmentId;
+        const known = attachmentUrls.get(key);
+        if (known) return known;
+        const pending = (async () => {
+          try {
+            const res = await fetch(
+              '/session/' +
+                encodeURIComponent(sid) +
+                '/attachments/' +
+                encodeURIComponent(attachmentId),
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            if (!res.ok) return null;
+            const body = await res.json();
+            const mime = String((body && body.mimeType) || '')
+              .split(';')[0]
+              .trim()
+              .toLowerCase();
+            if (!body || typeof body.data !== 'string' || !body.data) return null;
+            if (!ATTACHMENT_THUMB_TYPES.test(mime)) return null;
+            const bin = atob(body.data);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return { url: URL.createObjectURL(new Blob([bytes], { type: mime })) };
+          } catch {
+            return null;
+          }
+        })();
+        attachmentUrls.set(key, pending);
+        void pending.then((r) => {
+          if (!r && attachmentUrls.get(key) === pending) attachmentUrls.delete(key);
+        });
+        while (attachmentUrls.size > ATTACHMENT_URL_CAP) {
+          const oldest = attachmentUrls.keys().next().value;
+          const gone = attachmentUrls.get(oldest);
+          attachmentUrls.delete(oldest);
+          void gone.then((r) => {
+            if (r) URL.revokeObjectURL(r.url);
+          });
+        }
+        return pending;
+      }
+
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
           model: transcriptModel,
@@ -5743,6 +5852,8 @@
           onTurnAct: (act, item) => void turnAct(act, item),
           // #184: retry on a refused message's marker.
           onRetry: (item) => retryNotSent(item),
+          // #197: the picture on a message with an attachment.
+          loadAttachment: (attachmentId) => loadAttachmentThumb(attachmentId),
           onCancelSubagent: (item) =>
             void doCancelSubagent(watchedSessionId, item),
           onCostSubagent: (item) =>
@@ -9103,6 +9214,24 @@
         // boundary. Drawn unless it is this window's own echo (#114), which
         // the send path already put on screen at the moment you typed it.
         if (su === 'user_message_chunk') {
+          // #197: a picture or file the sender attached is not text, and drawn
+          // as text it was an empty bubble. It joins the message above it when
+          // there is one, so it is not a second turn.
+          const part =
+            typeof TranscriptModel.userPartOf === 'function'
+              ? TranscriptModel.userPartOf(u.content)
+              : null;
+          if (part) {
+            markPrevTurnEnd();
+            const added = transcriptModel.addUserPart(part, sentAt);
+            scrollTranscript(!added.merged);
+            if (!added.merged) {
+              userTurnsSeen += 1;
+              asstThisTurn = false;
+            }
+            if (!insideReplay) showProcessing();
+            return;
+          }
           userTurnsSeen += 1;
           asstThisTurn = false;
           // Drawn before the arm below, because addUser closes the turn it
@@ -11632,10 +11761,185 @@
         renderPendingAttachments();
       };
 
-      async function uploadAttachment(file) {
+      // #196: the upload limit the gateway reports on /rc/capabilities. An
+      // older gateway says nothing and enforced 8 MiB, so that is the fallback.
+      const LEGACY_ATTACHMENT_LIMIT = 8 * 1024 * 1024;
+      function attachmentLimit() {
+        const n =
+          caps && caps.remoteControl
+            ? caps.remoteControl.maxAttachmentBytes
+            : undefined;
+        return typeof n === 'number' && Number.isFinite(n) && n > 0
+          ? n
+          : LEGACY_ATTACHMENT_LIMIT;
+      }
+
+      // The shrink ladder. Longest sides to try, largest first; only the ones
+      // below the picture's own size are used (a picture is never enlarged), and
+      // its own size is always the first rung so a file that is merely heavy,
+      // not large, gets a lower quality before it loses pixels.
+      const IMAGE_SIDE_STEPS = [4096, 3072, 2048, 1600, 1280, 1024, 768, 512];
+      // JPEG qualities tried at each size.
+      const IMAGE_JPEG_QUALITY = [0.9, 0.8, 0.7, 0.55];
+      // A PNG that has transparency stays a PNG while it still fits at this
+      // longest side or more. Below that it is flattened onto white as a JPEG,
+      // because a thumbnail-sized PNG is worse than a photo-sized JPEG.
+      const PNG_KEEP_MIN_SIDE = 1024;
+      const RESIZABLE_IMAGE = /^image\/(jpeg|png|webp|bmp)$/;
+
+      function canvasBlob(canvas, type, quality) {
+        return new Promise((resolve) => {
+          try {
+            canvas.toBlob((b) => resolve(b), type, quality);
+          } catch {
+            resolve(null);
+          }
+        });
+      }
+
+      async function decodeImage(file) {
+        if (typeof createImageBitmap === 'function') {
+          try {
+            return await createImageBitmap(file);
+          } catch {
+            /* fall through to the element decoder */
+          }
+        }
+        const url = URL.createObjectURL(file);
+        try {
+          const img = new Image();
+          img.src = url;
+          await img.decode();
+          return img;
+        } catch {
+          return null;
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+
+      // True when any pixel of the picture is not opaque, judged on a small
+      // copy: a photograph-sized getImageData would cost more than the encode.
+      function hasTransparency(img) {
+        const c = document.createElement('canvas');
+        const k = Math.min(1, 128 / Math.max(img.width, img.height));
+        c.width = Math.max(1, Math.round(img.width * k));
+        c.height = Math.max(1, Math.round(img.height * k));
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0, c.width, c.height);
+        const px = g.getImageData(0, 0, c.width, c.height).data;
+        for (let i = 3; i < px.length; i += 4) if (px[i] < 255) return true;
+        return false;
+      }
+
+      function renamed(name, ext) {
+        const dot = name.lastIndexOf('.');
+        return (dot > 0 ? name.slice(0, dot) : name) + ext;
+      }
+
+      // Re-encodes a picture until it is at most `limit` bytes, or gives up
+      // with null. Returns { file, width, height } for the first that fits.
+      async function shrinkImage(file, limit) {
+        const img = await decodeImage(file);
+        if (!img) return null;
+        const longest = Math.max(img.width, img.height);
+        const sides = [longest].concat(
+          IMAGE_SIDE_STEPS.filter((side) => side < longest),
+        );
+        const canvas = document.createElement('canvas');
+        const draw = (side, flatten) => {
+          const k = side / longest;
+          canvas.width = Math.max(1, Math.round(img.width * k));
+          canvas.height = Math.max(1, Math.round(img.height * k));
+          const g = canvas.getContext('2d');
+          if (flatten) {
+            g.fillStyle = '#ffffff';
+            g.fillRect(0, 0, canvas.width, canvas.height);
+          }
+          g.imageSmoothingQuality = 'high';
+          g.drawImage(img, 0, 0, canvas.width, canvas.height);
+        };
+        const keepPng = file.type === 'image/png' && hasTransparency(img);
+        if (keepPng) {
+          for (const side of sides) {
+            if (side < PNG_KEEP_MIN_SIDE && side !== longest) break;
+            draw(side, false);
+            const blob = await canvasBlob(canvas, 'image/png');
+            if (blob && blob.size <= limit) {
+              return {
+                file: new File([blob], file.name, { type: 'image/png' }),
+                width: canvas.width,
+                height: canvas.height,
+              };
+            }
+          }
+        }
+        for (const side of sides) {
+          draw(side, true);
+          for (const q of IMAGE_JPEG_QUALITY) {
+            const blob = await canvasBlob(canvas, 'image/jpeg', q);
+            if (blob && blob.size <= limit) {
+              return {
+                file: new File([blob], renamed(file.name, '.jpg'), {
+                  type: 'image/jpeg',
+                }),
+                width: canvas.width,
+                height: canvas.height,
+              };
+            }
+          }
+        }
+        return null;
+      }
+
+      async function uploadAttachment(picked) {
         if (!watchedSessionId) {
           setPendingNote('watch a session first');
           return;
+        }
+        let file = picked;
+        const limit = attachmentLimit();
+        let reduced = '';
+        if (file.size > limit) {
+          if (!RESIZABLE_IMAGE.test(file.type)) {
+            // Refused here, with the number, rather than sent to be refused.
+            setPendingNote(
+              file.name +
+                ': ' +
+                formatBytes(file.size) +
+                ' is over the ' +
+                formatBytes(limit) +
+                ' limit',
+            );
+            return;
+          }
+          setPendingNote('reducing ' + file.name + '…');
+          const fit = await shrinkImage(file, limit);
+          if (!fit) {
+            setPendingNote(
+              file.name +
+                ': ' +
+                formatBytes(file.size) +
+                ' is over the ' +
+                formatBytes(limit) +
+                ' limit and could not be reduced to fit',
+            );
+            return;
+          }
+          reduced =
+            file.name +
+            ' reduced from ' +
+            formatBytes(file.size) +
+            ' to ' +
+            formatBytes(fit.file.size) +
+            ' (' +
+            fit.width +
+            'x' +
+            fit.height +
+            ') to fit the ' +
+            formatBytes(limit) +
+            ' limit';
+          file = fit.file;
         }
         setPendingNote('uploading ' + file.name + '…');
         let res;
@@ -11672,6 +11976,7 @@
         // as still-running forever beside a file that is plainly listed.
         pendingNote = '';
         renderPendingAttachments();
+        if (reduced) setStatus(reduced);
       }
 
       $('attach').onclick = () => {

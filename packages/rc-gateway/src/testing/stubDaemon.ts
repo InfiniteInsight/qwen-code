@@ -2209,7 +2209,7 @@ export async function startStubDaemon(
   // through, and a stub that ignored them could not prove that happened.
   app.post(
     '/session/:id/attachments',
-    express.raw({ type: () => true }),
+    express.raw({ type: () => true, limit: '16mb' }),
     (req, res) => {
       const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       state.lastAttachmentUpload = {

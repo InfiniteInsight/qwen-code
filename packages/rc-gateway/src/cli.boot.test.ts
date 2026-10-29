@@ -58,6 +58,37 @@ describe('parseServeFlags', () => {
     expect(parseServeFlags([]).hostActionsPath).toBeUndefined();
   });
 
+  it('reads --max-attachment-bytes in both forms and from the environment (#196)', () => {
+    expect(parseServeFlags(['--max-attachment-bytes', '1000'])).toMatchObject({
+      maxAttachmentBytes: 1000,
+    });
+    expect(parseServeFlags(['--max-attachment-bytes=2000'])).toMatchObject({
+      maxAttachmentBytes: 2000,
+    });
+    expect(parseServeFlags([]).maxAttachmentBytes).toBeUndefined();
+    const prior = process.env['QWEN_RC_MAX_ATTACHMENT_BYTES'];
+    try {
+      process.env['QWEN_RC_MAX_ATTACHMENT_BYTES'] = '3000';
+      expect(parseServeFlags([]).maxAttachmentBytes).toBe(3000);
+      // The flag wins over the environment, like the other pairs.
+      expect(parseServeFlags(['--max-attachment-bytes', '4000'])).toMatchObject(
+        { maxAttachmentBytes: 4000 },
+      );
+    } finally {
+      if (prior === undefined)
+        delete process.env['QWEN_RC_MAX_ATTACHMENT_BYTES'];
+      else process.env['QWEN_RC_MAX_ATTACHMENT_BYTES'] = prior;
+    }
+  });
+
+  it('rejects a bad --max-attachment-bytes before anything is spawned (#196)', () => {
+    for (const bad of ['0', '-1', 'abc', '104857601', '2.5']) {
+      expect(() => parseServeFlags(['--max-attachment-bytes', bad])).toThrow(
+        /--max-attachment-bytes/,
+      );
+    }
+  });
+
   it('keeps 0 legal, because that is the pick a free port request', () => {
     expect(parseServeFlags(['--port', '0'])).toMatchObject({ gatewayPort: 0 });
   });

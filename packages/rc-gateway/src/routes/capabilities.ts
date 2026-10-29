@@ -76,6 +76,12 @@ export function createCapabilityRoute(deps: {
   nativeShells?: () => NativeShellsCapability;
   /** True when the loopback `POST /rc/host/attach` routes are mounted. */
   hostAttach?: boolean;
+  /**
+   * The upload size limit the attachment route enforces (#196), so the page
+   * can shrink an image to fit before sending it. Omitted when not wired; the
+   * page then assumes the old 8 MiB.
+   */
+  maxAttachmentBytes?: number;
   /** Read of the daemon's own `/capabilities` envelope (see #96). */
   daemonStatus?: () => Promise<DaemonCapabilities>;
   /** Test seam for the daemon read's bound. */
@@ -116,6 +122,10 @@ export function createCapabilityRoute(deps: {
       // tell the user the command exists. True only when the gateway mounted
       // it, which the boot wiring always does.
       hostAttach: deps.hostAttach === true,
+      // #196: the largest upload `POST /session/:id/attachments` accepts.
+      ...(typeof deps.maxAttachmentBytes === 'number'
+        ? { maxAttachmentBytes: deps.maxAttachmentBytes }
+        : {}),
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

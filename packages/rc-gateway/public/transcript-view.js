@@ -387,8 +387,18 @@
       b.appendChild(roleLine(m.shape, item, stampZone));
       var body = el('span');
       m.body = textRef(item.text);
+      m.bodyBox = body;
       body.appendChild(m.body.node);
       b.appendChild(body);
+      // The attachments of a user message (#197) sit between its text and its
+      // not-sent marker. The box is always there for a user row and hidden
+      // while empty, so a part added later has somewhere to go.
+      m.partsBox = null;
+      m.partsN = 0;
+      if (item.kind === 'user') {
+        m.partsBox = el('div', 'att-list');
+        b.appendChild(m.partsBox);
+      }
       // A user message the daemon never accepted keeps its echo but says so:
       // the row is already on screen when the POST is in flight, and removing
       // it would take everything after it with it.
@@ -412,10 +422,122 @@
     }
     function patchUser(m) {
       syncTextNode(m.body, m.item.text);
+      syncParts(m);
       var note = m.item.notSent ? 'not sent: ' + m.item.notSent : '';
       if (m.notSent.textContent !== note) m.notSent.textContent = note;
       m.notSent.hidden = !note;
       m.retry.hidden = !note;
+    }
+
+    // ---- Attachments of a user message (#197) ------------------------------
+    // Parts only ever grow, so a sync appends the ones not drawn yet. The text
+    // span is hidden (not emptied) while the message has no text, so an
+    // attachment-only message does not carry a blank line above its picture.
+    function syncParts(m) {
+      var parts = m.item.parts || [];
+      var hideBody = !m.item.text && parts.length > 0;
+      if (m.bodyBox.hidden !== hideBody) m.bodyBox.hidden = hideBody;
+      if (!m.partsBox) return;
+      for (; m.partsN < parts.length; m.partsN++) {
+        m.partsBox.appendChild(buildPart(parts[m.partsN]));
+      }
+      var hide = parts.length === 0;
+      if (m.partsBox.hidden !== hide) m.partsBox.hidden = hide;
+    }
+    function partSizeLabel(n) {
+      if (!n) return '';
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+      return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+    function buildPart(part) {
+      return part.kind === 'image' ? buildPartImage(part) : buildPartChip(part);
+    }
+    // A file, or an image type the viewer will not open: name, type and size.
+    function buildPartChip(part) {
+      var chip = el('div', 'att-chip');
+      chip.appendChild(el('span', 'att-chip-name', part.name));
+      var meta = [part.mimeType || 'file', partSizeLabel(part.size)]
+        .filter(Boolean)
+        .join(' \u00b7 ');
+      chip.appendChild(el('span', 'att-chip-meta', meta));
+      return chip;
+    }
+    // A picture. Inline bytes draw at once; a stored one is fetched through the
+    // page (opts.loadAttachment, which holds the token and the session), and a
+    // row rebuilt after it scrolled away reuses the url kept on the part. The
+    // box has a set height until the picture lands, and the row is observed by
+    // the virtualizer, so the new height is measured when it arrives.
+    function buildPartImage(part) {
+      var box = el('div', 'att-image');
+      var a = el('a', 'att-link');
+      // The viewer holds a live session, so full size never replaces it.
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+      var img = el('img', 'att-thumb');
+      img.setAttribute('alt', part.name);
+      a.appendChild(img);
+      box.appendChild(a);
+      if (part.attachmentId) box.appendChild(el('div', 'att-name', part.name));
+
+      function show(url) {
+        img.setAttribute('src', url);
+        a.setAttribute('href', url);
+        box.classList.remove('att-loading');
+      }
+      function fail() {
+        box.classList.remove('att-loading');
+        a.remove();
+        box.insertBefore(
+          el('div', 'att-note', 'image unavailable'),
+          box.firstChild,
+        );
+      }
+      var retried = false;
+      function load() {
+        box.classList.add('att-loading');
+        var pending;
+        try {
+          pending = opts.loadAttachment(part.attachmentId, part);
+        } catch {
+          return fail();
+        }
+        Promise.resolve(pending).then(function (r) {
+          if (r && r.url) {
+            part.url = r.url;
+            show(r.url);
+          } else fail();
+        }, fail);
+      }
+      if (part.data) {
+        img.setAttribute(
+          'src',
+          'data:' + part.mimeType + ';base64,' + part.data,
+        );
+        a.addEventListener('click', function () {
+          if (a.getAttribute('href')) return;
+          var url = fullSizeUrl({ data: part.data, mime: part.mimeType });
+          if (url) a.setAttribute('href', url);
+        });
+      } else if (part.url) {
+        show(part.url);
+        // A url the page has since let go (it keeps a bounded number) is asked
+        // for again, once.
+        img.addEventListener('error', function () {
+          if (retried || typeof opts.loadAttachment !== 'function') return;
+          retried = true;
+          delete part.url;
+          load();
+        });
+      } else if (
+        part.attachmentId &&
+        typeof opts.loadAttachment === 'function'
+      ) {
+        load();
+      } else {
+        fail();
+      }
+      return box;
     }
 
     // An assistant row renders markdown. Its body is a block container rather
@@ -1004,9 +1126,22 @@
       var perLine = Math.max(16, Math.floor(((width - 16) * 0.92 - 20) / 8));
       switch (item.kind) {
         case 'user':
+          // Attachments (#197): a picture is capped at 240px by the page's CSS
+          // plus its name line and gap; a chip is one line. A message with no
+          // text draws no text line.
+          var parts = item.parts || [];
+          var partsH = 0;
+          for (var pi = 0; pi < parts.length; pi++) {
+            partsH += parts[pi].kind === 'image' ? 276 : 44;
+          }
           return (
             38 +
-            21 * (lineCount(item, item.text, perLine) + (item.notSent ? 1 : 0))
+            21 *
+              ((item.text || !parts.length
+                ? lineCount(item, item.text, perLine)
+                : 0) +
+                (item.notSent ? 1 : 0)) +
+            partsH
           );
         case 'asst':
           return (

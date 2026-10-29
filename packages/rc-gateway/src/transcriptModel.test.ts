@@ -43,6 +43,14 @@ interface Item {
   mode?: string;
   note?: string;
   busy?: boolean;
+  parts?: Array<{
+    kind: string;
+    name: string;
+    attachmentId?: string;
+    mimeType: string;
+    size: number;
+    data?: string;
+  }>;
 }
 interface Ev {
   type: 'append' | 'update' | 'reset';
@@ -55,6 +63,7 @@ interface Model {
   planItem: Item | null;
   subscribe(fn: (ev: Ev) => void): () => void;
   addUser(text: string): Item;
+  addUserPart(part: unknown, time?: number): { item: Item; merged: boolean };
   appendAssistant(text: string): void;
   appendThought(text: string): void;
   finishThought(): void;
@@ -81,6 +90,9 @@ interface Api {
   clean(t: unknown): string;
   createTranscriptModel(opts?: { now?: () => number }): Model;
   replayStoredPage(events: unknown[]): Item[];
+  userPartOf(
+    content: unknown,
+  ): Item['parts'] extends Array<infer P> | undefined ? P | null : never;
 }
 
 let api: Api;
@@ -906,6 +918,131 @@ describe('TranscriptModel', () => {
       m.addImage('image/png', '');
       expect(m.items[0].data).toBeNull();
       expect(m.items[0].note).toContain('carried no data');
+    });
+  });
+
+  describe('a user message that is an attachment (#197)', () => {
+    const REF = {
+      type: 'image',
+      attachmentId: 'IMG_0001.jpg',
+      mimeType: 'image/jpeg',
+      size: 123456,
+    };
+
+    it('reads a reference block as an image part named by its id', () => {
+      expect(api.userPartOf(REF)).toEqual({
+        kind: 'image',
+        name: 'IMG_0001.jpg',
+        attachmentId: 'IMG_0001.jpg',
+        mimeType: 'image/jpeg',
+        size: 123456,
+      });
+    });
+
+    it('reads a resource reference, and any image type it will not open, as a file', () => {
+      expect(
+        api.userPartOf({
+          type: 'resource',
+          attachmentId: 'crash.log',
+          mimeType: 'text/plain',
+          size: 10,
+        }),
+      ).toMatchObject({ kind: 'file', name: 'crash.log', size: 10 });
+      // SVG is script in a blob: document on this origin: never a thumbnail.
+      expect(
+        api.userPartOf({
+          ...REF,
+          attachmentId: 'a.svg',
+          mimeType: 'image/svg+xml',
+        }),
+      ).toMatchObject({ kind: 'file' });
+    });
+
+    it('reads inline image bytes and a resource link', () => {
+      expect(
+        api.userPartOf({ type: 'image', data: 'AAAA', mimeType: 'image/png' }),
+      ).toMatchObject({ kind: 'image', data: 'AAAA', size: 3 });
+      expect(
+        api.userPartOf({
+          type: 'resource_link',
+          uri: 'file:///x/report.pdf',
+          name: 'report.pdf',
+          mimeType: 'application/pdf',
+          size: 99,
+        }),
+      ).toMatchObject({
+        kind: 'file',
+        name: 'report.pdf',
+        mimeType: 'application/pdf',
+        size: 99,
+      });
+    });
+
+    it('leaves text and junk to the text path', () => {
+      expect(api.userPartOf({ text: 'hi' })).toBeNull();
+      expect(api.userPartOf({ type: 'text', text: 'hi' })).toBeNull();
+      expect(api.userPartOf(null)).toBeNull();
+      expect(api.userPartOf({ type: 'image' })).toBeNull();
+      expect(api.userPartOf('x')).toBeNull();
+    });
+
+    it('makes one user row with no text when the part comes alone', () => {
+      const { m, events } = setup();
+      const part = api.userPartOf(REF)!;
+      const r = m.addUserPart(part, 5);
+      expect(r.merged).toBe(false);
+      expect(m.items.map((i) => i.kind)).toEqual(['user']);
+      expect(m.items[0].text).toBe('');
+      expect(m.items[0].parts).toEqual([part]);
+      expect(events).toEqual(['append']);
+    });
+
+    it('adds to the user row before it, skipping the processing row, instead of opening a second bubble', () => {
+      const { m, events } = setup();
+      m.addUser('what is this?');
+      m.showProcessing();
+      const r = m.addUserPart(api.userPartOf(REF)!);
+      expect(r.merged).toBe(true);
+      expect(m.items.map((i) => i.kind)).toEqual(['user']);
+      expect(m.items[0].text).toBe('what is this?');
+      expect(m.items[0].parts).toHaveLength(1);
+      // Counting user rows (fork and rewind turns) still sees one message.
+      expect(m.userTurns()).toHaveLength(1);
+      expect(events).toContain('update');
+    });
+
+    it('opens a new row after an answer', () => {
+      const { m } = setup();
+      m.addUser('first');
+      m.appendAssistant('reply');
+      const r = m.addUserPart(api.userPartOf(REF)!);
+      expect(r.merged).toBe(false);
+      expect(m.items.map((i) => i.kind)).toEqual(['user', 'asst', 'user']);
+    });
+
+    it('draws a stored page the same way: text then picture is one message', () => {
+      const frame = (content: unknown) => ({
+        type: 'session_update',
+        data: { update: { sessionUpdate: 'user_message_chunk', content } },
+      });
+      const rows = api.replayStoredPage([
+        frame({ text: 'look at this' }),
+        frame(REF),
+        frame({
+          type: 'resource',
+          attachmentId: 'n.txt',
+          mimeType: 'text/plain',
+          size: 4,
+        }),
+        frame(REF),
+      ]);
+      expect(rows.map((i) => i.kind)).toEqual(['user']);
+      expect(rows[0].text).toBe('look at this');
+      expect(rows[0].parts!.map((p) => p.kind)).toEqual([
+        'image',
+        'file',
+        'image',
+      ]);
     });
   });
 

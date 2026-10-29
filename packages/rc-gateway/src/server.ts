@@ -183,7 +183,8 @@ import {
   createAttachmentRemoveRoute,
   createAttachmentUploadRoute,
   gateJsonBody,
-  rawAttachmentBody,
+  createRawAttachmentBody,
+  effectiveAttachmentLimit,
 } from './routes/sessionAttachments.js';
 import {
   installAsyncErrorCapture,
@@ -298,6 +299,11 @@ export interface GatewayDeps {
    * harness hands in one built over a fake.
    */
   hostActions?: HostActions;
+  /**
+   * `--max-attachment-bytes` (#196): the configured upload limit. The limit
+   * actually enforced and reported is {@link effectiveAttachmentLimit} of it.
+   */
+  maxAttachmentBytes?: number;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
   /** Compiled routing matcher; notifier drop-gating wires only when set. */
@@ -556,6 +562,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // type, and a parser that claimed that body would drain the stream before
   // the route's raw parser could read it. See routes/sessionAttachments.ts.
   app.use(gateJsonBody(express.json()));
+  // #196: one number for the upload parser, its 413 text and the capability
+  // the page reads to size an image before sending it.
+  const attachmentLimit = effectiveAttachmentLimit(deps.maxAttachmentBytes);
 
   const registry = new ConnectionRegistry();
 
@@ -1098,7 +1107,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // (an upload is a user-initiated write into a conversation, and a phone is
   // the natural place to send a photo or a log), including the rate limiter:
   // unlike a stop request, an upload costs disk and bandwidth, so bridge
-  // fan-in needs a per-chat-user cap. `rawAttachmentBody` reads the file and
+  // fan-in needs a per-chat-user cap. `createRawAttachmentBody` reads the file and
   // refuses an oversize body with 413 before it is buffered.
   app.post(
     '/session/:id/attachments',
@@ -1107,7 +1116,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user -> 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap uploads per chat user
-    rawAttachmentBody,
+    createRawAttachmentBody(attachmentLimit),
     createAttachmentUploadRoute(deps.daemon, audit),
   );
   // GET /session/:id/attachments — session-read-scope, mirroring /export: the
@@ -1329,6 +1338,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
       hostAttach: deps.hostAttach !== undefined,
+      maxAttachmentBytes: attachmentLimit,
       // #96: the daemon's own flag list, read per request. The gateway block
       // above stays whatever the gateway itself promises; this is the daemon's
       // answer, so the UI can finally tell the two apart.
