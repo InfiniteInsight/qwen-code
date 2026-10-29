@@ -301,10 +301,10 @@ describe('boot daemon pool options (#203)', () => {
 });
 
 describe('session WAL directory (#174)', () => {
-  it('defaults to ~/.qwen/rc/wal, takes --wal-dir (tilde too), and --no-wal turns it off', () => {
-    expect(resolveSessionWalDir({}, '/h')).toBe(
-      join('/h', '.qwen', 'rc', 'wal'),
-    );
+  it('defaults to the rc root ~/.qwen/rc, takes --wal-dir (tilde too), and --no-wal turns it off', () => {
+    // The root, not the WAL itself: segments go to <root>/wal/, so the
+    // default WAL is ~/.qwen/rc/wal/ and not a doubled ~/.qwen/rc/wal/wal/.
+    expect(resolveSessionWalDir({}, '/h')).toBe(join('/h', '.qwen', 'rc'));
     expect(resolveSessionWalDir({ walDir: '/x/w' }, '/h')).toBe('/x/w');
     expect(resolveSessionWalDir({ walDir: '~/w' }, '/h')).toBe(join('/h', 'w'));
     expect(
@@ -312,11 +312,12 @@ describe('session WAL directory (#174)', () => {
     ).toBeUndefined();
   });
 
-  it('creates the directory owner-only (0700), and accepts one that exists', () => {
-    const dir = join(mkdtempSync(join(tmpdir(), 'rc-wal-dir-')), 'a', 'wal');
+  it('creates the wal subdirectory owner-only (0700), and accepts one that exists', () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'rc-wal-dir-')), 'a', 'rc');
     prepareSessionWalDir(dir);
-    expect(statSync(dir).isDirectory()).toBe(true);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    const wal = join(dir, 'wal');
+    expect(statSync(wal).isDirectory()).toBe(true);
+    expect(statSync(wal).mode & 0o777).toBe(0o700);
     expect(() => prepareSessionWalDir(dir)).not.toThrow();
   });
 
@@ -326,10 +327,11 @@ describe('session WAL directory (#174)', () => {
     expect(() => prepareSessionWalDir(file)).toThrow(/--wal-dir/);
   });
 
-  it('says at boot where the WAL lives, or that it is off', () => {
-    expect(formatSessionWalLine('/h/.qwen/rc/wal')).toContain(
-      '/h/.qwen/rc/wal',
-    );
+  it('says at boot where the WAL lives (the wal subdirectory of the root), or that it is off', () => {
+    const line = formatSessionWalLine('/h/.qwen/rc');
+    expect(line).toContain('session WAL: /h/.qwen/rc/wal ');
+    expect(line).toContain('--wal-dir /h/.qwen/rc');
+    expect(line).not.toContain('/wal/wal');
     expect(formatSessionWalLine(undefined)).toMatch(/off/);
   });
 });

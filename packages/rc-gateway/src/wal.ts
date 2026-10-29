@@ -133,7 +133,7 @@ export class SessionWal {
     this.now = opts.now ?? Date.now;
 
     // Owner-only: the log holds conversation text. The CLI creates the root
-    // the same way (cli.ts prepareSessionWalDir).
+    // this subdirectory the same way at boot (cli.ts prepareSessionWalDir).
     mkdirSync(this.walDir, { recursive: true, mode: 0o700 });
     this.recover();
   }

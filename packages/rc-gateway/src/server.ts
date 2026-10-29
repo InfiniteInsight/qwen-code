@@ -378,7 +378,8 @@ export interface GatewayDeps {
    * fork and rewind routes seed durable markers (`session_forked`/
    * `child_forked`/`session_rewound`), and the resume route hands back its
    * watermark in the gateway's numbering. cli.ts wires `--wal-dir` (default
-   * `~/.qwen/rc/wal`); `--no-wal` leaves it unset, and every one of those
+   * `~/.qwen/rc`, so the WAL is `~/.qwen/rc/wal/`); `--no-wal` leaves it unset,
+   * and every one of those
    * paths then behaves as it did before the WAL was wired.
    */
   walDir?: string;

@@ -397,9 +397,10 @@ export interface ServeOptions {
   /** Override the ACME directory URL (private CA / Pebble). */
   acmeDirectoryUrl?: string;
   /**
-   * `--wal-dir <dir>` (env `QWEN_RC_WAL_DIR`): where the session WAL lives
-   * (#174). Default `~/.qwen/rc/wal`, created owner-only (0700). See
-   * {@link resolveSessionWalDir}.
+   * `--wal-dir <dir>` (env `QWEN_RC_WAL_DIR`): the directory the session WAL
+   * (#174) is written under: its segments go to `<dir>/wal/`. Default
+   * `~/.qwen/rc`, so the WAL is `~/.qwen/rc/wal/`; that `wal` subdirectory is
+   * created owner-only (0700). See {@link resolveSessionWalDir}.
    */
   walDir?: string;
   /**
@@ -501,9 +502,10 @@ function startWalRetention(
 export class SessionWalDirError extends Error {}
 
 /**
- * The session WAL directory this boot uses, or undefined when `--no-wal` turns
- * the WAL off. The WAL's segments are written under `<dir>/wal/` (the layout
- * SessionWal has always used under the directory it is handed).
+ * The root the session WAL is written under, or undefined when `--no-wal`
+ * turns the WAL off. Segments go to `<root>/wal/` (the layout SessionWal has
+ * always used under the directory it is handed), so the default root is the
+ * rc directory itself and the WAL lands at `~/.qwen/rc/wal/`.
  */
 export function resolveSessionWalDir(
   opts: Pick<ServeOptions, 'walDir' | 'noWal'>,
@@ -511,37 +513,42 @@ export function resolveSessionWalDir(
 ): string | undefined {
   if (opts.noWal) return undefined;
   const dir = opts.walDir;
-  if (dir === undefined) return join(home, '.qwen', 'rc', 'wal');
+  if (dir === undefined) return join(home, '.qwen', 'rc');
   if (dir === '~') return home;
   return dir.startsWith('~/') ? join(home, dir.slice(2)) : dir;
 }
 
 /**
- * Create the session WAL directory owner-only (0700), the way every other file
- * under ~/.qwen/rc that holds conversation data is kept. An existing directory
- * is used as it is; a path that exists and is not a directory is refused here,
- * before a daemon is spawned, rather than on the first watcher's append.
+ * Create the WAL's `wal` subdirectory under the root, owner-only (0700): the
+ * log holds conversation text. A root that does not exist yet is created the
+ * same way; an existing directory is used as it is. A path that is not a
+ * directory is refused here, before a daemon is spawned, rather than on the
+ * first watcher's append.
  */
 export function prepareSessionWalDir(dir: string): void {
+  const walSubdir = join(dir, 'wal');
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(walSubdir, { recursive: true, mode: 0o700 });
   } catch (err) {
     throw new SessionWalDirError(
-      `--wal-dir / QWEN_RC_WAL_DIR: cannot create "${dir}": ${(err as Error).message}`,
+      `--wal-dir / QWEN_RC_WAL_DIR: cannot create "${walSubdir}": ${(err as Error).message}`,
     );
   }
-  if (!statSync(dir).isDirectory()) {
+  if (!statSync(walSubdir).isDirectory()) {
     throw new SessionWalDirError(
-      `--wal-dir / QWEN_RC_WAL_DIR: "${dir}" is not a directory`,
+      `--wal-dir / QWEN_RC_WAL_DIR: "${walSubdir}" is not a directory`,
     );
   }
 }
 
-/** The boot line naming where the session WAL lives, or that it is off. */
+/**
+ * The boot line naming where the session WAL is written (the `wal`
+ * subdirectory of the `--wal-dir` root), or that it is off.
+ */
 export function formatSessionWalLine(dir: string | undefined): string {
   return dir === undefined
     ? 'session WAL: off (--no-wal): one daemon subscription per watcher, no durable replay'
-    : `session WAL: ${dir} (one shared subscription per session, durable replay; --no-wal to turn off)`;
+    : `session WAL: ${join(dir, 'wal')} (--wal-dir ${dir}; one shared subscription per session, durable replay; --no-wal to turn off)`;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -2342,7 +2349,8 @@ if (process.argv[2] === 'serve') {
   //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --host-actions <path>
-  //        --max-attachment-bytes <n> --qwen-bin <path> --wal-dir <dir> --no-wal
+  //        --max-attachment-bytes <n> --qwen-bin <path>
+  //        --wal-dir <dir> (WAL in <dir>/wal/, default ~/.qwen/rc) --no-wal
   //        --wal-retention-days <n> --wal-max-mb <n>
   //        --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
