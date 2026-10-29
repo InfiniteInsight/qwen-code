@@ -317,6 +317,27 @@ class HubWatcher {
   }
 }
 
+/**
+ * Sessions with an open shared subscription, by WAL directory, counted per
+ * hub. Process-wide (every route instance's hubs) because the question it
+ * answers is one the WAL directory's retention sweep asks of the process: is
+ * anything relaying into this session's log right now.
+ */
+const liveRelays = new Map<string, number>();
+const relayKey = (walDir: string, sessionId: string) =>
+  `${walDir}\u0000${sessionId}`;
+
+/**
+ * Whether a session's WAL is being appended to by a live shared subscription.
+ * The retention sweep leaves such a session alone whatever its age or size:
+ * deleting a log under a relay would drop the WAL head the relay anchors new
+ * ids above, and the ids it hands out next could fall back below ids its
+ * watchers already hold.
+ */
+export function isSessionRelayLive(walDir: string, sessionId: string): boolean {
+  return (liveRelays.get(relayKey(walDir, sessionId)) ?? 0) > 0;
+}
+
 interface HubDeps {
   daemon: SessionDaemon;
   walDir: string;
@@ -364,6 +385,9 @@ class SessionEventsHub {
     firstCursor: number | undefined,
   ) {
     this.state = resolveEpochState(deps.walDir, deps.sessionId);
+    // Counted only once nothing above can throw, so close() always pairs it.
+    const key = relayKey(deps.walDir, deps.sessionId);
+    liveRelays.set(key, (liveRelays.get(key) ?? 0) + 1);
     const cursor = this.upstreamCursor(firstCursor);
     this.catchingUp = cursor !== undefined;
     let resolveReady!: () => void;
@@ -405,6 +429,10 @@ class SessionEventsHub {
       this.graceTimer = undefined;
     }
     this.upstream.abort();
+    const key = relayKey(this.deps.walDir, this.deps.sessionId);
+    const left = (liveRelays.get(key) ?? 1) - 1;
+    if (left > 0) liveRelays.set(key, left);
+    else liveRelays.delete(key);
     this.deps.onClosed(this);
     for (const w of this.watchers) w.end(kind);
     this.watchers.clear();

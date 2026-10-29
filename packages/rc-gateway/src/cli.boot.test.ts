@@ -5,10 +5,18 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DaemonHandle } from './daemonSupervisor.js';
+import type { AuditEntry } from './auditLog.js';
+import { SessionWal } from './wal.js';
 
 // cli.ts ends with a top level dispatch on process.argv, so pin argv away from
 // every subcommand before the module is evaluated. Nothing here needs a boot to
@@ -23,6 +31,8 @@ const {
   resolveSessionWalDir,
   prepareSessionWalDir,
   formatSessionWalLine,
+  resolveWalRetention,
+  sweepWalDir,
 } = await import('./cli.js');
 
 /** A handle that only records that it was stopped, plus a call counter. */
@@ -181,6 +191,40 @@ describe('parseServeFlags', () => {
     expect(() => parseServeFlags(['--wal-dir', ''])).toThrow(/--wal-dir/);
   });
 
+  it('reads the WAL retention bounds from flags and the environment, and rejects bad ones (#174)', () => {
+    expect(
+      parseServeFlags(['--wal-retention-days', '3', '--wal-max-mb=64']),
+    ).toMatchObject({ walRetentionDays: 3, walMaxMb: 64 });
+    const priorDays = process.env['QWEN_RC_WAL_RETENTION_DAYS'];
+    const priorMb = process.env['QWEN_RC_WAL_MAX_MB'];
+    try {
+      delete process.env['QWEN_RC_WAL_RETENTION_DAYS'];
+      delete process.env['QWEN_RC_WAL_MAX_MB'];
+      expect(parseServeFlags([]).walRetentionDays).toBeUndefined();
+      expect(parseServeFlags([]).walMaxMb).toBeUndefined();
+      process.env['QWEN_RC_WAL_RETENTION_DAYS'] = '2';
+      process.env['QWEN_RC_WAL_MAX_MB'] = '100';
+      expect(parseServeFlags([])).toMatchObject({
+        walRetentionDays: 2,
+        walMaxMb: 100,
+      });
+    } finally {
+      if (priorDays === undefined)
+        delete process.env['QWEN_RC_WAL_RETENTION_DAYS'];
+      else process.env['QWEN_RC_WAL_RETENTION_DAYS'] = priorDays;
+      if (priorMb === undefined) delete process.env['QWEN_RC_WAL_MAX_MB'];
+      else process.env['QWEN_RC_WAL_MAX_MB'] = priorMb;
+    }
+    for (const bad of ['0', '-1', 'abc', '2.5']) {
+      expect(() => parseServeFlags(['--wal-retention-days', bad])).toThrow(
+        /--wal-retention-days/,
+      );
+      expect(() => parseServeFlags(['--wal-max-mb', bad])).toThrow(
+        /--wal-max-mb/,
+      );
+    }
+  });
+
   it('keeps 0 legal, because that is the pick a free port request', () => {
     expect(parseServeFlags(['--port', '0'])).toMatchObject({ gatewayPort: 0 });
   });
@@ -287,5 +331,55 @@ describe('session WAL directory (#174)', () => {
       '/h/.qwen/rc/wal',
     );
     expect(formatSessionWalLine(undefined)).toMatch(/off/);
+  });
+});
+
+describe('session WAL retention (#174)', () => {
+  const DAY = 86_400_000;
+
+  it('defaults to 7 days and 512 MiB, and takes the configured bounds', () => {
+    expect(resolveWalRetention({})).toEqual({
+      maxAgeMs: 7 * DAY,
+      maxBytes: 512 * 1024 * 1024,
+    });
+    expect(resolveWalRetention({ walRetentionDays: 2, walMaxMb: 10 })).toEqual({
+      maxAgeMs: 2 * DAY,
+      maxBytes: 10 * 1024 * 1024,
+    });
+  });
+
+  it('writes one audit row for a sweep that removed something, and none for one that did not', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-wal-sweep-'));
+    const old = 'd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0';
+    const wal = new SessionWal({ dir, sessionId: old });
+    wal.append({ id: 1, v: 1, type: 'session_update', data: {} });
+    wal.close();
+    const now = Date.now();
+    const at = new Date(now - 10 * DAY);
+    for (const name of readdirSync(join(dir, 'wal'))) {
+      utimesSync(join(dir, 'wal', name), at, at);
+    }
+    const rows: AuditEntry[] = [];
+    const audit = { record: async (e: AuditEntry) => void rows.push(e) };
+    const retention = { maxAgeMs: 7 * DAY, maxBytes: 512 * 1024 * 1024 };
+
+    sweepWalDir({ dir, retention, audit, now: () => now });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: 'wal_pruned',
+      detail: {
+        sessionsRemoved: 1,
+        removedForAge: 1,
+        removedForSize: 0,
+        maxAgeDays: 7,
+        maxBytes: 512 * 1024 * 1024,
+      },
+    });
+    // The audit row carries counts and bounds, never a session id or a path.
+    expect(JSON.stringify(rows[0])).not.toContain(old);
+    expect(JSON.stringify(rows[0])).not.toContain(dir);
+
+    sweepWalDir({ dir, retention, audit, now: () => now });
+    expect(rows).toHaveLength(1);
   });
 });

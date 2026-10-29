@@ -15,6 +15,7 @@ import {
   createSessionEventsRoute,
   gatewayCursorForDaemonCursor,
   withGatewayResumeCursor,
+  isSessionRelayLive,
 } from './sessionEvents.js';
 import { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
@@ -1259,6 +1260,20 @@ describe('session-events fan-out: one daemon subscription per session (#174)', (
     const wal = new SessionWal({ dir: walDir, sessionId: sid });
     expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
     wal.close();
+  });
+
+  it('reports a session as live while its shared subscription is up, so retention leaves its WAL alone', async () => {
+    const sid = 'a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    expect(isSessionRelayLive(walDir, sid)).toBe(false);
+    const w = await watch(url);
+    await w.waitFor(joined);
+    expect(isSessionRelayLive(walDir, sid)).toBe(true);
+    w.close();
+    await until(() => bus.liveSubscribers === 0);
+    expect(isSessionRelayLive(walDir, sid)).toBe(false);
   });
 
   it('a watcher leaving keeps the others fed; the last one leaving closes the upstream after the grace', async () => {

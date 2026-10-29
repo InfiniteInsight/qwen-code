@@ -72,6 +72,8 @@ import {
   type PooledDaemonSpawn,
 } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
+import { pruneWalDir, type WalRetentionBounds } from './wal.js';
+import { isSessionRelayLive } from './routes/sessionEvents.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
 import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
@@ -265,7 +267,7 @@ import {
   formatWhoami,
   type DaemonRow,
 } from './daemons/daemonsCli.js';
-import { AuditLog } from './auditLog.js';
+import { AuditLog, type AuditRecorder } from './auditLog.js';
 import {
   RecoveryOrchestrator,
   createReportOutcome,
@@ -406,6 +408,93 @@ export interface ServeOptions {
    * over `--wal-dir`.
    */
   noWal?: boolean;
+  /**
+   * `--wal-retention-days <n>` (env `QWEN_RC_WAL_RETENTION_DAYS`): a session
+   * whose WAL has not been written for this many days is removed. Default 7.
+   */
+  walRetentionDays?: number;
+  /**
+   * `--wal-max-mb <n>` (env `QWEN_RC_WAL_MAX_MB`): past this many MiB, the
+   * least recently written sessions are removed until the directory fits.
+   * Default 512.
+   */
+  walMaxMb?: number;
+}
+
+const DAY_MS = 86_400_000;
+const MIB = 1024 * 1024;
+/** How often the WAL directory is swept, after the sweep at boot. */
+const WAL_RETENTION_INTERVAL_MS = 60 * 60 * 1000;
+
+/** The WAL directory's retention bounds: 7 days, 512 MiB unless configured. */
+export function resolveWalRetention(
+  opts: Pick<ServeOptions, 'walRetentionDays' | 'walMaxMb'>,
+): WalRetentionBounds {
+  return {
+    maxAgeMs: (opts.walRetentionDays ?? 7) * DAY_MS,
+    maxBytes: (opts.walMaxMb ?? 512) * MIB,
+  };
+}
+
+/**
+ * One retention sweep of the WAL directory, with one `wal_pruned` audit row
+ * when it removed anything (an hourly sweep that finds nothing writes none).
+ * The row carries counts and the bounds, never a session id or a path.
+ */
+export function sweepWalDir(args: {
+  dir: string;
+  retention: WalRetentionBounds;
+  audit?: Pick<AuditRecorder, 'record'>;
+  keep?: (sessionId: string) => boolean;
+  now?: () => number;
+  log?: (line: string) => void;
+}): void {
+  const result = pruneWalDir(args.dir, {
+    ...args.retention,
+    ...(args.keep ? { keep: args.keep } : {}),
+    ...(args.now ? { now: args.now } : {}),
+  });
+  if (result.sessionsRemoved === 0) return;
+  void args.audit?.record({
+    action: 'wal_pruned',
+    detail: {
+      sessionsRemoved: result.sessionsRemoved,
+      removedForAge: result.removedForAge,
+      removedForSize: result.removedForSize,
+      bytesFreed: result.bytesFreed,
+      sessionsRetained: result.sessionsRetained,
+      bytesRetained: result.bytesRetained,
+      maxAgeDays: args.retention.maxAgeMs / DAY_MS,
+      maxBytes: args.retention.maxBytes,
+    },
+  });
+  args.log?.(
+    `session WAL: pruned ${result.sessionsRemoved} session(s), ` +
+      `freed ${result.bytesFreed} bytes`,
+  );
+}
+
+/**
+ * Sweep now and then every hour. Unref'd so it never holds the process open;
+ * the returned stop clears it. A failing sweep is logged and retried on the
+ * next tick rather than taking the gateway down.
+ */
+function startWalRetention(
+  args: Parameters<typeof sweepWalDir>[0],
+): () => void {
+  const run = () => {
+    try {
+      sweepWalDir(args);
+    } catch (err) {
+      args.log?.(
+        `session WAL: retention sweep failed: ${(err as Error).message}`,
+      );
+    }
+  };
+  run();
+  const timer = setInterval(run, WAL_RETENTION_INTERVAL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /** A session WAL directory that cannot be used, reported before any spawn. */
@@ -1273,6 +1362,21 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   );
   bridgeReaper.unref();
 
+  // Session WAL retention (#174): a session's own log is bounded only when it
+  // is appended to, so the directory is swept at boot and hourly. A session
+  // being relayed right now is never removed.
+  const stopWalRetention =
+    sessionWalDir !== undefined
+      ? startWalRetention({
+          dir: sessionWalDir,
+          retention: resolveWalRetention(opts),
+          audit,
+          keep: (sessionId) => isSessionRelayLive(sessionWalDir, sessionId),
+          // eslint-disable-next-line no-console
+          log: (line) => console.log(line),
+        })
+      : () => {};
+
   // Load the policy fail-closed, layered over the same workspace cwd resolved
   // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
   // <cwd>/.qwen/policy.yaml (the workspace layer can only narrow: its allow
@@ -1871,6 +1975,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     rateReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     clearInterval(bridgeReaper);
+    stopWalRetention();
     for (const b of startedBridges) b.stop();
     // mDNS Goodbye (design D4): withdraw the advertisement so a stale record does
     // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
@@ -2150,6 +2255,8 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     throw new Error('--wal-dir: expected a directory path, got ""');
   }
   const walDirEnv = process.env.QWEN_RC_WAL_DIR;
+  const walRetentionFlag = flag('wal-retention-days');
+  const walMaxMbFlag = flag('wal-max-mb');
   const qwenBinFromFlag =
     argv.includes('--qwen-bin') ||
     argv.some((a) => a.startsWith('--qwen-bin='));
@@ -2201,7 +2308,32 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     // an empty environment value counts as unset.
     walDir: walDirFlag ?? (walDirEnv ? walDirEnv : undefined),
     noWal: argv.includes('--no-wal') || process.env.QWEN_RC_NO_WAL === '1',
+    walRetentionDays: parsePositiveIntFlag(
+      walRetentionFlag !== undefined
+        ? '--wal-retention-days'
+        : 'QWEN_RC_WAL_RETENTION_DAYS',
+      walRetentionFlag ?? process.env.QWEN_RC_WAL_RETENTION_DAYS,
+    ),
+    walMaxMb: parsePositiveIntFlag(
+      walMaxMbFlag !== undefined ? '--wal-max-mb' : 'QWEN_RC_WAL_MAX_MB',
+      walMaxMbFlag ?? process.env.QWEN_RC_WAL_MAX_MB,
+    ),
   };
+}
+
+/** A positive whole number, or undefined when unset (an empty env is unset). */
+function parsePositiveIntFlag(
+  name: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined || (raw === '' && !name.startsWith('--'))) {
+    return undefined;
+  }
+  const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    throw new Error(`${name}: expected a positive whole number, got "${raw}"`);
+  }
+  return n;
 }
 
 if (process.argv[2] === 'serve') {
@@ -2211,6 +2343,7 @@ if (process.argv[2] === 'serve') {
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --host-actions <path>
   //        --max-attachment-bytes <n> --qwen-bin <path> --wal-dir <dir> --no-wal
+  //        --wal-retention-days <n> --wal-max-mb <n>
   //        --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
