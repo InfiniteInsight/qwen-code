@@ -22,7 +22,7 @@ import { getSharedWal } from '../wal.js';
 import type { WalFrame } from '../wal.js';
 import {
   CONSERVATIVE_EPOCH,
-  loadEpochState,
+  resolveEpochState,
   saveEpochState,
   type EpochState,
 } from '../walEpoch.js';
@@ -332,6 +332,10 @@ class SessionEventsHub {
   private readonly upstream = new AbortController();
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly state: EpochState;
+  /** The bus epoch token this subscription's daemon reported, if any. */
+  private liveEpoch: string | undefined;
+  /** The daemon said its replay restarts at its epoch's start (no token). */
+  private epochResetSeen = false;
   closed = false;
   /** Subscribed with a cursor and the daemon's `replay_complete` not yet seen. */
   catchingUp: boolean;
@@ -342,7 +346,7 @@ class SessionEventsHub {
     private readonly deps: HubDeps,
     firstWantsReplay: boolean,
   ) {
-    this.state = loadEpochState(deps.walDir, deps.sessionId);
+    this.state = resolveEpochState(deps.walDir, deps.sessionId);
     const cursor = this.upstreamCursor(firstWantsReplay);
     this.catchingUp = cursor !== undefined;
     let resolveReady!: () => void;
@@ -414,8 +418,17 @@ class SessionEventsHub {
     let iterator: AsyncGenerator<RelayFrame>;
     let attach: FirstFrame<RelayFrame>;
     try {
+      const epoch = this.state.daemonEpoch;
       iterator = daemon.subscribeEvents(sessionId, {
         ...(cursor !== undefined ? { lastEventId: cursor } : {}),
+        // The token the cursor was minted under: a daemon whose bus has since
+        // been rebuilt answers with an epoch_reset resync and replays its new
+        // epoch from the start, instead of serving "after N" out of a
+        // numbering that restarted.
+        ...(cursor !== undefined && epoch !== undefined ? { epoch } : {}),
+        onEpoch: (learned: string) => {
+          this.liveEpoch = learned;
+        },
         signal: this.upstream.signal,
       });
       // Confirm reachability without hanging on an idle session (see
@@ -445,9 +458,25 @@ class SessionEventsHub {
   /**
    * Append a daemon frame to the WAL under its gateway id, then fan it out
    * (add-mid-turn-recovery §4 renumbering, now done once per raw frame).
+   *
+   * Gateway id = raw id + the epoch's offset, with three rules:
+   *
+   * - A new daemon epoch is recognised by its bus epoch token when both sides
+   *   have one. Only without a token does the relay fall back to the old guess
+   *   (`raw <= lastOutId`), which a restart whose ids have already passed the
+   *   old cursor defeats; a daemon `epoch_reset` resync also counts there.
+   * - In the same epoch, a raw id at or below `lastOutId` is already in the WAL
+   *   (resubscribing below the end replays it), so it is dropped, not appended
+   *   a second time under the id it already has.
+   * - The gateway id is always above the WAL's end. A new epoch anchors at
+   *   `max(0, latest + 1 - raw)`, keeping the daemon's own numbering while it
+   *   can (gaps are fine, the daemon's own ids have them); and a marker that
+   *   took the next slot through the shared handle (rewind, recovery, a resync
+   *   gap) moves the offset up past it instead of being collided with.
    */
   private relay(ev: RelayFrame): void {
     if (this.closed) return;
+    const { walDir, sessionId } = this.deps;
     if (ev.id === undefined) {
       // The daemon's replay sentinel answers the hub's cursor, not any
       // watcher's; each watcher gets its own (see HubWatcher).
@@ -455,33 +484,80 @@ class SessionEventsHub {
         this.finishCatchUp();
         return;
       }
+      if (ev.type === 'state_resync_required') {
+        this.recordGap(ev);
+        return;
+      }
       this.broadcast(serializeFrame(ev));
       return;
     }
-    const { walDir, sessionId } = this.deps;
     // The registry handle, fetched per frame, so this appends through the same
     // instance the rewind, fork and recovery markers use even if the registry
     // dropped and rebuilt it while this subscription was open.
     const wal = getSharedWal(walDir, sessionId);
     const state = this.state;
-    if (ev.id <= state.lastOutId) {
-      // New daemon epoch: re-anchor so the first renumbered id is latest + 1.
-      state.epochOffset = (wal.latestId() ?? 0) + 1 - ev.id;
-    }
-    const outId = ev.id + state.epochOffset;
-    state.lastOutId = ev.id;
+    const raw = ev.id;
+    const tokens =
+      this.liveEpoch !== undefined && state.daemonEpoch !== undefined;
+    const newEpoch = tokens
+      ? this.liveEpoch !== state.daemonEpoch
+      : this.epochResetSeen || raw <= state.lastOutId;
+    if (!newEpoch && raw <= state.lastOutId) return;
+    const latest = wal.latestId() ?? 0;
+    if (newEpoch) state.epochOffset = Math.max(0, latest + 1 - raw);
+    if (raw + state.epochOffset <= latest) state.epochOffset = latest + 1 - raw;
+    this.epochResetSeen = false;
+    const outId = raw + state.epochOffset;
+    state.lastOutId = raw;
+    if (this.liveEpoch !== undefined) state.daemonEpoch = this.liveEpoch;
+    else delete state.daemonEpoch;
     wal.append({
       id: outId,
       v: ev.v ?? 1,
       type: ev.type ?? 'unknown',
       data: ev.data,
       ...(ev._meta !== undefined ? { _meta: ev._meta } : {}),
+      _rc: {
+        raw,
+        ...(this.liveEpoch !== undefined ? { epoch: this.liveEpoch } : {}),
+      },
     });
-    // Persist per frame: a stale lastOutId could miss a new epoch whose first
-    // id is higher than the stale value, or resume the daemon below frames the
-    // WAL already holds.
+    // Persist per frame. The WAL's own stamps are authoritative (see
+    // resolveEpochState); this is the fallback for a log that holds none.
     saveEpochState(walDir, sessionId, state);
     this.broadcast(serializeFrame({ ...ev, id: outId }), outId);
+  }
+
+  /**
+   * The daemon could not replay what this subscription asked for: its ring
+   * rolled, a load reseeded it, or its bus is a new epoch. The WAL now has a
+   * hole at this point, and every watcher whose view runs through it has to
+   * reload. The daemon's resync frame is id-less and reaches only the
+   * subscribers present right now, so a later watcher replaying across the
+   * hole out of the WAL would never hear of it and render a silently partial
+   * transcript (#150). Written into the WAL under a gateway id instead, at the
+   * hole, it is replayed to exactly the watchers whose cursor is before it,
+   * and to none after. The daemon's own ids in its data are dropped: they are
+   * in its numbering, not the one a watcher's cursor is in.
+   */
+  private recordGap(ev: RelayFrame): void {
+    const { walDir, sessionId } = this.deps;
+    const data = (ev.data ?? {}) as Record<string, unknown>;
+    if (data['reason'] === 'epoch_reset') this.epochResetSeen = true;
+    const wal = getSharedWal(walDir, sessionId);
+    const frame: WalFrame = {
+      id: (wal.latestId() ?? 0) + 1,
+      v: ev.v ?? 1,
+      type: 'state_resync_required',
+      data: {
+        reason: typeof data['reason'] === 'string' ? data['reason'] : 'unknown',
+        ...(typeof data['detail'] === 'string'
+          ? { detail: data['detail'] }
+          : {}),
+      },
+    };
+    wal.append(frame);
+    this.broadcast(serializeFrame(frame), frame.id);
   }
 
   private finishCatchUp(): void {
@@ -807,15 +883,61 @@ export function createSessionEventsRoute(
   };
 }
 
-/** One SSE block: the `id:` line only for a frame that carries an id. */
+/**
+ * One SSE block: the `id:` line only for a frame that carries an id. A WAL
+ * frame's relay stamp (`_rc`, see walEpoch.ts) is the gateway's own
+ * bookkeeping in the daemon's numbering and never reaches a client.
+ */
 function serializeFrame(ev: {
   id?: number;
   v?: number;
   type?: string;
   data?: unknown;
+  _rc?: unknown;
 }): string {
   const idLine = ev.id !== undefined ? `id: ${ev.id}\n` : '';
-  return `${idLine}data: ${JSON.stringify(enrich(ev))}\n\n`;
+  let out: { id?: number; type?: string; data?: unknown } = ev;
+  if (ev._rc !== undefined) {
+    const { _rc: _stamp, ...rest } = ev;
+    out = rest;
+  }
+  return `${idLine}data: ${JSON.stringify(enrich(out))}\n\n`;
+}
+
+/**
+ * Map a cursor in the DAEMON's numbering (a load or resume response's
+ * `lastEventId`, with its `eventEpoch`) into the gateway's, for a page that
+ * renders that response's history and then watches from its watermark.
+ *
+ * - Never relayed: the first relayed frame anchors at offset 0, so the
+ *   numbering is the daemon's own.
+ * - Same epoch as the WAL's newest relayed frame (by token when both sides
+ *   have one, by the raw ids otherwise): raw + that epoch's offset.
+ * - An epoch the WAL has not reached yet: the WAL head. The next epoch is
+ *   anchored above it.
+ *
+ * Never below the WAL head either way. A load is a full view as of now, so
+ * nothing the WAL already holds is owed to a watcher starting from it, and a
+ * cursor below the head would replay a resync gap the load already covers
+ * straight back into another resync, which is a loop.
+ */
+export function gatewayCursorForDaemonCursor(
+  walDir: string,
+  sessionId: string,
+  daemonCursor: number,
+  daemonEpoch?: string,
+): number {
+  const head = getSharedWal(walDir, sessionId).latestId() ?? 0;
+  const state = resolveEpochState(walDir, sessionId);
+  let mapped = daemonCursor;
+  if (state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId) {
+    const sameEpoch =
+      daemonEpoch !== undefined && state.daemonEpoch !== undefined
+        ? daemonEpoch === state.daemonEpoch
+        : daemonCursor >= state.lastOutId;
+    mapped = sameEpoch ? daemonCursor + state.epochOffset : head;
+  }
+  return Math.max(mapped, head);
 }
 
 function writeFrame(

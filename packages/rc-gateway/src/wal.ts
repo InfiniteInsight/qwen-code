@@ -293,6 +293,22 @@ export class SessionWal {
     return { truncated: false, events };
   }
 
+  /**
+   * The newest retained frame matching `pred`, read from disk newest segment
+   * first, so a match in the active segment never decodes the rotated ones.
+   * Used to recover the relay's renumbering state from the log itself.
+   */
+  findLast(pred: (frame: WalFrame) => boolean): WalFrame | undefined {
+    const segments = this.segmentsOldestToNewest();
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const frames = [...decodeSegment(segments[i]!)];
+      for (let j = frames.length - 1; j >= 0; j--) {
+        if (pred(frames[j]!)) return frames[j];
+      }
+    }
+    return undefined;
+  }
+
   // -- internals ----------------------------------------------------------
 
   /**
