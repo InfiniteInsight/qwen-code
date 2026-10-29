@@ -726,13 +726,152 @@
       emit({ type: 'reset' });
     }
 
+    // ---- Splicing stored history in front (#171) ---------------------------
+    // Pages are read newest to oldest and each is reduced on a model of its
+    // own, so three things a single pass would have handled are settled here,
+    // where the rows meet the ones already on screen.
+    //
+    // A page can overlap what is drawn: the resume draws the replay, and the
+    // first page asked for is the newest one, which that replay already holds.
+    // Rows carry no record id the page could compare, so a run of rows at the
+    // END of the page that equals a run already on screen is the same records.
+    // A single row is not proof (a user who typed "yes" twice has two), so a
+    // lone row only counts when it is the whole page.
+    function rowKey(r) {
+      switch (r.kind) {
+        case 'user':
+          return 'u|' + r.text + '|' + (r.parts ? r.parts.length : 0);
+        case 'asst':
+          return 'a|' + r.text;
+        case 'thought':
+          return 't|' + r.text;
+        case 'system':
+          return 's|' + r.text;
+        case 'image':
+          return 'i|' + r.mime + '|' + r.bytes;
+        case 'tool':
+          return r.toolCallId ? 'T|' + r.toolCallId : null;
+        default:
+          return null;
+      }
+    }
+    // A tool row built from an update whose call is on another page: named by
+    // its raw id, because nothing told it a title.
+    function nameless(t) {
+      return !t.label || t.label === 'tool' || t.label === t.toolCallId;
+    }
+    // Give a nameless row what the call's own row knows. The row already on
+    // screen is the later one, so its status and result stand.
+    function fillTool(into, from) {
+      if (nameless(into) && !nameless(from)) into.label = from.label;
+      if (into.input === undefined && from.input !== undefined)
+        into.input = from.input;
+      if (into.result === undefined && from.result !== undefined)
+        into.result = from.result;
+      if (!into.status && from.status) into.status = from.status;
+      if (!into.sub && from.sub) into.sub = from.sub;
+    }
+    // Two rows are the same record unless both know when they were sent and
+    // the times differ: a chat of "continue" and "ok" repeats its words, not
+    // its minutes. A row with no time (the live replay stamps from the
+    // envelope, which a stored page does not carry) cannot tell, so the words
+    // decide.
+    function sameRow(a, b) {
+      var k = rowKey(a);
+      if (k === null || k !== rowKey(b)) return false;
+      return !(
+        typeof a.time === 'number' &&
+        typeof b.time === 'number' &&
+        a.time !== b.time
+      );
+    }
+    function sameRun(list, from, at) {
+      for (var j = 0; j < list.length - from; j++) {
+        if (!sameRow(list[from + j], items[at + j])) return false;
+      }
+      return true;
+    }
+    function trimOverlap(list) {
+      for (var from = 0; from < list.length; from++) {
+        var left = list.length - from;
+        if (left < 2 && list.length > 1) break;
+        var first = rowKey(list[from]);
+        if (first === null) continue;
+        for (var at = 0; at + left <= items.length; at++) {
+          if (rowKey(items[at]) !== first || !sameRun(list, from, at)) continue;
+          for (var j = 0; j < left; j++) {
+            var on = items[at + j];
+            if (on.kind === 'tool') {
+              fillTool(on, list[from + j]);
+              emitUpdate(on);
+            }
+          }
+          return list.slice(0, from);
+        }
+      }
+      return list;
+    }
+
     // Stored history is built by a throwaway model, so its items carry that
     // model's ids. Re-key from this model's counter before splicing: the view
     // keys rows on item.id, and a duplicate key makes the virtualizer hand one
     // mounted row to two different items.
-    function prependItems(list) {
+    //
+    // `beforeSplice` runs only when rows will actually go in, just before they
+    // do (the page anchors the reader there; anchoring for a splice that adds
+    // nothing would leave a hold behind). Returns the number of rows added.
+    function prependItems(list, beforeSplice) {
       if (!list || !list.length) return 0;
-      for (var i = 0; i < list.length; i++) list[i].id = nextId++;
+      // The page's to-do list is older than the one on screen: the daemon
+      // re-emits the whole list on every change, so only the newest stands.
+      var havePlan = items.some(function (i) {
+        return i.kind === 'plan';
+      });
+      list = list.filter(function (r) {
+        return !(havePlan && r.kind === 'plan');
+      });
+      list = trimOverlap(list);
+      // A call whose result is already on screen under its raw id: the row on
+      // screen is adopted into the call's place, so it keeps its id and the
+      // live updates that find it by tool id still reach it. A call already
+      // drawn under its own name is just the same call twice.
+      var adopted = [];
+      var fresh = [];
+      for (var n = 0; n < list.length; n++) {
+        var r = list[n];
+        var at = -1;
+        if (r.kind === 'tool' && r.toolCallId) {
+          for (var k = 0; k < items.length; k++) {
+            if (
+              items[k].kind === 'tool' &&
+              items[k].toolCallId === r.toolCallId
+            ) {
+              at = k;
+              break;
+            }
+          }
+        }
+        if (at < 0) {
+          fresh.push(r);
+          continue;
+        }
+        var on = items[at];
+        var wasNameless = nameless(on);
+        fillTool(on, r);
+        if (wasNameless) {
+          items.splice(at, 1);
+          adopted.push(on);
+          fresh.push(on);
+        } else {
+          emitUpdate(on);
+        }
+      }
+      list = fresh;
+      if (!list.length) return 0;
+      if (beforeSplice) beforeSplice();
+      for (var i = 0; i < list.length; i++) {
+        if (adopted.indexOf(list[i]) < 0) list[i].id = nextId++;
+      }
       // Mutate in place. The view binds `var items = model.items` once, so a
       // reassigned array would leave it rendering a list the model no longer
       // holds.

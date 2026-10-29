@@ -6015,37 +6015,48 @@
         transcriptPaging = true;
         renderLoadEarlier();
         try {
-          const q = new URLSearchParams({
-            direction: 'backward',
-            limit: String(TRANSCRIPT_PAGE_SIZE),
-          });
-          if (transcriptCursor) q.set('cursor', transcriptCursor);
-          const res = await fetch(
-            '/session/' + encodeURIComponent(id) + '/transcript?' + q,
-            { headers: { Authorization: 'Bearer ' + token() } },
-          );
-          if (gen !== switchGen) return;
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({}));
-            throw new Error(strOr(body.error, 'HTTP ' + res.status));
-          }
-          const page = await res.json();
-          if (gen !== switchGen) return;
-          const rows = TranscriptModel.replayStoredPage(page.events);
-          markStoredTurnEnds(rows); // #184: their finished turns get actions
-          transcriptCursor = strOr(page.nextCursor, '') || null;
-          // Continuing needs the cursor as much as the daemon saying there is
-          // more: without one a second tap would re-read the same newest page
-          // and prepend it a second time.
-          transcriptExhausted = page.hasMore !== true || !transcriptCursor;
-          if (rows.length) {
+          // #171: the first page asked for (no cursor) is the newest, which the
+          // resume has usually drawn already; the model drops the part of a
+          // page the transcript holds. A page that was nothing but that drew
+          // nothing, and stopping there would cost a tap per page of history
+          // already on screen, so read on until something lands. Bounded: a
+          // transcript that never yields a new row is not walked to its end.
+          const MAX_HOPS = 6;
+          let added = 0;
+          for (let hop = 0; hop < MAX_HOPS && !added; hop++) {
+            const q = new URLSearchParams({
+              direction: 'backward',
+              limit: String(TRANSCRIPT_PAGE_SIZE),
+            });
+            if (transcriptCursor) q.set('cursor', transcriptCursor);
+            const res = await fetch(
+              '/session/' + encodeURIComponent(id) + '/transcript?' + q,
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            if (gen !== switchGen) return;
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              throw new Error(strOr(body.error, 'HTTP ' + res.status));
+            }
+            const page = await res.json();
+            if (gen !== switchGen) return;
+            const rows = TranscriptModel.replayStoredPage(page.events);
+            markStoredTurnEnds(rows); // #184: their finished turns get actions
+            transcriptCursor = strOr(page.nextCursor, '') || null;
+            // Continuing needs the cursor as much as the daemon saying there is
+            // more: without one a second tap would re-read the same newest page
+            // and prepend it a second time.
+            transcriptExhausted = page.hasMore !== true || !transcriptCursor;
             // Rows arriving above the viewport leave the scroll position aimed
             // at different content. Only the view puts the reader back; it owns
-            // every other scroll correction.
-            if (transcriptView) transcriptView.anchorReader();
-            transcriptModel.prependItems(rows);
+            // every other scroll correction, and the model calls this just
+            // before rows go in (a page that adds none leaves nothing held).
+            added = transcriptModel.prependItems(rows, () => {
+              if (transcriptView) transcriptView.anchorReader();
+            });
+            if (transcriptExhausted) break;
           }
-          if (!rows.length && !transcriptExhausted) {
+          if (!added && !transcriptExhausted) {
             setStatus('nothing older to show');
           }
         } catch (err) {
