@@ -10,13 +10,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   compileRouting,
+  loadLayeredRoutingMatcher,
   loadLayeredRoutingMatcherStrict,
+  loadResolvedRoutingRules,
   mergeRoutingConfigs,
   type RoutingConfig,
   type RoutingMatcher,
 } from './rules.js';
 import { createRoutingHotReload, type HotReload } from '../policy/hotReload.js';
 import type { AuditEntry } from '../auditLog.js';
+import { RATE_LIMIT_CRITICAL_KINDS } from '../webpush/notifier.js';
 
 // Issue InfiniteInsight/Qwen-Code-Remote#156, routing half. The workspace
 // routing layer DOES exist: `<cwd>/.qwen/routing.yaml` is merged over the user
@@ -48,7 +51,7 @@ describe('mergeRoutingConfigs: the workspace layer adds, never takes over a user
 
   it('renames a workspace rule that reuses a user rule id, so the audit cannot confuse the two', () => {
     const user = { rules: [rule('quiet-completions', 'task.completed')] };
-    const ws = { rules: [rule('quiet-completions', 'permission.required')] };
+    const ws = { rules: [rule('quiet-completions', 'session.idle')] };
     const merged = mergeRoutingConfigs(ws, user)!;
     expect(merged.rules.map((r) => r.id)).toEqual([
       'workspace:quiet-completions',
@@ -59,7 +62,7 @@ describe('mergeRoutingConfigs: the workspace layer adds, never takes over a user
     expect(matcher.firstDrop({ kind: 'task.completed' })).toBe(
       'quiet-completions',
     );
-    expect(matcher.firstDrop({ kind: 'permission.required' })).toBe(
+    expect(matcher.firstDrop({ kind: 'session.idle' })).toBe(
       'workspace:quiet-completions',
     );
   });
@@ -75,6 +78,114 @@ describe('mergeRoutingConfigs: the workspace layer adds, never takes over a user
   it('does not rename anything when there is no user layer', () => {
     const merged = mergeRoutingConfigs({ rules: [rule('mine', 'x')] }, null)!;
     expect(merged.rules.map((r) => r.id)).toEqual(['mine']);
+  });
+});
+
+// A workspace drop rule that can match an action-required event is refused: a
+// file the model can write must not be able to mute the pushes that tell the
+// operator a human is needed. The critical set is the notifier's own.
+describe('workspace routing cannot suppress critical kinds (issue #156)', () => {
+  const dropOf = (id: string, match: Record<string, unknown>) => ({
+    id,
+    match,
+    route: { drop: true },
+  });
+
+  it('refuses a workspace drop on every critical kind the notifier knows', () => {
+    expect(RATE_LIMIT_CRITICAL_KINDS.has('permission.required')).toBe(true);
+    for (const kind of RATE_LIMIT_CRITICAL_KINDS) {
+      const refused: string[] = [];
+      const merged = mergeRoutingConfigs(
+        { rules: [dropOf('w', { kind })] },
+        null,
+        (r) => refused.push(r.id ?? ''),
+      );
+      expect(merged?.rules).toEqual([]);
+      expect(refused).toEqual(['w']);
+    }
+  });
+
+  it('refuses a workspace drop whose kind list includes a critical kind', () => {
+    const merged = mergeRoutingConfigs(
+      { rules: [dropOf('w', { kind: ['task.completed', 'session.died'] })] },
+      null,
+    );
+    expect(merged?.rules).toEqual([]);
+  });
+
+  it('refuses a workspace drop with no kind, which would match every kind', () => {
+    const merged = mergeRoutingConfigs(
+      { rules: [dropOf('all', { sessionTag: 'x*' })] },
+      null,
+    );
+    expect(merged?.rules).toEqual([]);
+  });
+
+  it('still applies a workspace drop on a non-critical kind', () => {
+    const merged = mergeRoutingConfigs(
+      { rules: [dropOf('w', { kind: 'turn_complete' })] },
+      null,
+    )!;
+    expect(compileRouting(merged).firstDrop({ kind: 'turn_complete' })).toBe(
+      'w',
+    );
+  });
+
+  it('still applies a USER drop on a critical kind', () => {
+    const merged = mergeRoutingConfigs(null, {
+      rules: [dropOf('u', { kind: 'permission.required' })],
+    })!;
+    expect(
+      compileRouting(merged).firstDrop({ kind: 'permission.required' }),
+    ).toBe('u');
+  });
+
+  describe('through the loaders', () => {
+    let dir: string;
+    let userPath: string;
+    let cwd: string;
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'rc-routing-crit-'));
+      userPath = join(dir, 'routing.yaml');
+      cwd = join(dir, 'ws');
+      await mkdir(join(cwd, '.qwen'), { recursive: true });
+      await writeFile(
+        join(cwd, '.qwen', 'routing.yaml'),
+        `rules:
+  - id: mute-prompts
+    match: { kind: permission.required }
+    route: { drop: true }
+  - id: mute-turns
+    match: { kind: turn_complete }
+    route: { drop: true }
+`,
+        'utf8',
+      );
+    });
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it('boot load warns and drops it; the inspector omits it too', async () => {
+      const warnings: string[] = [];
+      const { matcher, ruleCount } = await loadLayeredRoutingMatcher(
+        userPath,
+        cwd,
+        (m) => warnings.push(m),
+      );
+      expect(ruleCount).toBe(1);
+      expect(matcher?.firstDrop({ kind: 'permission.required' })).toBeNull();
+      expect(matcher?.firstDrop({ kind: 'turn_complete' })).toBe('mute-turns');
+      expect(warnings.join('\n')).toContain('mute-prompts');
+      const resolved = await loadResolvedRoutingRules(userPath, cwd);
+      expect(resolved.map((r) => r.rule.id)).toEqual(['mute-turns']);
+    });
+
+    it('the strict (reload) loader reports how many it dropped', async () => {
+      const res = await loadLayeredRoutingMatcherStrict(userPath, cwd);
+      expect(res.ruleCount).toBe(1);
+      expect(res.ignored).toBe(1);
+    });
   });
 });
 
@@ -203,6 +314,7 @@ rules:
     expect(rows('routing_reloaded')[0]!.detail).toEqual({
       file: workspaceFile,
       ruleCount: 2,
+      ignored: 0,
     });
   });
 
@@ -222,5 +334,48 @@ rules:
     expect(applied).toBe(1);
     expect(rows('routing_reloaded')).toHaveLength(1);
     expect(live?.firstDrop({ kind: 'x' })).toBe('w19');
+  });
+
+  it('a workspace drop on permission.required is ignored and audited; one on turn_complete applies', async () => {
+    await start();
+    await writeFile(
+      workspaceFile,
+      `
+rules:
+  - id: mute-prompts
+    match: { kind: permission.required }
+    route: { drop: true }
+  - id: mute-turns
+    match: { kind: turn_complete }
+    route: { drop: true }
+`,
+      'utf8',
+    );
+    reload!.trigger(workspaceFile);
+    await vi.waitFor(() => expect(rows('routing_reloaded')).toHaveLength(1));
+    expect(live?.firstDrop({ kind: 'permission.required' })).toBeNull();
+    expect(live?.firstDrop({ kind: 'turn_complete' })).toBe('mute-turns');
+    expect(rows('routing_reloaded')[0]!.detail).toEqual({
+      file: workspaceFile,
+      ruleCount: 2,
+      ignored: 1,
+    });
+  });
+
+  it('a user drop on permission.required still applies across a reload', async () => {
+    await writeFile(
+      userPath,
+      `rules:\n  - id: user-mute\n    match: { kind: permission.required }\n    route: { drop: true }\n`,
+      'utf8',
+    );
+    await start();
+    await writeFile(
+      workspaceFile,
+      `rules:\n  - id: w\n    match: { kind: turn_complete }\n    route: { drop: true }\n`,
+      'utf8',
+    );
+    reload!.trigger(workspaceFile);
+    await vi.waitFor(() => expect(applied).toBe(1));
+    expect(live?.firstDrop({ kind: 'permission.required' })).toBe('user-mute');
   });
 });

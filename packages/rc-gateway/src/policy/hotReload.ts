@@ -231,6 +231,7 @@ export function createRoutingHotReload(
   return createHotReload<{
     matcher: RoutingMatcher | undefined;
     ruleCount: number;
+    ignored: number;
   }>({
     files: [
       opts.userPath,
@@ -238,12 +239,15 @@ export function createRoutingHotReload(
         ? [join(opts.workspaceCwd, '.qwen', 'routing.yaml')]
         : []),
     ],
-    load: () =>
-      loadLayeredRoutingMatcherStrict(opts.userPath, opts.workspaceCwd),
+    load: (note) =>
+      loadLayeredRoutingMatcherStrict(opts.userPath, opts.workspaceCwd, (m) => {
+        note(m);
+        (opts.log ?? defaultLog).warn(m);
+      }),
     apply: ({ matcher }) => opts.apply(matcher),
     reloaded: 'routing_reloaded',
     failed: 'routing_reload_failed',
-    appliedDetail: ({ ruleCount }) => ({ ruleCount }),
+    appliedDetail: ({ ruleCount, ignored }) => ({ ruleCount, ignored }),
     label: 'routing',
     audit: opts.audit,
     log: opts.log ?? defaultLog,

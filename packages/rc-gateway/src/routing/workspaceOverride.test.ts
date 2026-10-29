@@ -15,16 +15,14 @@ import {
   type RoutingConfig,
 } from './rules.js';
 
-/** A config of one event-global drop rule matching kind `permission.required`. */
+/** A config of one event-global drop rule matching kind `task.completed` (a workspace rule may not drop action-required kinds, #156). */
 function dropRule(id: string): RoutingConfig {
   return {
-    rules: [
-      { id, match: { kind: 'permission.required' }, route: { drop: true } },
-    ],
+    rules: [{ id, match: { kind: 'task.completed' }, route: { drop: true } }],
   };
 }
 
-const EV = { kind: 'permission.required' };
+const EV = { kind: 'task.completed' };
 
 describe('mergeRoutingConfigs', () => {
   it('returns null when both inputs are null', () => {
@@ -69,7 +67,7 @@ describe('loadLayeredRoutingMatcher', () => {
   });
 
   const yml = (id: string) =>
-    `rules:\n  - id: ${id}\n    match: { kind: permission.required }\n    route: { drop: true }\n`;
+    `rules:\n  - id: ${id}\n    match: { kind: task.completed }\n    route: { drop: true }\n`;
 
   it('returns no matcher when neither file exists', async () => {
     const r = await loadLayeredRoutingMatcher(userPath, workspaceCwd, warn);
