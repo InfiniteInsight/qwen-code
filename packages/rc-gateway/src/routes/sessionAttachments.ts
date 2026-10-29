@@ -8,6 +8,7 @@ import type { ErrorRequestHandler, RequestHandler, Response } from 'express';
 import express from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Session attachments (add-capability-parity #109, first slice: uploads).
@@ -228,6 +229,7 @@ export function sendAttachmentError(res: Response, err: unknown): void {
     });
     return;
   }
+  if (relayDaemonAuthFailure(res, err, 'attachments')) return;
   const { status, kind, message, hint } = readFsError(err);
   if (typeof status === 'number' && status >= 400 && status < 500) {
     // A 404 with no fs envelope is not "that attachment is not here" - it is a

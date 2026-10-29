@@ -197,7 +197,8 @@ export type AuditAction =
   | 'session_worktree_reset'
   | 'host_action_started'
   | 'host_attached'
-  | 'host_attach_rejected';
+  | 'host_attach_rejected'
+  | 'daemon_auth_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -318,6 +319,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'host_action_started',
   'host_attached',
   'host_attach_rejected',
+  'daemon_auth_failed',
 ];
 
 export interface AuditEntry {

@@ -7,6 +7,7 @@
 import type { Request, RequestHandler, Response } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Which sessions are actually open right now (add-capability-parity #111).
@@ -118,6 +119,7 @@ function sendLiveStateError(res: Response, err: unknown): void {
     });
     return;
   }
+  if (relayDaemonAuthFailure(res, err, 'live_state')) return;
   const status = (err as { status?: unknown }).status;
   const body = (err as { body?: unknown }).body as ErrorBody | undefined;
   const kind = typeof body?.errorKind === 'string' ? body.errorKind : undefined;

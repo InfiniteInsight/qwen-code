@@ -7,6 +7,7 @@
 import type { RequestHandler, Response } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * The visible queue (add-capability-parity #110, second slice).
@@ -72,6 +73,7 @@ interface FsErrorBody {
  */
 function sendQueueError(res: Response, err: unknown): void {
   if (res.headersSent) return;
+  if (relayDaemonAuthFailure(res, err, 'queue')) return;
   const status = (err as { status?: unknown }).status;
   const body = (err as { body?: unknown }).body as FsErrorBody | undefined;
   const kind = typeof body?.errorKind === 'string' ? body.errorKind : undefined;

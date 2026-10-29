@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Read a daemon error's 409 `code` without asking what class the error is.
@@ -170,6 +171,7 @@ export function createSessionWorktreeResetRoute(
     try {
       replacement = await daemon.resetWorktreeSession(sessionId, {});
     } catch (err) {
+      if (relayDaemonAuthFailure(res, err, 'worktree_reset')) return;
       const { status, code } = daemonRejection(err);
       if (code !== undefined && REFUSALS[code] !== undefined) {
         const refusal = REFUSALS[code];

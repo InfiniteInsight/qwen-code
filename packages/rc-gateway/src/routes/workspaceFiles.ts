@@ -66,6 +66,7 @@
 import type { Request, RequestHandler, Response } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface these routes need. */
 export type WorkspaceFilesDaemon = Pick<
@@ -160,6 +161,7 @@ export function sendWorkspaceFileError(res: Response, err: unknown): void {
     });
     return;
   }
+  if (relayDaemonAuthFailure(res, err, 'workspace_files')) return;
   const status = (err as { status?: unknown }).status;
   const body = (err as { body?: unknown }).body as FsErrorBody | undefined;
   const kind = typeof body?.errorKind === 'string' ? body.errorKind : undefined;
