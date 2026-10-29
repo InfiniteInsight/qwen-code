@@ -70,4 +70,24 @@ describe('markdownToHtml', () => {
       'call run_the_tests now',
     );
   });
+
+  // The placeholder delimiter is a Private Use Area character; model text can
+  // contain it too (#168).
+  const PUA = String.fromCharCode(0xe000);
+
+  it('does not throw on model text that forges a placeholder (#168)', () => {
+    // No span 5 exists: this used to reach escapeHtml(undefined) and throw,
+    // and the stream flush's catch dropped the whole message.
+    const forged = `before ${PUA}S5${PUA} and ${PUA}B9${PUA} after`;
+    expect(() => markdownToHtml(forged)).not.toThrow();
+    const html = markdownToHtml(forged);
+    expect(html).toContain('before');
+    expect(html).toContain('after');
+    expect(html).not.toContain('undefined');
+  });
+
+  it('a forged placeholder cannot duplicate a real code span', () => {
+    const html = markdownToHtml(`\`secret\` and ${PUA}S0${PUA}`);
+    expect(html.match(/<code>secret<\/code>/g)).toHaveLength(1);
+  });
 });

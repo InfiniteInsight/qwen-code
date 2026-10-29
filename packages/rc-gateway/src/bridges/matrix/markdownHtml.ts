@@ -20,10 +20,15 @@
  * author input can inject other tags/attributes.
  */
 
-// Private-Use-Area delimiter for extracted-code placeholders: it never appears in
-// agent prose, isn't a control char, and escapeHtml + the inline rules all leave
-// it untouched — so placeholders can't collide with or be mangled by author text.
+// Private-Use-Area delimiter for extracted-code placeholders: it isn't a control
+// char, and escapeHtml + the inline rules all leave it untouched. Model text CAN
+// contain it, though (#168): a forged `<PUA>S5<PUA>` with no span 5 reached
+// escapeHtml(undefined) and threw, and the stream flush's catch dropped the
+// whole message. So every PUA in the input is replaced (with U+FFFD) before
+// placeholders are minted, and only the converter's own placeholders remain.
 const PUA = String.fromCharCode(0xe000);
+const PUA_ANY = new RegExp(PUA, 'g');
+const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
 const SPAN_RE = new RegExp(`${PUA}S(\\d+)${PUA}`, 'g');
 const BLOCK_RE = new RegExp(`${PUA}B(\\d+)${PUA}`, 'g');
 
@@ -49,7 +54,7 @@ function escapeHtml(s: string): string {
 export function markdownToHtml(md: string): string {
   const blocks: string[] = [];
   const spans: string[] = [];
-  let s = md;
+  let s = md.replace(PUA_ANY, REPLACEMENT_CHAR);
 
   // 1. Extract fenced code blocks (```lang\n…```), then inline code (`…`), so
   //    their contents bypass escaping/inline rules and are restored verbatim.
