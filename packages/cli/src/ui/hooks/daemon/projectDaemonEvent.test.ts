@@ -16,6 +16,7 @@ import {
   pendingHistoryItemsOf,
   pendingToolCallsOf,
   activePermissionOf,
+  projectReplaySnapshot,
   thoughtOf,
   type DaemonFrame,
   type DaemonProjectionState,
@@ -669,5 +670,235 @@ describe('projectDaemonEvent — replay', () => {
     const end = projectDaemonEvent(state, { type: 'turn_complete', data: {} });
     expect(end.committed).toEqual([{ type: 'gemini', text: 'great' }]);
     expect(end.state.streamingState).toBe(StreamingState.Idle);
+  });
+});
+
+// --- attach-time seeding from the load response's replay snapshot (#194) ---
+
+describe('projectReplaySnapshot', () => {
+  // The shape of a compacted daemon replay: each turn is folded at its
+  // boundary, so a merged event carries the id of its LAST source chunk and a
+  // latest-wins update keeps its first slot but the newest id. Ids inside a
+  // turn are therefore NOT monotonic. Replayed user chunks carry no
+  // originatorClientId (verified against a live daemon).
+  const compactedReplay: DaemonFrame[] = [
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'first question' },
+      }),
+      3,
+    ),
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [],
+      }),
+      40,
+    ),
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'thinking' },
+      }),
+      20,
+    ),
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call_1',
+        title: 'Read file',
+        status: 'completed',
+        _meta: { toolName: 'read_file' },
+      }),
+      12,
+    ),
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'first answer' },
+      }),
+      30,
+    ),
+    withId({ type: 'turn_complete', data: { stopReason: 'end_turn' } }, 31),
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'second question' },
+      }),
+      41,
+    ),
+    withId(
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'second answer' },
+      }),
+      50,
+    ),
+    withId({ type: 'turn_complete', data: { stopReason: 'end_turn' } }, 51),
+  ];
+  const liveJournal: DaemonFrame[] = [
+    withId(
+      sessionUpdate(
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'third question' },
+        },
+        PHONE,
+      ),
+      52,
+    ),
+    withId(
+      sessionUpdate(
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'third answer so far' },
+        },
+        PHONE,
+      ),
+      53,
+    ),
+  ];
+
+  it('folds compacted replay then the live journal, in order, ignoring non-monotonic ids', () => {
+    const { committed, state } = projectReplaySnapshot(
+      { compactedReplay, liveJournal },
+      { ownClientId: SELF, lastEventId: 53 },
+    );
+    expect(committed.map((i) => i.type)).toEqual([
+      'user',
+      'tool_group',
+      'gemini',
+      'user',
+      'gemini',
+      'user',
+      'gemini',
+    ]);
+    expect(committed[0]).toEqual({ type: 'user', text: 'first question' });
+    expect(committed[2]).toEqual({ type: 'gemini', text: 'first answer' });
+    expect(committed[3]).toEqual({ type: 'user', text: 'second question' });
+    expect(committed[4]).toEqual({ type: 'gemini', text: 'second answer' });
+    expect(committed[5]).toEqual({ type: 'user', text: 'third question' });
+    // No prompt in flight: the trailing journal turn is committed and the
+    // projection returns to Idle instead of a stuck spinner.
+    expect(committed[6]).toEqual({
+      type: 'gemini',
+      text: 'third answer so far',
+    });
+    expect(state.streamingState).toBe(StreamingState.Idle);
+    expect(pendingHistoryItemsOf(state)).toEqual([]);
+    // The live loop continues from the subscription cursor with our identity.
+    expect(state.ownClientId).toBe(SELF);
+    expect(state.lastEventId).toBe(53);
+  });
+
+  it('keeps the in-flight journal turn pending when the daemon reports an active prompt', () => {
+    const { committed, state } = projectReplaySnapshot(
+      { compactedReplay, liveJournal },
+      { ownClientId: SELF, lastEventId: 53, hasActivePrompt: true },
+    );
+    expect(committed.at(-1)).toEqual({ type: 'user', text: 'third question' });
+    expect(state.streamingState).toBe(StreamingState.Responding);
+    expect(pendingHistoryItemsOf(state)).toEqual([
+      { type: 'gemini', text: 'third answer so far' },
+    ]);
+  });
+
+  it('renders a replayed user line even when it carries our own clientId', () => {
+    // Replay is history, not an echo of input this client just rendered.
+    const { committed, state } = projectReplaySnapshot(
+      {
+        compactedReplay: [
+          withId(
+            sessionUpdate(
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'typed here earlier' },
+              },
+              SELF,
+            ),
+            1,
+          ),
+        ],
+        liveJournal: [],
+      },
+      { ownClientId: SELF },
+    );
+    expect(committed).toEqual([{ type: 'user', text: 'typed here earlier' }]);
+    // ...but live self-echo suppression is armed for what follows.
+    const echo = projectDaemonEvent(
+      state,
+      withId(
+        sessionUpdate(
+          {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'new input' },
+          },
+          SELF,
+        ),
+        2,
+      ),
+    );
+    expect(echo.committed).toEqual([]);
+  });
+
+  it('puts one info line first when earlier history is not included', () => {
+    const viaFlag = projectReplaySnapshot(
+      { compactedReplay, liveJournal: [] },
+      { historyHasMore: true },
+    ).committed;
+    expect(viaFlag[0]?.type).toBe('info');
+    expect(viaFlag.filter((i) => i.type === 'info')).toHaveLength(1);
+    expect(viaFlag[1]).toEqual({ type: 'user', text: 'first question' });
+
+    // A history_truncated marker in the window means the same thing.
+    const viaMarker = projectReplaySnapshot(
+      {
+        compactedReplay: [
+          {
+            type: 'history_truncated',
+            data: { reason: 'replay_window_exceeded' },
+          },
+          ...compactedReplay,
+        ],
+        liveJournal: [],
+      },
+      {},
+    ).committed;
+    expect(viaMarker[0]?.type).toBe('info');
+    expect(viaMarker.filter((i) => i.type === 'info')).toHaveLength(1);
+  });
+
+  it('adds one info line when the replay is partial or degraded', () => {
+    for (const flags of [
+      { replayPartial: true },
+      { replayDegraded: true },
+      { replayPartial: true, replayDegraded: true },
+    ]) {
+      const { committed } = projectReplaySnapshot(
+        { compactedReplay, liveJournal: [] },
+        flags,
+      );
+      const infos = committed.filter((i) => i.type === 'info');
+      expect(infos).toHaveLength(1);
+      expect(committed[0]?.type).toBe('info');
+    }
+    // Both conditions at once: two separate lines (history hidden + incomplete).
+    const both = projectReplaySnapshot(
+      { compactedReplay, liveJournal: [] },
+      { historyHasMore: true, replayPartial: true },
+    ).committed;
+    expect(both.slice(0, 2).map((i) => i.type)).toEqual(['info', 'info']);
+  });
+
+  it('commits nothing and leaves the watermark alone for an empty snapshot', () => {
+    const { committed, state } = projectReplaySnapshot(
+      { compactedReplay: [], liveJournal: [] },
+      { ownClientId: SELF, lastEventId: 0 },
+    );
+    expect(committed).toEqual([]);
+    expect(state.streamingState).toBe(StreamingState.Idle);
+    expect(state.lastEventId).toBeUndefined();
+    expect(state.ownClientId).toBe(SELF);
   });
 });
