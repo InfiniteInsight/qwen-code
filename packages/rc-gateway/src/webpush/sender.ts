@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Agent as HttpsAgent } from 'node:https';
 import webpush, { WebPushError } from 'web-push';
 import type { AuditRecorder } from '../auditLog.js';
 import type { PushStore, PushSubscriptionRecord } from '../pushStore.js';
 import type { VapidStore } from './vapid.js';
 import type { PushPayload } from './payload.js';
+import {
+  PushEndpointPolicy,
+  createGuardedLookup,
+  type PushEndpointRefusal,
+} from './endpointPolicy.js';
 
 export interface PushTransportResult {
   statusCode: number;
@@ -25,7 +31,26 @@ export interface PushSenderOptions {
   /** Backoff delays between attempts. Default [1s,2s,4s,8s,16s]. */
   backoffMs?: number[];
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Endpoint policy the default transport enforces before every delivery
+   * (#165). Defaults to the known Web Push services.
+   */
+  endpointPolicy?: PushEndpointPolicy;
 }
+
+/**
+ * Thrown by the default transport when a stored endpoint fails the policy.
+ * Not transient: the same endpoint will fail the same way on every retry.
+ */
+export class PushEndpointRefusedError extends Error {
+  constructor(readonly reason: PushEndpointRefusal | 'connect_refused') {
+    super(`push endpoint refused: ${reason}`);
+    this.name = 'PushEndpointRefusedError';
+  }
+}
+
+/** Per-request socket timeout for a delivery (web-push has none by default). */
+const SEND_TIMEOUT_MS = 15_000;
 
 const DEFAULT_BACKOFF = [1000, 2000, 4000, 8000, 16000];
 const MAX_ATTEMPTS = 5;
@@ -75,7 +100,17 @@ export class PushSender {
   private readonly transport: PushTransport;
   private readonly backoffMs: number[];
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly endpointPolicy: PushEndpointPolicy;
   private vapidConfigured = false;
+  /**
+   * Every delivery goes through this agent, whose lookup refuses non-public
+   * addresses at connect time (#165), so a hostname re-pointed at an internal
+   * address after registration is still not reached.
+   */
+  private readonly agent = new HttpsAgent({
+    lookup: createGuardedLookup(),
+    keepAlive: false,
+  });
 
   constructor(
     private readonly vapid: VapidStore,
@@ -86,9 +121,15 @@ export class PushSender {
     this.transport = opts.transport ?? this.defaultTransport;
     this.backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF;
     this.sleep = opts.sleep ?? defaultSleep;
+    this.endpointPolicy = opts.endpointPolicy ?? new PushEndpointPolicy();
   }
 
   private defaultTransport: PushTransport = async (sub, payloadJson) => {
+    // Re-checked on every send, not only at registration: a record stored
+    // before #165, or before the operator narrowed the allowlist, must not
+    // be POSTed to either.
+    const verdict = this.endpointPolicy.checkStatic(sub.endpoint);
+    if (!verdict.ok) throw new PushEndpointRefusedError(verdict.reason);
     if (!this.vapidConfigured) {
       webpush.setVapidDetails(
         this.vapid.getSubject(),
@@ -97,11 +138,19 @@ export class PushSender {
       );
       this.vapidConfigured = true;
     }
-    const res = await webpush.sendNotification(
-      { endpoint: sub.endpoint, keys: sub.keys },
-      payloadJson,
-    );
-    return { statusCode: res.statusCode };
+    try {
+      const res = await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: sub.keys },
+        payloadJson,
+        { agent: this.agent, timeout: SEND_TIMEOUT_MS },
+      );
+      return { statusCode: res.statusCode };
+    } catch (err) {
+      if ((err as { code?: unknown }).code === 'EPUSHNONPUBLIC') {
+        throw new PushEndpointRefusedError('connect_refused');
+      }
+      throw err;
+    }
   };
 
   /** Record an audit entry, swallowing any error (never propagates). */
@@ -134,6 +183,18 @@ export class PushSender {
           );
           code = res.statusCode;
         } catch (err) {
+          if (err instanceof PushEndpointRefusedError) {
+            // Policy refusal: no retry (it cannot change across the backoff)
+            // and the record is kept, like an auth error, so a mistaken
+            // allowlist cannot wipe every device's subscription.
+            await this.safeAudit('push_send_failed', {
+              subscriptionId: record.id,
+              kind: payload.kind,
+              reason: 'endpoint_refused',
+              refusal: err.reason,
+            });
+            return;
+          }
           // Network/transient throw (default transport maps WebPushError, but a
           // raw throw from any transport is treated as transient).
           code =

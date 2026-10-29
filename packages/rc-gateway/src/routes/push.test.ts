@@ -12,7 +12,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { RcScope } from '../scopes.js';
-import { OWNER, SESSION_READ } from '../scopes.js';
+import { OWNER, SESSION_READ, SHARE } from '../scopes.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { VapidStore } from '../webpush/vapid.js';
 import { PushStore } from '../pushStore.js';
@@ -20,6 +20,7 @@ import { TokenStore } from '../tokenStore.js';
 import { PushSender, type PushTransport } from '../webpush/sender.js';
 import { PushNotifier } from '../webpush/notifier.js';
 import type { PushPayload } from '../webpush/payload.js';
+import { PushEndpointPolicy } from '../webpush/endpointPolicy.js';
 import { createPushRouter } from './push.js';
 
 let server: Server | undefined;
@@ -29,7 +30,10 @@ let tokens: TokenStore;
 let notifier: PushNotifier;
 let sent: Array<{ endpoint: string; payload: PushPayload }>;
 let audit: AuditRecorder & { calls: AuditEntry[] };
-let client: { id: string; scopes: RcScope[] };
+let client: { id: string; scopes: RcScope[]; sessionLockId?: string };
+// Registration-time DNS is stubbed: every name resolves to one public address,
+// so the tests exercise the policy without touching the network.
+let policy: PushEndpointPolicy | undefined;
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   const calls: AuditEntry[] = [];
@@ -62,6 +66,9 @@ beforeEach(async () => {
   });
   notifier = new PushNotifier(tokens, store, sender);
   client = { id: 'tokA', scopes: [SESSION_READ] };
+  policy = new PushEndpointPolicy({
+    resolve: async () => [{ address: '142.250.80.10', family: 4 }],
+  });
 });
 
 async function mount(): Promise<string> {
@@ -71,7 +78,16 @@ async function mount(): Promise<string> {
     req.rcClient = client;
     next();
   });
-  app.use('/rc/push', createPushRouter(vapid, store, notifier, audit));
+  app.use(
+    '/rc/push',
+    createPushRouter(
+      vapid,
+      store,
+      notifier,
+      audit,
+      policy ? { endpointPolicy: policy } : {},
+    ),
+  );
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
   });
@@ -81,7 +97,7 @@ async function mount(): Promise<string> {
 }
 
 const VALID_SUB = {
-  endpoint: 'https://push.example.com/secret-endpoint-1',
+  endpoint: 'https://fcm.googleapis.com/fcm/send/secret-endpoint-1',
   keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
 };
 
@@ -120,7 +136,7 @@ describe('push routes', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/x',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/x',
           keys: { p256dh: 'p' },
         },
       }),
@@ -601,5 +617,162 @@ describe('DELETE forgets the rate-limit window', () => {
     expect(res.status).toBe(404);
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe('#165 subscribe endpoint policy (blind SSRF)', () => {
+  async function subscribe(
+    url: string,
+    endpoint: string,
+  ): Promise<{ status: number; body: { code?: string; reason?: string } }> {
+    const res = await fetch(`${url}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } },
+      }),
+    });
+    return {
+      status: res.status,
+      body: (await res.json().catch(() => ({}))) as {
+        code?: string;
+        reason?: string;
+      },
+    };
+  }
+
+  it.each([
+    ['https://internal-host:8443/x', 'port'],
+    ['https://internal-host/x', 'host_not_allowed'],
+    ['https://10.0.0.5/x', 'non_public_address'],
+    ['https://127.0.0.1/x', 'non_public_address'],
+    ['https://[::1]/x', 'non_public_address'],
+    ['http://fcm.googleapis.com/fcm/send/x', 'not_https'],
+  ])(
+    'refuses %s with 400 invalid_push_endpoint and stores nothing',
+    async (endpoint, reason) => {
+      const url = await mount();
+      const { status, body } = await subscribe(url, endpoint);
+      expect(status).toBe(400);
+      expect(body.code).toBe('invalid_push_endpoint');
+      expect(body.reason).toBe(reason);
+      expect(store.listAll()).toHaveLength(0);
+    },
+  );
+
+  it('refuses a host that resolves to a private address at registration', async () => {
+    policy = new PushEndpointPolicy({
+      allowedHostSuffixes: null,
+      resolve: async () => [{ address: '192.168.1.100', family: 4 }],
+    });
+    const url = await mount();
+    const { status, body } = await subscribe(
+      url,
+      'https://looks-public.example.net/x',
+    );
+    expect(status).toBe(400);
+    expect(body.reason).toBe('non_public_address');
+    expect(store.listAll()).toHaveLength(0);
+  });
+
+  it('with no policy passed, the route still refuses a private literal (secure default)', async () => {
+    policy = undefined;
+    const url = await mount();
+    const { status, body } = await subscribe(url, 'https://10.0.0.5:8443/x');
+    expect(status).toBe(400);
+    expect(body.code).toBe('invalid_push_endpoint');
+    expect(store.listAll()).toHaveLength(0);
+  });
+
+  it('refuses oversized keys', async () => {
+    const url = await mount();
+    const res = await fetch(`${url}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: VALID_SUB.endpoint,
+          keys: { p256dh: 'p'.repeat(4096), auth: 'a' },
+        },
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(store.listAll()).toHaveLength(0);
+  });
+
+  it('a share (session-locked) token cannot register push (403)', async () => {
+    client = {
+      id: 'shareA',
+      scopes: [SESSION_READ, SHARE],
+      sessionLockId: 's1',
+    };
+    const url = await mount();
+    const { status, body } = await subscribe(url, VALID_SUB.endpoint);
+    expect(status).toBe(403);
+    expect(body.code).toBe('insufficient_scope');
+    expect(store.listAll()).toHaveLength(0);
+  });
+
+  it('a paired read-only token still can (push stays at session:read)', async () => {
+    client = { id: 'reader', scopes: [SESSION_READ] };
+    const url = await mount();
+    const { status } = await subscribe(url, VALID_SUB.endpoint);
+    expect(status).toBe(201);
+    expect(store.listFor('reader')).toHaveLength(1);
+  });
+});
+
+describe('#165 per-token subscription cap', () => {
+  async function subscribeN(url: string, prefix: string, n: number) {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const res = await fetch(`${url}/rc/push/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscription: {
+            endpoint: `https://fcm.googleapis.com/fcm/send/${prefix}-${i}`,
+            keys: { p256dh: 'p', auth: 'a' },
+          },
+        }),
+      });
+      expect(res.status).toBe(201);
+      ids.push(((await res.json()) as { id: string }).id);
+    }
+    return ids;
+  }
+
+  it('keeps at most 8 per token, evicting the oldest, auditing and forgetting it', async () => {
+    const spy = vi.spyOn(notifier, 'forgetRateLimit');
+    const url = await mount();
+    const ids = await subscribeN(url, 'dev', 9);
+    const mine = store.listFor('tokA').map((r) => r.id);
+    expect(mine).toHaveLength(8);
+    expect(mine).not.toContain(ids[0]);
+    expect(mine).toContain(ids[8]);
+    expect(spy).toHaveBeenCalledWith(ids[0]);
+    const evicted = audit.calls.find(
+      (c) =>
+        c.action === 'push_unsubscribed' &&
+        (c.detail as { reason?: string }).reason === 'cap_evicted',
+    );
+    expect(evicted?.detail).toEqual({
+      subscriptionId: ids[0],
+      reason: 'cap_evicted',
+    });
+    spy.mockRestore();
+  });
+
+  it("the cap is per token: another token's subscriptions are untouched", async () => {
+    for (let i = 0; i < 8; i++) {
+      await store.add('tokB', {
+        endpoint: `https://fcm.googleapis.com/fcm/send/b-${i}`,
+        keys: { p256dh: 'p', auth: 'a' },
+      });
+    }
+    const url = await mount();
+    await subscribeN(url, 'a', 9);
+    expect(store.listFor('tokB')).toHaveLength(8);
+    expect(store.listFor('tokA')).toHaveLength(8);
   });
 });

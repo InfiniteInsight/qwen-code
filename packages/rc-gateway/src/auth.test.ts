@@ -24,6 +24,7 @@ import { SESSION_READ, APPROVE, WRITE, BRIDGE, OWNER } from './scopes.js';
 import { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import { SubActorBanStore } from './bridges/subActorBans.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
+import { PeerAuditThrottle } from './auditThrottle.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   const calls: AuditEntry[] = [];
@@ -130,6 +131,47 @@ describe('auth middleware', () => {
       detail: { path: '/rc/tokens' },
     });
     expect(audit.calls[0].actorTokenId).toBeUndefined();
+  });
+
+  it('#165 a flood of bad tokens from one peer writes one row per minute with a count', () => {
+    const audit = fakeAudit();
+    let now = 0;
+    const throttle = new PeerAuditThrottle(audit, {
+      now: () => now,
+      autoFlush: false,
+    });
+    const mw = bearerResolve(store, audit, throttle);
+    const req = {
+      headers: { authorization: 'Bearer qwk_nope' },
+      path: '/rc/tokens',
+      socket: { remoteAddress: '203.0.113.50' },
+    } as unknown as Request;
+    for (let i = 0; i < 50; i++) {
+      const res = fakeRes();
+      mw(req, res, () => {});
+      expect(res._status).toBe(401);
+    }
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'auth_failed',
+      detail: { path: '/rc/tokens', peer: '203.0.113.50', count: 1 },
+    });
+    now = 60_000;
+    mw(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(2);
+    expect(audit.calls[1]!.detail).toMatchObject({ count: 50 });
+  });
+
+  it('#165 without an explicit throttle bearerResolve still throttles per peer', () => {
+    const audit = fakeAudit();
+    const mw = bearerResolve(store, audit);
+    const req = {
+      headers: {},
+      path: '/rc/tokens',
+      socket: { remoteAddress: '203.0.113.51' },
+    } as unknown as Request;
+    for (let i = 0; i < 20; i++) mw(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(1);
   });
 
   it('does not record when auth succeeds', async () => {
@@ -489,6 +531,82 @@ describe('enforceSubActorRateLimit middleware', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].subActor).toBe('telegram:alice');
     expect(rows[0].target).toBe('s1');
+  });
+
+  describe('#165 perToken: key on the token when no sub-actor is asserted', () => {
+    function tokenReq(id: string, subActor?: string): Request {
+      return {
+        rcClient: { id, scopes: ['session:read'], subActor },
+        params: { id: 's1' },
+      } as unknown as Request;
+    }
+    function run(
+      mw: ReturnType<typeof enforceSubActorRateLimit>,
+      req: Request,
+    ) {
+      const res = fakeRes();
+      let called = false;
+      mw(req, res, () => {
+        called = true;
+      });
+      return { res, called };
+    }
+
+    it('429s a token over the cap with code rate_limited and audits once', () => {
+      const audit = fakeAudit();
+      const limiter = new SubActorRateLimiter();
+      let t = 0;
+      const mw = enforceSubActorRateLimit(limiter, 2, audit, () => t++, {
+        perToken: true,
+      });
+      expect(run(mw, tokenReq('guest')).called).toBe(true);
+      expect(run(mw, tokenReq('guest')).called).toBe(true);
+      const third = run(mw, tokenReq('guest'));
+      expect(third.called).toBe(false);
+      expect(third.res._status).toBe(429);
+      expect(third.res._json).toMatchObject({ code: 'rate_limited' });
+      run(mw, tokenReq('guest'));
+      const rows = audit.calls.filter((c) => c.action === 'token_rate_limited');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].actorTokenId).toBe('guest');
+      expect(rows[0].target).toBe('s1');
+      // Another token is counted separately.
+      expect(run(mw, tokenReq('other')).called).toBe(true);
+    });
+
+    it('uses the same rolling window: the token is served again once it passes', () => {
+      const limiter = new SubActorRateLimiter(1000);
+      let now = 0;
+      const mw = enforceSubActorRateLimit(limiter, 1, undefined, () => now, {
+        perToken: true,
+      });
+      expect(run(mw, tokenReq('g')).called).toBe(true);
+      expect(run(mw, tokenReq('g')).called).toBe(false);
+      now = 1001;
+      expect(run(mw, tokenReq('g')).called).toBe(true);
+    });
+
+    it('still keys on the sub-actor when one is asserted', () => {
+      const limiter = new SubActorRateLimiter();
+      const mw = enforceSubActorRateLimit(limiter, 1, undefined, () => 0, {
+        perToken: true,
+      });
+      expect(run(mw, tokenReq('bridge', 'telegram:a')).called).toBe(true);
+      // A different chat user behind the same bridge token has its own window.
+      expect(run(mw, tokenReq('bridge', 'telegram:b')).called).toBe(true);
+      const over = run(mw, tokenReq('bridge', 'telegram:a'));
+      expect(over.res._json).toMatchObject({ code: 'sub_actor_rate_limited' });
+    });
+
+    it('a token id cannot collide with a sub-actor key', () => {
+      const limiter = new SubActorRateLimiter();
+      const mw = enforceSubActorRateLimit(limiter, 1, undefined, () => 0, {
+        perToken: true,
+      });
+      expect(run(mw, tokenReq('bridge', 'telegram:a')).called).toBe(true);
+      // A token whose id equals that sub-actor string still has its own window.
+      expect(run(mw, tokenReq('telegram:a')).called).toBe(true);
+    });
   });
 });
 

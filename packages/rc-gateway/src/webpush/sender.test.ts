@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
+import { Agent as HttpsAgent } from 'node:https';
+import webpush from 'web-push';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
@@ -217,5 +219,54 @@ describe('PushSender', () => {
     await expect(sender.send(record, PAYLOAD)).resolves.toBeUndefined();
     expect(audit.calls.some((c) => c.action === 'push_send_failed')).toBe(true);
     expect(store.get(record.id)).toBeDefined();
+  });
+});
+
+describe('#165 default transport endpoint guard', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('refuses a private-address record (e.g. one stored before #165) with no network call', async () => {
+    const spy = vi
+      .spyOn(webpush, 'sendNotification')
+      .mockResolvedValue({ statusCode: 201, body: '', headers: {} });
+    const bad = await store.add('tokA', {
+      endpoint: 'https://10.0.0.5:8443/x',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const sender = new PushSender(vapid, store, audit, FAST);
+    await sender.send(bad, PAYLOAD);
+    expect(spy).not.toHaveBeenCalled();
+    const failed = audit.calls.filter((c) => c.action === 'push_send_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].detail).toMatchObject({
+      subscriptionId: bad.id,
+      reason: 'endpoint_refused',
+    });
+    // Kept, not wiped: an operator narrowing the allowlist by mistake must not
+    // delete every device's subscription.
+    expect(store.get(bad.id)).toBeDefined();
+  });
+
+  it('sends an allowed endpoint through an https agent with the guarded lookup', async () => {
+    const spy = vi
+      .spyOn(webpush, 'sendNotification')
+      .mockResolvedValue({ statusCode: 201, body: '', headers: {} });
+    const good = await store.add('tokA', {
+      endpoint: 'https://fcm.googleapis.com/fcm/send/abc',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const sender = new PushSender(vapid, store, audit, FAST);
+    await sender.send(good, PAYLOAD);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const opts = spy.mock.calls[0]![2] as { agent?: unknown };
+    expect(opts?.agent).toBeInstanceOf(HttpsAgent);
+    const agentOpts = (
+      opts.agent as HttpsAgent & {
+        options: { lookup?: unknown };
+      }
+    ).options;
+    expect(typeof agentOpts.lookup).toBe('function');
   });
 });

@@ -4,16 +4,63 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_STAMP_ZONE, UiPrefsStore } from './uiPrefsStore.js';
 import { isValidTimeZone } from './policy/conditions.js';
+import { BIG, observeDuringWrite, parsesAsJson } from './testing/tornRead.js';
 
 function tempPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'rc-uiprefs-')), 'ui-prefs.json');
 }
+
+describe('#165 UiPrefsStore crash-safe persistence', () => {
+  it('a reader never sees a torn prefs file while a persist is in flight', async () => {
+    const path = tempPath();
+    // A big existing file, so the next persist spans many event-loop turns.
+    writeFileSync(
+      path,
+      JSON.stringify({ byToken: { big: { stampZone: 'UTC', pad: BIG } } }),
+    );
+    const store = await UiPrefsStore.open(path);
+    const { reads, torn } = await observeDuringWrite(
+      path,
+      () => store.setStampZone('tokA', 'Europe/Paris'),
+      parsesAsJson,
+    );
+    expect(reads).toBeGreaterThan(0);
+    expect(torn).toBe(0);
+    expect((await UiPrefsStore.open(path)).get('tokA').stampZone).toBe(
+      'Europe/Paris',
+    );
+    expect(readdirSync(dirname(path))).toEqual(['ui-prefs.json']);
+  });
+
+  it('a corrupt file is logged and set aside', async () => {
+    const path = tempPath();
+    writeFileSync(path, '{not json');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await UiPrefsStore.open(path);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(
+        readdirSync(dirname(path)).some((f) =>
+          f.startsWith('ui-prefs.json.corrupt-'),
+        ),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe('UiPrefsStore', () => {
   it('reads a missing file as an empty store rather than failing to open', async () => {

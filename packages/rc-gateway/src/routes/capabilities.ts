@@ -8,6 +8,99 @@ import type { RequestHandler } from 'express';
 import type { DaemonCapabilities } from '@qwen-code/sdk';
 import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
 import type { NativeShellsCapability } from '../nativePush/nativeShells.js';
+import { WRITE, hasScope } from '../scopes.js';
+
+/**
+ * Who is asking, as far as this route's answer is concerned (#165).
+ *
+ *  - `full`: a token holding WRITE (owner, write, bridge). Gets today's
+ *    shape, unchanged. WRITE is the line because the workspace paths this
+ *    route used to hand to everyone are already a WRITE-floor fact elsewhere:
+ *    `GET /rc/workspaces` sits at WRITE.
+ *  - `reader`: a paired token without WRITE (read-only, approve-only). No
+ *    paths and no ssh details; the workspace list keeps its ids and flags so
+ *    a reader can still tell runtimes apart.
+ *  - `guest`: a session-locked share token, whatever its scopes. Only what
+ *    the page needs to render its one conversation.
+ *
+ * A client with no scopes array is a reader at best: the route fails closed.
+ */
+type Audience = 'full' | 'reader' | 'guest';
+
+function audienceOf(client: {
+  scopes?: unknown;
+  sessionLockId?: unknown;
+}): Audience {
+  if (client.sessionLockId !== undefined) return 'guest';
+  const scopes = Array.isArray(client.scopes)
+    ? (client.scopes as string[])
+    : [];
+  return hasScope(scopes, WRITE) ? 'full' : 'reader';
+}
+
+/**
+ * Daemon envelope keys a reader or a guest may see. An allowlist rather than
+ * a list of what to strip, so a field the daemon adds tomorrow reaches owner
+ * and write tokens at once (the #96 point of passing it through verbatim) but
+ * reaches nobody else until someone decides it is safe to.
+ */
+const GUEST_DAEMON_KEYS: readonly string[] = [
+  'v',
+  'protocolVersions',
+  'sessionLiveStatePollIntervalMs',
+  'mode',
+  'features',
+  'limits',
+  'transports',
+  'available',
+];
+const READER_DAEMON_KEYS: readonly string[] = [
+  ...GUEST_DAEMON_KEYS,
+  'qwenCodeVersion',
+  'modelServices',
+];
+/** Per-workspace keys a reader may see: never `cwd`, never `ssh`. */
+const READER_WORKSPACE_KEYS: readonly string[] = [
+  'id',
+  'displayName',
+  'primary',
+  'trusted',
+  'agentCollaborationEnabled',
+  'workflowsEnabled',
+  'removable',
+  'kind',
+];
+
+function pick(
+  obj: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
+  }
+  return out;
+}
+
+function scopeDaemonBlock(
+  block: Record<string, unknown>,
+  audience: Audience,
+): Record<string, unknown> {
+  if (audience === 'full') return block;
+  if (audience === 'guest') return pick(block, GUEST_DAEMON_KEYS);
+  const out = pick(block, READER_DAEMON_KEYS);
+  if (Array.isArray(block.workspaces)) {
+    out.workspaces = (block.workspaces as unknown[])
+      .filter((w): w is Record<string, unknown> => !!w && typeof w === 'object')
+      .map((w) => pick(w, READER_WORKSPACE_KEYS));
+  }
+  // `available` last, as readDaemonStatus does, so nothing can shadow it.
+  if ('available' in out) {
+    const { available, ...rest } = out;
+    return { ...rest, available };
+  }
+  return out;
+}
 
 /**
  * How long discovery waits for the daemon's own list before answering without
@@ -42,7 +135,10 @@ async function readDaemonStatus(
  * GET /rc/capabilities — the gateway's capability surface. The daemon's own
  * `/capabilities` is un-editable under the fork boundary, so the gateway serves
  * its own `remoteControl` block. Always mounted (mDNS reports here even when cost
- * tracking is off); any authenticated token; no secrets.
+ * tracking is off); any authenticated token; no secrets. What a token sees is
+ * scoped by who it is (#165, see {@link Audience}): owner and write tokens get
+ * the whole answer, a reader loses host paths and ssh details, and a share
+ * guest gets only the flags the page needs for its one conversation.
  *
  * Composes optional sub-blocks from deps:
  *  - `costTracking` — only when a usage store is wired (`add-cost-tracking`).
@@ -98,6 +194,7 @@ export function createCapabilityRoute(deps: {
       res.status(401).json({ error: 'Unauthorized', code: 'unauthorized' });
       return;
     }
+    const audience = audienceOf(req.rcClient);
     const remoteControl: Record<string, unknown> = {
       version: RC_PROTOCOL_VERSION,
       supportedTransports: ['sse', 'ws'],
@@ -137,7 +234,8 @@ export function createCapabilityRoute(deps: {
                 : await deps.maxAttachmentBytes(),
           }
         : {}),
-      ...(deps.daemonQwenBin !== undefined
+      // A host path: owner and write only (#165).
+      ...(deps.daemonQwenBin !== undefined && audience === 'full'
         ? { daemonQwenBin: deps.daemonQwenBin }
         : {}),
     };
@@ -145,22 +243,29 @@ export function createCapabilityRoute(deps: {
       remoteControl.costTracking = {
         enabled: true,
         currencyLabel: deps.costTracking.currencyLabel(),
-        rateTablePath: '~/.qwen/rc/model-rates.yaml',
+        ...(audience === 'full'
+          ? { rateTablePath: '~/.qwen/rc/model-rates.yaml' }
+          : {}),
       };
     }
     if (deps.mdnsStatus) {
       const m = deps.mdnsStatus();
-      remoteControl.mdns = m.advertising
-        ? { advertising: true, instanceName: m.instanceName }
-        : { advertising: false };
+      // The instance name is usually the host's name; a guest has no use for it.
+      remoteControl.mdns =
+        m.advertising && audience !== 'guest'
+          ? { advertising: true, instanceName: m.instanceName }
+          : { advertising: m.advertising };
     }
     if (deps.nativeShells) {
       remoteControl.nativeShells = deps.nativeShells();
     }
     if (deps.daemonStatus) {
-      remoteControl.daemon = await readDaemonStatus(
-        deps.daemonStatus,
-        deps.daemonBudgetMs ?? DEFAULT_DAEMON_BUDGET_MS,
+      remoteControl.daemon = scopeDaemonBlock(
+        await readDaemonStatus(
+          deps.daemonStatus,
+          deps.daemonBudgetMs ?? DEFAULT_DAEMON_BUDGET_MS,
+        ),
+        audience,
       );
     }
     res.status(200).json({ remoteControl });

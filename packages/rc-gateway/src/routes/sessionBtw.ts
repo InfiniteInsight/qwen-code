@@ -65,7 +65,9 @@ function isDaemonSessionNotFound(err: unknown): boolean {
  * repeatedly and a model call per tap is this limiter. `subActorBan` comes
  * first so a banned chat user is refused before any budget is spent, and the
  * limiter is the same one a prompt and a recap go through, because what it
- * guards is the spending rather than the revealing.
+ * guards is the spending rather than the revealing. Like the recap, it keys
+ * on the token when no sub-actor is asserted (#165), so the cap binds every
+ * caller and not only a bridge.
  *
  * WHY THE CLIENT DISCONNECT IS PROPAGATED, WHICH THE PROMPT ROUTE DELIBERATELY
  * DOES NOT DO

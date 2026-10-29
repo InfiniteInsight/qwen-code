@@ -36,7 +36,12 @@ import {
   BRIDGE,
 } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
-import { AuditLog, type AuditRecorder } from './auditLog.js';
+import {
+  AuditLog,
+  parseAuditEnvNumber,
+  type AuditRecorder,
+} from './auditLog.js';
+import { PeerAuditThrottle } from './auditThrottle.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import {
   createListCorsOriginsRoute,
@@ -244,6 +249,10 @@ import {
   createInvokeCommandRoute,
 } from './routes/commands.js';
 import { PushSender } from './webpush/sender.js';
+import {
+  PushEndpointPolicy,
+  parsePushHostsEnv,
+} from './webpush/endpointPolicy.js';
 import { PushNotifier } from './webpush/notifier.js';
 import { PushRateLimiter } from './webpush/rateLimiter.js';
 import { PushCoalescer } from './webpush/coalescer.js';
@@ -280,6 +289,16 @@ export interface GatewayDeps {
   terminalRcArgv?: string[];
   /** Audit log path; defaults to ~/.qwen/rc/audit.log. */
   auditPath?: string;
+  /**
+   * Days of audit files kept (#165). Falls back to the
+   * `QWEN_RC_AUDIT_RETENTION_DAYS` env, then 30. 0 keeps everything.
+   */
+  auditRetentionDays?: number;
+  /**
+   * Ceiling on all audit files together, in bytes (#165). Falls back to the
+   * `QWEN_RC_AUDIT_MAX_BYTES` env, then 1 GiB. 0 = no ceiling.
+   */
+  auditMaxTotalBytes?: number;
   /** Static web-client root; defaults to the package's public/ dir. */
   webRoot?: string;
   /** Gateway-owned VAPID keypair. Push routes mount only when both this and pushStore are set. */
@@ -323,6 +342,12 @@ export interface GatewayDeps {
    * opt-in). Falls back to the `QWEN_RC_COALESCE_MS` env when unset.
    */
   coalesceWindowMs?: number;
+  /**
+   * Where a push subscription endpoint may point (#165). Defaults to the known
+   * Web Push services, or to the `QWEN_RC_PUSH_HOSTS` env when set (a
+   * comma-separated list of host suffixes, or `*` for any public host).
+   */
+  pushEndpointPolicy?: PushEndpointPolicy;
   /**
    * Per-session idle override store (the `/suggest on|off` toggle). The boot
    * wiring (cli.ts) creates it so the idle handler's `getSessionEnabled` and the
@@ -599,8 +624,22 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const audit = new AuditLog(
     deps.auditPath ?? join(homedir(), '.qwen', 'rc', 'audit.log'),
     undefined,
-    { onRecord: (record) => ownerEvents.publish({ type: 'audit', record }) },
+    {
+      onRecord: (record) => ownerEvents.publish({ type: 'audit', record }),
+      // #165: bounded on disk. Unset or unparseable falls back to the
+      // defaults (30 days, 1 GiB); 0 turns that bound off.
+      retentionDays:
+        deps.auditRetentionDays ??
+        parseAuditEnvNumber(process.env.QWEN_RC_AUDIT_RETENTION_DAYS),
+      maxTotalBytes:
+        deps.auditMaxTotalBytes ??
+        parseAuditEnvNumber(process.env.QWEN_RC_AUDIT_MAX_BYTES),
+    },
   );
+  // #165: rows that unauthenticated traffic can cause (401s, refused CORS
+  // preflights) are written once per peer per minute with a count, through
+  // this one shared throttle, instead of once per request.
+  const unauthAudit = new PeerAuditThrottle(audit);
 
   // ---------------------------------------------------------------------------
   // CORS allowlist — built from persisted db origins + config overrides.
@@ -634,7 +673,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     if (decision.allowed) {
       res.status(204).end();
     } else {
-      void audit.record({
+      unauthAudit.record(req.socket?.remoteAddress, {
         action: 'cors_denied',
         detail: {
           origin: decision.origin,
@@ -685,6 +724,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorLimiter,
     subActorCap,
     audit,
+  );
+  // #165: the routes that each cost one model call (recap, btw) are limited
+  // per TOKEN as well when no sub-actor is asserted, with the same window and
+  // cap, so a view-only guest cannot loop them. Bridged requests keep their
+  // per-sub-actor window, shared with every other write route as before.
+  const modelCallRateLimit = enforceSubActorRateLimit(
+    subActorLimiter,
+    subActorCap,
+    audit,
+    Date.now,
+    { perToken: true },
   );
   // Owner-managed per-sub-actor bans (block one chat user without revoking the
   // bridge token). In-memory; ban/lift are audited so they survive in the log.
@@ -801,7 +851,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   if (deps.clientsManifestReadToml) {
     app.get(
       '/ui/clients-manifest.json',
-      bearerResolve(deps.store, audit),
+      bearerResolve(deps.store, audit, unauthAudit),
       requireScope(OWNER, audit),
       createClientsManifestRoute({
         readToml: deps.clientsManifestReadToml,
@@ -812,7 +862,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
-  app.use(bearerResolve(deps.store, audit));
+  app.use(bearerResolve(deps.store, audit, unauthAudit));
   // Reject a non-bridge authenticated token that sends X-RC-SubActor (would
   // otherwise silently pollute attribution). Must follow bearerResolve.
   app.use(enforceSubActorScope());
@@ -926,7 +976,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
-    subActorRateLimit, // bridge fan-in: a recap costs tokens like a prompt
+    modelCallRateLimit, // a recap costs a model call: per sub-actor, else per token
     createSessionRecapRoute(deps.daemon, audit),
   );
   // POST /session/:id/btw - ask one conversation a side question without
@@ -944,7 +994,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
     subActorBan, // banned chat user, refused before any budget is spent
-    subActorRateLimit, // a side question costs a model call like a prompt
+    modelCallRateLimit, // a side question costs a model call: per sub-actor, else per token
     createSessionBtwRoute(deps.daemon, audit),
   );
   // GET /session/:id/supported-commands — read-scope; relays the daemon's
@@ -1779,7 +1829,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   let notifier: PushNotifier | undefined;
   if (deps.vapid && deps.pushStore) {
-    const sender = new PushSender(deps.vapid, deps.pushStore, audit);
+    // #165: one policy for registration (route) and delivery (sender), so an
+    // endpoint the route accepts is one the sender will actually send to.
+    const pushEndpointPolicy =
+      deps.pushEndpointPolicy ??
+      new PushEndpointPolicy({
+        allowedHostSuffixes: parsePushHostsEnv(process.env.QWEN_RC_PUSH_HOSTS),
+      });
+    const sender = new PushSender(deps.vapid, deps.pushStore, audit, {
+      endpointPolicy: pushEndpointPolicy,
+    });
     // Per-subscription rolling-hour push rate limiter (cycle 46). In-memory:
     // a restart resets the counters (fail-open — never suppress a notification).
     const rateLimiter = new PushRateLimiter();
@@ -1832,7 +1891,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     app.use(
       '/rc/push',
       requireScope(SESSION_READ, audit),
-      createPushRouter(deps.vapid, deps.pushStore, notifier, audit),
+      createPushRouter(deps.vapid, deps.pushStore, notifier, audit, {
+        endpointPolicy: pushEndpointPolicy,
+      }),
     );
   }
 

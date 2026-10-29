@@ -5,10 +5,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CertStore, safeDirName, type CertBundle } from './certStore.js';
+import { BIG, observeDuringWrite } from '../../testing/tornRead.js';
 
 let base: string;
 beforeEach(async () => {
@@ -38,6 +39,32 @@ describe('CertStore', () => {
     const store = new CertStore(base);
     await store.save('qwen.example.com', bundle);
     expect(await store.load('qwen.example.com')).toEqual(bundle);
+  });
+
+  it('#165 a reader never sees a torn cert or key while a renewal is saved', async () => {
+    const store = new CertStore(base);
+    const old: CertBundle = { ...bundle, cert: 'a'.repeat(BIG.length) };
+    const next: CertBundle = {
+      ...bundle,
+      cert: 'b'.repeat(BIG.length),
+      meta: { ...bundle.meta, notAfter: '2026-07-01T00:00:00.000Z' },
+    };
+    await store.save('qwen.example.com', old);
+    const certPath = join(base, 'qwen.example.com', 'cert.pem');
+    const { reads, torn } = await observeDuringWrite(
+      certPath,
+      () => store.save('qwen.example.com', next),
+      (text) => text === old.cert || text === next.cert,
+    );
+    expect(reads).toBeGreaterThan(0);
+    expect(torn).toBe(0);
+    expect(await store.load('qwen.example.com')).toEqual(next);
+    expect((await readdir(join(base, 'qwen.example.com'))).sort()).toEqual([
+      'cert.pem',
+      'chain.pem',
+      'meta.json',
+      'privkey.pem',
+    ]);
   });
 
   it('writes private material 0600 under a 0700 directory', async () => {

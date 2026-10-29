@@ -4,16 +4,82 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, statSync, readFileSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { TokenStore } from './tokenStore.js';
 import { SESSION_READ, SHARE, APPROVE } from './scopes.js';
+import { BIG, observeDuringWrite, parsesAsJson } from './testing/tornRead.js';
 
 function freshPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'rc-tokens-')), 'tokens.json');
 }
+
+describe('#165 TokenStore crash-safe persistence', () => {
+  let path: string;
+  beforeEach(() => {
+    path = freshPath();
+  });
+
+  it('a reader never sees a torn tokens file while a persist is in flight', async () => {
+    const store = await TokenStore.open(path);
+    await store.issue([SESSION_READ], BIG);
+    const { reads, torn } = await observeDuringWrite(
+      path,
+      () => store.issue([SESSION_READ], 'second'),
+      parsesAsJson,
+    );
+    expect(reads).toBeGreaterThan(0);
+    expect(torn).toBe(0);
+    const reopened = await TokenStore.open(path);
+    expect(reopened.list().map((t) => t.label)).toContain('second');
+  });
+
+  it('leaves no temp file behind and keeps mode 0600', async () => {
+    const store = await TokenStore.open(path);
+    await store.issue([SESSION_READ], 'a');
+    await store.issue([SESSION_READ], 'b');
+    expect(readdirSync(dirname(path))).toEqual(['tokens.json']);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('a corrupt file is logged and set aside, not silently replaced', async () => {
+    const torn = '{"tokens": [ {"id": "a"';
+    writeFileSync(path, torn);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const store = await TokenStore.open(path);
+      expect(store.list()).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toContain(path);
+      const aside = readdirSync(dirname(path)).filter((f) =>
+        f.startsWith('tokens.json.corrupt-'),
+      );
+      expect(aside).toHaveLength(1);
+      expect(readFileSync(join(dirname(path), aside[0]!), 'utf8')).toBe(torn);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a missing file opens empty without a warning', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const store = await TokenStore.open(path);
+      expect(store.list()).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe('TokenStore', () => {
   let path: string;
@@ -237,6 +303,37 @@ describe('TokenStore', () => {
     });
     expect(store.scopesFor(share.id)).toEqual([SHARE, SESSION_READ, APPROVE]);
     now = share.expiresAt; // expired (strict >=)
+    expect(store.scopesFor(share.id)).toBeUndefined();
+  });
+
+  it('#165 scopesFor applies the 180-day max-age ceiling resolve() applies', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    now = 1_000_000 + 180 * DAY_MS;
+    // Exactly at the ceiling both still answer (the check is strict >).
+    expect(store.scopesFor(id)).toEqual([SESSION_READ]);
+    expect(store.resolve(`Bearer ${token}`)).not.toBeNull();
+    now += 1;
+    // One ms past it the token can no longer log in, so it must not keep
+    // receiving push either.
+    expect(store.resolve(`Bearer ${token}`)).toBeNull();
+    expect(store.scopesFor(id)).toBeUndefined();
+  });
+
+  it('#165 scopesFor max-age also binds a long-lived share', async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 365 * 86_400,
+      parentId: 'owner-1',
+    });
+    now = 1_000_000 + 181 * DAY_MS; // TTL still in the future
     expect(store.scopesFor(share.id)).toBeUndefined();
   });
 

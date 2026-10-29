@@ -23,6 +23,7 @@ import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
+import { PushEndpointPolicy } from './webpush/endpointPolicy.js';
 import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
@@ -78,6 +79,10 @@ async function boot(
     pushStore,
     snooze,
     commandsUserDir,
+    // #165: registration-time DNS is stubbed so push tests stay offline.
+    pushEndpointPolicy: new PushEndpointPolicy({
+      resolve: async () => [{ address: '142.250.80.10', family: 4 }],
+    }),
     ...extraDeps,
   }); // `audit` is also returned; boot() does not need it here.
   const server: Server = await new Promise((resolve) => {
@@ -1239,7 +1244,7 @@ describe('gateway app', () => {
       },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/1',
           keys: { p256dh: 'p', auth: 'a' },
         },
       }),
@@ -1272,7 +1277,7 @@ describe('gateway app', () => {
       },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/owner-test',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/owner-test',
           keys: { p256dh: 'p', auth: 'a' },
         },
       }),
@@ -1310,7 +1315,7 @@ describe('gateway app', () => {
       },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/prefs-target',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/prefs-target',
           keys: { p256dh: 'p', auth: 'a' },
         },
       }),
@@ -1969,5 +1974,119 @@ describe('CORS preflight and actual-request middleware', () => {
     expect(
       body.origins.some((o) => o.origin === 'https://app.example.com'),
     ).toBe(true);
+  });
+});
+
+describe('#165 unauthenticated traffic cannot grow the audit log per request', () => {
+  it('a flood of refused CORS preflights from one peer writes one row', async () => {
+    const { url, auditPath } = await boot();
+    for (let i = 0; i < 25; i++) {
+      const r = await fetch(`${url}/rc/tokens`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'https://evil.example',
+          'Access-Control-Request-Method': 'POST',
+        },
+      });
+      expect(r.status).toBe(403);
+    }
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'cors_denied'),
+    );
+    // Give any stray per-request rows time to land before counting.
+    await new Promise((r) => setTimeout(r, 100));
+    const denied = readAudit(auditPath).filter(
+      (x) => x.action === 'cors_denied',
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]!.detail).toMatchObject({
+      origin: 'https://evil.example',
+      phase: 'preflight',
+      count: 1,
+    });
+  });
+
+  it('a flood of bad bearer tokens from one peer writes one row', async () => {
+    const { url, auditPath } = await boot();
+    for (let i = 0; i < 25; i++) {
+      const r = await fetch(`${url}/rc/tokens`, {
+        headers: { Authorization: 'Bearer qwk_wrong' },
+      });
+      expect(r.status).toBe(401);
+    }
+    await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'auth_failed'),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    const failed = readAudit(auditPath).filter(
+      (x) => x.action === 'auth_failed',
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.detail).toMatchObject({ count: 1 });
+  });
+});
+
+describe('#165 model-call routes are rate limited per token', () => {
+  const SID = '11111111-1111-1111-1111-111111111111';
+  async function tokenFor(
+    url: string,
+    pairing: PairingService,
+    scopes: string[],
+  ) {
+    const { code } = pairing.mint(scopes);
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    return ((await r.json()) as { token: string }).token;
+  }
+  async function hit(url: string, path: string, token: string) {
+    const r = await fetch(`${url}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ question: 'what changed?' }),
+    });
+    return {
+      status: r.status,
+      code: ((await r.json().catch(() => ({}))) as { code?: string }).code,
+    };
+  }
+
+  it('a view-only token cannot loop /recap past the cap', async () => {
+    const { url, pairing, auditPath } = await boot(undefined, {
+      subActorCap: 2,
+    });
+    const reader = await tokenFor(url, pairing, [SESSION_READ]);
+    const path = `/session/${SID}/recap`;
+    expect((await hit(url, path, reader)).status).not.toBe(429);
+    expect((await hit(url, path, reader)).status).not.toBe(429);
+    const third = await hit(url, path, reader);
+    expect(third.status).toBe(429);
+    expect(third.code).toBe('rate_limited');
+    // Per token: another reader has its own window.
+    const other = await tokenFor(url, pairing, [SESSION_READ]);
+    expect((await hit(url, path, other)).status).not.toBe(429);
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'token_rate_limited'),
+    );
+    expect(rows.filter((x) => x.action === 'token_rate_limited')).toHaveLength(
+      1,
+    );
+  });
+
+  it('/btw is capped per token for a write token too', async () => {
+    const { url, pairing } = await boot(undefined, { subActorCap: 2 });
+    const writer = await tokenFor(url, pairing, [WRITE]);
+    const path = `/session/${SID}/btw`;
+    await hit(url, path, writer);
+    await hit(url, path, writer);
+    const third = await hit(url, path, writer);
+    expect(third.status).toBe(429);
+    expect(third.code).toBe('rate_limited');
   });
 });

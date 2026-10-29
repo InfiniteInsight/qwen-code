@@ -5,8 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readJsonStore, writeFileAtomic } from './atomicWrite.js';
 
 export interface PushSubscriptionRecord {
   /** Random 128-bit hex id. */
@@ -56,12 +55,12 @@ export class PushStore {
     nowFn: () => number = Date.now,
   ): Promise<PushStore> {
     let records: PushSubscriptionRecord[] = [];
-    try {
-      const raw = await readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as PersistShape;
-      if (Array.isArray(parsed.subscriptions)) records = parsed.subscriptions;
-    } catch {
-      // Missing/corrupt file → start empty.
+    // Missing file → start empty; a corrupt one is logged and kept aside.
+    const parsed = (await readJsonStore(filePath)) as
+      | Partial<PersistShape>
+      | undefined;
+    if (parsed && Array.isArray(parsed.subscriptions)) {
+      records = parsed.subscriptions;
     }
     return new PushStore(filePath, records, nowFn);
   }
@@ -74,10 +73,46 @@ export class PushStore {
     tokenId: string,
     sub: { endpoint: string; keys: { p256dh: string; auth: string } },
   ): Promise<PushSubscriptionRecord> {
+    return (await this.addCapped(tokenId, sub, Number.POSITIVE_INFINITY))
+      .record;
+  }
+
+  /**
+   * {@link add} with a per-token ceiling (#165). When the token already holds
+   * `maxPerToken` subscriptions, its oldest ones are dropped to make room, in
+   * the same persist as the add, and returned as `evicted` so the caller can
+   * audit them and free their rate-limit windows. A re-add of an existing
+   * (tokenId, endpoint) evicts nothing.
+   *
+   * Oldest-out rather than refuse-new because the usual way to reach the cap
+   * is a browser that re-subscribed with a fresh endpoint and left its old
+   * record behind; refusing the new one would keep the dead one.
+   */
+  async addCapped(
+    tokenId: string,
+    sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+    maxPerToken: number,
+  ): Promise<{
+    record: PushSubscriptionRecord;
+    evicted: PushSubscriptionRecord[];
+  }> {
     const existing = this.records.find(
       (r) => r.tokenId === tokenId && r.endpoint === sub.endpoint,
     );
-    if (existing) return existing;
+    if (existing) return { record: existing, evicted: [] };
+
+    const evicted: PushSubscriptionRecord[] = [];
+    const cap = Math.max(1, maxPerToken);
+    const mine = this.records
+      .filter((r) => r.tokenId === tokenId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    while (mine.length - evicted.length >= cap) {
+      evicted.push(mine[evicted.length]!);
+    }
+    if (evicted.length > 0) {
+      const gone = new Set(evicted.map((r) => r.id));
+      this.records = this.records.filter((r) => !gone.has(r.id));
+    }
 
     const rec: PushSubscriptionRecord = {
       id: randomBytes(16).toString('hex'),
@@ -88,7 +123,7 @@ export class PushStore {
     };
     this.records.push(rec);
     await this.persist();
-    return rec;
+    return { record: rec, evicted };
   }
 
   listFor(tokenId: string): PushSubscriptionRecord[] {
@@ -174,11 +209,20 @@ export class PushStore {
     return true;
   }
 
+  /**
+   * Temp-and-rename (#165), with the body built when the write starts, so a
+   * burst of adds coalesces into at most two whole-file writes rather than
+   * one per add. Each write is still the whole file; the per-token cap in
+   * {@link addCapped} is what bounds its size.
+   */
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { subscriptions: this.records };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+    await writeFileAtomic(
+      this.filePath,
+      () => {
+        const body: PersistShape = { subscriptions: this.records };
+        return JSON.stringify(body, null, 2);
+      },
+      { mode: 0o600 },
+    );
   }
 }

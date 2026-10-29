@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { AuditLog, AUDIT_ACTIONS } from './auditLog.js';
+import { AuditLog, AUDIT_ACTIONS, parseAuditEnvNumber } from './auditLog.js';
 
 function freshDir(): string {
   return mkdtempSync(join(tmpdir(), 'rc-audit-'));
@@ -580,5 +580,163 @@ describe('workspace-control audit actions (rc-workspace-permissions)', () => {
     ] as const) {
       expect(AUDIT_ACTIONS).toContain(a);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #165: retention and size pruning, streaming query
+// ---------------------------------------------------------------------------
+
+describe('#165 AuditLog pruning', () => {
+  const TODAY = () => fakeDate('2026-07-09T12:00:00Z');
+  function seed(dir: string, names: string[], bytes = 10): void {
+    for (const n of names)
+      writeFileSync(join(dir, n), 'x'.repeat(bytes - 1) + '\n');
+  }
+  function auditFiles(dir: string): string[] {
+    return readdirSync(dir)
+      .filter((f) => f.startsWith('audit-'))
+      .sort();
+  }
+
+  it('keeps 30 days by default and prunes older date-named files when a file opens', async () => {
+    const dir = freshDir();
+    seed(dir, [
+      'audit-2026-05-01.log',
+      'audit-2026-06-08.log',
+      'audit-2026-06-09.log',
+      'audit-2026-07-08.log',
+      'audit-notes.log',
+    ]);
+    const audit = new AuditLog(join(dir, 'audit.log'), () => 1, {
+      nowDate: TODAY,
+    });
+    await audit.record({ action: 'token_minted' });
+    expect(auditFiles(dir)).toEqual([
+      'audit-2026-06-09.log',
+      'audit-2026-07-08.log',
+      'audit-2026-07-09.log',
+      'audit-notes.log',
+    ]);
+  });
+
+  it('retentionDays is configurable, and 0 keeps everything', async () => {
+    const dir = freshDir();
+    seed(dir, ['audit-2026-07-01.log', 'audit-2026-07-07.log']);
+    const audit = new AuditLog(join(dir, 'audit.log'), () => 1, {
+      nowDate: TODAY,
+      retentionDays: 5,
+    });
+    await audit.record({ action: 'token_minted' });
+    expect(auditFiles(dir)).toEqual([
+      'audit-2026-07-07.log',
+      'audit-2026-07-09.log',
+    ]);
+
+    const dir2 = freshDir();
+    seed(dir2, ['audit-2020-01-01.log']);
+    const keep = new AuditLog(join(dir2, 'audit.log'), () => 1, {
+      nowDate: TODAY,
+      retentionDays: 0,
+    });
+    await keep.record({ action: 'token_minted' });
+    expect(auditFiles(dir2)).toContain('audit-2020-01-01.log');
+  });
+
+  it('a total-size cap removes the oldest older files first and never the open one', async () => {
+    const dir = freshDir();
+    seed(
+      dir,
+      ['audit-2026-07-05.log', 'audit-2026-07-06.log', 'audit-2026-07-07.log'],
+      1000,
+    );
+    const audit = new AuditLog(join(dir, 'audit.log'), () => 1, {
+      nowDate: TODAY,
+      maxTotalBytes: 2500,
+    });
+    await audit.record({ action: 'token_minted' });
+    expect(auditFiles(dir)).toEqual([
+      'audit-2026-07-06.log',
+      'audit-2026-07-07.log',
+      'audit-2026-07-09.log',
+    ]);
+  });
+
+  it('the size cap is rechecked while one day grows', async () => {
+    const dir = freshDir();
+    seed(dir, ['audit-2026-07-08.log'], 2000);
+    const audit = new AuditLog(join(dir, 'audit.log'), () => 1, {
+      nowDate: TODAY,
+      maxTotalBytes: 3000,
+      pruneCheckBytes: 500,
+    });
+    for (let i = 0; i < 20; i++) {
+      await audit.record({
+        action: 'auth_failed',
+        detail: { pad: 'p'.repeat(80) },
+      });
+    }
+    expect(auditFiles(dir)).toEqual(['audit-2026-07-09.log']);
+    // Pruning whole older files never breaks the surviving chain.
+    expect(AuditLog.verifyChain(dir)).toEqual({ ok: true, failures: [] });
+  });
+});
+
+describe('#165 AuditLog.query streams newest first and stops at limit', () => {
+  it('an older day is not read once newer days fill the limit', async () => {
+    const dir = freshDir();
+    const path = join(dir, 'audit.log');
+    let day = '2026-07-08';
+    let ts = 9_000_000_000_000;
+    const audit = new AuditLog(path, () => ts, {
+      nowDate: () => fakeDate(`${day}T00:00:00Z`),
+    });
+    // A row whose ts would sort first if the older file were parsed.
+    await audit.record({ action: 'token_minted', target: 'older-day' });
+    day = '2026-07-09';
+    for (const t of [1, 2, 3]) {
+      ts = t;
+      await audit.record({ action: 'token_minted', target: `new-${t}` });
+    }
+    expect((await audit.query({ limit: 2 })).map((r) => r.target)).toEqual([
+      'new-3',
+      'new-2',
+    ]);
+    // With room to spare it still reaches back into the older day.
+    expect((await audit.query({ limit: 10 })).map((r) => r.target)).toEqual([
+      'older-day',
+      'new-3',
+      'new-2',
+      'new-1',
+    ]);
+  });
+
+  it('keeps the newest matches of a large file without holding them all', async () => {
+    const dir = freshDir();
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    const audit = new AuditLog(path, () => ++t, {
+      nowDate: () => fakeDate('2026-07-09T00:00:00Z'),
+    });
+    for (let i = 0; i < 300; i++) {
+      await audit.record({
+        action: i % 2 ? 'auth_failed' : 'token_minted',
+        target: String(i),
+      });
+    }
+    const rows = await audit.query({ action: 'token_minted', limit: 3 });
+    expect(rows.map((r) => r.target)).toEqual(['298', '296', '294']);
+  });
+});
+
+describe('parseAuditEnvNumber', () => {
+  it('accepts non-negative integers and rejects the rest', () => {
+    expect(parseAuditEnvNumber(undefined)).toBeUndefined();
+    expect(parseAuditEnvNumber('')).toBeUndefined();
+    expect(parseAuditEnvNumber('30')).toBe(30);
+    expect(parseAuditEnvNumber('0')).toBe(0);
+    expect(parseAuditEnvNumber('-1')).toBeUndefined();
+    expect(parseAuditEnvNumber('abc')).toBeUndefined();
+    expect(parseAuditEnvNumber('1.5')).toBeUndefined();
   });
 });
