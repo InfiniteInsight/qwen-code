@@ -3587,8 +3587,8 @@
           <input
             id="past-filter"
             type="search"
-            placeholder="Search by name"
-            aria-label="Search conversations by name"
+            placeholder="Search names and previews"
+            aria-label="Search conversations by name and preview"
             autocomplete="off"
           />
         </div>
@@ -14377,9 +14377,19 @@
         // the displayed title (title text, or the session-id fallback the
         // rows show) case-insensitively. The truncated note below still
         // describes the fetched set, which the filter does not change.
+        // #190: and the preview, the line under the title, which is what a
+        // reader often remembers a conversation by.
         const shown = pastFilter
           ? inView.filter(
-              (s) => s && convoTitle(s).toLowerCase().includes(pastFilter),
+              (s) =>
+                s &&
+                (
+                  convoTitle(s) +
+                  '\n' +
+                  strOr(s.preview, '')
+                )
+                  .toLowerCase()
+                  .includes(pastFilter),
             )
           : inView;
         const host = listHostLabel();

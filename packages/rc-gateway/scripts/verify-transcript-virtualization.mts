@@ -23631,6 +23631,33 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P318 the list search matches the preview line as well as the title',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190ListFixture(page, {
+      '/p318': [
+        { sessionId: '31800000-0000-0000-0000-000000000001', title: 'nightly build', preview: 'moved to bookworm', updatedAt: h190Now },
+        { sessionId: '31800000-0000-0000-0000-000000000002', title: 'cache keys', preview: 'the zebra cache', updatedAt: h190Now },
+      ],
+    }, { '/p318': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p318'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`);
+    await openList(page);
+    await page.click('#list-search');
+    await page.fill('#past-filter', 'zebra');
+    const shown = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
+    expect(shown.join('|') === 'cache keys', `searching a word only in a preview shows ${JSON.stringify(shown)}`);
+    await page.fill('#past-filter', 'nightly');
+    const byTitle = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent)`)) as string[];
+    expect(byTitle.join('|') === 'nightly build', `searching a title shows ${JSON.stringify(byTitle)}`);
+    const hint = (await page.getAttribute('#past-filter', 'placeholder')) || '';
+    await page.fill('#past-filter', '');
+    return `"zebra" found the row by its preview, "nightly" by its title; the field reads "${hint}"`;
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
