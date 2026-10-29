@@ -184,6 +184,12 @@ export function createCapabilityRoute(deps: {
    * never its version. Omitted when not wired.
    */
   daemonQwenBin?: string;
+  /**
+   * Whether the boot import probe of that binary passed (#191). Reported as
+   * `daemonQwenBinHealthy`; `false` means its build is inconsistent. Omitted
+   * when not probed or inconclusive.
+   */
+  daemonQwenBinHealthy?: boolean;
   /** Read of the daemon's own `/capabilities` envelope (see #96). */
   daemonStatus?: () => Promise<DaemonCapabilities>;
   /** Test seam for the daemon read's bound. */
@@ -239,6 +245,10 @@ export function createCapabilityRoute(deps: {
       // A host path: owner and write only (#165).
       ...(deps.daemonQwenBin !== undefined && audience === 'full'
         ? { daemonQwenBin: deps.daemonQwenBin }
+        : {}),
+      // Same audience as the path it describes (#191).
+      ...(deps.daemonQwenBinHealthy !== undefined && audience === 'full'
+        ? { daemonQwenBinHealthy: deps.daemonQwenBinHealthy }
         : {}),
     };
     if (deps.costTracking) {
