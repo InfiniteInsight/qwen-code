@@ -19714,6 +19714,162 @@ PAGE_SCENARIOS.push({
   });
 }
 
+/**
+ * #196. A picture made inside the page: `w` x `h` of seeded noise, which no
+ * encoder can squeeze, so its size is set by its dimensions. Returned as base64
+ * so a scenario can plant it through the file input. Arrow functions only: a
+ * named helper inside an evaluate callback gets tsx's `__name` injected.
+ */
+const noisePicture = (
+  page: Page,
+  w: number,
+  h: number,
+  type: 'image/jpeg' | 'image/png',
+  alpha: number,
+): Promise<Buffer> =>
+  page
+    .evaluate(
+      async ([w, h, type, alpha]) => {
+        const c = document.createElement('canvas');
+        c.width = w as number;
+        c.height = h as number;
+        const g = c.getContext('2d')!;
+        const d = g.createImageData(c.width, c.height);
+        let seed = 12345;
+        for (let i = 0; i < d.data.length; i += 4) {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+          d.data[i] = seed & 255;
+          d.data[i + 1] = (seed >> 8) & 255;
+          d.data[i + 2] = (seed >> 16) & 255;
+          d.data[i + 3] = alpha as number;
+        }
+        g.putImageData(d, 0, 0);
+        const blob: Blob = await new Promise((r) => c.toBlob((b) => r(b!), type as string, 0.95));
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(bin);
+      },
+      [w, h, type, alpha] as const,
+    )
+    .then((b64) => Buffer.from(b64, 'base64'));
+
+{
+  const MiB = 1024 * 1024;
+  PAGE_SCENARIOS.push({
+    name: 'P196 the upload limit is the one /rc/capabilities reports (8 MB without it): a picture over it is shrunk on a canvas until it fits and the status line says so, a small one goes untouched, a file that is not a picture is refused with the real numbers in MB',
+    // #196. The picture is noise so its size is set by its pixels; the limit
+    // is lowered by the capabilities answer rather than by growing the file.
+    waitView: false,
+    noConsoleErrors: true,
+    before: async (page) => {
+      await page.route('**/rc/capabilities', async (route) => {
+        const res = await route.fetch();
+        const body = await res.json();
+        body.remoteControl.maxAttachmentBytes = 2 * 1024 * 1024;
+        await route.fulfill({ response: res, json: body });
+      });
+    },
+    run: async ({ page, viewer }) => {
+      const uploads: { name: string; type: string; size: number }[] = [];
+      page.on('request', (r) => {
+        const u = new URL(r.url());
+        if (r.method() !== 'POST' || !u.pathname.endsWith('/attachments')) return;
+        uploads.push({
+          name: u.searchParams.get('name') ?? '',
+          type: r.headers()['content-type'] ?? '',
+          size: r.postDataBuffer()?.length ?? 0,
+        });
+      });
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.waitForFunction(() => (caps as { remoteControl?: { maxAttachmentBytes?: number } } | null)?.remoteControl?.maxAttachmentBytes === 2 * 1024 * 1024);
+      const pick = async (name: string, mimeType: string, buffer: Buffer): Promise<void> => {
+        await page.setInputFiles('#attach-file', { name, mimeType, buffer });
+      };
+      const staged = (): Promise<string> => page.evaluate(() => document.getElementById('pending-list')?.textContent ?? '');
+      const note = (): Promise<string> => page.evaluate(() => document.getElementById('pending-note')?.textContent ?? '');
+      const settle = async (n: number): Promise<void> => {
+        try {
+          await page.waitForFunction(
+            (want) => (document.querySelectorAll('#pending-list > span').length >= want) || /limit/.test(document.getElementById('pending-note')?.textContent ?? ''),
+            n,
+            { timeout: 30_000 },
+          );
+        } catch {
+          throw new Error(`waiting for ${n} staged files; the note reads ${JSON.stringify(await note())}, the strip ${JSON.stringify(await staged())}`);
+        }
+      };
+      const status = (): Promise<string> => page.evaluate(() => document.getElementById('status')?.textContent ?? '');
+
+      // 1. A photo over the limit.
+      const photo = await noisePicture(page, 2400, 1800, 'image/jpeg', 255);
+      expect(photo.length > 2 * MiB, `the planted photo is ${photo.length} bytes, which does not exceed the 2 MiB limit`);
+      await pick('IMG_0001.jpeg', 'image/jpeg', photo);
+      await settle(1);
+      expect(uploads.length === 1, `${uploads.length} uploads for one photo`);
+      const up = uploads[0]!;
+      expect(up.size <= 2 * MiB && up.size < photo.length, `the body sent was ${up.size} bytes against a ${photo.length} byte photo and a ${2 * MiB} limit`);
+      expect(up.type === 'image/jpeg' && up.name === 'IMG_0001.jpg', `it went as ${up.type} named ${up.name}`);
+      const said = await status();
+      expect(
+        /^IMG_0001\.jpeg reduced from \d+\.\d MB to \d\.\d MB \(\d+x\d+\) to fit the 2\.0 MB limit$/.test(said),
+        `the status line reads ${JSON.stringify(said)}`,
+      );
+      expect((await staged()).includes('IMG_0001.jpg'), `the strip shows ${JSON.stringify(await staged())}`);
+
+      // 2. A picture already under the limit is not touched.
+      const small = await noisePicture(page, 200, 150, 'image/jpeg', 255);
+      await pick('small.jpg', 'image/jpeg', small);
+      await settle(2);
+      const sm = uploads[1]!;
+      expect(sm.size === small.length && sm.name === 'small.jpg', `a small picture went as ${sm.size} bytes (was ${small.length}) named ${sm.name}`);
+      expect(!/reduced/.test(await status()) || (await status()) === said, `a small picture was reported reduced: ${await status()}`);
+
+      // 3. A file that is not a picture is refused, in MB, and never sent.
+      await pick('trace.log', 'text/plain', Buffer.alloc(3 * MiB, 120));
+      await page.waitForFunction(() => /limit/.test(document.getElementById('pending-note')?.textContent ?? ''), null, { timeout: 15_000 });
+      const refusal = await note();
+      expect(refusal === 'trace.log: 3.0 MB is over the 2.0 MB limit', `the refusal reads ${JSON.stringify(refusal)}`);
+      expect(uploads.length === 2, `the refused file was uploaded anyway (${uploads.length} uploads)`);
+
+      // The picture is never enlarged: the reported size is at most its own.
+      const dims = /\((\d+)x(\d+)\)/.exec(said);
+      expect(
+        dims !== null && Number(dims[1]) <= 2400 && Number(dims[2]) <= 1800 && Math.abs(Number(dims[1]) / Number(dims[2]) - 4 / 3) < 0.01,
+        `the reduced size ${dims?.[0]} is not within 2400x1800 at the same shape`,
+      );
+
+      // 4. A transparent PNG stays a PNG while a smaller PNG fits, and is
+      // flattened to a JPEG only when none does.
+      const alphaPng = await noisePicture(page, 1600, 1200, 'image/png', 128);
+      expect(alphaPng.length > 4 * MiB, `the planted PNG is ${alphaPng.length} bytes`);
+      await page.evaluate(() => { (caps as { remoteControl: { maxAttachmentBytes: number } }).remoteControl.maxAttachmentBytes = 4 * 1024 * 1024; });
+      await pick('logo.png', 'image/png', alphaPng);
+      await settle(3);
+      const png = uploads[2]!;
+      expect(png.type === 'image/png' && png.name === 'logo.png' && png.size <= 4 * MiB && png.size < alphaPng.length, `the PNG went as ${png.type} named ${png.name}, ${png.size} bytes against ${alphaPng.length}`);
+      expect(/^logo\.png reduced from \d\.\d MB to \d\.\d MB \(\d+x\d+\) to fit the 4\.0 MB limit$/.test(await status()), `the status line reads ${JSON.stringify(await status())}`);
+      await page.evaluate(() => { (caps as { remoteControl: { maxAttachmentBytes: number } }).remoteControl.maxAttachmentBytes = 1024 * 1024; });
+      await pick('logo2.png', 'image/png', alphaPng);
+      await settle(4);
+      const flat = uploads[3]!;
+      expect(flat.type === 'image/jpeg' && flat.name === 'logo2.jpg' && flat.size <= MiB, `with no PNG that fits it went as ${flat.type} named ${flat.name}, ${flat.size} bytes`);
+      const pngSaid = await status();
+
+      // 5. A gateway that reports nothing is held to the old 8 MB.
+      await page.evaluate(() => { delete (caps as { remoteControl: { maxAttachmentBytes?: number } }).remoteControl.maxAttachmentBytes; });
+      await pick('big.bin', 'application/octet-stream', Buffer.alloc(9 * MiB, 1));
+      await page.waitForFunction(() => /8\.0 MB limit/.test(document.getElementById('pending-note')?.textContent ?? ''), null, { timeout: 15_000 });
+      const legacy = await note();
+      expect(legacy === 'big.bin: 9.0 MB is over the 8.0 MB limit', `with no capability the refusal reads ${JSON.stringify(legacy)}`);
+      return `photo ${photo.length} -> ${up.size} bytes (${said}); small untouched; non-image: ${refusal}; alpha png ${alphaPng.length} -> ${png.size} as ${png.type}, then ${flat.size} as ${flat.type} (${pngSaid}); legacy: ${legacy}`;
+    },
+  });
+}
+
 /** Parses `rgb(r, g, b)` / `rgba(r, g, b, a)` into channels. */
 function pgParseRgb(css: string): { r: number; g: number; b: number; a: number } | null {
   const m = /^rgba?\(([^)]+)\)$/.exec(css.trim());

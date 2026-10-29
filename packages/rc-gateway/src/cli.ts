@@ -55,6 +55,11 @@ import {
 import { PushStore } from './pushStore.js';
 import { UiPrefsStore } from './uiPrefsStore.js';
 import { HostActions } from './hostActions.js';
+import {
+  effectiveAttachmentLimit,
+  parseMaxAttachmentBytes,
+  DAEMON_ATTACHMENT_ITEM_BYTES,
+} from './routes/sessionAttachments.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
 import { ApnsJwtSigner } from './nativePush/apnsJwt.js';
 import { apnsHost } from './nativePush/apnsSender.js';
@@ -313,6 +318,14 @@ export interface ServeOptions {
    */
   hostActionsPath?: string;
   /**
+   * `--max-attachment-bytes <n>` (env `QWEN_RC_MAX_ATTACHMENT_BYTES`): the
+   * largest session-attachment upload the gateway accepts (#196). Default
+   * 25 MiB; a positive integer not above 100 MiB. The limit actually enforced
+   * is also held to the daemon's per-file cap, see
+   * `effectiveAttachmentLimit` in routes/sessionAttachments.ts.
+   */
+  maxAttachmentBytes?: number;
+  /**
    * `--acme-domain` values: bind with native TLS using an auto-obtained (and
    * auto-renewed) Let's Encrypt cert via DNS-01. Requires {@link acmeEmail} and
    * {@link acmeDnsProvider}; DNS-provider creds come from env. See
@@ -493,6 +506,18 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // eslint-disable-next-line no-console
     (line) => console.log(line),
   );
+  // #196: say so once when the configured limit is held down to the daemon's
+  // per-file cap, so an operator who raised it is not left guessing.
+  if (
+    opts.maxAttachmentBytes !== undefined &&
+    effectiveAttachmentLimit(opts.maxAttachmentBytes) !==
+      opts.maxAttachmentBytes
+  ) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `qwen-rc serve: attachment limit ${opts.maxAttachmentBytes} bytes is held to ${DAEMON_ATTACHMENT_ITEM_BYTES}, the daemon's per-file cap`,
+    );
+  }
   // Host-terminal requests (issue #49): the gateway is the only writer; the
   // Windows-side launcher app reads it and keeps its own cursor. Requests carry
   // the daemon token, so the file is 0600 like the other credential stores.
@@ -838,6 +863,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     pushStore,
     uiPrefs,
     hostActions,
+    ...(opts.maxAttachmentBytes !== undefined
+      ? { maxAttachmentBytes: opts.maxAttachmentBytes }
+      : {}),
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
@@ -1922,6 +1950,7 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const port = flag('port');
   const daemonPort = flag('daemon-port');
   const acmeDomain = flag('acme-domain');
+  const maxAttachmentFlag = flag('max-attachment-bytes');
   return {
     host: flag('host'),
     loopbackBindHost:
@@ -1939,6 +1968,12 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     attachDaemonToken: flag('daemon-token') ?? process.env.QWEN_RC_DAEMON_TOKEN,
     llamaSwapUrl: flag('llama-swap-url') ?? process.env.QWEN_RC_LLAMA_SWAP_URL,
     hostActionsPath: flag('host-actions'),
+    maxAttachmentBytes: parseMaxAttachmentBytes(
+      maxAttachmentFlag !== undefined
+        ? '--max-attachment-bytes'
+        : 'QWEN_RC_MAX_ATTACHMENT_BYTES',
+      maxAttachmentFlag ?? process.env.QWEN_RC_MAX_ATTACHMENT_BYTES,
+    ),
     // Auto TLS (Let's Encrypt, DNS-01). Provider creds come from env.
     acmeDomains: acmeDomain
       ? acmeDomain
@@ -1958,7 +1993,8 @@ if (process.argv[2] === 'serve') {
   //        --loopback-bind <h> --port <n> --daemon-port <n> --no-mdns
   //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
-  //        --llama-swap-url <url> --host-actions <path> --acme-domain <d[,d]> --acme-email <e>
+  //        --llama-swap-url <url> --host-actions <path>
+  //        --max-attachment-bytes <n> --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
   try {

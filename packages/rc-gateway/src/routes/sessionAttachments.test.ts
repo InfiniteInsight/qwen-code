@@ -17,8 +17,14 @@ import {
   createAttachmentReadRoute,
   createAttachmentRemoveRoute,
   createAttachmentUploadRoute,
+  DAEMON_ATTACHMENT_ITEM_BYTES,
+  DEFAULT_MAX_ATTACHMENT_BYTES,
+  MAX_CONFIGURABLE_ATTACHMENT_BYTES,
+  effectiveAttachmentLimit,
   gateJsonBody,
-  rawAttachmentBody,
+  createRawAttachmentBody,
+  parseMaxAttachmentBytes,
+  sendAttachmentError,
 } from './sessionAttachments.js';
 
 let gateway: Server | undefined;
@@ -40,12 +46,13 @@ afterEach(async () => {
 async function mountGateway(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
+  maxBytes: number = DAEMON_ATTACHMENT_ITEM_BYTES,
 ): Promise<string> {
   const app = express();
   app.use(gateJsonBody(express.json()));
   app.post(
     '/session/:id/attachments',
-    rawAttachmentBody,
+    createRawAttachmentBody(maxBytes),
     createAttachmentUploadRoute(daemon, audit),
   );
   app.get('/session/:id/attachments', createAttachmentListRoute(daemon));
@@ -625,5 +632,103 @@ describe('DELETE /session/:id/attachments/:attachmentId', () => {
 
     expect(res.status).toBe(502);
     expect(body['code']).toBe('attachments_unsupported');
+  });
+});
+
+describe('the configurable size limit (#196)', () => {
+  it('reads the limit it is given for both the parser and the 413 text', async () => {
+    const fake = fakeDaemon();
+    const base = await mountGateway(fake.daemon, undefined, 1000);
+
+    const ok = await postRaw(
+      base,
+      '/session/s-1/attachments?name=a.bin',
+      new Uint8Array(1000),
+      'application/octet-stream',
+    );
+    expect(ok.status).toBe(201);
+
+    const over = await postRaw(
+      base,
+      '/session/s-1/attachments?name=a.bin',
+      new Uint8Array(1001),
+      'application/octet-stream',
+    );
+    expect(over.status).toBe(413);
+    expect(over.body['code']).toBe('attachment_too_large');
+    expect(String(over.body['error'])).toContain('1000');
+    // Refused at the boundary: the daemon never saw the second one.
+    expect(fake.calls.filter((c) => c['kind'] === 'upload')).toHaveLength(1);
+  });
+
+  it('accepts a body above the old 8 MiB when the limit was raised', async () => {
+    const fake = fakeDaemon();
+    const base = await mountGateway(fake.daemon, undefined, 12 * 1024 * 1024);
+    const res = await postRaw(
+      base,
+      '/session/s-1/attachments?name=photo.jpg',
+      new Uint8Array(9 * 1024 * 1024),
+      'image/jpeg',
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("answers the SDK's own RangeError as 413, not as a dead daemon", () => {
+    let status = 0;
+    let body: unknown;
+    const res = {
+      headersSent: false,
+      status(n: number) {
+        status = n;
+        return this;
+      },
+      json(b: unknown) {
+        body = b;
+        return this;
+      },
+    };
+    sendAttachmentError(
+      res as unknown as Parameters<typeof sendAttachmentError>[0],
+      new RangeError('Session attachments must not exceed 8 MiB'),
+    );
+    expect(status).toBe(413);
+    expect((body as { code: string }).code).toBe('attachment_too_large');
+  });
+});
+
+describe('parseMaxAttachmentBytes', () => {
+  it('defaults to 25 MiB when unset', () => {
+    expect(DEFAULT_MAX_ATTACHMENT_BYTES).toBe(25 * 1024 * 1024);
+    expect(parseMaxAttachmentBytes('--max-attachment-bytes', undefined)).toBe(
+      undefined,
+    );
+  });
+
+  it('accepts a positive integer up to 100 MiB inclusive', () => {
+    expect(parseMaxAttachmentBytes('--max-attachment-bytes', '1')).toBe(1);
+    expect(parseMaxAttachmentBytes('--max-attachment-bytes', '104857600')).toBe(
+      MAX_CONFIGURABLE_ATTACHMENT_BYTES,
+    );
+  });
+
+  it.each(['0', '-5', '1.5', 'abc', '', '104857601', '1e3', ' '])(
+    'rejects %j',
+    (raw) => {
+      expect(() =>
+        parseMaxAttachmentBytes('--max-attachment-bytes', raw),
+      ).toThrow(/--max-attachment-bytes/);
+    },
+  );
+});
+
+describe('effectiveAttachmentLimit', () => {
+  it("never promises more than the daemon's own per-file cap", () => {
+    expect(effectiveAttachmentLimit(undefined)).toBe(
+      Math.min(DEFAULT_MAX_ATTACHMENT_BYTES, DAEMON_ATTACHMENT_ITEM_BYTES),
+    );
+    expect(effectiveAttachmentLimit(1000)).toBe(1000);
+    expect(effectiveAttachmentLimit(MAX_CONFIGURABLE_ATTACHMENT_BYTES)).toBe(
+      DAEMON_ATTACHMENT_ITEM_BYTES,
+    );
   });
 });

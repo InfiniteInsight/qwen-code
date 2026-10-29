@@ -11607,10 +11607,185 @@
         renderPendingAttachments();
       };
 
-      async function uploadAttachment(file) {
+      // #196: the upload limit the gateway reports on /rc/capabilities. An
+      // older gateway says nothing and enforced 8 MiB, so that is the fallback.
+      const LEGACY_ATTACHMENT_LIMIT = 8 * 1024 * 1024;
+      function attachmentLimit() {
+        const n =
+          caps && caps.remoteControl
+            ? caps.remoteControl.maxAttachmentBytes
+            : undefined;
+        return typeof n === 'number' && Number.isFinite(n) && n > 0
+          ? n
+          : LEGACY_ATTACHMENT_LIMIT;
+      }
+
+      // The shrink ladder. Longest sides to try, largest first; only the ones
+      // below the picture's own size are used (a picture is never enlarged), and
+      // its own size is always the first rung so a file that is merely heavy,
+      // not large, gets a lower quality before it loses pixels.
+      const IMAGE_SIDE_STEPS = [4096, 3072, 2048, 1600, 1280, 1024, 768, 512];
+      // JPEG qualities tried at each size.
+      const IMAGE_JPEG_QUALITY = [0.9, 0.8, 0.7, 0.55];
+      // A PNG that has transparency stays a PNG while it still fits at this
+      // longest side or more. Below that it is flattened onto white as a JPEG,
+      // because a thumbnail-sized PNG is worse than a photo-sized JPEG.
+      const PNG_KEEP_MIN_SIDE = 1024;
+      const RESIZABLE_IMAGE = /^image\/(jpeg|png|webp|bmp)$/;
+
+      function canvasBlob(canvas, type, quality) {
+        return new Promise((resolve) => {
+          try {
+            canvas.toBlob((b) => resolve(b), type, quality);
+          } catch {
+            resolve(null);
+          }
+        });
+      }
+
+      async function decodeImage(file) {
+        if (typeof createImageBitmap === 'function') {
+          try {
+            return await createImageBitmap(file);
+          } catch {
+            /* fall through to the element decoder */
+          }
+        }
+        const url = URL.createObjectURL(file);
+        try {
+          const img = new Image();
+          img.src = url;
+          await img.decode();
+          return img;
+        } catch {
+          return null;
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+
+      // True when any pixel of the picture is not opaque, judged on a small
+      // copy: a photograph-sized getImageData would cost more than the encode.
+      function hasTransparency(img) {
+        const c = document.createElement('canvas');
+        const k = Math.min(1, 128 / Math.max(img.width, img.height));
+        c.width = Math.max(1, Math.round(img.width * k));
+        c.height = Math.max(1, Math.round(img.height * k));
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0, c.width, c.height);
+        const px = g.getImageData(0, 0, c.width, c.height).data;
+        for (let i = 3; i < px.length; i += 4) if (px[i] < 255) return true;
+        return false;
+      }
+
+      function renamed(name, ext) {
+        const dot = name.lastIndexOf('.');
+        return (dot > 0 ? name.slice(0, dot) : name) + ext;
+      }
+
+      // Re-encodes a picture until it is at most `limit` bytes, or gives up
+      // with null. Returns { file, width, height } for the first that fits.
+      async function shrinkImage(file, limit) {
+        const img = await decodeImage(file);
+        if (!img) return null;
+        const longest = Math.max(img.width, img.height);
+        const sides = [longest].concat(
+          IMAGE_SIDE_STEPS.filter((side) => side < longest),
+        );
+        const canvas = document.createElement('canvas');
+        const draw = (side, flatten) => {
+          const k = side / longest;
+          canvas.width = Math.max(1, Math.round(img.width * k));
+          canvas.height = Math.max(1, Math.round(img.height * k));
+          const g = canvas.getContext('2d');
+          if (flatten) {
+            g.fillStyle = '#ffffff';
+            g.fillRect(0, 0, canvas.width, canvas.height);
+          }
+          g.imageSmoothingQuality = 'high';
+          g.drawImage(img, 0, 0, canvas.width, canvas.height);
+        };
+        const keepPng = file.type === 'image/png' && hasTransparency(img);
+        if (keepPng) {
+          for (const side of sides) {
+            if (side < PNG_KEEP_MIN_SIDE && side !== longest) break;
+            draw(side, false);
+            const blob = await canvasBlob(canvas, 'image/png');
+            if (blob && blob.size <= limit) {
+              return {
+                file: new File([blob], file.name, { type: 'image/png' }),
+                width: canvas.width,
+                height: canvas.height,
+              };
+            }
+          }
+        }
+        for (const side of sides) {
+          draw(side, true);
+          for (const q of IMAGE_JPEG_QUALITY) {
+            const blob = await canvasBlob(canvas, 'image/jpeg', q);
+            if (blob && blob.size <= limit) {
+              return {
+                file: new File([blob], renamed(file.name, '.jpg'), {
+                  type: 'image/jpeg',
+                }),
+                width: canvas.width,
+                height: canvas.height,
+              };
+            }
+          }
+        }
+        return null;
+      }
+
+      async function uploadAttachment(picked) {
         if (!watchedSessionId) {
           setPendingNote('watch a session first');
           return;
+        }
+        let file = picked;
+        const limit = attachmentLimit();
+        let reduced = '';
+        if (file.size > limit) {
+          if (!RESIZABLE_IMAGE.test(file.type)) {
+            // Refused here, with the number, rather than sent to be refused.
+            setPendingNote(
+              file.name +
+                ': ' +
+                formatBytes(file.size) +
+                ' is over the ' +
+                formatBytes(limit) +
+                ' limit',
+            );
+            return;
+          }
+          setPendingNote('reducing ' + file.name + '…');
+          const fit = await shrinkImage(file, limit);
+          if (!fit) {
+            setPendingNote(
+              file.name +
+                ': ' +
+                formatBytes(file.size) +
+                ' is over the ' +
+                formatBytes(limit) +
+                ' limit and could not be reduced to fit',
+            );
+            return;
+          }
+          reduced =
+            file.name +
+            ' reduced from ' +
+            formatBytes(file.size) +
+            ' to ' +
+            formatBytes(fit.file.size) +
+            ' (' +
+            fit.width +
+            'x' +
+            fit.height +
+            ') to fit the ' +
+            formatBytes(limit) +
+            ' limit';
+          file = fit.file;
         }
         setPendingNote('uploading ' + file.name + '…');
         let res;
@@ -11647,6 +11822,7 @@
         // as still-running forever beside a file that is plainly listed.
         pendingNote = '';
         renderPendingAttachments();
+        if (reduced) setStatus(reduced);
       }
 
       $('attach').onclick = () => {

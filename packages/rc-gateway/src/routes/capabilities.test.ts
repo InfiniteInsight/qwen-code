@@ -273,3 +273,25 @@ describe('GET /rc/capabilities', () => {
     }
   });
 });
+
+describe('maxAttachmentBytes (#196)', () => {
+  it('reports the limit the upload route enforces', async () => {
+    const m = await mount({ maxAttachmentBytes: 12345 });
+    try {
+      const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+      expect(body.remoteControl.maxAttachmentBytes).toBe(12345);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('leaves it out when the route has no limit wired, so the page falls back', async () => {
+    const m = await mount({});
+    try {
+      const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+      expect('maxAttachmentBytes' in body.remoteControl).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+});
