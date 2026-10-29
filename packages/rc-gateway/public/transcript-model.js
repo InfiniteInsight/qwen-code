@@ -514,7 +514,9 @@
         if (id) idx.set(id, entry);
       }
       entry.label = toolLabel(u, id, entry.label);
-      entry.status = status;
+      // An update that names no status (a note, a rename) leaves the one the
+      // call had; assigning '' made a running child read as not started.
+      if (status) entry.status = status;
       emitUpdate(tool);
     }
 
@@ -538,7 +540,10 @@
       var tool = id ? toolIndex.get(id) : null;
       if (tool) {
         tool.label = toolLabel(u, id, tool.label);
-        tool.status = status;
+        // #171: every Agent tool gets a status-less update
+        // (subagentSessionReady); taking '' from it dropped [in_progress] for
+        // the whole subagent run.
+        if (status) tool.status = status;
         if (input !== undefined) tool.input = input;
         if (result !== undefined) tool.result = result;
       } else {
@@ -586,6 +591,9 @@
       if (!Array.isArray(entries) || entries.length === 0) return;
       var t = planTally(entries);
       if (t.total === 0) return;
+      // Like every other row, a plan closes the thought before it: left open,
+      // that thought kept timing until the next unrelated frame.
+      finishThought();
       if (!planItem) {
         planItem = push(
           newItem('plan', { open: t.open, done: t.done, total: t.total }),
