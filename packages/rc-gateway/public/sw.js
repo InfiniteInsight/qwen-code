@@ -1,18 +1,31 @@
-/* global self, fetch, indexedDB, URL */
+/* global self, fetch, indexedDB, URL, AbortController, setTimeout, clearTimeout */
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-// Multi-daemon manifest cache written by the viewer (CLIENTS_KEY) — same
-// origin, so the SW shares the page's localStorage. Maps this SW's origin to
-// its registry name so push titles can carry the source daemon
-// (add-multi-workspace-client "Notification displays source daemon").
-// Resolves '' on any error — a missing/corrupt cache just drops the prefix.
-function originDaemonName() {
+// Registry name of the daemon this SW's origin is, so push titles can carry
+// the source daemon (add-multi-workspace-client "Notification displays source
+// daemon"). The viewer caches the manifest in localStorage, which a service
+// worker does not have (#171: `self.localStorage` is undefined here, so the
+// prefix never appeared). Ask the gateway for the same manifest instead, with
+// the bearer the viewer mirrored into IndexedDB; the owner-only route answers a
+// non-owner or a single-daemon install with 403 or 404 and that is simply no
+// prefix. Bounded, because a push notification must not wait on a slow
+// gateway. Resolves '' on any error.
+const MANIFEST_WAIT_MS = 2000;
+async function originDaemonName() {
+  let timer;
   try {
-    const raw = self.localStorage.getItem('qwen-rc:clients');
-    if (!raw) return '';
-    const obj = JSON.parse(raw);
-    const list = Array.isArray(obj.daemons) ? obj.daemons : [];
+    const token = await idbGetToken();
+    if (!token) return '';
+    const ctl = new AbortController();
+    timer = setTimeout(() => ctl.abort(), MANIFEST_WAIT_MS);
+    const res = await fetch('/ui/clients-manifest.json', {
+      headers: { Authorization: 'Bearer ' + token },
+      signal: ctl.signal,
+    });
+    if (!res.ok) return '';
+    const obj = await res.json();
+    const list = obj && Array.isArray(obj.daemons) ? obj.daemons : [];
     for (const d of list) {
       if (!d || typeof d.name !== 'string' || typeof d.url !== 'string')
         continue;
@@ -23,7 +36,9 @@ function originDaemonName() {
       }
     }
   } catch {
-    /* corrupt cache — no prefix */
+    /* unreachable, refused or corrupt — no prefix */
+  } finally {
+    clearTimeout(timer);
   }
   return '';
 }
@@ -41,10 +56,6 @@ self.addEventListener('push', (event) => {
   else if (p.kind === 'session.turn_complete') title = 'Reply ready';
   else if (p.kind === 'session.turn_failed') title = 'Turn failed';
   else title = 'qwen-code';
-  // Push titles only (notification clicks are untouched): when this origin is
-  // one of several registered daemons, "[workstation-1] Permission needed".
-  const dname = originDaemonName();
-  if (dname) title = '[' + dname + '] ' + title;
   const actions =
     p.kind === 'permission.required'
       ? [
@@ -53,18 +64,25 @@ self.addEventListener('push', (event) => {
         ]
       : [];
   event.waitUntil(
-    self.registration.showNotification(title, {
-      body: String(p.summary || '').slice(0, 140),
-      tag: p.requestId || p.sessionId || undefined,
-      data: {
-        url: p.url || '/ui/',
-        requestId: p.requestId,
-        sessionId: p.sessionId,
-        kind: p.kind,
-        approveOptionId: p.approveOptionId,
-      },
-      actions,
-    }),
+    (async () => {
+      // Push titles only (notification clicks are untouched): when this origin
+      // is one of several registered daemons, "[workstation-1] Permission
+      // needed".
+      const dname = await originDaemonName();
+      if (dname) title = '[' + dname + '] ' + title;
+      await self.registration.showNotification(title, {
+        body: String(p.summary || '').slice(0, 140),
+        tag: p.requestId || p.sessionId || undefined,
+        data: {
+          url: p.url || '/ui/',
+          requestId: p.requestId,
+          sessionId: p.sessionId,
+          kind: p.kind,
+          approveOptionId: p.approveOptionId,
+        },
+        actions,
+      });
+    })(),
   );
 });
 
