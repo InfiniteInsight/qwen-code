@@ -448,6 +448,42 @@ describe('MatrixBridge runner — session_update streaming', () => {
     expect(content.body).toContain('**bold**'); // plaintext keeps the markdown
   });
 
+  it('says a streamed message mentions nobody, so model text cannot ping (#168)', async () => {
+    await rooms.bind('!r1:h', 'sess_q');
+    const h = harness([]);
+    h.bridge.deliverEvent('sess_q', chunk('@room look, and @alice:h too\n\n'));
+    await h.drainStream();
+    const content = h.sent[0].content as Record<string, unknown>;
+    expect(content['m.mentions']).toEqual({});
+  });
+
+  it('every bot message carries m.mentions: {}, the edit in both layers', async () => {
+    await rooms.bind('!r1:h', 'sess_q');
+    const h = harness([]);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_m',
+        bridgeHints: {
+          recommendedSurface: 'inline',
+          argsSummaryShort: 'run_shell {"cmd":"echo @room"}',
+        },
+      },
+    });
+    await waitFor(() => h.sent.length === 1);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req_m', outcome: 'allow_once' },
+    });
+    await waitFor(() => h.sent.length === 2);
+    const [req, edit] = h.sent.map((s) => s.content as Record<string, unknown>);
+    expect(req['m.mentions']).toEqual({});
+    expect(edit['m.mentions']).toEqual({});
+    expect(
+      (edit['m.new_content'] as Record<string, unknown>)['m.mentions'],
+    ).toEqual({});
+  });
+
   it('relates the 7th message of a turn into an m.thread off the first', async () => {
     await rooms.bind('!r1:h', 'sess_q');
     const h = harness([]);

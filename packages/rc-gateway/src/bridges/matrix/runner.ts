@@ -200,7 +200,7 @@ export class MatrixBridge {
             event_id: opts.threadRootEventId,
           };
         }
-        const r = await this.cfg.rest.sendMessage(roomId, content);
+        const r = await this.send(roomId, content);
         return r.ok && r.eventId ? r.eventId : null;
       },
     };
@@ -214,7 +214,7 @@ export class MatrixBridge {
   private dispatchDeps(): MatrixDispatchDeps {
     return {
       bridge: this.cfg.client,
-      rest: this.cfg.rest,
+      rest: { sendMessage: (roomId, content) => this.send(roomId, content) },
       rooms: this.cfg.rooms,
       bridgeId: MATRIX_BRIDGE_ID,
       bans: this.bans,
@@ -292,6 +292,20 @@ export class MatrixBridge {
    */
   async dispatchReaction(reaction: NormalizedMatrixReaction): Promise<void> {
     await handleReaction(reaction, this.dispatchDeps());
+  }
+
+  /**
+   * Every message the bot sends goes out here, marked as mentioning nobody
+   * (`m.mentions: {}`, Matrix intentional mentions, #168). Without it, clients
+   * fall back to matching the body, so model text or tool args containing a
+   * display name, an MXID or `@room` pinged people. An edit carries it in
+   * `m.new_content` too.
+   */
+  private send(
+    roomId: string,
+    content: unknown,
+  ): ReturnType<MatrixInbound['sendMessage']> {
+    return this.cfg.rest.sendMessage(roomId, withoutMentions(content));
   }
 
   /** Register (or re-register) this bridge's capabilities with the gateway. */
@@ -392,7 +406,7 @@ export class MatrixBridge {
       for (const roomId of ex.encryptedRooms) {
         if (this.encryptedRooms.has(roomId)) continue;
         this.encryptedRooms.add(roomId);
-        await this.cfg.rest.sendMessage(roomId, {
+        await this.send(roomId, {
           msgtype: 'm.text',
           body: ENCRYPTED_ROOM_NOTICE,
         });
@@ -521,7 +535,7 @@ export class MatrixBridge {
     // a one-time guidance reply when a user reacts on them.
     const isDeeplink = !tracksReactions(data);
     for (const roomId of this.cfg.rooms.roomsFor(sessionId)) {
-      const r = await this.cfg.rest.sendMessage(roomId, content);
+      const r = await this.send(roomId, content);
       if (!r.ok || !r.eventId) continue;
       if (requestId) {
         const list = this.sent.get(requestId) ?? [];
@@ -547,12 +561,20 @@ export class MatrixBridge {
       typeof d['outcome'] === 'string' ? (d['outcome'] as string) : 'resolved';
     for (const t of targets) {
       this.tracked.delete(t.eventId); // stop accepting reactions on a resolved req
-      await this.cfg.rest.sendMessage(
-        t.roomId,
-        renderResolveEdit(t.body, t.eventId, outcome),
-      );
+      await this.send(t.roomId, renderResolveEdit(t.body, t.eventId, outcome));
     }
   }
+}
+
+/** `content` with an empty `m.mentions` (and in `m.new_content`, for an edit). */
+function withoutMentions(content: unknown): unknown {
+  if (!content || typeof content !== 'object') return content;
+  const c = content as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...c, 'm.mentions': {} };
+  const edited = c['m.new_content'];
+  if (edited && typeof edited === 'object')
+    out['m.new_content'] = { ...edited, 'm.mentions': {} };
+  return out;
 }
 
 /** Sleep `ms`, resolving early if `signal` aborts (so shutdown is prompt). */
