@@ -846,6 +846,7 @@
         cancelNote: null,
         cost: null,
         costNote: null,
+        trace: null,
       };
       head.appendChild(r.spin);
       head.appendChild(r.msg);
@@ -872,6 +873,18 @@
       r.costNote = el('span', 'subagent-cost-note');
       head.appendChild(r.cost);
       head.appendChild(r.costNote);
+      // issue #110: open this child's trace (its steps in order, its stop) in
+      // the page's agents sheet. Offered running or settled, like cost, and
+      // only when the page says it can draw one (canTraceSubagent), so an old
+      // gateway shows nothing new on the block.
+      r.trace = el('button', 'subagent-trace', 'trace');
+      r.trace.type = 'button';
+      r.trace.title = 'what this subagent did, step by step';
+      r.trace.hidden = true;
+      r.trace.addEventListener('click', function () {
+        if (opts.onTraceSubagent) opts.onTraceSubagent(m.item);
+      });
+      head.appendChild(r.trace);
       host.appendChild(head);
       bubble.appendChild(host);
       return r;
@@ -917,6 +930,12 @@
       var costBusy = !!s.costBusy;
       if (r.cost.disabled !== costBusy) r.cost.disabled = costBusy;
       setText(r.costNote, s.costNote || '');
+      var traceable =
+        !!r.ref &&
+        typeof opts.onTraceSubagent === 'function' &&
+        (typeof opts.canTraceSubagent !== 'function' ||
+          !!opts.canTraceSubagent());
+      if (r.trace.hidden !== !traceable) r.trace.hidden = !traceable;
       if (s.text && !r.text) {
         r.text = el('div', 'subagent-text');
         r.textBody = textRef('');

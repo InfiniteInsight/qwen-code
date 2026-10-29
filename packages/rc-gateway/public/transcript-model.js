@@ -628,7 +628,10 @@
       }
       var entry = id ? idx.get(id) : null;
       if (!entry) {
-        entry = { id: id, label: '', status: '' };
+        // #110: textAt is how much of the child's text had arrived when this
+        // call started, so a trace can put the call between the words said
+        // before it and after it rather than after all of them.
+        entry = { id: id, label: '', status: '', textAt: h.sub.text.length };
         h.sub.tools.push(entry);
         if (id) idx.set(id, entry);
       }
@@ -852,10 +855,25 @@
     // already held (`into`). The same frames can sit in both when a page
     // overlaps the live replay, so text `into` already holds is not doubled and
     // a child call is matched by its id.
+    // #110: a call's textAt counts into the text it was recorded against, so
+    // text put in front of that text moves the call along by the same amount.
+    function shiftTextAt(tools, by) {
+      if (!by) return;
+      tools.forEach(function (t) {
+        if (typeof t.textAt === 'number') t.textAt += by;
+      });
+    }
     function mergeSub(into, from) {
       if (!from || from === into) return into;
-      if (from.text && into.text.indexOf(from.text) < 0)
+      // Where the older text sits in the merged text: in front of it when it
+      // is prepended, or wherever the overlap already holds it.
+      var fromAt = 0;
+      if (from.text && into.text.indexOf(from.text) < 0) {
+        shiftTextAt(into.tools, from.text.length);
         into.text = from.text + into.text;
+      } else if (from.text) {
+        fromAt = into.text.indexOf(from.text);
+      }
       var known = {};
       into.tools.forEach(function (t) {
         if (t.id) known[t.id] = t;
@@ -866,6 +884,7 @@
         if (!have) older.push(t);
         else if (!have.label && t.label) have.label = t.label;
       });
+      shiftTextAt(older, fromAt);
       into.tools.splice.apply(into.tools, [0, 0].concat(older));
       subToolIndex.delete(into);
       if (!into.type) into.type = from.type;

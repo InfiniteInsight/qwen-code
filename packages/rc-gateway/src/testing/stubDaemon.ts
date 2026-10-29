@@ -231,6 +231,14 @@ export interface StubDaemon {
   lastSendMidTurnMessagesNowSessionId: string | undefined;
   /** Workspace the most recent GET .../sessions/live-state named, decoded. */
   lastLiveStateWorkspace: string | undefined;
+  /** #110: session id of the most recent GET /session/:id/agents. */
+  lastAgentsSessionId: string | undefined;
+  /** #110: how many GET /session/:id/agents reads arrived. */
+  agentsReadCount: number;
+  /** #110: the query of the most recent GET /session/:id/agent-trace. */
+  lastAgentTraceQuery: Record<string, unknown> | undefined;
+  /** #110: what the most recent GET .../saved-workflows/:name named. */
+  lastSavedWorkflow: { sessionId: string; name: string } | undefined;
   /** #132: every POST /sessions/catalog body, in order. */
   catalogRequests: unknown[];
   close: () => Promise<void>;
@@ -761,6 +769,29 @@ export interface StubDaemonOptions {
   liveStateErrorBody?: unknown;
   liveStateResult?: unknown;
   /**
+   * #110: body for GET /session/:id/agents (default an empty roster). A
+   * function is read per request, so a test can move an agent from running to
+   * finished between two reads.
+   */
+  sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
+  /** #110: status for GET /session/:id/agents (default 200). A 404 with no
+   * `sessionAgentsErrorBody` stands for a daemon predating the route. */
+  sessionAgentsStatus?: number;
+  sessionAgentsErrorBody?: unknown;
+  /**
+   * #110: the whole lineage GET /session/:id/agent-trace answers from (default
+   * none). Narrowed by `?rootAgentId=` the way the daemon narrows it
+   * (core/src/agents/agent-transcript.ts readAgentTrace).
+   */
+  agentTraceResult?: unknown;
+  /** #110: status for GET /session/:id/agent-trace (default 200). */
+  agentTraceStatus?: number;
+  agentTraceErrorBody?: unknown;
+  /** #110: the `workflow` GET .../saved-workflows/:name answers (default null). */
+  savedWorkflowResult?: unknown;
+  /** #110: status for GET .../saved-workflows/:name (default 200). */
+  savedWorkflowStatus?: number;
+  /**
    * #132: the workspaces this daemon has registered, each with what POST
    * /sessions/catalog answers for it: its rows (`DaemonSessionSummary`, any
    * order; the stub sorts them the way the daemon does), its group records,
@@ -877,6 +908,12 @@ export async function startStubDaemon(
       | undefined,
     lastSendMidTurnMessagesNowSessionId: undefined as string | undefined,
     lastLiveStateWorkspace: undefined as string | undefined,
+    lastAgentsSessionId: undefined as string | undefined,
+    agentsReadCount: 0,
+    lastAgentTraceQuery: undefined as Record<string, unknown> | undefined,
+    lastSavedWorkflow: undefined as
+      | { sessionId: string; name: string }
+      | undefined,
     catalogRequests: [] as unknown[],
   };
   const app = express();
@@ -2184,6 +2221,81 @@ export async function startStubDaemon(
     });
   });
 
+  // -- Session agents (#110) --------------------------------------------
+  // Shapes copied from the SDK's DaemonSessionAgentsStatus, DaemonAgentTrace
+  // and DaemonSessionSavedWorkflowStatus (sdk-typescript/src/daemon/types.ts),
+  // which mirror the daemon's ServeSession* types.
+
+  app.get('/session/:id/agents', (req, res) => {
+    const sessionId = String(req.params.id);
+    state.lastAgentsSessionId = sessionId;
+    state.agentsReadCount += 1;
+    const status = opts.sessionAgentsStatus ?? 200;
+    if (status !== 200) {
+      if (opts.sessionAgentsErrorBody === undefined) res.status(status).end();
+      else res.status(status).json(opts.sessionAgentsErrorBody);
+      return;
+    }
+    const given =
+      typeof opts.sessionAgentsResult === 'function'
+        ? (opts.sessionAgentsResult as (id: string) => unknown)(sessionId)
+        : opts.sessionAgentsResult;
+    res
+      .status(200)
+      .json(given ?? { v: 1, sessionId, now: Date.now(), tasks: [] });
+  });
+
+  app.get('/session/:id/agent-trace', (req, res) => {
+    const sessionId = String(req.params.id);
+    state.lastAgentTraceQuery = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    const status = opts.agentTraceStatus ?? 200;
+    if (status !== 200) {
+      if (opts.agentTraceErrorBody === undefined) res.status(status).end();
+      else res.status(status).json(opts.agentTraceErrorBody);
+      return;
+    }
+    const whole = (opts.agentTraceResult ?? {
+      v: 1,
+      sessionId,
+      nodes: [],
+      rootAgentIds: [],
+      warnings: [],
+    }) as { nodes?: Array<{ rootAgentId?: string }> } & Record<
+      string,
+      unknown
+    >;
+    const root = req.query['rootAgentId'];
+    if (typeof root !== 'string' || !Array.isArray(whole.nodes)) {
+      res.status(200).json(whole);
+      return;
+    }
+    const nodes = whole.nodes.filter((n) => n.rootAgentId === root);
+    res.status(200).json({
+      ...whole,
+      nodes,
+      rootAgentIds: [...new Set(nodes.map((n) => n.rootAgentId))].sort(),
+    });
+  });
+
+  app.get('/session/:id/saved-workflows/:name', (req, res) => {
+    const sessionId = String(req.params.id);
+    const name = String(req.params.name);
+    state.lastSavedWorkflow = { sessionId, name };
+    const status = opts.savedWorkflowStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    res.status(200).json({
+      v: 1,
+      sessionId,
+      name,
+      workflow: opts.savedWorkflowResult ?? null,
+    });
+  });
+
   // -- Workspace file reads (add-capability-parity #107) ----------------
   // The daemon's four reads answer JSON (the SDK calls r.json() on each), so
   // the stub does too. Each records the query it received: the gateway's job
@@ -3433,6 +3545,18 @@ export async function startStubDaemon(
     },
     get lastLiveStateWorkspace() {
       return state.lastLiveStateWorkspace;
+    },
+    get lastAgentsSessionId() {
+      return state.lastAgentsSessionId;
+    },
+    get agentsReadCount() {
+      return state.agentsReadCount;
+    },
+    get lastAgentTraceQuery() {
+      return state.lastAgentTraceQuery;
+    },
+    get lastSavedWorkflow() {
+      return state.lastSavedWorkflow;
     },
     get catalogRequests() {
       return state.catalogRequests;

@@ -255,6 +255,13 @@ export interface BootViewerOptions {
     /** #132: what each spawned stub's POST /sessions/catalog serves. */
     catalog?: (cwd: string) => StubDaemonOptions['catalog'];
   };
+  /**
+   * #110: the roster GET /session/:id/agents answers (default empty). A
+   * function is read per request, so a scenario can move an agent along.
+   */
+  sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
+  /** #110: the whole lineage GET /session/:id/agent-trace narrows. */
+  agentTraceResult?: unknown;
   /** #132: what the boot stub's POST /sessions/catalog serves (unset: no route). */
   catalog?: StubDaemonOptions['catalog'];
 }
@@ -427,6 +434,8 @@ export async function bootViewer(
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,
+    sessionAgentsResult: opts.sessionAgentsResult,
+    agentTraceResult: opts.agentTraceResult,
     catalog: opts.catalog,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));

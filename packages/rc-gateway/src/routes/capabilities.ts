@@ -276,6 +276,12 @@ export function createCapabilityRoute(deps: {
       ...(deps.daemonQwenBinHealthy !== undefined && audience === 'full'
         ? { daemonQwenBinHealthy: deps.daemonQwenBinHealthy }
         : {}),
+      // #110: GET /session/:id/agents, /agent-trace and
+      // /saved-workflows/:name are mounted. The page draws the agents strip,
+      // the Agents sheet and the trace only when this is set AND the daemon
+      // advertises `session_agents`, so an old gateway shows nothing new and
+      // an old daemon is never asked.
+      sessionAgents: true,
       // #132: POST /rc/sessions/catalog is mounted: one merged order and one
       // cursor across the workspaces, with groups. The page is served from
       // disk and can meet an older gateway, so it reads the catalog only when
