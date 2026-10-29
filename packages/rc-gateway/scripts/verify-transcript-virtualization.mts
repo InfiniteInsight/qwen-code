@@ -19180,7 +19180,9 @@ PAGE_SCENARIOS.push({
                 upper: cs.textTransform,
                 weight: cs.fontWeight,
                 color: cs.color,
-                rows: Array.from(g.querySelectorAll('.row')).map((row) => {
+                // #110: a row the gateway or daemon does not offer is in the
+                // markup but not drawn, so it is not one of the drawing's rows.
+                rows: Array.from(g.querySelectorAll('.row')).filter((row) => row.getClientRects().length > 0).map((row) => {
                   const b = row.getBoundingClientRect();
                   const chev = row.querySelector('svg.chev');
                   const cb = chev ? chev.getBoundingClientRect() : null;
