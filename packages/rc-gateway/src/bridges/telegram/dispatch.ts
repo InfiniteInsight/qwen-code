@@ -9,6 +9,7 @@ import type { TgApiResult } from './botApi.js';
 import type { TelegramUpdate } from './botApi.js';
 import type { TelegramChatStore } from './chatStore.js';
 import { subActorOf, parseCallbackData, outcomeFor } from './render.js';
+import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
 
 /** The bridge-client surface the dispatcher needs (subset → easy to mock). */
 export interface PromptVoter {
@@ -160,7 +161,12 @@ async function handleMessage(
       chatId,
       `Slow down — try again in ${secs} seconds.`,
     );
+    return;
   }
+  // A prompt the gateway did not take (502/503/504 and the like) is said in
+  // the chat; it used to vanish without a word (#168).
+  const notice = promptFailureNotice(r);
+  if (notice) await deps.tg.sendMessage(chatId, notice);
   // Success is silent here; the agent's reply arrives via the SSE echo loop.
 }
 
@@ -200,6 +206,13 @@ async function handleCallback(
   if (r.status === 403) {
     deps.bans.add(subActor);
     await deps.tg.answerCallbackQuery(cbq.id, 'You are blocked.');
+    return;
+  }
+  // Only a counted vote is acked with its outcome; 404/409/429/5xx used to
+  // be acked "Approved" too (#168).
+  const failed = voteFailureNotice(r);
+  if (failed) {
+    await deps.tg.answerCallbackQuery(cbq.id, failed);
     return;
   }
   await deps.tg.answerCallbackQuery(

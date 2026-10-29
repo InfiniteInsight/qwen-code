@@ -215,6 +215,21 @@ describe('discord dispatch — chat message → prompt', () => {
     expect(f.sent[0].channelId).toBe('chan_42');
     expect(f.sent[0].text).toContain('7 seconds');
   });
+
+  it('reports a prompt answered 502, 503 or 504 to the channel (#168)', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    for (const status of [502, 503, 504]) {
+      const f = deps();
+      f.setPromptResult({ ok: false, status });
+      await handleMessage(
+        { channelId: 'chan_42', authorId: 'u1', isBot: false, content: 'x' },
+        f.deps,
+      );
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0].channelId).toBe('chan_42');
+      expect(f.sent[0].text).toContain(String(status));
+    }
+  });
 });
 
 describe('discord dispatch — slash commands', () => {
@@ -337,6 +352,20 @@ describe('discord dispatch — button click → vote', () => {
     expect(f.sent[0].channelId).toBe('chan_42');
     expect(f.sent[0].text).toContain('<@111122223333>');
     expect(f.sent[0].text).toContain('approve');
+  });
+
+  it('says why a vote was not counted (404, 429) instead of a bare failure', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    const gone = deps();
+    gone.setVoteResult({ ok: false, status: 404 });
+    await handleComponent(comp('vote:approve:req_xyz'), gone.deps);
+    expect(gone.editedReplies[0].text).toMatch(/^Vote failed/);
+    expect(gone.editedReplies[0].text).toContain('no longer pending');
+
+    const limited = deps();
+    limited.setVoteResult({ ok: false, status: 429, retryAfterSec: 3 });
+    await handleComponent(comp('vote:approve:req_xyz'), limited.deps);
+    expect(limited.editedReplies[0].text).toContain('3 seconds');
   });
 
   it('>15-min fallback: channel message mentions voter on vote failure too', async () => {

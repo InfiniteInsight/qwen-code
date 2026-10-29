@@ -176,6 +176,18 @@ describe('matrix dispatch — message → prompt', () => {
     await handleMessage(msg(), f.deps);
     expect(f.sent[0].body).toContain('9 seconds');
   });
+
+  it('reports a prompt answered 502, 503 or 504 to the room (#168)', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    for (const status of [502, 503, 504]) {
+      const f = deps();
+      f.setPromptResult({ ok: false, status });
+      await handleMessage(msg(), f.deps);
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0].roomId).toBe('!abc:home.example.com');
+      expect(f.sent[0].body).toContain(String(status));
+    }
+  });
 });
 
 describe('matrix dispatch — !qwen commands + power-level gate', () => {
@@ -438,6 +450,16 @@ describe('matrix dispatch — reaction → vote', () => {
     f.setVoteResult({ ok: false, status: 403 });
     await handleReaction(react(), f.deps);
     expect(f.deps.bans.has('matrix:@alice:home.example.com')).toBe(true);
+  });
+
+  it('tells the room when a vote was not counted, rather than dropping it silently', async () => {
+    const f = deps({ tracked: trackedInline() });
+    f.setVoteResult({ ok: false, status: 502 });
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toHaveLength(1);
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].body).toMatch(/^Vote failed/);
+    expect(f.sent[0].body).toContain('502');
   });
 
   it('deeplink reaction: replies with guidance instead of voting (once per requestId)', async () => {

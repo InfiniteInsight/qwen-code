@@ -8,6 +8,7 @@ import type { WriteResult } from '../client.js';
 import type { MatrixRestResult } from './restApi.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { subActorOf, voteForReaction, outcomeFor } from './render.js';
+import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
 
 /**
  * Pure inbound dispatch for the Matrix bridge (`add-matrix-bridge`): given a
@@ -196,7 +197,16 @@ export async function handleMessage(
       msgtype: 'm.text',
       body: `Slow down — try again in ${secs} seconds.`,
     });
+    return;
   }
+  // A prompt the gateway did not take (502/503/504 and the like) is said in
+  // the room; it used to vanish without a word (#168).
+  const notice = promptFailureNotice(r);
+  if (notice)
+    await deps.rest.sendMessage(msg.roomId, {
+      msgtype: 'm.text',
+      body: notice,
+    });
 }
 
 async function handleCommand(
@@ -334,5 +344,16 @@ export async function handleReaction(
     outcomeFor(vote),
     subActor,
   );
-  if (r.status === 403) deps.bans.add(subActor);
+  if (r.status === 403) {
+    deps.bans.add(subActor);
+    return;
+  }
+  // Matrix has no per-user ack, so a vote the gateway did not count is said
+  // in the room; otherwise the reactor believes it was counted (#168).
+  const failed = voteFailureNotice(r);
+  if (failed)
+    await deps.rest.sendMessage(reaction.roomId, {
+      msgtype: 'm.text',
+      body: failed,
+    });
 }

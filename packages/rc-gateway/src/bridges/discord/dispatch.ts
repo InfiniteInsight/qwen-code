@@ -8,6 +8,7 @@ import type { WriteResult } from '../client.js';
 import type { DiscordRestResult } from './restApi.js';
 import type { DiscordChannelStore } from './channelStore.js';
 import { subActorOf, parseCustomId, outcomeFor } from './render.js';
+import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
 
 /**
  * Pure inbound dispatch for the Discord bridge (`add-discord-bridge`): given a
@@ -144,7 +145,12 @@ export async function handleMessage(
       msg.channelId,
       `Slow down — try again in ${secs} seconds.`,
     );
+    return;
   }
+  // A prompt the gateway did not take (502/503/504 and the like) is said in
+  // the channel; it used to vanish without a word (#168).
+  const notice = promptFailureNotice(r);
+  if (notice) await deps.rest.createMessage(msg.channelId, notice);
   // Success is silent; the agent's reply arrives via the SSE echo loop.
 }
 
@@ -241,12 +247,9 @@ export async function handleComponent(
     await replyOrFallback(deps, comp, 'You are blocked.');
     return;
   }
-  if (!r.ok) {
-    await replyOrFallback(
-      deps,
-      comp,
-      'Vote failed — try again from the web client.',
-    );
+  const failed = voteFailureNotice(r);
+  if (failed) {
+    await replyOrFallback(deps, comp, failed);
     return;
   }
   await replyOrFallback(deps, comp, `You voted ${parsed.action}.`);

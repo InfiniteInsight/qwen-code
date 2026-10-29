@@ -247,6 +247,41 @@ describe('handleUpdate — messages', () => {
     await handleUpdate(msg('second'), h.deps);
     expect(h.prompts).toHaveLength(1); // the banned 2nd never reached the gateway
   });
+
+  it('a prompt answered 502, 503 or 504 is reported to the chat, not dropped (#168)', async () => {
+    await chats.bind(5, 'sess-x');
+    const cases: Array<[WriteResult, RegExp]> = [
+      [
+        { ok: false, status: 502, body: { code: 'daemon_unavailable' } },
+        /daemon/i,
+      ],
+      [{ ok: false, status: 503, body: { code: 'queue_timeout' } }, /busy/i],
+      [
+        { ok: false, status: 504, body: { code: 'prompt_timeout' } },
+        /timed out/i,
+      ],
+      [{ ok: false, status: 503 }, /503/],
+    ];
+    for (const [result, pattern] of cases) {
+      const h = fakeDeps(chats);
+      h.setPromptResult(result);
+      await handleUpdate(
+        {
+          update_id: 9,
+          message: {
+            message_id: 9,
+            chat: { id: 5 },
+            from: { id: 1 },
+            text: 'go',
+          },
+        },
+        h.deps,
+      );
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0].chatId).toBe(5);
+      expect(h.sent[0].text).toMatch(pattern);
+    }
+  });
 });
 
 describe('handleUpdate — callbacks', () => {
@@ -271,6 +306,38 @@ describe('handleUpdate — callbacks', () => {
       subActor: 'telegram:67890',
     });
     expect(h.acks[0]).toEqual({ id: 'cbq1', text: 'Approved' });
+  });
+
+  it('a vote the gateway did not take is never acked "Approved" (#168)', async () => {
+    await chats.bind(5, 'sess-x');
+    const cases: Array<[WriteResult, RegExp]> = [
+      [{ ok: false, status: 404 }, /no longer pending/],
+      [{ ok: false, status: 409 }, /no longer pending/],
+      [{ ok: false, status: 429, retryAfterSec: 4 }, /4 seconds/],
+      [{ ok: false, status: 500 }, /500/],
+      [{ ok: false, status: 502 }, /502/],
+    ];
+    for (const [result, pattern] of cases) {
+      const h = fakeDeps(chats);
+      h.setVoteResult(result);
+      await handleUpdate(
+        {
+          update_id: 10,
+          callback_query: {
+            id: 'cbq9',
+            from: { id: 67890 },
+            message: { chat: { id: 5 } },
+            data: 'vote:approve:req_z',
+          },
+        },
+        h.deps,
+      );
+      expect(h.votes).toHaveLength(1);
+      expect(h.acks).toHaveLength(1);
+      expect(h.acks[0].text).not.toBe('Approved');
+      expect(h.acks[0].text).toMatch(/^Vote failed/);
+      expect(h.acks[0].text).toMatch(pattern);
+    }
   });
 
   it('a foreign callback is acked and ignored (no vote)', async () => {
