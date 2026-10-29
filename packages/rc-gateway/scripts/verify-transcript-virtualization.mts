@@ -21055,6 +21055,85 @@ function solidPng(w: number, h: number): Buffer {
       return `upload on A, B's send bare, A's strip back and its send carried ${A}-a-notes.txt; a late upload for A stayed off B and rode A's next send (${prompts.length} prompts)`;
     },
   });
+
+  // #173. startWatch(id) with no cursor clears the transcript and sends no
+  // Last-Event-ID, so the daemon replays nothing: a conversation that was
+  // intact on disk came back empty and marked "streaming". The stub replays
+  // every frame whatever the header says, so "rows came back" proves nothing;
+  // what these three read is the header each events request really carries.
+  const lastEventIds = (page: Page, id: string): (string | null)[] => {
+    const seen: (string | null)[] = [];
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname === `/session/${id}/events`) {
+        seen.push(r.headers()['last-event-id'] ?? null);
+      }
+    });
+    return seen;
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P240 after a rewind the re-watch of the same conversation asks for a replay (a Last-Event-ID) instead of connecting bare onto an empty stream',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(`**/session/${A}/rewind`, (route) => json(route, { toTurn: 1 }));
+      const sent = lastEventIds(page, A);
+      await go(page, A);
+      expect(sent.length === 1 && sent[0] === null, `the first watch asked ${JSON.stringify(sent)}`);
+      await page.evaluate(
+        `window.confirm = () => true; document.getElementById('rewind-chat').onclick(); void document.getElementById('rewind-pick-btn').onclick()`,
+      );
+      await poll(() => sent.length >= 2, 'the rewind never re-watched the conversation');
+      expect(sent[1] !== null, `the re-watch after the rewind sent no Last-Event-ID (${JSON.stringify(sent)}), so the daemon replays nothing`);
+      await onAir(page, A);
+      return `the re-watch after a rewind asked for Last-Event-ID ${sent[1]}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P241 the Watch button, pressed on a conversation whose stream ended, re-attaches from the last event seen and keeps the rows on screen',
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      const sent = lastEventIds(page, A);
+      await go(page, A);
+      const seenBefore = (await page.evaluate('lastSeenEventId')) as number | null;
+      expect(seenBefore !== null && seenBefore > 0, `no event id was seen (${seenBefore})`);
+      // The stream drops without the reader leaving the conversation.
+      await page.evaluate('controller.abort()');
+      await page.waitForFunction("!document.getElementById('watch').disabled", null, { timeout: 10_000 });
+      expect(((await page.evaluate('transcriptModel.items.length')) as number) > 0, 'the rows went with the stream');
+      await page.evaluate("document.getElementById('watch').click()");
+      await poll(() => sent.length >= 2, 'Watch never reconnected');
+      expect(
+        sent[1] === String(seenBefore),
+        `Watch asked for Last-Event-ID ${JSON.stringify(sent[1])}, wanted the last event seen (${seenBefore})`,
+      );
+      return `Watch re-attached at Last-Event-ID ${sent[1]}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P242 Open on a search hit from this gateway asks for a replay from 0 and does not unwatch the conversation first",
+    waitView: false,
+    frames: frames172,
+    run: async ({ page }) => {
+      await page.route(/\/rc\/search\?/, (route) =>
+        json(route, { hits: [{ sessionId: B, eventId: 'e1', kind: 'user', ts: '2026-01-01T00:00:00Z', snippet: 'p242 snippet' }], elapsedMs: 1 }),
+      );
+      const sentB = lastEventIds(page, B);
+      await go(page, A);
+      await page.evaluate(`document.getElementById('search-q').value = 'p242'; void runSearch()`);
+      await page.waitForFunction("document.querySelector('#search-results .search-row button')", null, { timeout: 10_000 });
+      await page.evaluate("document.querySelector('#search-results .search-row button').click()");
+      await poll(() => sentB.length >= 1, 'Open never watched the hit');
+      expect(sentB[0] === '0', `Open connected with Last-Event-ID ${JSON.stringify(sentB[0])}, wanted 0 (a replay)`);
+      await onAir(page, B);
+      return 'the hit opened with Last-Event-ID 0';
+    },
+  });
+
+  // @@NEXT-P-SCENARIO@@
 }
 
 // #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD

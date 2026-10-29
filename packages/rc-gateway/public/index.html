@@ -15568,8 +15568,11 @@
         // New-conversation button), which runs its own watch hand-off.
         if (!watchedSessionId)
           return setStatus('pick a conversation from the list first');
-        lastSeenEventId = null;
-        startWatch(watchedSessionId);
+        // #173: the rows are still on screen (Watch is only live once the
+        // stream has ended), so this is the Reconnect button's move: carry on
+        // from the last event seen. With no cursor startWatch cleared the
+        // transcript and the daemon replayed nothing.
+        startWatch(watchedSessionId, lastSeenEventId ?? 0, watchedSessionTitle);
       };
 
       // issue #48: notifications are on by default. The Settings toggle
@@ -16748,6 +16751,48 @@
       // stale/invalid stored token would still fire these eagerly before the
       // auth gate has validated it. See restoreWatchedSession(), used there.
 
+      // #173: open a conversation known only by its id (a push deep link, a
+      // search hit). The folder is not known, so the recent folders are probed
+      // for it and the match is resumed, which loads the transcript in-band; if
+      // none lists it the watch replays from 0 so a persisted transcript
+      // rebuilds. A watch with no cursor would clear the rows and replay
+      // nothing. `ready` is a promise to wait on before the switch (the deep
+      // link's pending-card read).
+      async function openConversationById(id, ready) {
+        // #172: the probe can take a folder's worth of reads, and a reader
+        // who taps another conversation meanwhile has answered it. Without
+        // this the probe's resume landed last and took the page back.
+        const gen = switchGen;
+        for (const cwd of loadRecentWorkspaces()) {
+          try {
+            const res = await fetch(
+              '/rc/sessions?cwd=' + encodeURIComponent(cwd),
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            if (gen !== switchGen) return;
+            if (!res.ok) continue;
+            const body = await res.json();
+            if (gen !== switchGen) return;
+            const s = (body.sessions || []).find((x) => x && x.sessionId === id);
+            if (s) {
+              if (ready) await ready;
+              if (gen !== switchGen) return;
+              void resumeConversation(id, cwd, strOr(s.title, ''), {
+                hostTerminal: true,
+              });
+              return;
+            }
+          } catch {
+            /* unreachable workspace: keep probing */
+          }
+        }
+        // No recent workspace listed it: replay from 0, like
+        // restoreWatchedSession, so a persisted transcript rebuilds.
+        if (ready) await ready;
+        if (gen !== switchGen) return;
+        void startWatch(id, 0);
+      }
+
       // Turn-end push deep link (#40): a push notification's URL is
       // /ui/?session=<id>. The push payload is metadata-only — it carries
       // NO cwd — so the session's workspace is resolved by probing the
@@ -16793,42 +16838,7 @@
           refreshPendingCards(id, true),
           new Promise((r) => setTimeout(r, 1500)),
         ]);
-        void (async () => {
-          // #172: the probe can take a folder's worth of reads, and a reader
-          // who taps another conversation meanwhile has answered it. Without
-          // this the probe's resume landed last and took the page back.
-          const gen = switchGen;
-          for (const cwd of loadRecentWorkspaces()) {
-            try {
-              const res = await fetch(
-                '/rc/sessions?cwd=' + encodeURIComponent(cwd),
-                { headers: { Authorization: 'Bearer ' + token() } },
-              );
-              if (gen !== switchGen) return;
-              if (!res.ok) continue;
-              const body = await res.json();
-              if (gen !== switchGen) return;
-              const s = (body.sessions || []).find(
-                (x) => x && x.sessionId === id,
-              );
-              if (s) {
-                await pinned;
-                if (gen !== switchGen) return;
-                void resumeConversation(id, cwd, strOr(s.title, ''), {
-                  hostTerminal: true,
-                });
-                return;
-              }
-            } catch {
-              /* unreachable workspace — keep probing */
-            }
-          }
-          // No recent workspace listed it: replay from 0, like
-          // restoreWatchedSession, so a persisted transcript rebuilds.
-          await pinned;
-          if (gen !== switchGen) return;
-          void startWatch(id, 0);
-        })();
+        void openConversationById(id, pinned);
         return true;
       }
 
@@ -17130,11 +17140,15 @@
         const open = document.createElement('button');
         open.textContent = 'Open';
         open.onclick = () => {
-          // If a stream is already active, abort it first (else the new watch
-          // overwrites the module-level controller and orphans the old stream).
-          if ($('watch').disabled) $('stop').onclick();
-          lastSeenEventId = null;
-          startWatch(h.sessionId);
+          // #173: the hit names no folder, so the open goes the way a deep link
+          // does (find the folder and resume, else replay from 0) rather than
+          // startWatch with no cursor, which blanked the transcript and
+          // replayed nothing. Nothing is torn down first: startWatch replaces
+          // the live stream itself, and a stop here left the page empty while
+          // the probe was still reading.
+          if (!token()) return setStatus('pair first');
+          noteConversationSwitch();
+          void openConversationById(h.sessionId);
         };
         head.appendChild(label);
         head.appendChild(open);
@@ -18156,8 +18170,14 @@
           'rewound to turn ' + r.body.toTurn + ' — re-syncing transcript',
         );
         // Re-sync: re-watch from event 0 so the transcript reflects the
-        // truncation (startWatch clears and replays the shortened history).
-        void startWatch(id);
+        // truncation. #173: with no cursor startWatch sends no Last-Event-ID,
+        // so the daemon replays nothing and the conversation came back empty
+        // and marked streaming. Asking for the replay is what rebuilds it; the
+        // rows are cleared here first because a cursor watch keeps what is on
+        // screen, and the discarded turns must not stay under the replay.
+        lastSeenEventId = null;
+        clearTranscript(id);
+        void startWatch(id, 0, watchedSessionTitle);
       };
 
       // #184: Rewind to here, under a turn's answer. The same picker and the
