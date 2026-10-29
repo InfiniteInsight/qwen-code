@@ -36,6 +36,20 @@ export interface PushSenderOptions {
    * (#165). Defaults to the known Web Push services.
    */
   endpointPolicy?: PushEndpointPolicy;
+  /**
+   * Hard deadline for ONE delivery attempt, whatever the transport (#169).
+   * Default {@link REQUEST_DEADLINE_MS}. A timed-out attempt is transient
+   * and retried like a 5xx.
+   */
+  requestTimeoutMs?: number;
+}
+
+/** Thrown in place of an attempt that outlived its deadline. */
+class PushRequestTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`push request timed out after ${ms}ms`);
+    this.name = 'PushRequestTimeoutError';
+  }
 }
 
 /**
@@ -51,6 +65,29 @@ export class PushEndpointRefusedError extends Error {
 
 /** Per-request socket timeout for a delivery (web-push has none by default). */
 const SEND_TIMEOUT_MS = 15_000;
+
+/**
+ * Total deadline for one attempt (#169). The socket timeout above is an IDLE
+ * timeout: an endpoint that trickles a byte now and then, or a stalled lookup,
+ * never trips it. Set above it so the library's own teardown normally wins.
+ */
+const REQUEST_DEADLINE_MS = 20_000;
+
+/**
+ * Race `work` against a `ms` deadline. The deadline only stops the WAIT; the
+ * default transport's socket timeout and `keepAlive: false` agent bound the
+ * request itself.
+ */
+function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PushRequestTimeoutError(ms)), ms);
+    if (typeof timer === 'object' && timer && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
 
 const DEFAULT_BACKOFF = [1000, 2000, 4000, 8000, 16000];
 const MAX_ATTEMPTS = 5;
@@ -90,6 +127,9 @@ function isAuthError(code: number): boolean {
  *  - 429 / 5xx / network  → retry per backoff (max 5 attempts); after the last
  *                           attempt → push_send_failed{reason:
  *                           'transient_exhausted'}, keep the subscription.
+ *                           An attempt past its deadline (`requestTimeoutMs`)
+ *                           is transient too (`timedOut: true` when the last
+ *                           attempt was one).
  *
  * send() is best-effort and NEVER throws (like the audit log): the entire body
  * is wrapped in an outer try/catch, and each transport call has its own inner
@@ -101,6 +141,7 @@ export class PushSender {
   private readonly backoffMs: number[];
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly endpointPolicy: PushEndpointPolicy;
+  private readonly requestTimeoutMs: number;
   private vapidConfigured = false;
   /**
    * Every delivery goes through this agent, whose lookup refuses non-public
@@ -122,6 +163,7 @@ export class PushSender {
     this.backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF;
     this.sleep = opts.sleep ?? defaultSleep;
     this.endpointPolicy = opts.endpointPolicy ?? new PushEndpointPolicy();
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_DEADLINE_MS;
   }
 
   private defaultTransport: PushTransport = async (sub, payloadJson) => {
@@ -173,16 +215,22 @@ export class PushSender {
     try {
       const payloadJson = JSON.stringify(payload);
       let lastCode = 0;
+      let lastTimedOut = false;
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         let code: number;
+        lastTimedOut = false;
         try {
-          const res = await this.transport(
-            { endpoint: record.endpoint, keys: record.keys },
-            payloadJson,
+          const res = await withDeadline(
+            this.transport(
+              { endpoint: record.endpoint, keys: record.keys },
+              payloadJson,
+            ),
+            this.requestTimeoutMs,
           );
           code = res.statusCode;
         } catch (err) {
+          lastTimedOut = err instanceof PushRequestTimeoutError;
           if (err instanceof PushEndpointRefusedError) {
             // Policy refusal: no retry (it cannot change across the backoff)
             // and the record is kept, like an auth error, so a mistaken
@@ -244,6 +292,7 @@ export class PushSender {
         kind: payload.kind,
         statusCode: lastCode,
         reason: 'transient_exhausted',
+        ...(lastTimedOut ? { timedOut: true } : {}),
       });
     } catch {
       // Outer guard: send() is best-effort and must never throw.

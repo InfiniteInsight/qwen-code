@@ -339,6 +339,89 @@ describe('SessionEventPump', () => {
     });
   });
 
+  it('a hung notify() cannot stall the pump: the next request is still auto-voted (#169)', async () => {
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      permissionStatus: 200,
+      frames: [
+        // A push-producing frame whose delivery never finishes (an endpoint
+        // that accepted the connection and then went silent)...
+        { id: 1, type: 'prompt_completed', data: {} },
+        // ...followed by a request policy votes on by itself.
+        {
+          id: 2,
+          type: 'permission_request',
+          data: {
+            requestId: 'r2',
+            toolCall: {
+              toolCallId: 'tc2',
+              title: 'humanized',
+              kind: 'execute',
+              rawInput: {},
+            },
+            options: [{ optionId: 'ok', kind: 'allow_once' }],
+          },
+        },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const allowAll: Policy = {
+      defaults: { action: 'prompt', requireScope: 'approve' },
+      rules: [{ id: 'ok', match: { tool: 'execute' }, action: 'allow' }],
+    };
+    const notified: string[] = [];
+    const hung = {
+      notify: (e: { type: string }): Promise<void> => {
+        notified.push(e.type);
+        return new Promise<void>(() => {}); // never settles
+      },
+    };
+    const dispatched: number[] = [];
+    pump = new SessionEventPump(daemon, hung, {
+      pollMs: 20,
+      reconnectMs: 0,
+      sleep: async () => {},
+      enforcer: new PolicyEnforcer(daemon, allowAll),
+      notifyWaitMs: 20,
+      onDispatch: (_id, ev) => dispatched.push(ev.id as number),
+    });
+    await pump.start();
+
+    expect(await waitFor(() => dispatched.includes(2), 1500)).toBe(true);
+    expect(notified).toEqual(['prompt_completed']);
+    expect(stub.lastRespondedPermission?.requestId).toBe('r2');
+  });
+
+  it('a rejecting notify() neither breaks nor reconnects the loop', async () => {
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [
+        { id: 1, type: 'prompt_completed', data: {} },
+        { id: 2, type: 'prompt_completed', data: {} },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const dispatched: number[] = [];
+    pump = new SessionEventPump(
+      daemon,
+      { notify: async () => Promise.reject(new Error('boom')) },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        onDispatch: (_id, ev) => dispatched.push(ev.id as number),
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => dispatched.includes(2))).toBe(true);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(dispatched).toEqual([1, 2]); // no reconnect re-delivered a frame
+  });
+
   it('updates lastEventId from numeric event ids', async () => {
     const collected: Dispatched[] = [];
     const onDispatchSeen: Array<{ id: string; event: DaemonEvent }> = [];

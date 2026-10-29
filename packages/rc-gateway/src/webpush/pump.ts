@@ -70,7 +70,18 @@ export interface SessionEventPumpOptions {
    * into reconcile.
    */
   onSessionIdle?: (sessionId: string, workspaceCwd: string) => void;
+  /**
+   * How long the loop waits for one event's `notify()` before moving on to the
+   * next event (#169). The delivery keeps running in the background; only the
+   * loop stops waiting for it, so a hung push endpoint cannot hold up the
+   * session's later events, policy auto-votes included. While deliveries are
+   * fast they still finish in event order. Default 1000ms; 0 never waits.
+   */
+  notifyWaitMs?: number;
 }
+
+/** Default bound on the loop's wait for one event's `notify()`. */
+const DEFAULT_NOTIFY_WAIT_MS = 1000;
 
 /** Per-session subscription loop state. */
 interface Loop {
@@ -114,6 +125,7 @@ export class SessionEventPump {
     sessionId: string,
     workspaceCwd: string,
   ) => void;
+  private readonly notifyWaitMs: number;
 
   private readonly loops = new Map<string, Loop>();
   /**
@@ -151,6 +163,7 @@ export class SessionEventPump {
     this.onEvent = opts.onEvent;
     this.enforcer = opts.enforcer;
     this.onSessionIdle = opts.onSessionIdle;
+    this.notifyWaitMs = opts.notifyWaitMs ?? DEFAULT_NOTIFY_WAIT_MS;
   }
 
   /** Resolves once the first reconcile has run. Never throws. */
@@ -292,7 +305,7 @@ export class SessionEventPump {
             // `policy.decisionSource` rules can match it (issue #166).
             routing = routingContextFromPolicy(outcome);
           }
-          await this.notifier?.notify(
+          await this.dispatchNotify(
             { type: ev.type, data: ev.data },
             {
               sessionId: s.sessionId,
@@ -315,6 +328,44 @@ export class SessionEventPump {
       if (!loop.active || this.stopped) break;
       await this.sleep(this.reconnectMs);
     }
+  }
+
+  /**
+   * Fire one event's push fan-out and wait for it at most `notifyWaitMs`
+   * (#169). Awaiting `notify()` outright let one hung push endpoint (a request
+   * that never answers, retried with backoff) hold the whole loop, so the
+   * session's later events, policy auto-votes included, waited behind it. The
+   * delivery itself keeps running in the background with its rejection
+   * swallowed: push is best-effort, and a rejection must not throw into the
+   * loop and force a reconnect. Gating (scope, quiet hours, rate limit) runs
+   * synchronously inside `notify()` before its first await, so it still sees
+   * events in order.
+   */
+  private async dispatchNotify(
+    event: { type: string; data: unknown },
+    ctx: {
+      sessionId: string;
+      sessionName?: string;
+      routing?: RoutingEventContext;
+    },
+  ): Promise<void> {
+    if (!this.notifier) return;
+    let delivery: Promise<void>;
+    try {
+      delivery = this.notifier.notify(event, ctx).catch(() => {});
+    } catch {
+      return; // a synchronous throw is as best-effort as a rejection
+    }
+    if (this.notifyWaitMs <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.notifyWaitMs);
+      if (typeof timer === 'object' && timer && 'unref' in timer) {
+        (timer as { unref: () => void }).unref();
+      }
+    });
+    await Promise.race([delivery, bound]);
+    clearTimeout(timer);
   }
 
   /**

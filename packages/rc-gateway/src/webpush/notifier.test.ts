@@ -1621,6 +1621,44 @@ describe('PushNotifier — APNs fan-out', () => {
     expect(apns.sends.map((s) => s.deviceToken)).toEqual(['app-dev']);
   });
 
+  it('a hung web push endpoint does not hold back the APNs fan-out (#169)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/hung',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));
+    await apnsStore.register({
+      tokenId: approver.id,
+      deviceToken: 'app-dev',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    // A web push delivery that never answers.
+    const hungSender = new PushSender(vapid, store, audit, {
+      transport: () => new Promise(() => {}),
+      requestTimeoutMs: 60_000,
+      ...FAST,
+    });
+    const apns = fakeApns();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      hungSender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: apnsStore, sender: apns },
+    );
+    void notifier.notify(PERM, { sessionId: 's1' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(apns.sends.map((s) => s.deviceToken)).toEqual(['app-dev']);
+  });
+
   it('a global snooze suppresses the APNs fan-out too (no send)', async () => {
     const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
     const apnsStore = await ApnsStore.open(join(dir, 'apns.json'));

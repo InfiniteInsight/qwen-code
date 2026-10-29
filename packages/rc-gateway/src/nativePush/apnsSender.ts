@@ -147,15 +147,49 @@ export class ApnsSender {
  * chain. The integration test passes its self-signed CA (or `rejectUnauthorized:
  * false`) here to point the REAL transport at an in-process HTTP/2 server — there
  * is no code path by which production silently skips cert verification.
+ *
+ * Every request has a hard deadline (`opts.timeoutMs`, default
+ * {@link APNS_REQUEST_TIMEOUT_MS}, #169): connect, TLS, headers and body all
+ * count against it. On expiry the session is destroyed and the promise rejects,
+ * which the notifier audits as `push_send_failed` like any connection error.
+ * Without it a request Apple (or a black-holed route) never answered held the
+ * notifier, and with it the session's event pump, indefinitely.
  */
 export function createHttp2ApnsTransport(
   connectOptions?: import('node:http2').SecureClientSessionOptions,
+  opts: { timeoutMs?: number } = {},
 ): ApnsTransport {
+  const timeoutMs = opts.timeoutMs ?? APNS_REQUEST_TIMEOUT_MS;
   return {
     post: (req) =>
       new Promise((resolve, reject) => {
         const client = connect(`https://${req.host}`, connectOptions);
-        client.on('error', reject);
+        let settled = false;
+        // Hoisted, so the timer callback below can call it; it only ever runs
+        // after `timer` is assigned.
+        function settle(finish: () => void): void {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          finish();
+        }
+        const timer = setTimeout(
+          () =>
+            settle(() => {
+              client.destroy();
+              reject(new Error(`APNs request timed out after ${timeoutMs}ms`));
+            }),
+          timeoutMs,
+        );
+        if (typeof timer === 'object' && timer && 'unref' in timer) {
+          (timer as { unref: () => void }).unref();
+        }
+        client.on('error', (err) =>
+          settle(() => {
+            client.destroy();
+            reject(err);
+          }),
+        );
         const stream = client.request({
           [H2.HTTP2_HEADER_METHOD]: 'POST',
           [H2.HTTP2_HEADER_PATH]: `/3/device/${req.deviceToken}`,
@@ -171,19 +205,26 @@ export function createHttp2ApnsTransport(
         let bodyText = '';
         stream.setEncoding('utf8');
         stream.on('data', (c) => (bodyText += c));
-        stream.on('end', () => {
-          client.close();
-          resolve({ status, reason: bodyText || undefined });
-        });
-        stream.on('error', (err) => {
-          client.close();
-          reject(err);
-        });
+        stream.on('end', () =>
+          settle(() => {
+            client.close();
+            resolve({ status, reason: bodyText || undefined });
+          }),
+        );
+        stream.on('error', (err) =>
+          settle(() => {
+            client.close();
+            reject(err);
+          }),
+        );
         stream.write(req.body);
         stream.end();
       }),
   };
 }
+
+/** Default hard deadline for one APNs request (#169). */
+export const APNS_REQUEST_TIMEOUT_MS = 15_000;
 
 /** APNs host for the configured environment. */
 export function apnsHost(environment: 'sandbox' | 'production'): string {

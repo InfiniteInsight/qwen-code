@@ -323,7 +323,7 @@ export class PushNotifier {
     }
     const need = KIND_SCOPE[payload.kind];
     if (!need) return;
-    await Promise.all(
+    const web = Promise.all(
       this.store.listAll().map(async (r) => {
         const scopes = this.tokens.scopesFor(r.tokenId);
         if (!scopes || !scopes.includes(need)) return;
@@ -510,7 +510,10 @@ export class PushNotifier {
     // Second transport: fan the same payload out to APNs device subscriptions
     // (add-native-mobile-shells), under the same global gates already applied
     // above (snooze, routing drop) plus the token-level gates re-checked per sub.
-    await this.notifyApns(payload, ctx, routingEv, routing, need, now);
+    // Started alongside the web fan-out rather than after it (#169): a web
+    // endpoint that never answers must not hold back every device's APNs push.
+    const apns = this.notifyApns(payload, ctx, routingEv, routing, need, now);
+    await Promise.all([web, apns]);
   }
 
   /**

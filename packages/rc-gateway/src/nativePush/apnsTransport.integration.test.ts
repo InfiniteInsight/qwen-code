@@ -150,6 +150,35 @@ describe('createHttp2ApnsTransport (real http2 against a fake APNs)', () => {
     }
   });
 
+  it('times out a request Apple never answers and tears the connection down (#169)', async () => {
+    // A server that accepts the stream and then goes silent: no headers, no end.
+    let streamClosed = false;
+    server = createSecureServer({
+      key: LOCALHOST_TEST_KEY,
+      cert: LOCALHOST_TEST_CERT,
+    });
+    server.on('stream', (stream) => {
+      stream.on('close', () => (streamClosed = true));
+    });
+    await new Promise<void>((r) => server!.listen(0, '127.0.0.1', r));
+    const port = (server!.address() as AddressInfo).port;
+
+    const started = Date.now();
+    await expect(
+      createHttp2ApnsTransport(trust, { timeoutMs: 150 }).post({
+        host: `localhost:${port}`,
+        deviceToken: 'd',
+        topic: 't',
+        jwt: 'j',
+        body: '{}',
+      }),
+    ).rejects.toThrow(/timed out/);
+    expect(Date.now() - started).toBeLessThan(5000);
+    // The client destroyed its session, so the server side sees the stream go.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(streamClosed).toBe(true);
+  });
+
   it('DEFAULTS to strict TLS — no connectOptions rejects the self-signed server', async () => {
     const { host } = await startFakeApns(200);
     // Production path: no trust override → the self-signed cert must be refused.
