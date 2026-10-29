@@ -201,6 +201,12 @@ export class PushNotifier {
    * (see the cycle-75 design). No cross-session leak — the counts only exist for
    * pushes that already passed the scope + session-lock gates when recorded.
    *
+   * The scope gate is re-checked at SEND time (#169): the counts were recorded
+   * hours earlier, and a token revoked or expired since then must not reach its
+   * device. Revocation cascades only to APNs records, so a revoked token's web
+   * push record is still in the store here. Only kinds the token may still
+   * receive are counted; nothing left means no digest.
+   *
    * Sync and never throws: `sender.send` is best-effort/never-throwing and is
    * fired-and-forgotten, so a failed digest is simply lost (like all push)
    * rather than retried next window.
@@ -216,7 +222,15 @@ export class PushNotifier {
       if (!summary || summary.total <= 0) return;
       const rec = byId.get(id);
       if (!rec) return;
-      void this.sender.send(rec, buildDigestPayload(summary));
+      const scopes = this.tokens.scopesFor(rec.tokenId);
+      if (!scopes) return; // revoked or expired token: silent, like notify()
+      let total = 0;
+      for (const [kind, n] of Object.entries(summary.byKind)) {
+        const need = KIND_SCOPE[kind];
+        if (need !== undefined && scopes.includes(need)) total += n;
+      }
+      if (total <= 0) return;
+      void this.sender.send(rec, buildDigestPayload({ ...summary, total }));
     });
   }
 

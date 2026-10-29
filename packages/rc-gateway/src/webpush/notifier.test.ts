@@ -1516,6 +1516,28 @@ describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
     expect(sent).toHaveLength(1); // no double-fire
   });
 
+  it('SECURITY: a revoked token’s browser gets no digest (#169)', async () => {
+    const { notifier } = await quietSub();
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { kind: 'execute', title: 'x' }, requestId: 'r' },
+      },
+      { sessionId: 's1' },
+      new Date('2026-06-09T02:00:00Z'),
+    );
+    notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z')); // seed quiet
+    // Revoked while quiet. Only APNs cascades on revoke; the web push record
+    // stays in the store, so the digest path must check the token itself.
+    const [rec] = store.listAll();
+    expect(await tokens.revoke(rec.tokenId)).toBe(true);
+    notifier.flushQuietDigests(new Date('2026-06-09T08:00:00Z')); // window ended
+    await settle();
+    expect(sent).toHaveLength(0);
+    // The pending counts are still dropped, so nothing lingers for the id.
+    expect(notifier.digestSummary()).toEqual([]);
+  });
+
   it('does not send a digest when nothing was suppressed while quiet', async () => {
     const { notifier } = await quietSub();
     notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z')); // seed quiet, no counts
