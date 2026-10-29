@@ -80,7 +80,8 @@ export const RATE_LIMIT_CRITICAL_KINDS = new Set([
 /**
  * The APNs send seam the notifier drives (satisfied by `ApnsSender`). Kept
  * structural so the notifier needn't import the http2 transport. The orphan
- * guard (`isTokenLive`) and 410/400 removal + 429/5xx backoff live in the sender.
+ * guard (`isTokenLive`), removal on a 410 or a 400 BadDeviceToken, and 429/5xx
+ * backoff live in the sender.
  */
 export interface ApnsNotifier {
   send(sub: ApnsSubscriptionRecord, payload: PushPayload): Promise<unknown>;
