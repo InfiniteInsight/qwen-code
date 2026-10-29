@@ -84,6 +84,15 @@ export class TelegramBridge {
    * late callback_query taps without hitting the daemon.
    */
   private readonly resolvedRequests = new Set<string>();
+  /**
+   * chatId → tail of that chat's in-flight message dispatch (#159). A prompt
+   * POST answers only when the whole turn ends, so message updates run OFF the
+   * poll loop (otherwise the Approve tap behind a tool approval is never read).
+   * Chaining per chat keeps one chat's messages in order: a second message
+   * queues behind the running turn instead of racing it. Entries delete
+   * themselves when the chain drains.
+   */
+  private readonly chatChains = new Map<number, Promise<void>>();
   private readonly log: (msg: string) => void;
 
   constructor(cfg: TelegramBridgeConfig) {
@@ -100,7 +109,28 @@ export class TelegramBridge {
       bans: this.bans,
       sentRequests: this.sentRequests,
       resolvedRequests: this.resolvedRequests,
+      onError: (err) =>
+        this.log(
+          `telegram bridge: update dispatch failed: ${(err as Error)?.message ?? String(err)}`,
+        ),
     };
+  }
+
+  /**
+   * Run `run` after everything already queued for `chatId` has finished.
+   * `run` must not reject (handleUpdate swallows). Resolves when `run` is done.
+   */
+  private enqueueForChat(
+    chatId: number,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    const prev = this.chatChains.get(chatId) ?? Promise.resolve();
+    const next = prev.then(run);
+    this.chatChains.set(chatId, next);
+    void next.then(() => {
+      if (this.chatChains.get(chatId) === next) this.chatChains.delete(chatId);
+    });
+    return next;
   }
 
   /** Register (or re-register) this bridge's capabilities with the gateway. */
@@ -154,7 +184,20 @@ export class TelegramBridge {
       const updates = await this.cfg.botApi.getUpdates(offset, timeout, signal);
       for (const u of updates) {
         offset = Math.max(offset, u.update_id + 1);
-        await handleUpdate(u, this.dispatchDeps());
+        const chatId =
+          u.message?.text !== undefined ? u.message.chat.id : undefined;
+        if (chatId === undefined) {
+          // Button taps (votes) are quick and must be handled inline.
+          await handleUpdate(u, this.dispatchDeps());
+          continue;
+        }
+        // A message may be a prompt that holds its POST open for the whole
+        // turn: dispatch it off the loop so the next getUpdates (and the
+        // Approve tap it carries) is still read. A /start in the message binds
+        // a new session, so reconcile again once it finishes.
+        void this.enqueueForChat(chatId, () =>
+          handleUpdate(u, this.dispatchDeps()),
+        ).then(() => this.reconcileSubscriptions(signal));
       }
       // A /start in this batch may have bound a new session → pick it up.
       this.reconcileSubscriptions(signal);
