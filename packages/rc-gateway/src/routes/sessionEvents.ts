@@ -19,7 +19,7 @@ import type { WatchPresence } from '../webpush/watchPresence.js';
 import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
 import { getSharedWal } from '../wal.js';
-import type { WalFrame } from '../wal.js';
+import type { ReplayResult, WalFrame } from '../wal.js';
 import {
   CONSERVATIVE_EPOCH,
   resolveEpochState,
@@ -204,11 +204,28 @@ class HubWatcher {
   constructor(
     private readonly wantsReplay: boolean,
     private readonly actorTokenId: string | undefined,
+    /**
+     * Frames at or below this id are already on the client: set only when the
+     * WAL held nothing to replay from the watcher's cursor (see the route).
+     */
+    private readonly skipThrough?: number,
   ) {}
 
-  /** Fan-out entry: one serialized SSE block, with its id when it has one. */
-  deliver(chunk: string, id?: number): void {
+  /**
+   * Fan-out entry: one serialized SSE block, with its id when it has one.
+   * `gap` marks a resync marker, which is never skipped: it is about the
+   * hole, not about frames the client already has.
+   */
+  deliver(chunk: string, id?: number, gap = false): void {
     if (this.finished) return;
+    if (
+      !gap &&
+      id !== undefined &&
+      this.skipThrough !== undefined &&
+      id <= this.skipThrough
+    ) {
+      return;
+    }
     if (id !== undefined && this.wantsReplay && !this.replayCompleteQueued) {
       this.noteReplayed(id, 1);
     }
@@ -344,10 +361,10 @@ class SessionEventsHub {
 
   constructor(
     private readonly deps: HubDeps,
-    firstWantsReplay: boolean,
+    firstCursor: number | undefined,
   ) {
     this.state = resolveEpochState(deps.walDir, deps.sessionId);
-    const cursor = this.upstreamCursor(firstWantsReplay);
+    const cursor = this.upstreamCursor(firstCursor);
     this.catchingUp = cursor !== undefined;
     let resolveReady!: () => void;
     let rejectReady!: (err: unknown) => void;
@@ -398,15 +415,17 @@ class SessionEventsHub {
    * A watcher's Last-Event-ID is in the gateway's numbering and is answered out
    * of the WAL, so it is never forwarded.
    */
-  private upstreamCursor(firstWantsReplay: boolean): number | undefined {
+  private upstreamCursor(firstCursor: number | undefined): number | undefined {
     // Relayed before: resume from the last raw id this gateway relayed, so the
     // daemon replays exactly what the WAL is missing.
     if (this.state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId) {
       return this.state.lastOutId;
     }
-    // Never relayed: a first watcher asking for history gets the daemon's ring
-    // replayed into the WAL; one asking for live frames gets live frames.
-    return firstWantsReplay ? 0 : undefined;
+    // Never relayed: the numbering is still the daemon's own (the first frame
+    // anchors at offset 0), so the first watcher's cursor is a daemon cursor,
+    // exactly as the WAL-dark relay forwarded it: 0 replays the daemon's ring
+    // into the WAL, a load watermark resumes after it, none is live only.
+    return firstCursor;
   }
 
   private async pump(
@@ -557,7 +576,7 @@ class SessionEventsHub {
       },
     };
     wal.append(frame);
-    this.broadcast(serializeFrame(frame), frame.id);
+    this.broadcast(serializeFrame(frame), frame.id, true);
   }
 
   private finishCatchUp(): void {
@@ -566,8 +585,8 @@ class SessionEventsHub {
     for (const w of this.watchers) w.catchUpDone();
   }
 
-  private broadcast(chunk: string, id?: number): void {
-    for (const w of this.watchers) w.deliver(chunk, id);
+  private broadcast(chunk: string, id?: number, gap = false): void {
+    for (const w of this.watchers) w.deliver(chunk, id, gap);
   }
 }
 
@@ -605,7 +624,7 @@ export function createSessionEventsRoute(
   const acquireHub = (
     dir: string,
     sessionId: string,
-    firstWantsReplay: boolean,
+    firstCursor: number | undefined,
   ): SessionEventsHub => {
     const live = hubs.get(sessionId);
     if (live !== undefined && !live.closed) return live;
@@ -620,7 +639,7 @@ export function createSessionEventsRoute(
           if (hubs.get(sessionId) === closed) hubs.delete(sessionId);
         },
       },
-      firstWantsReplay,
+      firstCursor,
     );
     hubs.set(sessionId, hub);
     return hub;
@@ -784,28 +803,55 @@ export function createSessionEventsRoute(
           ? lastEventId
           : undefined;
       let replayed: WalFrame[] = [];
-      if (cursor !== undefined) {
-        const replay = getSharedWal(walDir, sessionId).replayFrom(cursor);
-        if (replay.truncated) {
-          // The resume point has fallen out of the WAL; signal the client to
-          // re-subscribe from the earliest available event.
-          res.status(412).json({
-            type: 'replay_truncated',
-            data: {
-              earliestAvailableId: replay.earliestAvailableId,
-              reason: replay.reason,
-            },
-          });
-          return;
+      let skipThrough: number | undefined;
+      let hub: SessionEventsHub;
+      let watcher: HubWatcher;
+      try {
+        if (cursor !== undefined) {
+          const wal = getSharedWal(walDir, sessionId);
+          const replay = wal.replayFrom(cursor);
+          if (replay.truncated && replay.reason === 'older_than_wal_horizon') {
+            res.status(412).json(replayTruncatedBody(replay, wal.latestId()));
+            return;
+          }
+          if (replay.truncated) {
+            // An empty WAL ('no_wal'): the gateway has relayed nothing of
+            // this session, so it has nothing to replay and no hole it could
+            // vouch for. The cursor came from the daemon's own numbering (the
+            // WAL-dark relay passed raw ids through; a load response hands
+            // out its watermark), which a never-relayed session still shares,
+            // so it is honoured the way the WAL-dark relay honoured it: the
+            // session's subscription resumes the daemon from it, and nothing
+            // at or below it is handed to this watcher. A 412 here sent a
+            // reloading page to a null cursor that blanked the transcript it
+            // had just rendered, and sends a resuming one round the resume
+            // again.
+            skipThrough = cursor;
+          } else {
+            replayed = replay.events;
+          }
         }
-        replayed = replay.events;
+        // Same synchronous step as the replay read above, with no await
+        // between: a frame the hub appends from here on lands in this
+        // watcher's buffer, and one appended before it is in `replayed`.
+        // Nothing falls between.
+        watcher = new HubWatcher(
+          cursor !== undefined,
+          actorTokenId,
+          skipThrough,
+        );
+        hub = acquireHub(walDir, sessionId, cursor);
+        hub.join(watcher);
+      } catch {
+        // The log could not be read or opened (permissions, a full disk).
+        // Answered rather than thrown: Express 4 does not catch a rejected
+        // async handler, and the request would hang until the socket timed
+        // out. Retryable, like the daemon's 502.
+        res
+          .status(500)
+          .json({ error: 'Session log unavailable', code: 'wal_unavailable' });
+        return;
       }
-      // Same synchronous step as the replay read above, with no await between:
-      // a frame the hub appends from here on lands in this watcher's buffer,
-      // and one appended before it is in `replayed`. Nothing falls between.
-      const watcher = new HubWatcher(cursor !== undefined, actorTokenId);
-      const hub = acquireHub(walDir, sessionId, cursor !== undefined);
-      hub.join(watcher);
 
       const abort = new AbortController();
       const unregister = tokenId ? registry.register(tokenId, abort) : () => {};
@@ -880,6 +926,97 @@ export function createSessionEventsRoute(
       closeStream?.();
       unregister();
     }
+  };
+}
+
+/**
+ * The 412 `replay_truncated` body, for a watcher whose Last-Event-ID is older
+ * than anything the WAL still holds:
+ *
+ *     {
+ *       "type": "replay_truncated",
+ *       "data": {
+ *         "reason": "older_than_wal_horizon",
+ *         "earliestAvailableId": 500,
+ *         "recovery": "reload",
+ *         "lastEventId": 742
+ *       }
+ *     }
+ *
+ * - `earliestAvailableId`: the oldest gateway id still retained. Retrying the
+ *   watch from `earliestAvailableId - 1` replays what the WAL has, and only
+ *   that: the conversation from the boundary on, with everything before it
+ *   missing and nothing on screen saying so.
+ * - `recovery: "reload"`: what the page should do instead (#150). Reload the
+ *   whole conversation from the load response (POST /session/:id/resume
+ *   renders `compactedReplay` + `liveJournal` in-band), then watch from that
+ *   response's `lastEventId`, which the gateway hands back already mapped into
+ *   its own numbering and never below the WAL head, so the watch that follows
+ *   cannot land behind the boundary and 412 again.
+ * - `lastEventId`: the WAL head right now, in the gateway's numbering: the
+ *   cursor to watch from after that reload if its response carries no
+ *   watermark (an older daemon). Null when the WAL is empty.
+ *
+ * Fields are additive: a page that reads only `earliestAvailableId` keeps its
+ * boundary retry.
+ */
+function replayTruncatedBody(
+  replay: Extract<ReplayResult, { truncated: true }>,
+  head: number | null,
+): {
+  type: 'replay_truncated';
+  data: {
+    earliestAvailableId: number | null;
+    reason: string;
+    recovery: 'reload';
+    lastEventId: number | null;
+  };
+} {
+  return {
+    type: 'replay_truncated',
+    data: {
+      earliestAvailableId: replay.earliestAvailableId,
+      reason: replay.reason,
+      recovery: 'reload',
+      lastEventId: head,
+    },
+  };
+}
+
+/**
+ * The resume route's daemon, with its response's `lastEventId` mapped from the
+ * daemon's numbering into the gateway's (see gatewayCursorForDaemonCursor).
+ *
+ * With a WAL wired the events route reads a Last-Event-ID in the gateway's
+ * numbering, but the page watches from the resume response's watermark, which
+ * the daemon minted in its own. After a daemon restart the two differ, and a
+ * raw watermark replayed history the page had just rendered from the response,
+ * or landed behind the WAL's boundary and 412'd back into another resume.
+ * Wired by server.ts only when a WAL is.
+ */
+export function withGatewayResumeCursor(
+  daemon: Pick<SessionDaemon, 'resumeSession'>,
+  walDir: string,
+): Pick<SessionDaemon, 'resumeSession'> {
+  return {
+    resumeSession: async (sessionId, req) => {
+      const restored = await daemon.resumeSession(sessionId, req);
+      if (
+        typeof restored.lastEventId !== 'number' ||
+        !isValidSessionId(sessionId)
+      ) {
+        return restored;
+      }
+      return {
+        ...restored,
+        lastEventId: gatewayCursorForDaemonCursor(
+          walDir,
+          sessionId,
+          restored.lastEventId,
+          restored.eventEpoch,
+        ),
+      };
+    },
   };
 }
 

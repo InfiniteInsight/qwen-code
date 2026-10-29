@@ -14,6 +14,7 @@ import { UnknownSessionError, type RecoveryState } from '../daemonPool.js';
 import {
   createSessionEventsRoute,
   gatewayCursorForDaemonCursor,
+  withGatewayResumeCursor,
 } from './sessionEvents.js';
 import { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
@@ -644,11 +645,21 @@ describe('session-events WAL integration', () => {
     expect(res.status).toBe(412);
     const body = (await res.json()) as {
       type: string;
-      data: { earliestAvailableId: number | null; reason: string };
+      data: {
+        earliestAvailableId: number | null;
+        reason: string;
+        recovery: string;
+        lastEventId: number | null;
+      };
     };
     expect(body.type).toBe('replay_truncated');
     expect(body.data.reason).toBe('older_than_wal_horizon');
     expect(body.data.earliestAvailableId).toBe(10);
+    // #150: reload the whole history from the load response, not from the
+    // boundary; the head is the cursor to watch from if that load carries
+    // no watermark of its own.
+    expect(body.data.recovery).toBe('reload');
+    expect(body.data.lastEventId).toBe(11);
   });
 });
 
@@ -1306,7 +1317,10 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
       .map((f) => (f.ev.data as { text: string }).text);
   const walIds = (walDir: string, sessionId: string) => {
     const wal = new SessionWal({ dir: walDir, sessionId });
-    const ids = wal.replayFrom(0).events.map((f) => f.id);
+    // From the WAL's own boundary: replayFrom(0) is a truncation once the
+    // log starts above 1.
+    const from = Math.max(0, (wal.earliestId() ?? 1) - 1);
+    const ids = wal.replayFrom(from).events.map((f) => f.id);
     wal.close();
     return ids;
   };
@@ -1449,6 +1463,104 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
       [3, 'session_update'],
       [4, 'state_resync_required'],
     ]);
+  });
+
+  it('a cursor on a WAL that holds nothing yet resumes the daemon from that cursor instead of a 412', async () => {
+    // The first boot with the WAL wired, and every resume of a conversation
+    // the gateway has not relayed since: the page holds a cursor in the
+    // daemon's numbering (the WAL-dark relay passed raw ids through, a load
+    // response hands out its own watermark) and the session's WAL is empty.
+    // A 412 there sent today's page to a null cursor and blanked a transcript
+    // it had just rendered.
+    const sid = 'b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6';
+    const bus = new FakeBusDaemon();
+    for (const w of ['one', 'two', 'three', 'four', 'five']) bus.publish(w);
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    const w = await watch(url, { 'Last-Event-ID': '3' });
+    expect(w.status).toBe(200);
+    await w.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+    expect(bus.subscriptions[0]?.lastEventId).toBe(3);
+    expect(w.ids()).toEqual([4, 5]);
+    expect(texts(w)).toEqual(['four', 'five']);
+    expect(walIds(walDir, sid)).toEqual([4, 5]);
+
+    // Behind what the WAL now holds is a real truncation again.
+    const stale = await openWatcher(url, { 'Last-Event-ID': '1' });
+    expect(stale.status).toBe(412);
+  });
+
+  it('hands a resume response its watermark in the gateway numbering', async () => {
+    const sid = 'b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const wal = getSharedWal(walDir, sid);
+    for (let id = 1; id <= 3; id++) {
+      wal.append({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {},
+        _rc: { raw: id, epoch: 'e1' },
+      });
+    }
+    wal.append({
+      id: 4,
+      v: 1,
+      type: 'state_resync_required',
+      data: { reason: 'epoch_reset' },
+    });
+    wal.append({
+      id: 5,
+      v: 1,
+      type: 'session_update',
+      data: {},
+      _rc: { raw: 1, epoch: 'e2' },
+    });
+    const calls: unknown[] = [];
+    const restored = {
+      sessionId: sid,
+      workspaceCwd: '/w',
+      attached: true,
+      state: {},
+      lastEventId: 9,
+      eventEpoch: 'e2',
+    };
+    const daemon = {
+      resumeSession: async (id: string, req: { workspaceCwd: string }) => {
+        calls.push([id, req]);
+        return restored;
+      },
+    };
+    const wrapped = withGatewayResumeCursor(daemon as never, walDir);
+    const out = await wrapped.resumeSession(sid, { workspaceCwd: '/w' });
+    expect(calls).toEqual([[sid, { workspaceCwd: '/w' }]]);
+    // e2 anchored raw 1 at id 5, so raw 9 is 13; everything else untouched.
+    expect(out).toEqual({ ...restored, lastEventId: 13 });
+
+    // No watermark in the response (an older daemon): nothing to map.
+    const { lastEventId: _omit, ...bare } = restored;
+    const plain = withGatewayResumeCursor(
+      { resumeSession: async () => bare } as never,
+      walDir,
+    );
+    expect(await plain.resumeSession(sid, { workspaceCwd: '/w' })).toEqual(
+      bare,
+    );
+  });
+
+  it('answers 500 wal_unavailable, rather than hanging, when the log cannot be opened', async () => {
+    const sid = 'b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8';
+    const bus = new FakeBusDaemon();
+    const notADir = join(mkdtempSync(join(tmpdir(), 'rc-se-ep-')), 'file');
+    writeFileSync(notADir, 'x');
+    const url = `${await mountFanout(bus, notADir)}/session/${sid}/events`;
+    for (const headers of [{ 'Last-Event-ID': '1' }, undefined]) {
+      const res = await fetch(url, { headers });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'wal_unavailable' });
+    }
+    expect(bus.subscriptions).toHaveLength(0);
   });
 
   it('maps a daemon cursor from a load response into the gateway numbering', async () => {

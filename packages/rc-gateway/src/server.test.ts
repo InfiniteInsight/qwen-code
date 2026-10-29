@@ -26,6 +26,8 @@ import { PushStore } from './pushStore.js';
 import { PushEndpointPolicy } from './webpush/endpointPolicy.js';
 import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
+import { decodeSegment, getSharedWal } from './wal.js';
+import { resolveChatsDir } from './sessions/chatsPath.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
 import type { PushNotifier } from './webpush/notifier.js';
 import {
@@ -1060,6 +1062,123 @@ describe('gateway app', () => {
     );
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe('parent_transcript_not_found');
+  });
+
+  it('with a session WAL wired, a resume hands back its watermark in the gateway numbering (#174)', async () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-srv-wal-'));
+    const sid = '33333333333333333333333333333333';
+    // A WAL whose newest relayed frame put the daemon's raw 1 (epoch e2) at
+    // gateway id 5: that epoch's offset is 4.
+    const wal = getSharedWal(walDir, sid);
+    wal.append({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {},
+      _rc: { raw: 4, epoch: 'e1' },
+    });
+    wal.append({
+      id: 5,
+      v: 1,
+      type: 'session_update',
+      data: {},
+      _rc: { raw: 1, epoch: 'e2' },
+    });
+    stub = await startStubDaemon();
+    const client = new DaemonClient({ baseUrl: stub.baseUrl });
+    const daemon = new Proxy(client, {
+      get(target, prop) {
+        if (prop === 'resumeSession') {
+          return async (id: string, req: { workspaceCwd: string }) => ({
+            sessionId: id,
+            workspaceCwd: req.workspaceCwd,
+            attached: true,
+            state: {},
+            lastEventId: 9,
+            eventEpoch: 'e2',
+          });
+        }
+        const v = Reflect.get(target, prop, target) as unknown;
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    await stub.close();
+    stub = undefined;
+    const { url, pairing } = await boot(undefined, { daemon, walDir });
+    const { code } = pairing.mint([WRITE, SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'phone' }),
+    });
+    const { token } = (await redeem.json()) as { token: string };
+    const res = await fetch(`${url}/session/${sid}/resume`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ cwd: walDir }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { lastEventId: number }).lastEventId).toBe(
+      13,
+    );
+  });
+
+  it('with a session WAL wired, a fork writes its markers to the parent and child WALs (#174)', async () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-srv-wal-'));
+    const runtime = mkdtempSync(join(tmpdir(), 'rc-srv-rt-'));
+    const parentId = '44444444444444444444444444444444';
+    const prior = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = runtime;
+    try {
+      const chats = resolveChatsDir('/stub/workspace');
+      mkdirSync(chats, { recursive: true });
+      writeFileSync(
+        join(chats, `${parentId}.jsonl`),
+        JSON.stringify({
+          uuid: 'p0',
+          parentUuid: null,
+          sessionId: parentId,
+          cwd: '/stub/workspace',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        }) + '\n',
+      );
+      const { url, pairing } = await boot(undefined, { walDir });
+      const { code } = pairing.mint([SESSION_READ, WRITE]);
+      const redeem = await fetch(`${url}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, label: 'forker' }),
+      });
+      const { token } = (await redeem.json()) as { token: string };
+      const res = await fetch(`${url}/session/${parentId}/fork`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      const { sessionId: childId } = (await res.json()) as {
+        sessionId: string;
+      };
+      const parentFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${parentId}.log`)),
+      ];
+      expect(parentFrames.map((f) => f.type)).toEqual(['session_forked']);
+      const childFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${childId}.log`)),
+      ];
+      expect(childFrames.map((f) => f.type)).toEqual(['child_forked']);
+    } finally {
+      if (prior === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = prior;
+      rmSync(runtime, { recursive: true, force: true });
+    }
   });
 
   it('403s the rewind route for a write token (owner scope required)', async () => {

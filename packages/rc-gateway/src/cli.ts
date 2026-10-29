@@ -6,6 +6,7 @@
 
 import {
   existsSync,
+  mkdirSync,
   statSync,
   watch,
   readFileSync,
@@ -393,6 +394,65 @@ export interface ServeOptions {
   acmeStaging?: boolean;
   /** Override the ACME directory URL (private CA / Pebble). */
   acmeDirectoryUrl?: string;
+  /**
+   * `--wal-dir <dir>` (env `QWEN_RC_WAL_DIR`): where the session WAL lives
+   * (#174). Default `~/.qwen/rc/wal`, created owner-only (0700). See
+   * {@link resolveSessionWalDir}.
+   */
+  walDir?: string;
+  /**
+   * `--no-wal` (env `QWEN_RC_NO_WAL=1`): run WAL-dark, the shape before #174:
+   * one daemon subscription per watcher, raw ids, no durable replay. Wins
+   * over `--wal-dir`.
+   */
+  noWal?: boolean;
+}
+
+/** A session WAL directory that cannot be used, reported before any spawn. */
+export class SessionWalDirError extends Error {}
+
+/**
+ * The session WAL directory this boot uses, or undefined when `--no-wal` turns
+ * the WAL off. The WAL's segments are written under `<dir>/wal/` (the layout
+ * SessionWal has always used under the directory it is handed).
+ */
+export function resolveSessionWalDir(
+  opts: Pick<ServeOptions, 'walDir' | 'noWal'>,
+  home: string,
+): string | undefined {
+  if (opts.noWal) return undefined;
+  const dir = opts.walDir;
+  if (dir === undefined) return join(home, '.qwen', 'rc', 'wal');
+  if (dir === '~') return home;
+  return dir.startsWith('~/') ? join(home, dir.slice(2)) : dir;
+}
+
+/**
+ * Create the session WAL directory owner-only (0700), the way every other file
+ * under ~/.qwen/rc that holds conversation data is kept. An existing directory
+ * is used as it is; a path that exists and is not a directory is refused here,
+ * before a daemon is spawned, rather than on the first watcher's append.
+ */
+export function prepareSessionWalDir(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    throw new SessionWalDirError(
+      `--wal-dir / QWEN_RC_WAL_DIR: cannot create "${dir}": ${(err as Error).message}`,
+    );
+  }
+  if (!statSync(dir).isDirectory()) {
+    throw new SessionWalDirError(
+      `--wal-dir / QWEN_RC_WAL_DIR: "${dir}" is not a directory`,
+    );
+  }
+}
+
+/** The boot line naming where the session WAL lives, or that it is off. */
+export function formatSessionWalLine(dir: string | undefined): string {
+  return dir === undefined
+    ? 'session WAL: off (--no-wal): one daemon subscription per watcher, no durable replay'
+    : `session WAL: ${dir} (one shared subscription per session, durable replay; --no-wal to turn off)`;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -503,6 +563,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   if (opts.mdnsInstanceName !== undefined) {
     validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
   }
+  // The session WAL directory (#174), settled before anything is spawned so an
+  // unusable one fails the boot cleanly instead of the first watcher's append.
+  const sessionWalDir = resolveSessionWalDir(opts, homedir());
+  if (sessionWalDir !== undefined) prepareSessionWalDir(sessionWalDir);
+  // eslint-disable-next-line no-console
+  console.log(formatSessionWalLine(sessionWalDir));
   // Which `qwen` every daemon runs, settled and logged before anything is
   // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
   // and the daemons used to run whatever `qwen` PATH held, so say which one
@@ -988,6 +1054,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       : {}),
     daemonQwenBin: daemonBin.path,
     daemonQwenBinHealthy: daemonProbe.healthy,
+    ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
@@ -1107,14 +1174,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // resumeSession) AND the app's promptQueue (hadInFlightTurn), so it can
   // only be built here, after both exist. reportOutcome appends the durable
   // marker frames, publishes them on the owner stream, writes the audit rows,
-  // and fans out the push kinds. In production the session WAL is dark (no
-  // walDir is wired), so createReportOutcome skips the durable frames + owner
-  // session_event publish and only audits + pushes — the saga still runs and
-  // sessions are resumed in place.
+  // and fans out the push kinds. The markers go to the same WAL directory the
+  // events route relays into, so their ids interleave with the relayed ones;
+  // under --no-wal there is none, and reportOutcome only audits and pushes.
   const recoveryOrchestrator = new RecoveryOrchestrator({
     pool: daemonPool,
     promptQueue,
     reportOutcome: createReportOutcome({
+      ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
       ownerEvents,
       audit,
       notifier,
@@ -2078,6 +2145,11 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const daemonPort = flag('daemon-port');
   const acmeDomain = flag('acme-domain');
   const maxAttachmentFlag = flag('max-attachment-bytes');
+  const walDirFlag = flag('wal-dir');
+  if (walDirFlag !== undefined && walDirFlag.trim() === '') {
+    throw new Error('--wal-dir: expected a directory path, got ""');
+  }
+  const walDirEnv = process.env.QWEN_RC_WAL_DIR;
   const qwenBinFromFlag =
     argv.includes('--qwen-bin') ||
     argv.some((a) => a.startsWith('--qwen-bin='));
@@ -2125,6 +2197,10 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     acmeDnsProvider: flag('acme-dns-provider'),
     acmeStaging: argv.includes('--acme-staging'),
     acmeDirectoryUrl: flag('acme-directory'),
+    // Session WAL (#174): the flag over the environment, like the other pairs;
+    // an empty environment value counts as unset.
+    walDir: walDirFlag ?? (walDirEnv ? walDirEnv : undefined),
+    noWal: argv.includes('--no-wal') || process.env.QWEN_RC_NO_WAL === '1',
   };
 }
 
@@ -2134,7 +2210,8 @@ if (process.argv[2] === 'serve') {
   //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --host-actions <path>
-  //        --max-attachment-bytes <n> --qwen-bin <path> --acme-domain <d[,d]> --acme-email <e>
+  //        --max-attachment-bytes <n> --qwen-bin <path> --wal-dir <dir> --no-wal
+  //        --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
   try {
@@ -2151,7 +2228,8 @@ if (process.argv[2] === 'serve') {
     console.error(
       err instanceof BindSecurityError ||
         err instanceof MdnsConfigError ||
-        err instanceof DaemonBinError
+        err instanceof DaemonBinError ||
+        err instanceof SessionWalDirError
         ? `qwen-rc serve: ${err.message}`
         : `qwen-rc serve failed: ${err instanceof Error ? (err.stack ?? err.message) : err}`,
     );

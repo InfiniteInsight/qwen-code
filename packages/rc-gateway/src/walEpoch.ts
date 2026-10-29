@@ -155,7 +155,7 @@ export function saveEpochState(
   const path = sidecarPath(walDir, sessionId);
   const tmp = `${path}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify(state));
+    writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
     renameSync(tmp, path);
   } catch {
     // Best-effort (see above).

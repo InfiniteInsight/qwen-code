@@ -132,7 +132,9 @@ export class SessionWal {
     this.horizonSec = opts.horizonSec ?? WAL_DEFAULTS.walHorizonSec;
     this.now = opts.now ?? Date.now;
 
-    mkdirSync(this.walDir, { recursive: true });
+    // Owner-only: the log holds conversation text. The CLI creates the root
+    // the same way (cli.ts prepareSessionWalDir).
+    mkdirSync(this.walDir, { recursive: true, mode: 0o700 });
     this.recover();
   }
 
@@ -334,7 +336,8 @@ export class SessionWal {
   private ensureOpen(): number {
     if (this.fd === null) {
       // 'a' => append mode; every write lands at end-of-file atomically.
-      this.fd = openSync(this.activePath, 'a');
+      // 0600 applies only when this creates the segment.
+      this.fd = openSync(this.activePath, 'a', 0o600);
       this.activeBytes = existsSync(this.activePath)
         ? fstatSync(this.fd).size
         : 0;

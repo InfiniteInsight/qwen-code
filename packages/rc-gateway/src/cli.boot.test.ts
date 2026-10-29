@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DaemonHandle } from './daemonSupervisor.js';
 
 // cli.ts ends with a top level dispatch on process.argv, so pin argv away from
@@ -17,6 +20,9 @@ const {
   releaseBootDaemon,
   stopBootOwnedDaemon,
   bootDaemonPoolOptions,
+  resolveSessionWalDir,
+  prepareSessionWalDir,
+  formatSessionWalLine,
 } = await import('./cli.js');
 
 /** A handle that only records that it was stopped, plus a call counter. */
@@ -146,6 +152,35 @@ describe('parseServeFlags', () => {
     }
   });
 
+  it('reads --wal-dir in both forms and from QWEN_RC_WAL_DIR, flag over env, and --no-wal (#174)', () => {
+    expect(parseServeFlags(['--wal-dir', '/w/a'])).toMatchObject({
+      walDir: '/w/a',
+    });
+    expect(parseServeFlags(['--wal-dir=/w/b'])).toMatchObject({
+      walDir: '/w/b',
+    });
+    const priorDir = process.env['QWEN_RC_WAL_DIR'];
+    const priorOff = process.env['QWEN_RC_NO_WAL'];
+    try {
+      delete process.env['QWEN_RC_WAL_DIR'];
+      delete process.env['QWEN_RC_NO_WAL'];
+      expect(parseServeFlags([]).walDir).toBeUndefined();
+      expect(parseServeFlags([]).noWal).toBe(false);
+      process.env['QWEN_RC_WAL_DIR'] = '/w/env';
+      expect(parseServeFlags([]).walDir).toBe('/w/env');
+      expect(parseServeFlags(['--wal-dir', '/w/flag']).walDir).toBe('/w/flag');
+      expect(parseServeFlags(['--no-wal']).noWal).toBe(true);
+      process.env['QWEN_RC_NO_WAL'] = '1';
+      expect(parseServeFlags([]).noWal).toBe(true);
+    } finally {
+      if (priorDir === undefined) delete process.env['QWEN_RC_WAL_DIR'];
+      else process.env['QWEN_RC_WAL_DIR'] = priorDir;
+      if (priorOff === undefined) delete process.env['QWEN_RC_NO_WAL'];
+      else process.env['QWEN_RC_NO_WAL'] = priorOff;
+    }
+    expect(() => parseServeFlags(['--wal-dir', ''])).toThrow(/--wal-dir/);
+  });
+
   it('keeps 0 legal, because that is the pick a free port request', () => {
     expect(parseServeFlags(['--port', '0'])).toMatchObject({ gatewayPort: 0 });
   });
@@ -218,5 +253,39 @@ describe('boot daemon pool options (#203)', () => {
       respawnDefaultDaemon: true,
       stopDefaultDaemon: handle.stop,
     });
+  });
+});
+
+describe('session WAL directory (#174)', () => {
+  it('defaults to ~/.qwen/rc/wal, takes --wal-dir (tilde too), and --no-wal turns it off', () => {
+    expect(resolveSessionWalDir({}, '/h')).toBe(
+      join('/h', '.qwen', 'rc', 'wal'),
+    );
+    expect(resolveSessionWalDir({ walDir: '/x/w' }, '/h')).toBe('/x/w');
+    expect(resolveSessionWalDir({ walDir: '~/w' }, '/h')).toBe(join('/h', 'w'));
+    expect(
+      resolveSessionWalDir({ walDir: '/x/w', noWal: true }, '/h'),
+    ).toBeUndefined();
+  });
+
+  it('creates the directory owner-only (0700), and accepts one that exists', () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'rc-wal-dir-')), 'a', 'wal');
+    prepareSessionWalDir(dir);
+    expect(statSync(dir).isDirectory()).toBe(true);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(() => prepareSessionWalDir(dir)).not.toThrow();
+  });
+
+  it('refuses a path that is not a directory before anything is spawned', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'rc-wal-dir-')), 'f');
+    writeFileSync(file, 'x');
+    expect(() => prepareSessionWalDir(file)).toThrow(/--wal-dir/);
+  });
+
+  it('says at boot where the WAL lives, or that it is off', () => {
+    expect(formatSessionWalLine('/h/.qwen/rc/wal')).toContain(
+      '/h/.qwen/rc/wal',
+    );
+    expect(formatSessionWalLine(undefined)).toMatch(/off/);
   });
 });
