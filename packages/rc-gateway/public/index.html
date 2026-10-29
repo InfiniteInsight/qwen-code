@@ -9468,6 +9468,34 @@
             void fetchContextUsage(watchedSessionId);
             if (asstThisTurn && transcriptModel.curAsst) placeForkButton();
             return;
+          case 'turn_error': {
+            // #199. The daemon sends this INSTEAD of turn_complete when a
+            // prompt fails (a model request dying mid-stream, a rate limit, a
+            // Stop hook outlasting the daemon's wait), for the turn this window
+            // sent and for one it only watches. Without it the thinking row,
+            // the timer and Stop stayed on a turn that had stopped. The reply
+            // so far stays, one error row says why, and the turn ends the way
+            // turn_complete ends it, minus the fork row, since there is no
+            // finished answer to fork from.
+            const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            // The prompt id names the failure; a daemon that omits it falls
+            // back to the frame id. Either keeps one failure to one row when a
+            // replay overlaps the live stream.
+            const failKey =
+              typeof d.promptId === 'string' && d.promptId
+                ? d.promptId
+                : ev.id != null
+                  ? ev.id
+                  : frameEventId;
+            transcriptModel.failTurn(TranscriptModel.turnErrorText(d), failKey);
+            scrollTranscript();
+            endTurn();
+            // A prompt this window sent holds Send until its request settles;
+            // the turn is over, so release it, as turn_complete does (#70).
+            if (abandonPendingSend) abandonPendingSend('turn');
+            drainOutbox(0);
+            return;
+          }
           case 'session_rewound': {
             // The rewind truncates the daemon's history. Two producers
             // carry this frame: the daemon's own event (data.targetTurnIndex)

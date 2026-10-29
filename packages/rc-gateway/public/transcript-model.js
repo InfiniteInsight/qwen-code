@@ -143,6 +143,27 @@
     return null;
   }
 
+  // ---- A turn that failed (#199) ---------------------------------------------
+  // The daemon publishes turn_error INSTEAD of turn_complete when a prompt
+  // fails: a model request that dies mid-stream, a rate limit, a Stop hook that
+  // outlasts the daemon's wait. The fields read are data.message and
+  // data.errorKind (data.promptId and the envelope's originatorClientId are not
+  // needed to draw it). The wording mirrors the attached TUI's turnErrorText
+  // (projectDaemonEvent.ts), so a phone and a laptop watching one turn say the
+  // same thing.
+  function turnErrorText(data) {
+    var d = isRecord(data) ? data : {};
+    var message = strOr(
+      typeof d.message === 'string' ? d.message.trim() : '',
+      'unknown error',
+    );
+    return d.errorKind === 'model_stream_interrupted'
+      ? 'The reply stopped: the connection to the model was lost (' +
+          message +
+          ').'
+      : 'The turn failed: ' + message;
+  }
+
   function createTranscriptModel(opts) {
     var now = (opts && opts.now) || Date.now;
     var items = [];
@@ -309,6 +330,38 @@
     function addSystem(text, err) {
       resetTurn();
       push(newItem('system', { text: clean(text), err: !!err }));
+    }
+
+    // #199. A turn that ended in turn_error: what was said so far stays (an
+    // open assistant bubble is simply left as it is, a live thought folds, the
+    // processing row goes), a subagent still running is settled as failed, and
+    // ONE error row says why the turn stopped. `key` names the failure (the
+    // prompt id, else the frame id): the same failure delivered twice, by a
+    // replay that overlaps the live stream, adds its row once. Returns the row,
+    // or null when this failure already has one.
+    function failTurn(text, key) {
+      resetTurn();
+      var last = items.length ? items[items.length - 1] : null;
+      if (
+        key != null &&
+        last &&
+        last.kind === 'system' &&
+        last.turnError &&
+        last.errKey === key
+      ) {
+        return null;
+      }
+      toolIndex.forEach(function (tool, pid) {
+        finishSubagent(pid, 'failed');
+      });
+      return push(
+        newItem('system', {
+          text: clean(text),
+          err: true,
+          turnError: true,
+          errKey: key == null ? null : key,
+        }),
+      );
     }
 
     // ---- Assistant images ----------------------------------------------------
@@ -671,6 +724,7 @@
       appendThought: appendThought,
       finishThought: finishThought,
       addSystem: addSystem,
+      failTurn: failTurn,
       addImage: addImage,
       setPlan: setPlan,
       upsertTool: upsertTool,
@@ -729,7 +783,16 @@
   }
 
   function applyStoredFrame(m, ev) {
-    if (!ev || typeof ev !== 'object' || ev.type !== 'session_update') return;
+    if (!ev || typeof ev !== 'object') return;
+    // #199: a failed turn's terminal draws the same error row a live one does.
+    if (ev.type === 'turn_error') {
+      var d = isRecord(ev.data) ? ev.data : {};
+      return m.failTurn(
+        turnErrorText(d),
+        typeof d.promptId === 'string' && d.promptId ? d.promptId : ev.id,
+      );
+    }
+    if (ev.type !== 'session_update') return;
     var u = storedUpdate(ev);
     if (!u) return;
     var su = u.sessionUpdate;
@@ -795,6 +858,7 @@
     clean: clean,
     createTranscriptModel: createTranscriptModel,
     replayStoredPage: replayStoredPage,
+    turnErrorText: turnErrorText,
     userPartOf: userPartOf,
   };
 })();

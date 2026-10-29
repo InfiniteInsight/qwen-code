@@ -2207,6 +2207,10 @@ declare let planFramesSeen: number;
 declare const logLines: string[];
 declare const appendSubagentText: (parentId: string, text: string) => void;
 declare const userTurnsSeen: number;
+// #199. Whether the page still counts a turn as running, and the one-second
+// clock that redraws the status line while it does.
+declare let turnOpen: boolean;
+declare let runClock: unknown;
 declare const forkTurnCount: number;
 declare const __pg: {
   view(): VtView | null | undefined;
@@ -20690,7 +20694,7 @@ function solidPng(w: number, h: number): Buffer {
   });
 
   PAGE_SCENARIOS.push({
-    name: "P210 Unwatch and a gone conversation both drop A's context answered after them, so no model is named with nothing watched",
+    name: "P212 Unwatch and a gone conversation both drop A's context answered after them, so no model is named with nothing watched",
     waitView: false,
     frames: frames172,
     run: async ({ page }) => {
@@ -20732,7 +20736,7 @@ function solidPng(w: number, h: number): Buffer {
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P211 an end session or a fork of A answered after the switch to B leaves B watched, and a fork sheet still open on A is cancelled by the switch',
+    name: 'P213 an end session or a fork of A answered after the switch to B leaves B watched, and a fork sheet still open on A is cancelled by the switch',
     waitView: false,
     frames: frames172,
     run: async ({ page }) => {
@@ -20773,6 +20777,157 @@ function solidPng(w: number, h: number): Buffer {
       await page.waitForTimeout(300);
       expect(fork.asked === 1, `the fork sheet left over from A forked ${fork.asked - 1} more time(s)`);
       return 'a late end of A and a late fork of A both left B watched, and the open fork sheet was cancelled by the switch';
+    },
+  });
+}
+
+// #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD
+// of turn_complete, and the page had no case for it: the thinking row, the
+// timer and Stop stayed on a turn that had stopped. The frame is the shape the
+// fork's fixture captured (two-client-turn.fixture.ts, turnError()).
+{
+  const TURN_ERROR = {
+    type: 'turn_error',
+    id: 900,
+    data: {
+      sessionId: 'stub',
+      message: 'terminated',
+      errorKind: 'model_stream_interrupted',
+      promptId: 'prompt-199',
+    },
+    originatorClientId: 'someone-else',
+  };
+  const ERROR_TEXT =
+    'The reply stopped: the connection to the model was lost (terminated).';
+  const turnState = (page: Page) =>
+    page.evaluate(() => {
+      const items = transcriptModel.items as Array<{ kind: string; text?: string; err?: boolean }>;
+      const stop = document.getElementById('cancel-turn') as HTMLElement;
+      const send = document.getElementById('send') as HTMLElement;
+      return {
+        processing: items.filter((i) => i.kind === 'processing').length,
+        errors: items.filter((i) => i.kind === 'system' && i.err).map((i) => i.text),
+        asst: items.filter((i) => i.kind === 'asst').map((i) => i.text),
+        running: turnOpen,
+        clock: runClock !== null,
+        stopShown: !stop.hidden && stop.getClientRects().length > 0,
+        sendShown: !send.hidden && send.getClientRects().length > 0,
+        sendDisabled: (document.getElementById('send') as HTMLButtonElement).disabled,
+        state: document.getElementById('h1-status')?.getAttribute('data-state') ?? '',
+        word: document.getElementById('h1-state')?.textContent ?? '',
+        domErrors: Array.from(document.querySelectorAll('#transcript .system.err')).map((e) => e.textContent),
+      };
+    });
+  PAGE_SCENARIOS.push({
+    name: 'P210 a turn this window only watches that ends in turn_error keeps its reply, adds one error row saying why, and drops the thinking row, the timer and Stop for Send',
+    noConsoleErrors: true,
+    frames: () =>
+      new Frames()
+        .user('write me a long story')
+        .thought('planning the story. ')
+        .asst('Once upon a time there was').list,
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitForFrame(page, 3, 30_000);
+      const beat = await page.evaluate(() => PROCESSING_QUIET_MS);
+      // The turn is running and quiet: the thinking row is back and Stop has
+      // taken Send's place. That is the state the missing case left behind.
+      await page.waitForFunction(
+        () => (transcriptModel.items as Array<{ kind: string }>).some((i) => i.kind === 'processing'),
+        null,
+        { timeout: beat + 5_000 },
+      );
+      const before = await turnState(page);
+      expect(
+        before.processing === 1 && before.running && before.clock && before.stopShown && !before.sendShown && before.state === 'run',
+        `the watched turn is not in the running state this scenario starts from: ${JSON.stringify(before)}`,
+      );
+
+      await page.evaluate((f) => renderFrame(f), TURN_ERROR);
+      await settlePage(page);
+      // Past one quiet beat, so a thinking row that came back would be seen.
+      await page.waitForTimeout(beat + 600);
+      const after = await turnState(page);
+      expect(after.processing === 0, `${after.processing} thinking rows after the turn failed`);
+      expect(
+        after.errors.length === 1 && after.errors[0] === ERROR_TEXT && after.domErrors.length === 1,
+        `error rows ${JSON.stringify(after.errors)}, on screen ${JSON.stringify(after.domErrors)}`,
+      );
+      expect(
+        after.asst.length === 1 && after.asst[0] === 'Once upon a time there was',
+        `the reply so far is ${JSON.stringify(after.asst)}`,
+      );
+      expect(!after.running && !after.clock, `the turn still counts as running (turnOpen ${after.running}, clock ${after.clock})`);
+      expect(
+        after.sendShown && !after.stopShown && !after.sendDisabled,
+        `Stop ${after.stopShown} Send ${after.sendShown} disabled ${after.sendDisabled}`,
+      );
+      expect(after.state === 'idle' && after.word === 'idle', `the status line reads ${after.state} / ${JSON.stringify(after.word)}`);
+
+      // The same frame again (a replay that overlaps the live stream) adds no
+      // second row.
+      await page.evaluate((f) => renderFrame(f), TURN_ERROR);
+      await settlePage(page);
+      const again = await turnState(page);
+      expect(again.errors.length === 1 && again.processing === 0, `a repeat of the frame left ${again.errors.length} error rows`);
+      return `reply kept, 1 error row (${JSON.stringify(ERROR_TEXT)}), thinking row 1 -> 0, Stop -> Send, status run -> idle, repeat frame adds none`;
+    },
+  });
+  PAGE_SCENARIOS.push({
+    name: 'P211 a prompt this window sent that ends in turn_error frees Send and the status line, shows one error row, and the refused request that follows adds no second row',
+    noConsoleErrors: true,
+    // The request is held for 1.5 s and then answered 500, as a daemon that
+    // failed the turn answers it. The frame arrives while Send is still held.
+    stub: { promptDelayMs: 1_500, promptStatus: 500 },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await page.waitForSelector('#composer', { state: 'visible' });
+      await page.evaluate(() => {
+        (document.getElementById('prompt') as HTMLTextAreaElement).value = 'tell me a story';
+        (document.getElementById('send') as HTMLButtonElement).click();
+      });
+      await page.waitForFunction(() => abandonPendingSend !== null);
+      const held = await turnState(page);
+      expect(
+        held.running && held.stopShown && held.processing === 1,
+        `the sent turn is not running when the failure arrives: ${JSON.stringify(held)}`,
+      );
+
+      // The daemon echoes the prompt, streams a little, then fails the turn.
+      await page.evaluate((f) => {
+        renderFrame({
+          type: 'session_update',
+          data: { update: { sessionUpdate: 'user_message_chunk', content: { text: 'tell me a story' } } },
+        });
+        renderFrame({
+          type: 'session_update',
+          data: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'It began' } } },
+        });
+        renderFrame(f);
+      }, { ...TURN_ERROR, originatorClientId: 'this-window' });
+      await page.waitForFunction(() => abandonPendingSend === null, null, { timeout: 5_000 });
+      await settlePage(page);
+      const freed = await turnState(page);
+      expect(
+        freed.sendShown && !freed.sendDisabled && !freed.stopShown,
+        `Send is still held after the failure: Stop ${freed.stopShown} Send ${freed.sendShown} disabled ${freed.sendDisabled}`,
+      );
+      expect(freed.processing === 0 && !freed.running && !freed.clock, `thinking ${freed.processing}, running ${freed.running}, clock ${freed.clock}`);
+      expect(freed.state === 'idle', `the status line reads ${freed.state}`);
+      expect(
+        freed.errors.length === 1 && freed.errors[0] === ERROR_TEXT && freed.asst.join() === 'It began',
+        `rows after the failure: errors ${JSON.stringify(freed.errors)}, reply ${JSON.stringify(freed.asst)}`,
+      );
+
+      // Let the held request come back refused, then repeat the frame: the
+      // failure was drawn once and stays drawn once.
+      await page.waitForTimeout(2_000);
+      await page.evaluate((f) => renderFrame(f), TURN_ERROR);
+      await settlePage(page);
+      const end = await turnState(page);
+      expect(end.errors.length === 1 && end.domErrors.length === 1, `after the request settled: ${JSON.stringify(end.errors)}`);
+      expect(end.sendShown && !end.sendDisabled && end.state === 'idle', `Send/status after the request settled: ${JSON.stringify({ s: end.sendShown, d: end.sendDisabled, st: end.state })}`);
+      return `own prompt held (Stop, 1 thinking row) -> turn_error -> Send free, status idle, 1 error row; refused request and repeat frame add none`;
     },
   });
 }

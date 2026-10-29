@@ -33,6 +33,9 @@ import {
   type UsageTick,
 } from './ingester.js';
 import { SessionAttributionMap } from './sessionAttribution.js';
+import { SessionModelCache, modelIdFromContext } from './sessionModelCache.js';
+import { UsageFeeder } from './usageFeeder.js';
+import { parseRateTable } from './rateTable.js';
 
 let stub: StubDaemon | undefined;
 let pump: SessionEventPump | undefined;
@@ -155,5 +158,89 @@ describe('cost ingestion through the real pump', () => {
     await pump.start(); // must not throw with notifier=undefined
     await waitFor(() => store.sessionTotals('s1').tokensInTotal > 0);
     expect(store.sessionTotals('s1').tokensInTotal).toBe(1000);
+  });
+
+  it('prices the LIVE frame shape (no model in _meta, cachedReadTokens) via the daemon /context', async () => {
+    const ctx = (modelId: string) => ({
+      v: 1,
+      sessionId: 's1',
+      workspaceCwd: '/w',
+      state: { models: { current: { modelId }, providers: [] } },
+    });
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      contextStatus: ctx('flint(openai)'),
+      frames: [
+        {
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 's1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'hello' },
+              // Exactly what buildUpdateMeta emits: no model id anywhere.
+              _meta: {
+                usage: {
+                  inputTokens: 1000,
+                  outputTokens: 100,
+                  totalTokens: 1100,
+                  cachedReadTokens: 600,
+                },
+                timestamp: 1,
+              },
+            },
+          },
+        },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const ingester = new UsageIngester({
+      rates: new RateTableHolder(
+        parseRateTable(`
+currencyLabel: USD
+defaultModelServiceId: qwen
+models:
+  - modelServiceId: qwen
+    modelId: flint
+    inputPerMTok: 100
+    outputPerMTok: 400
+    cachedReadPerMTok: 10
+`),
+      ),
+      store,
+      coalescer: new UsageTickCoalescer({ emit: () => {} }),
+      now: () => 1_000,
+    });
+    const feeder = new UsageFeeder({
+      cache: new SessionModelCache({
+        fromContext: async (sid) =>
+          modelIdFromContext(await daemon.sessionContext(sid)),
+        fromTranscript: async () => null,
+        now: () => Date.now(),
+      }),
+      ingester,
+      attributionFor: () => ({ attributionTokenId: 'tkn', subActor: null }),
+      now: () => 1_000,
+    });
+    pump = new SessionEventPump(daemon, undefined, {
+      pollMs: 20,
+      reconnectMs: 0,
+      sleep: async () => {},
+      onEvent: (sid, ev) => feeder.onEvent(sid, ev),
+    });
+    await pump.start();
+    await waitFor(() => store.sessionTotals('s1').tokensInTotal > 0);
+    // (1000-600)*100 + 100*400 + 600*10
+    expect(store.sessionTotals('s1').costMicrocentsSesTotal).toBe(86_000);
+    expect(store.sessionTotals('s1').tokensCachedTotal).toBe(600);
+    const byModel = store.aggregate({
+      sinceMs: 0,
+      untilMs: 2000,
+      groupBy: 'model',
+    });
+    expect(byModel.map((r) => r.key)).toEqual(['qwen/flint(openai)']);
   });
 });

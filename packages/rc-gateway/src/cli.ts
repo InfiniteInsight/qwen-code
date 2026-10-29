@@ -123,6 +123,18 @@ import { UsageIngester, UsageTickCoalescer } from './cost/ingester.js';
 import { resolveNamedWorkflow } from '@qwen-code/qwen-code-core';
 import { SessionAttributionMap } from './cost/sessionAttribution.js';
 import { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
+import {
+  SessionModelCache,
+  modelIdFromContext,
+} from './cost/sessionModelCache.js';
+import { UsageFeeder } from './cost/usageFeeder.js';
+import {
+  createTranscriptModelResolver,
+  defaultUsageDbPath,
+  formatRepriceReport,
+  parseRepriceArgs,
+  repriceUsage,
+} from './cost/usageReprice.js';
 import { formatUsageCsv, type UsageResponseRow } from './cost/usageQuery.js';
 import {
   parseUsageArgs,
@@ -900,6 +912,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const sessionAttribution = new SessionAttributionMap();
   const usageBroadcaster = new UsageTickBroadcaster();
   let usageIngester: UsageIngester | undefined;
+  let usageFeeder: UsageFeeder | undefined;
   let rateReloader: { stop(): void; trigger(): void } | undefined;
   // mDNS advertiser is created after listen() (it needs the bound port); the
   // capability route reads its live state through this closure.
@@ -1126,10 +1139,30 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       store: usageStore,
       coalescer,
       now: () => Date.now(),
-      onRateMiss: (modelServiceId, modelId) =>
+      // The ingester collapses these to one per (session, modelId) per hour.
+      onRateMiss: (modelServiceId, modelId, sessionId) =>
         void audit.record({
           action: 'rate_table_miss',
-          detail: { modelServiceId, modelId },
+          detail: { modelServiceId, modelId, sessionId },
+        }),
+    });
+    // The usage frame carries no model id (#181): the feeder resolves it per
+    // session (daemon /context, then the transcript; kept current by
+    // model_switched) and hands it to the ingester as plain data.
+    usageFeeder = new UsageFeeder({
+      cache: new SessionModelCache({
+        fromContext: async (sid) =>
+          modelIdFromContext(await handle.daemon.sessionContext(sid)),
+        fromTranscript: createTranscriptModelResolver(),
+        now: () => Date.now(),
+      }),
+      ingester: usageIngester,
+      attributionFor: (sid) => sessionAttribution.get(sid),
+      now: () => Date.now(),
+      onUnresolved: (sessionId, frames) =>
+        void audit.record({
+          action: 'usage_model_unresolved',
+          detail: { sessionId, frames },
         }),
     });
   }
@@ -1637,7 +1670,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
       ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
       onEvent: (sid: string, ev: { type: string; data: unknown }) => {
-        usageIngester?.ingest(sid, ev.data, sessionAttribution.get(sid));
+        usageFeeder?.onEvent(sid, ev);
         // Fire-and-forget: lifecycle transitions must never block or
         // break the pump's subscribe loop.
         agentLifecycle
@@ -2477,6 +2510,42 @@ if (process.argv[2] === 'serve') {
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error(`reindex: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'usage' && process.argv[3] === 'reprice') {
+  // `qwen-rc usage reprice [--dry-run] [--db <path>] [--chats-dir <dir>]` - one-shot
+  // backfill (#160/#181): rows with no model id or no cost get their model from the
+  // session transcript and are priced with the current rate table. Daemon-free.
+  void (async () => {
+    const args = parseRepriceArgs(process.argv.slice(4));
+    let UsageStore: typeof import('./cost/usageStore.js').UsageStore;
+    try {
+      ({ UsageStore } = await import('./cost/usageStore.js'));
+    } catch {
+      // eslint-disable-next-line no-console
+      console.error('cost tracking unavailable (better-sqlite3 not built)');
+      process.exit(1);
+    }
+    const store = UsageStore.open(args.dbPath ?? defaultUsageDbPath());
+    const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
+    try {
+      rates.set(await loadRateTableFile(rateTablePath()));
+    } catch {
+      // keep defaults
+    }
+    const report = await repriceUsage(
+      store,
+      rates.current(),
+      createTranscriptModelResolver({ chatsDir: args.chatsDir }),
+      { dryRun: args.dryRun },
+    );
+    store.close();
+    // eslint-disable-next-line no-console
+    console.log(formatRepriceReport(report));
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`usage reprice: ${(err as Error).message}`);
     process.exit(1);
   });
 } else if (process.argv[2] === 'usage' && process.argv[3] === 'prune') {
