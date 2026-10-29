@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { RATE_LIMIT_CRITICAL_KINDS } from '../webpush/notifier.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -454,19 +455,70 @@ export async function loadRoutingConfigFile(
 }
 
 /**
+ * `true` when a workspace routing rule is out of bounds: a `drop` rule that can
+ * match an action-required event (issue #156). The workspace file is untrusted
+ * (the model can write it), and muting `permission.required` or `session.died`
+ * would hide the very pushes that say a human is needed. "Can match" is
+ * deliberately conservative: a rule with no `kind` matches every kind, and a
+ * kind list matches if any entry is critical; the other match fields only
+ * narrow the rule further, so they do not clear it. The critical set is the
+ * notifier's own ({@link RATE_LIMIT_CRITICAL_KINDS}), not a copy. A USER rule
+ * may still drop these kinds.
+ */
+export function canSuppressCriticalKind(rule: RoutingRule): boolean {
+  if (rule.route.drop !== true) return false;
+  const kind = rule.match.kind;
+  if (kind === undefined) return true;
+  const kinds = Array.isArray(kind) ? kind : [kind];
+  return kinds.some((k) => RATE_LIMIT_CRITICAL_KINDS.has(k));
+}
+
+/** One line naming a refused workspace rule, for the boot warning. */
+function refusedRuleMessage(rule: RoutingRule): string {
+  return (
+    `[routing] workspace routing.yaml: ignoring rule '${rule.id || '<unnamed>'}': ` +
+    `a workspace rule may not drop action-required events ` +
+    `(${[...RATE_LIMIT_CRITICAL_KINDS].join(', ')})`
+  );
+}
+
+/**
  * Merge two routing configs by PREPENDING the workspace rules to the user rules
  * (design D1 / spec.md:8-10: workspace rules evaluate first; both sets active).
  * A single {@link compileRouting} over the returned config then preserves
  * document-order first-match across the layer boundary. Pure; returns `null`
  * only when BOTH inputs are `null` (neither file present).
+ *
+ * The workspace file is untrusted (the model can write it, issue #156): it may
+ * ADD rules but cannot take over a user rule, and cannot mute action-required
+ * events. Every user rule is kept as is; a workspace rule that reuses a user
+ * rule's id is renamed `workspace:<id>` so the audit trail names the rule that
+ * actually matched (same treatment as policy rule ids, issue #166); a
+ * workspace rule for which {@link canSuppressCriticalKind} holds is dropped and
+ * reported through `onRefused`.
  */
 export function mergeRoutingConfigs(
   workspace: RoutingConfig | null,
   user: RoutingConfig | null,
+  onRefused?: (rule: RoutingRule) => void,
 ): RoutingConfig | null {
   if (!workspace && !user) return null;
+  const userIds = new Set(
+    (user?.rules ?? []).flatMap((r) => (r.id ? [r.id] : [])),
+  );
+  const workspaceRules = (workspace?.rules ?? [])
+    .filter((r) => {
+      if (!canSuppressCriticalKind(r)) return true;
+      onRefused?.(r);
+      return false;
+    })
+    .map((r) =>
+      r.id !== undefined && userIds.has(r.id)
+        ? { ...r, id: `workspace:${r.id}` }
+        : r,
+    );
   const merged: RoutingConfig = {
-    rules: [...(workspace?.rules ?? []), ...(user?.rules ?? [])],
+    rules: [...workspaceRules, ...(user?.rules ?? [])],
   };
   const version = workspace?.version ?? user?.version;
   if (version !== undefined) merged.version = version;
@@ -542,7 +594,9 @@ export async function loadLayeredRoutingMatcher(
     workspaceCwd,
     warn,
   );
-  const merged = mergeRoutingConfigs(workspace, user);
+  const merged = mergeRoutingConfigs(workspace, user, (r) =>
+    warn(refusedRuleMessage(r)),
+  );
   if (!merged) return { matcher: undefined, ruleCount: 0 };
   return { matcher: compileRouting(merged), ruleCount: merged.rules.length };
 }
@@ -561,14 +615,28 @@ export async function loadLayeredRoutingMatcher(
 export async function loadLayeredRoutingMatcherStrict(
   userPath: string,
   workspaceCwd: string | undefined,
-): Promise<{ matcher: RoutingMatcher | undefined; ruleCount: number }> {
+  warn: (msg: string) => void = () => {},
+): Promise<{
+  matcher: RoutingMatcher | undefined;
+  ruleCount: number;
+  /** Workspace rules dropped for being out of bounds (see mergeRoutingConfigs). */
+  ignored: number;
+}> {
   const user = await loadRoutingConfigFile(userPath);
   const workspace = workspaceCwd
     ? await loadRoutingConfigFile(join(workspaceCwd, '.qwen', 'routing.yaml'))
     : null;
-  const merged = mergeRoutingConfigs(workspace, user);
-  if (!merged) return { matcher: undefined, ruleCount: 0 };
-  return { matcher: compileRouting(merged), ruleCount: merged.rules.length };
+  let ignored = 0;
+  const merged = mergeRoutingConfigs(workspace, user, (r) => {
+    ignored += 1;
+    warn(refusedRuleMessage(r));
+  });
+  if (!merged) return { matcher: undefined, ruleCount: 0, ignored };
+  return {
+    matcher: compileRouting(merged),
+    ruleCount: merged.rules.length,
+    ignored,
+  };
 }
 
 /** One rule of the resolved (merged) routing ruleset, with its source file path. */
@@ -597,8 +665,14 @@ export async function loadResolvedRoutingRules(
   );
   const out: ResolvedRoutingRule[] = [];
   if (workspace && workspacePath) {
-    for (const rule of workspace.rules)
+    for (const rule of workspace.rules) {
+      // Show the ruleset the gateway runs: an out-of-bounds rule is not in it.
+      if (canSuppressCriticalKind(rule)) {
+        warn(refusedRuleMessage(rule));
+        continue;
+      }
       out.push({ source: workspacePath, rule });
+    }
   }
   if (user) {
     for (const rule of user.rules) out.push({ source: userPath, rule });

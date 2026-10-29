@@ -24,7 +24,7 @@ describe('loadLayeredRoutingMatcherStrict (hot-reload loader)', () => {
       join(dir, 'routing.yaml'),
       undefined,
     );
-    expect(res).toEqual({ matcher: undefined, ruleCount: 0 });
+    expect(res).toEqual({ matcher: undefined, ruleCount: 0, ignored: 0 });
   });
 
   it('valid user file → compiled matcher with the rule count', async () => {

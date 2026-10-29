@@ -15,7 +15,7 @@ import {
 } from './rules.js';
 
 const yml = (id: string) =>
-  `rules:\n  - id: ${id}\n    match: { kind: permission.required }\n    route: { drop: true }\n`;
+  `rules:\n  - id: ${id}\n    match: { kind: task.completed }\n    route: { drop: true }\n`;
 
 describe('loadResolvedRoutingRules', () => {
   let dir: string;
