@@ -24,6 +24,20 @@ export interface DebouncedReloaderOptions<T> {
   onError: (err: unknown) => void;
   /** Debounce window in ms (default 250 — spec). */
   debounceMs?: number;
+  /**
+   * Floor between the START of one reload and the start of the next (default 0,
+   * off). A watched file the model itself can write (issue #156) must not be
+   * able to make the gateway reload, and audit, as fast as it can write.
+   */
+  minIntervalMs?: number;
+  /**
+   * Ceiling on how long a pending change may wait behind further changes
+   * (default unbounded). Without it a writer that never pauses for the debounce
+   * window postpones the reload forever. The min interval still applies.
+   */
+  maxWaitMs?: number;
+  /** Clock for the two bounds above (defaults to `Date.now`; faked in tests). */
+  now?: () => number;
   schedule?: Schedule;
   cancel?: Cancel;
 }
@@ -46,6 +60,9 @@ export class DebouncedReloader<T> {
   private readonly onReloaded: (value: T) => void;
   private readonly onError: (err: unknown) => void;
   private readonly debounceMs: number;
+  private readonly minIntervalMs: number;
+  private readonly maxWaitMs: number;
+  private readonly now: () => number;
   private readonly schedule: Schedule;
   private readonly cancel: Cancel;
 
@@ -53,6 +70,10 @@ export class DebouncedReloader<T> {
   private running = false;
   /** A trigger arrived while a reload was in flight → run exactly once more. */
   private pending = false;
+  /** When the last reload started (for the min interval). */
+  private lastRunAt: number | undefined = undefined;
+  /** When the oldest not-yet-run change arrived (for the max wait). */
+  private firstPendingAt: number | undefined = undefined;
 
   constructor(opts: DebouncedReloaderOptions<T>) {
     this.load = opts.load;
@@ -60,17 +81,32 @@ export class DebouncedReloader<T> {
     this.onReloaded = opts.onReloaded;
     this.onError = opts.onError;
     this.debounceMs = opts.debounceMs ?? 250;
+    this.minIntervalMs = opts.minIntervalMs ?? 0;
+    this.maxWaitMs = opts.maxWaitMs ?? Number.POSITIVE_INFINITY;
+    this.now = opts.now ?? Date.now;
     this.schedule = opts.schedule ?? ((fn, ms) => setTimeout(fn, ms));
     this.cancel = opts.cancel ?? ((h) => clearTimeout(h as NodeJS.Timeout));
   }
 
   /** Note a filesystem change; (re)arm the debounce timer. */
   trigger(): void {
+    const now = this.now();
+    this.firstPendingAt ??= now;
     if (this.timer !== undefined) this.cancel(this.timer);
+    // Trailing debounce, but never later than the max wait since the oldest
+    // pending change, and never sooner than the min interval after the last
+    // reload started. The floor wins over the ceiling: bounding the rate is
+    // the point.
+    const ceiling = Math.max(0, this.firstPendingAt + this.maxWaitMs - now);
+    const floor =
+      this.lastRunAt === undefined
+        ? 0
+        : Math.max(0, this.lastRunAt + this.minIntervalMs - now);
+    const delay = Math.max(floor, Math.min(this.debounceMs, ceiling));
     this.timer = this.schedule(() => {
       this.timer = undefined;
       void this.run();
-    }, this.debounceMs);
+    }, delay);
   }
 
   /** Cancel any pending reload (shutdown). */
@@ -90,6 +126,8 @@ export class DebouncedReloader<T> {
       return;
     }
     this.running = true;
+    this.lastRunAt = this.now();
+    this.firstPendingAt = undefined;
     try {
       const value = await this.load();
       try {
@@ -108,7 +146,10 @@ export class DebouncedReloader<T> {
     }
     if (this.pending) {
       this.pending = false;
-      await this.run();
+      // With a min interval the follow-up goes back through the bounded timer
+      // instead of starting immediately; unbounded keeps the original behavior.
+      if (this.minIntervalMs > 0) this.trigger();
+      else await this.run();
     }
   }
 }
