@@ -1322,6 +1322,87 @@
       #plan[aria-expanded='false'] > #plan-more {
         display: none;
       }
+      /* #138. Find in conversation: one 52px band above the composer. The
+         field takes what the count and the three 44px buttons leave. The
+         field is 16px so a phone does not zoom into it on focus. */
+      #find-bar {
+        flex: none;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px 4px 12px;
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-line);
+      }
+      #find-bar[hidden] {
+        display: none;
+      }
+      #find-q {
+        flex: 1 1 0;
+        min-width: 0;
+        box-sizing: border-box;
+        height: 44px;
+        padding: 0 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 22px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font: inherit;
+        font-size: 16px;
+      }
+      #find-q:focus {
+        outline: none;
+        border-color: var(--g1-link);
+      }
+      #find-count {
+        flex: none;
+        min-width: 3.5em;
+        padding: 0 4px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--g1-ink);
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      #find-bar > button {
+        flex: none;
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--g1-ink-hi);
+      }
+      #find-bar > button:disabled {
+        color: var(--g1-ink-dim);
+      }
+      #find-bar > button:not(:disabled):hover {
+        background: var(--g1-raise);
+      }
+      /* A hit is shown on its row without touching the row's size: a box
+         shadow takes no room, and the words are painted by the CSS Custom
+         Highlight API over the text as it is. The ring is the fallback where
+         that API is missing, and the active row's stronger ring marks which
+         row the count is about. */
+      #transcript .vrow.find-hit > .bubble {
+        box-shadow: inset 0 0 0 1px rgba(210, 153, 34, 0.5);
+      }
+      #transcript .vrow.find-active > .bubble {
+        box-shadow: 0 0 0 2px var(--g1-warn);
+      }
+      ::highlight(rc-find) {
+        background-color: rgba(210, 153, 34, 0.4);
+        color: inherit;
+      }
+      ::highlight(rc-find-active) {
+        background-color: var(--g1-warn);
+        color: #0d1117;
+      }
       /* The composer's tools, opened by its +: 44px pills in a sideways
          scroller, 52px of the column while open and nothing while shut. */
       #h1-tools {
@@ -2545,6 +2626,10 @@
             </button>
             <button type="button" class="row" data-panel="queue">
               <span class="lbl">Prompt queue</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" id="more-find" data-action="find" disabled>
+              <span class="lbl">Find in conversation</span><span class="val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
             <button type="button" class="row" data-panel="search">
@@ -4637,6 +4722,38 @@
           <div id="plan-rows"></div>
           <div id="plan-more" hidden></div>
         </div>
+        <!-- #138. Find in conversation. A band in the thumb zone, between the
+             to-do strip and the composer, so the field, the count and the two
+             44px step buttons are where the thumb is; it is opened from More >
+             This conversation (and from Ctrl or Cmd F on the laptop layout) and
+             shut by Escape or its close, which also clears the marks. The
+             search runs on the model's rows, not on what the virtualizer has
+             mounted. -->
+        <div id="find-bar" role="search" aria-label="Find in conversation" hidden>
+          <input
+            id="find-q"
+            type="text"
+            inputmode="search"
+            enterkeyhint="search"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            maxlength="200"
+            placeholder="Find in conversation"
+            aria-label="Find in conversation"
+          />
+          <span id="find-count" aria-live="polite"></span>
+          <button id="find-prev" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>
+          </button>
+          <button id="find-next" type="button" aria-label="Next match" title="Next match (Enter)" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button id="find-close" type="button" aria-label="Close find" title="Close (Escape)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
         <!-- #184. The composer's tools, opened by its +. Each pill is the
              control that already did the job, moved out of the row it shared
              with the verbs: Attach still clicks the hidden file input, Dictate
@@ -5175,6 +5292,237 @@
         if (key === 'share') $('more-export').disabled = !watchedSessionId;
       }
 
+      // #138. Find in conversation. The model finds the rows (it holds all of
+      // them; the view mounts a window of the list), the view paints them and
+      // takes the reader to one, and this keeps the query, the hit list and the
+      // place the reader was at when the search opened. A hit is a row, so
+      // "n of N" counts rows, and the list is read again, debounced, whenever
+      // the model changes, so it grows as a live turn adds rows.
+      const findState = {
+        open: false,
+        query: '',
+        hits: [],
+        pos: -1,
+        origin: null, // where the reader was when the search opened
+        jumped: false, // a hit has been brought into view since
+        moved: false, // the reader has scrolled since that
+        timer: null,
+        unsub: null,
+      };
+      const FIND_REFRESH_MS = 150;
+      function findActiveItem() {
+        const h = findState.hits[findState.pos];
+        return h ? h.item : null;
+      }
+      function findPaint() {
+        if (!transcriptView || typeof transcriptView.setFind !== 'function') return;
+        const hits = findState.hits;
+        transcriptView.setFind(
+          findState.open && hits.length
+            ? {
+                query: findState.query,
+                ids: hits.map((h) => h.id),
+                active: findActiveItem(),
+              }
+            : null,
+        );
+      }
+      function findRenderCount() {
+        const n = findState.hits.length;
+        const asked = findState.query.trim() !== '';
+        const text = !asked
+          ? ''
+          : n
+            ? Math.max(findState.pos, 0) + 1 + ' of ' + n
+            : 'No match';
+        const out = $('find-count');
+        if (out.textContent !== text) out.textContent = text;
+        $('find-prev').disabled = n === 0;
+        $('find-next').disabled = n === 0;
+      }
+      // The hit to start from: the first at or after the row the reader was
+      // on when the search opened, else the last (a reader at the end of the
+      // conversation is shown the newest match).
+      function findStartPos(hits) {
+        if (!hits.length) return -1;
+        const o = findState.origin;
+        if (!o || o.end || !o.item) return hits.length - 1;
+        const from = transcriptModel.items.indexOf(o.item);
+        if (from < 0) return hits.length - 1;
+        const at = hits.findIndex((h) => h.index >= from);
+        return at < 0 ? hits.length - 1 : at;
+      }
+      function findReveal() {
+        const item = findActiveItem();
+        if (!item || !transcriptView || typeof transcriptView.revealItem !== 'function')
+          return;
+        findState.jumped = true;
+        findState.moved = false;
+        transcriptView.revealItem(item);
+      }
+      // Reads the hits again. `fresh` is a new query: start over from where
+      // the reader was and bring the first hit into view. Otherwise (the list
+      // changed under an open search) the hit being looked at stays the hit
+      // being looked at, nothing scrolls, and only the count moves.
+      function findRefresh(fresh) {
+        if (findState.timer !== null) clearTimeout(findState.timer);
+        findState.timer = null;
+        if (!findState.open) return;
+        const was = findActiveItem();
+        const wasPos = findState.pos;
+        findState.hits =
+          typeof transcriptModel.search === 'function'
+            ? transcriptModel.search(findState.query)
+            : [];
+        const hits = findState.hits;
+        if (fresh) {
+          findState.pos = findStartPos(hits);
+        } else if (!hits.length) {
+          findState.pos = -1;
+        } else {
+          const kept = was ? hits.findIndex((h) => h.item === was) : -1;
+          findState.pos =
+            kept >= 0 ? kept : Math.min(Math.max(wasPos, 0), hits.length - 1);
+        }
+        findRenderCount();
+        findPaint();
+        if (fresh) findReveal();
+      }
+      function findSoon() {
+        if (findState.timer !== null) return;
+        findState.timer = setTimeout(() => findRefresh(false), FIND_REFRESH_MS);
+      }
+      function findStep(delta) {
+        const n = findState.hits.length;
+        if (!n) return;
+        findState.pos = (Math.max(findState.pos, 0) + delta + n) % n;
+        findRenderCount();
+        findPaint();
+        findReveal();
+      }
+      function findOpen() {
+        if (!watchedSessionId || $('app-body').hidden) return;
+        if (!findState.open) {
+          // Whatever else is over the chat gives way: the search is about the
+          // chat, and the list pane at the laptop width is beside it already.
+          setMoreOpen(false);
+          setSheetOpen(false);
+          closeH1Menu(false);
+          if (!paneLayout()) setListOpen(false);
+          findState.origin =
+            transcriptView && typeof transcriptView.readerAnchor === 'function'
+              ? transcriptView.readerAnchor()
+              : null;
+          findState.open = true;
+          findState.jumped = false;
+          findState.moved = false;
+          $('find-bar').hidden = false;
+          findState.unsub = transcriptModel.subscribe(() => findSoon());
+        }
+        const q = $('find-q');
+        q.focus();
+        q.select();
+      }
+      // Shuts the search and clears its marks. `restore` puts the reader back
+      // where they were when it opened, unless they have scrolled since they
+      // were last taken to a hit: then they are reading somewhere on purpose
+      // and stay there. A conversation switch closes without restoring.
+      function findClose(restore) {
+        if (!findState.open) return;
+        const o = findState.origin;
+        const back = restore && findState.jumped && !findState.moved && o;
+        findState.open = false;
+        if (findState.timer !== null) clearTimeout(findState.timer);
+        findState.timer = null;
+        if (findState.unsub) findState.unsub();
+        findState.unsub = null;
+        findState.query = '';
+        findState.hits = [];
+        findState.pos = -1;
+        findState.origin = null;
+        const q = $('find-q');
+        q.value = '';
+        if (document.activeElement === q) q.blur();
+        $('find-bar').hidden = true;
+        findRenderCount();
+        if (transcriptView && typeof transcriptView.setFind === 'function')
+          transcriptView.setFind(null);
+        if (back && transcriptView) {
+          if (o.end) transcriptView.scrollToEnd();
+          else if (o.item && typeof transcriptView.restorePlace === 'function')
+            transcriptView.restorePlace(o.item, o.top);
+        }
+      }
+      $('more-find').addEventListener('click', () => findOpen());
+      $('find-q').addEventListener('input', () => {
+        findState.query = $('find-q').value;
+        findRefresh(true);
+      });
+      $('find-q').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.isComposing) return;
+        e.preventDefault();
+        findStep(e.shiftKey ? -1 : 1);
+      });
+      $('find-next').addEventListener('click', () => findStep(1));
+      $('find-prev').addEventListener('click', () => findStep(-1));
+      $('find-close').addEventListener('click', () => findClose(true));
+      // The reader moving the transcript themselves: wheel, a finger drag, a
+      // key that scrolls it, or a press on its own scrollbar.
+      for (const type of ['wheel', 'touchmove', 'keydown']) {
+        $('transcript').addEventListener(
+          type,
+          () => {
+            findState.moved = true;
+          },
+          { passive: true },
+        );
+      }
+      $('transcript').addEventListener(
+        'pointerdown',
+        (e) => {
+          if (e.target === $('transcript')) findState.moved = true;
+        },
+        { passive: true },
+      );
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          if (!findState.open || e.defaultPrevented) return;
+          const at = e.target;
+          // From the field or the bar, or with focus on nothing or in the
+          // transcript. Not from a screen or dialog that has the key itself.
+          if (
+            at === document.body ||
+            $('find-bar').contains(at) ||
+            $('transcript-wrap').contains(at)
+          ) {
+            e.preventDefault();
+            findClose(true);
+          }
+          return;
+        }
+        // Ctrl or Cmd F on the laptop layout, when the composer (or any other
+        // field) is not the focus: the browser's own find only reaches the
+        // rows that are mounted, so this one runs on the whole conversation.
+        // In the composer the key is the browser's, as a text field expects.
+        if (
+          (e.metaKey || e.ctrlKey) &&
+          !e.altKey &&
+          !e.shiftKey &&
+          (e.key === 'f' || e.key === 'F')
+        ) {
+          if (!paneLayout() || $('app-body').hidden || !watchedSessionId) return;
+          if (document.querySelector('dialog[open]')) return;
+          const at = document.activeElement;
+          const typing =
+            at &&
+            at !== $('find-q') &&
+            (at.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(at.tagName));
+          if (typing) return;
+          e.preventDefault();
+          findOpen();
+        }
+      });
+
       // #182 kept the open pane across a reload; what comes back now is the
       // open panel screen, over More so its back button goes where it would
       // have. Same rule as the conversation pointer (#50): this window's own
@@ -5242,6 +5590,7 @@
           if (turns) v.rewind = turns + (turns === 1 ? ' turn' : ' turns');
           if (outbox.length) v.queue = outbox.length + ' queued';
         }
+        $('more-find').disabled = !watchedSessionId; // #138
         const used = sessionUsageParts();
         if (used) v.usage = used.tokens + (used.cost ? ' \u00b7 ' + used.cost : '');
         if (permRules) {
@@ -6364,6 +6713,7 @@
       // `openingSessionId` names the conversation the clear is making room for,
       // so its pending cards stay pinned through it (#186, see dropAllCards).
       function clearTranscript(openingSessionId) {
+        findClose(false); // #138: a search belongs to the conversation it ran in
         // Every item, the tool/subagent bookkeeping and the turn pointers.
         transcriptModel.clear();
         // The cursor belongs to the conversation, not to the window: a page
