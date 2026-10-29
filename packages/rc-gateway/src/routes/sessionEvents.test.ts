@@ -918,6 +918,366 @@ describe('walEpoch sidecar (add-mid-turn-recovery §4)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// #174: one daemon subscription per session, shared by every watcher
+// ---------------------------------------------------------------------------
+
+type BusFrame = {
+  id?: number;
+  v: number;
+  type: string;
+  data: unknown;
+};
+
+type SubscribeOpts = {
+  lastEventId?: number;
+  epoch?: string;
+  onEpoch?: (epoch: string) => void;
+  signal?: AbortSignal;
+};
+
+/**
+ * A daemon whose session bus behaves like acp-bridge's EventBus where it
+ * matters here: every subscriber receives every published frame under the SAME
+ * raw id, a cursor replays the ring past it and closes with an id-less
+ * `replay_complete`, a cursor this epoch never produced (or a mismatched epoch
+ * token) gets an id-less `state_resync_required` and the whole ring, and a
+ * restart starts a new epoch whose ids begin at 1 again. The stub daemon used
+ * above streams a fixed script per request and ignores cursors, so it cannot
+ * show two watchers sharing one bus.
+ */
+class FakeBusDaemon {
+  epoch = 'epoch-1';
+  /** When false the bus does not report its epoch token (an old daemon). */
+  sendEpoch = true;
+  private nextId = 1;
+  private ring: BusFrame[] = [];
+  private readonly subs = new Set<{
+    push: (f: BusFrame | 'end' | Error) => void;
+  }>();
+  /** What every subscribeEvents call asked for, in order. */
+  readonly subscriptions: Array<{ lastEventId?: number; epoch?: string }> = [];
+
+  get liveSubscribers(): number {
+    return this.subs.size;
+  }
+
+  publish(text: string): number {
+    const frame: BusFrame = {
+      id: this.nextId++,
+      v: 1,
+      type: 'session_update',
+      data: { text },
+    };
+    this.ring.push(frame);
+    for (const s of this.subs) s.push(frame);
+    return frame.id!;
+  }
+
+  /** Burn ids the way a load's seeded replay does: consumed, never streamed. */
+  burnIds(n: number): void {
+    this.nextId += n;
+    this.ring.length = 0;
+  }
+
+  /** Daemon restart: every stream drops, the next epoch's ids restart at 1. */
+  restart(epoch: string): void {
+    for (const s of this.subs) s.push(new Error('daemon restarted'));
+    this.subs.clear();
+    this.epoch = epoch;
+    this.nextId = 1;
+    this.ring = [];
+  }
+
+  subscribeEvents(
+    _sessionId: string,
+    opts: SubscribeOpts = {},
+  ): AsyncGenerator<BusFrame> {
+    return this.stream(opts);
+  }
+
+  private async *stream(opts: SubscribeOpts): AsyncGenerator<BusFrame> {
+    const queue: Array<BusFrame | 'end' | Error> = [];
+    let wake: (() => void) | undefined;
+    const sub = {
+      push(f: BusFrame | 'end' | Error) {
+        queue.push(f);
+        wake?.();
+      },
+    };
+    this.subs.add(sub);
+    this.subscriptions.push({
+      lastEventId: opts.lastEventId,
+      epoch: opts.epoch,
+    });
+    if (this.sendEpoch) opts.onEpoch?.(this.epoch);
+    if (opts.lastEventId !== undefined) {
+      const reset =
+        (opts.epoch !== undefined && opts.epoch !== this.epoch) ||
+        opts.lastEventId >= this.nextId;
+      if (reset) {
+        queue.push({
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        });
+      }
+      const from = reset ? 0 : opts.lastEventId;
+      let n = 0;
+      for (const f of this.ring) {
+        if (f.id! > from) {
+          queue.push(f);
+          n++;
+        }
+      }
+      queue.push({ v: 1, type: 'replay_complete', data: { replayedCount: n } });
+    }
+    const onAbort = () => sub.push('end');
+    opts.signal?.addEventListener('abort', onAbort);
+    try {
+      for (;;) {
+        while (queue.length === 0) {
+          await new Promise<void>((r) => (wake = r));
+          wake = undefined;
+        }
+        const next = queue.shift()!;
+        if (next === 'end') return;
+        if (next instanceof Error) throw next;
+        yield next;
+      }
+    } finally {
+      this.subs.delete(sub);
+      opts.signal?.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
+type SseFrame = { id?: number; ev: { type?: string; data?: unknown } };
+
+/** A watcher held open, its frames collected as they arrive. */
+interface SseClient {
+  status: number;
+  frames: SseFrame[];
+  ids(): number[];
+  waitFor(pred: (frames: SseFrame[]) => boolean, ms?: number): Promise<void>;
+  close(): void;
+}
+
+async function openWatcher(
+  url: string,
+  headers: Record<string, string> = {},
+): Promise<SseClient> {
+  const ac = new AbortController();
+  const res = await fetch(url, { headers, signal: ac.signal });
+  const frames: SseFrame[] = [];
+  if (res.ok && res.body) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    void (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buf += decoder.decode(value, { stream: true });
+          const blocks = buf.split('\n\n');
+          buf = blocks.pop() ?? '';
+          for (const block of blocks) {
+            const lines = block.split('\n');
+            const data = lines.find((l) => l.startsWith('data:'));
+            if (!data) continue;
+            const idLine = lines.find((l) => l.startsWith('id:'));
+            frames.push({
+              id: idLine ? Number(idLine.slice(3).trim()) : undefined,
+              ev: JSON.parse(data.slice(5).trim()),
+            });
+          }
+        }
+      } catch {
+        // aborted by close()
+      }
+    })();
+  }
+  return {
+    status: res.status,
+    frames,
+    ids: () =>
+      frames.filter((f) => f.id !== undefined).map((f) => f.id as number),
+    async waitFor(pred, ms = 3000) {
+      const deadline = Date.now() + ms;
+      while (!pred(frames)) {
+        if (Date.now() > deadline) {
+          throw new Error(
+            `timed out; frames so far: ${JSON.stringify(frames.map((f) => [f.id, f.ev.type]))}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    },
+    close: () => ac.abort(),
+  };
+}
+
+async function until(pred: () => boolean, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error('condition never held');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+const joined = (fs: SseFrame[]) =>
+  fs.some((f) => f.ev.type === 'client_joined');
+
+async function mountFanout(
+  bus: FakeBusDaemon,
+  walDir: string,
+  hubGraceMs = 100,
+): Promise<string> {
+  const app = express();
+  app.get(
+    '/session/:id/events',
+    createSessionEventsRoute(
+      bus as unknown as DaemonClient,
+      new ConnectionRegistry(),
+      undefined,
+      undefined,
+      walDir,
+      undefined,
+      undefined,
+      50, // idleAttachMs: the fake bus is silent until a test publishes
+      undefined,
+      undefined,
+      hubGraceMs,
+    ),
+  );
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  gateway = server;
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+describe('session-events fan-out: one daemon subscription per session (#174)', () => {
+  const clients: SseClient[] = [];
+  afterEach(() => {
+    for (const c of clients.splice(0)) c.close();
+    // A watcher closed mid-test leaves the client's spare keep-alive sockets
+    // behind, which would hold the gateway's close() for the 5s keep-alive.
+    gateway?.closeAllConnections();
+  });
+  const watch = async (url: string, headers?: Record<string, string>) => {
+    const c = await openWatcher(url, headers);
+    clients.push(c);
+    return c;
+  };
+
+  it('two concurrent watchers see the same ids and the WAL holds each frame once', async () => {
+    // The probe from the audit: phone saw 1,3,5, laptop 2,4,6, and the WAL held
+    // every frame twice, because each watcher ran its own daemon subscription
+    // against one shared epoch and one WAL.
+    const sid = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    const phone = await watch(url);
+    const laptop = await watch(url);
+    await phone.waitFor(joined);
+    await laptop.waitFor(joined);
+
+    bus.publish('one');
+    bus.publish('two');
+    bus.publish('three');
+    await phone.waitFor(() => phone.ids().length >= 3);
+    await laptop.waitFor(() => laptop.ids().length >= 3);
+
+    expect(phone.ids()).toEqual([1, 2, 3]);
+    expect(laptop.ids()).toEqual([1, 2, 3]);
+    expect(bus.subscriptions).toHaveLength(1);
+    const wal = new SessionWal({ dir: walDir, sessionId: sid });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
+    wal.close();
+  });
+
+  it('a watcher joining late resumes from its own Last-Event-ID on the shared subscription', async () => {
+    const sid = 'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    const first = await watch(url);
+    await first.waitFor(joined);
+    bus.publish('one');
+    bus.publish('two');
+    await first.waitFor(() => first.ids().length >= 2);
+
+    // Saw 1 before it dropped: the WAL hands it 2, then the live stream.
+    const late = await watch(url, { 'Last-Event-ID': '1' });
+    await late.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+    // A watcher with no cursor asked for no history, as with the daemon.
+    const live = await watch(url);
+    await live.waitFor(joined);
+
+    bus.publish('three');
+    for (const c of [first, late, live]) {
+      await c.waitFor(() => c.ids().includes(3));
+    }
+
+    expect(first.ids()).toEqual([1, 2, 3]);
+    expect(late.ids()).toEqual([2, 3]);
+    expect(live.ids()).toEqual([3]);
+    // Its own replay is closed by its own sentinel, after the replayed frame
+    // and before the live one.
+    const order = late.frames
+      .filter((f) => f.id !== undefined || f.ev.type === 'replay_complete')
+      .map((f) => f.id ?? 'replay_complete');
+    expect(order).toEqual([2, 'replay_complete', 3]);
+    expect(bus.subscriptions).toHaveLength(1);
+    const wal = new SessionWal({ dir: walDir, sessionId: sid });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
+    wal.close();
+  });
+
+  it('a watcher leaving keeps the others fed; the last one leaving closes the upstream after the grace', async () => {
+    const sid = 'a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir, 150)}/session/${sid}/events`;
+
+    const stay = await watch(url);
+    const leave = await watch(url);
+    await stay.waitFor(joined);
+    await leave.waitFor(joined);
+    bus.publish('one');
+    await leave.waitFor(() => leave.ids().includes(1));
+
+    leave.close();
+    bus.publish('two');
+    await stay.waitFor(() => stay.ids().includes(2));
+    expect(stay.ids()).toEqual([1, 2]);
+    expect(bus.liveSubscribers).toBe(1);
+
+    // The last watcher leaves and comes back inside the grace: same upstream.
+    stay.close();
+    await new Promise((r) => setTimeout(r, 30));
+    const back = await watch(url, { 'Last-Event-ID': '2' });
+    await back.waitFor(joined);
+    bus.publish('three');
+    await back.waitFor(() => back.ids().includes(3));
+    expect(bus.subscriptions).toHaveLength(1);
+
+    // Gone for longer than the grace: the upstream subscription is closed.
+    back.close();
+    await until(() => bus.liveSubscribers === 0, 2000);
+    expect(bus.subscriptions).toHaveLength(1);
+
+    const wal = new SessionWal({ dir: walDir, sessionId: sid });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
+    wal.close();
+  });
+});
+
 describe('watch presence join/leave (#40)', () => {
   // Distinct valid 32-hex id so it can't collide with SESS fixtures.
   const WP_SID = '22222222222222222222222222222222';
