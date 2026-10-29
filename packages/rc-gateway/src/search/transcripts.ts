@@ -7,6 +7,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseQuery, matchesQuery } from './query.js';
+import { archiveChatsDirOf } from '../sessions/chatsPath.js';
 
 /**
  * A search result set plus whether more matches existed than were returned.
@@ -45,6 +46,13 @@ export interface SearchHit {
    * plan's seed; the BM25 ranked path will populate these).
    */
   highlights?: HighlightRange[];
+  /**
+   * True when the hit sits in a transcript under `chats/archive/`. Omitted for
+   * a live conversation, so the common payload is unchanged. An archived
+   * session is not openable (the daemon refuses it), so the only honest action
+   * on such a hit is restore.
+   */
+  archived?: true;
 }
 
 export interface SearchOptions {
@@ -52,12 +60,6 @@ export interface SearchOptions {
   kind?: string;
   /** Restrict to a single session. */
   sessionId?: string;
-  /**
-   * When present, restrict hits to the fork lineage of the given session id.
-   * Computed in-process by the search handler; the scanner ignores it (lineage
-   * filtering requires session records unavailable to the transcript scanner).
-   */
-  lineage?: string;
   /**
    * Explicit visible-session set for non-owner callers (permission filtering).
    * `undefined` = owner scope = no restriction applied.
@@ -137,6 +139,40 @@ function collectStrings(value: unknown, out: string[], budget = 200): void {
 }
 
 const SNIPPET_MAX = 200;
+
+/**
+ * Key prefix for a transcript read out of `chats/archive/`. The scanner and the
+ * BM25 index both name a file by its path relative to the chats dir, so an
+ * archived `x.jsonl` is `archive/x.jsonl` and never collides with a live `x.jsonl`.
+ */
+export const ARCHIVE_FILE_PREFIX = 'archive/';
+
+/** True when a file key (see {@link ARCHIVE_FILE_PREFIX}) names an archived transcript. */
+export function isArchivedFileKey(file: string): boolean {
+  return file.startsWith(ARCHIVE_FILE_PREFIX);
+}
+
+/**
+ * The transcript file keys to search: every live `*.jsonl` in the chats dir plus
+ * every `*.jsonl` in its `archive/` sibling (keyed `archive/<name>`). Archiving
+ * MOVES a transcript, so a caller that reads only the chats dir cannot see an
+ * archived conversation at all, although the sessions listing shows it. When
+ * the same name sits in both, the live copy wins (it is the one the daemon
+ * opens), matching the listing's rule. Pure over the two directory listings.
+ */
+export function transcriptFileKeys(
+  live: readonly string[],
+  archived: readonly string[],
+): string[] {
+  const liveNames = live.filter((n) => n.endsWith('.jsonl'));
+  const liveSet = new Set(liveNames);
+  return [
+    ...liveNames,
+    ...archived
+      .filter((n) => n.endsWith('.jsonl') && !liveSet.has(n))
+      .map((n) => ARCHIVE_FILE_PREFIX + n),
+  ];
+}
 
 // The on-disk chats dir for a workspace cwd is derived by `resolveChatsDir` in
 // `../sessions/chatsPath.ts` (the exact, daemon-byte-identical resolver, proven
@@ -220,17 +256,23 @@ export async function searchTranscriptsDetailed(
   const deadline = hasDeadline ? clock() + (opts.timeoutMs as number) : 0;
   let scanned = 0;
 
-  let files: string[];
+  let live: string[];
   try {
-    files = await readdir(chatsDir);
+    live = await readdir(chatsDir);
   } catch {
     // missing dir (ENOENT) or unreadable → no results.
     return { hits: [], truncated: false };
   }
+  let archived: string[] = [];
+  try {
+    archived = await readdir(archiveChatsDirOf(chatsDir));
+  } catch {
+    // no archive dir: nothing filed away
+  }
+  const files = transcriptFileKeys(live, archived);
 
   const hits: SearchHit[] = [];
   for (const name of files) {
-    if (!name.endsWith('.jsonl')) continue;
     if (hasDeadline && clock() > deadline) throw new SearchTimeoutError();
     let text: string;
     try {
@@ -271,6 +313,7 @@ export async function searchTranscriptsDetailed(
         kind: rec.type ?? '',
         ts: rec.timestamp ?? '',
         snippet: snippet(recText, plan.seed),
+        ...(isArchivedFileKey(name) ? { archived: true as const } : {}),
       });
     }
   }

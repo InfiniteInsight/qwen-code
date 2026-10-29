@@ -277,8 +277,11 @@ export class SearchDb {
   }
 
   /**
-   * Upsert a document (idempotent on session_id + event_id). The FTS5 triggers
-   * handle keeping the fts virtual table in sync.
+   * Upsert a document keyed on (session_id, event_id): a new key inserts, an
+   * existing key has its kind, ts and body REPLACED (last write wins), so
+   * re-indexing an edited record updates what search returns instead of
+   * leaving the first body in place forever. The FTS5 triggers keep the fts
+   * virtual table in sync for both the insert and the update.
    */
   upsertDocument(doc: {
     sessionId: string;
@@ -292,7 +295,10 @@ export class SearchDb {
         `
       INSERT INTO documents (session_id, event_id, kind, ts, body)
       VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (session_id, event_id) DO NOTHING
+      ON CONFLICT (session_id, event_id) DO UPDATE SET
+        kind = excluded.kind,
+        ts   = excluded.ts,
+        body = excluded.body
     `,
       )
       .run(doc.sessionId, doc.eventId, doc.kind, doc.ts, doc.body);

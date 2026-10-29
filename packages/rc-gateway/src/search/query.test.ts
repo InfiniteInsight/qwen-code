@@ -169,6 +169,21 @@ describe('matchesQuery', () => {
     expect(m('"oauth refresh"', 'oauth then refresh')).toBe(false);
   });
 
+  it('a phrase matches across a newline or run of whitespace in the haystack (#170)', () => {
+    expect(m('"foo bar"', 'foo\nbar')).toBe(true);
+    expect(m('"foo bar"', 'foo \t\n  bar')).toBe(true);
+    expect(m('"foo bar"', 'a foo\r\nbar b')).toBe(true);
+    expect(m('NOT "foo bar"', 'foo\nbar')).toBe(false);
+  });
+
+  it('prefix token-start works for non-ASCII stems (#170)', () => {
+    expect(m('élan*', 'un élan vital')).toBe(true);
+    expect(m('élan*', 'célan')).toBe(false); // mid-token
+    expect(m('日本*', '私は 日本語 です')).toBe(true);
+    expect(m('日本*', '私は大日本帝国')).toBe(false);
+    expect(m('ñu*', 'el ñu corre')).toBe(true);
+  });
+
   it('prefix matches a token start, not mid-token', () => {
     expect(m('oauth*', 'an oauthToken here')).toBe(true);
     expect(m('oauth*', 'reoauth here')).toBe(false);
