@@ -17,7 +17,10 @@ import type { AuditRecorder } from '../auditLog.js';
 import { forwardedPeer } from '../tls/http2Front.js';
 import { bearerMatches, isLoopbackRemote } from '../localCredential.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
-import { planTerminalCommand, type TerminalPlanOptions } from '../terminals.js';
+import {
+  planAttachedTuiCommand,
+  type TerminalPlanOptions,
+} from '../terminals.js';
 import { isSessionNotFoundError } from './sessionResume.js';
 
 /** The slice of the pool these routes call. */
@@ -75,8 +78,8 @@ export interface HostAttachRoutes {
  *       come back to, as opposed to a 502/503, which is worth retrying.
  *
  * Both answer `200 { sessionId, workspaceCwd, daemonUrl, daemonToken,
- * linuxArgv, title, via }`. `linuxArgv`/`title` come from `planTerminalCommand`
- * with the terminals route's options, so qwen's flag names keep one owner.
+ * linuxArgv, title, via }`. `linuxArgv` comes from `planAttachedTuiCommand`
+ * (the TUI, not the wrapper) with the terminals route's options, so qwen's flag names keep one owner.
  * `workspaceCwd` is the pool's canonical path for the daemon, which is the
  * directory the TUI must run in. `via` (`created` | `pooled` | `resumed`) says
  * which path was taken.
@@ -175,10 +178,11 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       );
       return;
     }
-    const command = planTerminalCommand(
+    // The TUI itself, never the `qwen-rc attach` wrapper a phone-opened tab
+    // runs: the caller here IS that wrapper and would otherwise run itself.
+    const linuxArgv = planAttachedTuiCommand(
       {
         sessionId,
-        workspaceCwd: endpoint.workspaceCwd,
         daemonUrl: endpoint.url,
         daemonToken: endpoint.token,
       },
@@ -200,8 +204,8 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       workspaceCwd: endpoint.workspaceCwd,
       daemonUrl: endpoint.url,
       daemonToken: endpoint.token,
-      linuxArgv: command.linuxArgv,
-      title: command.title,
+      linuxArgv,
+      title: `qwen ${sessionId.slice(0, 8)}`,
       via,
     });
   };

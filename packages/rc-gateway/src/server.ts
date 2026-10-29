@@ -271,6 +271,12 @@ export interface GatewayDeps {
    * that supports `--attach-daemon`; defaults to `qwen` on PATH.
    */
   terminalQwenArgv?: string[];
+  /**
+   * This gateway's own entry point as argv, which a phone-opened terminal runs
+   * as `qwen-rc attach --session <id> <cwd>` so it re-attaches after a
+   * gateway restart. Defaults to `qwen-rc` on PATH.
+   */
+  terminalRcArgv?: string[];
   /** Audit log path; defaults to ~/.qwen/rc/audit.log. */
   auditPath?: string;
   /** Static web-client root; defaults to the package's public/ dir. */
@@ -1250,6 +1256,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       subActorBan,
       createTerminalOpenRoute(deps.daemon, deps.terminalRequests, audit, {
         qwenArgv: deps.terminalQwenArgv,
+        rcArgv: deps.terminalRcArgv,
       }),
     );
   }

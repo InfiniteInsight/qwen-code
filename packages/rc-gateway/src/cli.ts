@@ -828,6 +828,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     pairing,
     terminalRequests,
     terminalQwenArgv: terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN),
+    // A phone-opened tab runs this very entry point's `attach`, so it
+    // re-attaches after a restart. Absent a script path (an embedded run), the
+    // plan falls back to `qwen-rc` on PATH.
+    ...(process.argv[1]
+      ? { terminalRcArgv: [process.execPath, process.argv[1]] }
+      : {}),
     vapid,
     pushStore,
     uiPrefs,

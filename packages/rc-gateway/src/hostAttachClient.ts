@@ -33,6 +33,7 @@ import { constants as osConstants } from 'node:os';
 import { join, resolve } from 'node:path';
 import { readState } from './launcher/state.js';
 import { readLocalToken } from './localCredential.js';
+import { runWithReattach, type ReattachAttempt } from './reattachLoop.js';
 
 /** Basename of the host-attach token, beside the other `~/.qwen/rc` secrets. */
 export const HOST_ATTACH_TOKEN_FILENAME = 'host-attach-token';
@@ -325,6 +326,84 @@ function describeRefusal(
   return `qwen-rc attach: ${error} (${res.status}${code ? ` ${code}` : ''})`;
 }
 
+/**
+ * Read one answer from the re-attach poll (slice E) as the loop needs it.
+ * Retry only what can heal on its own: 502 and 503 (the daemon is restarting
+ * or the pool is full) and a gateway that is not listening yet. Everything
+ * else, a 404 (nothing to come back to), a refused token, a body that names no
+ * session, a certificate that does not verify, ends the wait with its reason.
+ */
+export function classifyReattach(
+  outcome: { res: HostAttachResponse } | { err: unknown },
+  args: { cwd: string; sessionId: string },
+  target: GatewayLoopbackTarget,
+): ReattachAttempt {
+  if ('err' in outcome) {
+    const code = (outcome.err as { code?: unknown } | undefined)?.code;
+    if (typeof code === 'string' && UNREACHABLE_CODES.has(code)) {
+      return { kind: 'retry', reason: `no gateway answering (${code})` };
+    }
+    return {
+      kind: 'stop',
+      message: describeTransportError(outcome.err, target),
+    };
+  }
+  const { res } = outcome;
+  if (res.status === 200) {
+    const attachment = readAttachment(res.body);
+    if (attachment) {
+      return {
+        kind: 'ready',
+        linuxArgv: attachment.linuxArgv,
+        workspaceCwd: attachment.workspaceCwd,
+      };
+    }
+    return {
+      kind: 'stop',
+      message:
+        'qwen-rc attach: the gateway answered without a session to attach to; ' +
+        RESTART_HINT,
+    };
+  }
+  if (res.status === 502 || res.status === 503) {
+    const code = typeof res.body.code === 'string' ? ` ${res.body.code}` : '';
+    return { kind: 'retry', reason: `gateway answered ${res.status}${code}` };
+  }
+  return { kind: 'stop', message: describeRefusal(res, args) };
+}
+
+/** Sleep that ends early when `signal` aborts. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+/**
+ * Report an interrupt (Ctrl-C, or a terminate) during the re-attach wait. The
+ * TUI is not running then, so nothing else would take the signal and the
+ * default would be to die with the signal's status; this turns it into a clean
+ * exit through the loop. Returns the undo.
+ */
+export function watchWaitInterrupts(onInterrupt: () => void): () => void {
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onInterrupt);
+  return () => {
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onInterrupt);
+  };
+}
+
 /** The fields the CLI needs from a 200, or undefined when any is missing. */
 function readAttachment(
   body: Record<string, unknown>,
@@ -377,6 +456,10 @@ export interface HostAttachRunDeps {
   ) => SpawnSyncReturns<Buffer | string>;
   request?: typeof postHostAttach;
   shieldSignals?: () => () => void;
+  /** Re-attach loop seams (slice E); the defaults are the real clock and signals. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  now?: () => number;
+  watchInterrupt?: (onInterrupt: () => void) => () => void;
 }
 
 /**
@@ -439,25 +522,69 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
   // Node has no execvp, so the TUI runs as a child with this terminal handed
   // straight through, and its exit code becomes this process's. The argv
   // carries the daemon token, so it is never printed.
-  const [command, ...rest] = attachment.linuxArgv;
-  const restore = (deps.shieldSignals ?? shieldParentSignals)();
-  let result: SpawnSyncReturns<Buffer | string>;
-  try {
-    result = spawn(command, rest, {
-      stdio: 'inherit',
-      cwd: attachment.workspaceCwd,
-    });
-  } finally {
-    restore();
-  }
-  if (result.error) {
-    stderr(`qwen-rc attach: could not run ${command}: ${result.error.message}`);
+  //
+  // When the daemon dies (the gateway restarted) the TUI exits 75; the loop
+  // then asks the gateway for the session again and runs the TUI again, so a
+  // tab survives the restart (slice E). Any other exit code ends this process.
+  const runTui = async (linuxArgv: string[], cwd: string): Promise<number> => {
+    const [command, ...rest] = linuxArgv;
+    const restore = (deps.shieldSignals ?? shieldParentSignals)();
+    let result: SpawnSyncReturns<Buffer | string>;
+    try {
+      result = spawn(command, rest, { stdio: 'inherit', cwd });
+    } finally {
+      restore();
+    }
+    if (result.error) {
+      stderr(
+        `qwen-rc attach: could not run ${command}: ${result.error.message}`,
+      );
+      return 1;
+    }
+    if (typeof result.status === 'number') return result.status;
+    if (result.signal) {
+      const n = osConstants.signals[result.signal];
+      return typeof n === 'number' ? 128 + n : 1;
+    }
     return 1;
-  }
-  if (typeof result.status === 'number') return result.status;
-  if (result.signal) {
-    const n = osConstants.signals[result.signal];
-    return typeof n === 'number' ? 128 + n : 1;
-  }
-  return 1;
+  };
+  const reattachArgs = {
+    cwd: attachment.workspaceCwd,
+    sessionId: attachment.sessionId,
+  };
+  const reattachPath = `/rc/host/attach/${encodeURIComponent(attachment.sessionId)}`;
+  const code = await runWithReattach(
+    { linuxArgv: attachment.linuxArgv, workspaceCwd: attachment.workspaceCwd },
+    {
+      sessionId: attachment.sessionId,
+      run: runTui,
+      attach: async () => {
+        // The token is read again each time: a gateway restart does not change
+        // it, but an operator who rotated the file while the tab waited should
+        // not have to close the tab.
+        const fresh = (await readLocalToken(tokenPath)) ?? token;
+        // The target is resolved again too, so a gateway that came back on a
+        // new port or with a renewed cert is found.
+        const where = resolveGatewayLoopback(deps.rcDir);
+        try {
+          return classifyReattach(
+            {
+              res: await request(where, fresh, reattachPath, {
+                cwd: attachment.workspaceCwd,
+              }),
+            },
+            reattachArgs,
+            where,
+          );
+        } catch (err) {
+          return classifyReattach({ err }, reattachArgs, where);
+        }
+      },
+      sleep: deps.sleep ?? sleepUnlessAborted,
+      now: deps.now ?? Date.now,
+      log: stderr,
+      watchInterrupt: deps.watchInterrupt ?? watchWaitInterrupts,
+    },
+  );
+  return code;
 }
