@@ -381,14 +381,22 @@ describe('AuditLog prevHash chain', () => {
 // ---------------------------------------------------------------------------
 
 describe('AuditLog.verifyChain', () => {
-  it('returns ok:true for an empty directory', () => {
+  it('returns ok:true for an empty directory, and says nothing was checked', () => {
     const dir = freshDir();
-    expect(AuditLog.verifyChain(dir)).toEqual({ ok: true, failures: [] });
+    expect(AuditLog.verifyChain(dir)).toEqual({
+      ok: true,
+      failures: [],
+      filesChecked: 0,
+    });
   });
 
-  it('returns ok:true for a directory that does not exist', () => {
+  it('returns ok:true for a directory that does not exist, and says nothing was checked', () => {
     const dir = join(freshDir(), 'nonexistent');
-    expect(AuditLog.verifyChain(dir)).toEqual({ ok: true, failures: [] });
+    expect(AuditLog.verifyChain(dir)).toEqual({
+      ok: true,
+      failures: [],
+      filesChecked: 0,
+    });
   });
 
   it('returns ok:true for a valid chain', async () => {
@@ -403,6 +411,7 @@ describe('AuditLog.verifyChain', () => {
     const result = AuditLog.verifyChain(dir);
     expect(result.ok).toBe(true);
     expect(result.failures).toEqual([]);
+    expect(result.filesChecked).toBe(1);
   });
 
   it('detects a tampered line (first line prevHash wrong)', () => {
@@ -678,7 +687,11 @@ describe('#165 AuditLog pruning', () => {
     }
     expect(auditFiles(dir)).toEqual(['audit-2026-07-09.log']);
     // Pruning whole older files never breaks the surviving chain.
-    expect(AuditLog.verifyChain(dir)).toEqual({ ok: true, failures: [] });
+    expect(AuditLog.verifyChain(dir)).toEqual({
+      ok: true,
+      failures: [],
+      filesChecked: 1,
+    });
   });
 });
 

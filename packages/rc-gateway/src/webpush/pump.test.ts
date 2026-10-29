@@ -264,6 +264,81 @@ describe('SessionEventPump', () => {
     expect(got).toBe(true);
   });
 
+  describe('onEvent and permission_request (issue #166)', () => {
+    const permFrame = {
+      id: 7,
+      type: 'permission_request',
+      data: {
+        requestId: 'r1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'humanized',
+          kind: 'execute',
+          rawInput: {},
+        },
+        options: [{ optionId: 'ok', kind: 'allow_once' }],
+      },
+    };
+
+    async function runWith(
+      policy: Policy | undefined,
+    ): Promise<{ seen: string[]; collected: Dispatched[] }> {
+      const collected: Dispatched[] = [];
+      const seen: string[] = [];
+      stub = await startStubDaemon({
+        workspaceCwd: '/w',
+        sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+        holdOpenMs: 2000,
+        permissionStatus: 200,
+        frames: [permFrame],
+      });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      const dispatched: string[] = [];
+      pump = new SessionEventPump(daemon, fakeNotifier(collected), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        ...(policy ? { enforcer: new PolicyEnforcer(daemon, policy) } : {}),
+        onEvent: (_id, ev) => seen.push(ev.type),
+        onDispatch: (id) => dispatched.push(id),
+      });
+      await pump.start();
+      expect(await waitFor(() => dispatched.length >= 1)).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      return { seen, collected };
+    }
+
+    it('does not deliver a policy-auto-approved permission_request to onEvent', async () => {
+      const { seen, collected } = await runWith({
+        defaults: { action: 'prompt', requireScope: 'approve' },
+        rules: [{ id: 'ok', match: { tool: 'execute' }, action: 'allow' }],
+      });
+      expect(seen).not.toContain('permission_request');
+      expect(collected).toHaveLength(0);
+    });
+
+    it('does not deliver a policy-auto-denied permission_request to onEvent', async () => {
+      const { seen } = await runWith({
+        defaults: { action: 'prompt', requireScope: 'approve' },
+        rules: [{ id: 'no', match: { tool: 'execute' }, action: 'deny' }],
+      });
+      expect(seen).not.toContain('permission_request');
+    });
+
+    it('delivers a prompt-decision permission_request to onEvent exactly once', async () => {
+      const { seen } = await runWith({
+        defaults: { action: 'prompt', requireScope: 'approve' },
+        rules: [],
+      });
+      expect(seen.filter((t) => t === 'permission_request')).toHaveLength(1);
+    });
+
+    it('delivers permission_request to onEvent immediately when no enforcer is wired', async () => {
+      const { seen } = await runWith(undefined);
+      expect(seen.filter((t) => t === 'permission_request')).toHaveLength(1);
+    });
+  });
+
   it('updates lastEventId from numeric event ids', async () => {
     const collected: Dispatched[] = [];
     const onDispatchSeen: Array<{ id: string; event: DaemonEvent }> = [];
@@ -503,5 +578,151 @@ describe('SessionEventPump', () => {
       await waitFor(() => attempts('s1') >= 3);
       expect(attempts('s1')).toBeGreaterThanOrEqual(3);
     });
+  });
+});
+
+describe('SessionEventPump routing context and session name (issue #166)', () => {
+  const frame = (rawInput: Record<string, unknown> = {}) => ({
+    id: 7,
+    type: 'permission_request',
+    data: {
+      requestId: 'r1',
+      toolCall: {
+        toolCallId: 'tc1',
+        title: 'humanized',
+        kind: 'execute',
+        rawInput,
+      },
+      options: [{ optionId: 'ok', kind: 'allow_once' }],
+    },
+  });
+
+  it('stamps a fall-through prompt with policy.action=prompt, decisionSource=fallthrough', async () => {
+    const calls: Array<{ ctx: unknown }> = [];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [frame()],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          calls.push({ ctx });
+        },
+      },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        enforcer: new PolicyEnforcer(daemon, {
+          defaults: { action: 'prompt', requireScope: 'approve' },
+          rules: [],
+        }),
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => calls.length >= 1)).toBe(true);
+    expect(calls[0].ctx).toMatchObject({
+      sessionId: 's1',
+      routing: { policyAction: 'prompt', policyDecisionSource: 'fallthrough' },
+    });
+  });
+
+  it('stamps a rule-caused prompt with decisionSource=rule', async () => {
+    const calls: Array<{ ctx: unknown }> = [];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [frame()],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          calls.push({ ctx });
+        },
+      },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        enforcer: new PolicyEnforcer(daemon, {
+          defaults: { action: 'prompt', requireScope: 'approve' },
+          rules: [{ id: 'p', match: { tool: 'execute' }, action: 'prompt' }],
+        }),
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => calls.length >= 1)).toBe(true);
+    expect(calls[0].ctx).toMatchObject({
+      routing: { policyAction: 'prompt', policyDecisionSource: 'rule' },
+    });
+  });
+
+  it('carries no routing context without an enforcer or on a non-permission event', async () => {
+    const calls: Array<{ ctx: Record<string, unknown> }> = [];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [frame(), { id: 8, type: 'session_update', data: {} }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          calls.push({ ctx: ctx as Record<string, unknown> });
+        },
+      },
+      { pollMs: 20, reconnectMs: 0, sleep: async () => {} },
+    );
+    await pump.start();
+    expect(await waitFor(() => calls.length >= 2)).toBe(true);
+    expect(calls.every((c) => !('routing' in c.ctx))).toBe(true);
+  });
+
+  it('resolves the session name per event, so a title set after the loop started is used', async () => {
+    const names: Array<string | undefined> = [];
+    const sessions: Array<{
+      sessionId: string;
+      workspaceCwd: string;
+      displayName?: string;
+    }> = [{ sessionId: 's1', workspaceCwd: '/w' }];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions,
+      holdOpenMs: 600,
+      frames: [{ id: 1, type: 'session_update', data: {} }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    let delivered = 0;
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          names.push(ctx.sessionName);
+        },
+      },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        sessionName: (s) => s.displayName,
+        onDispatch: () => void delivered++,
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => delivered >= 1)).toBe(true);
+    expect(names[0]).toBeUndefined(); // not titled yet
+    // The daemon auto-titles the session; the next poll sees it. The stream
+    // reconnects (holdOpenMs elapses) and replays a frame.
+    sessions[0].displayName = 'my-session';
+    expect(await waitFor(() => names.includes('my-session'), 4000)).toBe(true);
   });
 });

@@ -195,6 +195,7 @@ import {
   installAsyncErrorCapture,
   jsonErrorBackstop,
 } from './middleware/errorBackstop.js';
+import { bearerMatches } from './localCredential.js';
 /** #110: the visible queue (pending prompts and mid-turn messages). */
 import {
   createMidTurnMessageEnqueueRoute,
@@ -577,6 +578,22 @@ export interface GatewayApp {
   workflowRuns?: WorkflowRunRegistry;
 }
 
+/**
+ * The JSON parser for a route mounted ahead of `bearerResolve` that has its
+ * own host-local secret (#163): the body is parsed only when the request
+ * carries `token` as its bearer. Anyone else's body is left unread, and the
+ * route's own check (which still runs, in its own order) answers them, so a
+ * caller without the secret cannot make the gateway parse a body, and cannot
+ * tell a malformed body (which would be a 400) from a refused one.
+ */
+function jsonForBearer(token: string): express.RequestHandler {
+  const json = express.json();
+  return (req, res, next) =>
+    bearerMatches(req.headers.authorization, token)
+      ? json(req, res, next)
+      : next();
+}
+
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // #155: Express 4 drops the promise an async handler returns, so a rejection
   // escaped to the process (and Node 22 exits on it). Forward it to next(err)
@@ -587,11 +604,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // whatever NODE_ENV says. The backstop answers JSON first; this covers the
   // default handler it hands an already-started response to.
   app.set('env', 'production');
-  // The JSON parser is wrapped rather than mounted bare: an attachment upload
-  // carries the file itself as the request body with the file's own media
-  // type, and a parser that claimed that body would drain the stream before
-  // the route's raw parser could read it. See routes/sessionAttachments.ts.
-  app.use(gateJsonBody(express.json()));
+  // No JSON parser here (#163). The app-wide one is mounted right after
+  // `bearerResolve` below, so an unauthenticated body is never parsed: it is
+  // a 401 whether it is malformed, oversized or fine. The few routes that sit
+  // ahead of `bearerResolve` and need a body parse it themselves (see
+  // `jsonForBearer`), and a malformed body that does get parsed reaches
+  // `jsonErrorBackstop` at the end of this function as a 400 `invalid_json`.
   // #196: one number for the upload parser, its 413 text and the capability
   // the page reads to size an image before sending it.
   // It follows the per-file cap the daemon advertises (read lazily, cached),
@@ -777,8 +795,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
+  // The pairing code is the credential and it travels in the body, so this
+  // route has to parse before anything can be authenticated.
   app.post(
     '/rc/pair/redeem',
+    express.json(),
     createPairRedeemRoute(
       deps.pairing,
       deps.store,
@@ -797,6 +818,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   if (deps.hookIngest) {
     app.post(
       '/rc/hooks/ingest',
+      jsonForBearer(deps.hookIngest.ingestToken),
       createHookIngestRoute({
         ownerEvents,
         ingestToken: deps.hookIngest.ingestToken,
@@ -822,8 +844,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       planOpts: { qwenArgv: deps.terminalQwenArgv },
       attachedWorkspaces: deps.hostAttachedWorkspaces,
     });
-    app.post('/rc/host/attach', hostAttach.create);
-    app.post('/rc/host/attach/:sessionId', hostAttach.attach);
+    const hostAttachJson = jsonForBearer(deps.hostAttach.token);
+    app.post('/rc/host/attach', hostAttachJson, hostAttach.create);
+    app.post('/rc/host/attach/:sessionId', hostAttachJson, hostAttach.attach);
   }
 
   const webRoot =
@@ -866,6 +889,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
   app.use(bearerResolve(deps.store, audit, unauthAudit));
+  // The JSON parser, only now that the caller is authenticated (#163). It is
+  // wrapped rather than mounted bare: an attachment upload carries the file
+  // itself as the request body with the file's own media type, and a parser
+  // that claimed that body would drain the stream before the route's raw
+  // parser could read it. See routes/sessionAttachments.ts.
+  app.use(gateJsonBody(express.json()));
   // Reject a non-bridge authenticated token that sends X-RC-SubActor (would
   // otherwise silently pollute attribution). Must follow bearerResolve.
   app.use(enforceSubActorScope());

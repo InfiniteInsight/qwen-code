@@ -400,6 +400,12 @@ export interface VerifyChainResult {
   ok: boolean;
   /** FIRST broken chain link per failing file (absolute path, 1-based line). */
   failures: Array<{ file: string; line: number }>;
+  /**
+   * How many audit files were actually read. 0 means nothing was checked (no
+   * directory, or no `audit-*.log` in it), which `ok: true` alone cannot tell
+   * apart from a clean pass.
+   */
+  filesChecked: number;
 }
 
 /** Result of {@link AuditLog.recover} over a single audit file. */
@@ -780,7 +786,7 @@ export class AuditLog implements AuditRecorder, AuditReader {
   static verifyChain(dir: string): VerifyChainResult {
     const failures: Array<{ file: string; line: number }> = [];
     if (!existsSync(dir)) {
-      return { ok: true, failures };
+      return { ok: true, failures, filesChecked: 0 };
     }
     let names: string[];
     try {
@@ -788,8 +794,9 @@ export class AuditLog implements AuditRecorder, AuditReader {
         .filter((f) => /^audit-.*\.log$/.test(f))
         .sort();
     } catch {
-      return { ok: true, failures };
+      return { ok: true, failures, filesChecked: 0 };
     }
+    let filesChecked = 0;
     for (const name of names) {
       const filePath = join(dir, name);
       let bytes: Buffer;
@@ -798,6 +805,7 @@ export class AuditLog implements AuditRecorder, AuditReader {
       } catch {
         continue;
       }
+      filesChecked += 1;
       let expected = sha256Hex('genesis:' + name);
       let lineNo = 0;
       let start = 0;
@@ -827,7 +835,7 @@ export class AuditLog implements AuditRecorder, AuditReader {
         expected = sha256Hex(lineBytes);
       }
     }
-    return { ok: failures.length === 0, failures };
+    return { ok: failures.length === 0, failures, filesChecked };
   }
 }
 

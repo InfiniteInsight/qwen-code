@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { loadPolicy } from './loader.js';
-import { evaluate } from './evaluator.js';
+import { evaluate, explainPolicy } from './evaluator.js';
 import type { Policy } from './loader.js';
 
 describe('evaluate', () => {
@@ -662,5 +662,59 @@ rules:
         cwd: '/proj',
       }).action,
     ).toBe('prompt');
+  });
+});
+
+describe('argsGlob whitespace normalisation (issue #166)', () => {
+  const denyRmRf = loadPolicy(`
+rules:
+  - id: no-rm-rf
+    match:
+      tool: execute
+      argsGlob: "*rm -rf*"
+    action: deny
+`);
+
+  it.each([
+    ['tab', 'rm\t-rf /tmp/x'],
+    ['newline', 'rm\n-rf /tmp/x'],
+    ['carriage return', 'rm\r-rf /tmp/x'],
+    ['vertical tab', 'rm\v-rf /tmp/x'],
+    ['form feed', 'rm\f-rf /tmp/x'],
+    ['run of mixed whitespace', 'rm \t \n -rf /tmp/x'],
+    ['non-breaking space', 'rm -rf /tmp/x'],
+  ])('a %s between rm and -rf still hits the deny (object args)', (_n, cmd) => {
+    const d = evaluate(denyRmRf, { tool: 'execute', args: { command: cmd } });
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('no-rm-rf');
+  });
+
+  it('a tab inside a plain string argument still hits the deny', () => {
+    const d = evaluate(denyRmRf, { tool: 'execute', args: 'rm\t-rf /tmp/x' });
+    expect(d.action).toBe('deny');
+  });
+
+  it('a tab in a nested array/object value is normalised too', () => {
+    const d = evaluate(denyRmRf, {
+      tool: 'execute',
+      args: { argv: ['rm\t-rf', '/tmp/x'], env: { A: 'rm\t-rf' } },
+    });
+    expect(d.action).toBe('deny');
+  });
+
+  it('a literal backslash-t in a command is not turned into whitespace', () => {
+    const d = evaluate(denyRmRf, {
+      tool: 'execute',
+      args: { command: 'echo rm\\t-rf' },
+    });
+    expect(d.action).toBe('prompt');
+  });
+
+  it('explainPolicy traces the same normalised string', () => {
+    const e = explainPolicy(denyRmRf, {
+      tool: 'execute',
+      args: { command: 'rm\t-rf /tmp/x' },
+    });
+    expect(e.decision.action).toBe('deny');
   });
 });

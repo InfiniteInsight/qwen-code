@@ -32,6 +32,8 @@ export interface AgentNotifySink {
  *  - `session_died` on the agent's session      → `failed`   + agent_failed
  *  - terminal prompt completion (onPromptSettled)→ `completed`+ agent_completed
  *  - outstanding `permission_request`           → `blocked`  + agent_blocked
+ *    (the pump only hands this over when policy did NOT auto-handle the
+ *    request, i.e. a human really is needed; see SessionEventPump `onEvent`)
  *  - `session_update` while blocked             → `running`  (no frame; the
  *    spec registers exactly five event types — resumption is visible via
  *    GET /rc/agents)

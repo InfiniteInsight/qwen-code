@@ -148,9 +148,13 @@ rules:
     fresh(
       'rules:\n  - match: { originatingClientScope: owner }\n    route: { drop: true }',
     );
-    expect(spy).toHaveBeenCalledTimes(1);
-    const msg = spy.mock.calls[0][0] as string;
-    expect(msg).toContain('route.urgency');
+    // One "not-yet-supported" warning in total (the never-carried-field warning
+    // for originatingClientScope is a separate message, tested below).
+    const unsupported = spy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((m) => m.includes('not-yet-supported'));
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]).toContain('route.urgency');
     spy.mockRestore();
   });
 
@@ -569,7 +573,11 @@ rules:
       suppressIfWorkingDevice: true
     route: { drop: true }
 `);
-    expect(spy).not.toHaveBeenCalled();
+    expect(
+      spy.mock.calls.filter((c) =>
+        (c[0] as string).includes('not-yet-supported'),
+      ),
+    ).toHaveLength(0);
     spy.mockRestore();
   });
 });
@@ -620,5 +628,49 @@ rules:
     route: { drop: true }
 `),
     ).toThrow(RoutingError);
+  });
+});
+
+describe('loader warns on a match field no event ever carries (issue #166)', () => {
+  const collect = (yaml: string): string[] => {
+    const msgs: string[] = [];
+    loadRoutingConfig(yaml, { warn: (m) => msgs.push(m) });
+    return msgs;
+  };
+
+  it.each(['originatingClientScope: owner', 'subActor: bot:1'])(
+    'warns for %s, naming the rule and the field',
+    (line) => {
+      const msgs = collect(
+        `rules:\n  - id: r1\n    match: { ${line} }\n    route: { drop: true }\n`,
+      );
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toContain("rule 'r1'");
+      expect(msgs[0]).toContain(`match.${line.split(':')[0]}`);
+      expect(msgs[0]).toContain('can never match');
+    },
+  );
+
+  it('names an id-less rule by index', () => {
+    const msgs = collect(
+      'rules:\n  - match: { kind: x }\n    route: { drop: true }\n  - match: { subActor: a }\n    route: { drop: true }\n',
+    );
+    expect(msgs[0]).toContain('rule [1]');
+  });
+
+  it('does not warn for fields an event does carry, or for plain rules', () => {
+    expect(
+      collect(
+        'rules:\n  - match: { kind: x, policy.action: prompt, policy.decisionSource: rule, suppressIfWorkingDevice: true }\n    route: { drop: true }\n',
+      ),
+    ).toEqual([]);
+  });
+
+  it('the rule is still loaded (warn, not reject)', () => {
+    const cfg = loadRoutingConfig(
+      'rules:\n  - match: { subActor: a }\n    route: { drop: true }\n',
+      { warn: () => {} },
+    );
+    expect(cfg.rules).toHaveLength(1);
   });
 });
