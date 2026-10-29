@@ -50,6 +50,7 @@ function fakes(
       subActor: string,
     ) => Promise<unknown>;
     log?: (msg: string) => void;
+    cursors?: CursorStore;
   } = {},
 ) {
   const votes: Array<{
@@ -137,6 +138,7 @@ function fakes(
       baseUrl: 'http://127.0.0.1:4170',
       pollTimeoutSec: 0,
       ...(opts.log ? { log: opts.log } : {}),
+      ...(opts.cursors ? { cursors: opts.cursors, tokenId: 'tok_t' } : {}),
       sleep: async (ms: number) => {
         sleeps.push(ms);
       },
@@ -159,6 +161,28 @@ describe('TelegramBridge runner', () => {
     // The message runs off the poll loop (#159), so the bind lands just after.
     await waitFor(() => f.subscribed.includes('sess-q'));
     expect(chats.sessionFor(7)).toBe('sess-q'); // bound to the redeemed session
+  });
+
+  it('a chat re-bound to another session drops the old session cursor (#204)', async () => {
+    await chats.bind(7, 'sess-old');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_t', 'sess-old', 5);
+    const f = fakes(
+      [
+        [
+          {
+            update_id: 1,
+            message: { message_id: 1, chat: { id: 7 }, text: '/start inv_ok' },
+          },
+        ],
+      ],
+      { cursors },
+    );
+    await f.bridge.start(f.ac.signal);
+    await waitFor(() => chats.sessionFor(7) === 'sess-q');
+    await waitFor(() => cursors.get('tok_t', 'sess-old') === undefined);
+    await cursors['inFlight'];
+    await cursors['queued'];
   });
 
   it('deliverEvent renders a permission_request to every bound chat', async () => {

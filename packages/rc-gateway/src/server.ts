@@ -329,6 +329,12 @@ export interface GatewayDeps {
    * (`--qwen-bin`), reported as `daemonQwenBin` on `/rc/capabilities`.
    */
   daemonQwenBin?: string;
+  /**
+   * Whether that binary's boot import probe passed (#191): false means the
+   * build is inconsistent and daemons and terminals started from it die on
+   * load. Omitted when the probe could not tell.
+   */
+  daemonQwenBinHealthy?: boolean;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
   /** Compiled routing matcher; notifier drop-gating wires only when set. */
@@ -1432,6 +1438,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       hostAttach: deps.hostAttach !== undefined,
       maxAttachmentBytes: attachmentLimit,
       daemonQwenBin: deps.daemonQwenBin,
+      daemonQwenBinHealthy: deps.daemonQwenBinHealthy,
       // #96: the daemon's own flag list, read per request. The gateway block
       // above stays whatever the gateway itself promises; this is the daemon's
       // answer, so the UI can finally tell the two apart.

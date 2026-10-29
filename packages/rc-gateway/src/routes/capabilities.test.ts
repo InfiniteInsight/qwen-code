@@ -287,6 +287,40 @@ describe('GET /rc/capabilities', () => {
   });
 });
 
+describe('daemonQwenBinHealthy (#191)', () => {
+  it('reports false for an inconsistent build, and true for a good one', async () => {
+    for (const healthy of [false, true]) {
+      const m = await mount({
+        daemonQwenBin: '/opt/qwen/dist/cli.js',
+        daemonQwenBinHealthy: healthy,
+      });
+      try {
+        const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+        expect(body.remoteControl.daemonQwenBinHealthy).toBe(healthy);
+      } finally {
+        await m.close();
+      }
+    }
+  });
+
+  it('leaves it out when the probe could not tell, and from a non-owner view', async () => {
+    const m = await mount({ daemonQwenBin: '/opt/qwen/dist/cli.js' });
+    const guest = await mount({ daemonQwenBinHealthy: false }, true, {
+      id: 'r',
+      scopes: ['session:read'],
+    });
+    try {
+      const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+      expect('daemonQwenBinHealthy' in body.remoteControl).toBe(false);
+      const g = await (await fetch(`${guest.base}/rc/capabilities`)).json();
+      expect('daemonQwenBinHealthy' in g.remoteControl).toBe(false);
+    } finally {
+      await m.close();
+      await guest.close();
+    }
+  });
+});
+
 describe('daemonQwenBin', () => {
   it('reports the resolved path of the binary the daemons run', async () => {
     const m = await mount({ daemonQwenBin: '/opt/qwen/dist/cli.js' });

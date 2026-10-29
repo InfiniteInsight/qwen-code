@@ -19,7 +19,9 @@ import { join } from 'node:path';
 import {
   detectBuildDrift,
   formatDaemonBinLine,
+  formatBrokenBuildWarning,
   formatDriftWarning,
+  probeDaemonBin,
   readDaemonVersion,
   resolveDaemonBin,
   resolveOnPath,
@@ -174,6 +176,103 @@ describe('readDaemonVersion', () => {
     const t0 = Date.now();
     await expect(readDaemonVersion(bin, 150)).resolves.toBeUndefined();
     expect(Date.now() - t0).toBeLessThan(3000);
+  });
+});
+
+describe('probeDaemonBin (#191)', () => {
+  const ESM_ERROR =
+    "SyntaxError: The requested module '@qwen-code/qwen-code-core' does not provide an export named 'projectGoalStateToLegacy'";
+
+  it('is healthy when --version exits 0 with a clean stderr', async () => {
+    const bin = exe(join(dir, 'probe-ok'), '#!/bin/sh\necho 0.25.3\n');
+    await expect(probeDaemonBin(bin)).resolves.toEqual({
+      version: '0.25.3',
+      healthy: true,
+      problem: undefined,
+    });
+  });
+
+  it('is unhealthy when the bundle dies on a missing export, naming the first stderr line', async () => {
+    const bin = exe(
+      join(dir, 'probe-esm'),
+      `#!/bin/sh\necho "file:///x/cli/dist/index.js:1" >&2\necho "${ESM_ERROR}" >&2\nexit 1\n`,
+    );
+    const probe = await probeDaemonBin(bin);
+    expect(probe.healthy).toBe(false);
+    expect(probe.version).toBeUndefined();
+    expect(probe.problem).toBe('file:///x/cli/dist/index.js:1');
+  });
+
+  it('is unhealthy on ERR_MODULE_NOT_FOUND', async () => {
+    const bin = exe(
+      join(dir, 'probe-nf'),
+      '#!/bin/sh\necho "Error [ERR_MODULE_NOT_FOUND]: Cannot find module \'/x/dist/a.js\'" >&2\nexit 1\n',
+    );
+    const probe = await probeDaemonBin(bin);
+    expect(probe.healthy).toBe(false);
+    expect(probe.problem).toMatch(/^Error \[ERR_MODULE_NOT_FOUND\]/);
+  });
+
+  it('is unhealthy on any non-zero exit, with the exit code when stderr is empty', async () => {
+    const bin = exe(join(dir, 'probe-exit'), '#!/bin/sh\nexit 3\n');
+    await expect(probeDaemonBin(bin)).resolves.toEqual({
+      version: undefined,
+      healthy: false,
+      problem: 'exited with code 3',
+    });
+  });
+
+  it('is unhealthy when a load error is printed even though the exit was 0', async () => {
+    const bin = exe(
+      join(dir, 'probe-zero'),
+      `#!/bin/sh\necho "${ESM_ERROR}" >&2\necho 0.25.3\n`,
+    );
+    const probe = await probeDaemonBin(bin);
+    expect(probe.healthy).toBe(false);
+    expect(probe.version).toBe('0.25.3');
+    expect(probe.problem).toBe(ESM_ERROR);
+  });
+
+  it('stays healthy when stderr carries an unrelated warning', async () => {
+    const bin = exe(
+      join(dir, 'probe-warn'),
+      '#!/bin/sh\necho "ExperimentalWarning: something" >&2\necho 1.0.0\n',
+    );
+    expect((await probeDaemonBin(bin)).healthy).toBe(true);
+  });
+
+  it('cannot say anything about a binary that is missing or too slow', async () => {
+    const missing = await probeDaemonBin(join(dir, 'probe-missing'));
+    expect(missing.healthy).toBeUndefined();
+    const slow = exe(join(dir, 'probe-slow'), '#!/bin/sh\nsleep 5\n');
+    const t0 = Date.now();
+    expect((await probeDaemonBin(slow, 150)).healthy).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(3000);
+  });
+});
+
+describe('formatBrokenBuildWarning (#191)', () => {
+  it('names the binary and first stderr line, says the build is inconsistent, and gives the fix', () => {
+    const line = formatBrokenBuildWarning('/x/qwen-fork', {
+      version: undefined,
+      healthy: false,
+      problem: 'SyntaxError: nope',
+    });
+    expect(line).toBe(
+      'qwen-rc serve: WARNING: the daemon qwen /x/qwen-fork failed its import check (SyntaxError: nope): the build is inconsistent (a workspace package was rebuilt without the packages that depend on it), so every daemon and terminal tab started from it will die on load. Fix: run `npm run build` at the fork root.',
+    );
+  });
+
+  it('says nothing for a healthy or inconclusive probe', () => {
+    for (const healthy of [true, undefined]) {
+      expect(
+        formatBrokenBuildWarning('/x/q', {
+          version: '1',
+          healthy,
+          problem: undefined,
+        }),
+      ).toBeUndefined();
+    }
   });
 });
 
