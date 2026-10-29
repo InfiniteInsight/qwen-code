@@ -104,7 +104,6 @@ import {
 import { SnoozeStore } from './routing/snooze.js';
 import {
   loadLayeredRoutingMatcher,
-  loadLayeredRoutingMatcherStrict,
   loadResolvedRoutingRules,
   formatResolvedRouting,
 } from './routing/rules.js';
@@ -201,9 +200,12 @@ import {
   FileQuotaWal,
   quotaLimitsFromPolicy,
 } from './policy/quotas.js';
-import { createPolicyHotReload, type HotReload } from './policy/hotReload.js';
+import {
+  createPolicyHotReload,
+  createRoutingHotReload,
+  type HotReload,
+} from './policy/hotReload.js';
 import { PermissionOverlayStore } from './policy/overlays.js';
-import { DebouncedReloader } from './reload/debouncedReloader.js';
 import {
   checkPolicyFilePermissions,
   formatInsecurePolicyWarning,
@@ -1276,10 +1278,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // and reason), a running gateway must not crash/widen on a half-typed save
   // (spec "Parse error preserves previous ruleset"). The workspace file is
   // model-writable (issue #156): the reload runs the same loader as boot, so it
-  // can only narrow, and createPolicyHotReload bounds how often it can run. NOTE: a rule id reused
-  // across a reload inherits its prior consumption counts (fail-safe: more
-  // prompting, not a loosening). The policy_load_error SSE frame is deferred —
-  // no gateway-level owner-broadcast surface exists yet (Phase 4).
+  // can only narrow, and createPolicyHotReload bounds how often it can run.
+  // NOTE: a rule id reused across a reload inherits its prior consumption
+  // counts (fail-safe: more prompting, not a loosening). The policy_load_error
+  // SSE frame is deferred: no gateway-level owner-broadcast surface exists yet
+  // (Phase 4).
   const watchers: FSWatcher[] = [];
   let reloader: HotReload | undefined;
   // Routing hot-reload (notification-routing spec: "hot-reloaded on change with a
@@ -1288,12 +1291,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // shares its dir watchers. The STRICT loader throws on a malformed layer so a
   // half-typed save RETAINS the prior rules (a silent fail-open would instead
   // WIDEN the fan-out). The swap is a sync notifier.setRouting; per-event
-  // atomicity is handled by notify() capturing the matcher once.
-  let routingReloader:
-    | DebouncedReloader<
-        Awaited<ReturnType<typeof loadLayeredRoutingMatcherStrict>>
-      >
-    | undefined;
+  // atomicity is handled by notify() capturing the matcher once. The workspace
+  // routing.yaml is held to the same bounds as the policy one (issue #156): it
+  // adds rules, it cannot remove or take over a user rule, and the reload is
+  // bounded and audited (routing_reloaded / routing_reload_failed with file).
+  let routingReloader: HotReload | undefined;
   if (enforcer) {
     const activeEnforcer = enforcer;
     reloader = createPolicyHotReload({
@@ -1314,31 +1316,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (notifier) {
       const activeNotifier = notifier;
       const routingPath = join(homedir(), '.qwen', 'rc', 'routing.yaml');
-      routingReloader = new DebouncedReloader({
-        load: () => loadLayeredRoutingMatcherStrict(routingPath, workspaceCwd),
+      routingReloader = createRoutingHotReload({
+        userPath: routingPath,
+        workspaceCwd,
         // Sync field swap; notify() captures the matcher once per event.
-        apply: ({ matcher }) => activeNotifier.setRouting(matcher),
-        onReloaded: ({ ruleCount }) => {
-          void audit.record({
-            action: 'routing_reloaded',
-            detail: { ruleCount },
-          });
-          // eslint-disable-next-line no-console
-          console.log(
-            `routing: reloaded (${ruleCount === 0 ? 'no' : ruleCount} rule(s))`,
-          );
-        },
-        onError: (err) => {
-          const reason = (err as Error)?.name ?? 'error';
-          void audit.record({
-            action: 'routing_reload_failed',
-            detail: { reason },
-          });
-          // eslint-disable-next-line no-console
-          console.warn(
-            `routing: reload failed, keeping previous ruleset (${reason})`,
-          );
-        },
+        apply: (matcher) => activeNotifier.setRouting(matcher),
+        audit,
       });
     }
     const activeRoutingReloader = routingReloader;
@@ -1360,7 +1343,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
               );
             }
             if (filename === null || filename === 'routing.yaml') {
-              activeRoutingReloader?.trigger();
+              activeRoutingReloader?.trigger(
+                filename === null ? undefined : join(dir, filename),
+              );
             }
           }),
         );

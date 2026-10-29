@@ -465,8 +465,21 @@ export function mergeRoutingConfigs(
   user: RoutingConfig | null,
 ): RoutingConfig | null {
   if (!workspace && !user) return null;
+  // The workspace file is untrusted (the model can write it, issue #156): it
+  // may ADD rules but cannot take over a user rule. Every user rule is kept
+  // as is, and a workspace rule that reuses a user rule's id is renamed
+  // `workspace:<id>`, so the audit trail and the suppression row name the rule
+  // that actually matched (same treatment as policy rule ids, issue #166).
+  const userIds = new Set(
+    (user?.rules ?? []).flatMap((r) => (r.id ? [r.id] : [])),
+  );
+  const workspaceRules = (workspace?.rules ?? []).map((r) =>
+    r.id !== undefined && userIds.has(r.id)
+      ? { ...r, id: `workspace:${r.id}` }
+      : r,
+  );
   const merged: RoutingConfig = {
-    rules: [...(workspace?.rules ?? []), ...(user?.rules ?? [])],
+    rules: [...workspaceRules, ...(user?.rules ?? [])],
   };
   const version = workspace?.version ?? user?.version;
   if (version !== undefined) merged.version = version;

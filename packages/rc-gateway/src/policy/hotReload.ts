@@ -11,6 +11,10 @@ import {
 } from '../reload/debouncedReloader.js';
 import type { AuditEntry } from '../auditLog.js';
 import { loadLayeredPolicy, type Policy } from './loader.js';
+import {
+  loadLayeredRoutingMatcherStrict,
+  type RoutingMatcher,
+} from '../routing/rules.js';
 
 /**
  * Hot reload of the policy and routing files (issue #156, second half).
@@ -203,6 +207,46 @@ export function createPolicyHotReload(opts: PolicyHotReloadOptions): HotReload {
     label: 'policy',
     audit: opts.audit,
     log,
+    timing: opts.timing,
+  });
+}
+
+export interface RoutingHotReloadOptions {
+  userPath: string;
+  workspaceCwd: string | undefined;
+  /** Swap the compiled matcher in. MUST be synchronous. */
+  apply: (matcher: RoutingMatcher | undefined) => void;
+  audit: { record(entry: AuditEntry): Promise<void> };
+  log?: HotReloadLog;
+  timing?: Timing;
+}
+
+/**
+ * Hot reload of the layered routing rules, through the STRICT loader: a
+ * malformed layer is refused and the previous matcher stays.
+ */
+export function createRoutingHotReload(
+  opts: RoutingHotReloadOptions,
+): HotReload {
+  return createHotReload<{
+    matcher: RoutingMatcher | undefined;
+    ruleCount: number;
+  }>({
+    files: [
+      opts.userPath,
+      ...(opts.workspaceCwd
+        ? [join(opts.workspaceCwd, '.qwen', 'routing.yaml')]
+        : []),
+    ],
+    load: () =>
+      loadLayeredRoutingMatcherStrict(opts.userPath, opts.workspaceCwd),
+    apply: ({ matcher }) => opts.apply(matcher),
+    reloaded: 'routing_reloaded',
+    failed: 'routing_reload_failed',
+    appliedDetail: ({ ruleCount }) => ({ ruleCount }),
+    label: 'routing',
+    audit: opts.audit,
+    log: opts.log ?? defaultLog,
     timing: opts.timing,
   });
 }
