@@ -119,8 +119,13 @@ export async function createAcmeClient(): Promise<AcmeClient> {
         altNames: req.domains,
       });
       const handles = new Map<string, DnsChallengeHandle>();
-      const key = (a: AcmeAuthz, c: AcmeChallenge) =>
-        `${a.identifier.value}|${c.type}`;
+      // #165: `example.com` and `*.example.com` are two authorizations with
+      // the SAME identifier (`example.com`) and challenge type, so a key of
+      // identifier + type made the wildcard's handle overwrite the apex's and
+      // the apex's TXT record was never cleaned up. The key authorization is
+      // unique per challenge and is handed to both callbacks.
+      const key = (a: AcmeAuthz, c: AcmeChallenge, keyAuthorization: string) =>
+        `${a.identifier.value}|${c.type}|${keyAuthorization}`;
 
       const fullchain = await client.auto({
         csr,
@@ -139,12 +144,14 @@ export async function createAcmeClient(): Promise<AcmeClient> {
           // the one line to revisit (digest vs raw).
           const fqdn = `_acme-challenge.${authz.identifier.value}`;
           handles.set(
-            key(authz, challenge),
+            key(authz, challenge, keyAuthorization),
             await provider.present({ fqdn, value: keyAuthorization }),
           );
         },
-        challengeRemoveFn: async (authz, challenge) => {
-          const handle = handles.get(key(authz, challenge));
+        challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
+          const k = key(authz, challenge, keyAuthorization);
+          const handle = handles.get(k);
+          handles.delete(k);
           if (handle) await provider.cleanup(handle);
         },
       });

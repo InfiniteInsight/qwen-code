@@ -48,7 +48,7 @@ describe('Route53DnsProvider', () => {
       hostedZoneId: 'Z1',
       action: 'UPSERT',
       name: record.fqdn,
-      value: record.value,
+      values: [record.value],
       ttl: 60,
     });
     expect(handle).toMatchObject({
@@ -73,7 +73,7 @@ describe('Route53DnsProvider', () => {
       hostedZoneId: 'Z1',
       action: 'DELETE',
       name: record.fqdn,
-      value: record.value,
+      values: [record.value],
       ttl: 60,
     });
   });
@@ -110,5 +110,77 @@ describe('Route53DnsProvider', () => {
       pollIntervalMs: 1000,
     });
     await expect(provider.present(record)).rejects.toThrow(/INSYNC/);
+  });
+});
+
+describe('#165 apex plus wildcard share one challenge name', () => {
+  /**
+   * Route53's own semantics for one TXT name: an UPSERT replaces the whole
+   * record set, and a DELETE must name the current set exactly or it fails.
+   * Reads either the old single `value` or a `values` list, so the same test
+   * runs against both shapes of the client input.
+   */
+  function rrsetClient(latencyMs: (n: number) => number = () => 0) {
+    const sets = new Map<string, string[]>();
+    let n = 0;
+    const client: Route53Client & { sets: Map<string, string[]> } = {
+      sets,
+      async changeTxtRecord(input) {
+        const raw = input as Route53ChangeInput & {
+          value?: string;
+          values?: string[];
+        };
+        const vals = raw.values ?? (raw.value !== undefined ? [raw.value] : []);
+        await new Promise((r) => setTimeout(r, latencyMs(n++)));
+        if (input.action === 'UPSERT') {
+          sets.set(input.name, [...vals]);
+        } else {
+          const cur = sets.get(input.name) ?? [];
+          const same =
+            cur.length === vals.length && cur.every((v) => vals.includes(v));
+          if (!same) throw new Error('InvalidChangeBatch: values do not match');
+          sets.delete(input.name);
+        }
+        return { changeId: `/change/${n}` };
+      },
+      async getChangeStatus() {
+        return 'INSYNC';
+      },
+    };
+    return client;
+  }
+  const fqdn = '_acme-challenge.qwen.example.com';
+
+  it('both values are live at once while the CA validates', async () => {
+    // The apex's write lands after the wildcard's, as concurrent API calls can.
+    const client = rrsetClient((i) => (i === 0 ? 20 : 0));
+    const provider = new Route53DnsProvider({
+      client,
+      hostedZoneId: 'Z1',
+      sleep: async () => {},
+    });
+    await Promise.all([
+      provider.present({ fqdn, value: 'apex-token' }),
+      provider.present({ fqdn, value: 'wildcard-token' }),
+    ]);
+    expect([...(client.sets.get(fqdn) ?? [])].sort()).toEqual([
+      'apex-token',
+      'wildcard-token',
+    ]);
+  });
+
+  it('cleaning one up keeps the other, and the last one removes the record', async () => {
+    const client = rrsetClient();
+    const provider = new Route53DnsProvider({
+      client,
+      hostedZoneId: 'Z1',
+      sleep: async () => {},
+    });
+    const a = await provider.present({ fqdn, value: 'apex-token' });
+    const w = await provider.present({ fqdn, value: 'wildcard-token' });
+    await provider.cleanup(a);
+    expect(client.sets.get(fqdn)).toEqual(['wildcard-token']);
+    await provider.cleanup(w);
+    expect(client.sets.has(fqdn)).toBe(false);
   });
 });

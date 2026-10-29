@@ -26,8 +26,12 @@ export interface Route53ChangeInput {
   action: 'UPSERT' | 'DELETE';
   /** Record name (FQDN), e.g. `_acme-challenge.qwen.example.com`. */
   name: string;
-  /** Raw TXT value; the client quotes it as Route53 requires. */
-  value: string;
+  /**
+   * Every raw TXT value of the record set: what an UPSERT sets it to, or
+   * what a DELETE removes (Route53 requires a DELETE to name the current set
+   * exactly). The client quotes each as Route53 requires.
+   */
+  values: string[];
   ttl: number;
 }
 
@@ -57,36 +61,87 @@ const DEFAULTS = { ttl: 60, pollIntervalMs: 2000, maxWaitMs: 120_000 };
 export class Route53DnsProvider implements DnsProvider {
   readonly name = 'route53';
 
+  /**
+   * Challenge values this provider currently has live, per record name
+   * (#165). `example.com` and `*.example.com` are validated through the
+   * SAME name, `_acme-challenge.example.com`, with different values, and an
+   * UPSERT replaces the whole record set: writing one value at a time made
+   * the wildcard's write erase the apex's while the CA was still checking it.
+   */
+  private readonly live = new Map<string, string[]>();
+  /** Per-name queue, so each change is built from the set the last one left. */
+  private readonly queues = new Map<string, Promise<void>>();
+
   constructor(private readonly opts: Route53ProviderOptions) {}
 
   async present(record: DnsChallengeRecord): Promise<DnsChallengeHandle> {
-    const { changeId } = await this.opts.client.changeTxtRecord({
-      hostedZoneId: this.opts.hostedZoneId,
-      action: 'UPSERT',
-      name: record.fqdn,
-      value: record.value,
-      ttl: this.opts.ttl ?? DEFAULTS.ttl,
+    const zone = this.opts.hostedZoneId;
+    const changeId = await this.serialized(record.fqdn, async () => {
+      const values = [
+        ...(this.live.get(record.fqdn) ?? []).filter((v) => v !== record.value),
+        record.value,
+      ];
+      const res = await this.opts.client.changeTxtRecord({
+        hostedZoneId: zone,
+        action: 'UPSERT',
+        name: record.fqdn,
+        values,
+        ttl: this.opts.ttl ?? DEFAULTS.ttl,
+      });
+      this.live.set(record.fqdn, values);
+      return res.changeId;
     });
+    // Outside the queue: Route53 applies changes in submission order, and a
+    // later change only adds to this value, so waiting here need not hold
+    // up the other challenge's write.
     await this.waitInSync(changeId);
     return {
       ...record,
-      hostedZoneId: this.opts.hostedZoneId,
+      hostedZoneId: zone,
       changeId,
     };
   }
 
   async cleanup(handle: DnsChallengeHandle): Promise<void> {
+    await this.serialized(handle.fqdn, async () => {
+      const current = this.live.get(handle.fqdn) ?? [handle.value];
+      const rest = current.filter((v) => v !== handle.value);
+      try {
+        await this.opts.client.changeTxtRecord({
+          hostedZoneId: String(
+            handle['hostedZoneId'] ?? this.opts.hostedZoneId,
+          ),
+          // Another challenge still uses the name: keep its value.
+          action: rest.length > 0 ? 'UPSERT' : 'DELETE',
+          name: handle.fqdn,
+          values: rest.length > 0 ? rest : [handle.value],
+          ttl: this.opts.ttl ?? DEFAULTS.ttl,
+        });
+      } catch {
+        // Best-effort: a missing record (already gone) must not surface. Cleanup
+        // runs after an order completes OR fails, and must never mask the cause.
+      } finally {
+        if (rest.length > 0) this.live.set(handle.fqdn, rest);
+        else this.live.delete(handle.fqdn);
+      }
+    });
+  }
+
+  /** Run `fn` after every earlier change to `name` has been submitted. */
+  private async serialized<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.queues.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((r) => {
+      release = r;
+    });
+    const tail = prev.then(() => mine);
+    this.queues.set(name, tail);
+    await prev;
     try {
-      await this.opts.client.changeTxtRecord({
-        hostedZoneId: String(handle['hostedZoneId'] ?? this.opts.hostedZoneId),
-        action: 'DELETE',
-        name: handle.fqdn,
-        value: handle.value,
-        ttl: this.opts.ttl ?? DEFAULTS.ttl,
-      });
-    } catch {
-      // Best-effort: a missing record (already gone) must not surface — cleanup
-      // runs after an order completes OR fails, and must never mask the cause.
+      return await fn();
+    } finally {
+      release();
+      if (this.queues.get(name) === tail) this.queues.delete(name);
     }
   }
 
@@ -150,7 +205,7 @@ export async function createRoute53Client(
     opts.region ? { region: opts.region } : {},
   );
   return {
-    async changeTxtRecord({ hostedZoneId, action, name, value, ttl }) {
+    async changeTxtRecord({ hostedZoneId, action, name, values, ttl }) {
       const res = (await client.send(
         new sdk.ChangeResourceRecordSetsCommand({
           HostedZoneId: hostedZoneId,
@@ -163,7 +218,7 @@ export async function createRoute53Client(
                   Type: 'TXT',
                   TTL: ttl,
                   // Route53 requires TXT values double-quoted.
-                  ResourceRecords: [{ Value: `"${value}"` }],
+                  ResourceRecords: values.map((v) => ({ Value: `"${v}"` })),
                 },
               },
             ],

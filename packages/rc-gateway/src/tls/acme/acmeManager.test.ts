@@ -12,6 +12,7 @@ import {
 } from './acmeManager.js';
 import type { CertBundle } from './certStore.js';
 import type { DnsProvider } from './dnsProvider.js';
+import { GW_TEST_LEAF_CERT } from '../../testing/tlsChainFixture.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-01-01T00:00:00Z').getTime();
@@ -78,15 +79,19 @@ function fakeTimers() {
   };
 }
 
-function storedBundle(notAfterMs: number): CertBundle {
+/** A stored 90-day cert (the Let's Encrypt shape) expiring at `notAfterMs`. */
+function storedBundle(
+  notAfterMs: number,
+  domains: string[] = ['qwen.example.com'],
+): CertBundle {
   return {
     cert: 'old',
     chain: 'c',
     privateKey: 'k',
     meta: {
-      domains: ['qwen.example.com'],
+      domains,
       notAfter: new Date(notAfterMs).toISOString(),
-      issuedAt: new Date(NOW).toISOString(),
+      issuedAt: new Date(notAfterMs - 90 * DAY).toISOString(),
     },
   };
 }
@@ -224,5 +229,186 @@ describe('AcmeManager', () => {
       clearTimer: t.clearTimer,
     });
     await expect(mgr.start()).rejects.toThrow(/could not obtain/);
+  });
+});
+
+describe('#165 AcmeManager renewal timing and bookkeeping', () => {
+  /** A CA that issues certs valid for `lifetimeMs` from the moment asked. */
+  function shortLivedClient(clock: () => number, lifetimeMs: number) {
+    const calls = { n: 0 };
+    const client: AcmeClient = {
+      async obtainCertificate() {
+        calls.n += 1;
+        return {
+          cert: `cert${calls.n}`,
+          chain: 'chain',
+          privateKey: 'key',
+          notAfter: new Date(clock() + lifetimeMs),
+        };
+      },
+    };
+    return { client, calls };
+  }
+
+  it('a private CA issuing 24h leafs is not re-ordered on every wake', async () => {
+    let clock = NOW;
+    const { client, calls } = shortLivedClient(() => clock, DAY);
+    const t = fakeTimers();
+    const mgr = new AcmeManager({
+      ...base,
+      client,
+      store: fakeStore(null),
+      maxTimerMs: SIX_H,
+      now: () => clock,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    });
+    await mgr.start();
+    // Five wakes, the clock advancing by whatever each wake was armed for.
+    for (let i = 0; i < 5; i++) {
+      const armed = t.armed[t.armed.length - 1]!;
+      expect(armed.ms).toBeGreaterThan(0);
+      clock += armed.ms;
+      await t.fireLast();
+    }
+    // 30h of wall clock with a 24h leaf renewed at half life: the initial
+    // order plus renewals at 12h and 24h. Main ordered on all five wakes.
+    expect(clock - NOW).toBe(30 * 60 * 60 * 1000);
+    expect(calls.n).toBe(3);
+  });
+
+  it('a 6-day cert renews two days before expiry, not thirty', async () => {
+    const store = fakeStore({
+      ...storedBundle(NOW + 5 * DAY),
+      meta: {
+        domains: ['qwen.example.com'],
+        notAfter: new Date(NOW + 5 * DAY).toISOString(),
+        issuedAt: new Date(NOW - DAY).toISOString(),
+      },
+    });
+    const { client, calls } = fakeClient(new Date(NOW + 90 * DAY));
+    const t = fakeTimers();
+    const mgr = new AcmeManager({
+      ...base,
+      client,
+      store,
+      now: () => NOW,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    });
+    await mgr.start();
+    expect(calls.n).toBe(0);
+    expect(t.armed[0]!.ms).toBe(SIX_H);
+  });
+
+  it('a meta.json with no notAfter renews now instead of spinning on a NaN timer', async () => {
+    const stored = storedBundle(NOW + 90 * DAY);
+    const store = fakeStore({
+      ...stored,
+      meta: { ...stored.meta, notAfter: undefined as unknown as string },
+    });
+    const { client, calls } = fakeClient(new Date(NOW + 90 * DAY));
+    const t = fakeTimers();
+    const mgr = new AcmeManager({
+      ...base,
+      client,
+      store,
+      now: () => NOW,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    });
+    await mgr.start();
+    expect(calls.n).toBe(1);
+    for (const a of t.armed) {
+      expect(Number.isFinite(a.ms)).toBe(true);
+      expect(a.ms).toBeGreaterThan(0);
+    }
+  });
+
+  it('a meta.json with no notAfter reads the expiry from the certificate itself', async () => {
+    const store = fakeStore({
+      cert: GW_TEST_LEAF_CERT,
+      chain: '',
+      privateKey: 'k',
+      meta: {
+        domains: ['qwen.example.com'],
+        notAfter: undefined as unknown as string,
+        issuedAt: undefined as unknown as string,
+      },
+    });
+    const { client, calls } = fakeClient(new Date(NOW + 90 * DAY));
+    const t = fakeTimers();
+    const mgr = new AcmeManager({
+      ...base,
+      client,
+      store,
+      now: () => NOW,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    });
+    await mgr.start();
+    // The fixture leaf is valid for a century: nothing to renew.
+    expect(calls.n).toBe(0);
+    expect(t.armed[0]!.ms).toBeGreaterThan(0);
+  });
+
+  it('adding a domain orders a new certificate at start', async () => {
+    const store = fakeStore(storedBundle(NOW + 80 * DAY));
+    const { client, calls } = fakeClient(new Date(NOW + 90 * DAY));
+    const t = fakeTimers();
+    const mgr = new AcmeManager({
+      ...base,
+      domains: ['qwen.example.com', 'alt.example.com'],
+      client,
+      store,
+      now: () => NOW,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    });
+    const bundle = await mgr.start();
+    expect(calls.n).toBe(1);
+    expect(bundle.meta.domains).toEqual([
+      'qwen.example.com',
+      'alt.example.com',
+    ]);
+  });
+
+  it('removing a domain keeps serving the stored cert, which still covers the rest', async () => {
+    const store = fakeStore(
+      storedBundle(NOW + 80 * DAY, ['qwen.example.com', 'alt.example.com']),
+    );
+    const { client, calls } = fakeClient(new Date(NOW + 90 * DAY));
+    const t = fakeTimers();
+    const mgr = new AcmeManager({
+      ...base,
+      client,
+      store,
+      now: () => NOW,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    });
+    await mgr.start();
+    expect(calls.n).toBe(0);
+  });
+
+  it('a CA handing back an already-due cert backs off instead of looping', async () => {
+    const clock = NOW;
+    const { client, calls } = shortLivedClient(() => clock, -DAY);
+    const t = fakeTimers();
+    const log = vi.fn();
+    const mgr = new AcmeManager({
+      ...base,
+      client,
+      store: fakeStore(null),
+      baseBackoffMs: 5 * 60 * 1000,
+      now: () => clock,
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+      log,
+    });
+    await mgr.start();
+    expect(calls.n).toBe(1);
+    expect(t.armed[0]!.ms).toBe(5 * 60 * 1000);
+    expect(log).toHaveBeenCalled();
   });
 });
