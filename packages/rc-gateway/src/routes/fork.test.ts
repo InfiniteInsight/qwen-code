@@ -23,7 +23,7 @@ import { WorkspacePoolFullError } from '../daemonPool.js';
 import { resolveChatsDir, archiveChatsDirOf } from '../sessions/chatsPath.js';
 import { createForkRoute } from './fork.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
-import { decodeSegment } from '../wal.js';
+import { decodeSegment, getSharedWal } from '../wal.js';
 import { listSessions } from '../sessions/sessionList.js';
 import { parentOf } from '../sessions/lineage.js';
 import { readParentRecords } from '../sessions/forkStore.js';
@@ -578,6 +578,44 @@ describe('fork route', () => {
         (f) => f.type === 'session_forked',
       );
       expect(forkedFrame?.id).toBe(11); // fromEventId(10) + 1
+    });
+
+    it('the parent marker lands above what the parent WAL already holds, never on one of its ids (#174)', async () => {
+      // fromEventId counts transcript records; it is not a WAL id. Once the
+      // WAL is wired the parent's log already holds relayed frames, and the
+      // old fromEventId + 1 anchor wrote a second frame under an id it had.
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const bus = new OwnerEventBus();
+      const received: OwnerEvent[] = [];
+      bus.subscribe((e) => received.push(e));
+      const walDir = join(runtimeBase, 'wal-live-parent');
+      const parent = getSharedWal(walDir, PARENT_ID);
+      for (let id = 1; id <= 5; id++) {
+        parent.append({ id, v: 1, type: 'session_update', data: {} });
+      }
+      const url = await mount({
+        daemon,
+        audit,
+        randomId: () => NEW_ID,
+        bus,
+        walDir,
+      });
+      const res = await postFork(url, { fromEventId: 2 });
+      expect(res.status).toBe(200);
+
+      const frames = [
+        ...decodeSegment(join(walDir, 'wal', `${PARENT_ID}.log`)),
+      ];
+      expect(frames.map((f) => f.id)).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(frames.find((f) => f.type === 'session_forked')?.id).toBe(6);
+      const published = received.find(
+        (e) => e.type === 'session_event' && e.sessionId === PARENT_ID,
+      );
+      expect(
+        published?.type === 'session_event' ? published.event.id : undefined,
+      ).toBe(6);
     });
 
     it('no SSE/WAL side effects when bus and walDir are absent', async () => {

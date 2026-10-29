@@ -493,6 +493,35 @@ The phone UI shows a non-blocking banner above the transcript:
 - **`session_recovered`** — clears the crash banner and briefly shows
   "session recovered" (auto-fades).
 
+### The session WAL
+
+The durable replay and id renumbering above live in the gateway's
+session write-ahead log (WAL), which is on by default:
+
+| Flag                       | Environment                  | Default      | Effect                                                                                                                             |
+| -------------------------- | ---------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `--wal-dir <dir>`          | `QWEN_RC_WAL_DIR`            | `~/.qwen/rc` | The WAL is written to `<dir>/wal/`, so `~/.qwen/rc/wal/` by default. That directory is created owner-only (0700).                  |
+| `--no-wal`                 | `QWEN_RC_NO_WAL=1`           | off          | Run without a WAL: one daemon subscription per watcher, raw event ids, no durable replay, no marker frames. Wins over `--wal-dir`. |
+| `--wal-retention-days <n>` | `QWEN_RC_WAL_RETENTION_DAYS` | `7`          | A session whose WAL has not been written for this many days is removed.                                                            |
+| `--wal-max-mb <n>`         | `QWEN_RC_WAL_MAX_MB`         | `512`        | Past this size, the least recently written sessions are removed until the WAL fits.                                                |
+
+The boot log names the directory in use (`session WAL: /home/you/.qwen/rc/wal ...`)
+or says the WAL is off. With the WAL on, every watcher of a session
+shares one daemon subscription: each event is written to the WAL once
+and handed to every watcher, and a client that reconnects with
+`Last-Event-ID` replays what it missed from the WAL. A client whose
+`Last-Event-ID` is older than anything the WAL still holds gets
+`412 replay_truncated` with `recovery: "reload"`: reload the
+conversation in full (`POST /session/:id/resume`) and watch from that
+response's `lastEventId`.
+
+Each session's log is capped as it is written (10,000 events, 24
+hours). On top of that the WAL directory is swept at boot and every
+hour: a session's files are removed as a unit, a session that is being
+watched is never removed, and a sweep that removed anything writes one
+`wal_pruned` audit row with counts and the bounds (no session ids or
+paths).
+
 ### Audit and notifications
 
 | Audit action          | When                             | Detail                               |

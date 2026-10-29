@@ -11,7 +11,12 @@ import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { UnknownSessionError, type RecoveryState } from '../daemonPool.js';
-import { createSessionEventsRoute } from './sessionEvents.js';
+import {
+  createSessionEventsRoute,
+  gatewayCursorForDaemonCursor,
+  withGatewayResumeCursor,
+  isSessionRelayLive,
+} from './sessionEvents.js';
 import { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
@@ -641,11 +646,21 @@ describe('session-events WAL integration', () => {
     expect(res.status).toBe(412);
     const body = (await res.json()) as {
       type: string;
-      data: { earliestAvailableId: number | null; reason: string };
+      data: {
+        earliestAvailableId: number | null;
+        reason: string;
+        recovery: string;
+        lastEventId: number | null;
+      };
     };
     expect(body.type).toBe('replay_truncated');
     expect(body.data.reason).toBe('older_than_wal_horizon');
     expect(body.data.earliestAvailableId).toBe(10);
+    // #150: reload the whole history from the load response, not from the
+    // boundary; the head is the cursor to watch from if that load carries
+    // no watermark of its own.
+    expect(body.data.recovery).toBe('reload');
+    expect(body.data.lastEventId).toBe(11);
   });
 });
 
@@ -915,6 +930,685 @@ describe('walEpoch sidecar (add-mid-turn-recovery §4)', () => {
       '{"epochOffset":"x","lastOutId":3}',
     );
     expect(loadEpochState(walDir, SID)).toEqual(CONSERVATIVE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #174: one daemon subscription per session, shared by every watcher
+// ---------------------------------------------------------------------------
+
+type BusFrame = {
+  id?: number;
+  v: number;
+  type: string;
+  data: unknown;
+};
+
+type SubscribeOpts = {
+  lastEventId?: number;
+  epoch?: string;
+  onEpoch?: (epoch: string) => void;
+  signal?: AbortSignal;
+};
+
+/**
+ * A daemon whose session bus behaves like acp-bridge's EventBus where it
+ * matters here: every subscriber receives every published frame under the SAME
+ * raw id, a cursor replays the ring past it and closes with an id-less
+ * `replay_complete`, a cursor this epoch never produced (or a mismatched epoch
+ * token) gets an id-less `state_resync_required` and the whole ring, and a
+ * restart starts a new epoch whose ids begin at 1 again. The stub daemon used
+ * above streams a fixed script per request and ignores cursors, so it cannot
+ * show two watchers sharing one bus.
+ */
+class FakeBusDaemon {
+  epoch = 'epoch-1';
+  /** When false the bus does not report its epoch token (an old daemon). */
+  sendEpoch = true;
+  private nextId = 1;
+  private ring: BusFrame[] = [];
+  private readonly subs = new Set<{
+    push: (f: BusFrame | 'end' | Error) => void;
+  }>();
+  /** What every subscribeEvents call asked for, in order. */
+  readonly subscriptions: Array<{ lastEventId?: number; epoch?: string }> = [];
+
+  get liveSubscribers(): number {
+    return this.subs.size;
+  }
+
+  publish(text: string): number {
+    const frame: BusFrame = {
+      id: this.nextId++,
+      v: 1,
+      type: 'session_update',
+      data: { text },
+    };
+    this.ring.push(frame);
+    for (const s of this.subs) s.push(frame);
+    return frame.id!;
+  }
+
+  /** Burn ids the way a load's seeded replay does: consumed, never streamed. */
+  burnIds(n: number): void {
+    this.nextId += n;
+    this.ring.length = 0;
+  }
+
+  /** Daemon restart: every stream drops, the next epoch's ids restart at 1. */
+  restart(epoch: string): void {
+    for (const s of this.subs) s.push(new Error('daemon restarted'));
+    this.subs.clear();
+    this.epoch = epoch;
+    this.nextId = 1;
+    this.ring = [];
+  }
+
+  subscribeEvents(
+    _sessionId: string,
+    opts: SubscribeOpts = {},
+  ): AsyncGenerator<BusFrame> {
+    return this.stream(opts);
+  }
+
+  private async *stream(opts: SubscribeOpts): AsyncGenerator<BusFrame> {
+    const queue: Array<BusFrame | 'end' | Error> = [];
+    let wake: (() => void) | undefined;
+    const sub = {
+      push(f: BusFrame | 'end' | Error) {
+        queue.push(f);
+        wake?.();
+      },
+    };
+    this.subs.add(sub);
+    this.subscriptions.push({
+      lastEventId: opts.lastEventId,
+      epoch: opts.epoch,
+    });
+    if (this.sendEpoch) opts.onEpoch?.(this.epoch);
+    if (opts.lastEventId !== undefined) {
+      const reset =
+        (opts.epoch !== undefined && opts.epoch !== this.epoch) ||
+        opts.lastEventId >= this.nextId;
+      const earliest = this.ring[0]?.id;
+      const gap = reset
+        ? 'epoch_reset'
+        : earliest === undefined && opts.lastEventId < this.nextId - 1
+          ? 'seeded_replay_not_in_ring'
+          : earliest !== undefined && earliest > opts.lastEventId + 1
+            ? 'ring_evicted'
+            : undefined;
+      if (gap !== undefined) {
+        queue.push({
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: gap },
+        });
+      }
+      const from = reset ? 0 : opts.lastEventId;
+      let n = 0;
+      for (const f of this.ring) {
+        if (f.id! > from) {
+          queue.push(f);
+          n++;
+        }
+      }
+      queue.push({ v: 1, type: 'replay_complete', data: { replayedCount: n } });
+    }
+    const onAbort = () => sub.push('end');
+    opts.signal?.addEventListener('abort', onAbort);
+    try {
+      for (;;) {
+        while (queue.length === 0) {
+          await new Promise<void>((r) => (wake = r));
+          wake = undefined;
+        }
+        const next = queue.shift()!;
+        if (next === 'end') return;
+        if (next instanceof Error) throw next;
+        yield next;
+      }
+    } finally {
+      this.subs.delete(sub);
+      opts.signal?.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
+type SseFrame = { id?: number; ev: { type?: string; data?: unknown } };
+
+/** A watcher held open, its frames collected as they arrive. */
+interface SseClient {
+  status: number;
+  frames: SseFrame[];
+  ids(): number[];
+  waitFor(pred: (frames: SseFrame[]) => boolean, ms?: number): Promise<void>;
+  close(): void;
+}
+
+async function openWatcher(
+  url: string,
+  headers: Record<string, string> = {},
+): Promise<SseClient> {
+  const ac = new AbortController();
+  const res = await fetch(url, { headers, signal: ac.signal });
+  const frames: SseFrame[] = [];
+  if (res.ok && res.body) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    void (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buf += decoder.decode(value, { stream: true });
+          const blocks = buf.split('\n\n');
+          buf = blocks.pop() ?? '';
+          for (const block of blocks) {
+            const lines = block.split('\n');
+            const data = lines.find((l) => l.startsWith('data:'));
+            if (!data) continue;
+            const idLine = lines.find((l) => l.startsWith('id:'));
+            frames.push({
+              id: idLine ? Number(idLine.slice(3).trim()) : undefined,
+              ev: JSON.parse(data.slice(5).trim()),
+            });
+          }
+        }
+      } catch {
+        // aborted by close()
+      }
+    })();
+  }
+  return {
+    status: res.status,
+    frames,
+    ids: () =>
+      frames.filter((f) => f.id !== undefined).map((f) => f.id as number),
+    async waitFor(pred, ms = 3000) {
+      const deadline = Date.now() + ms;
+      while (!pred(frames)) {
+        if (Date.now() > deadline) {
+          throw new Error(
+            `timed out; frames so far: ${JSON.stringify(frames.map((f) => [f.id, f.ev.type]))}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    },
+    close: () => ac.abort(),
+  };
+}
+
+async function until(pred: () => boolean, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error('condition never held');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+const joined = (fs: SseFrame[]) =>
+  fs.some((f) => f.ev.type === 'client_joined');
+
+async function mountFanout(
+  bus: FakeBusDaemon,
+  walDir: string,
+  hubGraceMs = 100,
+): Promise<string> {
+  const app = express();
+  app.get(
+    '/session/:id/events',
+    createSessionEventsRoute(
+      bus as unknown as DaemonClient,
+      new ConnectionRegistry(),
+      undefined,
+      undefined,
+      walDir,
+      undefined,
+      undefined,
+      50, // idleAttachMs: the fake bus is silent until a test publishes
+      undefined,
+      undefined,
+      hubGraceMs,
+    ),
+  );
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  gateway = server;
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+describe('session-events fan-out: one daemon subscription per session (#174)', () => {
+  const clients: SseClient[] = [];
+  afterEach(() => {
+    for (const c of clients.splice(0)) c.close();
+    // A watcher closed mid-test leaves the client's spare keep-alive sockets
+    // behind, which would hold the gateway's close() for the 5s keep-alive.
+    gateway?.closeAllConnections();
+  });
+  const watch = async (url: string, headers?: Record<string, string>) => {
+    const c = await openWatcher(url, headers);
+    clients.push(c);
+    return c;
+  };
+
+  it('two concurrent watchers see the same ids and the WAL holds each frame once', async () => {
+    // The probe from the audit: phone saw 1,3,5, laptop 2,4,6, and the WAL held
+    // every frame twice, because each watcher ran its own daemon subscription
+    // against one shared epoch and one WAL.
+    const sid = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    const phone = await watch(url);
+    const laptop = await watch(url);
+    await phone.waitFor(joined);
+    await laptop.waitFor(joined);
+
+    bus.publish('one');
+    bus.publish('two');
+    bus.publish('three');
+    await phone.waitFor(() => phone.ids().length >= 3);
+    await laptop.waitFor(() => laptop.ids().length >= 3);
+
+    expect(phone.ids()).toEqual([1, 2, 3]);
+    expect(laptop.ids()).toEqual([1, 2, 3]);
+    expect(bus.subscriptions).toHaveLength(1);
+    const wal = new SessionWal({ dir: walDir, sessionId: sid });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
+    wal.close();
+  });
+
+  it('a watcher joining late resumes from its own Last-Event-ID on the shared subscription', async () => {
+    const sid = 'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    const first = await watch(url);
+    await first.waitFor(joined);
+    bus.publish('one');
+    bus.publish('two');
+    await first.waitFor(() => first.ids().length >= 2);
+
+    // Saw 1 before it dropped: the WAL hands it 2, then the live stream.
+    const late = await watch(url, { 'Last-Event-ID': '1' });
+    await late.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+    // A watcher with no cursor asked for no history, as with the daemon.
+    const live = await watch(url);
+    await live.waitFor(joined);
+
+    bus.publish('three');
+    for (const c of [first, late, live]) {
+      await c.waitFor(() => c.ids().includes(3));
+    }
+
+    expect(first.ids()).toEqual([1, 2, 3]);
+    expect(late.ids()).toEqual([2, 3]);
+    expect(live.ids()).toEqual([3]);
+    // Its own replay is closed by its own sentinel, after the replayed frame
+    // and before the live one.
+    const order = late.frames
+      .filter((f) => f.id !== undefined || f.ev.type === 'replay_complete')
+      .map((f) => f.id ?? 'replay_complete');
+    expect(order).toEqual([2, 'replay_complete', 3]);
+    expect(bus.subscriptions).toHaveLength(1);
+    const wal = new SessionWal({ dir: walDir, sessionId: sid });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
+    wal.close();
+  });
+
+  it('reports a session as live while its shared subscription is up, so retention leaves its WAL alone', async () => {
+    const sid = 'a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    expect(isSessionRelayLive(walDir, sid)).toBe(false);
+    const w = await watch(url);
+    await w.waitFor(joined);
+    expect(isSessionRelayLive(walDir, sid)).toBe(true);
+    w.close();
+    await until(() => bus.liveSubscribers === 0);
+    expect(isSessionRelayLive(walDir, sid)).toBe(false);
+  });
+
+  it('a watcher leaving keeps the others fed; the last one leaving closes the upstream after the grace', async () => {
+    const sid = 'a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fan-'));
+    const url = `${await mountFanout(bus, walDir, 150)}/session/${sid}/events`;
+
+    const stay = await watch(url);
+    const leave = await watch(url);
+    await stay.waitFor(joined);
+    await leave.waitFor(joined);
+    bus.publish('one');
+    await leave.waitFor(() => leave.ids().includes(1));
+
+    leave.close();
+    bus.publish('two');
+    await stay.waitFor(() => stay.ids().includes(2));
+    expect(stay.ids()).toEqual([1, 2]);
+    expect(bus.liveSubscribers).toBe(1);
+
+    // The last watcher leaves and comes back inside the grace: same upstream.
+    stay.close();
+    await new Promise((r) => setTimeout(r, 30));
+    const back = await watch(url, { 'Last-Event-ID': '2' });
+    await back.waitFor(joined);
+    bus.publish('three');
+    await back.waitFor(() => back.ids().includes(3));
+    expect(bus.subscriptions).toHaveLength(1);
+
+    // Gone for longer than the grace: the upstream subscription is closed.
+    back.close();
+    await until(() => bus.liveSubscribers === 0, 2000);
+    expect(bus.subscriptions).toHaveLength(1);
+
+    const wal = new SessionWal({ dir: walDir, sessionId: sid });
+    expect(wal.replayFrom(0).events.map((f) => f.id)).toEqual([1, 2, 3]);
+    wal.close();
+  });
+});
+
+describe('session-events daemon cursor and epoch identity (#174)', () => {
+  const clients: SseClient[] = [];
+  afterEach(() => {
+    for (const c of clients.splice(0)) c.close();
+    gateway?.closeAllConnections();
+  });
+  const watch = async (url: string, headers?: Record<string, string>) => {
+    const c = await openWatcher(url, headers);
+    clients.push(c);
+    return c;
+  };
+  const texts = (c: SseClient) =>
+    c.frames
+      .filter((f) => f.ev.type === 'session_update')
+      .map((f) => (f.ev.data as { text: string }).text);
+  const walIds = (walDir: string, sessionId: string) => {
+    const wal = new SessionWal({ dir: walDir, sessionId });
+    // From the WAL's own boundary: replayFrom(0) is a truncation once the
+    // log starts above 1.
+    const from = Math.max(0, (wal.earliestId() ?? 1) - 1);
+    const ids = wal.replayFrom(from).events.map((f) => f.id);
+    wal.close();
+    return ids;
+  };
+  /** One watcher sees `words` published, then leaves, and the hub closes. */
+  const relayThenLeave = async (
+    bus: FakeBusDaemon,
+    url: string,
+    words: string[],
+  ) => {
+    const w = await watch(url);
+    await w.waitFor(joined);
+    for (const word of words) bus.publish(word);
+    await w.waitFor(() => texts(w).length >= words.length);
+    w.close();
+    await until(() => bus.liveSubscribers === 0);
+    return w;
+  };
+
+  it('a restart whose new ids already passed the old cursor is caught by the epoch token, and the new epoch replays from its start', async () => {
+    // The numeric guess (raw id <= last raw id) cannot see this restart: the
+    // new epoch has published five frames, so asking it for "after 3" replays
+    // only 4 and 5 and silently drops a, b and c.
+    const sid = 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    await relayThenLeave(bus, url, ['one', 'two', 'three']);
+
+    bus.restart('epoch-2');
+    for (const w of ['a', 'b', 'c', 'd', 'e']) bus.publish(w);
+
+    const back = await watch(url, { 'Last-Event-ID': '3' });
+    await back.waitFor(() => texts(back).length >= 5);
+
+    // The daemon got its own numbering and the epoch that numbering belongs to.
+    expect(bus.subscriptions[1]).toEqual({ lastEventId: 3, epoch: 'epoch-1' });
+    expect(texts(back)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(back.ids().every((id) => id > 3)).toBe(true);
+    const ids = walIds(walDir, sid);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual([...ids].sort((x, y) => x - y));
+
+    // Next time round the daemon is resumed in the NEW epoch's numbering.
+    back.close();
+    await until(() => bus.liveSubscribers === 0);
+    const again = await watch(url, {
+      'Last-Event-ID': String(ids[ids.length - 1]),
+    });
+    await again.waitFor(joined);
+    expect(bus.subscriptions[2]).toEqual({ lastEventId: 5, epoch: 'epoch-2' });
+  });
+
+  it('a marker appended through the shared handle never shares an id with the next relayed frame', async () => {
+    // #159 moved the markers onto the shared handle, but the relay assigned
+    // raw + offset without looking at it, so the next frame of the same epoch
+    // landed on the marker's id.
+    const sid = 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    const w = await watch(url);
+    await w.waitFor(joined);
+    bus.publish('one');
+    bus.publish('two');
+    await w.waitFor(() => w.ids().length >= 2);
+
+    const shared = getSharedWal(walDir, sid);
+    shared.append({
+      id: (shared.latestId() ?? 0) + 1,
+      v: 1,
+      type: 'session_rewound',
+      data: { toTurn: 1 },
+    });
+    bus.publish('three');
+    await w.waitFor(() => texts(w).includes('three'));
+
+    expect(w.ids()).toEqual([1, 2, 4]);
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('a frame the WAL already holds is not appended again when the sidecar fell behind it', async () => {
+    // The sidecar is written after the WAL, so a crash between the two leaves
+    // it one frame behind. Resuming the daemon from the sidecar then replays a
+    // frame the WAL holds, under the id it already has.
+    const sid = 'b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    await relayThenLeave(bus, url, ['one', 'two', 'three']);
+    saveEpochState(walDir, sid, {
+      epochOffset: 0,
+      lastOutId: 2,
+      daemonEpoch: 'epoch-1',
+    });
+
+    const back = await watch(url, { 'Last-Event-ID': '3' });
+    await back.waitFor(joined);
+    bus.publish('four');
+    await back.waitFor(() => texts(back).includes('four'));
+
+    expect(bus.subscriptions[1]?.lastEventId).toBe(3);
+    expect(back.ids()).toEqual([4]);
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('a gap the daemon could not replay is written into the WAL, so a later replay across it is told to resync', async () => {
+    // While nobody watched, a load seeded the bus and cleared its ring: the
+    // daemon cannot replay what the gateway missed. The watcher that brought
+    // the subscription back hears it live, and so does a reload that replays
+    // across the hole later, instead of rendering a silently partial
+    // transcript (#150).
+    const sid = 'b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    await relayThenLeave(bus, url, ['one', 'two', 'three']);
+    bus.burnIds(10);
+
+    const back = await watch(url, { 'Last-Event-ID': '3' });
+    await back.waitFor((fs) =>
+      fs.some((f) => f.ev.type === 'state_resync_required'),
+    );
+    const live = back.frames.find(
+      (f) => f.ev.type === 'state_resync_required',
+    )!;
+    expect(live.id).toBe(4);
+    expect(live.ev.data).toMatchObject({ reason: 'seeded_replay_not_in_ring' });
+
+    const reload = await watch(url, { 'Last-Event-ID': '0' });
+    await reload.waitFor((fs) =>
+      fs.some((f) => f.ev.type === 'replay_complete'),
+    );
+    expect(
+      reload.frames
+        .filter((f) => f.id !== undefined)
+        .map((f) => [f.id, f.ev.type]),
+    ).toEqual([
+      [1, 'session_update'],
+      [2, 'session_update'],
+      [3, 'session_update'],
+      [4, 'state_resync_required'],
+    ]);
+  });
+
+  it('a cursor on a WAL that holds nothing yet resumes the daemon from that cursor instead of a 412', async () => {
+    // The first boot with the WAL wired, and every resume of a conversation
+    // the gateway has not relayed since: the page holds a cursor in the
+    // daemon's numbering (the WAL-dark relay passed raw ids through, a load
+    // response hands out its own watermark) and the session's WAL is empty.
+    // A 412 there sent today's page to a null cursor and blanked a transcript
+    // it had just rendered.
+    const sid = 'b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6';
+    const bus = new FakeBusDaemon();
+    for (const w of ['one', 'two', 'three', 'four', 'five']) bus.publish(w);
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    const w = await watch(url, { 'Last-Event-ID': '3' });
+    expect(w.status).toBe(200);
+    await w.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+    expect(bus.subscriptions[0]?.lastEventId).toBe(3);
+    expect(w.ids()).toEqual([4, 5]);
+    expect(texts(w)).toEqual(['four', 'five']);
+    expect(walIds(walDir, sid)).toEqual([4, 5]);
+
+    // Behind what the WAL now holds is a real truncation again.
+    const stale = await openWatcher(url, { 'Last-Event-ID': '1' });
+    expect(stale.status).toBe(412);
+  });
+
+  it('hands a resume response its watermark in the gateway numbering', async () => {
+    const sid = 'b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const wal = getSharedWal(walDir, sid);
+    for (let id = 1; id <= 3; id++) {
+      wal.append({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {},
+        _rc: { raw: id, epoch: 'e1' },
+      });
+    }
+    wal.append({
+      id: 4,
+      v: 1,
+      type: 'state_resync_required',
+      data: { reason: 'epoch_reset' },
+    });
+    wal.append({
+      id: 5,
+      v: 1,
+      type: 'session_update',
+      data: {},
+      _rc: { raw: 1, epoch: 'e2' },
+    });
+    const calls: unknown[] = [];
+    const restored = {
+      sessionId: sid,
+      workspaceCwd: '/w',
+      attached: true,
+      state: {},
+      lastEventId: 9,
+      eventEpoch: 'e2',
+    };
+    const daemon = {
+      resumeSession: async (id: string, req: { workspaceCwd: string }) => {
+        calls.push([id, req]);
+        return restored;
+      },
+    };
+    const wrapped = withGatewayResumeCursor(daemon as never, walDir);
+    const out = await wrapped.resumeSession(sid, { workspaceCwd: '/w' });
+    expect(calls).toEqual([[sid, { workspaceCwd: '/w' }]]);
+    // e2 anchored raw 1 at id 5, so raw 9 is 13; everything else untouched.
+    expect(out).toEqual({ ...restored, lastEventId: 13 });
+
+    // No watermark in the response (an older daemon): nothing to map.
+    const { lastEventId: _omit, ...bare } = restored;
+    const plain = withGatewayResumeCursor(
+      { resumeSession: async () => bare } as never,
+      walDir,
+    );
+    expect(await plain.resumeSession(sid, { workspaceCwd: '/w' })).toEqual(
+      bare,
+    );
+  });
+
+  it('answers 500 wal_unavailable, rather than hanging, when the log cannot be opened', async () => {
+    const sid = 'b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8';
+    const bus = new FakeBusDaemon();
+    const notADir = join(mkdtempSync(join(tmpdir(), 'rc-se-ep-')), 'file');
+    writeFileSync(notADir, 'x');
+    const url = `${await mountFanout(bus, notADir)}/session/${sid}/events`;
+    for (const headers of [{ 'Last-Event-ID': '1' }, undefined]) {
+      const res = await fetch(url, { headers });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'wal_unavailable' });
+    }
+    expect(bus.subscriptions).toHaveLength(0);
+  });
+
+  it('maps a daemon cursor from a load response into the gateway numbering', async () => {
+    const sid = 'b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    // Never relayed: the gateway numbering is the daemon's.
+    expect(gatewayCursorForDaemonCursor(walDir, sid, 7, 'epoch-1')).toBe(7);
+
+    await relayThenLeave(bus, url, ['one', 'two', 'three']);
+    bus.restart('epoch-2');
+    bus.publish('a');
+    bus.publish('b');
+    const w = await watch(url, { 'Last-Event-ID': '3' });
+    await w.waitFor(() => texts(w).length >= 2);
+    w.close();
+    await until(() => bus.liveSubscribers === 0);
+    // WAL: 1..3 (epoch-1), 4 the epoch-reset gap marker, a=5 b=6 (raw 1, 2).
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4, 5, 6]);
+
+    // Same epoch as the WAL's newest relayed frame: raw + that epoch's offset
+    // (b is raw 2 at id 6, so the offset is 4).
+    expect(gatewayCursorForDaemonCursor(walDir, sid, 9, 'epoch-2')).toBe(13);
+    // Never below the WAL head: a load is a full view as of now, so nothing
+    // the WAL already holds is owed to a watcher starting from it.
+    expect(gatewayCursorForDaemonCursor(walDir, sid, 1, 'epoch-2')).toBe(6);
+    // A cursor from an epoch the WAL has not seen yet starts at the head; the
+    // next epoch is anchored above it.
+    expect(gatewayCursorForDaemonCursor(walDir, sid, 40, 'epoch-3')).toBe(6);
+    // No token on either side (an old daemon): the raw ids decide.
+    expect(gatewayCursorForDaemonCursor(walDir, sid, 9)).toBe(13);
   });
 });
 
