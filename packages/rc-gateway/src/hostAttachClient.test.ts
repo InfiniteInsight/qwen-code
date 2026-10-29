@@ -681,6 +681,26 @@ describe('runHostAttach re-attach', () => {
       };
     }
 
+    it('exits 129 when the terminal goes while the TUI runs, and does not ask the gateway again', async () => {
+      const t = closableGuard();
+      const out = await reattachRun({
+        statuses: [],
+        answers: [READY('first')],
+        deps: {
+          terminalGuard: t.guard,
+          // The TUI is ended by the guard, as the real spawnTui does: it
+          // exits 75 (or any code) once the tab is closed.
+          spawn: (async () => {
+            t.close();
+            return { status: 75, signal: null };
+          }) as unknown as HostAttachRunDeps['spawn'],
+        },
+      });
+      expect(out.code).toBe(129);
+      expect(out.paths).toHaveLength(1);
+      expect(out.lines.some((l) => l.includes('re-attaching'))).toBe(false);
+    });
+
     it('exits 129 when the terminal goes during the re-attach wait, without spawning again', async () => {
       const t = closableGuard();
       const out = await reattachRun({
@@ -693,6 +713,28 @@ describe('runHostAttach re-attach', () => {
       });
       expect(out.code).toBe(129);
       expect(out.spawned).toHaveLength(1);
+    });
+
+    it('does not re-spawn when the terminal went just as the gateway answered ready', async () => {
+      const t = closableGuard();
+      let calls = 0;
+      const out = await reattachRun({
+        statuses: [75],
+        answers: [],
+        deps: {
+          terminalGuard: t.guard,
+          // The first call is the attach; the tab closes while the second
+          // (the re-attach) is in flight, and its answer is "ready".
+          request: (async () => {
+            calls++;
+            if (calls === 2) t.close();
+            return READY(calls === 1 ? 'first' : 'second');
+          }) as unknown as HostAttachRunDeps['request'],
+        },
+      });
+      expect(calls).toBe(2);
+      expect(out.code).toBe(129);
+      expect(out.spawned).toEqual([['fake-qwen', '--first']]);
     });
 
     it('a live terminal changes no exit code', async () => {

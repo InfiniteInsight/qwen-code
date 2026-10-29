@@ -579,6 +579,7 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     {
       sessionId: attachment.sessionId,
       run: runTui,
+      terminalGone: () => guard.gone(),
       attach: async () => {
         // The token is read again each time: a gateway restart does not change
         // it, but an operator who rotated the file while the tab waited should

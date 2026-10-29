@@ -33,10 +33,18 @@
  *   with exit code 1.
  * - An interrupt (Ctrl-C), watched for only while waiting, ends it with 130
  *   at once, including from inside a sleep or an attach call in flight.
+ * - The terminal going away (#207, a closed tab) ends it with
+ *   {@link TERMINAL_GONE_EXIT}: `terminalGone` is asked before every TUI start,
+ *   after each TUI exit and again once a daemon answers, so a loop never
+ *   re-attaches into a dead pty. Whoever wires `watchInterrupt` also makes a
+ *   terminal that goes during the wait abort it like an interrupt.
  */
 
 /** The exit code the TUI uses for "my daemon is gone" (sysexits EX_TEMPFAIL). */
 export const TUI_DAEMON_GONE_EXIT = 75;
+
+/** Exit code when the terminal went away: 128 + SIGHUP. Same value as terminalGuard's. */
+export const TERMINAL_GONE_EXIT = 129;
 
 /** Exit code for an interrupt during the wait: 128 + SIGINT, as a shell reports it. */
 export const INTERRUPTED_EXIT = 130;
@@ -73,6 +81,11 @@ export interface ReattachLoopDeps {
    * owns Ctrl-C then). Without it nothing can interrupt the wait.
    */
   watchInterrupt?(onInterrupt: () => void): () => void;
+  /**
+   * True when the terminal this loop runs in no longer exists. Asked fresh each
+   * time, never cached. Without it the loop assumes the terminal is there.
+   */
+  terminalGone?(): boolean;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
   giveUpMs?: number;
@@ -114,12 +127,20 @@ export async function runWithReattach(
   const giveUp = deps.giveUpMs ?? REATTACH_GIVE_UP_MS;
   const stable = deps.stableRunMs ?? REATTACH_STABLE_RUN_MS;
 
+  // An abort is a Ctrl-C unless the terminal is what went away.
+  const interrupted = (): number =>
+    deps.terminalGone?.() ? TERMINAL_GONE_EXIT : INTERRUPTED_EXIT;
+
   let target = first;
   let delay = initial;
   for (;;) {
+    if (deps.terminalGone?.()) return TERMINAL_GONE_EXIT;
     const startedAt = deps.now();
     const code = await deps.run(target.linuxArgv, target.workspaceCwd);
     if (code !== TUI_DAEMON_GONE_EXIT) return code;
+    // A TUI that exited 75 because its terminal died with it must not start a
+    // wait, and must not write to a pty that is not there.
+    if (deps.terminalGone?.()) return TERMINAL_GONE_EXIT;
 
     deps.log(`daemon gone, re-attaching ${deps.sessionId}…`);
     const lostAt = deps.now();
@@ -136,17 +157,18 @@ export async function runWithReattach(
       // A TUI that died right after starting means the last "ready" was a lie
       // (a pool entry for a daemon that is gone); wait before believing again.
       if (lostAt - startedAt < stable && !(await wait())) {
-        return INTERRUPTED_EXIT;
+        return interrupted();
       }
       let next: Extract<ReattachAttempt, { kind: 'ready' }> | undefined;
       while (next === undefined) {
         const got = await raceAbort(deps.attach(), interrupt.signal);
-        if (got === 'aborted') return INTERRUPTED_EXIT;
+        if (got === 'aborted') return interrupted();
         if (got.kind === 'stop') {
           deps.log(got.message);
           return 1;
         }
         if (got.kind === 'ready') {
+          if (deps.terminalGone?.()) return TERMINAL_GONE_EXIT;
           next = got;
           break;
         }
@@ -157,7 +179,7 @@ export async function runWithReattach(
           );
           return 1;
         }
-        if (!(await wait())) return INTERRUPTED_EXIT;
+        if (!(await wait())) return interrupted();
       }
       target = { linuxArgv: next.linuxArgv, workspaceCwd: next.workspaceCwd };
     } finally {
