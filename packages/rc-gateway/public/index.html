@@ -12678,8 +12678,14 @@
           row.style.display = 'block';
           row.style.marginTop = '4px';
           const label = document.createElement('span');
-          label.textContent =
-            entry.name + ' (' + formatBytes(Number(entry.reference.size) || 0) + ')';
+          // #130: a file still going up has no reference yet; its row shows how
+          // far it is, and says so when it has stopped.
+          label.textContent = entry.up
+            ? uploadLabel(entry)
+            : entry.name +
+              ' (' +
+              formatBytes(Number(entry.reference.size) || 0) +
+              ')';
           const drop = document.createElement('button');
           drop.type = 'button';
           drop.textContent = 'Drop';
@@ -12692,14 +12698,38 @@
             const left = pendingFor(shownFor).filter((e) => e !== entry);
             if (left.length) pendingAttachmentsBySession.set(shownFor, left);
             else pendingAttachmentsBySession.delete(shownFor);
+            // An upload still going is stopped, and what the gateway staged
+            // for it is let go.
+            if (entry.up) abandonUpload(shownFor, entry);
             renderPendingAttachments();
           };
           row.appendChild(label);
+          if (entry.up && entry.up.state === 'stalled') {
+            const again = document.createElement('button');
+            again.type = 'button';
+            again.textContent = 'Resume';
+            again.style.marginLeft = '6px';
+            again.onclick = () => void driveUpload(entry, shownFor);
+            row.appendChild(again);
+          }
           row.appendChild(drop);
           list.appendChild(row);
         }
         $('pending-note').textContent = pendingNote;
         box.hidden = shown.length === 0 && pendingNote === '';
+        // #130: coming back to a conversation whose upload had stopped tries
+        // it once more. Once per visit: a stop records the visit it happened
+        // in, so a connection that is still down cannot loop.
+        for (const entry of shown) {
+          if (
+            entry.up &&
+            entry.up.state === 'stalled' &&
+            entry.up.stalledGen !== switchGen &&
+            shownFor === watchedSessionId
+          ) {
+            queueMicrotask(() => void driveUpload(entry, shownFor));
+          }
+        }
       }
 
       const setPendingNote = (m) => {
@@ -12838,6 +12868,232 @@
         return null;
       }
 
+      // #130: a file over one chunk goes up in pieces the gateway keeps by
+      // index (POST /session/:id/attachment-uploads, then PUT .../chunks/:i,
+      // GET the status, POST .../complete). A connection that drops costs the
+      // chunks that had not landed, not the file: the upload id lives on the
+      // pending entry (`entry.up`), so a stop is picked up again by asking the
+      // gateway which chunks it holds. A gateway without the routes says
+      // nothing on /rc/capabilities and gets the single POST below.
+      const RESUMABLE_MIN_BYTES = 512 * 1024;
+      // Waits between the tries of one request: three retries, then it stops.
+      const UPLOAD_BACKOFF_MS = [500, 1500, 4000];
+      const resumableUploadsOn = () =>
+        !!(caps && caps.remoteControl && caps.remoteControl.resumableAttachmentUploads === true);
+
+      function uploadLabel(entry) {
+        const up = entry.up;
+        const pct = up.chunkCount
+          ? Math.floor((100 * up.landed.size) / up.chunkCount)
+          : 0;
+        return up.state === 'stalled'
+          ? entry.name + ' paused at ' + pct + '% (' + formatBytes(up.file.size) + ')'
+          : entry.name + ' ' + pct + '% (' + formatBytes(up.file.size) + ')';
+      }
+
+      const uploadsBase = (target) =>
+        '/session/' + encodeURIComponent(target) + '/attachment-uploads';
+
+      // One request of an upload. A dropped connection, a 5xx, a 429 and a
+      // 408 are tried again after a wait, up to three times; anything else is
+      // the gateway's answer and is returned for the caller to read.
+      async function uploadCall(up, method, url, init) {
+        for (let attempt = 0; ; attempt++) {
+          if (up.dropped) throw new Error('dropped');
+          let res = null;
+          try {
+            res = await fetch(url, {
+              ...init,
+              method,
+              headers: { Authorization: 'Bearer ' + token(), ...(init && init.headers) },
+            });
+          } catch {
+            res = null;
+          }
+          if (res && !(res.status >= 500 || res.status === 429 || res.status === 408)) {
+            const body = await res.json().catch(() => null);
+            return { status: res.status, body };
+          }
+          if (attempt >= UPLOAD_BACKOFF_MS.length) {
+            const stop = new Error('stalled');
+            stop.stalled = true;
+            throw stop;
+          }
+          await new Promise((r) => setTimeout(r, UPLOAD_BACKOFF_MS[attempt]));
+        }
+      }
+
+      function abandonUpload(target, entry) {
+        const up = entry.up;
+        up.dropped = true;
+        if (up.uploadId) {
+          // Best effort: an upload the gateway keeps is let go on its own
+          // when it has been idle long enough.
+          fetch(uploadsBase(target) + '/' + encodeURIComponent(up.uploadId), {
+            method: 'DELETE',
+            headers: { Authorization: 'Bearer ' + token() },
+          }).catch(() => {});
+        }
+      }
+
+      const noteUpload = (target, m) => {
+        if (target !== watchedSessionId) return;
+        pendingNote = m;
+        renderPendingAttachments();
+      };
+
+      // Runs (or runs again) the upload of one pending entry until it is done,
+      // has stopped, or was dropped. Safe to call twice: a running one is left.
+      async function driveUpload(entry, target) {
+        const up = entry.up;
+        if (up.running || up.dropped) return;
+        up.running = true;
+        up.state = 'running';
+        if (target === watchedSessionId) renderPendingAttachments();
+        const gone = () => up.dropped || !pendingFor(target).includes(entry);
+        try {
+          let restarted = false;
+          for (let round = 0; round < 4; round++) {
+            if (!up.uploadId) {
+              const r = await uploadCall(up, 'POST', uploadsBase(target), {
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  name: entry.name,
+                  mimeType: up.file.type || 'application/octet-stream',
+                  size: up.file.size,
+                }),
+              });
+              if (gone()) return abandonDriven(target, entry, r.body && r.body.uploadId);
+              if (r.status !== 201 || !r.body || !r.body.uploadId) {
+                return refusedUpload(target, entry, r);
+              }
+              up.uploadId = r.body.uploadId;
+              up.chunkSize = r.body.chunkSize;
+              up.chunkCount = r.body.chunkCount;
+              up.landed = new Set();
+            } else {
+              // Resuming: ask which chunks the gateway holds rather than
+              // trusting what this page counted.
+              const r = await uploadCall(up, 'GET', uploadsBase(target) + '/' + encodeURIComponent(up.uploadId));
+              if (gone()) return abandonDriven(target, entry);
+              if (r.status === 404 && r.body && r.body.code === 'attachment_upload_not_found' && !restarted) {
+                // The gateway no longer has it (restarted, or idle too long):
+                // begin again from nothing, once.
+                restarted = true;
+                up.uploadId = null;
+                up.landed = new Set();
+                continue;
+              }
+              if (r.status !== 200 || !r.body) return refusedUpload(target, entry, r);
+              if (r.body.state === 'completed' && r.body.attachment) {
+                return finishedUpload(target, entry, r.body.attachment);
+              }
+              up.landed = new Set(r.body.landed || []);
+            }
+            for (let i = 0; i < up.chunkCount; i++) {
+              if (up.landed.has(i)) continue;
+              const r = await uploadCall(
+                up,
+                'PUT',
+                uploadsBase(target) + '/' + encodeURIComponent(up.uploadId) + '/chunks/' + i,
+                {
+                  headers: { 'Content-Type': 'application/octet-stream' },
+                  body: up.file.slice(i * up.chunkSize, Math.min(up.file.size, (i + 1) * up.chunkSize)),
+                },
+              );
+              if (gone()) return abandonDriven(target, entry);
+              if (r.status === 404 && r.body && r.body.code === 'attachment_upload_not_found' && !restarted) {
+                restarted = true;
+                up.uploadId = null;
+                break;
+              }
+              if (r.status !== 200) return refusedUpload(target, entry, r);
+              up.landed.add(i);
+              if (target === watchedSessionId) renderPendingAttachments();
+            }
+            if (!up.uploadId) continue;
+            const done = await uploadCall(up, 'POST', uploadsBase(target) + '/' + encodeURIComponent(up.uploadId) + '/complete');
+            if (gone()) return abandonDriven(target, entry);
+            if (done.status === 201 && done.body && done.body.attachment) {
+              return finishedUpload(target, entry, done.body.attachment);
+            }
+            if (done.status === 409 && done.body && done.body.code === 'attachment_upload_incomplete') {
+              // Told which chunks are missing: go round and send those.
+              up.landed = new Set(
+                Array.from({ length: up.chunkCount }, (_, i) => i).filter(
+                  (i) => !(done.body.missing || []).includes(i),
+                ),
+              );
+              continue;
+            }
+            if (done.status === 404 && done.body && done.body.code === 'attachment_upload_not_found' && !restarted) {
+              restarted = true;
+              up.uploadId = null;
+              continue;
+            }
+            return refusedUpload(target, entry, done);
+          }
+          return refusedUpload(target, entry, { status: 0, body: { code: 'upload_incomplete' } });
+        } catch (err) {
+          if (up.dropped) return;
+          if (err && err.stalled) {
+            // Out of retries. The id and the landed set stay on the entry, so
+            // a reconnect, Resume, or coming back here picks up from them.
+            up.state = 'stalled';
+            up.stalledGen = switchGen;
+            noteUpload(target, entry.name + ': connection lost, will resume');
+            if (target === watchedSessionId) renderPendingAttachments();
+            return;
+          }
+          refusedUpload(target, entry, { status: 0, body: { code: 'upload_failed' } });
+        } finally {
+          up.running = false;
+        }
+      }
+
+      function dropEntry(target, entry) {
+        const left = pendingFor(target).filter((e) => e !== entry);
+        if (left.length) pendingAttachmentsBySession.set(target, left);
+        else pendingAttachmentsBySession.delete(target);
+      }
+
+      // The entry was dropped (or its conversation went away) while a request
+      // was in flight: let the gateway's copy go, including an upload that was
+      // begun in the meantime.
+      function abandonDriven(target, entry, lateId) {
+        entry.up.dropped = true;
+        if (lateId && !entry.up.uploadId) entry.up.uploadId = lateId;
+        abandonUpload(target, entry);
+      }
+
+      function refusedUpload(target, entry, r) {
+        const code = (r.body && r.body.code) || String(r.status);
+        abandonUpload(target, entry);
+        dropEntry(target, entry);
+        noteUpload(target, entry.name + ': refused (' + code + ')');
+        if (target === watchedSessionId) renderPendingAttachments();
+      }
+
+      function finishedUpload(target, entry, reference) {
+        const reduced = entry.up.reduced;
+        entry.reference = reference;
+        delete entry.up;
+        if (target === watchedSessionId) {
+          pendingNote = '';
+          renderPendingAttachments();
+          if (reduced) setStatus(reduced);
+        }
+      }
+
+      // A connection that comes back picks every stopped upload up again.
+      window.addEventListener('online', () => {
+        for (const [sid, list] of pendingAttachmentsBySession) {
+          for (const entry of list) {
+            if (entry.up && entry.up.state === 'stalled') void driveUpload(entry, sid);
+          }
+        }
+      });
+
       async function uploadAttachment(picked) {
         if (!watchedSessionId) {
           setPendingNote('watch a session first');
@@ -12897,6 +13153,31 @@
             formatBytes(limit) +
             ' limit';
           file = fit.file;
+        }
+        // #130: over one chunk, and the gateway can resume: in pieces, filed
+        // on the pending strip from the first byte so it shows how far it is.
+        if (resumableUploadsOn() && file.size > RESUMABLE_MIN_BYTES) {
+          const entry = {
+            name: file.name,
+            reference: null,
+            up: {
+              file,
+              reduced,
+              uploadId: null,
+              chunkSize: 0,
+              chunkCount: 0,
+              landed: new Set(),
+              state: 'running',
+              running: false,
+              dropped: false,
+              stalledGen: -1,
+            },
+          };
+          pendingAttachmentsBySession.set(target, [...pendingFor(target), entry]);
+          setPendingNote('');
+          renderPendingAttachments();
+          await driveUpload(entry, target);
+          return;
         }
         setPendingNote('uploading ' + file.name + '…');
         let res;
@@ -13810,6 +14091,9 @@
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
         if (!watchedSessionId) return setStatus('watch a session first');
+        // #130: a file still going up would be left behind by this message.
+        if (pendingFor(watchedSessionId).some((entry) => !entry.reference))
+          return setStatus('a file is still uploading; wait for it or drop it');
         $('send').disabled = true;
         // The reason line goes to #status, which is not where the reader is
         // looking, so the held button carries it too. #184: in its label,
@@ -13851,10 +14135,17 @@
         // counts as sent.
         // #201: only the watched conversation's own files; another one's
         // stay filed under it.
-        const sentAttachments = pendingFor(watchedSessionId).map(
-          (entry) => entry.reference,
+        // #130: a file still going up has no reference to send; it stays on
+        // the strip and finishes into the next message.
+        const sentAttachments = pendingFor(watchedSessionId)
+          .filter((entry) => entry.reference)
+          .map((entry) => entry.reference);
+        const unfinished = pendingFor(watchedSessionId).filter(
+          (entry) => !entry.reference,
         );
-        pendingAttachmentsBySession.delete(watchedSessionId);
+        if (unfinished.length)
+          pendingAttachmentsBySession.set(watchedSessionId, unfinished);
+        else pendingAttachmentsBySession.delete(watchedSessionId);
         renderPendingAttachments();
         // Echo locally for the immediate feedback, and queue the text so the
         // daemon's echo of THIS prompt is recognised and not drawn twice

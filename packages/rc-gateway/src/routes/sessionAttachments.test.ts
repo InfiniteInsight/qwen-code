@@ -13,6 +13,8 @@ import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
+  ATTACHMENT_UPLOAD_CHUNK_BYTES,
+  createResumableAttachmentUploads,
   createAttachmentListRoute,
   createAttachmentReadRoute,
   createAttachmentRemoveRoute,
@@ -851,5 +853,423 @@ describe('createRawAttachmentBody with a resolved limit', () => {
     expect(res.status).toBe(413);
     expect(String(res.body['error'])).toContain('1000');
     expect(fake.calls.filter((c) => c['kind'] === 'upload')).toHaveLength(0);
+  });
+});
+
+/**
+ * #130: a resumable upload. The gateway stages the chunks itself and hands the
+ * assembled file to the same one-call SDK upload the single POST uses, so a
+ * dropped phone connection costs the chunks that had not landed and nothing
+ * else.
+ */
+describe('resumable attachment uploads (#130)', () => {
+  const CHUNK = ATTACHMENT_UPLOAD_CHUNK_BYTES;
+  const BASE = '/session/s-1/attachment-uploads';
+
+  interface Mounted {
+    base: string;
+    calls: Array<{ sessionId: string; bytes: Buffer; name: string; mime: string }>;
+    rows: Array<Record<string, unknown>>;
+    clock: { now: number };
+    failNext: { err?: unknown };
+  }
+
+  async function mountResumable(
+    opts: {
+      limit?: number;
+      maxUploads?: number;
+      maxStagedBytes?: number;
+      idleMs?: number;
+    } = {},
+  ): Promise<Mounted> {
+    const calls: Mounted['calls'] = [];
+    const rows: Mounted['rows'] = [];
+    const clock = { now: 1_000_000 };
+    const failNext: Mounted['failNext'] = {};
+    const daemon = {
+      uploadSessionAttachment: async (
+        sessionId: string,
+        blob: Blob,
+        name: string,
+        mime: string,
+      ) => {
+        if (failNext.err) {
+          const e = failNext.err;
+          failNext.err = undefined;
+          throw e;
+        }
+        calls.push({
+          sessionId,
+          bytes: Buffer.from(await blob.arrayBuffer()),
+          name,
+          mime,
+        });
+        return { attachmentId: `att-${calls.length}`, name, size: blob.size };
+      },
+    } as unknown as SessionDaemon;
+    const audit = {
+      record: (entry: Record<string, unknown>) => {
+        rows.push(entry);
+      },
+    } as unknown as AuditRecorder;
+    const ups = createResumableAttachmentUploads({
+      daemon,
+      limit: async () => opts.limit ?? DAEMON_ATTACHMENT_ITEM_BYTES,
+      audit,
+      now: () => clock.now,
+      idleMs: opts.idleMs,
+      maxUploads: opts.maxUploads,
+      maxStagedBytes: opts.maxStagedBytes,
+    });
+    const app = express();
+    app.use(gateJsonBody(express.json()));
+    // Stands in for bearerResolve: the caller is named by a header.
+    app.use((req, _res, next) => {
+      (req as { rcClient?: unknown }).rcClient = {
+        id: req.get('x-actor') ?? 'tok-a',
+        scopes: ['write'],
+      };
+      next();
+    });
+    app.post('/session/:id/attachment-uploads', ups.begin);
+    app.put(
+      '/session/:id/attachment-uploads/:uploadId/chunks/:index',
+      ups.chunkBody,
+      ups.chunk,
+    );
+    app.get('/session/:id/attachment-uploads/:uploadId', ups.status);
+    app.post('/session/:id/attachment-uploads/:uploadId/complete', ups.complete);
+    app.delete('/session/:id/attachment-uploads/:uploadId', ups.cancel);
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+    return { base: `http://127.0.0.1:${port}`, calls, rows, clock, failNext };
+  }
+
+  const call = async (
+    m: Mounted,
+    method: string,
+    url: string,
+    init: { json?: unknown; body?: BodyInit; actor?: string; type?: string } = {},
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const headers: Record<string, string> = {};
+    if (init.actor) headers['x-actor'] = init.actor;
+    let body = init.body;
+    if (init.json !== undefined) {
+      headers['content-type'] = 'application/json';
+      body = JSON.stringify(init.json);
+    } else if (body !== undefined) {
+      headers['content-type'] = init.type ?? 'application/octet-stream';
+    }
+    const res = await fetch(m.base + url, { method, headers, body });
+    return { status: res.status, body: await jsonOf(res) };
+  };
+
+  const fileOf = (n: number): Buffer =>
+    Buffer.from(Uint8Array.from({ length: n }, (_, i) => (i * 7 + 3) % 251));
+
+  const begin = async (
+    m: Mounted,
+    size: number,
+    extra: { actor?: string; name?: string } = {},
+  ) =>
+    call(m, 'POST', BASE, {
+      json: { name: extra.name ?? 'IMG_1.jpg', mimeType: 'image/jpeg', size },
+      actor: extra.actor,
+    });
+
+  const put = (
+    m: Mounted,
+    id: string,
+    index: number,
+    bytes: Uint8Array,
+    actor?: string,
+  ) =>
+    call(m, 'PUT', `${BASE}/${id}/chunks/${index}`, {
+      body: bytes as unknown as BodyInit,
+      actor,
+    });
+
+  it('begins an upload and states the chunk size and how many chunks to send', async () => {
+    const m = await mountResumable();
+    const size = CHUNK * 2 + 10;
+    const res = await begin(m, size);
+    expect(res.status).toBe(201);
+    expect(typeof res.body['uploadId']).toBe('string');
+    expect(res.body['chunkSize']).toBe(CHUNK);
+    expect(res.body['chunkCount']).toBe(3);
+    expect(res.body['size']).toBe(size);
+  });
+
+  it('refuses a begin with no name, no size or a size that is not a positive whole number', async () => {
+    const m = await mountResumable();
+    for (const json of [
+      { mimeType: 'image/jpeg', size: 10 },
+      { name: 'a.jpg', mimeType: 'image/jpeg' },
+      { name: 'a.jpg', mimeType: 'image/jpeg', size: 0 },
+      { name: 'a.jpg', mimeType: 'image/jpeg', size: 1.5 },
+      { name: 'a.jpg', mimeType: 'image/jpeg', size: '10' },
+      { name: '', mimeType: 'image/jpeg', size: 10 },
+    ]) {
+      const res = await call(m, 'POST', BASE, { json });
+      expect(res.status, JSON.stringify(json)).toBe(400);
+      expect(res.body['code']).toBe('invalid_upload');
+    }
+  });
+
+  it('refuses a begin above the size limit with the 413 the single POST gives (#196)', async () => {
+    const m = await mountResumable({ limit: 1000 });
+    const ok = await begin(m, 1000);
+    expect(ok.status).toBe(201);
+    const over = await begin(m, 1001);
+    expect(over.status).toBe(413);
+    expect(over.body['code']).toBe('attachment_too_large');
+    expect(String(over.body['error'])).toContain('1000');
+  });
+
+  it('stores a chunk and reports which chunks have landed, in any order', async () => {
+    const m = await mountResumable();
+    const file = fileOf(CHUNK * 2 + 10);
+    const { body } = await begin(m, file.length);
+    const id = String(body['uploadId']);
+    const third = await put(m, id, 2, file.subarray(CHUNK * 2));
+    expect(third.status).toBe(200);
+    expect(third.body['index']).toBe(2);
+    await put(m, id, 0, file.subarray(0, CHUNK));
+    const st = await call(m, 'GET', `${BASE}/${id}`);
+    expect(st.status).toBe(200);
+    expect(st.body['landed']).toEqual([0, 2]);
+    expect(st.body['chunkSize']).toBe(CHUNK);
+    expect(st.body['chunkCount']).toBe(3);
+    expect(st.body['size']).toBe(file.length);
+    expect(st.body['state']).toBe('receiving');
+  });
+
+  it('takes the same chunk twice without double counting it', async () => {
+    const m = await mountResumable();
+    const file = fileOf(CHUNK + 5);
+    const id = String((await begin(m, file.length)).body['uploadId']);
+    const first = await put(m, id, 0, file.subarray(0, CHUNK));
+    const again = await put(m, id, 0, file.subarray(0, CHUNK));
+    expect(first.status).toBe(200);
+    expect(again.status).toBe(200);
+    await put(m, id, 1, file.subarray(CHUNK));
+    const st = await call(m, 'GET', `${BASE}/${id}`);
+    expect(st.body['landed']).toEqual([0, 1]);
+    const done = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(done.status).toBe(201);
+    expect(m.calls[0]!.bytes.equals(file)).toBe(true);
+  });
+
+  it('refuses a chunk of the wrong length, an index out of range and an index that is not a number', async () => {
+    const m = await mountResumable();
+    const file = fileOf(CHUNK + 5);
+    const id = String((await begin(m, file.length)).body['uploadId']);
+    const short = await put(m, id, 0, file.subarray(0, CHUNK - 1));
+    expect(short.status).toBe(400);
+    expect(short.body['code']).toBe('invalid_chunk');
+    // The last chunk is the remainder, not a full one.
+    const longLast = await put(m, id, 1, file.subarray(0, CHUNK));
+    expect(longLast.status).toBe(400);
+    const high = await put(m, id, 2, file.subarray(CHUNK));
+    expect(high.status).toBe(400);
+    expect(high.body['code']).toBe('invalid_chunk');
+    const nan = await call(m, 'PUT', `${BASE}/${id}/chunks/one`, {
+      body: new Uint8Array(5) as unknown as BodyInit,
+    });
+    expect(nan.status).toBe(400);
+    const empty = await put(m, id, 1, new Uint8Array(0));
+    expect(empty.status).toBe(400);
+    expect((await call(m, 'GET', `${BASE}/${id}`)).body['landed']).toEqual([]);
+  });
+
+  it('refuses a body above one chunk with 413 before buffering it', async () => {
+    const m = await mountResumable();
+    const id = String((await begin(m, CHUNK * 3)).body['uploadId']);
+    const res = await put(m, id, 0, new Uint8Array(CHUNK + 1));
+    expect(res.status).toBe(413);
+  });
+
+  it('keeps a chunk whose declared media type is JSON out of the JSON parser', async () => {
+    const m = await mountResumable();
+    const file = Buffer.from('{"a":1}');
+    const id = String((await begin(m, file.length)).body['uploadId']);
+    const res = await call(m, 'PUT', `${BASE}/${id}/chunks/0`, {
+      body: file as unknown as BodyInit,
+      type: 'application/json',
+    });
+    expect(res.status).toBe(200);
+    const done = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(done.status).toBe(201);
+    expect(m.calls[0]!.bytes.toString()).toBe('{"a":1}');
+  });
+
+  it('answers 404 for an upload that does not exist, is another session\'s or another caller\'s', async () => {
+    const m = await mountResumable();
+    const id = String((await begin(m, 10)).body['uploadId']);
+    const bytes = new Uint8Array(10);
+    expect((await put(m, 'nope', 0, bytes)).status).toBe(404);
+    expect((await call(m, 'GET', `${BASE}/nope`)).status).toBe(404);
+    expect(
+      (await call(m, 'POST', `${BASE}/nope/complete`)).status,
+    ).toBe(404);
+    const other = '/session/s-2/attachment-uploads';
+    expect((await call(m, 'GET', `${other}/${id}`)).status).toBe(404);
+    expect((await put(m, id, 0, bytes, 'tok-b')).status).toBe(404);
+    expect(
+      (await call(m, 'GET', `${BASE}/${id}`, { actor: 'tok-b' })).status,
+    ).toBe(404);
+    expect(
+      (await call(m, 'POST', `${BASE}/${id}/complete`, { actor: 'tok-b' }))
+        .status,
+    ).toBe(404);
+    expect(
+      (await call(m, 'DELETE', `${BASE}/${id}`, { actor: 'tok-b' })).body[
+        'cancelled'
+      ],
+    ).toBe(false);
+    // The owner still has it.
+    expect((await call(m, 'GET', `${BASE}/${id}`)).status).toBe(200);
+  });
+
+  it('refuses to complete while chunks are missing, and names them', async () => {
+    const m = await mountResumable();
+    const file = fileOf(CHUNK * 2 + 1);
+    const id = String((await begin(m, file.length)).body['uploadId']);
+    await put(m, id, 1, file.subarray(CHUNK, CHUNK * 2));
+    const res = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(res.status).toBe(409);
+    expect(res.body['code']).toBe('attachment_upload_incomplete');
+    expect(res.body['missing']).toEqual([0, 2]);
+    expect(m.calls).toHaveLength(0);
+  });
+
+  it('completes by handing the assembled file, in order, to the one-call SDK upload', async () => {
+    const m = await mountResumable();
+    const file = fileOf(CHUNK * 2 + 123);
+    const id = String(
+      (await begin(m, file.length, { name: 'IMG_9.jpg' })).body['uploadId'],
+    );
+    // Out of order on purpose.
+    await put(m, id, 2, file.subarray(CHUNK * 2));
+    await put(m, id, 0, file.subarray(0, CHUNK));
+    await put(m, id, 1, file.subarray(CHUNK, CHUNK * 2));
+    const res = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(res.status).toBe(201);
+    expect(res.body['attachment']).toEqual({
+      attachmentId: 'att-1',
+      name: 'IMG_9.jpg',
+      size: file.length,
+    });
+    expect(m.calls).toHaveLength(1);
+    expect(m.calls[0]!.sessionId).toBe('s-1');
+    expect(m.calls[0]!.name).toBe('IMG_9.jpg');
+    expect(m.calls[0]!.mime).toBe('image/jpeg');
+    expect(m.calls[0]!.bytes.equals(file)).toBe(true);
+  });
+
+  it('answers a repeated complete with the same attachment and uploads once', async () => {
+    const m = await mountResumable();
+    const file = fileOf(40);
+    const id = String((await begin(m, 40)).body['uploadId']);
+    await put(m, id, 0, file);
+    const [a, b] = await Promise.all([
+      call(m, 'POST', `${BASE}/${id}/complete`),
+      call(m, 'POST', `${BASE}/${id}/complete`),
+    ]);
+    const c = await call(m, 'POST', `${BASE}/${id}/complete`);
+    for (const r of [a, b, c]) {
+      expect(r.status).toBe(201);
+      expect(r.body['attachment']).toEqual(a.body['attachment']);
+    }
+    expect(m.calls).toHaveLength(1);
+    expect(m.rows).toEqual([
+      { action: 'attachment_uploaded', actorTokenId: 'tok-a', target: 's-1' },
+    ]);
+    // A page that lost the answer can still read it back.
+    const st = await call(m, 'GET', `${BASE}/${id}`);
+    expect(st.body['state']).toBe('completed');
+    expect(st.body['attachment']).toEqual(a.body['attachment']);
+    // And a chunk after completion is refused.
+    expect((await put(m, id, 0, file)).status).toBe(409);
+  });
+
+  it('keeps the staged chunks when the daemon refuses, so a retry of complete can succeed', async () => {
+    const m = await mountResumable();
+    const file = fileOf(40);
+    const id = String((await begin(m, 40)).body['uploadId']);
+    await put(m, id, 0, file);
+    m.failNext.err = new Error('socket hang up');
+    const bad = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(bad.status).toBe(502);
+    expect(bad.body['code']).toBe('daemon_unavailable');
+    expect(m.rows).toHaveLength(0);
+    const good = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(good.status).toBe(201);
+    expect(m.calls[0]!.bytes.equals(file)).toBe(true);
+  });
+
+  it('relays a shaped daemon refusal from complete', async () => {
+    const m = await mountResumable();
+    const id = String((await begin(m, 4)).body['uploadId']);
+    await put(m, id, 0, new Uint8Array(4));
+    m.failNext.err = refusal(415, { errorKind: 'unsupported_type', error: 'no' });
+    const res = await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect(res.status).toBe(415);
+    expect(res.body['code']).toBe('unsupported_type');
+  });
+
+  it('cancels an upload, frees it, and treats a second cancel as already done', async () => {
+    const m = await mountResumable();
+    const id = String((await begin(m, 10)).body['uploadId']);
+    await put(m, id, 0, new Uint8Array(10));
+    const gone = await call(m, 'DELETE', `${BASE}/${id}`);
+    expect(gone.status).toBe(200);
+    expect(gone.body['cancelled']).toBe(true);
+    expect((await put(m, id, 0, new Uint8Array(10))).status).toBe(404);
+    expect((await call(m, 'GET', `${BASE}/${id}`)).status).toBe(404);
+    const again = await call(m, 'DELETE', `${BASE}/${id}`);
+    expect(again.status).toBe(200);
+    expect(again.body['cancelled']).toBe(false);
+  });
+
+  it('forgets an upload that has been idle too long, and a chunk keeps it alive', async () => {
+    const m = await mountResumable({ idleMs: 1000 });
+    const file = fileOf(CHUNK * 2);
+    const id = String((await begin(m, file.length)).body['uploadId']);
+    m.clock.now += 900;
+    await put(m, id, 0, file.subarray(0, CHUNK));
+    m.clock.now += 900;
+    expect((await call(m, 'GET', `${BASE}/${id}`)).status).toBe(200);
+    m.clock.now += 1001;
+    expect((await call(m, 'GET', `${BASE}/${id}`)).status).toBe(404);
+    expect((await put(m, id, 1, file.subarray(CHUNK))).status).toBe(404);
+  });
+
+  it('refuses a begin when too many uploads, or too many bytes, are already staged', async () => {
+    const m = await mountResumable({ maxUploads: 2, maxStagedBytes: 100 });
+    const a = await begin(m, 40);
+    const b = await begin(m, 40);
+    expect(a.status).toBe(201);
+    expect(b.status).toBe(201);
+    const third = await begin(m, 10);
+    expect(third.status).toBe(429);
+    expect(third.body['code']).toBe('attachment_upload_capacity_exceeded');
+    // Freeing one makes room, and the byte budget is the second gate.
+    await call(m, 'DELETE', `${BASE}/${String(a.body['uploadId'])}`);
+    const big = await begin(m, 61);
+    expect(big.status).toBe(429);
+    expect((await begin(m, 60)).status).toBe(201);
+  });
+
+  it('frees the staging budget once an upload completes', async () => {
+    const m = await mountResumable({ maxStagedBytes: 50 });
+    const id = String((await begin(m, 50)).body['uploadId']);
+    expect((await begin(m, 1)).status).toBe(429);
+    await put(m, id, 0, new Uint8Array(50));
+    await call(m, 'POST', `${BASE}/${id}/complete`);
+    expect((await begin(m, 50)).status).toBe(201);
   });
 });
