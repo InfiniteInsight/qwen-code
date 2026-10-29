@@ -39,6 +39,7 @@ import { promisify } from 'node:util';
 import type { Page, Route } from 'playwright';
 import { bootViewer, harnessRuntimeRoot, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
+import type { StubDaemonOptions } from '../src/testing/stubDaemon.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -3013,7 +3014,11 @@ type PageScenario =
          * answer live-state with `liveState(cwd)` (see bootViewer's `pool`),
          * so a scenario can count what the pool holds.
          */
-        pool?: { liveState: (cwd: string) => unknown };
+        pool?: {
+          liveState: (cwd: string) => unknown;
+          /** #132: what each spawned daemon's catalog serves. */
+          catalog?: (cwd: string) => StubDaemonOptions['catalog'];
+        };
         /**
          * #110. The roster the stub's GET /session/:id/agents answers, or a
          * function of the session id read per request.
@@ -3021,6 +3026,8 @@ type PageScenario =
         sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
         /** #110. The whole lineage the stub's agent-trace narrows. */
         agentTraceResult?: unknown;
+        /** #132: what the boot daemon's POST /sessions/catalog serves. */
+        catalog?: StubDaemonOptions['catalog'];
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22935,6 +22942,7 @@ async function runPageScenario(
     pool: s.stub?.pool,
     sessionAgentsResult: s.stub?.sessionAgentsResult,
     agentTraceResult: s.stub?.agentTraceResult,
+    catalog: s.stub?.catalog,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -27327,6 +27335,427 @@ VIEW_SCENARIOS.push({
     return `live: k-1 at 3 and k-2 at 5 of "abcde", a status update did not move k-1; folded from two halves: ${r.merged} of ${JSON.stringify(r.mergedText)}`;
   },
 });
+
+// ---- #132 the session catalog --------------------------------------------
+// The list keeps its rows from /rc/sessions and reads POST /rc/sessions/catalog
+// beside them: groups on the rows, a notice for a folder whose daemon refused,
+// and Load more. These run on a real daemon pool: the boot daemon serves
+// /stub/workspace, and the current folder's daemon is the one the page's own
+// spawning live-state read starts. Neither folder has a transcript on disk
+// unless the scenario plants one, so a row on screen came from the catalog.
+// In-page code is a plain string, as in the #193 block.
+{
+  type CatRow = NonNullable<NonNullable<StubDaemonOptions['catalog']>[string]['sessions']>[number];
+  const CAT_HOME = '/stub/workspace';
+  // One base for every time in the block, taken when the file loads, so a
+  // row's place against a planted file's mtime does not drift with when the
+  // scenario happens to run in a long pass.
+  const CAT_BASE = Date.now();
+  const catAgo = (minutes: number) => new Date(CAT_BASE - minutes * 60_000).toISOString();
+  const catRow = (id: string, title: string, minutesAgo: number, extra: Partial<CatRow> = {}): CatRow =>
+    ({ sessionId: id, workspaceCwd: '', updatedAt: catAgo(minutesAgo), displayName: title, titleSource: 'manual', ...extra }) as CatRow;
+  const catId = (n: number) => `13200000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  // A folder of the scenario's own under the harness root, so /rc/fs can
+  // browse to it.
+  const catFolder = (name: string) => {
+    const folder = join(harnessRuntimeRoot(), name);
+    rmSync(folder, { recursive: true, force: true });
+    mkdirSync(folder, { recursive: true });
+    return folder;
+  };
+  const catBodies = (page: Page) => {
+    const bodies: Array<Record<string, unknown>> = [];
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname === '/rc/sessions/catalog') {
+        bodies.push(JSON.parse(r.postData() || '{}') as Record<string, unknown>);
+      }
+    });
+    return bodies;
+  };
+  // Seeds the recent folders, browses to `current` (whose read starts its
+  // daemon) and opens the list, which reads the catalog.
+  const catOpen = async (page: Page, current: string, recent: string[], pageSize?: number) => {
+    // The boot stub's own live-state names a session of its invention, which
+    // the list would add as a live-only row; nothing is open here.
+    await page.route(/\/rc\/sessions\/live-state\?workspace=%2Fstub%2Fworkspace/, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ v: 1, sessions: [] }) }),
+    );
+    await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+    await page.evaluate('clearInterval(pastConvosPollId); pastConvosPollId = null;');
+    if (pageSize) await page.evaluate(`catalogPageSize = ${pageSize};`);
+    await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', ${JSON.stringify(JSON.stringify(recent))}); renderRecentWorkspaces();`);
+    await page.evaluate(`browseTo(${JSON.stringify(current)})`);
+    await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(current)}`, null, { timeout: 10_000 });
+    await openList(page);
+  };
+  type CatDrawn = { id: string; title: string; dir: string | null; sub: string; group: string | null; groupName: string; swatch: string | null; label: string | null; h: number };
+  const catDrawn = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+      const s = w.querySelector('.s');
+      const dir = s.querySelector('.dir');
+      const g = s.querySelector('.grp');
+      return {
+        id: w.dataset.session,
+        title: (s.querySelector('.tt') || {}).textContent || '',
+        dir: dir ? dir.title : null,
+        sub: (s.querySelector('.sub') || {}).textContent || '',
+        group: g ? g.dataset.group : null,
+        groupName: g && g.querySelector('.gn') ? g.querySelector('.gn').textContent : '',
+        swatch: g ? getComputedStyle(g.querySelector('.gd')).backgroundColor : null,
+        label: g ? g.getAttribute('aria-label') : null,
+        h: Math.round(s.getBoundingClientRect().height),
+      };
+    })`) as Promise<CatDrawn[]>;
+  const catCount = (page: Page, n: number) =>
+    page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === ${n}`, null, { timeout: 10_000 });
+  // Serves each folder's /rc/sessions read: `rows` (catalog rows, in the
+  // scan's words) and whether the scan was capped. The catalog itself stays
+  // the gateway's own answer.
+  const catScan = async (page: Page, byFolder: Record<string, { rows: CatRow[]; truncated: boolean }>) => {
+    await page.route(
+      (u) => u.pathname === '/rc/sessions' && !u.searchParams.has('archiveState') && byFolder[u.searchParams.get('cwd') ?? ''] !== undefined,
+      (route) => {
+        const f = byFolder[new URL(route.request().url()).searchParams.get('cwd') ?? '']!;
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            sessions: f.rows.map((r) => ({ sessionId: r.sessionId, title: r.displayName, titleSource: 'manual', forks: [], updatedAt: r.updatedAt, preview: 'scanned ' + r.displayName })),
+            truncated: f.truncated,
+          }),
+        });
+      },
+    );
+  };
+
+  // Interleaved in time across the two folders, newest first:
+  // h1 (2 min) b2 (4) h3 (6) b4 (8) h5 (10) b6 (12) h7 (14) b8 (16) h9 (18).
+  const P420_HOME = [1, 3, 5, 7, 9].map((n) => catRow(catId(n), `p420 home ${n}`, n * 2));
+  const P420_B = [2, 4, 6, 8].map((n) => catRow(catId(n), `p420 b ${n}`, n * 2));
+
+  PAGE_SCENARIOS.push({
+    name: 'P420 the catalog lists three folders as one list, newest first, each row naming its folder: two read through their running daemons and one with none read from disk, for which no daemon is started',
+    waitView: false,
+    stub: {
+      catalog: { [CAT_HOME]: { sessions: P420_HOME.slice(0, 3) } },
+      pool: {
+        liveState: () => ({ v: 1, catalogVersion: { generation: 'g-p420', revision: 1 }, sessions: [] }),
+        catalog: (cwd) => ({ [cwd]: { sessions: P420_B.slice(0, 2) } }),
+      },
+    },
+    run: async ({ page, viewer }) => {
+      const b = catFolder('p420-b');
+      // A folder no daemon runs for, with one conversation on disk, 5
+      // minutes old: between b's first row (4) and home's second (6).
+      const c = catFolder('p420-cold');
+      const cChats = resolveChatsDir(c);
+      mkdirSync(cChats, { recursive: true });
+      const cFile = join(cChats, `${catId(50)}.jsonl`);
+      writeFileSync(
+        cFile,
+        JSON.stringify({ type: 'system', subtype: 'custom_title', systemPayload: { customTitle: 'p420 cold', titleSource: 'manual' } }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { parts: [{ text: 'p420 kept on disk' }] } }) +
+          '\n',
+      );
+      const fiveAgo = new Date(CAT_BASE - 5 * 60_000);
+      utimesSync(cFile, fiveAgo, fiveAgo);
+      const bodies = catBodies(page);
+      // Each live folder's scan was capped and holds only its newest row, so
+      // every older row on screen is the catalog's. The cold folder's scan is
+      // its own disk, as is its catalog member.
+      await catScan(page, {
+        [CAT_HOME]: { rows: P420_HOME.slice(0, 1), truncated: true },
+        [b]: { rows: P420_B.slice(0, 1), truncated: true },
+      });
+      try {
+        await catOpen(page, b, [CAT_HOME, c]);
+        await catCount(page, 6);
+        const merged = (await page.evaluate(`[...catalogState.rows.keys()].join()`)) as string;
+        expect(
+          merged === [catId(1), catId(2), catId(50), catId(3), catId(4), catId(5)].join(),
+          `the catalog's own page came in the order ${merged}`,
+        );
+        await page.waitForFunction(`catalogState.rows.size === 6`, null, { timeout: 10_000 });
+        const rows = await catDrawn(page);
+        const want = [catId(1), catId(2), catId(50), catId(3), catId(4), catId(5)];
+        expect(rows.map((r) => r.id).join() === want.join(), `the rows read ${JSON.stringify(rows.map((r) => r.title))}`);
+        expect(
+          rows.map((r) => r.dir).join() === [CAT_HOME, b, c, CAT_HOME, b, CAT_HOME].join(),
+          `the folder lines read ${JSON.stringify(rows.map((r) => r.dir))}`,
+        );
+        const sources = (await page.evaluate(
+          `[...catalogState.rows.values()].map((r) => r.sessionId.slice(-2) + ':' + r.source).sort().join()`,
+        )) as string;
+        expect(sources === '01:daemon,02:daemon,03:daemon,04:daemon,05:daemon,50:disk', `the catalog rows came from ${sources}`);
+        const first = bodies[0] as { workspaces?: string[]; options?: { view?: string }; includeGroups?: boolean };
+        expect(
+          JSON.stringify(first.workspaces) === JSON.stringify([b, CAT_HOME, c]) && first.options?.view === 'organized' && first.includeGroups === true,
+          `the first catalog read sent ${JSON.stringify(first)}`,
+        );
+        expect((await page.$('#past-more')) === null, 'Load more is offered with nothing more to load');
+        const spawned = viewer.pool!.spawned;
+        expect(spawned.includes(b) && !spawned.includes(c), `the pool spawned ${JSON.stringify(spawned)}; the cold folder must get none`);
+        await shot(page, 'p420-merged-390');
+        return `${rows.length} rows in time order across three folders, the cold one's row from disk, and no daemon for it (spawned: ${spawned.map((x) => x.split('/').pop()).join(', ')})`;
+      } finally {
+        rmSync(cFile, { force: true });
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P421 Load more continues the merged order from the cursor, each press adding the next rows with no row twice and none skipped, until it runs out',
+    waitView: false,
+    stub: {
+      catalog: { [CAT_HOME]: { sessions: P420_HOME } },
+      pool: {
+        liveState: () => ({ v: 1, catalogVersion: { generation: 'g-p421', revision: 1 }, sessions: [] }),
+        catalog: (cwd) => ({ [cwd]: { sessions: P420_B } }),
+      },
+    },
+    run: async ({ page }) => {
+      const b = catFolder('p421-b');
+      const bodies = catBodies(page);
+      await catScan(page, {
+        [CAT_HOME]: { rows: P420_HOME.slice(0, 1), truncated: true },
+        [b]: { rows: P420_B.slice(0, 1), truncated: true },
+      });
+      await catOpen(page, b, [CAT_HOME], 3);
+      const order = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(catId);
+      const steps: string[] = [];
+      for (const n of [3, 6, 9]) {
+        await catCount(page, n);
+        const ids = (await catDrawn(page)).map((r) => r.id);
+        expect(new Set(ids).size === ids.length, `a row is listed twice after ${n}: ${JSON.stringify(ids)}`);
+        expect(ids.join() === order.slice(0, n).join(), `after ${n} rows the list is ${JSON.stringify(ids)}, not the first ${n} of the merged order`);
+        if (n < 9) {
+          await page.waitForSelector('#past-more:not([disabled])');
+          if (n === 3) await shot(page, 'p421-load-more-390');
+          await page.click('#past-more');
+        }
+        steps.push(String(n));
+      }
+      await page.waitForFunction(`!document.getElementById('past-more')`, null, { timeout: 5_000 });
+      const status = await page.textContent('#status');
+      expect(/loaded 3 more conversations/.test(status || ''), `the status line reads ${JSON.stringify(status)}`);
+      const later = bodies.slice(1) as Array<Record<string, unknown>>;
+      expect(
+        later.length === 2 && later.every((x) => typeof x['cursor'] === 'string' && Object.keys(x).sort().join() === 'cursor,includeGroups'),
+        `the Load more reads sent ${JSON.stringify(later.map((x) => Object.keys(x)))}`,
+      );
+      return `rows ${steps.join(' then ')}, each a prefix of the merged order, the later reads sent only the cursor, and Load more went away at the end`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P422 a folder whose daemon refuses the catalog gets a notice in the list naming it and the reason, and the other folder's rows still list",
+    waitView: false,
+    stub: {
+      catalog: { [CAT_HOME]: { sessions: P420_HOME.slice(0, 2) } },
+      pool: {
+        liveState: () => ({ v: 1, catalogVersion: { generation: 'g-p422', revision: 1 }, sessions: [] }),
+        catalog: (cwd) => ({
+          [cwd]: { error: { code: 'untrusted_workspace', message: 'Workspace is not trusted.', status: 403 } },
+        }),
+      },
+    },
+    run: async ({ page }) => {
+      const b = catFolder('p422-b');
+      await catScan(page, {
+        [CAT_HOME]: { rows: P420_HOME.slice(0, 1), truncated: true },
+        [b]: { rows: [], truncated: false },
+      });
+      await catOpen(page, b, [CAT_HOME]);
+      await catCount(page, 2);
+      await page.waitForSelector('#past-list .note.cat-err', { timeout: 10_000 });
+      const notes = (await page.evaluate(
+        `Array.from(document.querySelectorAll('#past-list .note.cat-err')).map((n) => ({ ws: n.dataset.workspace, text: n.textContent, role: n.getAttribute('role') }))`,
+      )) as Array<{ ws: string; text: string; role: string }>;
+      expect(notes.length === 1 && notes[0].ws === b, `the notices are ${JSON.stringify(notes)}`);
+      expect(
+        notes[0].text.includes('Workspace is not trusted.') && notes[0].text.includes('p422-b') && notes[0].role === 'status',
+        `the notice reads ${JSON.stringify(notes[0])}`,
+      );
+      const rows = await catDrawn(page);
+      expect(rows.every((r) => r.dir === CAT_HOME), `the rows that listed are ${JSON.stringify(rows.map((r) => r.dir))}`);
+      await shot(page, 'p422-member-error-390');
+      return `"${notes[0].text}", and ${rows.length} rows from ${CAT_HOME}`;
+    },
+  });
+
+  const P423_HOME = [
+    catRow(catId(1), 'p423 released', 2, { groupId: 'g-rel' }),
+    catRow(catId(3), 'p423 tagged', 6, { color: 'purple' }),
+    catRow(catId(5), 'p423 plain', 10),
+  ];
+  const P423_B = [catRow(catId(2), 'p423 documented', 4, { groupId: 'g-docs' })];
+  PAGE_SCENARIOS.push({
+    name: 'P423 a row in a group shows its colour and name on its folder line, a colour tag shows its colour alone, groups from two folders merge, and the row stays 64px, at 390 and 1100',
+    waitView: false,
+    stub: {
+      catalog: {
+        [CAT_HOME]: {
+          sessions: P423_HOME,
+          groups: [{ id: 'g-rel', name: 'Release', color: 'green', order: 0, createdAt: catAgo(60), updatedAt: catAgo(60) }],
+        },
+      },
+      pool: {
+        liveState: () => ({ v: 1, catalogVersion: { generation: 'g-p423', revision: 1 }, sessions: [] }),
+        catalog: (cwd) => ({
+          [cwd]: {
+            sessions: P423_B,
+            groups: [{ id: 'g-docs', name: 'Docs', color: '#a371f7', order: 0, createdAt: catAgo(60), updatedAt: catAgo(60) }],
+          },
+        }),
+      },
+    },
+    run: async ({ page }) => {
+      const b = catFolder('p423-b');
+      // Complete scans: every row is the scan's, and the catalog only adds
+      // its group.
+      await catScan(page, {
+        [CAT_HOME]: { rows: P423_HOME, truncated: false },
+        [b]: { rows: P423_B, truncated: false },
+      });
+      await catOpen(page, b, [CAT_HOME]);
+      await catCount(page, 4);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .grp').length === 3`, null, { timeout: 10_000 });
+      const lines: string[] = [];
+      for (const size of H190_SIZES) {
+        await page.setViewportSize(size);
+        await page.waitForTimeout(150);
+        const rows = await catDrawn(page);
+        const by = (title: string) => rows.find((r) => r.title === title)!;
+        const rel = by('p423 released');
+        const docs = by('p423 documented');
+        const tag = by('p423 tagged');
+        const plain = by('p423 plain');
+        expect(rel.group === 'g-rel' && rel.groupName === 'Release' && rel.swatch === 'rgb(63, 185, 80)', `${size.width}: the Release row's chip is ${JSON.stringify(rel)}`);
+        expect(docs.group === 'g-docs' && docs.groupName === 'Docs' && docs.swatch === 'rgb(163, 113, 247)', `${size.width}: the Docs row's chip is ${JSON.stringify(docs)}`);
+        expect(tag.group === 'color:purple' && tag.groupName === '' && tag.label === 'purple tag', `${size.width}: the tagged row's chip is ${JSON.stringify(tag)}`);
+        expect(plain.group === null, `${size.width}: the plain row has a chip ${JSON.stringify(plain)}`);
+        expect(rows.every((r) => r.h === 64), `${size.width}: the row heights are ${rows.map((r) => r.h).join(',')}`);
+        await shot(page, `p423-groups-${size.width}`);
+        lines.push(`${size.width}: Release, Docs and a purple tag drawn, 64px rows`);
+      }
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P424 on a gateway without the catalog the list reads no catalog and draws exactly what /rc/sessions sent',
+    waitView: false,
+    before: async (page) => {
+      // An older gateway: the same answer without the word.
+      await page.route(/\/rc\/capabilities$/, async (route) => {
+        const res = await route.fetch();
+        const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+        if (j.remoteControl) delete j.remoteControl['sessionCatalog'];
+        await route.fulfill({ response: res, json: j });
+      });
+    },
+    run: async ({ page }) => {
+      const bodies = catBodies(page);
+      await h190ListFixture(page, {
+        '/p424': [
+          { sessionId: catId(1), title: 'p424 one', preview: 'the first', updatedAt: h190Now },
+          { sessionId: catId(2), title: 'p424 two', preview: 'the second', updatedAt: h190Now },
+        ],
+      }, { '/p424': { parent: null, entries: [] }, '/p190': { parent: null, entries: [] } });
+      // The boot's own browse first: it can leave before the routes above
+      // exist, and landing after the browse below it would move the list off
+      // /p424. The fixture serves a pathless browse as /p190, so it settles
+      // either way.
+      await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null', null, { timeout: 10_000 });
+      await page.evaluate(h190At('/p424'));
+      await page.waitForFunction(`pastConvosCwd === '/p424'`, null, { timeout: 10_000 });
+      await openList(page);
+      await catCount(page, 2);
+      await page.waitForTimeout(500);
+      const rows = await catDrawn(page);
+      const extras = (await page.evaluate(
+        `({ chips: document.querySelectorAll('#past-list .grp').length, notes: document.querySelectorAll('#past-list .cat-err').length, more: !!document.getElementById('past-more'), on: sessionCatalogOn() })`,
+      )) as { chips: number; notes: number; more: boolean; on: boolean };
+      expect(bodies.length === 0, `the page read the catalog ${bodies.length} times`);
+      expect(!extras.on && extras.chips === 0 && extras.notes === 0 && !extras.more, `the list drew ${JSON.stringify(extras)}`);
+      expect(
+        rows.map((r) => `${r.title}|${r.sub.split(' · ').pop()}`).join() === 'p424 one|the first,p424 two|the second',
+        `the rows read ${JSON.stringify(rows.map((r) => [r.title, r.sub]))}`,
+      );
+      return `no catalog read, ${rows.length} rows as /rc/sessions sent them, no chips, notices or Load more`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P425 a conversation both the folder scan and the catalog list is drawn once, keeping the scan\'s title and preview and taking the catalog\'s group',
+    waitView: false,
+    stub: {
+      pool: {
+        liveState: () => ({ v: 1, catalogVersion: { generation: 'g-p425', revision: 1 }, sessions: [] }),
+        catalog: (cwd) => ({
+          [cwd]: {
+            sessions: [catRow(catId(7), 'p425 catalog name', 1, { groupId: 'g-p425' })],
+            groups: [{ id: 'g-p425', name: 'Filed', color: 'blue', order: 0, createdAt: catAgo(60), updatedAt: catAgo(60) }],
+          },
+        }),
+      },
+    },
+    run: async ({ page }) => {
+      const b = catFolder('p425-b');
+      const chats = resolveChatsDir(b);
+      mkdirSync(chats, { recursive: true });
+      writeFileSync(
+        join(chats, `${catId(7)}.jsonl`),
+        JSON.stringify({ type: 'system', subtype: 'custom_title', systemPayload: { customTitle: 'p425 disk title', titleSource: 'manual' } }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { parts: [{ text: 'p425 from the disk' }] } }) +
+          '\n',
+      );
+      try {
+        await catOpen(page, b, []);
+        await page.waitForSelector('#past-list .grp', { timeout: 10_000 });
+        const rows = await catDrawn(page);
+        expect(rows.length === 1 && rows[0].id === catId(7), `the list holds ${JSON.stringify(rows.map((r) => r.id))}`);
+        expect(
+          rows[0].title === 'p425 disk title' && rows[0].sub.includes('p425 from the disk') && rows[0].groupName === 'Filed',
+          `the row reads ${JSON.stringify(rows[0])}`,
+        );
+        return `one row: "${rows[0].title}", "${rows[0].sub}", in Filed`;
+      } finally {
+        rmSync(join(chats, `${catId(7)}.jsonl`), { force: true });
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: "P426 a row the catalog still holds but a complete folder read no longer lists (archived since) is not drawn again, while a capped folder's older catalog rows are",
+    waitView: false,
+    stub: {
+      catalog: { [CAT_HOME]: { sessions: P420_HOME.slice(0, 3) } },
+      pool: {
+        liveState: () => ({ v: 1, catalogVersion: { generation: 'g-p426', revision: 1 }, sessions: [] }),
+        catalog: (cwd) => ({ [cwd]: { sessions: P420_B.slice(0, 2) } }),
+      },
+    },
+    run: async ({ page }) => {
+      const b = catFolder('p426-b');
+      // b's read is complete and lists only b2: b4, which the catalog still
+      // holds, was archived. Home's read is capped at h1, so h3 and h5 are
+      // past its end.
+      await catScan(page, {
+        [CAT_HOME]: { rows: P420_HOME.slice(0, 1), truncated: true },
+        [b]: { rows: P420_B.slice(0, 1), truncated: false },
+      });
+      await catOpen(page, b, [CAT_HOME]);
+      await page.waitForFunction(`catalogState.rows.size === 5`, null, { timeout: 10_000 });
+      await catCount(page, 4);
+      const ids = (await catDrawn(page)).map((r) => r.id);
+      expect(ids.join() === [catId(1), catId(2), catId(3), catId(5)].join(), `the list draws ${JSON.stringify(ids)}`);
+      return 'b4 (in the catalog, gone from the complete read) stays off the list; h3 and h5 (past the capped read) are drawn';
+    },
+  });
+}
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

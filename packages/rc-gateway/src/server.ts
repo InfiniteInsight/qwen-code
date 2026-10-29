@@ -226,6 +226,7 @@ import {
 } from './routes/sessionQueue.js';
 /** #111: which sessions in a workspace are actually open right now. */
 import { createSessionLiveStateRoute } from './routes/sessionLiveState.js';
+import { createSessionCatalogRoute } from './routes/sessionCatalog.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
 import type { TerminalRequestLog } from './terminals.js';
@@ -1738,6 +1739,43 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/sessions/live-state',
     requireScope(OWNER, audit),
     createSessionLiveStateRoute(deps.daemon),
+  );
+  // POST /rc/sessions/catalog (#132): the session catalog across workspaces,
+  // one merged order and one cursor. OWNER like the listing and the
+  // live-state above, since it names the same sessions: a looser scope would
+  // let a read token enumerate what it cannot today. It mutates nothing and
+  // starts no daemon: each workspace is read through the daemon the pool
+  // already holds for it, or from disk. With no workspaces named it lists the
+  // set `/rc/sessions` unions, the default workspace plus the recent ones.
+  app.post(
+    '/rc/sessions/catalog',
+    requireScope(OWNER, audit),
+    createSessionCatalogRoute({
+      daemon: deps.daemon,
+      audit,
+      defaultWorkspaces: async () => {
+        let home: string | undefined;
+        try {
+          home = (await deps.daemon.capabilities()).workspaceCwd;
+        } catch {
+          return undefined;
+        }
+        if (!home) return undefined;
+        const [fromTerminals, fromAttach] = await Promise.all([
+          deps.terminalRequests?.recentWorkspaceEntries(
+            RECENT_WORKSPACES_CAP,
+          ) ?? [],
+          deps.hostAttachedWorkspaces?.read() ?? [],
+        ]);
+        return [
+          home,
+          ...mergeRecentWorkspaces(
+            [fromTerminals, fromAttach],
+            RECENT_WORKSPACES_CAP,
+          ),
+        ];
+      },
+    }),
   );
 
   // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy

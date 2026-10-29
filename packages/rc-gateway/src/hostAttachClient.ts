@@ -24,16 +24,18 @@
 import { X509Certificate } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
-import {
-  spawnSync as nodeSpawnSync,
-  type SpawnSyncOptions,
-  type SpawnSyncReturns,
-} from 'node:child_process';
+import type { SpawnSyncOptions, SpawnSyncReturns } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 import { join, resolve } from 'node:path';
 import { readState } from './launcher/state.js';
 import { readLocalToken } from './localCredential.js';
 import { runWithReattach, type ReattachAttempt } from './reattachLoop.js';
+import {
+  spawnTui,
+  startTerminalGuard,
+  TERMINAL_GONE_EXIT,
+  type TerminalGuard,
+} from './terminalGuard.js';
 
 /** Basename of the host-attach token, beside the other `~/.qwen/rc` secrets. */
 export const HOST_ATTACH_TOKEN_FILENAME = 'host-attach-token';
@@ -449,11 +451,21 @@ export interface HostAttachRunDeps {
   /** `~/.qwen/rc`. */
   rcDir: string;
   stderr?: (line: string) => void;
+  /**
+   * Run the TUI to completion. The default is the async, terminal-aware
+   * `spawnTui`; a test may answer synchronously.
+   */
   spawn?: (
     command: string,
     args: string[],
     options: SpawnSyncOptions,
-  ) => SpawnSyncReturns<Buffer | string>;
+  ) =>
+    | SpawnSyncReturns<Buffer | string>
+    | Promise<
+        Pick<SpawnSyncReturns<Buffer | string>, 'status' | 'signal' | 'error'>
+      >;
+  /** The watcher for this process's terminal (#207); the default is the real one. */
+  terminalGuard?: TerminalGuard;
   request?: typeof postHostAttach;
   shieldSignals?: () => () => void;
   /** Re-attach loop seams (slice E); the defaults are the real clock and signals. */
@@ -473,7 +485,6 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     ((line: string) => {
       process.stderr.write(`${line}\n`);
     });
-  const spawn = deps.spawn ?? nodeSpawnSync;
   const request = deps.request ?? postHostAttach;
 
   const args = parseAttachArgs(deps.argv, deps.cwd);
@@ -526,12 +537,21 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
   // When the daemon dies (the gateway restarted) the TUI exits 75; the loop
   // then asks the gateway for the session again and runs the TUI again, so a
   // tab survives the restart (slice E). Any other exit code ends this process.
+  //
+  // The terminal is watched from here to the end (#207, see terminalGuard.ts):
+  // when its tab is closed the pty goes away but this wrapper and the TUI do
+  // not, so the guard ends the TUI and the loop, including during the wait.
+  const guard = deps.terminalGuard ?? startTerminalGuard();
+  const spawn =
+    deps.spawn ??
+    ((command: string, args: string[], options: SpawnSyncOptions) =>
+      spawnTui(command, args, options, guard));
   const runTui = async (linuxArgv: string[], cwd: string): Promise<number> => {
     const [command, ...rest] = linuxArgv;
     const restore = (deps.shieldSignals ?? shieldParentSignals)();
-    let result: SpawnSyncReturns<Buffer | string>;
+    let result: Awaited<ReturnType<typeof spawn>>;
     try {
-      result = spawn(command, rest, { stdio: 'inherit', cwd });
+      result = await spawn(command, rest, { stdio: 'inherit', cwd });
     } finally {
       restore();
     }
@@ -553,11 +573,13 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     sessionId: attachment.sessionId,
   };
   const reattachPath = `/rc/host/attach/${encodeURIComponent(attachment.sessionId)}`;
+  const watchInterrupt = deps.watchInterrupt ?? watchWaitInterrupts;
   const code = await runWithReattach(
     { linuxArgv: attachment.linuxArgv, workspaceCwd: attachment.workspaceCwd },
     {
       sessionId: attachment.sessionId,
       run: runTui,
+      terminalGone: () => guard.gone(),
       attach: async () => {
         // The token is read again each time: a gateway restart does not change
         // it, but an operator who rotated the file while the tab waited should
@@ -583,8 +605,16 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
       sleep: deps.sleep ?? sleepUnlessAborted,
       now: deps.now ?? Date.now,
       log: stderr,
-      watchInterrupt: deps.watchInterrupt ?? watchWaitInterrupts,
+      // A terminal that goes during the wait aborts it like Ctrl-C does.
+      watchInterrupt: (onInterrupt) => {
+        const undoInterrupt = watchInterrupt(onInterrupt);
+        const undoGone = guard.onGone(onInterrupt);
+        return () => {
+          undoInterrupt();
+          undoGone();
+        };
+      },
     },
-  );
-  return code;
+  ).finally(() => guard.stop());
+  return guard.reason() !== undefined ? TERMINAL_GONE_EXIT : code;
 }

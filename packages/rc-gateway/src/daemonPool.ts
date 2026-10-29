@@ -86,6 +86,11 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
 import { asDaemonHttpError, isSessionLevelGone } from './daemonHttpError.js';
+import type {
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogResult,
+} from '@qwen-code/sdk';
+import { catalogCallFailure } from './sessions/catalogFanout.js';
 
 /** What {@link deleteWorkspaceFileOnPrimary} needs from a client. */
 export type PrimaryWorkspaceDeleteClient = Pick<
@@ -358,6 +363,21 @@ export interface SessionDaemon {
    * look in, and the route answers that it cannot read without spawning.
    */
   peekSessionLiveState?(workspaceCwd?: string): Promise<unknown | undefined>;
+  /**
+   * The daemon's session catalog batch (#132). Named `listSessionsCatalog`
+   * exactly as `DaemonClient.listSessionsCatalog` is
+   * (packages/sdk-typescript/src/daemon/DaemonClient.ts:3477), for the reason
+   * recorded in D61. A bare client answers for the workspaces its one daemon
+   * has registered and a per-member `workspace_not_found` for the rest; the
+   * pool sends each selection to the daemon it already holds for that
+   * workspace and answers `workspace_not_pooled` where it holds none, never
+   * spawning, so the result keeps the SDK's shape either way: one page or one
+   * error per selection, in selection order.
+   */
+  listSessionsCatalog(
+    request: DaemonSessionCatalogRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionCatalogResult>;
   setSessionApprovalMode(
     sessionId: string,
     mode: DaemonApprovalMode,
@@ -2508,6 +2528,97 @@ export class DaemonPool implements SessionDaemon {
     return this.callOn(key, entry, (client) =>
       client.getWorkspaceSessionLiveState(key),
     );
+  }
+
+  /**
+   * #132: each selection goes to the daemon this pool already holds for its
+   * workspace, the `peekSessionLiveState` way: no spawn, no `touch` and no
+   * `hold`, because the list reads every folder it shows and must neither
+   * start a daemon per folder nor keep an idle one from being reaped. A
+   * selection with no live daemon answers `workspace_not_pooled`, which the
+   * catalog route reads from disk instead. A daemon that fails answers an
+   * error for each of its selections rather than failing the batch, so the
+   * SDK's contract (one page or one error per selection, in order) holds.
+   * `'all'` asks every live daemon for its own registry and joins them.
+   */
+  async listSessionsCatalog(
+    request: DaemonSessionCatalogRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionCatalogResult> {
+    const live: Array<{ key: string; entry: Entry }> = [];
+    if (!this.defaultEntry.dead) {
+      live.push({ key: this.defaultWorkspaceCwd, entry: this.defaultEntry });
+    }
+    for (const [key, entry] of this.byWorkspace) {
+      if (!entry.dead && entry !== this.defaultEntry) live.push({ key, entry });
+    }
+    if (request.workspaces === 'all') {
+      const parts = await Promise.all(
+        live.map(async ({ key, entry }) => {
+          try {
+            const r = await this.callOn(key, entry, (client) =>
+              client.listSessionsCatalog(request, opts),
+            );
+            return r.workspaces;
+          } catch (err) {
+            return [{ workspace: key, error: catalogCallFailure(err) }];
+          }
+        }),
+      );
+      return { workspaces: parts.flat() };
+    }
+    const selections = request.workspaces;
+    const out: DaemonSessionCatalogResult['workspaces'] = new Array(
+      selections.length,
+    );
+    const byOwner = new Map<Entry, { key: string; indexes: number[] }>();
+    selections.forEach((sel, i) => {
+      const key = this.keyFor(sel.workspace);
+      const owner = live.find((l) => l.key === key);
+      if (!owner) {
+        out[i] = {
+          workspace: sel.workspace,
+          error: {
+            code: 'workspace_not_pooled',
+            message:
+              'No daemon is running for this workspace, and this read does not start one.',
+            status: 404,
+          },
+        };
+        return;
+      }
+      const group = byOwner.get(owner.entry) ?? { key, indexes: [] };
+      group.indexes.push(i);
+      byOwner.set(owner.entry, group);
+    });
+    await Promise.all(
+      [...byOwner].map(async ([entry, { key, indexes }]) => {
+        try {
+          const r = await this.callOn(key, entry, (client) =>
+            client.listSessionsCatalog(
+              { ...request, workspaces: indexes.map((i) => selections[i]) },
+              opts,
+            ),
+          );
+          indexes.forEach((idx, j) => {
+            out[idx] = r.workspaces?.[j] ?? {
+              workspace: selections[idx].workspace,
+              error: {
+                code: 'session_catalog_failed',
+                message: 'The daemon answered without this workspace.',
+                status: 502,
+              },
+            };
+          });
+        } catch (err) {
+          const error = catalogCallFailure(err);
+          for (const idx of indexes) {
+            out[idx] = { workspace: selections[idx].workspace, error };
+          }
+        }
+      }),
+    );
+    return { workspaces: out };
   }
 
   // -- Workspace control (rc-workspace-permissions, scoped per #28) -----
