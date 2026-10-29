@@ -118,9 +118,10 @@ export const MATRIX_INVITE_AUTOJOIN_CAP = 20;
 /**
  * Single global bucket key for the invite auto-join limiter: `invite_state`
  * exposes the bot's own membership event, not a reliable per-inviter identity,
- * so the bound is bot-wide (total auto-joins per window), not per-sender.
+ * so the bound is bot-wide (total auto-joins per window), not per-sender. The
+ * E2EE adapter applies the same cap with its own limiter (#168).
  */
-const MATRIX_INVITE_AUTOJOIN_KEY = '__matrix_invite_autojoin__';
+export const MATRIX_INVITE_AUTOJOIN_KEY = '__matrix_invite_autojoin__';
 
 /** Where a rendered permission_request landed (for the resolve edit). */
 interface SentRequest {

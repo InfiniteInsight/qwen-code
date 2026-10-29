@@ -34,7 +34,12 @@ import { join } from 'node:path';
 import { olmStoreDir, OLM_STORE_MISSING_LOG } from './e2ee.js';
 import { senderPowerLevel, type NormalizedMatrixReaction } from './dispatch.js';
 import { promptTextOf } from './normalize.js';
-import type { MatrixInbound } from './runner.js';
+import {
+  MATRIX_INVITE_AUTOJOIN_CAP,
+  MATRIX_INVITE_AUTOJOIN_KEY,
+  type MatrixInbound,
+} from './runner.js';
+import { SubActorRateLimiter } from '../subActorRateLimiter.js';
 
 /**
  * Does a non-empty olm/megolm store already exist? Drives the healthz
@@ -126,7 +131,6 @@ export async function createMatrixCryptoAdapter(
       MatrixClient,
       RustSdkCryptoStorageProvider,
       SimpleFsStorageProvider,
-      AutojoinRoomsMixin,
     } = sdk;
     // @vector-im/matrix-bot-sdk re-exports the store-type enum as a TYPE only
     // (`RustSdkCryptoStoreType` is a `const enum`, erased at runtime → `undefined`
@@ -152,9 +156,31 @@ export async function createMatrixCryptoAdapter(
       cryptoStore,
     );
     // Invites → auto-join, so the bot is in the room (and receives its megolm
-    // sessions) by the time messages arrive — the same effect the fetch
-    // syncLoop's explicit join had, but driven by the SDK's sole sync.
-    AutojoinRoomsMixin.setupOnClient(client);
+    // sessions) by the time messages arrive. Under the same cap as the fetch
+    // syncLoop (#168): the SDK's AutojoinRoomsMixin joined every invite, so on
+    // the E2EE path anyone could make the bot join (and sync) unboundedly many
+    // rooms. Declining is fail-safe; an operator re-invites after the window.
+    const inviteLimiter = new SubActorRateLimiter();
+    client.on('room.invite', (roomId: string) => {
+      const { allowed } = inviteLimiter.tryConsume(
+        MATRIX_INVITE_AUTOJOIN_KEY,
+        MATRIX_INVITE_AUTOJOIN_CAP,
+        Date.now(),
+      );
+      if (!allowed) {
+        deps.log?.(
+          `matrix crypto: declined invite to ${roomId} (auto-join rate limit exceeded)`,
+        );
+        return;
+      }
+      void client.joinRoom(roomId).then(
+        () => deps.log?.(`matrix crypto: joined room ${roomId}`),
+        (err: unknown) =>
+          deps.log?.(
+            `matrix crypto join failed: ${(err as Error)?.message ?? String(err)}`,
+          ),
+      );
+    });
 
     // The sender's power level comes from the room's `m.room.power_levels` state
     // (best-effort: a missing/erroring lookup → 0, sufficient for plain prompts;

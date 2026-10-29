@@ -17,18 +17,25 @@ import type { EventEmitter } from 'node:events';
 
 // vi.mock factories are hoisted above the imports, so shared state comes from
 // vi.hoisted and the factory imports what it needs itself.
-const { clients } = vi.hoisted(() => ({ clients: [] as EventEmitter[] }));
+const { clients } = vi.hoisted(() => ({
+  clients: [] as Array<EventEmitter & { joined: string[] }>,
+}));
 
 vi.mock('@vector-im/matrix-bot-sdk', async () => {
   const { EventEmitter } = await import('node:events');
   class MatrixClient extends EventEmitter {
     crypto = { isReady: true, prepare: async () => {} };
+    joined: string[] = [];
     constructor() {
       super();
       clients.push(this);
     }
     async getRoomStateEvent() {
       return { users: {}, users_default: 0 };
+    }
+    async joinRoom(roomId: string) {
+      this.joined.push(roomId);
+      return roomId;
     }
   }
   return {
@@ -43,6 +50,7 @@ vi.mock('@matrix-org/matrix-sdk-crypto-nodejs', () => ({
 }));
 
 const { createMatrixCryptoAdapter } = await import('./cryptoAdapter.js');
+const { MATRIX_INVITE_AUTOJOIN_CAP } = await import('./runner.js');
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1000) {
   const start = Date.now();
@@ -86,6 +94,28 @@ describe('createMatrixCryptoAdapter, which messages become prompts (#168)', () =
     await waitFor(() => bodies.length === 1);
     await new Promise((r) => setTimeout(r, 20));
     expect(bodies).toEqual(['run the tests']);
+  });
+});
+
+describe('createMatrixCryptoAdapter, invite auto-join (#168)', () => {
+  it('applies the same auto-join cap as the fetch path', async () => {
+    const logs: string[] = [];
+    const adapter = await createMatrixCryptoAdapter({
+      homeserverUrl: 'https://hs.example.com',
+      accessToken: 'tok',
+      stateDir: '/nonexistent-state-dir',
+      onMessage: () => {},
+      log: (m) => logs.push(m),
+    });
+    expect(adapter).not.toBeNull();
+    const client = clients.at(-1)!;
+    const burst = MATRIX_INVITE_AUTOJOIN_CAP + 5;
+    for (let i = 0; i < burst; i++)
+      client.emit('room.invite', `!flood${i}:evil.example`, {});
+    await waitFor(() => client.joined.length === MATRIX_INVITE_AUTOJOIN_CAP);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(client.joined).toHaveLength(MATRIX_INVITE_AUTOJOIN_CAP);
+    expect(logs.filter((l) => l.includes('declined invite'))).toHaveLength(5);
   });
 });
 
