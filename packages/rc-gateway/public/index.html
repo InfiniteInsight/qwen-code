@@ -13737,7 +13737,9 @@
         }
         if (scr.hidden === !open) return;
         scr.hidden = !open;
-        $('h1-title').setAttribute('aria-expanded', String(open));
+        if (!paneLayout()) {
+          $('h1-title').setAttribute('aria-expanded', String(open));
+        }
         if (!open) return;
         closeH1Menu(false);
         setMoreOpen(false);
@@ -13758,6 +13760,29 @@
         if (paneLayout()) setListSearch(true);
         else setListOpen(true);
       });
+      // #190. In the pane layout the list is a standing pane, not a dialog,
+      // and the title focuses its search rather than opening it, so neither
+      // says otherwise to a screen reader there.
+      function syncListRoles() {
+        const pane = paneLayout();
+        const title = $('h1-title');
+        const scr = $('list-screen');
+        if (pane) {
+          title.removeAttribute('aria-haspopup');
+          title.removeAttribute('aria-expanded');
+          title.setAttribute('aria-controls', 'past-filter');
+          title.setAttribute('aria-label', 'Search conversations');
+          scr.setAttribute('role', 'region');
+        } else {
+          title.setAttribute('aria-haspopup', 'dialog');
+          title.setAttribute('aria-expanded', String(!scr.hidden));
+          title.setAttribute('aria-controls', 'list-screen');
+          title.removeAttribute('aria-label');
+          scr.setAttribute('role', 'dialog');
+        }
+      }
+      syncListRoles();
+      PANE_QUERY.addEventListener('change', syncListRoles);
       $('list-back').addEventListener('click', closeListToChat);
       $('list-screen').addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;

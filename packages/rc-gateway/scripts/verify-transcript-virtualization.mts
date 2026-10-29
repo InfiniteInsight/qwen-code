@@ -13020,7 +13020,12 @@ PAGE_SCENARIOS.push({
         await page.focus('#prompt');
         const rest = await measure();
         expect(!rest.rail, `the rail element is still on the page at ${at}`);
-        expect(rest.expanded === 'false', `the title does not say the list is shut at ${at} (aria-expanded ${rest.expanded})`);
+        // #190: in the pane layout the title focuses the search of a list
+        // that is always up, so it carries no open-or-shut state there.
+        expect(
+          pane ? rest.expanded === null : rest.expanded === 'false',
+          `the title does not say the list is shut at ${at} (aria-expanded ${rest.expanded})`,
+        );
         if (!pane) {
           // At rest: no rail, no strip, no column. The transcript has the width.
           expect(!rest.shown, `the list is over the chat at rest at ${at}`);
@@ -23752,6 +23757,28 @@ PAGE_SCENARIOS.push({
       lines.push(`${size.width}: field ${r.w}px${r.fTop === r.bTop ? ', beside Start here' : ', on its own line'}`);
     }
     return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P322 in the pane layout the title is not a dialog opener and the list is not a dialog; under 1100 both are again',
+  waitView: false,
+  run: async ({ page }) => {
+    const read = () =>
+      page.evaluate(`({
+        popup: document.getElementById('h1-title').getAttribute('aria-haspopup'),
+        controls: document.getElementById('h1-title').getAttribute('aria-controls'),
+        role: document.getElementById('list-screen').getAttribute('role'),
+      })`) as Promise<{ popup: string | null; controls: string | null; role: string | null }>;
+    await page.setViewportSize({ width: 1100, height: 810 });
+    await h190Settle(page);
+    const wide = await read();
+    expect(wide.popup === null && wide.controls === 'past-filter' && wide.role === 'region', `1100: ${JSON.stringify(wide)}`);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await h190Settle(page);
+    const phone = await read();
+    expect(phone.popup === 'dialog' && phone.controls === 'list-screen' && phone.role === 'dialog', `390: ${JSON.stringify(phone)}`);
+    return `1100 ${JSON.stringify(wide)}; 390 ${JSON.stringify(phone)}`;
   },
 });
 
