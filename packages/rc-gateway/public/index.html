@@ -9277,9 +9277,11 @@
           // #197: a picture or file the sender attached is not text, and drawn
           // as text it was an empty bubble. It joins the message above it when
           // there is one, so it is not a second turn.
+          // #171: a block with no picture of its own (audio, an unreadable
+          // resource) is a chip naming its type, not an empty bubble.
           const part =
-            typeof TranscriptModel.userPartOf === 'function'
-              ? TranscriptModel.userPartOf(u.content)
+            typeof TranscriptModel.userBlockOf === 'function'
+              ? TranscriptModel.userBlockOf(u.content)
               : null;
           if (part) {
             markPrevTurnEnd();
@@ -9292,11 +9294,26 @@
             if (!insideReplay) showProcessing();
             return;
           }
-          userTurnsSeen += 1;
-          asstThisTurn = false;
-          // Drawn before the arm below, because addUser closes the turn it
+          // #171: nothing to draw is nothing to count. An empty frame used to
+          // open an empty bubble and move the turn count past the rows, so a
+          // rewind cut inside a turn it meant to keep.
+          if (typeof text !== 'string' || !text) return;
+          // The daemon echoes one chunk per block, so a picture sent first has
+          // already opened this message's row: the caption joins it, and it
+          // is one turn, not two.
+          let joined = false;
+          // Drawn before the arm below, because the model closes the turn it
           // opens and the arm is what re-opens it.
-          if (!claimSelfEcho(text)) addUser(text || '', sentAt);
+          if (!claimSelfEcho(text)) {
+            markPrevTurnEnd();
+            const added = transcriptModel.addUserChunk(text, sentAt);
+            joined = added.merged;
+            scrollTranscript(true);
+          }
+          if (!joined) {
+            userTurnsSeen += 1;
+            asstThisTurn = false;
+          }
           // #73: the second arm point. A turn started on the laptop reaches this
           // transcript as one of these frames, and a live one means a prompt was
           // just accepted, so the work is real and this can say so at once

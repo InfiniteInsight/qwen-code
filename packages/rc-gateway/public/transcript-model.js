@@ -143,6 +143,27 @@
     return null;
   }
 
+  // #171. Whatever a user_message_chunk carries that is not text, as a part: a
+  // block userPartOf can describe, else a chip that names its type, so a block
+  // the viewer has no picture for (audio, a resource it cannot read) still says
+  // that something was sent instead of drawing an empty bubble. Text, an empty
+  // text and junk are null: the text path owns those.
+  function userBlockOf(content) {
+    var part = userPartOf(content);
+    if (part) return part;
+    if (!isRecord(content)) return null;
+    var type = typeof content.type === 'string' ? clean(content.type) : '';
+    if (!type || type === 'text' || typeof content.text === 'string') {
+      return null;
+    }
+    return {
+      kind: 'file',
+      name: type + ' block',
+      mimeType: strOr(content.mimeType, '').toLowerCase(),
+      size: 0,
+    };
+  }
+
   // ---- A turn that failed (#199) ---------------------------------------------
   // The daemon publishes turn_error INSTEAD of turn_complete when a prompt
   // fails: a model request that dies mid-stream, a rate limit, a Stop hook that
@@ -289,6 +310,24 @@
       }
       var item = push(newItem('user', { text: '', time: time, parts: [part] }));
       return { item: item, merged: false };
+    }
+    // #171. The text of a user message. The daemon echoes one chunk per block,
+    // so a picture sent first opens a text-less row and its caption arrives
+    // after it: the caption belongs in that row. Filling a row that already
+    // has text would merge two prompts queued back to back, so only a row with
+    // parts and no text takes it. Returns { item, merged } like addUserPart.
+    function addUserChunk(text, time) {
+      resetTurn();
+      var last = items.length ? items[items.length - 1] : null;
+      if (last && last.kind === 'user' && !last.text && last.parts) {
+        last.text = clean(text);
+        emitUpdate(last);
+        return { item: last, merged: true };
+      }
+      return {
+        item: push(newItem('user', { text: clean(text), time: time })),
+        merged: false,
+      };
     }
     function appendAssistant(text, time) {
       finishThought();
@@ -728,6 +767,7 @@
       subscribe: subscribe,
       addUser: addUser,
       addUserPart: addUserPart,
+      addUserChunk: addUserChunk,
       appendAssistant: appendAssistant,
       appendThought: appendThought,
       finishThought: finishThought,
@@ -846,9 +886,11 @@
       return;
     }
     if (su === 'user_message_chunk') {
-      var part = userPartOf(u.content);
+      var part = userBlockOf(u.content);
       if (part) return m.addUserPart(part, sentAt);
-      return m.addUser(text || '', sentAt);
+      // A frame with nothing to say draws nothing (it was an empty bubble).
+      if (typeof text !== 'string' || !text) return;
+      return m.addUserChunk(text, sentAt);
     }
     if (su === 'agent_message_chunk') {
       if (u.content && u.content.type === 'image')
@@ -894,5 +936,6 @@
     replayStoredPage: replayStoredPage,
     turnErrorText: turnErrorText,
     userPartOf: userPartOf,
+    userBlockOf: userBlockOf,
   };
 })();
