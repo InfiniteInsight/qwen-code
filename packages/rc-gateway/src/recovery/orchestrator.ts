@@ -57,6 +57,10 @@ export interface SessionRecoveryOutcome {
   /** Wall time (ms) from the start of this session's recovery to its
    * outcome. */
   tookMs: number;
+  /** Why the session was not recovered, when the failed respawn named it
+   * with a string `reason` (#203: `attached_daemon_unreachable`, an attached
+   * daemon the gateway does not replace). Absent otherwise. */
+  reason?: string;
 }
 
 /** The surface of the daemon pool the saga drives. `DaemonPool` satisfies
@@ -225,12 +229,14 @@ export class RecoveryOrchestrator {
       sessionId: string,
       recovered: boolean,
       startedAt: number,
+      reason?: string,
     ): void => {
       const outcome: SessionRecoveryOutcome = {
         recovered,
         hadInFlightTurn: inFlight.get(sessionId) ?? false,
         exitCode: exit.code,
         tookMs: Math.max(0, this.now() - startedAt),
+        ...(reason !== undefined ? { reason } : {}),
       };
       this.state.set(sessionId, recovered ? 'recovered' : 'unrecoverable');
       this.outcomes.set(sessionId, outcome);
@@ -245,10 +251,19 @@ export class RecoveryOrchestrator {
     const sagaStart = this.now();
     try {
       await this.pool.getOrSpawn(workspaceKey);
-    } catch {
-      // Respawn failed (spawn error, cap race): every affected session is
+    } catch (err) {
+      // Respawn failed (spawn error, cap race, or an attached daemon that is
+      // gone and not ours to replace): every affected session is
       // unrecoverable; the saga ends.
-      for (const id of unique) report(id, false, sagaStart);
+      const reason = (err as { reason?: unknown } | null)?.reason;
+      for (const id of unique) {
+        report(
+          id,
+          false,
+          sagaStart,
+          typeof reason === 'string' ? reason : undefined,
+        );
+      }
       return;
     }
 
@@ -342,12 +357,13 @@ export function createReportOutcome(
   };
 
   return (sessionId, outcome) => {
-    const { recovered, hadInFlightTurn, exitCode, tookMs } = outcome;
+    const { recovered, hadInFlightTurn, exitCode, tookMs, reason } = outcome;
     const interruptedData: Record<string, unknown> = {
       sessionId,
       recovered,
       hadInFlightTurn,
       ...(exitCode !== null ? { exitCode } : {}),
+      ...(reason !== undefined ? { reason } : {}),
     };
     appendMarker(sessionId, 'session_interrupted', interruptedData);
     void audit?.record({
@@ -358,6 +374,7 @@ export function createReportOutcome(
         recovered,
         hadInFlightTurn,
         ...(exitCode !== null ? { exitCode } : {}),
+        ...(reason !== undefined ? { reason } : {}),
       },
     });
     if (recovered) {

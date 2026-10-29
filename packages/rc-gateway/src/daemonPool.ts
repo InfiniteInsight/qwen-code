@@ -621,8 +621,33 @@ export interface SessionDaemon {
 export interface DaemonPoolOptions {
   /** The boot daemon, already running, used when a create omits cwd. The
    * pool never stops it. Once it dies, the default workspace is served by a
-   * replacement from `spawn(defaultWorkspaceCwd)` instead (#163). */
+   * replacement from `spawn(defaultWorkspaceCwd)` instead (#163), unless
+   * `respawnDefaultDaemon` is false. */
   defaultDaemon: DaemonClient;
+  /**
+   * Whether a dead default daemon is replaced by one the pool spawns
+   * (`spawn(defaultWorkspaceCwd)`). Default true.
+   *
+   * False is for attach mode (#203), where the default daemon is a terminal's
+   * `qwen serve` the gateway only shares. A gateway-owned replacement there
+   * would carry the phone's conversations away from the terminal they were
+   * shared with, onto a second daemon writing the same workspace. So with this
+   * off, losing that daemon is reported instead: the `daemon_died` row names
+   * the reason, the recovery saga finds nothing to resume on, and every call
+   * for the default workspace fails with {@link DefaultDaemonUnavailableError}
+   * until the external daemon answers `/health` again, at which point the
+   * pool serves the default workspace from it once more.
+   */
+  respawnDefaultDaemon?: boolean;
+  /**
+   * Stops the boot daemon, which the pool otherwise never does (#203). Called
+   * once, and only when a transport error marked the boot daemon dead and a
+   * replacement now serves the default workspace: a boot daemon that was
+   * marked dead wrongly must not keep running beside its replacement. An exit
+   * needs no stop. Absent (attach mode, where the daemon is not the
+   * gateway's) → the pool never stops it.
+   */
+  stopDefaultDaemon?: () => Promise<void>;
   defaultWorkspaceCwd: string;
   /** Endpoint of the boot daemon, used for terminal requests against the
    * default workspace (issue #49). Absent → those requests are refused. */
@@ -642,6 +667,17 @@ export interface DaemonPoolOptions {
    * ids stay counted. Default 5000.
    */
   probeTimeoutMs?: number;
+  /**
+   * How long a call that failed with a transport error waits before the one
+   * `/health` probe that decides whether its daemon died (#203). A reset or a
+   * dropped socket is also what a live daemon produces when it closes an idle
+   * keep-alive socket as a request goes out, or evicts a slow stream. The
+   * wait lets a dying process finish dying and lets the client drop sockets
+   * the daemon already closed, so the probe does not trip over the same
+   * stale socket. A refused connection is not probed: nothing is listening.
+   * Default 250.
+   */
+  deathProbeDelayMs?: number;
   /** Invoked with the affected session ids when a daemon dies
    * (add-mid-turn-recovery). Absent → the sessions are simply dropped
    * (404s, as today); the `daemon_died` audit row is still written. The
@@ -673,11 +709,16 @@ interface Entry {
   /** The in-flight `reconcileEntry` run, so the reaper timer and a create
    * at the cap share one round of questions instead of stacking them. */
   reconciling?: Promise<void>;
+  /** The in-flight confirmation of a transport error (see
+   * `transportDeathConfirmed`), shared by every call that failed on this
+   * daemon meanwhile so they cost one probe (#203). */
+  confirming?: Promise<boolean>;
 }
 
 const DEFAULT_MAX_DAEMONS = 3;
 const DEFAULT_IDLE_REAP_MS = 15 * 60_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+const DEFAULT_DEATH_PROBE_DELAY_MS = 250;
 
 /** Thrown when a session id isn't owned by any known daemon (unrecorded, or
  * its owning daemon was already reaped). Routes map this to a `404
@@ -704,6 +745,29 @@ export function isGoneSessionError(err: unknown): boolean {
     err instanceof UnknownSessionError ||
     (err as { status?: unknown } | undefined)?.status === 404
   );
+}
+
+/** The `reason` a lost attached daemon is reported under (#203). */
+export const ATTACHED_DAEMON_UNREACHABLE = 'attached_daemon_unreachable';
+
+/**
+ * Thrown for a call that needs the default workspace's daemon while the daemon
+ * the gateway attached to is gone and does not answer, when the pool was told
+ * not to replace it (`respawnDefaultDaemon: false`, attach mode, #203). Routes
+ * map it like any other daemon failure (502 `daemon_unavailable`), and the
+ * capability route reports the daemon `available: false`. The recovery saga
+ * gets it from its respawn attempt and records `reason` on every session it
+ * could not bring back.
+ */
+export class DefaultDaemonUnavailableError extends Error {
+  readonly reason = ATTACHED_DAEMON_UNREACHABLE;
+  constructor() {
+    super(
+      'The attached daemon serving the default workspace is unreachable, ' +
+        'and this gateway does not start one of its own in attach mode',
+    );
+    this.name = 'DefaultDaemonUnavailableError';
+  }
 }
 
 /** Thrown when `getOrSpawn` needs to spawn a daemon for a new workspace but
@@ -804,14 +868,34 @@ export class DaemonPool implements SessionDaemon {
    * it gets its own record, so `dead` is the idempotency guard for THAT
    * daemon's death and a replacement starts clean. A single pool-wide flag
    * used to latch on the first death and swallow every later one.
+   *
+   * With `respawnDefaultDaemon` off (attach mode, #203) nothing replaces the
+   * boot daemon: it is re-attached under a fresh record once it answers
+   * again (see `reattachDefaultEntry`).
    */
   private defaultEntry: Entry;
   /** The boot daemon's own record, kept so its exit (`handleDaemonExit`)
-   * can only ever mark the boot daemon dead, never a replacement. */
-  private readonly bootEntry: Entry;
-  /** The in-flight respawn of the default workspace's daemon, shared by
-   * every caller that finds the current one dead. */
+   * can only ever mark the boot daemon dead, never a replacement. Replaced
+   * by a fresh record when the boot daemon is re-attached (#203), because
+   * that record serves the same process. */
+  private bootEntry: Entry;
+  /** The in-flight respawn (or, in attach mode, re-attach) of the default
+   * workspace's daemon, shared by every caller that finds the current one
+   * dead. */
   private defaultSpawning: Promise<Entry> | undefined;
+  /** `opts.respawnDefaultDaemon`, defaulted (#203). */
+  private readonly respawnDefault: boolean;
+  private readonly deathProbeDelayMs: number;
+  /**
+   * Daemons a transport error took, by key, still to be stopped once a
+   * replacement serves that key (#203; see `stopSuperseded`). The error was
+   * confirmed by a probe, but a daemon that was wrongly marked dead would
+   * otherwise keep running beside its successor, and a pooled one would
+   * outlive the gateway: it is out of `byWorkspace`, so `stopAll` never saw
+   * it. A daemon whose exit was seen is not listed: there is nothing left to
+   * stop.
+   */
+  private readonly superseded = new Map<string, Entry>();
 
   /** Wire the audit recorder in (add-mid-turn-recovery: `daemon_died`
    * rows). Called by cli.ts after the gateway app is constructed. */
@@ -839,11 +923,15 @@ export class DaemonPool implements SessionDaemon {
     this.maxDaemons = opts.maxDaemons ?? DEFAULT_MAX_DAEMONS;
     this.idleReapMs = opts.idleReapMs ?? DEFAULT_IDLE_REAP_MS;
     this.probeTimeoutMs = opts.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    this.respawnDefault = opts.respawnDefaultDaemon ?? true;
+    this.deathProbeDelayMs =
+      opts.deathProbeDelayMs ?? DEFAULT_DEATH_PROBE_DELAY_MS;
     this.defaultWorkspaceCwd = this.normalizeCwd(opts.defaultWorkspaceCwd);
     this.bootEntry = this.newEntry({
       client: opts.defaultDaemon,
-      // Not the pool's to stop: see `defaultEntry`.
-      stop: async () => {},
+      // Not the pool's to stop (see `defaultEntry`), except a boot daemon a
+      // transport error took once its replacement is up (#203).
+      stop: opts.stopDefaultDaemon ?? (async () => {}),
       endpoint: opts.defaultEndpoint,
     });
     this.defaultEntry = this.bootEntry;
@@ -917,25 +1005,15 @@ export class DaemonPool implements SessionDaemon {
   }
 
   /** The default workspace's daemon, or the respawn that replaces it when
-   * the current one is dead (#163). Concurrent callers share one respawn. */
+   * the current one is dead (#163). Concurrent callers share one respawn.
+   * In attach mode (#203) the "respawn" is a re-attach to the same external
+   * daemon, which fails while that daemon does not answer. */
   private liveDefaultEntry(): Entry | Promise<Entry> {
     if (!this.defaultEntry.dead) return this.defaultEntry;
     if (this.defaultSpawning) return this.defaultSpawning;
-    const key = this.defaultWorkspaceCwd;
-    const p = (async () => {
-      const s = await this.opts.spawn(key);
-      const entry = this.newEntry(s);
-      if (this.stopped) {
-        // Same reason as the pooled spawn below: nothing would stop it later.
-        await s.stop().catch(() => {});
-        return entry;
-      }
-      // Identity-guarded like a pooled entry: a late exit of this daemon
-      // after it, too, was replaced cannot kill its successor.
-      s.onExit = (info) => this.markDead(key, info, entry);
-      this.defaultEntry = entry;
-      return entry;
-    })();
+    const p = this.respawnDefault
+      ? this.respawnDefaultEntry()
+      : this.reattachDefaultEntry();
     this.defaultSpawning = p;
     // Cleared as a reaction rather than in a `finally` inside the closure, so
     // it can never run before the assignment above, and a failed respawn is
@@ -945,6 +1023,59 @@ export class DaemonPool implements SessionDaemon {
     };
     p.then(clear, clear);
     return p;
+  }
+
+  /** Spawn a gateway-owned replacement for the dead default daemon (#163). */
+  private async respawnDefaultEntry(): Promise<Entry> {
+    const key = this.defaultWorkspaceCwd;
+    const s = await this.opts.spawn(key);
+    const entry = this.newEntry(s);
+    if (this.stopped) {
+      // Same reason as the pooled spawn below: nothing would stop it later.
+      await s.stop().catch(() => {});
+      return entry;
+    }
+    // Identity-guarded like a pooled entry: a late exit of this daemon
+    // after it, too, was replaced cannot kill its successor.
+    s.onExit = (info) => this.markDead(key, info, entry);
+    this.defaultEntry = entry;
+    this.stopSuperseded(key);
+    return entry;
+  }
+
+  /**
+   * Attach mode (#203): serve the default workspace from the external daemon
+   * again, never from one of the pool's own. One `/health` question, bounded
+   * by `probeTimeoutMs`: an answer re-attaches it under a fresh record (so a
+   * later loss is reported like the first), and anything else is
+   * {@link DefaultDaemonUnavailableError}. A daemon that comes back on the
+   * same URL and token is therefore picked up by the next call, and a death
+   * that turns out to have been a false alarm resumes its sessions in place
+   * when the recovery saga asks.
+   */
+  private async reattachDefaultEntry(): Promise<Entry> {
+    const client = this.opts.defaultDaemon;
+    const answers = await settleWithin(
+      (async () => {
+        await client.health();
+        return true;
+      })(),
+      this.probeTimeoutMs,
+      false,
+    );
+    if (!answers) throw new DefaultDaemonUnavailableError();
+    const entry = this.newEntry({
+      client,
+      stop: this.bootEntry.stop,
+      endpoint: this.opts.defaultEndpoint,
+    });
+    if (this.stopped) return entry;
+    this.bootEntry = entry;
+    this.defaultEntry = entry;
+    // The daemon that answered IS the one marked dead, so this is no
+    // replacement and there is nothing to stop.
+    this.superseded.delete(this.defaultWorkspaceCwd);
+    return entry;
   }
 
   /** `getOrSpawn`, answering with the entry itself so a caller can mark
@@ -986,7 +1117,12 @@ export class DaemonPool implements SessionDaemon {
 
     const p = (async () => {
       try {
-        const s = await this.opts.spawn(key);
+        // Through `promiseFrom` (#203): a spawner that throws before it
+        // returns a promise would otherwise run the `finally` below right
+        // now, before `spawning.set` further down stores `p`, and the
+        // rejected `p` stored after it would answer every later call for
+        // this cwd. Awaiting a rejection always yields first.
+        const s = await promiseFrom(() => this.opts.spawn(key));
         const entry = this.newEntry(s);
         if (this.stopped) {
           // `stopAll()` ran while this spawn was in flight — the pool's
@@ -1004,6 +1140,7 @@ export class DaemonPool implements SessionDaemon {
         // in this microtask.
         s.onExit = (info) => this.markDead(key, info, entry);
         this.byWorkspace.set(key, entry);
+        this.stopSuperseded(key);
         return entry;
       } finally {
         // Runs on both success AND rejection — a failed spawn must not
@@ -1042,6 +1179,18 @@ export class DaemonPool implements SessionDaemon {
       if (n <= 0) this.pendingUses.delete(key);
       else this.pendingUses.set(key, n);
     };
+  }
+
+  /** Stop the daemon a transport error took `key` from, now that a
+   * replacement serves `key` (#203; see `superseded`). Not awaited: the
+   * replacement is already serving, and a stop that escalates to SIGKILL
+   * takes seconds. Its exit, when it lands, is a stale trigger the identity
+   * guard in `markDead` ignores. */
+  private stopSuperseded(key: string): void {
+    const old = this.superseded.get(key);
+    if (old === undefined) return;
+    this.superseded.delete(key);
+    old.stop().catch(() => {});
   }
 
   /** Stop the daemon, drop its entry, and scrub any of its session ids out
@@ -1238,7 +1387,8 @@ export class DaemonPool implements SessionDaemon {
    *   them via `resumeSession`),
    * - writes ONE `daemon_died` audit row — detail
    *   `{ exitCode, signal, sessionCount }`, no workspace path (the
-   *   session-create/resume audit rule),
+   *   session-create/resume audit rule), plus `reason` when the dead daemon
+   *   is an attached one nothing will replace (#203),
    * - hands the affected list to `opts.onDaemonDeath` (the recovery
    *   orchestrator; absent → the sessions are simply dropped, 404s as
    *   today — the audit row is still written).
@@ -1254,11 +1404,16 @@ export class DaemonPool implements SessionDaemon {
    * workspace respawns it (see `liveDefaultEntry`). The idempotency guard is
    * the per-daemon `dead` flag, so the replacement's own death is reported
    * like the first one was (#163).
+   *
+   * `trigger` is how the death was learned. A process whose exit was seen is
+   * gone; one a transport error took may still be running, so it is kept in
+   * `superseded` and stopped once its replacement is up (#203).
    */
   private markDead(
     key: string,
     info: DaemonExitInfo,
     expectedEntry?: Entry,
+    trigger: 'exit' | 'transport' = 'exit',
   ): void {
     if (this.stopped) return; // shutdown: no audit, no hook
     const isDefaultKey = key === this.defaultWorkspaceCwd;
@@ -1271,6 +1426,7 @@ export class DaemonPool implements SessionDaemon {
     const exit = { code: info.code, signal: info.signal, atMs: this.now() };
     entry.exit = exit;
     if (!isDefaultKey) this.byWorkspace.delete(key);
+    if (trigger === 'transport') this.superseded.set(key, entry);
     const affected = new Set<string>(entry.sessions);
     for (const [sid, k] of this.ownerOf) {
       if (k === key) affected.add(sid);
@@ -1283,26 +1439,71 @@ export class DaemonPool implements SessionDaemon {
           exitCode: exit.code,
           signal: exit.signal,
           sessionCount: affected.size,
+          // Attach mode (#203): nothing will replace this daemon, so the row
+          // says why its sessions are not coming back.
+          ...(isDefaultKey && !this.respawnDefault
+            ? { reason: ATTACHED_DAEMON_UNREACHABLE }
+            : {}),
         },
       })
       .catch(() => {});
     this.opts.onDaemonDeath?.(key, [...affected], exit);
   }
 
-  /** Transport trigger: if `err` is a transport-level death error, the
-   * daemon behind `entry` is dead (covers races where the exit handler has
-   * not fired yet). Transport errors carry no exit info; if the exit trigger
-   * fires later it is a no-op on this same death. Only `entry` itself can be
-   * marked: a replacement that took `key` while the call was out is left
-   * alone. */
-  private noteTransportDeath(key: string, entry: Entry, err: unknown): void {
-    if (isTransportDeathError(err)) {
-      this.markDead(key, { code: null, signal: null }, entry);
+  /** Transport trigger: if `err` is a transport-level error and the daemon
+   * behind `entry` is confirmed dead (see `transportDeathConfirmed`), mark it
+   * dead (covers races where the exit handler has not fired yet). Transport
+   * errors carry no exit info; if the exit trigger fires later it is a no-op
+   * on this same death. Only `entry` itself can be marked: a replacement that
+   * took `key` while the call was out is left alone. Never rejects. */
+  private async noteTransportDeath(
+    key: string,
+    entry: Entry,
+    err: unknown,
+  ): Promise<void> {
+    if (await this.transportDeathConfirmed(entry, err)) {
+      this.markDead(key, { code: null, signal: null }, entry, 'transport');
     }
   }
 
+  /**
+   * Whether `err`, from a call to `entry`'s daemon, means that daemon is dead
+   * (#203). Not a transport error: no. A refused connection: yes, at once,
+   * because nothing is listening. Any other transport error (a reset, a
+   * dropped socket, the SDK's closed stream) is what a live daemon also
+   * produces, from the keep-alive race on an idle socket or a stream
+   * eviction, so it is decided by one `/health` probe after
+   * `deathProbeDelayMs` (see `probeConfirmsDeath`). Calls that fail on the
+   * same daemon while that probe is out share it.
+   */
+  private transportDeathConfirmed(
+    entry: Entry,
+    err: unknown,
+  ): Promise<boolean> {
+    const code = transportDeathCode(err);
+    if (code === undefined || entry.dead) return Promise.resolve(false);
+    if (code === 'ECONNREFUSED') return Promise.resolve(true);
+    if (entry.confirming) return entry.confirming;
+    const run = (async () => {
+      if (this.deathProbeDelayMs > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.deathProbeDelayMs),
+        );
+      }
+      return this.probeConfirmsDeath(entry.client);
+    })();
+    entry.confirming = run;
+    const clear = () => {
+      if (entry.confirming === run) entry.confirming = undefined;
+    };
+    run.then(clear, clear);
+    return run;
+  }
+
   /** Run `call` against `entry`'s daemon, marking that daemon dead on a
-   * transport-level error (then rethrow; routes keep their 502 mapping). */
+   * confirmed transport-level error (then rethrow; routes keep their 502
+   * mapping). The rethrow waits for the confirmation, so a caller that
+   * retries finds the pool already knowing whether to respawn. */
   private async callOn<T>(
     key: string,
     entry: Entry,
@@ -1311,7 +1512,7 @@ export class DaemonPool implements SessionDaemon {
     try {
       return await call(entry.client);
     } catch (err) {
-      this.noteTransportDeath(key, entry, err);
+      await this.noteTransportDeath(key, entry, err);
       throw err;
     }
   }
@@ -1545,10 +1746,12 @@ export class DaemonPool implements SessionDaemon {
    * holds them. So a transport-shaped stream failure marks the daemon dead
    * only when nothing says it is alive: no `client_evicted` frame arrived
    * first, and a `/health` probe fails at the transport level too (see
-   * `probeConfirmsDeath`). Either way the error is rethrown unchanged, which
-   * is what makes each consumer re-subscribe from its own cursor with its own
-   * backoff (the events relay, the push pump, the review bridge; the bridge
-   * stops on a clean end, so a loss must not be turned into one).
+   * `transportDeathConfirmed`, which every call shares since #203; a
+   * refused connection needs no probe). Either way the error is rethrown
+   * unchanged, which is what makes each consumer re-subscribe from its own
+   * cursor with its own backoff (the events relay, the push pump, the review
+   * bridge; the bridge stops on a clean end, so a loss must not be turned
+   * into one).
    *
    * A `client_evicted` frame that arrives is relayed like any other. Today
    * the daemon's own write-then-destroy loses it before it reaches the socket
@@ -1571,26 +1774,25 @@ export class DaemonPool implements SessionDaemon {
         yield event;
       }
     } catch (err) {
-      if (
-        !evicted &&
-        !opts.signal?.aborted &&
-        isTransportDeathError(err) &&
-        (await this.probeConfirmsDeath(client))
-      ) {
-        this.noteTransportDeath(key, entry, err);
+      // The same confirmation as every other call (#203): a refused
+      // connection is a death, any other transport error waits for a
+      // `/health` probe.
+      if (!evicted && !opts.signal?.aborted) {
+        await this.noteTransportDeath(key, entry, err);
       }
       throw err;
     }
   }
 
   /**
-   * After an event stream drops, ask the daemon whether it is still there.
-   * Only a probe that itself fails at the transport level confirms a death.
-   * Any HTTP answer, even an error status, means a live process answered; a
-   * probe that does not settle within `probeTimeoutMs` proves nothing either
-   * way. For a daemon that really is gone, its exit event (`onExit`, or
-   * `handleDaemonExit` for the boot daemon) still reports it, and a wrong
-   * "dead" here costs a second daemon on a live workspace.
+   * After a transport error (a dropped event stream, a reset call), ask the
+   * daemon whether it is still there. Only a probe that itself fails at the
+   * transport level confirms a death. Any HTTP answer, even an error status,
+   * means a live process answered; a probe that does not settle within
+   * `probeTimeoutMs` proves nothing either way. For a daemon that really is
+   * gone, its exit event (`onExit`, or `handleDaemonExit` for the boot
+   * daemon) still reports it, and a wrong "dead" here costs a second daemon
+   * on a live workspace.
    */
   private probeConfirmsDeath(client: DaemonClient): Promise<boolean> {
     const probe = (async () => {
@@ -2414,7 +2616,9 @@ export class DaemonPool implements SessionDaemon {
    * whoever constructed the pool (cli.ts stops it separately via its own
    * `handle.stop()`, alongside this call). A replacement the pool spawned
    * for the default workspace after the boot daemon died is the pool's own
-   * and is stopped like a pooled one (#163). Tolerates an individual entry's
+   * and is stopped like a pooled one (#163), and so is a pooled or
+   * replacement daemon a transport error took that nothing replaced yet
+   * (#203). Tolerates an individual entry's
    * `stop()` rejecting (`Promise.allSettled`) — one stuck daemon must not
    * block the others from being asked to stop. Intended for shutdown; not
    * safe to call mid-lifetime (any in-flight session routing is dropped).
@@ -2428,9 +2632,15 @@ export class DaemonPool implements SessionDaemon {
   async stopAll(): Promise<void> {
     this.stopped = true;
     clearInterval(this.reapTimer);
-    const entries = [...this.byWorkspace.values()];
-    if (this.defaultEntry !== this.bootEntry) entries.push(this.defaultEntry);
-    await Promise.allSettled(entries.map((e) => e.stop()));
+    const entries = new Set(this.byWorkspace.values());
+    if (this.defaultEntry !== this.bootEntry) entries.add(this.defaultEntry);
+    // A daemon a transport error took that nothing replaced may still be
+    // running, and it is no longer in `byWorkspace` (#203).
+    for (const old of this.superseded.values()) {
+      if (old !== this.bootEntry) entries.add(old);
+    }
+    this.superseded.clear();
+    await Promise.allSettled([...entries].map((e) => e.stop()));
     // Drain the spawns that were in flight when shutdown began. Each one stops
     // the daemon it just created once it sees `stopped`, but that cleanup only
     // runs if the process is still alive to run it, and the gateway calls this
@@ -2447,6 +2657,16 @@ export class DaemonPool implements SessionDaemon {
     this.byWorkspace.clear();
     this.ownerOf.clear();
     this.pendingUses.clear();
+  }
+}
+
+/** `fn()`, with a synchronous throw handed back as a rejected promise
+ * instead of thrown at the call site (#203). */
+function promiseFrom<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return fn();
+  } catch (err) {
+    return Promise.reject(err);
   }
 }
 
@@ -2475,7 +2695,10 @@ function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 /** Socket codes (found on an error or its `cause` chain) that mean the daemon
  * transport is gone: the process is dead or the socket was torn down. Node's
  * "socket hang up" carries `ECONNRESET` and undici's "other side closed"
- * carries `UND_ERR_SOCKET`, so the codes cover both without reading text. */
+ * carries `UND_ERR_SOCKET`, so the codes cover both without reading text.
+ * Only `ECONNREFUSED` is taken as a death outright; the others are also what
+ * a live daemon's keep-alive race produces on an ordinary call, so the pool
+ * confirms them with a probe first (#203, `transportDeathConfirmed`). */
 const TRANSPORT_DEATH_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
@@ -2494,24 +2717,34 @@ const TRANSPORT_DEATH_CODES = new Set([
  * the same reason a `DaemonHttpError` (a numeric `status`: the daemon
  * answered) ends the walk as "not a death", whatever its message or cause. */
 function isTransportDeathError(err: unknown): boolean {
+  return transportDeathCode(err) !== undefined;
+}
+
+/** The classification behind {@link isTransportDeathError}, naming what it
+ * found: the socket code, or `DaemonTransportClosedError`. Undefined when
+ * `err` is not a transport death. The pool tells a refused connection
+ * (nothing listening) from the rest by it (#203). */
+function transportDeathCode(err: unknown): string | undefined {
   let cur: unknown = err;
   for (
     let depth = 0;
     cur !== null && typeof cur === 'object' && depth < 8;
     depth++
   ) {
-    if (cur instanceof DaemonTransportClosedError) return true;
     // The name check covers an SDK loaded from a second copy of the package,
     // where `instanceof` would fail.
-    if ((cur as { name?: unknown }).name === 'DaemonTransportClosedError') {
-      return true;
+    if (
+      cur instanceof DaemonTransportClosedError ||
+      (cur as { name?: unknown }).name === 'DaemonTransportClosedError'
+    ) {
+      return 'DaemonTransportClosedError';
     }
-    if (asDaemonHttpError(cur) !== undefined) return false;
+    if (asDaemonHttpError(cur) !== undefined) return undefined;
     const code = (cur as { code?: unknown }).code;
     if (typeof code === 'string' && TRANSPORT_DEATH_CODES.has(code)) {
-      return true;
+      return code;
     }
     cur = (cur as { cause?: unknown }).cause;
   }
-  return false;
+  return undefined;
 }

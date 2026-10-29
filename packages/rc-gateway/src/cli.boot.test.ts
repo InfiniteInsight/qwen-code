@@ -16,6 +16,7 @@ const {
   claimBootDaemon,
   releaseBootDaemon,
   stopBootOwnedDaemon,
+  bootDaemonPoolOptions,
 } = await import('./cli.js');
 
 /** A handle that only records that it was stopped, plus a call counter. */
@@ -199,5 +200,23 @@ describe('boot daemon ownership', () => {
     expect(await stopBootOwnedDaemon(50)).toBe(true);
     expect(calls()).toBe(1);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe('boot daemon pool options (#203)', () => {
+  it('attach mode turns off the respawn of the default workspace daemon', () => {
+    const { handle } = fakeHandle();
+    const attached = { ...handle, attached: true } as DaemonHandle;
+    expect(bootDaemonPoolOptions(attached)).toEqual({
+      respawnDefaultDaemon: false,
+    });
+  });
+
+  it('a daemon this gateway spawned is respawned after it dies, and the pool may stop it once replaced', () => {
+    const { handle } = fakeHandle();
+    expect(bootDaemonPoolOptions(handle)).toEqual({
+      respawnDefaultDaemon: true,
+      stopDefaultDaemon: handle.stop,
+    });
   });
 });
