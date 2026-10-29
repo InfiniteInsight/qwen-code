@@ -39,6 +39,7 @@ import { promisify } from 'node:util';
 import type { Page, Route } from 'playwright';
 import { bootViewer, harnessRuntimeRoot, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
+import type { StubDaemonOptions } from '../src/testing/stubDaemon.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -3013,7 +3014,13 @@ type PageScenario =
          * answer live-state with `liveState(cwd)` (see bootViewer's `pool`),
          * so a scenario can count what the pool holds.
          */
-        pool?: { liveState: (cwd: string) => unknown };
+        pool?: {
+          liveState: (cwd: string) => unknown;
+          /** #132: what each spawned daemon's catalog serves. */
+          catalog?: (cwd: string) => StubDaemonOptions['catalog'];
+        };
+        /** #132: what the boot daemon's POST /sessions/catalog serves. */
+        catalog?: StubDaemonOptions['catalog'];
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22899,6 +22906,7 @@ async function runPageScenario(
     currentTurnStatusCode: s.stub?.currentTurnStatusCode,
     hostActions: s.stub?.hostActions,
     pool: s.stub?.pool,
+    catalog: s.stub?.catalog,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
