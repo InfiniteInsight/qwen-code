@@ -94,6 +94,10 @@ export interface BootViewerOptions {
    * refuse an index read, and the page prints the reason code it was given.
    */
   turnIndexStatusCode?: number;
+  /** Body (or a function returning it) for GET /session/:id/turns/current (#131). */
+  currentTurn?: unknown;
+  /** Status the stub answers GET /session/:id/turns/current with (#131). */
+  currentTurnStatusCode?: number;
   /**
    * Daemon feature tags the stub advertises on GET /capabilities (default:
    * none). The page hides whole panels behind these tags, so a scenario that
@@ -385,6 +389,8 @@ export async function bootViewer(
     transcriptStatusCode: opts.transcriptStatusCode,
     turnIndexPage: opts.turnIndexPage,
     turnIndexStatusCode: opts.turnIndexStatusCode,
+    currentTurn: opts.currentTurn,
+    currentTurnStatusCode: opts.currentTurnStatusCode,
     capabilitiesFeatures: opts.capabilitiesFeatures,
     exportStatusCode: opts.exportStatusCode,
     attachmentUploadStatus: opts.attachmentUploadStatus,

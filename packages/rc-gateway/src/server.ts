@@ -1009,7 +1009,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionTurnIndexRoute(deps.daemon, audit),
   );
-  // GET /session/:id/turns/current — read-scope (#131). The daemon's record of
+  // GET /session/:id/turns/current: read-scope (#131). The daemon's record of
   // the turn a conversation is on: running, queued or the last one ended. The
   // status line's sheet polls it while open and a turn is live. Relayed
   // untouched and not audited (a poll). Bare namespace, 1:1 with the daemon route.

@@ -1145,6 +1145,14 @@
         height: 6px;
         background: var(--g1-link);
       }
+      /* #131: the prompt the running turn answers, one muted line. */
+      #turn-prompt {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       #session-footer .cwd {
         font-family: ui-monospace, monospace;
         overflow-wrap: anywhere;
@@ -7068,6 +7076,16 @@
       // { total, window, estimated } from GET /session/:id/context-usage, or
       // null when that read has not answered or reported no window.
       let ctxUsage = null;
+      // #131. The daemon's record of the turn now running or queued, for the
+      // sheet's "This turn" row: { sid, state, promptText, base, readAt } where
+      // `base` is how old the turn was (ms) when it was read, taken against the
+      // GATEWAY's clock (its Date header) so a phone clock that disagrees with
+      // the host's does not show a negative or hour-long turn. null when the
+      // daemon reports none, the gateway predates the route, or the sheet is
+      // shut.
+      let turnLive = null;
+      let turnPollTimer = null;
+      const TURN_POLL_MS = 4000;
 
       const fmtK = (n) =>
         typeof n === 'number' && n >= 1000
@@ -7503,6 +7521,37 @@
           }
           f.append(col);
         }
+        // #131: the daemon's record of the turn in flight, only while it is
+        // live here and the daemon reports it running or queued.
+        if (turnLive && turnLive.sid === watchedSessionId && turnRunning()) {
+          const col = document.createElement('div');
+          col.id = 'turn-row';
+          col.className = 'sh-col';
+          const v = document.createElement('span');
+          const el = document.createElement('span');
+          el.id = 'turn-elapsed';
+          el.textContent = h1Clock(turnLiveSecs());
+          const t0 = new Date(turnLive.readAt - turnLive.base);
+          v.append(
+            turnLive.state === 'queued' ? 'queued' : 'running',
+            ' \u00b7 since ' +
+              t0.toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              }) +
+              ' \u00b7 ',
+            el,
+          );
+          col.append(row('This turn', v));
+          if (turnLive.promptText) {
+            const p = document.createElement('div');
+            p.id = 'turn-prompt';
+            p.textContent = turnLive.promptText;
+            col.append(p);
+          }
+          f.append(col);
+        }
         if (ctxInfo.cwd) {
           const c = document.createElement('span');
           c.className = 'cwd';
@@ -7573,6 +7622,8 @@
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
         syncPromptPlaceholder();
+        syncTurnPoll();
+        h1Text($('turn-elapsed'), h1Clock(turnLiveSecs()));
         if (running && !runClock) {
           runClock = setInterval(renderStatusLine, 1000);
         } else if (!running && runClock) {
@@ -7609,6 +7660,7 @@
         if (sheet.hidden === !open) return;
         sheet.hidden = !open;
         $('h1-status').setAttribute('aria-expanded', String(open));
+        syncTurnPoll(); // #131: starts with the sheet, stops when it shuts
         if (!open) return;
         closeH1Menu(false);
         if (paneLayout()) setMoreOpen(false);
@@ -9934,6 +9986,77 @@
           if (ctxInfo) renderFooter();
         } catch {
           /* transient; leave the fill as-is */
+        }
+      }
+
+      // #131. Read GET /session/:id/turns/current. Only a running or queued turn
+      // is kept: an ended one is not "this turn", and `idle` says there is none.
+      // A failed read leaves what is drawn, as the fill read does.
+      const currentTurnOn = () =>
+        !!(caps && caps.remoteControl && caps.remoteControl.currentTurn === true);
+      async function readCurrentTurn() {
+        const id = watchedSessionId;
+        if (!id || !token() || !currentTurnOn()) return;
+        const gen = switchGen;
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/turns/current',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) return;
+          const body = await res.json();
+          if (gen !== switchGen || id !== watchedSessionId) return;
+          const live =
+            body && (body.state === 'running' || body.state === 'queued');
+          const t0 = live
+            ? typeof body.startedAt === 'number'
+              ? body.startedAt
+              : body.queuedAt
+            : undefined;
+          if (!live || typeof t0 !== 'number') {
+            if (turnLive === null) return;
+            turnLive = null;
+          } else {
+            const readAt = Date.now();
+            const hdr = Date.parse(res.headers.get('Date') || '');
+            const serverNow = Number.isNaN(hdr) ? readAt : hdr;
+            turnLive = {
+              sid: id,
+              state: body.state,
+              promptText:
+                typeof body.promptText === 'string' ? body.promptText : '',
+              base: Math.max(0, serverNow - t0),
+              readAt,
+            };
+          }
+          if (ctxInfo) renderFooter();
+        } catch {
+          /* transient; leave the row as-is */
+        }
+      }
+      function turnLiveSecs() {
+        return turnLive
+          ? Math.floor((turnLive.base + (Date.now() - turnLive.readAt)) / 1000)
+          : 0;
+      }
+      // The poll runs only while the sheet is open and a turn is live here: a
+      // closed sheet or an idle conversation costs the daemon nothing.
+      function syncTurnPoll() {
+        const want =
+          currentTurnOn() &&
+          !$('h1-sheet').hidden &&
+          turnRunning() &&
+          !!token();
+        if (want && !turnPollTimer) {
+          turnPollTimer = setInterval(readCurrentTurn, TURN_POLL_MS);
+          void readCurrentTurn();
+        } else if (!want && turnPollTimer) {
+          clearInterval(turnPollTimer);
+          turnPollTimer = null;
+        }
+        if (!want && turnLive) {
+          turnLive = null;
+          if (ctxInfo) renderFooter();
         }
       }
 
