@@ -100,17 +100,56 @@ const HELPERS_JS = String.raw`
     return Object.keys(core).sort().join(',');
   }
 
-  function setup(virtual) {
+  // #190. withHead hands the view a header row (a plain block whose height
+  // setHead changes), and every onNearBottomChange call is kept in state.nb.
+  var head = null;
+  function setup(virtual, withHead) {
     if (state.view) state.view.destroy();
     state.view = null;
     scroller.textContent = '';
     scroller.scrollTop = 0;
+    state.nb = [];
+    head = null;
+    if (withHead) {
+      head = document.createElement('div');
+      head.id = 'vt-head';
+      head.style.background = '#234';
+      head.style.height = '60px';
+    }
     state.model = TranscriptModel.createTranscriptModel();
     state.view = TranscriptView.createTranscriptView({
       model: state.model,
       scroller: scroller,
       virtualCore: virtual ? core : null,
+      header: head || undefined,
+      onNearBottomChange: function (nb) {
+        state.nb.push(nb);
+      },
     });
+  }
+  // 0 hides the header (display:none), as the page's pills row does when no
+  // pill is showing.
+  function setHead(px) {
+    if (!head) return;
+    if (px <= 0) {
+      head.style.display = 'none';
+    } else {
+      head.style.display = '';
+      head.style.height = px + 'px';
+    }
+  }
+  // The header's box relative to the scroller's top edge, and whether the
+  // view put it inside the scroller at all.
+  function headBox() {
+    if (!head) return null;
+    var edge = scroller.getBoundingClientRect().top;
+    var b = head.getBoundingClientRect();
+    return {
+      top: b.top - edge,
+      bottom: b.bottom - edge,
+      height: b.height,
+      inside: scroller.contains(head),
+    };
   }
 
   // n user/assistant pairs (2n items) of ~chars characters each.
@@ -284,6 +323,11 @@ const HELPERS_JS = String.raw`
     },
     loadCore: loadCore,
     setup: setup,
+    setHead: setHead,
+    headBox: headBox,
+    get nb() {
+      return state.nb || [];
+    },
     addTurns: addTurns,
     addMdTurns: addMdTurns,
     addLineTurns: addLineTurns,
@@ -367,6 +411,7 @@ interface VtView {
   followIfPinned(): void;
   isNearBottom(): boolean;
   mountedCount(): number;
+  revealHeader(): void;
   destroy(): void;
 }
 declare const __vt: {
@@ -374,7 +419,10 @@ declare const __vt: {
   model: VtModel;
   view: VtView;
   loadCore(): Promise<string>;
-  setup(virtual: boolean): void;
+  setup(virtual: boolean, withHead?: boolean): void;
+  setHead(px: number): void;
+  headBox(): { top: number; bottom: number; height: number; inside: boolean } | null;
+  nb: boolean[];
   addTurns(n: number, chars: number, seed: number): void;
   addMdTurns(n: number, seed: number): void;
   addLineTurns(n: number, lines: number): void;
@@ -1959,6 +2007,233 @@ const VIEW_SCENARIOS: Scenario[] = [
       }
       expect(problems.length === 0, problems.join('; '));
       return details.join('; ');
+    },
+  },
+  // #190. The header row (the page's load-earlier and recap pills): a block
+  // the view keeps above the first row, inside the list, so it scrolls away
+  // with the rows instead of floating over whichever row is at the top.
+  {
+    name: 'V15 header row sits above the first row and scrolls with the list',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(60, 300, 0);
+          await __vt.settle(300);
+          __vt.scroller.scrollTop = 0;
+          await __vt.settle(200);
+          const top = __vt.headBox();
+          const first = __vt.rowBox(__vt.model.items[0]!.id);
+          __vt.scroller.scrollTop = 800;
+          await __vt.settle(200);
+          return { top, first, away: __vt.headBox(), scrolled: __vt.scroller.scrollTop };
+        }, virtual);
+        expect(!!r.top && r.top.inside, `${mode}: the header is not inside the scroller`);
+        expect(Math.abs(r.top!.top - 8) <= 1, `${mode}: the header starts ${r.top!.top}px below the top, not 8`);
+        expect(
+          !!r.first && r.first.top >= r.top!.bottom + 7 && r.first.top <= r.top!.bottom + 9,
+          `${mode}: the first row starts at ${r.first && r.first.top}, not 8px under the header's bottom ${r.top!.bottom}`,
+        );
+        expect(
+          !!r.away && Math.abs(r.top!.top - r.away.top - r.scrolled) <= 1 && r.away.bottom <= 0,
+          `${mode}: after a scroll of ${r.scrolled}px the header is at ${r.away && r.away.top} (was ${r.top!.top}): it did not scroll with the rows`,
+        );
+        out.push(`${mode}: header 8-${Math.round(r.top!.bottom)}, first row ${Math.round(r.first!.top)}, scrolled away to ${Math.round(r.away!.top)}`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V16 a header that grows, shrinks, appears or goes above a reader mid-list moves no row, and waits for a finger to lift',
+    run: async (page) => {
+      const problems: string[] = [];
+      const details: string[] = [];
+      const run = async (p: Page, what: string, virtual: boolean, finger: boolean) => {
+        const r = await p.evaluate(
+          async ({ v, finger: f }) => {
+            __vt.setup(v, true);
+            __vt.setHead(60);
+            __vt.addTurns(80, 300, 0);
+            await __vt.settle(300);
+            __vt.scroller.scrollTop = 1500;
+            await __vt.settle(300);
+            const steps: Array<[string, number]> = [
+              ['grow', 260],
+              ['shrink', 40],
+              ['gone', 0],
+              ['back', 120],
+            ];
+            const moves: string[] = [];
+            let worst = 0;
+            const heights: number[] = [];
+            for (const [name, px] of steps) {
+              const a = __vt.topRow();
+              if (!a) return { setup: 'no row at the top edge' };
+              __vt.setHead(px);
+              // The next two frames are what the reader sees first.
+              await __vt.frame();
+              await __vt.frame();
+              const soon = __vt.rowBox(a.id);
+              await __vt.settle(250);
+              const late = __vt.rowBox(a.id);
+              if (!soon || !late) return { setup: `the reader's row went (${name})` };
+              const m1 = Math.round(soon.top - a.y);
+              const m2 = Math.round(late.top - a.y);
+              worst = Math.max(worst, Math.abs(m1), Math.abs(m2));
+              moves.push(`${name} ${m1}/${m2}`);
+              heights.push(Math.round(__vt.headBox()!.height));
+            }
+            let during = 0;
+            let after = 0;
+            let wrote = 0;
+            if (f) {
+              // A finger on the transcript: nothing moves while it is down,
+              // and the change lands with the reader's row held once it lifts.
+              const a = __vt.topRow()!;
+              const t0 = __vt.scroller.scrollTop;
+              __vt.touch('touchstart');
+              __vt.setHead(300);
+              await __vt.frame();
+              await __vt.frame();
+              await __vt.frame();
+              during = Math.round(__vt.rowBox(a.id)!.top - a.y);
+              wrote = Math.round(__vt.scroller.scrollTop - t0);
+              __vt.touch('touchend');
+              await __vt.settle(400);
+              after = Math.round(__vt.rowBox(a.id)!.top - a.y);
+            }
+            return {
+              inside: !!__vt.headBox() && __vt.headBox()!.inside,
+              moves,
+              worst,
+              heights,
+              during,
+              after,
+              wrote,
+              top: Math.round(__vt.scroller.scrollTop),
+            };
+          },
+          { v: virtual, finger },
+        );
+        if ('setup' in r) {
+          problems.push(`${what}: setup failed (${r.setup})`);
+          return;
+        }
+        if (!r.inside) problems.push(`${what}: the header is not inside the scroller`);
+        if (r.heights.join(',') !== '260,40,0,120')
+          problems.push(`${what}: the header measured ${r.heights.join(',')}, not 260,40,0,120`);
+        if (r.worst > 1) problems.push(`${what}: the reader's row moved (${r.moves.join(', ')})`);
+        if (Math.abs(r.during) > 1 || Math.abs(r.after) > 1 || r.wrote !== 0)
+          problems.push(`${what}: with a finger down the row moved ${r.during}px (scrollTop written ${r.wrote}px), and ${r.after}px once it lifted`);
+        details.push(`${what}: ${r.moves.join(', ')}${finger ? `, finger ${r.during}/${r.after}` : ''}`);
+      };
+      await run(page, 'desktop', true, false);
+      await run(page, 'fallback', false, false);
+      for (const [os, ua] of Object.entries(MOBILE_UA)) {
+        await onPhone(page, ua, async (p) => run(p, os, true, true));
+      }
+      expect(problems.length === 0, problems.join('; '));
+      return details.join('; ');
+    },
+  },
+  {
+    name: 'V17 a reader at the top sees the header change: the rows make room, and revealHeader brings it back from mid-list',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(60, 300, 0);
+          await __vt.settle(300);
+          __vt.scroller.scrollTop = 0;
+          await __vt.settle(200);
+          const id = __vt.model.items[0]!.id;
+          const y0 = __vt.rowBox(id)!.top;
+          __vt.setHead(200);
+          await __vt.settle(200);
+          const grown = { row: __vt.rowBox(id)!.top, top: __vt.scroller.scrollTop, head: __vt.headBox()!.top };
+          __vt.setHead(0);
+          await __vt.settle(200);
+          const gone = { row: __vt.rowBox(id)!.top, top: __vt.scroller.scrollTop };
+          __vt.setHead(90);
+          __vt.scroller.scrollTop = 2000;
+          await __vt.settle(250);
+          __vt.view.revealHeader();
+          await __vt.settle(250);
+          return { y0, grown, gone, revealed: { top: __vt.scroller.scrollTop, head: __vt.headBox()! } };
+        }, virtual);
+        expect(
+          r.grown.top === 0 && Math.abs(r.grown.row - r.y0 - 140) <= 1 && Math.abs(r.grown.head - 8) <= 1,
+          `${mode}: at the top a 140px taller header left scrollTop ${r.grown.top} and moved the first row ${r.grown.row - r.y0}px`,
+        );
+        expect(
+          r.gone.top === 0 && Math.abs(r.gone.row - 8) <= 1,
+          `${mode}: with the header gone the first row is at ${r.gone.row} (scrollTop ${r.gone.top}), not 8`,
+        );
+        expect(
+          r.revealed.top === 0 && Math.abs(r.revealed.head.top - 8) <= 1 && r.revealed.head.height === 90,
+          `${mode}: revealHeader left scrollTop ${r.revealed.top} and the header at ${r.revealed.head.top}`,
+        );
+        out.push(`${mode}: row ${Math.round(r.y0)} -> ${Math.round(r.grown.row)} -> ${Math.round(r.gone.row)}; revealed at ${Math.round(r.revealed.head.top)}`);
+      }
+      return out.join('; ');
+    },
+  },
+  {
+    name: 'V18 a reader at the end stays at the end as the header changes, and jump-to-bottom lands on the end after one',
+    run: async (page) => {
+      const out: string[] = [];
+      for (const virtual of [true, false]) {
+        const mode = virtual ? 'virtual' : 'fallback';
+        const r = await page.evaluate(async (v) => {
+          __vt.setup(v, true);
+          __vt.setHead(60);
+          __vt.addTurns(60, 300, 0);
+          __vt.view.scrollToEnd();
+          await __vt.settle(300);
+          const nb0 = __vt.nb.length;
+          const gaps: number[] = [];
+          for (const px of [240, 30, 0, 150]) {
+            __vt.setHead(px);
+            await __vt.frame();
+            await __vt.frame();
+            gaps.push(Math.round(__vt.gap()));
+            await __vt.settle(200);
+            gaps.push(Math.round(__vt.gap()));
+          }
+          const leftEnd = __vt.nb.slice(nb0).some((x) => x === false);
+          const near = __vt.view.isNearBottom();
+          // Jump to the bottom after the header changed under a reader mid-list.
+          __vt.scroller.scrollTop = 1200;
+          await __vt.settle(250);
+          __vt.setHead(320);
+          await __vt.settle(250);
+          __vt.view.scrollToEnd();
+          await __vt.settle(250);
+          const jumped = Math.round(__vt.gap());
+          // And in the same frame as the change.
+          __vt.scroller.scrollTop = 1200;
+          await __vt.settle(250);
+          __vt.setHead(20);
+          __vt.view.scrollToEnd();
+          await __vt.settle(250);
+          const hb = __vt.headBox();
+          return { gaps, leftEnd, near, jumped, same: Math.round(__vt.gap()), nearAfter: __vt.view.isNearBottom(), inside: !!hb && hb.inside && hb.height === 20 };
+        }, virtual);
+        expect(r.inside, `${mode}: the header is not a 20px block inside the scroller`);
+        expect(
+          r.gaps.every((g) => g <= 1) && !r.leftEnd && r.near,
+          `${mode}: at the end the gap went ${r.gaps.join(',')} (left the end: ${r.leftEnd}, near ${r.near})`,
+        );
+        expect(r.jumped <= 1 && r.same <= 1 && r.nearAfter, `${mode}: jump-to-bottom left a gap of ${r.jumped}px (${r.same}px in the same frame)`);
+        out.push(`${mode}: gaps ${r.gaps.join(',')}; jumps ${r.jumped}/${r.same}`);
+      }
+      return out.join('; ');
     },
   },
 ];
@@ -6983,11 +7258,12 @@ PAGE_SCENARIOS.push({
         return { id: -1, top: 0 };
       });
 
-    // Mid-transcript, not at the end: at the end the view follows, which is a
-    // different path and would make the anchor claim vacuous.
+    // Not at the end: at the end the view follows, which is a different path
+    // and would make the anchor claim vacuous. #190: at the top of the list,
+    // because the pill is the list's header row now, and a reader can only
+    // tap it where it is; the page still lands above the row they are on.
     await page.evaluate(() => {
-      const s = document.getElementById('transcript')!;
-      s.scrollTop = Math.floor(s.scrollHeight / 2);
+      document.getElementById('transcript')!.scrollTop = 0;
     });
     await settlePage(page);
 
@@ -22612,7 +22888,10 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P303 the load-earlier pill does not cover the first transcript line or the crash banner: the list top reserves the pills row, at 390 and 1100',
+    // #190: the pills are the list's header row now, not a float over a
+    // reserved inset (setTopInset is gone); the same three claims hold, and
+    // the pill has to be inside the list for them to hold for that reason.
+    name: 'P303 the load-earlier pill does not cover the first transcript line or the crash banner: it is the list\'s header row, at 390 and 1100',
     frames: g177Frames,
     run: async ({ page, viewer }) => {
       await g177Ready(page, viewer);
@@ -22634,6 +22913,10 @@ PAGE_SCENARIOS.push({
             };
           })()`) as never;
         const r = await read();
+        expect(
+          (await page.evaluate(`document.getElementById('transcript').contains(document.getElementById('load-earlier'))`)) === true,
+          `${size.width}: the pill is not inside the transcript list`,
+        );
         const hit = (a: { t: number; b: number; l: number; r: number }, c: { t: number; b: number; l: number; r: number }) =>
           !(a.b <= c.t || c.b <= a.t || a.r <= c.l || c.r <= a.l);
         const covered = r.rows.filter((row) => row.b > 0 && hit(r.pill, row));
@@ -22731,6 +23014,200 @@ PAGE_SCENARIOS.push({
     },
   });
 }
+
+// #190 (H1 adjustments, batch two). Each scenario names the adjustment, runs at
+// 390x844 and, where the layout differs, at 1100x810, and saves a shot when
+// SHOTS names a directory.
+const H190_SIZES = [
+  { width: 390, height: 844 },
+  { width: 1100, height: 810 },
+] as const;
+const h190Frames = (): Frame[] => {
+  const f = new Frames();
+  for (let i = 1; i <= 14; i++) {
+    f.user(`p310 question ${i}`).asst(
+      `p310 answer ${i} ` + 'lorem ipsum dolor sit amet consectetur '.repeat(6),
+    ).done();
+  }
+  return f.list;
+};
+const h190Settle = async (page: Page): Promise<void> => {
+  await page.waitForTimeout(250);
+  await frames3(page);
+};
+const h190Ready = async (page: Page, viewer: Viewer): Promise<void> => {
+  await watch(page, viewer.sessionId);
+  await waitForFrame(page, 14 * 3, 30_000);
+  await settlePage(page);
+};
+type H190Box = { t: number; b: number; l: number; r: number };
+// The pills, the transcript's box, its scroll offset and every mounted row.
+const h190Read = (page: Page): Promise<{
+  inList: boolean;
+  earlier: H190Box;
+  recap: H190Box;
+  tr: H190Box;
+  top: number;
+  rows: (H190Box & { text: string })[];
+}> =>
+  page.evaluate(`(() => {
+    const rc = (el) => { const b = el.getBoundingClientRect(); return { t: b.top, b: b.bottom, l: b.left, r: b.right }; };
+    const tr = document.getElementById('transcript');
+    return {
+      inList: tr.contains(document.getElementById('load-earlier')) && tr.contains(document.getElementById('recap-toggle')),
+      earlier: rc(document.getElementById('load-earlier')),
+      recap: rc(document.getElementById('recap-toggle')),
+      tr: rc(tr),
+      top: tr.scrollTop,
+      rows: Array.from(tr.querySelectorAll('.vrow')).map((r) => Object.assign(rc(r), { text: (r.textContent || '').slice(0, 30) })),
+    };
+  })()`) as never;
+const h190Hit = (a: H190Box, c: H190Box): boolean =>
+  !(a.b <= c.t || c.b <= a.t || a.r <= c.l || c.r <= a.l);
+// The first row whose bottom is below the transcript's top edge, by its top.
+const h190Mark = (page: Page): Promise<{ text: string; y: number }> =>
+  page.evaluate(`(() => {
+    const edge = document.getElementById('transcript').getBoundingClientRect().top;
+    const first = Array.from(document.querySelectorAll('#transcript .vrow')).filter((r) => r.getBoundingClientRect().bottom > edge + 4).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
+    return first ? { text: first.getAttribute('data-id'), y: first.getBoundingClientRect().top } : { text: '', y: -1 };
+  })()`) as never;
+
+PAGE_SCENARIOS.push({
+  name: 'P310 the load-earlier and recap pills are a row at the top of the transcript list, not floating: above the first row at the top, scrolled away with the rows mid-list, at 390 and 1100',
+  frames: h190Frames,
+  stub: { capabilitiesFeatures: ['session_recap'] },
+  run: async ({ page, viewer }) => {
+    await h190Ready(page, viewer);
+    await page.waitForSelector('#recap-toggle', { state: 'visible' });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 0`);
+      await h190Settle(page);
+      const at = await h190Read(page);
+      expect(at.inList, `${size.width}: the pills are not inside the transcript list`);
+      const firstTop = Math.min(...at.rows.map((x) => x.t));
+      const pillsBottom = Math.max(at.earlier.b, at.recap.b);
+      expect(
+        Math.abs(firstTop - pillsBottom - 8) <= 1.5,
+        `${size.width}: the first row starts at ${firstTop}, not 8px under the pills' bottom ${pillsBottom}`,
+      );
+      expect(
+        at.earlier.t - at.tr.t >= 4 && at.earlier.t - at.tr.t <= 16 && Math.abs(at.earlier.t - at.recap.t) < 1,
+        `${size.width}: the pills sit ${at.earlier.t - at.tr.t}px and ${at.recap.t - at.tr.t}px into the transcript, not side by side at its top`,
+      );
+      await shot(page, `p310-top-${size.width}`);
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 600`);
+      await h190Settle(page);
+      const mid = await h190Read(page);
+      const scrolled = mid.top - at.top;
+      expect(scrolled > 300, `${size.width}: the transcript only scrolled ${scrolled}px`);
+      expect(
+        Math.abs(at.earlier.t - mid.earlier.t - scrolled) <= 1.5,
+        `${size.width}: after a ${scrolled}px scroll the pill moved ${at.earlier.t - mid.earlier.t}px: it floats instead of scrolling with the rows`,
+      );
+      const covered = mid.rows.filter(
+        (row) => row.b > mid.tr.t && (h190Hit(mid.earlier, row) || h190Hit(mid.recap, row)),
+      );
+      expect(covered.length === 0, `${size.width}: mid-list the pills cover ${covered.length} row(s): ${JSON.stringify(covered[0])}`);
+      await shot(page, `p310-mid-${size.width}`);
+      lines.push(`${size.width}: pills ${Math.round(at.earlier.t - at.tr.t)}px into the list, first row ${Math.round(firstTop - pillsBottom)}px under them; ${Math.round(scrolled)}px down the pills are at ${Math.round(mid.earlier.t - mid.tr.t)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P311 the pills row changing height moves no row under a reader: the recap answering late mid-list, the recap shut mid-list, and at the end; the ⋯ menu brings the row into view with the recap open, at 390 and 1100',
+  frames: h190Frames,
+  stub: { capabilitiesFeatures: ['session_recap'] },
+  run: async ({ page, viewer }) => {
+    const LONG = 'p311 ' + 'moved the nightly to bookworm-slim and opened a pull request for it, '.repeat(5);
+    let held: Promise<void> | null = null;
+    let release: () => void = () => {};
+    await page.route(/\/session\/[^/]+\/recap$/, async (route) => {
+      if (held) await held;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sessionId: viewer.sessionId, recap: LONG }),
+      });
+    });
+    await h190Ready(page, viewer);
+    await page.waitForSelector('#recap-toggle', { state: 'visible' });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await h190Settle(page);
+      held = new Promise<void>((r) => {
+        release = r;
+      });
+      // Open the recap at the top; the answer is held while the reader goes
+      // on down the list.
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 0`);
+      await h190Settle(page);
+      await page.click('#recap-toggle');
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('asking')`);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('transcript').scrollTop = 600`);
+      await h190Settle(page);
+      const before = await h190Mark(page);
+      release();
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('p311')`);
+      await h190Settle(page);
+      const answered = await h190Mark(page);
+      const recapH = (await page.evaluate(`document.getElementById('recap').getBoundingClientRect().height`)) as number;
+      expect(recapH > 40, `${size.width}: the recap answer is only ${recapH}px tall, too short to test with`);
+      expect(
+        answered.text === before.text && Math.abs(answered.y - before.y) <= 1.5,
+        `${size.width}: the recap answering moved the reader's row ${before.text} from ${before.y} to ${answered.text}@${answered.y}`,
+      );
+      // Shut from elsewhere (the pill is scrolled away): the row stays.
+      await page.evaluate(`document.getElementById('recap-toggle').click()`);
+      await h190Settle(page);
+      const shut = await h190Mark(page);
+      expect(
+        shut.text === before.text && Math.abs(shut.y - before.y) <= 1.5,
+        `${size.width}: the recap shutting moved the reader's row ${before.text} from ${before.y} to ${shut.text}@${shut.y}`,
+      );
+      // ⋯ > Where did I leave off? from mid-list brings the row into view.
+      await openMenu(page);
+      await page.click('#h1-menu-recap');
+      await page.waitForFunction(`document.getElementById('recap').textContent.includes('p311')`);
+      await h190Settle(page);
+      const shown = (await page.evaluate(`(() => {
+        const tr = document.getElementById('transcript');
+        const t = tr.getBoundingClientRect();
+        const r = document.getElementById('recap').getBoundingClientRect();
+        const p = document.getElementById('recap-toggle').getBoundingClientRect();
+        return { top: tr.scrollTop, rTop: r.top - t.top, rBottom: r.bottom - t.top, pill: p.top - t.top, h: t.height };
+      })()`)) as { top: number; rTop: number; rBottom: number; pill: number; h: number };
+      expect(
+        shown.top === 0 && shown.pill >= 0 && shown.rTop > shown.pill && shown.rBottom <= shown.h,
+        `${size.width}: the ⋯ menu opened the recap off screen (scrollTop ${shown.top}, pill at ${shown.pill}, recap ${shown.rTop}-${shown.rBottom} in ${shown.h})`,
+      );
+      await shot(page, `p311-recap-${size.width}`);
+      // At the end: the recap and the recap pill going keep the end, and the
+      // jump pill stays away.
+      await page.evaluate(`transcriptView.scrollToEnd()`);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('recap-toggle').click()`);
+      await h190Settle(page);
+      await page.evaluate(`document.getElementById('recap-toggle').hidden = true`);
+      await h190Settle(page);
+      const end = (await page.evaluate(`(() => {
+        const tr = document.getElementById('transcript');
+        return { gap: tr.scrollHeight - tr.scrollTop - tr.clientHeight, jump: !document.getElementById('jump-bottom').hidden };
+      })()`)) as { gap: number; jump: boolean };
+      expect(end.gap <= 1 && !end.jump, `${size.width}: at the end the pills row going left a ${end.gap}px gap (jump pill shown: ${end.jump})`);
+      await page.evaluate(`document.getElementById('recap-toggle').hidden = false`);
+      await h190Settle(page);
+      lines.push(`${size.width}: recap ${Math.round(recapH)}px answered and shut under row ${before.text} without moving it; ⋯ opened it at ${Math.round(shown.rTop)}px; end gap ${end.gap}`);
+    }
+    return lines.join('; ');
+  },
+});
 
 
 async function runPageSection(): Promise<Result[]> {

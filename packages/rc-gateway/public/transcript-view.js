@@ -366,7 +366,7 @@
     // A user expand/collapse of a thought: { item, top } where `top` is the
     // clicked header's offset in the viewport. The next pass keeps it there.
     var hold = null;
-    var topInset = 0; // see setTopInset
+    var pendingTop = false; // revealHeader() requested
     // A restorePlace() request: { item, top }, applied by the next pass that
     // runs while the scroller is rendered (see goToPlace).
     var pendingPlace = null;
@@ -1272,6 +1272,83 @@
       scroller.appendChild(host);
     }
 
+    // ---- Header row -----------------------------------------------------------
+    // #190. A node the page wants above the first row, inside the list, so it
+    // scrolls away with the rows instead of floating over whichever row is at
+    // the top (the page's load-earlier and recap pills, and what the recap
+    // and the side question open under them). virtual-core has no header row:
+    // the only room it keeps above the first row is paddingStart, and it moves
+    // no scroll position when that changes. So the header sits absolutely
+    // positioned in that room (the render-all list's padding-top), a
+    // ResizeObserver reports when its height changes, and the pass that
+    // applies the new room keeps the reader's place itself:
+    //  - at the top (scrollTop 0) nothing is held: the header is what the
+    //    reader is looking at, and the rows move to make room for it;
+    //  - near the end, the end is kept, as for any other change there;
+    //  - anywhere else the row at the top edge is held where it was, the way
+    //    a toggled thought is (keepHeld), so a header growing or shrinking
+    //    above the viewport moves nothing the reader can see.
+    // Not while a finger is on the transcript: a scroll write then fights the
+    // finger (and on iOS ends its momentum), so the new room waits for the
+    // gesture to end, as following the end does.
+    var HEADER_GAP = 8; // between the header and the first row
+    var header =
+      opts.header && opts.header.nodeType === 1 ? opts.header : null;
+    var headerHome = null; // where the node was, to put it back on destroy
+    var headerRoom = 0; // px of room applied above the first row
+    var headerObserver = null;
+    if (header) {
+      headerHome = {
+        parent: header.parentNode,
+        next: header.nextSibling,
+        css: header.style.cssText,
+      };
+      header.style.position = 'absolute';
+      header.style.top = '8px';
+      header.style.left = '8px';
+      header.style.right = '8px';
+      header.style.margin = '0';
+      if (!virtualizer) host.style.position = 'relative';
+      host.insertBefore(header, host.firstChild);
+    }
+    function headerRoomNow() {
+      var h = header.offsetHeight;
+      return h > 0 ? h + HEADER_GAP : 0;
+    }
+    // The first slot a row may take in the host: after the header.
+    function firstRowSlot() {
+      return header && header.parentNode === host
+        ? header.nextSibling
+        : host.firstChild;
+    }
+    // Called at the start of a pass, before virtual-core lays the rows out
+    // with the new room, so the place recorded here is still the one the
+    // reader sees.
+    function applyHeaderRoom() {
+      // A hidden scroller measures the header 0: keep the room it had.
+      if (!rendered()) return;
+      if (!pendingTop && gestureActive()) return;
+      var room = headerRoomNow();
+      if (room === headerRoom) return;
+      if (
+        !pendingTop &&
+        !pendingEnd &&
+        !hold &&
+        !pendingPlace &&
+        !relayoutFrom &&
+        scroller.scrollTop >= 1
+      ) {
+        if (nearBottom) pendingEnd = true;
+        else {
+          var place = readerRow();
+          if (place.item) hold = place;
+        }
+      }
+      headerRoom = room;
+      if (virtualizer) vopts.paddingStart = 8 + room;
+      else host.style.paddingTop = room + 'px';
+    }
+
     function setSizerHeight() {
       var h = virtualizer.getTotalSize() + 'px';
       if (host.style.height !== h) host.style.height = h;
@@ -1382,8 +1459,8 @@
           m.y = v.start;
           m.row.style.transform = 'translateY(' + v.start + 'px)';
         }
-        // DOM order follows item order (selection, a11y).
-        var at = prev ? prev.nextSibling : host.firstChild;
+        // DOM order follows item order (selection, a11y), the header first.
+        var at = prev ? prev.nextSibling : firstRowSlot();
         if (m.row !== at) host.insertBefore(m.row, at);
         prev = m.row;
       }
@@ -1398,7 +1475,7 @@
       mounted.forEach(function (m, id) {
         if (!ids.has(id)) unmount(id);
       });
-      var at = host.firstChild;
+      var at = firstRowSlot();
       for (var j = 0; j < items.length; j++) {
         var m = mounted.get(items[j].id) || mount(items[j], now);
         if (m.row === at) at = at.nextSibling;
@@ -1543,6 +1620,8 @@
       rafId = 0;
       if (destroyed) return;
       var now = Date.now();
+      // First of all: the place it holds is read off rows not yet moved.
+      if (header) applyHeaderRoom();
       // Before any DOM write: virtual-core reads the current distance from
       // the end here to decide whether an append follows to the bottom.
       if (virtualizer) {
@@ -1640,7 +1719,15 @@
       structural = false;
       // A hidden scroller (display:none) keeps the request for later.
       if (scroller.clientHeight > 0) {
-        if (pendingEnd) {
+        if (pendingTop) {
+          pendingTop = false;
+          pendingEnd = false;
+          follow = false;
+          hold = null;
+          if (virtualizer) virtualizer.scrollToOffset(0);
+          else scroller.scrollTop = 0;
+          refreshNearBottom();
+        } else if (pendingEnd) {
           pendingEnd = false;
           follow = false;
           hold = null;
@@ -1731,6 +1818,10 @@
     // (the page's saved place can only name a row it can find again).
     function readerPlace(usable) {
       if (nearBottom) return { end: true };
+      return readerRow(usable);
+    }
+    // readerPlace() without the end: the row itself, wherever the reader is.
+    function readerRow(usable) {
       var edge = scroller.getBoundingClientRect().top;
       var above = null;
       var below = null;
@@ -1863,6 +1954,20 @@
       lastBoxHeight = scroller.clientHeight;
     }
 
+    // #190. The header's height changed. Its observer reports after layout
+    // and before paint, so the pass runs now rather than on the next frame:
+    // a frame drawn in between would show a grown header over the first row.
+    function onHeaderResize() {
+      if (destroyed || !header || !rendered()) return;
+      if (headerRoomNow() === headerRoom && !pendingTop) return;
+      if (rafId) cancelAnimationFrame(rafId);
+      pass();
+    }
+    if (header && typeof ResizeObserver === 'function') {
+      headerObserver = new ResizeObserver(onHeaderResize);
+      headerObserver.observe(header);
+    }
+
     // Derive everything from the event and `items`: during an append the
     // model's own pointers (curAsst, forkItem, ...) may not be set yet.
     var unsubscribe = model.subscribe(function (ev) {
@@ -1930,24 +2035,13 @@
       isNearBottom: function () {
         return nearBottom;
       },
-      // #177. Room above the first row, for controls the page floats over the
-      // top of the scroller (the load-earlier pill). The rows start `px` lower
-      // than they did, so at the top of the list nothing is under the pill.
-      // A reader further down keeps their row where it was.
-      setTopInset: function (px) {
-        var next = Math.max(0, Math.round(Number(px) || 0));
-        if (next === topInset || destroyed) return;
-        topInset = next;
-        if (virtualizer) {
-          if (scroller.scrollTop > 0) {
-            var place = readerPlace();
-            if (place.end) pendingEnd = true;
-            else if (place.item) hold = place;
-          }
-          vopts.paddingStart = 8 + topInset;
-        } else {
-          host.style.paddingTop = topInset + 'px';
-        }
+      // #190. Scrolls to the top of the list, where the header row is: for a
+      // control in the header the reader opened from somewhere else (the
+      // recap from the ⋯ menu), or one whose opening grows the header under
+      // them. The header's new height is applied in the same pass, unheld.
+      revealHeader: function () {
+        if (!header || destroyed) return;
+        pendingTop = true;
         schedule();
       },
       mountedCount: function () {
@@ -1977,6 +2071,25 @@
         if (boxResizeObserver) {
           boxResizeObserver.unobserve(scroller);
           boxResizeObserver = null;
+        }
+        if (headerObserver) {
+          headerObserver.disconnect();
+          headerObserver = null;
+        }
+        // The header goes back where the page had it, as it was styled: the
+        // page still finds its controls by id after the view is gone.
+        if (header) {
+          header.style.cssText = headerHome.css;
+          if (headerHome.parent) {
+            headerHome.parent.insertBefore(
+              header,
+              headerHome.next && headerHome.next.parentNode === headerHome.parent
+                ? headerHome.next
+                : null,
+            );
+          } else {
+            header.remove();
+          }
         }
         scroller.removeEventListener('touchstart', onTouchStart);
         scroller.removeEventListener('touchend', onTouchEnd);

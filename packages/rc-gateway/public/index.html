@@ -3813,24 +3813,16 @@
             overflow-y: auto;
           }
           /* #177. The pills are controls on the transcript, so they take the
-             control ground and edge, with the bright ink so they still read
-             as something to press over the rows they float on. The shadow is
-             what lifts a dark pill off a dark row. #184: 36px, the drawn size,
-             and the pair sits side by side at the top. */
+             control ground and edge, with the bright ink. #184: 36px, the
+             drawn size, and the pair sits side by side at the top. #190: the
+             column is the list's header row (the view places it above the
+             first row and sets its position), so it scrolls away with the
+             rows rather than floating over them. */
           #tx-top {
-            position: absolute;
-            top: 8px;
-            left: 12px;
-            right: 12px;
-            z-index: 2;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 8px;
-            pointer-events: none;
-          }
-          #tx-top > * {
-            pointer-events: auto;
           }
           #tx-top .pills {
             display: flex;
@@ -3868,14 +3860,13 @@
             transform: translateX(-50%);
             z-index: 2;
           }
-          /* The recap and the side question open under the pills, bounded so
-             an answer of any length scrolls inside its card. */
+          /* The recap and the side question open under the pills, in the
+             header row. #190: inside the list an answer of any length is
+             scrolled past with the rows, so neither card is bounded any more:
+             it cannot push the composer down from there. */
           #recap,
           #btw-panel {
             align-self: stretch;
-            flex: 0 1 auto;
-            min-height: 0;
-            overflow-y: auto;
             background: var(--g1-raise);
             border: 1px solid var(--g1-edge);
             border-radius: 12px;
@@ -3884,13 +3875,6 @@
             line-height: 1.45;
             color: var(--g1-ink-hi);
             box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-          }
-          /* Open, the column gets a definite height so the card can shrink
-             to it and scroll: the top 60% of the transcript, which leaves the
-             newest rows readable under it. */
-          #tx-top:has(> #recap:not([hidden])),
-          #tx-top:has(> #btw-panel:not([hidden])) {
-            bottom: 40%;
           }
           #recap[hidden],
           #btw-panel[hidden] {
@@ -4532,13 +4516,13 @@
         <div id="transcript-wrap">
           <div id="transcript"></div>
           <!-- #184. The pills at the top of the transcript, and what the recap
-               pill and the side question open, in place under them. They float
-               over the rows rather than sitting above the scroller for the
-               reason the load-earlier pill always did: an in-flow sibling takes
-               height out of the bounded scroller, which is what broke the
-               render-all fallback's scroll pin. Both panels are bounded and
-               scroll, because an open panel that grows is how a band once
-               pushed the composer under the fold on a phone. -->
+               pill and the side question open, in place under them. #190: the
+               view moves this column into the list as its header row, above
+               the first row, so it scrolls with the rows; it is not a sibling
+               of the scroller, which would take height out of the bounded box
+               (what broke the render-all fallback's scroll pin), and it does
+               not float over the rows, which covered whichever row was at the
+               top. -->
           <div id="tx-top">
             <div class="pills">
               <button id="load-earlier" type="button" hidden>
@@ -5794,7 +5778,6 @@
         }
         // The view reports changes only: seed the pill from its state now.
         $('jump-bottom').hidden = transcriptView.isNearBottom();
-        watchPillsRoom();
         applyStampZone();
       }
       // #197. A picture attached to a message is stored in the session, so its
@@ -5853,31 +5836,19 @@
         return pending;
       }
 
-      // #177. The pills (load earlier, the recap) float over the top of the
-      // transcript, so the first row was drawn under them. The list reserves
-      // the room they take, which is the row's height and the 8px under it,
-      // and gives it back when no pill is showing (the row is display:none
-      // then, so it measures 0).
-      let pillsWatch = null;
-      function watchPillsRoom() {
-        const pills = document.querySelector('#tx-top .pills');
-        if (!pills || typeof ResizeObserver === 'undefined') return;
-        if (pillsWatch) pillsWatch.disconnect();
-        const sync = () => {
-          if (!transcriptView) return;
-          const h = pills.getBoundingClientRect().height;
-          transcriptView.setTopInset(h > 0 ? Math.ceil(h) + 8 : 0);
-        };
-        pillsWatch = new ResizeObserver(sync);
-        pillsWatch.observe(pills);
-        sync();
-      }
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
           model: transcriptModel,
           scroller: $('transcript'),
           virtualCore,
           markdownIt,
+          // #190: the pills (load earlier, the recap) and what they open are
+          // the list's header row: they sit above the first row and scroll
+          // away with the rows, and the view keeps a reader's row in place
+          // when the row changes height above them (#177's reserved inset,
+          // under pills that floated over whatever row was at the top, is
+          // retired with it).
+          header: $('tx-top'),
           // While the user is reading history (scrolled up), show the
           // floating "jump to bottom" pill; it hides again once we reach
           // the bottom ("near" = within a bubble's height of the end).
@@ -12931,6 +12902,9 @@
         const opening = box.hidden;
         box.hidden = !opening;
         $('recap-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
+        // #190: the recap opens in the list's header row, which a reader who
+        // opened it from the ⋯ menu may have scrolled far past.
+        if (opening && transcriptView) transcriptView.revealHeader();
         if (opening) await loadRecap();
         else renderRecap();
       };
@@ -13048,8 +13022,12 @@
         panel.hidden = !opening;
         $('btw-toggle').setAttribute('aria-expanded', opening ? 'true' : 'false');
         if (opening) {
+          // #190: the panel opens in the list's header row; the view brings
+          // it into view, so the focus must not scroll the list as well.
+          if (transcriptView) transcriptView.revealHeader();
           const field = $('btw-question');
-          if (field) field.focus(); // on a phone the keyboard is half the task
+          // On a phone the keyboard is half the task.
+          if (field) field.focus({ preventScroll: true });
         }
       };
 
