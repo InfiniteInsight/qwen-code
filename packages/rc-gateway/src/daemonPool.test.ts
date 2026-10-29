@@ -1645,6 +1645,78 @@ describe('DaemonPool workspace scoping (rc-workspace-scoping, #28)', () => {
     expect(h.pool.size()).toBe(1);
   });
 
+  // #163: a workspace-scoped call made no reservation, so a fresh entry with
+  // no sessions looked idle for the whole round trip and a create for another
+  // workspace at the cap could evict (and SIGTERM) it mid-request.
+  it('a workspace-scoped call in flight holds its entry against a cap eviction', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stopped: string[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 1,
+      idleReapMs: 999_999_999,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async deleteSessionsData(ids: string[]) {
+            await gate;
+            return { removed: ids, notFound: [], errors: [] };
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+    const deleting = pool.deleteSessionsData(['old'], undefined, '/proj/a');
+    // Let the call reach the daemon: the entry exists and has no sessions.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pool.workspaces()).toEqual(['/proj/a']);
+
+    await expect(pool.getOrSpawn('/proj/b')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    expect(stopped).toEqual([]);
+
+    release!();
+    await expect(deleting).resolves.toEqual({
+      removed: ['old'],
+      notFound: [],
+      errors: [],
+    });
+    // Released once the call settles: now it is idle and can make room.
+    await pool.getOrSpawn('/proj/b');
+    expect(stopped).toEqual(['/proj/a']);
+    expect(pool.workspaces()).toEqual(['/proj/b']);
+  });
+
+  it('a workspace-scoped call that fails still releases its hold', async () => {
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 1,
+      idleReapMs: 999_999_999,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async workspaceMcp() {
+            throw new DaemonHttpError(500, { error: 'boom' }, 'boom');
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    await expect(pool.workspaceMcp('/proj/a')).rejects.toThrow(/boom/);
+    await pool.getOrSpawn('/proj/b'); // /proj/a is idle again: evicted
+    expect(pool.workspaces()).toEqual(['/proj/b']);
+  });
+
   it('workspaces() lists the non-default cwds the pool holds (default excluded)', async () => {
     const h = makeWsHarness();
     expect(h.pool.workspaces()).toEqual([]);

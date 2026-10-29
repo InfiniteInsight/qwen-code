@@ -759,19 +759,20 @@ export class DaemonPool implements SessionDaemon {
    * created on the default daemon). */
   private readonly ownerOf = new Map<string, string>();
   /**
-   * Count of in-flight `createOrAttachSession` calls per workspace key
-   * (never touched for the default workspace). Marked SYNCHRONOUSLY at
-   * the very start of `createOrAttachSession`, before any `await` —
-   * including before `getOrSpawn`, whose own first `await` already yields
-   * a microtask even when its body resolves synchronously (an existing
-   * entry's fast path). An entry can look idle (`sessions.size === 0`)
-   * for the entire duration of a create's network round-trip; without
-   * marking the key pending up front, a concurrent `getOrSpawn`'s cap
-   * eviction could reclaim the entry mid-registration — stopping the
-   * daemon while this call still returns what looks like a successful
-   * `DaemonSession` whose backend is already dead.
+   * Count of in-flight calls holding each workspace key (see `hold`;
+   * never touched for the default workspace): `createOrAttachSession`,
+   * `resumeSession`, and every workspace-scoped call (#163). Marked
+   * SYNCHRONOUSLY at the very start of the call, before any `await`,
+   * including before `getOrSpawn`, whose own first `await` already yields a
+   * microtask even when its body resolves synchronously (an existing entry's
+   * fast path). An entry can look idle (`sessions.size === 0`) for the
+   * entire duration of a call's network round-trip; without marking the key
+   * up front, a concurrent `getOrSpawn`'s cap eviction could reclaim the
+   * entry mid-request, stopping the daemon while this call still returns
+   * what looks like a successful answer whose backend is already dead (or,
+   * for a batch delete, a torn one).
    */
-  private readonly pendingCreates = new Map<string, number>();
+  private readonly pendingUses = new Map<string, number>();
   private readonly now: () => number;
   private readonly maxDaemons: number;
   private readonly idleReapMs: number;
@@ -1016,11 +1017,31 @@ export class DaemonPool implements SessionDaemon {
   }
 
   /** An entry is idle only when it has no live sessions AND no in-flight
-   * `createOrAttachSession` registering a new one on `key` — both
-   * `reapIdle` and `evictLruIdle` must agree on this so a mid-create entry
-   * is never reclaimed out from under its caller. */
+   * call holding `key` (see `hold`): both `reapIdle` and `evictLruIdle` must
+   * agree on this so an entry is never reclaimed out from under a caller
+   * that is still talking to it. */
   private isIdle(key: string, entry: Entry): boolean {
-    return entry.sessions.size === 0 && !this.pendingCreates.has(key);
+    return entry.sessions.size === 0 && !this.pendingUses.has(key);
+  }
+
+  /**
+   * Hold `key` against cap eviction and idle reaping until the returned
+   * release runs (see `pendingUses`). Call it synchronously, before the
+   * first `await` of the call it protects, and release in a `finally`. The
+   * release is idempotent. A no-op for the default workspace, which is never
+   * reaped or evicted.
+   */
+  private hold(key: string): () => void {
+    if (key === this.defaultWorkspaceCwd) return () => {};
+    this.pendingUses.set(key, (this.pendingUses.get(key) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const n = (this.pendingUses.get(key) ?? 1) - 1;
+      if (n <= 0) this.pendingUses.delete(key);
+      else this.pendingUses.set(key, n);
+    };
   }
 
   /** Stop the daemon, drop its entry, and scrub any of its session ids out
@@ -1085,7 +1106,7 @@ export class DaemonPool implements SessionDaemon {
       if (cutoff - entry.lastUsed <= this.idleReapMs) continue;
       if (this.isIdle(key, entry)) {
         this.discardEntry(key, entry);
-      } else if (entry.sessions.size > 0 && !this.pendingCreates.has(key)) {
+      } else if (entry.sessions.size > 0 && !this.pendingUses.has(key)) {
         checks.push(this.reconcileEntry(key, entry));
       }
     }
@@ -1138,7 +1159,7 @@ export class DaemonPool implements SessionDaemon {
           entry.dead ||
           this.byWorkspace.get(key) !== entry ||
           entry.touches !== asked ||
-          this.pendingCreates.has(key)
+          this.pendingUses.has(key)
         ) {
           return;
         }
@@ -1323,14 +1344,24 @@ export class DaemonPool implements SessionDaemon {
    * does not need a live session). Marks that daemon dead on a
    * transport-level error (then rethrow; routes keep their 502 mapping). A
    * `WorkspacePoolFullError` or a failed spawn from `getOrSpawn` is not a
-   * transport death: it propagates untouched for the route's mapping. */
+   * transport death: it propagates untouched for the route's mapping.
+   *
+   * Holds the workspace for the whole call, like a create does (#163): a
+   * workspace reached only through these calls has no sessions, so it looks
+   * idle throughout and a create for another workspace at the cap could
+   * otherwise evict and stop it mid-request. */
   private async withWorkspaceDeathTrigger<T>(
     workspaceCwd: string | undefined,
     call: (client: DaemonClient) => Promise<T>,
   ): Promise<T> {
     const key = this.keyFor(workspaceCwd);
-    const entry = await this.resolveEntry(workspaceCwd);
-    return this.callOn(key, entry, call);
+    const release = this.hold(key);
+    try {
+      const entry = await this.resolveEntry(workspaceCwd);
+      return await this.callOn(key, entry, call);
+    } finally {
+      release();
+    }
   }
 
   // -- Session routing ------------------------------------------------
@@ -1408,7 +1439,7 @@ export class DaemonPool implements SessionDaemon {
    * attach the session there, and record which daemon owns the returned
    * session id so later session-keyed calls route correctly.
    *
-   * `key` is marked pending in `pendingCreates` SYNCHRONOUSLY, before the
+   * `key` is held (see `hold`) SYNCHRONOUSLY, before the
    * `getOrSpawn` await — not after it resolves. Even when `getOrSpawn`
    * resolves an already-spawned entry (no internal await needed), `await
    * this.getOrSpawn(...)` still defers the rest of this function to a
@@ -1421,13 +1452,8 @@ export class DaemonPool implements SessionDaemon {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
-    const key = this.isDefault(req.workspaceCwd)
-      ? this.defaultWorkspaceCwd
-      : this.normalizeCwd(req.workspaceCwd!);
-    const tracksPending = key !== this.defaultWorkspaceCwd;
-    if (tracksPending) {
-      this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
-    }
+    const key = this.keyFor(req.workspaceCwd);
+    const release = this.hold(key);
     try {
       const entry = await this.resolveEntry(req.workspaceCwd);
       const session = await this.callOn(key, entry, (client) =>
@@ -1439,11 +1465,7 @@ export class DaemonPool implements SessionDaemon {
       this.recoveryProvider?.sessionLive?.(session.sessionId);
       return session;
     } finally {
-      if (tracksPending) {
-        const n = (this.pendingCreates.get(key) ?? 1) - 1;
-        if (n <= 0) this.pendingCreates.delete(key);
-        else this.pendingCreates.set(key, n);
-      }
+      release();
     }
   }
 
@@ -1468,20 +1490,15 @@ export class DaemonPool implements SessionDaemon {
    * Workspace-keyed (like `createOrAttachSession`): a resumed session's
    * owning workspace was never in memory here (this pool didn't create it),
    * so the caller must supply it. Mirrors `createOrAttachSession`'s
-   * `pendingCreates` reservation exactly -- marked SYNCHRONOUSLY, before the
+   * hold exactly -- marked SYNCHRONOUSLY, before the
    * `getOrSpawn` await -- for the same reason: without it, a concurrent
    * `getOrSpawn`'s cap eviction could reclaim this entry mid-registration. */
   async resumeSession(
     sessionId: string,
     req: { workspaceCwd: string },
   ): Promise<DaemonRestoredSession> {
-    const key = this.isDefault(req.workspaceCwd)
-      ? this.defaultWorkspaceCwd
-      : this.normalizeCwd(req.workspaceCwd);
-    const tracksPending = key !== this.defaultWorkspaceCwd;
-    if (tracksPending) {
-      this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
-    }
+    const key = this.keyFor(req.workspaceCwd);
+    const release = this.hold(key);
     try {
       const entry = await this.resolveEntry(req.workspaceCwd);
       // `load`, not `resume`: see the doc above -- the history travels in the
@@ -1495,11 +1512,7 @@ export class DaemonPool implements SessionDaemon {
       this.recoveryProvider?.sessionLive?.(sessionId);
       return restored;
     } finally {
-      if (tracksPending) {
-        const n = (this.pendingCreates.get(key) ?? 1) - 1;
-        if (n <= 0) this.pendingCreates.delete(key);
-        else this.pendingCreates.set(key, n);
-      }
+      release();
     }
   }
 
@@ -2114,7 +2127,11 @@ export class DaemonPool implements SessionDaemon {
     if (!entry || entry.dead) return undefined;
     // No `touch`: the list asks this of every recent folder on every refresh,
     // and bumping `lastUsed` would keep each folder's idle daemon from ever
-    // being reaped, which is the cost this read exists to avoid.
+    // being reaped, which is the cost this read exists to avoid. No `hold`
+    // either, unlike the spawning calls: with the list polling every folder,
+    // a hold would turn a create at the cap into a 503 whenever a refresh
+    // happened to be reading the one idle daemon it could evict. Losing that
+    // race costs this background read a 502 and the next refresh asks again.
     return this.callOn(key, entry, (client) =>
       client.getWorkspaceSessionLiveState(key),
     );
@@ -2429,7 +2446,7 @@ export class DaemonPool implements SessionDaemon {
     }
     this.byWorkspace.clear();
     this.ownerOf.clear();
-    this.pendingCreates.clear();
+    this.pendingUses.clear();
   }
 }
 
