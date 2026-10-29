@@ -762,9 +762,35 @@
   // user_message_chunk is drawn here and skipped by the live path, where the
   // prompt is echoed locally at send time: a stored page carries no echo, so
   // the reader's own messages only appear if this reducer draws them.
+  //
+  // The clock rides the same two ways. The live stream and the WAL stamp the
+  // ENVELOPE (`_meta.serverTimestamp`); the daemon's stored page stamps the
+  // update itself, as `_meta.timestamp` (epoch ms, from the record's own time):
+  // on `data` for the flat shape, on `data.update` for the nested one. Reading
+  // only the envelope drew every stored row without a time and folded every
+  // historical thought to <1s (#171).
+  function epochOf(t) {
+    if (typeof t === 'number') return Number.isFinite(t) ? t : 0;
+    if (typeof t === 'string' && t) {
+      var ms = Date.parse(t);
+      return Number.isFinite(ms) ? ms : 0;
+    }
+    return 0;
+  }
   function stampOf(ev) {
-    var t = ev && ev._meta && ev._meta.serverTimestamp;
-    return typeof t === 'number' && Number.isFinite(t) ? t : 0;
+    if (!isRecord(ev)) return 0;
+    var at = epochOf(isRecord(ev._meta) && ev._meta.serverTimestamp);
+    if (at) return at;
+    var data = ev.data;
+    if (!isRecord(data)) return 0;
+    var inner = isRecord(data.update) ? data.update : data;
+    var metas = [inner._meta, data._meta];
+    for (var i = 0; i < metas.length; i++) {
+      if (!isRecord(metas[i])) continue;
+      at = epochOf(metas[i].timestamp) || epochOf(metas[i].serverTimestamp);
+      if (at) return at;
+    }
+    return 0;
   }
 
   // The update rides two ways on a stored page: nested under data.update the way
