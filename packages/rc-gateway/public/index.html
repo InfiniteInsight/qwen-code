@@ -15580,6 +15580,9 @@
       // pushManager); boot auto-enables unless the user opted out
       // (localStorage flag, set when the toggle is switched off).
       let notifSwReg = null;
+      // #173: why the last attempt to turn notifications on did not take, so the
+      // Settings row can say it while the toggle reads off.
+      let notifError = '';
 
       const pushSupported = () =>
         'serviceWorker' in navigator &&
@@ -15621,7 +15624,8 @@
           Notification.permission === 'denied'
             ? 'disabled — browser permission denied (re-allow it in the site settings)'
             : Notification.permission === 'granted'
-              ? 'disabled'
+              ? 'disabled' +
+                (notifError ? ': ' + notifError + ', will retry on the next load' : '')
               : 'disabled — browser permission not asked yet';
       }
 
@@ -15642,20 +15646,39 @@
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(applicationServerKey),
         });
-        const subRes = await fetch('/rc/push/subscribe', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + token(),
-          },
-          body: JSON.stringify({
-            subscription: sub.toJSON ? sub.toJSON() : sub,
-          }),
-        });
-        idbPutToken(token());
-        if (subRes.status !== 201) {
-          throw new Error('subscribe failed (' + subRes.status + ')');
+        // #173: the browser keeps the subscription the moment subscribe()
+        // returns, whether or not the gateway ever hears of it. Left in place
+        // after a refusal it read as "enabled" and made every boot return early
+        // on "already enabled", so no push could arrive. A failure of any kind
+        // here gives it back, so the next boot starts over.
+        let failure = '';
+        try {
+          const subRes = await fetch('/rc/push/subscribe', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({
+              subscription: sub.toJSON ? sub.toJSON() : sub,
+            }),
+          });
+          idbPutToken(token());
+          if (subRes.status !== 201) {
+            failure = 'subscribe failed (' + subRes.status + ')';
+          }
+        } catch (e) {
+          failure = 'subscribe failed (' + ((e && e.message) || e) + ')';
         }
+        if (failure) {
+          try {
+            await sub.unsubscribe();
+          } catch (e) {
+            /* the browser may already have dropped it */
+          }
+          throw new Error(failure);
+        }
+        notifError = '';
       }
 
       // Returns 'ok' | 'denied' | 'not-granted' (prompt never showed) |
@@ -15735,14 +15758,23 @@
             // The browser will not prompt without a user gesture; try
             // again on the first click.
             const onFirstClick = () => {
-              void enableNotifications().then((r2) => {
-                if (r2 === 'ok') void refreshNotifToggle();
-              });
+              void enableNotifications()
+                .then((r2) => {
+                  if (r2 === 'ok') void refreshNotifToggle();
+                })
+                .catch((e2) => {
+                  notifError = String((e2 && e2.message) || e2);
+                  setStatus('notifications: ' + notifError);
+                  void refreshNotifToggle();
+                });
             };
             document.addEventListener('click', onFirstClick, { once: true });
           }
         } catch (e) {
-          /* best-effort at boot — the Settings toggle is the manual path */
+          // Best-effort at boot, and the Settings toggle is the manual path,
+          // but a refusal is said (#173): silence read as notifications on.
+          notifError = String((e && e.message) || e);
+          setStatus('notifications: ' + notifError);
         } finally {
           void refreshNotifToggle();
         }

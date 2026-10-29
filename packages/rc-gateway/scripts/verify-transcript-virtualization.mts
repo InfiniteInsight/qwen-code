@@ -21290,6 +21290,75 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. When /rc/push/subscribe failed, the browser kept the subscription it
+  // had just made. The page then said "enabled", and every later boot returned
+  // early on "already enabled", so the gateway never learned of it and no push
+  // ever arrived. The stand-in registration below keeps its one subscription in
+  // localStorage, which is how a real browser keeps it across a reload.
+  const p246 = { status: 500, posts: [] as number[] };
+  PAGE_SCENARIOS.push({
+    name: 'P246 a push subscribe the gateway refuses is undone in the browser, said on the page, and tried again on the next boot',
+    waitView: false,
+    before: async (page) => {
+      // Routed before the load: the boot subscribes on its own.
+      await page.route('**/rc/push/vapid', (route) =>
+        json(route, { applicationServerKey: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' }),
+      );
+      await page.route('**/rc/push/subscribe', (route) => {
+        p246.posts.push(p246.status);
+        return json(route, p246.status === 201 ? { id: 'p246' } : { error: 'nope' }, p246.status);
+      });
+      await page.addInitScript({
+        content: `(function () {
+          var KEY = 'p246-sub';
+          function current() {
+            if (!localStorage.getItem(KEY)) return null;
+            return {
+              endpoint: 'https://push.example/p246',
+              toJSON: function () { return { endpoint: 'https://push.example/p246', keys: {} }; },
+              unsubscribe: function () { localStorage.removeItem(KEY); return Promise.resolve(true); },
+            };
+          }
+          var reg = {
+            pushManager: {
+              getSubscription: function () { return Promise.resolve(current()); },
+              subscribe: function () { localStorage.setItem(KEY, '1'); return Promise.resolve(current()); },
+            },
+          };
+          window.PushManager = window.PushManager || function () {};
+          Object.defineProperty(Notification, 'permission', { get: function () { return 'granted'; } });
+          navigator.serviceWorker.register = function () { return Promise.resolve(reg); };
+          navigator.serviceWorker.getRegistration = function () { return Promise.resolve(reg); };
+        })();`,
+      });
+    },
+    run: async ({ page }) => {
+      const posts = p246.posts;
+      const read = (): Promise<{ stored: string | null; state: string; status: string }> =>
+        page.evaluate(`({
+          stored: localStorage.getItem('p246-sub'),
+          state: document.getElementById('notif-state').textContent,
+          status: document.getElementById('status').textContent,
+        })`) as Promise<{ stored: string | null; state: string; status: string }>;
+      await poll(() => posts.length >= 1, 'the boot never tried to subscribe');
+      await page.waitForTimeout(500);
+      const refused = await read();
+      expect(refused.stored === null, 'the browser kept the subscription the gateway refused');
+      expect(!refused.state.startsWith('enabled'), `the page said ${JSON.stringify(refused.state)} for a subscription the gateway refused`);
+      expect(
+        refused.state.includes('subscribe failed (500)') && refused.status.includes('subscribe failed (500)'),
+        `the refusal was not said (state ${JSON.stringify(refused.state)}, status ${JSON.stringify(refused.status)})`,
+      );
+
+      // The next boot starts over, and this time the gateway takes it.
+      p246.status = 201;
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await poll(() => posts.length >= 2, 'the next boot did not try again');
+      await page.waitForFunction(`document.getElementById('notif-state').textContent.startsWith('enabled')`, null, { timeout: 10_000 });
+      return `a 500 on subscribe left no browser subscription and read ${JSON.stringify(refused.state)}; the next boot subscribed and read enabled`;
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 
