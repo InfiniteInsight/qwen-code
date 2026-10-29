@@ -23949,6 +23949,23 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P329 the Time zone and Daemons and workspaces screens head their cards with what the card is, not a second name for the screen',
+  waitView: false,
+  run: async ({ page }) => {
+    const heads = (await page.evaluate(`({
+      zone: document.querySelector('#ui-prefs h2').textContent,
+      target: document.querySelector('#ws-target h2').textContent,
+    })`)) as { zone: string; target: string };
+    expect(heads.zone === 'Message times' && heads.target === 'Target workspace', `the card heads read ${JSON.stringify(heads)}`);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openPanel(page, 'zone');
+    await shot(page, 'p329-zone-390');
+    await openPanel(page, 'chat');
+    return `Time zone > "${heads.zone}", Daemons and workspaces > "${heads.target}"`;
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];
