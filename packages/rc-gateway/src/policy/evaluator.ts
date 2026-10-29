@@ -160,7 +160,9 @@ function pathMatchesAny(
 function specificity(rule: PolicyRule): number {
   const m = rule.match;
   let w = 0;
-  if (m.tool !== undefined) {
+  // `typeof`, not `!== undefined`: a hand-built policy with a null/blank tool
+  // must not make every evaluation throw (the loader rejects such a file).
+  if (typeof m.tool === 'string') {
     if (m.tool === '*') w += 10;
     else if (m.tool.includes('*')) w += 90;
     else w += 100;
