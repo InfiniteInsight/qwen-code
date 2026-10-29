@@ -76,6 +76,13 @@ export interface SessionEventPumpOptions {
 interface Loop {
   active: boolean;
   ctrl: AbortController;
+  /**
+   * The newest summary reconcile has seen for this session. The display name is
+   * resolved from it per event, not once when the loop starts: a session that
+   * is auto-titled later would otherwise keep its first (unset) name for the
+   * life of the loop, and `sessionTag` routing rules never match it (#166).
+   */
+  summary: DaemonSessionSummary;
   lastEventId?: number;
 }
 
@@ -186,7 +193,9 @@ export class SessionEventPump {
     if (this.stopped) return;
     const ids = new Set(list.map((s) => s.sessionId));
     for (const s of list) {
-      if (!this.loops.has(s.sessionId) && !this.refused.has(s.sessionId)) {
+      const existing = this.loops.get(s.sessionId);
+      if (existing) existing.summary = s;
+      if (!existing && !this.refused.has(s.sessionId)) {
         this.spawnLoop(s);
       }
       this.detectIdleEdge(s);
@@ -230,7 +239,11 @@ export class SessionEventPump {
   }
 
   private spawnLoop(s: DaemonSessionSummary): void {
-    const loop: Loop = { active: true, ctrl: new AbortController() };
+    const loop: Loop = {
+      active: true,
+      ctrl: new AbortController(),
+      summary: s,
+    };
     this.loops.set(s.sessionId, loop);
     void this.runLoop(s, loop);
   }
@@ -242,7 +255,6 @@ export class SessionEventPump {
    * and never reconnects. Never rethrows.
    */
   private async runLoop(s: DaemonSessionSummary, loop: Loop): Promise<void> {
-    const name = this.sessionName?.(s);
     while (loop.active && !this.stopped) {
       try {
         for await (const ev of this.daemon.subscribeEvents(s.sessionId, {
@@ -284,7 +296,7 @@ export class SessionEventPump {
             { type: ev.type, data: ev.data },
             {
               sessionId: s.sessionId,
-              sessionName: name,
+              sessionName: this.sessionName?.(loop.summary),
               ...(routing ? { routing } : {}),
             },
           );

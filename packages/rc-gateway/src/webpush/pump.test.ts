@@ -686,4 +686,43 @@ describe('SessionEventPump routing context and session name (issue #166)', () =>
     expect(await waitFor(() => calls.length >= 2)).toBe(true);
     expect(calls.every((c) => !('routing' in c.ctx))).toBe(true);
   });
+
+  it('resolves the session name per event, so a title set after the loop started is used', async () => {
+    const names: Array<string | undefined> = [];
+    const sessions: Array<{
+      sessionId: string;
+      workspaceCwd: string;
+      displayName?: string;
+    }> = [{ sessionId: 's1', workspaceCwd: '/w' }];
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions,
+      holdOpenMs: 600,
+      frames: [{ id: 1, type: 'session_update', data: {} }],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    let delivered = 0;
+    pump = new SessionEventPump(
+      daemon,
+      {
+        notify: async (_e, ctx) => {
+          names.push(ctx.sessionName);
+        },
+      },
+      {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        sessionName: (s) => s.displayName,
+        onDispatch: () => void delivered++,
+      },
+    );
+    await pump.start();
+    expect(await waitFor(() => delivered >= 1)).toBe(true);
+    expect(names[0]).toBeUndefined(); // not titled yet
+    // The daemon auto-titles the session; the next poll sees it. The stream
+    // reconnects (holdOpenMs elapses) and replays a frame.
+    sessions[0].displayName = 'my-session';
+    expect(await waitFor(() => names.includes('my-session'), 4000)).toBe(true);
+  });
 });
