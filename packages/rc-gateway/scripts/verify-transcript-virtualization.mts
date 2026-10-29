@@ -20779,6 +20779,107 @@ function solidPng(w: number, h: number): Buffer {
       return 'a late end of A and a late fork of A both left B watched, and the open fork sheet was cancelled by the switch';
     },
   });
+
+  PAGE_SCENARIOS.push({
+    name: 'P230 files uploaded but not yet sent belong to the conversation they were uploaded to: a switch hides A\'s strip, a send on B carries nothing, A\'s strip comes back with A and sends it, and an upload that lands after the switch is filed under A, not B',
+    // #201. The pending list was one array for the whole page, so a file picked
+    // on A rode along on the next send on B (with an attachment id the daemon
+    // issued for A) and the strip stayed on screen through a switch.
+    waitView: false,
+    noConsoleErrors: true,
+    frames: frames172,
+    run: async ({ page }) => {
+      const late = new Held();
+      let lateTaken = false;
+      const prompts: { id: string; body: Record<string, unknown> }[] = [];
+      // The name rides in the query, so the pattern ends at the question mark.
+      await page.route(/\/session\/[^/]+\/attachments\?/, async (route) => {
+        const req = route.request();
+        if (req.method() !== 'POST') return route.fallback();
+        const name = new URL(req.url()).searchParams.get('name') ?? '';
+        const answer = {
+          attachment: {
+            type: 'resource',
+            attachmentId: `${sidOf(route)}-${name}`,
+            mimeType: 'text/plain',
+            size: 10,
+          },
+        };
+        // The second file picked on A is the one held on the wire.
+        if (name === 'late.txt' && !lateTaken) {
+          lateTaken = true;
+          return late.serve(route, 200, answer);
+        }
+        return json(route, answer);
+      });
+      await page.route(/\/session\/[^/]+\/prompt$/, async (route) => {
+        prompts.push({
+          id: sidOf(route),
+          body: JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>,
+        });
+        return json(route, { stopReason: 'end_turn' });
+      });
+      const strip = (): Promise<{ hidden: boolean; text: string }> =>
+        page.evaluate(() => ({
+          hidden: (document.getElementById('pending') as HTMLElement).hidden,
+          text: document.getElementById('pending-list')?.textContent ?? '',
+        }));
+      const pick = (name: string): Promise<void> =>
+        page.setInputFiles('#attach-file', { name, mimeType: 'text/plain', buffer: Buffer.from('0123456789') });
+      const sendOn = async (text: string): Promise<Record<string, unknown>> => {
+        const before = prompts.length;
+        await page.fill('#prompt', text);
+        await page.click('#send');
+        await poll(() => prompts.length > before, `the send of ${text} never reached the wire`);
+        return prompts[prompts.length - 1]!.body;
+      };
+
+      // 1. Upload on A, switch to B: A's strip is gone and B's send is bare.
+      await go(page, A);
+      await pick('a-notes.txt');
+      await page.waitForFunction(() => (document.getElementById('pending-list')?.textContent ?? '').includes('a-notes.txt'), null, { timeout: 10_000 });
+      await go(page, B);
+      const onB = await strip();
+      expect(onB.hidden && onB.text === '', `A's strip stayed up on B (${JSON.stringify(onB)})`);
+      const bBody = await sendOn('p230 sent on B');
+      expect(
+        'prompt' in bBody && !('blocks' in bBody) && JSON.stringify(bBody).includes('a-notes') === false,
+        `B's send carried A's file: ${JSON.stringify(bBody)}`,
+      );
+
+      // 2. Back on A: the strip is there again, and the send carries the file.
+      await go(page, A);
+      const backOnA = await strip();
+      expect(!backOnA.hidden && backOnA.text.includes('a-notes.txt'), `A's strip did not come back (${JSON.stringify(backOnA)})`);
+      const aBody = await sendOn('p230 sent on A');
+      const aBlocks = (aBody['blocks'] ?? []) as { attachmentId?: string }[];
+      expect(
+        aBlocks.length === 2 && aBlocks[1]!.attachmentId === `${A}-a-notes.txt`,
+        `A's send carried ${JSON.stringify(aBody)}, not its own file`,
+      );
+      expect((await strip()).hidden, 'the strip stayed up after A sent');
+
+      // 3. An upload for A that lands after the switch is filed under A.
+      await pick('late.txt');
+      await asked(late, 'the upload of late.txt');
+      await go(page, B);
+      await land(page, late, 'the upload of late.txt');
+      const lateB = await strip();
+      expect(lateB.hidden && lateB.text === '', `A's late upload appeared on B (${JSON.stringify(lateB)})`);
+      const b2Body = await sendOn('p230 sent on B again');
+      expect(!('blocks' in b2Body), `B's send carried A's late upload: ${JSON.stringify(b2Body)}`);
+      await go(page, A);
+      const lateA = await strip();
+      expect(!lateA.hidden && lateA.text.includes('late.txt'), `the late upload was not filed under A (${JSON.stringify(lateA)})`);
+      const a2Body = await sendOn('p230 sent on A again');
+      const a2Blocks = (a2Body['blocks'] ?? []) as { attachmentId?: string }[];
+      expect(
+        a2Blocks.length === 2 && a2Blocks[1]!.attachmentId === `${A}-late.txt`,
+        `A's second send carried ${JSON.stringify(a2Body)}`,
+      );
+      return `upload on A, B's send bare, A's strip back and its send carried ${A}-a-notes.txt; a late upload for A stayed off B and rode A's next send (${prompts.length} prompts)`;
+    },
+  });
 }
 
 // #199. A prompt that fails ends in turn_error, which the daemon sends INSTEAD
