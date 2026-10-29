@@ -20,6 +20,14 @@ interface PendingCode {
 export class PairingService {
   private pending = new Map<string, PendingCode>();
 
+  /**
+   * Called when a minted code is used up: `redeemed` (a live code was
+   * accepted) or `expired` (a late presentation, which also consumes it). Lets
+   * the owner of a code that is mirrored elsewhere (the owner-bootstrap file)
+   * drop that mirror instead of leaving a dead code behind.
+   */
+  onConsumed?: (code: string, outcome: 'redeemed' | 'expired') => void;
+
   constructor(
     private readonly nowFn: () => number = Date.now,
     private readonly ttlMs: number = DEFAULT_TTL_MS,
@@ -47,7 +55,11 @@ export class PairingService {
     if (!entry) return null;
     // Single-use regardless of outcome: remove before validating expiry.
     this.pending.delete(code);
-    if (this.nowFn() > entry.expiresAt) return null;
+    if (this.nowFn() > entry.expiresAt) {
+      this.onConsumed?.(code, 'expired');
+      return null;
+    }
+    this.onConsumed?.(code, 'redeemed');
     return { grantScopes: entry.grantScopes, allowOrigin: entry.allowOrigin };
   }
 }

@@ -187,11 +187,16 @@ export function normalizeBrowseService(
   };
 }
 
-/** Dedupe by service name (latest wins), then sort by host, then port. */
+/**
+ * Dedupe by (name, host, port) with the latest sighting winning, then sort by
+ * host, then port. The TXT name is only `<host>-<workspace basename>`, so two
+ * workspaces with the same basename (or equal names on different hosts) are
+ * different daemons; keying on name alone showed only one of them.
+ */
 export function dedupeAndSortDaemons(records: DaemonRecord[]): DaemonRecord[] {
-  const byName = new Map<string, DaemonRecord>();
-  for (const r of records) byName.set(r.name, r);
-  return [...byName.values()].sort(
+  const byIdentity = new Map<string, DaemonRecord>();
+  for (const r of records) byIdentity.set(`${r.name}\0${r.host}\0${r.port}`, r);
+  return [...byIdentity.values()].sort(
     (a, b) => a.host.localeCompare(b.host) || a.port - b.port,
   );
 }

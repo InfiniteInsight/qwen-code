@@ -48,7 +48,12 @@ describe('browseDaemons', () => {
     const fb = fakeBonjour([
       svc({ name: 'z', host: 'z.local', port: 2 }),
       svc({ name: 'a', host: 'a.local', port: 9 }),
-      svc({ name: 'z', host: 'z.local', port: 5 }), // dup name → latest wins
+      svc({
+        name: 'z',
+        host: 'z.local',
+        port: 2,
+        txt: { version: '2', name: 'z', workspace: 'app', tlsRequired: 'true' },
+      }), // same daemon seen again → latest wins
     ]);
     const records = await browseDaemons({
       factory: () => fb.bonjour,
@@ -56,7 +61,7 @@ describe('browseDaemons', () => {
       wait: () => Promise.resolve(),
     });
     expect(records.map((r) => r.name)).toEqual(['a', 'z']);
-    expect(records.find((r) => r.name === 'z')?.port).toBe(5);
+    expect(records.find((r) => r.name === 'z')?.version).toBe('2');
     expect(fb.calls.find).toBe(1);
     expect(fb.calls.destroy).toBe(1); // socket torn down after the window
   });

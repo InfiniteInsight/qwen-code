@@ -54,4 +54,36 @@ describe('PairingService', () => {
     const svc = new PairingService(() => 0);
     expect(svc.redeem('nope')).toBeNull();
   });
+
+  describe('onConsumed', () => {
+    it('fires with outcome "redeemed" when a live code is redeemed', () => {
+      const svc = new PairingService(() => 0);
+      const seen: Array<[string, string]> = [];
+      svc.onConsumed = (c, o) => seen.push([c, o]);
+      const { code } = svc.mint([SESSION_READ]);
+      svc.redeem(code);
+      expect(seen).toEqual([[code, 'redeemed']]);
+    });
+
+    it('fires with outcome "expired" when an expired code is presented', () => {
+      let now = 0;
+      const svc = new PairingService(() => now, 1000);
+      const seen: Array<[string, string]> = [];
+      svc.onConsumed = (c, o) => seen.push([c, o]);
+      const { code } = svc.mint([SESSION_READ]);
+      now = 5000;
+      expect(svc.redeem(code)).toBeNull();
+      expect(seen).toEqual([[code, 'expired']]);
+    });
+
+    it('does not fire for a code that was never minted', () => {
+      const svc = new PairingService(() => 0);
+      let n = 0;
+      svc.onConsumed = () => {
+        n++;
+      };
+      svc.redeem('nope');
+      expect(n).toBe(0);
+    });
+  });
 });

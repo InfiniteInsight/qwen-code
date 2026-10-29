@@ -5,11 +5,18 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, statSync, rmSync, chmodSync } from 'node:fs';
+import {
+  mkdtempSync,
+  statSync,
+  rmSync,
+  chmodSync,
+  existsSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   writeBootstrapCode,
+  removeBootstrapCode,
   displayHint,
   BOOTSTRAP_CODE_FILENAME,
 } from './bootstrap.js';
@@ -104,5 +111,38 @@ describe('displayHint', () => {
     const hint = displayHint(path);
     expect(hint).toContain(path);
     expect(hint).not.toContain('\n');
+  });
+});
+
+describe('removeBootstrapCode', () => {
+  it('removes the file when the code matches', () => {
+    const d = mkTmp();
+    try {
+      writeBootstrapCode(d, 'CODE-A');
+      expect(removeBootstrapCode(d, 'CODE-A')).toBe(true);
+      expect(existsSync(join(d, BOOTSTRAP_CODE_FILENAME))).toBe(false);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a file holding a different (newer) code alone', () => {
+    const d = mkTmp();
+    try {
+      writeBootstrapCode(d, 'CODE-NEW');
+      expect(removeBootstrapCode(d, 'CODE-OLD')).toBe(false);
+      expect(existsSync(join(d, BOOTSTRAP_CODE_FILENAME))).toBe(true);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('is a no-op when there is no file', () => {
+    const d = mkTmp();
+    try {
+      expect(removeBootstrapCode(d, 'X')).toBe(false);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });
