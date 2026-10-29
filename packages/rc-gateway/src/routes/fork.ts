@@ -251,7 +251,7 @@ export function createForkRoute(
       return;
     }
 
-    // A turn-addressed fork slices the LIVE branch. A previous rewind leaves
+    // A turn-addressed or full fork slices the LIVE branch. A previous rewind leaves
     // the abandoned branch's records in the file; counting and slicing the raw
     // list would both mis-number the turns and copy dead records into the
     // fork, which `forkRecords` then chains in as live history.
@@ -272,6 +272,11 @@ export function createForkRoute(
           ? allRecords.length
           : live.indices[resolved.truncatedEventId]!;
       liveSlice = live.records.slice(0, resolved.truncatedEventId);
+    } else if (fromEventId === undefined && transcriptMode === 'include') {
+      // A full copy takes the live branch too: the dead records of an earlier
+      // rewind would otherwise be relinked as history. A raw `fromEventId`
+      // keeps naming a raw record position, so it is left as given.
+      liveSlice = activeBranch(allRecords).records;
     }
 
     // Apply fromEventId slicing: when present, take only the first fromEventId
