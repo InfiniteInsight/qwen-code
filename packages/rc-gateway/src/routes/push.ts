@@ -12,9 +12,29 @@ import type { VapidStore } from '../webpush/vapid.js';
 import type { PushStore } from '../pushStore.js';
 import type { PushNotifier } from '../webpush/notifier.js';
 import type { PushPayload } from '../webpush/payload.js';
+import { PushEndpointPolicy } from '../webpush/endpointPolicy.js';
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
+}
+
+/** Subscriptions one token may hold before its oldest is evicted (#165). */
+export const DEFAULT_MAX_SUBSCRIPTIONS_PER_TOKEN = 8;
+
+/**
+ * Bound on each subscription key. A P-256 public key is 87 base64url chars and
+ * the auth secret 22; the slack is for padding and whitespace variants.
+ */
+const MAX_KEY_LENGTH = 256;
+
+export interface PushRouterOptions {
+  /**
+   * Where an endpoint may point. Defaults to the known Web Push services with
+   * a real DNS check, so a caller that forgets to pass one is still safe.
+   */
+  endpointPolicy?: PushEndpointPolicy;
+  /** Per-token subscription cap. Default {@link DEFAULT_MAX_SUBSCRIPTIONS_PER_TOKEN}. */
+  maxSubscriptionsPerToken?: number;
 }
 
 /**
@@ -23,22 +43,48 @@ function isNonEmptyString(v: unknown): v is string {
  * applies requireScope(SESSION_READ); owner-only operations (?all=true,
  * cross-token delete) are checked here against req.rcClient.scopes.
  *
+ * WHY PUSH STAYS AT SESSION_READ, AND WHY A SHARE STILL CANNOT SUBSCRIBE
+ * (#165)
+ *
+ * The audit found a share guest could register an endpoint on an internal
+ * host and have the gateway POST to it (blind SSRF). The SSRF is closed by
+ * the endpoint policy for every scope, so the scope question is only "who
+ * should get notifications at all". A paired read-only device is the main
+ * reason to pair one: a phone that watches and is told when a turn finishes
+ * or a permission is waiting. Moving push to WRITE would take that away from
+ * exactly the device it is for. A share is different: it is a link handed to
+ * someone else, the guest page never subscribes, and nothing a guest needs
+ * depends on a gateway that sends to an address the guest chose. So a
+ * session-locked token is refused here, and the notifier's session-lock
+ * filter stays as the second line for any record that predates this.
+ *
  * Secrecy: the VAPID private key is never returned. Audit entries carry only
- * { subscriptionId } — never the endpoint or keys.
+ * { subscriptionId } (plus a reason on eviction), never the endpoint or keys.
  */
 export function createPushRouter(
   vapid: VapidStore,
   store: PushStore,
   notifier: PushNotifier,
   audit?: AuditRecorder,
+  opts: PushRouterOptions = {},
 ): Router {
   const router = Router();
+  const policy = opts.endpointPolicy ?? new PushEndpointPolicy();
+  const maxPerToken =
+    opts.maxSubscriptionsPerToken ?? DEFAULT_MAX_SUBSCRIPTIONS_PER_TOKEN;
 
   router.get('/vapid', (_req, res) => {
     res.json({ applicationServerKey: vapid.getApplicationServerKey() });
   });
 
   router.post('/subscribe', async (req, res) => {
+    if (req.rcClient!.sessionLockId !== undefined) {
+      res.status(403).json({
+        error: 'A share link cannot register push notifications',
+        code: 'insufficient_scope',
+      });
+      return;
+    }
     const body = (req.body ?? {}) as {
       subscription?: {
         endpoint?: unknown;
@@ -51,26 +97,56 @@ export function createPushRouter(
       !isNonEmptyString(sub.endpoint) ||
       !sub.keys ||
       !isNonEmptyString(sub.keys.p256dh) ||
-      !isNonEmptyString(sub.keys.auth)
+      !isNonEmptyString(sub.keys.auth) ||
+      sub.keys.p256dh.length > MAX_KEY_LENGTH ||
+      sub.keys.auth.length > MAX_KEY_LENGTH
     ) {
       res
         .status(400)
         .json({ error: 'Invalid subscription', code: 'invalid_subscription' });
       return;
     }
+    const endpoint = sub.endpoint;
+    const keys = { p256dh: sub.keys.p256dh, auth: sub.keys.auth };
 
-    const rec = await store.add(req.rcClient!.id, {
-      endpoint: sub.endpoint,
-      keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
-    });
-    void audit?.record({
-      action: 'push_subscribed',
-      actorTokenId: req.rcClient!.id,
-      shareId: req.rcClient?.shareId,
-      shareLabel: req.rcClient?.shareLabel,
-      detail: { subscriptionId: rec.id },
-    });
-    res.status(201).json({ id: rec.id });
+    try {
+      const verdict = await policy.check(endpoint);
+      if (!verdict.ok) {
+        res.status(400).json({
+          error: 'Push endpoint refused',
+          code: 'invalid_push_endpoint',
+          reason: verdict.reason,
+        });
+        return;
+      }
+
+      const { record: rec, evicted } = await store.addCapped(
+        req.rcClient!.id,
+        { endpoint, keys },
+        maxPerToken,
+      );
+      for (const old of evicted) {
+        notifier.forgetRateLimit(old.id);
+        void audit?.record({
+          action: 'push_unsubscribed',
+          actorTokenId: req.rcClient!.id,
+          detail: { subscriptionId: old.id, reason: 'cap_evicted' },
+        });
+      }
+      void audit?.record({
+        action: 'push_subscribed',
+        actorTokenId: req.rcClient!.id,
+        shareId: req.rcClient?.shareId,
+        shareLabel: req.rcClient?.shareLabel,
+        detail: { subscriptionId: rec.id },
+      });
+      res.status(201).json({ id: rec.id });
+    } catch {
+      // persist() can reject (EACCES/ENOSPC); answer rather than hang.
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal error', code: 'internal' });
+      }
+    }
   });
 
   router.get('/subscriptions', (req, res) => {

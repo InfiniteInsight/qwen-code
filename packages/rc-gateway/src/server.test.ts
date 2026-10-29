@@ -23,6 +23,7 @@ import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
+import { PushEndpointPolicy } from './webpush/endpointPolicy.js';
 import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
 import { ApnsStore } from './nativePush/apnsStore.js';
@@ -78,6 +79,10 @@ async function boot(
     pushStore,
     snooze,
     commandsUserDir,
+    // #165: registration-time DNS is stubbed so push tests stay offline.
+    pushEndpointPolicy: new PushEndpointPolicy({
+      resolve: async () => [{ address: '142.250.80.10', family: 4 }],
+    }),
     ...extraDeps,
   }); // `audit` is also returned; boot() does not need it here.
   const server: Server = await new Promise((resolve) => {
@@ -1239,7 +1244,7 @@ describe('gateway app', () => {
       },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/1',
           keys: { p256dh: 'p', auth: 'a' },
         },
       }),
@@ -1272,7 +1277,7 @@ describe('gateway app', () => {
       },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/owner-test',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/owner-test',
           keys: { p256dh: 'p', auth: 'a' },
         },
       }),
@@ -1310,7 +1315,7 @@ describe('gateway app', () => {
       },
       body: JSON.stringify({
         subscription: {
-          endpoint: 'https://push.example.com/prefs-target',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/prefs-target',
           keys: { p256dh: 'p', auth: 'a' },
         },
       }),

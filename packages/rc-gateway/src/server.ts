@@ -244,6 +244,10 @@ import {
   createInvokeCommandRoute,
 } from './routes/commands.js';
 import { PushSender } from './webpush/sender.js';
+import {
+  PushEndpointPolicy,
+  parsePushHostsEnv,
+} from './webpush/endpointPolicy.js';
 import { PushNotifier } from './webpush/notifier.js';
 import { PushRateLimiter } from './webpush/rateLimiter.js';
 import { PushCoalescer } from './webpush/coalescer.js';
@@ -323,6 +327,12 @@ export interface GatewayDeps {
    * opt-in). Falls back to the `QWEN_RC_COALESCE_MS` env when unset.
    */
   coalesceWindowMs?: number;
+  /**
+   * Where a push subscription endpoint may point (#165). Defaults to the known
+   * Web Push services, or to the `QWEN_RC_PUSH_HOSTS` env when set (a
+   * comma-separated list of host suffixes, or `*` for any public host).
+   */
+  pushEndpointPolicy?: PushEndpointPolicy;
   /**
    * Per-session idle override store (the `/suggest on|off` toggle). The boot
    * wiring (cli.ts) creates it so the idle handler's `getSessionEnabled` and the
@@ -1779,7 +1789,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   let notifier: PushNotifier | undefined;
   if (deps.vapid && deps.pushStore) {
-    const sender = new PushSender(deps.vapid, deps.pushStore, audit);
+    // #165: one policy for registration (route) and delivery (sender), so an
+    // endpoint the route accepts is one the sender will actually send to.
+    const pushEndpointPolicy =
+      deps.pushEndpointPolicy ??
+      new PushEndpointPolicy({
+        allowedHostSuffixes: parsePushHostsEnv(process.env.QWEN_RC_PUSH_HOSTS),
+      });
+    const sender = new PushSender(deps.vapid, deps.pushStore, audit, {
+      endpointPolicy: pushEndpointPolicy,
+    });
     // Per-subscription rolling-hour push rate limiter (cycle 46). In-memory:
     // a restart resets the counters (fail-open — never suppress a notification).
     const rateLimiter = new PushRateLimiter();
@@ -1832,7 +1851,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     app.use(
       '/rc/push',
       requireScope(SESSION_READ, audit),
-      createPushRouter(deps.vapid, deps.pushStore, notifier, audit),
+      createPushRouter(deps.vapid, deps.pushStore, notifier, audit, {
+        endpointPolicy: pushEndpointPolicy,
+      }),
     );
   }
 
