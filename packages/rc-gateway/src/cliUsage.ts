@@ -99,3 +99,31 @@ export function isRunAsCli(
     return false;
   }
 }
+
+/**
+ * Parse `qwen-rc audit verify` arguments. Accepts `--dir <path>` (the form the
+ * usage documents) and `--dir=<path>`. Anything else throws: the old parser
+ * ignored `--dir <path>` and quietly verified the default directory, so a
+ * tamper check could pass having looked at the wrong place.
+ */
+export function parseAuditVerifyArgs(argv: string[]): { dir?: string } {
+  let dir: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--dir') {
+      const v = argv[i + 1];
+      if (v === undefined || v === '' || v.startsWith('--')) {
+        throw new Error('--dir needs a directory path');
+      }
+      dir = v;
+      i++;
+    } else if (a.startsWith('--dir=')) {
+      const v = a.slice('--dir='.length);
+      if (v === '') throw new Error('--dir needs a directory path');
+      dir = v;
+    } else {
+      throw new Error(`unexpected argument '${a}'`);
+    }
+  }
+  return dir === undefined ? {} : { dir };
+}

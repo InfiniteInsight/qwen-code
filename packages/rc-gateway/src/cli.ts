@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { watch, readFileSync, type FSWatcher } from 'node:fs';
+import {
+  existsSync,
+  statSync,
+  watch,
+  readFileSync,
+  type FSWatcher,
+} from 'node:fs';
 import { createPrivateKey, createHash } from 'node:crypto';
 import {
   writeBootstrapCode,
@@ -17,7 +23,12 @@ import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
 import { join, basename } from 'node:path';
 import { createInterface } from 'node:readline';
-import { USAGE_TEXT, resolveTopLevel, isRunAsCli } from './cliUsage.js';
+import {
+  USAGE_TEXT,
+  resolveTopLevel,
+  isRunAsCli,
+  parseAuditVerifyArgs,
+} from './cliUsage.js';
 import {
   isLoopbackHost,
   resolveBindSecurity,
@@ -3425,15 +3436,32 @@ if (process.argv[2] === 'serve') {
   // Exits 0 when all chains are intact, 1 when any chain is broken (with a
   // human-readable report on stdout), 2 on a usage error. Daemon-free and
   // read-only: the verify pass never modifies any file.
-  const argv = process.argv.slice(4);
-  const dirFlag = argv.find((a) => a.startsWith('--dir='));
-  const auditDir = dirFlag
-    ? dirFlag.slice('--dir='.length)
-    : join(homedir(), '.qwen', 'rc');
+  let auditDir: string;
+  try {
+    auditDir =
+      parseAuditVerifyArgs(process.argv.slice(4)).dir ??
+      join(homedir(), '.qwen', 'rc');
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `audit verify: ${(err as Error).message}\nusage: qwen-rc audit verify [--dir <path>]`,
+    );
+    process.exit(2);
+  }
+  // A directory that is not there has nothing to verify; reporting OK for it
+  // (as verifyChain does for a library caller) made a typo'd --dir look like a
+  // passing tamper check.
+  if (!existsSync(auditDir) || !statSync(auditDir).isDirectory()) {
+    // eslint-disable-next-line no-console
+    console.error(`audit verify: not a directory: ${auditDir}`);
+    process.exit(2);
+  }
   const result = AuditLog.verifyChain(auditDir);
   if (result.ok) {
     // eslint-disable-next-line no-console
-    console.log(`audit verify: OK (directory: ${auditDir})`);
+    console.log(
+      `audit verify: OK (${result.filesChecked} file(s) checked, directory: ${auditDir})`,
+    );
     process.exit(0);
   } else {
     // eslint-disable-next-line no-console

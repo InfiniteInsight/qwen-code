@@ -8,6 +8,9 @@ import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Runs the real cli.ts entry through tsx so the fall-through at the end of the
 // subcommand dispatch is exercised, not just its pure helper.
@@ -56,6 +59,38 @@ describe.skipIf(!tsxImport)(
       const r = run('--version');
       expect(r.status).toBe(0);
       expect(r.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+    });
+
+    describe('audit verify', () => {
+      it('fails on a directory that does not exist, in both --dir forms', () => {
+        const missing = join(tmpdir(), 'qwen-rc-no-such-audit-dir-167');
+        for (const args of [['--dir', missing], [`--dir=${missing}`]]) {
+          const r = run('audit', 'verify', ...args);
+          expect(r.status).toBe(2);
+          expect(r.stderr).toContain('not a directory');
+        }
+      });
+
+      it('honours the documented --dir <path> form and catches a tampered chain there', () => {
+        const d = mkdtempSync(join(tmpdir(), 'qwen-rc-audit-'));
+        try {
+          writeFileSync(
+            join(d, 'audit-2026-07-09.log'),
+            JSON.stringify({ prevHash: 'not-the-genesis-hash' }) + '\n',
+          );
+          const r = run('audit', 'verify', '--dir', d);
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('FAILED');
+        } finally {
+          rmSync(d, { recursive: true, force: true });
+        }
+      });
+
+      it('rejects a dangling --dir with a usage error', () => {
+        const r = run('audit', 'verify', '--dir');
+        expect(r.status).toBe(2);
+        expect(r.stderr).toContain('--dir needs');
+      });
     });
   },
 );

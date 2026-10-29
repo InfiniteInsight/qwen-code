@@ -9,7 +9,12 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { USAGE_TEXT, resolveTopLevel, isRunAsCli } from './cliUsage.js';
+import {
+  USAGE_TEXT,
+  resolveTopLevel,
+  isRunAsCli,
+  parseAuditVerifyArgs,
+} from './cliUsage.js';
 
 describe('resolveTopLevel', () => {
   it.each(['help', '--help', '-h'])('%s is a help request', (w) => {
@@ -76,5 +81,34 @@ describe('isRunAsCli', () => {
     expect(isRunAsCli('/definitely/not/here', url)).toBe(false);
     expect(isRunAsCli(undefined, url)).toBe(false);
     expect(isRunAsCli(process.argv[1], url)).toBe(false);
+  });
+});
+
+describe('parseAuditVerifyArgs', () => {
+  it('has no dir when none is given, so the caller applies its default', () => {
+    expect(parseAuditVerifyArgs([])).toEqual({});
+  });
+
+  it('reads the --dir=<path> form', () => {
+    expect(parseAuditVerifyArgs(['--dir=/var/a'])).toEqual({ dir: '/var/a' });
+  });
+
+  it('reads the documented --dir <path> form', () => {
+    expect(parseAuditVerifyArgs(['--dir', '/var/a'])).toEqual({
+      dir: '/var/a',
+    });
+  });
+
+  it('rejects --dir without a value, with an empty value, or followed by another flag', () => {
+    expect(() => parseAuditVerifyArgs(['--dir'])).toThrow(/--dir/);
+    expect(() => parseAuditVerifyArgs(['--dir='])).toThrow(/--dir/);
+    expect(() => parseAuditVerifyArgs(['--dir', '--x'])).toThrow(/--dir/);
+  });
+
+  it('rejects an unknown argument rather than silently checking the default dir', () => {
+    expect(() => parseAuditVerifyArgs(['/var/a'])).toThrow(/unexpected/);
+    expect(() => parseAuditVerifyArgs(['--drr', '/var/a'])).toThrow(
+      /unexpected/,
+    );
   });
 });
