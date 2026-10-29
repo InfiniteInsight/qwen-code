@@ -19963,7 +19963,18 @@
             const shouldSend =
               $('dictate-autosend').checked && gotFinal && !errored;
             reset();
-            if (shouldSend) $('send').onclick();
+            if (shouldSend) {
+              // #173: through the press, as drainOutbox does, not a direct call
+              // of the handler: a click honours the disabled state, a direct
+              // call does not. A second POST went out mid-turn and Send came
+              // back enabled with its label stuck on "waiting...". The words
+              // stay in the composer when Send is held.
+              if ($('send').disabled) {
+                setStatus('voice: a send is in flight, the words stay in the composer');
+              } else {
+                $('send').click();
+              }
+            }
           };
           try {
             rec.start();

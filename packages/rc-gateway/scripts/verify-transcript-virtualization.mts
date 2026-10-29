@@ -21133,6 +21133,63 @@ function solidPng(w: number, h: number): Buffer {
     },
   });
 
+  // #173. Dictation's auto-send called $('send').onclick() directly, which
+  // ignores the disabled state a click honours: a second POST went out while a
+  // turn was in flight, and Send was re-enabled mid-turn with its label stuck.
+  PAGE_SCENARIOS.push({
+    name: 'P243 dictation auto-send goes through the guarded Send: held while a turn is in flight (text kept, no second POST), sent once Send is free',
+    waitView: false,
+    frames: frames172,
+    stub: { promptDelayMs: 2_500 },
+    before: async (page) => {
+      await page.addInitScript({
+        content: `window.SpeechRecognition = function () {
+          window.__rec = this;
+          this.start = function () {};
+          this.stop = function () { if (this.onend) this.onend(); };
+        };`,
+      });
+    },
+    run: async ({ page }) => {
+      const posts: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'POST' && /\/session\/[^/]+\/prompt$/.test(new URL(r.url()).pathname)) {
+          posts.push(r.postData() ?? '');
+        }
+      });
+      const speak = async (words: string): Promise<void> => {
+        await page.evaluate(`document.getElementById('dictate').click()`);
+        await page.evaluate(
+          `window.__rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: ${JSON.stringify(words)} }], { isFinal: true })] }); window.__rec.onend()`,
+        );
+      };
+      await go(page, A);
+      await page.evaluate(`document.getElementById('dictate-autosend').checked = true`);
+      await page.fill('#prompt', 'p243 first');
+      await page.click('#send');
+      await poll(() => posts.length === 1, 'the first send never reached the wire');
+
+      await speak('p243 spoken mid turn');
+      await page.waitForTimeout(500);
+      const held = await page.evaluate(`({
+        disabled: document.getElementById('send').disabled,
+        label: document.getElementById('send').querySelector('.lbl').textContent,
+        box: document.getElementById('prompt').value,
+      })`) as { disabled: boolean; label: string; box: string };
+      expect(posts.length === 1, `dictation sent ${posts.length - 1} extra prompt(s) while a turn was in flight`);
+      expect(held.disabled && held.label === 'waiting…', `Send was freed mid-turn (${JSON.stringify(held)})`);
+      expect(held.box.includes('p243 spoken mid turn'), `the dictated text was not kept in the composer (${JSON.stringify(held.box)})`);
+
+      // Once the turn ends and Send is free, the same path sends.
+      await page.waitForFunction(`!document.getElementById('send').disabled`, null, { timeout: 10_000 });
+      await page.evaluate(`document.getElementById('prompt').value = ''`);
+      await speak('p243 spoken after');
+      await poll(() => posts.length === 2, 'dictation did not send once Send was free');
+      expect(posts[1]!.includes('p243 spoken after'), `the second send carried ${posts[1]}`);
+      return 'auto-send held while Send was disabled (text kept, one POST) and sent once it was free';
+    },
+  });
+
   // @@NEXT-P-SCENARIO@@
 }
 
