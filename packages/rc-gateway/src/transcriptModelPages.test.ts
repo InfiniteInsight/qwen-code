@@ -33,7 +33,12 @@ interface Item {
   result?: unknown;
   open?: Array<{ text: string; status: string }>;
   parts?: Part[];
-  sub?: { tools: Array<{ id: string; label: string; status: string }> } | null;
+  sub?: {
+    text: string;
+    done: boolean;
+    type: string;
+    tools: Array<{ id: string; label: string; status: string }>;
+  } | null;
 }
 interface Model {
   items: Item[];
@@ -270,5 +275,153 @@ describe('prependItems does not draw a record twice (#171)', () => {
     ]);
     // "yes" alone matches a live row; one row of overlap is not proof.
     expect(m.prependItems(p)).toBe(3);
+  });
+});
+
+const IMG = {
+  type: 'image',
+  attachmentId: 'IMG_1.jpg',
+  mimeType: 'image/jpeg',
+  size: 10,
+};
+
+describe('a message split across a page boundary is one row (#202)', () => {
+  // Paging runs newest to oldest, so the page with the START of the message is
+  // the older one and goes in front of the page already drawn.
+  it('joins a message whose text ends one page and whose picture opens the next', () => {
+    const m = api.createTranscriptModel();
+    m.prependItems(
+      api.replayStoredPage([
+        flat('user_message_chunk', { content: IMG }, 2000),
+        flat('agent_message_chunk', text('a cat'), 2100),
+      ]),
+    );
+    const newer = m.items[0];
+    const added = m.prependItems(
+      api.replayStoredPage([
+        flat('agent_message_chunk', text('earlier answer'), 500),
+        flat('user_message_chunk', text('what is this?'), 1000),
+      ]),
+    );
+    expect(m.items.map((i) => i.kind)).toEqual(['asst', 'user', 'asst']);
+    expect(added).toBe(1);
+    const user = m.items[1];
+    expect(user.text).toBe('what is this?');
+    expect(user.parts).toHaveLength(1);
+    expect(user.time).toBe(1000);
+    // The row already on screen keeps its identity.
+    expect(user).toBe(newer);
+    expect(new Set(m.items.map((i) => i.id)).size).toBe(m.items.length);
+  });
+
+  it('joins a message whose picture ends one page and whose caption opens the next', () => {
+    const m = api.createTranscriptModel();
+    m.prependItems(
+      api.replayStoredPage([
+        flat('user_message_chunk', text('what is this?'), 1000),
+        flat('agent_message_chunk', text('a cat'), 1100),
+      ]),
+    );
+    m.prependItems(
+      api.replayStoredPage([flat('user_message_chunk', { content: IMG }, 900)]),
+    );
+    expect(m.items.map((i) => i.kind)).toEqual(['user', 'asst']);
+    expect(m.items[0].text).toBe('what is this?');
+    expect(m.items[0].parts).toHaveLength(1);
+    expect(m.items[0].time).toBe(900);
+  });
+
+  it('does not join two messages that each have their own text', () => {
+    const m = api.createTranscriptModel();
+    m.prependItems(
+      api.replayStoredPage([flat('user_message_chunk', text('second'), 2000)]),
+    );
+    m.prependItems(
+      api.replayStoredPage([flat('user_message_chunk', text('first'), 1000)]),
+    );
+    expect(m.items.map((i) => i.text)).toEqual(['first', 'second']);
+  });
+});
+
+describe('a subagent whose parent call is on an older page (#202)', () => {
+  const child = (parent: string, sessionUpdate: string, extra = {}) =>
+    flat(sessionUpdate, {
+      ...extra,
+      _meta: { parentToolCallId: parent, subagentType: 'explorer' },
+    });
+
+  it('attaches the child frames of a newer page when the parent arrives', () => {
+    const m = api.createTranscriptModel();
+    m.prependItems(
+      api.replayStoredPage([
+        child('p1', 'agent_message_chunk', text('found it')),
+        child('p1', 'tool_call', {
+          toolCallId: 'c1',
+          title: 'Grep',
+          status: 'completed',
+        }),
+        flat('tool_call_update', { toolCallId: 'p1', status: 'completed' }),
+      ]),
+    );
+    // The parent tool row is nameless and its subagent holds what the page had.
+    expect(m.items[0].sub?.text).toBe('found it');
+    m.prependItems(
+      api.replayStoredPage([
+        flat('tool_call', { toolCallId: 'p1', title: 'Agent' }),
+        child('p1', 'agent_message_chunk', text('looking ')),
+        child('p1', 'tool_call', {
+          toolCallId: 'c0',
+          title: 'Glob',
+          status: 'completed',
+        }),
+      ]),
+    );
+    const tool = m.items[0];
+    expect(tool.label).toBe('Agent');
+    expect(tool.sub?.text).toBe('looking found it');
+    expect(tool.sub?.tools.map((t) => t.id)).toEqual(['c0', 'c1']);
+    expect(tool.sub?.done).toBe(true);
+    expect(tool.sub?.type).toBe('explorer');
+  });
+
+  it('holds child frames of a page that has no row for their parent until it arrives', () => {
+    const m = api.createTranscriptModel();
+    // Only child frames: no tool row on this page at all.
+    expect(
+      m.prependItems(
+        api.replayStoredPage([
+          child('p2', 'agent_message_chunk', text('deep work')),
+          flat('agent_message_chunk', text('after')),
+        ]),
+      ),
+    ).toBe(1);
+    m.prependItems(
+      api.replayStoredPage([
+        flat('tool_call', { toolCallId: 'p2', title: 'Agent' }),
+      ]),
+    );
+    expect(m.items.map((i) => i.kind)).toEqual(['tool', 'asst']);
+    expect(m.items[0].sub?.text).toBe('deep work');
+  });
+
+  it('attaches to a parent row that is already on screen', () => {
+    const m = api.createTranscriptModel();
+    m.upsertTool({ toolCallId: 'p3', title: 'Agent', status: 'in_progress' });
+    m.prependItems(
+      api.replayStoredPage([child('p3', 'agent_message_chunk', text('hi'))]),
+    );
+    expect(m.items[0].sub?.text).toBe('hi');
+  });
+
+  it('does not double the text of children the live rows already hold', () => {
+    const m = api.createTranscriptModel();
+    m.upsertTool({ toolCallId: 'p4', title: 'Agent', status: 'in_progress' });
+    m.upsertSubagentTool({ toolCallId: 'c1', title: 'Grep' }, 'p4');
+    m.prependItems(
+      api.replayStoredPage([
+        child('p4', 'tool_call', { toolCallId: 'c1', title: 'Grep' }),
+      ]),
+    );
+    expect(m.items[0].sub?.tools).toHaveLength(1);
   });
 });
