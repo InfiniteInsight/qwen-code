@@ -1817,7 +1817,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use(
     '/rc/share',
     requireScope(OWNER, audit),
-    createShareRouter(deps.store, registry, audit),
+    createShareRouter(deps.store, registry, audit, onTokenRevoked),
   );
   // BM25 ranked search provider (search slice 2) — opt-in `?rank=bm25`. The
   // native better-sqlite3 is loaded LAZILY via a dynamic import the FIRST time a

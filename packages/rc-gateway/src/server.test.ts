@@ -2267,6 +2267,45 @@ describe('#205 token revoke cascade (web push, APNs, digest, audit)', () => {
     s.cleanup();
   });
 
+  it('DELETE /rc/share/:id removes the revoked share link push subscription and device, counts on share_revoked', async () => {
+    const s = await setup();
+    const mint = await fetch(`${s.url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s.owner.token}`,
+      },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: 3600 }),
+    });
+    expect(mint.status).toBe(201);
+    const share = (await mint.json()) as { id: string };
+    await s.pushStore.add(share.id, SUB(1));
+    await s.pushStore.add(s.bystander.id, SUB(2));
+    await s.device(share.id, 1);
+
+    const res = await fetch(`${s.url}/rc/share/${share.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${s.owner.token}` },
+    });
+    expect(res.status).toBe(204);
+    expect(s.pushStore.listFor(share.id)).toHaveLength(0);
+    expect(s.apnsStore.listForToken(share.id)).toHaveLength(0);
+    expect(s.pushStore.listFor(s.bystander.id)).toHaveLength(1);
+
+    const rows = await pollAudit(s.auditPath, (r) =>
+      r.some((x) => x.action === 'share_revoked'),
+    );
+    const revoked = rows.filter((x) => x.action === 'share_revoked');
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]!.detail).toMatchObject({
+      shareId: share.id,
+      subscriptions: 1,
+      devices: 1,
+    });
+    expect(JSON.stringify(rows)).not.toContain('push.example.com');
+    s.cleanup();
+  });
+
   it('still revokes with no APNs store wired and nothing to remove (counts are zero)', async () => {
     const { url, store, auditPath } = await boot();
     const owner = await store.issue([OWNER, SESSION_READ], 'owner');
