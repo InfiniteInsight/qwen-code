@@ -9,6 +9,7 @@ import { BanCache } from '../banCache.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 import type { CursorStore } from '../cursorStore.js';
+import { SubscriptionCursors } from '../sessionCursors.js';
 import { extractAgentText } from '../sessionUpdateText.js';
 import { markdownToHtml } from './markdownHtml.js';
 import { MatrixStreamRouter, type MatrixStreamPoster } from './streamRouter.js';
@@ -21,6 +22,7 @@ import {
   type NormalizedMatrixMessage,
   type NormalizedMatrixReaction,
   type TrackedEvent,
+  type ExpiredEvent,
 } from './dispatch.js';
 import {
   extractSync,
@@ -67,6 +69,8 @@ export interface MatrixBridgeConfig {
   runInbound?: (signal: AbortSignal) => Promise<void>;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Injectable clock for request expiry (tests); defaults to `Date.now`. */
+  now?: () => number;
   /** Injectable idle-flush timer for the stream router (tests). */
   setTimer?: (ms: number, fn: () => void) => () => void;
   /**
@@ -146,6 +150,11 @@ interface SentRequest {
 /** This bridge's stable id (registration + invite-redeem route path). */
 const MATRIX_BRIDGE_ID = 'matrix';
 
+/** How long an unresolved permission request stays tracked when it names no timeout. */
+const DEFAULT_REQUEST_TTL_MS = 60 * 60 * 1000;
+/** How many expired requests are remembered to answer a late reaction. */
+const EXPIRED_KEEP = 500;
+
 export class MatrixBridge {
   private readonly cfg: MatrixBridgeConfig;
   private readonly commandPrefix: string;
@@ -153,10 +162,12 @@ export class MatrixBridge {
   private readonly bans = new BanCache();
   private readonly encryptedRooms = new Set<string>();
   private readonly subscribed = new Set<string>();
-  /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
-  private readonly lastEventId = new Map<string, number>();
+  /** Resume cursors and per-session stream handles (dropped on unbind, #204). */
+  private readonly cursors: SubscriptionCursors;
   /** eventId → tracked permission_request (reaction → vote lookup). */
   private readonly tracked = new Map<string, TrackedEvent>();
+  /** eventId → a request dropped unresolved (newest {@link EXPIRED_KEEP}). */
+  private readonly expired = new Map<string, ExpiredEvent>();
   /** requestId → the sent messages that rendered it (for the resolve edit). */
   private readonly sent = new Map<string, SentRequest[]>();
   /** requestIds for which the deeplink-guidance reply has already been sent. */
@@ -180,6 +191,7 @@ export class MatrixBridge {
 
   constructor(cfg: MatrixBridgeConfig) {
     this.cfg = cfg;
+    this.cursors = new SubscriptionCursors(cfg.cursors, cfg.tokenId);
     this.commandPrefix = cfg.commandPrefix ?? '!qwen';
     this.log = cfg.log ?? (() => {});
     this.ctx = {
@@ -212,6 +224,7 @@ export class MatrixBridge {
   }
 
   private dispatchDeps(): MatrixDispatchDeps {
+    this.expireTracked();
     return {
       bridge: this.cfg.client,
       rest: { sendMessage: (roomId, content) => this.send(roomId, content) },
@@ -220,6 +233,7 @@ export class MatrixBridge {
       bans: this.bans,
       encryptedRooms: this.encryptedRooms,
       tracked: this.tracked,
+      expired: this.expired,
       deeplinkGuidanceSent: this.deeplinkGuidanceSent,
       commandPrefix: this.commandPrefix,
       onTurnBoundary: (sessionId) => this.stream.bumpTurn(sessionId),
@@ -325,12 +339,7 @@ export class MatrixBridge {
   async start(signal: AbortSignal): Promise<void> {
     this.signal = signal;
     // Load durable cursors so SSE subscriptions resume from where they left off.
-    if (this.cfg.cursors && this.cfg.tokenId) {
-      for (const sessionId of this.cfg.rooms.boundSessions()) {
-        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
-        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
-      }
-    }
+    this.cursors.load(this.cfg.rooms.boundSessions());
     const reg = await this.registerSelf();
     if (reg.ok && this.cfg.health) {
       this.cfg.health.registeredId = MATRIX_BRIDGE_ID;
@@ -450,7 +459,13 @@ export class MatrixBridge {
 
   /** Self-healing SSE echo loop per bound session (backoff reconnect to abort). */
   private reconcileSubscriptions(signal: AbortSignal): void {
-    for (const sessionId of this.cfg.rooms.boundSessions()) {
+    const bound = this.cfg.rooms.boundSessions();
+    // A session whose binding went (detach, or a room re-attached elsewhere)
+    // loses its stream and its cursor entry.
+    for (const sessionId of this.cursors.release(bound)) {
+      this.log(`matrix bridge: session ${sessionId} unbound, cursor dropped`);
+    }
+    for (const sessionId of bound) {
       if (this.subscribed.has(sessionId)) continue;
       this.subscribed.add(sessionId);
       void this.subscriptionLoop(sessionId, signal);
@@ -462,31 +477,26 @@ export class MatrixBridge {
     signal: AbortSignal,
   ): Promise<void> {
     let backoff = RECONNECT_INITIAL_MS;
+    const stream = this.cursors.signalFor(sessionId, signal);
     try {
-      while (!signal.aborted) {
+      while (!stream.aborted) {
         // Resume from the last frame id seen so a reconnect catches frames that
         // arrived during the blip (the daemon replays only id > cursor).
         await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => {
             if (typeof ev.id === 'number') {
-              this.lastEventId.set(sessionId, ev.id);
-              // Persist the cursor so restarts resume from here.
-              if (this.cfg.cursors && this.cfg.tokenId) {
-                void this.cfg.cursors.setLastEventId(
-                  this.cfg.tokenId,
-                  sessionId,
-                  ev.id,
-                );
-              }
+              // Persist the cursor so restarts resume from here (not for a
+              // stream whose session was unbound meanwhile).
+              this.cursors.record(sessionId, ev.id, stream);
             }
             this.deliverEvent(sessionId, ev);
           },
-          signal,
-          this.lastEventId.get(sessionId),
+          stream,
+          this.cursors.lastEventId.get(sessionId),
         );
-        if (signal.aborted) break;
-        await this.backoff(signal, backoff);
+        if (stream.aborted) break;
+        await this.backoff(stream, backoff);
         backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
       }
     } finally {
@@ -534,6 +544,15 @@ export class MatrixBridge {
     // track deeplink events with surface:'deeplink' so handleReaction can send
     // a one-time guidance reply when a user reacts on them.
     const isDeeplink = !tracksReactions(data);
+    this.expireTracked();
+    const timeoutMs = d['timeoutMs'];
+    const expiresAt =
+      this.now() +
+      (typeof timeoutMs === 'number' &&
+      Number.isFinite(timeoutMs) &&
+      timeoutMs > 0
+        ? timeoutMs
+        : DEFAULT_REQUEST_TTL_MS);
     for (const roomId of this.cfg.rooms.roomsFor(sessionId)) {
       const r = await this.send(roomId, content);
       if (!r.ok || !r.eventId) continue;
@@ -546,8 +565,46 @@ export class MatrixBridge {
           sessionId,
           roomId, // a reaction votes only from this room (#168)
           surface: isDeeplink ? 'deeplink' : 'inline',
+          expiresAt,
         });
       }
+    }
+  }
+
+  private now(): number {
+    return (this.cfg.now ?? Date.now)();
+  }
+
+  /**
+   * Stop tracking permission requests that outlived their deadline without a
+   * `permission_resolved` (the session ended, or the frame was missed): without
+   * this they stay in memory for the bridge's lifetime (#204). Each is logged
+   * once and remembered (newest {@link EXPIRED_KEEP}) so a late reaction on it
+   * is answered rather than silently dropped. Run before every dispatch and
+   * every new request, which bounds the tracked set without a timer.
+   */
+  private expireTracked(): void {
+    const now = this.now();
+    const logged = new Set<string>();
+    for (const [eventId, t] of this.tracked) {
+      if (t.expiresAt === undefined || now < t.expiresAt) continue;
+      this.tracked.delete(eventId);
+      this.sent.delete(t.requestId);
+      this.deeplinkGuidanceSent.delete(t.requestId);
+      this.expired.delete(eventId); // re-insert as the newest
+      this.expired.set(eventId, { requestId: t.requestId, roomId: t.roomId });
+      if (!logged.has(t.requestId)) {
+        logged.add(t.requestId);
+        this.log(
+          `matrix bridge: permission request ${t.requestId} (session ` +
+            `${t.sessionId}) expired unresolved; no longer tracked`,
+        );
+      }
+    }
+    while (this.expired.size > EXPIRED_KEEP) {
+      const oldest = this.expired.keys().next().value;
+      if (oldest === undefined) break;
+      this.expired.delete(oldest);
     }
   }
 

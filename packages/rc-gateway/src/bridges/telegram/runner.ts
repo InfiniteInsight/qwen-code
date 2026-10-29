@@ -16,6 +16,7 @@ import {
 import { renderPermissionRequest } from './render.js';
 import { runHeartbeatLoop, heartbeatIntervalMsOf } from '../heartbeat.js';
 import type { CursorStore } from '../cursorStore.js';
+import { SubscriptionCursors } from '../sessionCursors.js';
 
 /**
  * Live reachability state backing the bridge's `GET /healthz` report
@@ -77,11 +78,11 @@ export class TelegramBridge {
   private readonly bans = new BanCache();
   private readonly subscribed = new Set<string>();
   /**
-   * sessionId → highest SSE frame id seen (in-memory mirror of the durable
-   * cursor store). Populated from the cursor store on start; updated on each
-   * frame and flushed to the store when `cursors` is configured.
+   * Resume cursors (in-memory mirror of the durable cursor store, populated on
+   * start, updated on each frame) and per-session stream handles; dropped when
+   * a session is unbound (#204).
    */
-  private readonly lastEventId = new Map<string, number>();
+  private readonly cursors: SubscriptionCursors;
   /**
    * requestId → list of sent messages (chatId + messageId + original text) so
    * that `permission_resolved` events can edit the messages in place.
@@ -105,6 +106,7 @@ export class TelegramBridge {
 
   constructor(cfg: TelegramBridgeConfig) {
     this.cfg = cfg;
+    this.cursors = new SubscriptionCursors(cfg.cursors, cfg.tokenId);
     this.log = cfg.log ?? (() => {});
   }
 
@@ -160,12 +162,7 @@ export class TelegramBridge {
    */
   async start(signal: AbortSignal): Promise<void> {
     // Load durable cursors so SSE subscriptions resume from where they left off.
-    if (this.cfg.cursors && this.cfg.tokenId) {
-      for (const sessionId of this.cfg.chats.boundSessions()) {
-        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
-        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
-      }
-    }
+    this.cursors.load(this.cfg.chats.boundSessions());
     const reg = await this.registerSelf();
     this.log(
       reg.ok
@@ -230,28 +227,29 @@ export class TelegramBridge {
 
   /** Open an SSE echo subscription for every bound session not already watched. */
   private reconcileSubscriptions(signal: AbortSignal): void {
-    for (const sessionId of this.cfg.chats.boundSessions()) {
+    const bound = this.cfg.chats.boundSessions();
+    // A session whose binding went (/stop-style detach, or a chat re-bound
+    // elsewhere) loses its stream and its cursor entry (#204).
+    for (const sessionId of this.cursors.release(bound)) {
+      this.log(`telegram bridge: session ${sessionId} unbound, cursor dropped`);
+    }
+    for (const sessionId of bound) {
       if (this.subscribed.has(sessionId)) continue;
       this.subscribed.add(sessionId);
+      const stream = this.cursors.signalFor(sessionId, signal);
       void this.cfg.client
         .subscribeEvents(
           sessionId,
           (ev) => {
             if (typeof ev.id === 'number') {
-              this.lastEventId.set(sessionId, ev.id);
-              // Persist the cursor so restarts resume from here.
-              if (this.cfg.cursors && this.cfg.tokenId) {
-                void this.cfg.cursors.setLastEventId(
-                  this.cfg.tokenId,
-                  sessionId,
-                  ev.id,
-                );
-              }
+              // Persist the cursor so restarts resume from here (not for a
+              // stream whose session was unbound meanwhile).
+              this.cursors.record(sessionId, ev.id, stream);
             }
             this.deliverEvent(sessionId, ev);
           },
-          signal,
-          this.lastEventId.get(sessionId),
+          stream,
+          this.cursors.lastEventId.get(sessionId),
         )
         .finally(() => this.subscribed.delete(sessionId));
     }
