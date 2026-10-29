@@ -58,9 +58,10 @@ import { startDaemon, type DaemonHandle } from './daemonSupervisor.js';
 import {
   DaemonBinError,
   detectBuildDrift,
+  formatBrokenBuildWarning,
   formatDaemonBinLine,
   formatDriftWarning,
-  readDaemonVersion,
+  probeDaemonBin,
   resolveDaemonBin,
   validateQwenBinPath,
 } from './daemonBin.js';
@@ -516,13 +517,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       'qwen-rc serve: no `qwen` on PATH and no --qwen-bin; the daemon spawn will fail',
     );
   }
+  const daemonProbe = await probeDaemonBin(daemonBin.path);
   // eslint-disable-next-line no-console
-  console.log(
-    formatDaemonBinLine(
-      daemonBin.path,
-      await readDaemonVersion(daemonBin.path),
-    ),
-  );
+  console.log(formatDaemonBinLine(daemonBin.path, daemonProbe.version));
+  // A bundle that cannot load (a rebuilt `core` under a stale `cli`, #191)
+  // would otherwise be found by a terminal tab on the user's screen.
+  const brokenBuild = formatBrokenBuildWarning(daemonBin.path, daemonProbe);
+  if (brokenBuild) {
+    // eslint-disable-next-line no-console
+    console.warn(brokenBuild);
+  }
   const terminalArgv = terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN);
   const buildDrift = daemonBin.found
     ? detectBuildDrift(daemonBin.path, terminalArgv, process.env.PATH)
@@ -981,6 +985,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       ? { maxAttachmentBytes: opts.maxAttachmentBytes }
       : {}),
     daemonQwenBin: daemonBin.path,
+    daemonQwenBinHealthy: daemonProbe.healthy,
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
