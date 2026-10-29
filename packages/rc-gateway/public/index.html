@@ -2328,6 +2328,18 @@
         #list-screen[hidden] {
           display: flex;
         }
+        /* #190: the Fork include/empty sheet and its scrim belong to the
+           chat column, not to the panes beside it. */
+        #h1-ask {
+          left: var(--h1-left);
+          right: var(--h1-right);
+        }
+        #h1-ask .ask-card {
+          box-sizing: border-box;
+          width: 100%;
+          max-width: 80ch;
+          align-self: center;
+        }
         #list-back {
           visibility: hidden;
         }

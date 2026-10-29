@@ -23966,6 +23966,38 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P330 at 1100 and over the Fork include/empty sheet and its scrim cover the chat column, not the panes beside it; at 390 the whole screen',
+  frames: () => new Frames().user('p330 one').asst('the first answer').done().user('p330 two').asst('the second answer').done().list,
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 30_000);
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await settlePage(page);
+      await page.evaluate(`void askChoice('Fork here', 'p330', [['include', 'Fork with the conversation so far'], ['empty', 'Fork empty']])`);
+      await page.waitForFunction(`!document.getElementById('h1-ask').hidden`);
+      const r = (await page.evaluate(`(() => {
+        const a = document.getElementById('h1-ask').getBoundingClientRect();
+        const c = document.querySelector('#h1-ask .ask-card').getBoundingClientRect();
+        const col = document.getElementById('pane-chat').getBoundingClientRect();
+        const list = document.getElementById('list-screen').getBoundingClientRect();
+        return { aL: a.left, aR: a.right, cL: c.left, cR: c.right, colL: col.left, colR: col.right, listR: list.right, vw: window.innerWidth };
+      })()`)) as { aL: number; aR: number; cL: number; cR: number; colL: number; colR: number; listR: number; vw: number };
+      if (size.width >= 1100) {
+        expect(r.aL >= r.listR - 0.5 && r.cL >= r.colL - 0.5 && r.cR <= r.colR + 0.5, `1100: the sheet spans ${Math.round(r.aL)}-${Math.round(r.aR)} (card ${Math.round(r.cL)}-${Math.round(r.cR)}) over a column ${Math.round(r.colL)}-${Math.round(r.colR)} beside the list ending ${Math.round(r.listR)}`);
+      } else {
+        expect(r.aL === 0 && Math.round(r.aR) === r.vw, `390: the sheet spans ${r.aL}-${r.aR}`);
+      }
+      await shot(page, `p330-ask-${size.width}`);
+      await page.click('#h1-ask .cancel');
+      lines.push(`${size.width}: scrim ${Math.round(r.aL)}-${Math.round(r.aR)}, card ${Math.round(r.cL)}-${Math.round(r.cR)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];
