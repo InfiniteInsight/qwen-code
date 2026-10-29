@@ -35,6 +35,7 @@ import {
   type HostAttachDaemon,
 } from './routes/hostAttach.js';
 import { UnknownSessionError } from './daemonPool.js';
+import type { TerminalGuard } from './terminalGuard.js';
 
 const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -651,5 +652,99 @@ describe('runHostAttach re-attach', () => {
     });
     expect(out.code).toBe(130);
     expect(out.spawned).toHaveLength(1);
+  });
+
+  describe('when the terminal goes away (#207)', () => {
+    /** A guard that is alive until `close()`, then fires what is registered. */
+    function closableGuard(): { guard: TerminalGuard; close: () => void } {
+      let gone = false;
+      const callbacks = new Set<() => void>();
+      const guard: TerminalGuard = {
+        gone: () => gone,
+        reason: () => (gone ? 'fd 0 is /dev/pts/9 (deleted)' : undefined),
+        onGone: (cb) => {
+          if (gone) {
+            cb();
+            return () => {};
+          }
+          callbacks.add(cb);
+          return () => void callbacks.delete(cb);
+        },
+        stop: () => {},
+      };
+      return {
+        guard,
+        close: () => {
+          gone = true;
+          for (const cb of [...callbacks]) cb();
+        },
+      };
+    }
+
+    it('exits 129 when the terminal goes while the TUI runs, and does not ask the gateway again', async () => {
+      const t = closableGuard();
+      const out = await reattachRun({
+        statuses: [],
+        answers: [READY('first')],
+        deps: {
+          terminalGuard: t.guard,
+          // The TUI is ended by the guard, as the real spawnTui does: it
+          // exits 75 (or any code) once the tab is closed.
+          spawn: (async () => {
+            t.close();
+            return { status: 75, signal: null };
+          }) as unknown as HostAttachRunDeps['spawn'],
+        },
+      });
+      expect(out.code).toBe(129);
+      expect(out.paths).toHaveLength(1);
+      expect(out.lines.some((l) => l.includes('re-attaching'))).toBe(false);
+    });
+
+    it('exits 129 when the terminal goes during the re-attach wait, without spawning again', async () => {
+      const t = closableGuard();
+      const out = await reattachRun({
+        statuses: [75],
+        answers: [READY('first'), { status: 503, body: {} }],
+        deps: {
+          terminalGuard: t.guard,
+          sleep: async () => t.close(),
+        },
+      });
+      expect(out.code).toBe(129);
+      expect(out.spawned).toHaveLength(1);
+    });
+
+    it('does not re-spawn when the terminal went just as the gateway answered ready', async () => {
+      const t = closableGuard();
+      let calls = 0;
+      const out = await reattachRun({
+        statuses: [75],
+        answers: [],
+        deps: {
+          terminalGuard: t.guard,
+          // The first call is the attach; the tab closes while the second
+          // (the re-attach) is in flight, and its answer is "ready".
+          request: (async () => {
+            calls++;
+            if (calls === 2) t.close();
+            return READY(calls === 1 ? 'first' : 'second');
+          }) as unknown as HostAttachRunDeps['request'],
+        },
+      });
+      expect(calls).toBe(2);
+      expect(out.code).toBe(129);
+      expect(out.spawned).toEqual([['fake-qwen', '--first']]);
+    });
+
+    it('a live terminal changes no exit code', async () => {
+      const t = closableGuard();
+      const out = await reattachRun({
+        statuses: [7],
+        answers: [READY('first')],
+        deps: { terminalGuard: t.guard },
+      });
+      expect(out.code).toBe(7);
+    });
   });
 });

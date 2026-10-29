@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   runWithReattach,
+  TERMINAL_GONE_EXIT,
   TUI_DAEMON_GONE_EXIT,
   type ReattachAttempt,
   type ReattachLoopDeps,
@@ -232,5 +233,75 @@ describe('runWithReattach', () => {
     };
     await runWithReattach(FIRST, h.deps);
     expect(events).toEqual(['run', 'watch', 'unwatch', 'run']);
+  });
+});
+
+describe('runWithReattach when the terminal goes away (#207)', () => {
+  it('does not start a TUI into a terminal that is already gone', async () => {
+    const h = harness({ exits: [], attempts: [] });
+    h.deps.terminalGone = () => true;
+    expect(await runWithReattach(FIRST, h.deps)).toBe(TERMINAL_GONE_EXIT);
+    expect(h.ran).toEqual([]);
+  });
+
+  it('a TUI that exits 75 because its terminal died starts no wait and logs nothing', async () => {
+    const h = harness({ exits: [TUI_DAEMON_GONE_EXIT], attempts: [] });
+    let gone = false;
+    const run = h.deps.run;
+    h.deps.run = async (a, c) => {
+      const code = await run(a, c);
+      gone = true;
+      return code;
+    };
+    h.deps.terminalGone = () => gone;
+    expect(await runWithReattach(FIRST, h.deps)).toBe(TERMINAL_GONE_EXIT);
+    expect(h.lines).toEqual([]);
+    expect(h.attemptCalls()).toBe(0);
+    expect(h.slept).toEqual([]);
+  });
+
+  it('checks again once a daemon answers and does not re-spawn into the dead pty', async () => {
+    const h = harness({
+      exits: [TUI_DAEMON_GONE_EXIT],
+      attempts: [RETRY, READY('second')],
+    });
+    // Alive for the first start, the TUI's exit and the first (retry) answer;
+    // the tab is closed while the loop sleeps before the second answer.
+    let asked = 0;
+    h.deps.terminalGone = () => ++asked > 3;
+    expect(await runWithReattach(FIRST, h.deps)).toBe(TERMINAL_GONE_EXIT);
+    expect(h.ran).toHaveLength(1);
+    expect(h.attemptCalls()).toBe(2);
+  });
+
+  it('a terminal that goes during the wait aborts the sleep and exits with the terminal code, not 130', async () => {
+    let gone = false;
+    let abort: (() => void) | undefined;
+    const h = harness({ exits: [TUI_DAEMON_GONE_EXIT], attempts: [RETRY] });
+    h.deps.watchInterrupt = (fn) => {
+      abort = fn;
+      return () => {};
+    };
+    h.deps.terminalGone = () => gone;
+    h.deps.sleep = () =>
+      new Promise<void>((resolve) => {
+        queueMicrotask(() => {
+          gone = true;
+          abort?.();
+          resolve();
+        });
+      });
+    expect(await runWithReattach(FIRST, h.deps)).toBe(TERMINAL_GONE_EXIT);
+    expect(h.ran).toHaveLength(1);
+  });
+
+  it('a live terminal changes nothing', async () => {
+    const h = harness({
+      exits: [TUI_DAEMON_GONE_EXIT, 0],
+      attempts: [READY('second')],
+    });
+    h.deps.terminalGone = () => false;
+    expect(await runWithReattach(FIRST, h.deps)).toBe(0);
+    expect(h.ran).toHaveLength(2);
   });
 });
