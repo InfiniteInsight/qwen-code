@@ -72,10 +72,37 @@ export interface PolicyDecision {
   usedDeferredField: boolean;
 }
 
-/** Whitespace-collapsed canonical form of the call args for argsGlob matching. */
+/** Collapse every whitespace run (tab, newline, NBSP, ...) to one space. */
+function collapseWs(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Whitespace-collapsed canonical form of the call args for argsGlob matching.
+ *
+ * Collapsing must happen on the RAW strings, before `JSON.stringify` encodes
+ * them: afterwards a tab inside a command is the two characters `\` `t`, which
+ * no whitespace regex sees, so `rm<TAB>-rf /x` would slip past a `*rm -rf*`
+ * deny while the shell still runs it as `rm -rf`. Object keys are normalised
+ * too, since they are part of the matched JSON text.
+ */
 function canonicalArgString(args: unknown): string {
-  const raw = typeof args === 'string' ? args : JSON.stringify(args ?? '');
-  return raw.replace(/\s+/g, ' ').trim();
+  if (typeof args === 'string') return collapseWs(args);
+  const normalise = (v: unknown): unknown => {
+    if (typeof v === 'string') return collapseWs(v);
+    if (Array.isArray(v)) return v.map(normalise);
+    if (typeof v === 'object' && v !== null) {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v))
+        out[collapseWs(k)] = normalise(val);
+      return out;
+    }
+    return v;
+  };
+  // Unserialisable (cyclic) args throw here on purpose: the enforcer's catch
+  // turns that into a no-vote prompt, which is the safe outcome.
+  const json = JSON.stringify(normalise(args ?? '')) ?? '';
+  return collapseWs(json);
 }
 
 /**
