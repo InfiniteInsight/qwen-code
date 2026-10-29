@@ -124,6 +124,14 @@ import {
   createWorkspaceGlobRoute,
   createWorkspaceListRoute,
 } from './routes/workspaceFiles.js';
+import {
+  createWorkspaceFileBody,
+  createWorkspaceFileDeleteRoute,
+  createWorkspaceFileEditRoute,
+  createWorkspaceFileUploadRoute,
+  createWorkspaceFileWriteRoute,
+  createWorkspaceStatRoute,
+} from './routes/workspaceFileWrites.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import { createPermissionOverlayRoutes } from './routes/permissionOverlays.js';
@@ -2457,6 +2465,59 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceFileBytesRoute(deps.daemon),
+  );
+  // Workspace file writes (#123). WRITE, the floor the reads above already
+  // sit on: a token that may read host file contents and prompt an agent that
+  // writes files may write them itself, and every share token (session:read
+  // plus at most approve) is refused here by requireScope before any body is
+  // read. The stat read is WRITE too, not session:read: it answers whether a
+  // path exists and how big it is, the same host fact `list` gives, and the
+  // browser that uses it is unreachable below WRITE anyway. The three body
+  // routes read their own body after the scope check, under the #196 limit
+  // (`createWorkspaceFileBody`); the global parser stands aside for them
+  // (gateJsonBody). Each write leaves an audit row without its path.
+  app.get(
+    '/rc/workspace/stat',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceStatRoute(deps.daemon),
+  );
+  app.post(
+    '/rc/workspace/file/write',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('json', attachmentLimit),
+    createWorkspaceFileWriteRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/file/edit',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('json', attachmentLimit),
+    createWorkspaceFileEditRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/file/upload',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('raw', attachmentLimit),
+    createWorkspaceFileUploadRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/file/delete',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceFileDeleteRoute(deps.daemon, audit),
   );
 
   if (deps.snooze) {

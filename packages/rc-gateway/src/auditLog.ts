@@ -200,7 +200,11 @@ export type AuditAction =
   | 'host_attached'
   | 'host_attach_rejected'
   | 'daemon_auth_failed'
-  | 'wal_pruned';
+  | 'wal_pruned'
+  | 'workspace_file_written'
+  | 'workspace_file_edited'
+  | 'workspace_file_uploaded'
+  | 'workspace_file_deleted';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -324,6 +328,10 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'host_attach_rejected',
   'daemon_auth_failed',
   'wal_pruned',
+  'workspace_file_written',
+  'workspace_file_edited',
+  'workspace_file_uploaded',
+  'workspace_file_deleted',
 ];
 
 export interface AuditEntry {
