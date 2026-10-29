@@ -22497,6 +22497,49 @@ PAGE_SCENARIOS.push({
     },
   });
 
+  PAGE_SCENARIOS.push({
+    name: 'P301 no rail and no tab roles are left beside the panels: a panel is the whole screen at 390 and the 320px right pane at 1100, with nothing else drawn over its edge',
+    frames: g177Frames,
+    run: async ({ page, viewer }) => {
+      await g177Ready(page, viewer);
+      const lines: string[] = [];
+      for (const size of G177_SIZES) {
+        await page.setViewportSize(size);
+        await g177Settle(page);
+        await openMore(page);
+        await page.click('#more-screen .row[data-panel="usage"]');
+        await g177Settle(page);
+        const r = (await page.evaluate(`(() => {
+          const p = document.getElementById('panel-screen').getBoundingClientRect();
+          const hits = [0.1, 0.5, 0.9].map((fy) => {
+            const e = document.elementFromPoint(p.left + 4, p.top + p.height * fy);
+            return !!e && document.getElementById('panel-screen').contains(e);
+          });
+          return {
+            rail: !!document.getElementById('rail'),
+            tabs: document.querySelectorAll('[role="tab"], [role="tablist"]').length,
+            left: p.left, width: p.width,
+            hits,
+            wide: document.documentElement.scrollWidth,
+          };
+        })()`)) as { rail: boolean; tabs: number; left: number; width: number; hits: boolean[]; wide: number };
+        const wantW = size.width >= 1100 ? RIGHT_PANE : size.width;
+        expect(!r.rail && r.tabs === 0, `${size.width}: a rail (${r.rail}) or ${r.tabs} tab roles remain`);
+        expect(
+          Math.abs(r.width - wantW) < 1 && Math.abs(r.left + r.width - size.width) < 1,
+          `${size.width}: the panel is ${r.width}px wide at x ${r.left}, not ${wantW}px against the right edge`,
+        );
+        expect(r.hits.every(Boolean), `${size.width}: something else is drawn over the panel's edge (${JSON.stringify(r.hits)})`);
+        expect(r.wide <= size.width, `${size.width}: the document is ${r.wide}px wide`);
+        await shot(page, `p301-panel-${size.width}`);
+        lines.push(`${size.width}: panel ${Math.round(r.width)}px at x ${Math.round(r.left)}`);
+        await page.click('#panel-back');
+        await closeMore(page);
+      }
+      return lines.join('; ');
+    },
+  });
+
 }
 
 
