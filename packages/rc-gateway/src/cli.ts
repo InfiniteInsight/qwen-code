@@ -17,6 +17,7 @@ import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
 import { join, basename } from 'node:path';
 import { createInterface } from 'node:readline';
+import { USAGE_TEXT, resolveTopLevel, isRunAsCli } from './cliUsage.js';
 import {
   isLoopbackHost,
   resolveBindSecurity,
@@ -3444,5 +3445,27 @@ if (process.argv[2] === 'serve') {
       console.error(`  ${file}:${line}`);
     }
     process.exit(1);
+  }
+} else if (isRunAsCli(process.argv[1], import.meta.url)) {
+  // Nothing above claimed argv: bare `qwen-rc`, `help`, `--version`, a typo, or
+  // a command missing its subcommand (`policy`, `audit`). It used to fall off
+  // the end and exit 0 silently, so a typo'd tamper check looked like success.
+  // Only when run as the CLI: index.ts imports this module as a library.
+  const action = resolveTopLevel(process.argv[2], process.argv[3]);
+  if (action.kind === 'help') {
+    // eslint-disable-next-line no-console
+    console.log(USAGE_TEXT);
+    process.exit(0);
+  } else if (action.kind === 'version') {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    // eslint-disable-next-line no-console
+    console.log(pkg.version);
+    process.exit(0);
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(`qwen-rc: ${action.message}\n\n${USAGE_TEXT}`);
+    process.exit(2);
   }
 }
