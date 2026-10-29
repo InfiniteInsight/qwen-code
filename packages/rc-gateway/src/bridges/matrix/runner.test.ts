@@ -47,6 +47,7 @@ function harness(
     sendPrompt?: (sessionId: string, prompt: string) => Promise<unknown>;
     log?: (msg: string) => void;
     cursors?: CursorStore;
+    now?: () => number;
   } = {},
 ) {
   const sent: Array<{ roomId: string; content: unknown }> = [];
@@ -138,6 +139,7 @@ function harness(
     ...(opts.health ? { health: opts.health } : {}),
     ...(opts.log ? { log: opts.log } : {}),
     ...(opts.cursors ? { cursors: opts.cursors, tokenId: 'tok_m' } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
     setTimer: (_ms, fn) => {
       timers.push(fn);
@@ -730,6 +732,119 @@ describe('MatrixBridge.dispatchReaction (E2EE vote routing seam)', () => {
       key: '👍',
     });
     expect(h.votes).toEqual([]);
+  });
+});
+
+describe('MatrixBridge, permission requests that never resolve (#204)', () => {
+  const HOUR = 60 * 60 * 1000;
+  const request = (requestId: string, extra: Record<string, unknown> = {}) =>
+    ({
+      type: 'permission_request',
+      data: {
+        requestId,
+        bridgeHints: {
+          argsSummaryShort: 'run ls',
+          recommendedSurface: 'inline',
+        },
+        ...extra,
+      },
+    }) as never;
+  const thumbsUp = (eventId: string) => ({
+    roomId: '!r:h',
+    sender: '@alice:h',
+    targetEventId: eventId,
+    key: '👍',
+  });
+  const texts = (h: ReturnType<typeof harness>) =>
+    h.sent.map((s) => (s.content as { body?: string }).body ?? '');
+
+  it('drops an unresolved request after an hour, logs it, and answers a late reaction "no longer pending"', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 1_000_000;
+    const logs: string[] = [];
+    const h = harness([], { now: () => t, log: (m) => logs.push(m) });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    expect(h.bridge['tracked'].size).toBe(1);
+
+    t += HOUR - 1;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toHaveLength(1); // still pending: the vote goes through
+
+    t += 2; // past the hour
+    h.votes.length = 0;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toEqual([]); // nothing is cast on an expired request
+    expect(texts(h).at(-1)).toBe(
+      'Vote failed: this request is no longer pending.',
+    );
+    expect(h.bridge['tracked'].size).toBe(0);
+    expect(h.bridge['sent'].size).toBe(0);
+    expect(logs.some((l) => l.includes('req1') && l.includes('expired'))).toBe(
+      true,
+    );
+  });
+
+  it('expires on the request’s own timeout when the frame carries one', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 5_000;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1', { timeoutMs: 30_000 }));
+    await waitFor(() => h.sent.length === 1);
+    t += 29_999;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toHaveLength(1);
+    t += 2;
+    h.votes.length = 0;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toEqual([]);
+    expect(texts(h).at(-1)).toContain('no longer pending');
+  });
+
+  it('a later request sweeps the expired ones out of memory', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 0;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    t += HOUR + 1;
+    h.bridge.deliverEvent('sess_q', request('req2'));
+    await waitFor(() => h.sent.length === 2);
+    expect([...h.bridge['tracked'].values()].map((x) => x.requestId)).toEqual([
+      'req2',
+    ]);
+    expect([...h.bridge['sent'].keys()]).toEqual(['req2']);
+  });
+
+  it('an expired request answers a reaction only in the room it was posted to', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 0;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    t += HOUR + 1;
+    await h.bridge.dispatchReaction({
+      ...thumbsUp('$evt_1'),
+      roomId: '!evil:attacker.org',
+    });
+    expect(h.sent).toHaveLength(1); // no reply into a stranger's room
+    expect(h.votes).toEqual([]);
+  });
+
+  it('a resolved request is not left in the expired record', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 0;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req1', outcome: 'allow_once' },
+    } as never);
+    await waitFor(() => h.sent.length === 2);
+    t += HOUR + 1;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.sent).toHaveLength(2); // a resolved request stays quiet, as before
   });
 });
 

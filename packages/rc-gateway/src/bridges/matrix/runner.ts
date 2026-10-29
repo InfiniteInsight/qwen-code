@@ -22,6 +22,7 @@ import {
   type NormalizedMatrixMessage,
   type NormalizedMatrixReaction,
   type TrackedEvent,
+  type ExpiredEvent,
 } from './dispatch.js';
 import {
   extractSync,
@@ -68,6 +69,8 @@ export interface MatrixBridgeConfig {
   runInbound?: (signal: AbortSignal) => Promise<void>;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Injectable clock for request expiry (tests); defaults to `Date.now`. */
+  now?: () => number;
   /** Injectable idle-flush timer for the stream router (tests). */
   setTimer?: (ms: number, fn: () => void) => () => void;
   /**
@@ -147,6 +150,11 @@ interface SentRequest {
 /** This bridge's stable id (registration + invite-redeem route path). */
 const MATRIX_BRIDGE_ID = 'matrix';
 
+/** How long an unresolved permission request stays tracked when it names no timeout. */
+const DEFAULT_REQUEST_TTL_MS = 60 * 60 * 1000;
+/** How many expired requests are remembered to answer a late reaction. */
+const EXPIRED_KEEP = 500;
+
 export class MatrixBridge {
   private readonly cfg: MatrixBridgeConfig;
   private readonly commandPrefix: string;
@@ -158,6 +166,8 @@ export class MatrixBridge {
   private readonly cursors: SubscriptionCursors;
   /** eventId → tracked permission_request (reaction → vote lookup). */
   private readonly tracked = new Map<string, TrackedEvent>();
+  /** eventId → a request dropped unresolved (newest {@link EXPIRED_KEEP}). */
+  private readonly expired = new Map<string, ExpiredEvent>();
   /** requestId → the sent messages that rendered it (for the resolve edit). */
   private readonly sent = new Map<string, SentRequest[]>();
   /** requestIds for which the deeplink-guidance reply has already been sent. */
@@ -214,6 +224,7 @@ export class MatrixBridge {
   }
 
   private dispatchDeps(): MatrixDispatchDeps {
+    this.expireTracked();
     return {
       bridge: this.cfg.client,
       rest: { sendMessage: (roomId, content) => this.send(roomId, content) },
@@ -222,6 +233,7 @@ export class MatrixBridge {
       bans: this.bans,
       encryptedRooms: this.encryptedRooms,
       tracked: this.tracked,
+      expired: this.expired,
       deeplinkGuidanceSent: this.deeplinkGuidanceSent,
       commandPrefix: this.commandPrefix,
       onTurnBoundary: (sessionId) => this.stream.bumpTurn(sessionId),
@@ -532,6 +544,15 @@ export class MatrixBridge {
     // track deeplink events with surface:'deeplink' so handleReaction can send
     // a one-time guidance reply when a user reacts on them.
     const isDeeplink = !tracksReactions(data);
+    this.expireTracked();
+    const timeoutMs = d['timeoutMs'];
+    const expiresAt =
+      this.now() +
+      (typeof timeoutMs === 'number' &&
+      Number.isFinite(timeoutMs) &&
+      timeoutMs > 0
+        ? timeoutMs
+        : DEFAULT_REQUEST_TTL_MS);
     for (const roomId of this.cfg.rooms.roomsFor(sessionId)) {
       const r = await this.send(roomId, content);
       if (!r.ok || !r.eventId) continue;
@@ -544,8 +565,46 @@ export class MatrixBridge {
           sessionId,
           roomId, // a reaction votes only from this room (#168)
           surface: isDeeplink ? 'deeplink' : 'inline',
+          expiresAt,
         });
       }
+    }
+  }
+
+  private now(): number {
+    return (this.cfg.now ?? Date.now)();
+  }
+
+  /**
+   * Stop tracking permission requests that outlived their deadline without a
+   * `permission_resolved` (the session ended, or the frame was missed): without
+   * this they stay in memory for the bridge's lifetime (#204). Each is logged
+   * once and remembered (newest {@link EXPIRED_KEEP}) so a late reaction on it
+   * is answered rather than silently dropped. Run before every dispatch and
+   * every new request, which bounds the tracked set without a timer.
+   */
+  private expireTracked(): void {
+    const now = this.now();
+    const logged = new Set<string>();
+    for (const [eventId, t] of this.tracked) {
+      if (t.expiresAt === undefined || now < t.expiresAt) continue;
+      this.tracked.delete(eventId);
+      this.sent.delete(t.requestId);
+      this.deeplinkGuidanceSent.delete(t.requestId);
+      this.expired.delete(eventId); // re-insert as the newest
+      this.expired.set(eventId, { requestId: t.requestId, roomId: t.roomId });
+      if (!logged.has(t.requestId)) {
+        logged.add(t.requestId);
+        this.log(
+          `matrix bridge: permission request ${t.requestId} (session ` +
+            `${t.sessionId}) expired unresolved; no longer tracked`,
+        );
+      }
+    }
+    while (this.expired.size > EXPIRED_KEEP) {
+      const oldest = this.expired.keys().next().value;
+      if (oldest === undefined) break;
+      this.expired.delete(oldest);
     }
   }
 

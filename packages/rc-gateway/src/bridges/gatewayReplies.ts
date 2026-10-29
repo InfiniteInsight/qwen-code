@@ -54,14 +54,17 @@ export function promptFailureNotice(r: WriteResult): string | undefined {
   }
 }
 
+/** What a reactor is told when the request they voted on is no longer open. */
+export const REQUEST_NO_LONGER_PENDING =
+  'Vote failed: this request is no longer pending.';
+
 /**
  * The reply for a vote the gateway did not take, or undefined when it was
  * counted. A ban is left to the caller (it caches it and says "blocked").
  */
 export function voteFailureNotice(r: WriteResult): string | undefined {
   if (r.ok || isSubActorBan(r)) return undefined;
-  if (r.status === 404 || r.status === 409)
-    return 'Vote failed: this request is no longer pending.';
+  if (r.status === 404 || r.status === 409) return REQUEST_NO_LONGER_PENDING;
   if (r.status === 429)
     return `Vote failed: slow down, try again in ${r.retryAfterSec ?? 'a few'} seconds.`;
   return `Vote failed: the gateway answered ${statusText(r)}. Try again from the web client.`;
