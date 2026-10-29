@@ -15,6 +15,33 @@ function fenceBalanced(msg: string): boolean {
   return n % 2 === 0;
 }
 
+describe('splitForDiscord, starting inside a carried fence (#168)', () => {
+  it('reopens the carried fence with its language before the first line', () => {
+    expect(
+      splitForDiscord('b = 2\n```\nafter', 2000, { inFence: true, lang: 'ts' }),
+    ).toEqual(['```ts\nb = 2\n```\nafter']);
+  });
+
+  it('keeps reopening across its own cuts and closes at the end', () => {
+    const out = splitForDiscord('y'.repeat(30) + '\n' + 'z'.repeat(30), 40, {
+      inFence: true,
+      lang: 'py',
+    });
+    expect(out.length).toBeGreaterThan(1);
+    for (const m of out) {
+      expect(m.startsWith('```py\n')).toBe(true);
+      expect(m.endsWith('\n```')).toBe(true);
+      expect(m.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('drops a leading closing line instead of rendering an empty block', () => {
+    expect(
+      splitForDiscord('```\nprose', 2000, { inFence: true, lang: 'sh' }),
+    ).toEqual(['prose']);
+  });
+});
+
 describe('splitForDiscord', () => {
   it('returns a single message when it already fits', () => {
     expect(splitForDiscord('hello world')).toEqual(['hello world']);

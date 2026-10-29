@@ -5,6 +5,12 @@
  */
 
 import { splitForDiscord } from './streamSplit.js';
+import {
+  NO_FENCE,
+  atFlushPoint,
+  fenceStateAfter,
+  type FenceState,
+} from '../fence.js';
 
 /**
  * Routes streamed `session_update` text into bound Discord channels
@@ -29,11 +35,13 @@ import { splitForDiscord } from './streamSplit.js';
  *
  * DELIBERATE SCOPE: only `agent_message_chunk` text is rendered (thought/tool
  * chunks are skipped to keep channels readable). A code block split ACROSS two
- * separate flushes renders as two blocks (each individually fence-balanced) —
- * the splitter guarantees per-message balance; cross-flush continuity is not
- * attempted. Last-Event-ID resume is not used (the daemon replays nothing
- * without a cursor, so a reconnect drops in-blip chunks rather than double-
- * posting — see runner notes).
+ * separate flushes renders as two blocks: the channel carries the fence state
+ * from one flush to the next (#168), so the first closes the block and the
+ * second reopens it with the same language. A blank line inside a block is not
+ * a flush trigger; only the cap or the idle timer cuts a block. A new turn
+ * starts outside any fence. Last-Event-ID resume is not used (the daemon
+ * replays nothing without a cursor, so a reconnect drops in-blip chunks rather
+ * than double-posting; see runner notes).
  *
  * KNOWN LIMITATION (cosmetic): if turn N ends (resolve / new prompt) while a
  * sub-trigger tail is still buffered (no paragraph break, < cap, idle timer not
@@ -65,14 +73,14 @@ export class StreamBuffer {
   isEmpty(): boolean {
     return this.buf.length === 0;
   }
-  /** Paragraph break present, a fenced block just closed, or ≥ FLUSH_MAX_CHARS. */
-  hardDue(): boolean {
+  /**
+   * ≥ FLUSH_MAX_CHARS, or (ending outside a fence) a paragraph break or a
+   * block that just closed. `start` is the fence state carried in from the
+   * previous flush.
+   */
+  hardDue(start: FenceState = NO_FENCE): boolean {
     if (this.buf.length >= FLUSH_MAX_CHARS) return true;
-    if (this.buf.includes('\n\n')) return true; // paragraph break
-    const fences = this.buf
-      .split('\n')
-      .filter((l) => l.trimStart().startsWith('```')).length;
-    return fences > 0 && fences % 2 === 0; // a complete block has closed
+    return atFlushPoint(this.buf, start);
   }
   /** Return the buffered text and clear. */
   take(): string {
@@ -121,6 +129,10 @@ interface ChannelState {
   posted: number;
   anchorId: string | null;
   threadId: string | null;
+  /** Fence state at the end of the text already flushed (#168). */
+  fence: FenceState;
+  /** The turn `fence` belongs to; a new turn starts outside any fence. */
+  fenceTurn: number;
 }
 
 export class StreamRouter {
@@ -160,12 +172,18 @@ export class StreamRouter {
     if (this.pendingBump.has(sessionId)) this.bumpTurn(sessionId);
     for (const channelId of this.cfg.channelsFor(sessionId)) {
       const st = this.channelState(channelId, sessionId);
+      // A turn that ended inside an unclosed block must not wrap the next
+      // turn's prose. A tail still buffered from the old turn keeps its state.
+      if (st.fenceTurn !== this.seq(sessionId) && st.buffer.isEmpty()) {
+        st.fence = NO_FENCE;
+        st.fenceTurn = this.seq(sessionId);
+      }
       st.buffer.append(text);
       if (st.cancelTimer) {
         st.cancelTimer();
         st.cancelTimer = undefined;
       }
-      if (st.buffer.hardDue()) {
+      if (st.buffer.hardDue(st.fence)) {
         this.flush(channelId);
       } else {
         // Arm the idle timer (debounced: re-armed on each chunk).
@@ -189,6 +207,8 @@ export class StreamRouter {
         posted: 0,
         anchorId: null,
         threadId: null,
+        fence: NO_FENCE,
+        fenceTurn: this.seq(sessionId),
       };
       this.channels.set(channelId, st);
     } else {
@@ -197,16 +217,27 @@ export class StreamRouter {
     return st;
   }
 
-  /** Enqueue a serialized flush of the channel's buffer. */
+  /**
+   * Enqueue a serialized flush of the channel's buffer. The fence state is
+   * advanced here, at enqueue time, so it follows the text order exactly.
+   */
   private flush(channelId: string): void {
     const st = this.channels.get(channelId);
     if (!st || st.buffer.isEmpty()) return;
     const text = st.buffer.take();
-    st.chain = st.chain.then(() => this.doFlush(st, text)).catch(() => {});
+    const start = st.fence;
+    st.fence = fenceStateAfter(text, start);
+    st.chain = st.chain
+      .then(() => this.doFlush(st, text, start))
+      .catch(() => {});
   }
 
-  private async doFlush(st: ChannelState, text: string): Promise<void> {
-    const parts = splitForDiscord(text);
+  private async doFlush(
+    st: ChannelState,
+    text: string,
+    start: FenceState,
+  ): Promise<void> {
+    const parts = splitForDiscord(text, 2000, start);
     for (const part of parts) {
       this.resetTurnIfStale(st);
       st.posted += 1;
