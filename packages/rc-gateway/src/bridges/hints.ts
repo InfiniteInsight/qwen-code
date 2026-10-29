@@ -89,6 +89,83 @@ export interface BridgeHints {
   recommendedSurface: BridgeSurface;
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * The daemon publishes a tool call in the ACP shape (`toolCallId`, `title`,
+ * `kind`, `content`, `rawInput`, `_meta.toolName`), not `{name, args}`.
+ */
+function isAcpShaped(tc: Record<string, unknown>): boolean {
+  return (
+    typeof tc['name'] !== 'string' &&
+    !('args' in tc) &&
+    ('toolCallId' in tc || 'rawInput' in tc || typeof tc['title'] === 'string')
+  );
+}
+
+/** `run_shell_command` params the summary below accounts for. */
+const SHELL_KEYS = new Set([
+  'command',
+  'directory',
+  'description',
+  'is_background',
+  'timeout',
+]);
+
+/**
+ * Summarise an ACP-shaped call (#204). `complete` is false when the call carries
+ * input the summary does not show, so Approve in chat is not offered for it:
+ * a shell command is shown whole (its params are `command`, optional
+ * `directory`, and prose or run-mode flags); a file edit is shown as its path
+ * only, so its content stays unseen; any other tool is shown as its title, which
+ * is whole only when it has no input.
+ *
+ * Daemon field names: `toolCall.rawInput.command` and `.directory` for shell
+ * (`kind: 'execute'`), `toolCall.rawInput.file_path` for edit and write_file
+ * (`kind: 'edit'`), `toolCall.title` (the tool's own description of the call),
+ * `toolCall._meta.toolName` for the tool name.
+ */
+function summariseAcp(tc: Record<string, unknown>): {
+  name: string;
+  summary: string;
+  complete: boolean;
+} {
+  const meta = isRecord(tc['_meta']) ? tc['_meta'] : {};
+  const kind = typeof tc['kind'] === 'string' ? tc['kind'] : undefined;
+  const name =
+    typeof meta['toolName'] === 'string' && meta['toolName']
+      ? meta['toolName']
+      : (kind ?? 'tool');
+  const title = typeof tc['title'] === 'string' ? tc['title'].trim() : '';
+  const input = isRecord(tc['rawInput']) ? tc['rawInput'] : {};
+  const keys = Object.keys(input);
+
+  const command = input['command'];
+  if (typeof command === 'string' && command !== '') {
+    const dir = input['directory'];
+    const dirText = typeof dir === 'string' && dir ? ` [in ${dir}]` : '';
+    const known =
+      keys.every((k) => SHELL_KEYS.has(k)) &&
+      (dir === undefined || typeof dir === 'string');
+    return { name, summary: `${command}${dirText}`, complete: known };
+  }
+  const path = input['file_path'];
+  if (typeof path === 'string' && path !== '') {
+    return {
+      name,
+      summary: `Edit ${path}`,
+      complete: keys.every((k) => k === 'file_path'),
+    };
+  }
+  return {
+    name,
+    summary: title || name,
+    complete: keys.length === 0 && title !== '',
+  };
+}
+
 /**
  * Compute {@link BridgeHints} for a tool call. PURE + total (never throws — a
  * weird/unserializable shape degrades to a safe deeplink). The classification is
@@ -108,7 +185,9 @@ export function computeBridgeHints(toolCall: unknown): BridgeHints {
     toolCall && typeof toolCall === 'object'
       ? (toolCall as Record<string, unknown>)
       : {};
-  const name = typeof tc['name'] === 'string' ? tc['name'] : 'tool';
+  const acp = isAcpShaped(tc) ? summariseAcp(tc) : undefined;
+  const name =
+    acp?.name ?? (typeof tc['name'] === 'string' ? tc['name'] : 'tool');
   const subject = 'args' in tc ? tc['args'] : tc;
 
   let rawFull: string;
@@ -130,9 +209,11 @@ export function computeBridgeHints(toolCall: unknown): BridgeHints {
     : DANGEROUS_TOOL_RE.test(name)
       ? 'medium'
       : 'low';
-  const summary = `${name} ${rawFull}`.trim();
+  const summary = acp ? acp.summary : `${name} ${rawFull}`.trim();
   const shownWhole =
-    summary.length <= MAX_SHORT && !HIDDEN_TEXT_RE.test(summary);
+    (acp ? acp.complete : true) &&
+    summary.length <= MAX_SHORT &&
+    !HIDDEN_TEXT_RE.test(summary);
   const recommendedSurface: BridgeSurface =
     sensitivity === 'high' || !shownWhole ? 'deeplink' : 'inline';
 
