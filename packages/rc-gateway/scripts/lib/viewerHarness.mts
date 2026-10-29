@@ -25,6 +25,7 @@ import { DaemonClient } from '@qwen-code/sdk';
 import {
   startStubDaemon,
   type StubDaemon,
+  type StubDaemonOptions,
 } from '../../src/testing/stubDaemon.js';
 import { DaemonPool } from '../../src/daemonPool.js';
 import { TokenStore } from '../../src/tokenStore.js';
@@ -245,7 +246,13 @@ export interface BootViewerOptions {
    * calls go through the pool too, so a session the pool did not create is
    * unknown to it: a scenario using this reads the list, not a watch.
    */
-  pool?: { liveState: (cwd: string) => unknown };
+  pool?: {
+    liveState: (cwd: string) => unknown;
+    /** #132: what each spawned stub's POST /sessions/catalog serves. */
+    catalog?: (cwd: string) => StubDaemonOptions['catalog'];
+  };
+  /** #132: what the boot stub's POST /sessions/catalog serves (unset: no route). */
+  catalog?: StubDaemonOptions['catalog'];
 }
 
 /** The label the harness's one host action carries. */
@@ -414,6 +421,7 @@ export async function bootViewer(
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,
+    catalog: opts.catalog,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
@@ -430,6 +438,7 @@ export async function bootViewer(
           const own = await startStubDaemon({
             workspaceCwd: cwd,
             liveStateResult: poolOpt.liveState(cwd),
+            catalog: poolOpt.catalog?.(cwd),
           });
           spawnedStubs.push(own);
           return {
