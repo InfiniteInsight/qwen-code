@@ -17481,7 +17481,8 @@ PAGE_SCENARIOS.push({
               const host = dir.querySelector('.host');
               return Object.assign(ends(dir.querySelector('.cwd'), dir.title), {
                 dirIn: inBox(dir.getBoundingClientRect(), sb),
-                hostIn: inBox(host.getBoundingClientRect(), sb),
+                // #190: the host is on the folder line only, so a row has none.
+                hostIn: !host,
                 subIn: inBox(s.querySelector('.sub').getBoundingClientRect(), sb),
                 rowIn: inBox(sb, scr),
                 h: Math.round(sb.height),
@@ -23655,6 +23656,38 @@ PAGE_SCENARIOS.push({
     const hint = (await page.getAttribute('#past-filter', 'placeholder')) || '';
     await page.fill('#past-filter', '');
     return `"zebra" found the row by its preview, "nightly" by its title; the field reads "${hint}"`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P319 the host is named once on the folder line, for All folders too, and not on every row, at 390 and 1100',
+  waitView: false,
+  run: async ({ page }) => {
+    await h190ListFixture(page, {
+      '/p319': [
+        { sessionId: '31900000-0000-0000-0000-000000000001', title: 'one', updatedAt: h190Now },
+        { sessionId: '31900000-0000-0000-0000-000000000002', title: 'two', updatedAt: h190Now },
+      ],
+    }, { '/p319': { parent: null, entries: [] } });
+    await page.evaluate(h190At('/p319'));
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`);
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await h190Settle(page);
+      const r = (await page.evaluate(`({
+        head: document.getElementById('list-host').textContent,
+        cwd: document.getElementById('list-cwd').textContent,
+        rowHosts: document.querySelectorAll('#past-list .host').length,
+        host: listHostLabel(),
+      })`)) as { head: string; cwd: string; rowHosts: number; host: string };
+      expect(r.cwd.includes('All folders') || r.cwd.includes('p319'), `${size.width}: the folder line reads ${JSON.stringify(r.cwd)}`);
+      expect(r.head === 'on ' + r.host && r.rowHosts === 0, `${size.width}: the folder line says ${JSON.stringify(r.head)} and ${r.rowHosts} rows repeat the host`);
+      await shot(page, `p319-list-${size.width}`);
+      lines.push(`${size.width}: "${r.cwd.replace(/[⁦-⁩]/g, '')} ${r.head}", no host on the rows`);
+    }
+    return lines.join('; ');
   },
 });
 

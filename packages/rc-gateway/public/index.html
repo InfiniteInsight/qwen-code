@@ -13860,7 +13860,9 @@
             ? 'no folder yet'
             : 'All folders';
         cwdBox.classList.toggle('all', !one);
-        $('list-host').textContent = one && host ? 'on ' + host : '';
+        // #190: the host is said once, here, for every row under it (the rows
+        // all come from this gateway's host).
+        $('list-host').textContent = host && !none ? 'on ' + host : '';
         $('list-folder').title = one || (none ? '' : 'All folders');
         $('list-folder').setAttribute(
           'aria-label',
@@ -13868,7 +13870,7 @@
             ? 'Showing folder ' + one + (host ? ' on ' + host : '')
             : none
               ? 'No folder yet'
-              : 'Showing all folders') + '. Change',
+              : 'Showing all folders' + (host ? ' on ' + host : '')) + '. Change',
         );
       }
 
@@ -14392,7 +14394,6 @@
                   .includes(pastFilter),
             )
           : inView;
-        const host = listHostLabel();
         if (pastFilter && shown.length === 0) {
           closeRowMenu(false);
           none('No conversations match "' + $('past-filter').value + '".');
@@ -14440,12 +14441,6 @@
             path.className = 'cwd';
             path.textContent = isolatedFolder(s.cwd);
             dir.appendChild(path);
-            if (host) {
-              const on = document.createElement('span');
-              on.className = 'host';
-              on.textContent = 'on ' + host;
-              dir.appendChild(on);
-            }
             row.appendChild(dir);
           }
           // when · preview. A live-only row has neither, having no
