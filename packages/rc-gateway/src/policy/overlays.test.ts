@@ -10,6 +10,7 @@ import {
   OverlayLimitError,
   PermissionOverlayStore,
 } from './overlays.js';
+import { evaluate } from './evaluator.js';
 
 /** Arbitrary fixed "now" so the expiry tests are clock-independent. */
 const T0 = 1_000_000_000_000;
@@ -150,5 +151,52 @@ describe('PermissionOverlayStore', () => {
     expect(store.policyFor('s1', T0 + 50).rules).toHaveLength(1);
     expect(store.policyFor('s1', T0 + 100).rules).toHaveLength(0);
     expect(ov).toBeDefined();
+  });
+});
+
+/** The overlay decision for an `execute` call at T0 + 10 (inside every TTL). */
+function decide(store: PermissionOverlayStore, sessionId: string): string {
+  return evaluate(
+    store.policyFor(sessionId, T0 + 10),
+    { tool: 'execute', args: 'ls' },
+    new Date(T0 + 10),
+  ).action;
+}
+
+describe('PermissionOverlayStore.policyFor precedence at equal specificity (issue #166)', () => {
+  it('a newer session-only deny beats an older all-sessions allow', () => {
+    const store = new PermissionOverlayStore();
+    store.add({ action: 'allow', expiresAt: T0 + HOUR }, T0);
+    store.add(
+      { action: 'deny', sessionId: 's1', expiresAt: T0 + HOUR },
+      T0 + 5,
+    );
+    expect(decide(store, 's1')).toBe('deny');
+  });
+
+  it('a session-only overlay beats an all-sessions one even when the all-sessions one is newer', () => {
+    const store = new PermissionOverlayStore();
+    store.add({ action: 'deny', sessionId: 's1', expiresAt: T0 + HOUR }, T0);
+    store.add({ action: 'allow', expiresAt: T0 + HOUR }, T0 + 5);
+    expect(decide(store, 's1')).toBe('deny');
+    // another session only sees the all-sessions allow
+    expect(decide(store, 's2')).toBe('allow');
+  });
+
+  it('within the same binding the newer overlay wins', () => {
+    const store = new PermissionOverlayStore();
+    store.add({ action: 'allow', expiresAt: T0 + HOUR }, T0);
+    store.add({ action: 'deny', expiresAt: T0 + HOUR }, T0 + 5);
+    expect(decide(store, 's1')).toBe('deny');
+  });
+
+  it('a more specific tool still outranks binding order (specificity unchanged)', () => {
+    const store = new PermissionOverlayStore();
+    store.add({ action: 'deny', tool: 'execute', expiresAt: T0 + HOUR }, T0);
+    store.add(
+      { action: 'allow', sessionId: 's1', expiresAt: T0 + HOUR },
+      T0 + 5,
+    );
+    expect(decide(store, 's1')).toBe('deny');
   });
 });

@@ -463,9 +463,22 @@ const DEFAULT_PROMPT_POLICY: Policy = {
  */
 export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
   if (!workspace) return user;
-  const workspaceRules = workspace.rules
-    .filter(isWithinWorkspaceBounds)
-    .map((rule): PolicyRule => ({ ...rule, layer: 'workspace' }));
+  // Rule ids key the audit trail AND the quota store, and each file is only
+  // checked for duplicates on its own. A workspace rule that reuses a user rule
+  // id would share that rule's quota key and be indistinguishable from it in
+  // the audit feed, so it is renamed `workspace:<id>` (issue #166). The user
+  // rule keeps its id, so existing audit filters and quota history are
+  // untouched; a non-colliding workspace id is left as written.
+  const userIds = new Set(user.rules.flatMap((r) => (r.id ? [r.id] : [])));
+  const workspaceRules = workspace.rules.filter(isWithinWorkspaceBounds).map(
+    (rule): PolicyRule => ({
+      ...rule,
+      ...(rule.id !== undefined && userIds.has(rule.id)
+        ? { id: `workspace:${rule.id}` }
+        : {}),
+      layer: 'workspace',
+    }),
+  );
   return {
     defaults: user.defaults,
     rules: [...workspaceRules, ...user.rules],
