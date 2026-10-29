@@ -56,6 +56,26 @@ type AnyEvent = {
   content?: Record<string, unknown>;
 };
 
+/**
+ * The prompt text of an `m.room.message` content, or undefined when the event
+ * is not a user's chat line (#168). Shared by the fetch `/sync` path and the
+ * E2EE adapter so both forward the same events:
+ *  - only `msgtype: "m.text"` (another bot's `m.notice`, or an image whose
+ *    `body` is its filename, is not a prompt);
+ *  - never an `m.replace` edit: its `body` is the `* `-prefixed fallback of a
+ *    message that was already sent as a prompt, so forwarding it would run the
+ *    prompt twice.
+ */
+export function promptTextOf(content: unknown): string | undefined {
+  const c = content as Record<string, unknown> | null | undefined;
+  if (c?.['msgtype'] !== 'm.text') return undefined;
+  const body = c['body'];
+  if (typeof body !== 'string') return undefined;
+  const relates = c['m.relates_to'] as { rel_type?: unknown } | undefined;
+  if (relates?.rel_type === 'm.replace') return undefined;
+  return body;
+}
+
 function eventsOf(node: unknown, key: 'timeline' | 'state'): AnyEvent[] {
   const section = (node as Record<string, unknown>)?.[key] as
     | { events?: unknown }
@@ -112,13 +132,9 @@ export function extractSync(sync: unknown, ctx: RoomStateCtx): SyncExtract {
       if (e.type === 'm.room.encrypted') {
         encrypted = true; // a ciphertext message: the room IS encrypted
       } else if (e.type === 'm.room.message') {
-        const body = e.content?.['body'];
+        const body = promptTextOf(e.content);
         const sender = e.sender;
-        if (
-          e.content?.['msgtype'] === 'm.text' &&
-          typeof body === 'string' &&
-          typeof sender === 'string'
-        ) {
+        if (body !== undefined && typeof sender === 'string') {
           out.messages.push({
             roomId,
             sender,

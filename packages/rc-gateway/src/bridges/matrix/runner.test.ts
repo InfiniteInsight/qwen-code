@@ -448,6 +448,42 @@ describe('MatrixBridge runner — session_update streaming', () => {
     expect(content.body).toContain('**bold**'); // plaintext keeps the markdown
   });
 
+  it('says a streamed message mentions nobody, so model text cannot ping (#168)', async () => {
+    await rooms.bind('!r1:h', 'sess_q');
+    const h = harness([]);
+    h.bridge.deliverEvent('sess_q', chunk('@room look, and @alice:h too\n\n'));
+    await h.drainStream();
+    const content = h.sent[0].content as Record<string, unknown>;
+    expect(content['m.mentions']).toEqual({});
+  });
+
+  it('every bot message carries m.mentions: {}, the edit in both layers', async () => {
+    await rooms.bind('!r1:h', 'sess_q');
+    const h = harness([]);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req_m',
+        bridgeHints: {
+          recommendedSurface: 'inline',
+          argsSummaryShort: 'run_shell {"cmd":"echo @room"}',
+        },
+      },
+    });
+    await waitFor(() => h.sent.length === 1);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req_m', outcome: 'allow_once' },
+    });
+    await waitFor(() => h.sent.length === 2);
+    const [req, edit] = h.sent.map((s) => s.content as Record<string, unknown>);
+    expect(req['m.mentions']).toEqual({});
+    expect(edit['m.mentions']).toEqual({});
+    expect(
+      (edit['m.new_content'] as Record<string, unknown>)['m.mentions'],
+    ).toEqual({});
+  });
+
   it('relates the 7th message of a turn into an m.thread off the first', async () => {
     await rooms.bind('!r1:h', 'sess_q');
     const h = harness([]);
@@ -577,6 +613,32 @@ describe('MatrixBridge.dispatchReaction (E2EE vote routing seam)', () => {
         subActor: 'matrix:@alice:h',
       },
     ]);
+  });
+
+  it('refuses and logs a 👍 on a tracked event sent from another room (#168)', async () => {
+    await rooms.bind('!enc:h', 'sess_e2ee');
+    const logs: string[] = [];
+    const h = harness([], { log: (m) => logs.push(m) });
+    h.bridge.deliverEvent('sess_e2ee', {
+      type: 'permission_request',
+      data: {
+        requestId: 'req1',
+        bridgeHints: {
+          argsSummaryShort: 'run ls',
+          recommendedSurface: 'inline',
+        },
+      },
+    } as never);
+    await waitFor(() => h.sent.length === 1);
+
+    await h.bridge.dispatchReaction({
+      roomId: '!evil:attacker.org',
+      sender: '@mallory:attacker.org',
+      targetEventId: '$evt_1',
+      key: '👍',
+    });
+    expect(h.votes).toEqual([]);
+    expect(logs.some((l) => l.includes('refused'))).toBe(true);
   });
 
   it('ignores a reaction on an untracked event (no vote)', async () => {

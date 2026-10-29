@@ -147,14 +147,20 @@ export class TelegramBotApi {
 
   /**
    * Long-poll for updates from `offset` (the last seen update_id + 1), blocking
-   * up to `timeoutSec` server-side. Returns the parsed updates ([] on error or
-   * timeout). Restricts allowed_updates to the two kinds the bridge handles.
+   * up to `timeoutSec` server-side. Restricts allowed_updates to the two kinds
+   * the bridge handles.
+   *
+   * A failure is reported, not folded into an empty batch (#168): `ok: false`
+   * with Telegram's status (401 revoked token, 409 another poller or a webhook,
+   * 429 with `retryAfterSec`, 5xx) or `status: 0` for a network error or abort.
+   * An empty batch on timeout is `ok: true, updates: []`. The caller backs off
+   * on `ok: false`; before, both looked like `[]` and the loop spun hot.
    */
   async getUpdates(
     offset: number,
     timeoutSec = 25,
     signal?: AbortSignal,
-  ): Promise<TelegramUpdate[]> {
+  ): Promise<TgUpdatesResult> {
     const res = await this.call(
       'getUpdates',
       {
@@ -164,8 +170,26 @@ export class TelegramBotApi {
       },
       signal,
     );
-    return res.ok && Array.isArray(res.result)
-      ? (res.result as TelegramUpdate[])
-      : [];
+    const out: TgUpdatesResult = {
+      ok: res.ok,
+      status: res.status,
+      updates:
+        res.ok && Array.isArray(res.result)
+          ? (res.result as TelegramUpdate[])
+          : [],
+    };
+    if (res.retryAfterSec !== undefined) out.retryAfterSec = res.retryAfterSec;
+    return out;
   }
+}
+
+/** Outcome of one `getUpdates` long-poll. */
+export interface TgUpdatesResult {
+  ok: boolean;
+  /** HTTP status; 0 for a network error or an aborted poll. */
+  status: number;
+  /** Telegram's `parameters.retry_after` (seconds) on a 429. */
+  retryAfterSec?: number;
+  /** The updates; always [] when `ok` is false. */
+  updates: TelegramUpdate[];
 }

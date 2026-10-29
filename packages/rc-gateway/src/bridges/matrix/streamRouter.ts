@@ -28,7 +28,21 @@
  * can't interleave into out-of-order events or a racy count. Markdown→HTML and the
  * event content shape live in the injected poster, keeping this router
  * transport-agnostic.
+ *
+ * FENCES (#168): each event renders on its own, so a flush that ends inside a
+ * ``` block closes it and the next flush reopens it with the same language (the
+ * room carries the fence state between flushes). A blank line inside a block is
+ * not a flush trigger. Before, a cut block rendered as literal backticks. A new
+ * turn starts outside any fence.
  */
+
+import {
+  NO_FENCE,
+  atFlushPoint,
+  balanceFences,
+  fenceStateAfter,
+  type FenceState,
+} from '../fence.js';
 
 export const MX_FLUSH_MAX_BYTES = 16384;
 export const MX_FLUSH_IDLE_MS = 1500;
@@ -43,14 +57,13 @@ export class MatrixStreamBuffer {
   isEmpty(): boolean {
     return this.buf.length === 0;
   }
-  /** Paragraph break present, a fenced block just closed, or ≥ the byte cap. */
-  hardDue(): boolean {
+  /**
+   * ≥ the byte cap, or (ending outside a fence) a paragraph break or a block
+   * that just closed. `start` is the fence state carried from the last flush.
+   */
+  hardDue(start: FenceState = NO_FENCE): boolean {
     if (Buffer.byteLength(this.buf, 'utf8') >= MX_FLUSH_MAX_BYTES) return true;
-    if (this.buf.includes('\n\n')) return true;
-    const fences = this.buf
-      .split('\n')
-      .filter((l) => l.trimStart().startsWith('```')).length;
-    return fences > 0 && fences % 2 === 0;
+    return atFlushPoint(this.buf, start);
   }
   take(): string {
     const s = this.buf;
@@ -88,6 +101,10 @@ interface RoomState {
   turnId: number;
   posted: number;
   anchorEventId: string | null;
+  /** Fence state at the end of the text already flushed (#168). */
+  fence: FenceState;
+  /** The turn `fence` belongs to; a new turn starts outside any fence. */
+  fenceTurn: number;
 }
 
 export class MatrixStreamRouter {
@@ -122,12 +139,18 @@ export class MatrixStreamRouter {
     if (this.pendingBump.has(sessionId)) this.bumpTurn(sessionId);
     for (const roomId of this.cfg.roomsFor(sessionId)) {
       const st = this.roomState(roomId, sessionId);
+      // A turn that ended inside an unclosed block must not wrap the next
+      // turn's prose. A tail still buffered from the old turn keeps its state.
+      if (st.fenceTurn !== this.seq(sessionId) && st.buffer.isEmpty()) {
+        st.fence = NO_FENCE;
+        st.fenceTurn = this.seq(sessionId);
+      }
       st.buffer.append(text);
       if (st.cancelTimer) {
         st.cancelTimer();
         st.cancelTimer = undefined;
       }
-      if (st.buffer.hardDue()) {
+      if (st.buffer.hardDue(st.fence)) {
         this.flush(roomId);
       } else {
         st.cancelTimer = this.setTimer(MX_FLUSH_IDLE_MS, () => {
@@ -149,6 +172,8 @@ export class MatrixStreamRouter {
         turnId: this.seq(sessionId),
         posted: 0,
         anchorEventId: null,
+        fence: NO_FENCE,
+        fenceTurn: this.seq(sessionId),
       };
       this.rooms.set(roomId, st);
     } else {
@@ -160,7 +185,11 @@ export class MatrixStreamRouter {
   private flush(roomId: string): void {
     const st = this.rooms.get(roomId);
     if (!st || st.buffer.isEmpty()) return;
-    const text = st.buffer.take();
+    const raw = st.buffer.take();
+    // Advance the fence state at enqueue time so it follows the text order.
+    const text = balanceFences(raw, st.fence);
+    st.fence = fenceStateAfter(raw, st.fence);
+    if (!text) return; // only the closing line of a block already closed
     st.chain = st.chain.then(() => this.doFlush(st, text)).catch(() => {});
   }
 

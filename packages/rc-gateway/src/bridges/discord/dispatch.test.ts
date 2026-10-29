@@ -16,6 +16,13 @@ import {
   type DiscordDispatchDeps,
 } from './dispatch.js';
 import type { WriteResult } from '../client.js';
+
+/** The gateway's answer to a write by a banned sub-actor. */
+const BANNED: WriteResult = {
+  ok: false,
+  status: 403,
+  body: { error: 'Sub-actor is banned', code: 'sub_actor_banned' },
+};
 import type { DiscordRestResult } from './restApi.js';
 
 let dir: string;
@@ -146,7 +153,7 @@ describe('discord dispatch — chat message → prompt', () => {
     );
     expect(turns).toEqual(['sess_abc']); // ok prompt → new turn
 
-    f.setPromptResult({ ok: false, status: 403 });
+    f.setPromptResult(BANNED);
     await handleMessage(
       { channelId: 'chan_42', authorId: '2', isBot: false, content: 'x' },
       f.deps,
@@ -191,7 +198,7 @@ describe('discord dispatch — chat message → prompt', () => {
   it('caches the ban on a daemon 403', async () => {
     await channels.bind('chan_42', 'g1', 'sess_abc');
     const f = deps();
-    f.setPromptResult({ ok: false, status: 403 });
+    f.setPromptResult(BANNED);
     await handleMessage(
       {
         channelId: 'chan_42',
@@ -214,6 +221,37 @@ describe('discord dispatch — chat message → prompt', () => {
     );
     expect(f.sent[0].channelId).toBe('chan_42');
     expect(f.sent[0].text).toContain('7 seconds');
+  });
+
+  it('a 403 that is not a ban caches nothing and is reported (#168)', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    const f = deps();
+    f.setPromptResult({
+      ok: false,
+      status: 403,
+      body: { code: 'scope_required' },
+    });
+    await handleMessage(
+      { channelId: 'chan_42', authorId: 'u1', isBot: false, content: 'x' },
+      f.deps,
+    );
+    expect(f.deps.bans.has('discord:u1')).toBe(false);
+    expect(f.sent[0].text).toContain('403 scope_required');
+  });
+
+  it('reports a prompt answered 502, 503 or 504 to the channel (#168)', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    for (const status of [502, 503, 504]) {
+      const f = deps();
+      f.setPromptResult({ ok: false, status });
+      await handleMessage(
+        { channelId: 'chan_42', authorId: 'u1', isBot: false, content: 'x' },
+        f.deps,
+      );
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0].channelId).toBe('chan_42');
+      expect(f.sent[0].text).toContain(String(status));
+    }
   });
 });
 
@@ -318,7 +356,7 @@ describe('discord dispatch — button click → vote', () => {
   it('caches the ban and tells the clicker on a 403', async () => {
     await channels.bind('chan_42', 'g1', 'sess_abc');
     const f = deps();
-    f.setVoteResult({ ok: false, status: 403 });
+    f.setVoteResult(BANNED);
     await handleComponent(comp('vote:approve:req_xyz'), f.deps);
     expect(f.deps.bans.has('discord:111122223333')).toBe(true);
     expect(f.editedReplies[0].text).toContain('blocked');
@@ -337,6 +375,20 @@ describe('discord dispatch — button click → vote', () => {
     expect(f.sent[0].channelId).toBe('chan_42');
     expect(f.sent[0].text).toContain('<@111122223333>');
     expect(f.sent[0].text).toContain('approve');
+  });
+
+  it('says why a vote was not counted (404, 429) instead of a bare failure', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    const gone = deps();
+    gone.setVoteResult({ ok: false, status: 404 });
+    await handleComponent(comp('vote:approve:req_xyz'), gone.deps);
+    expect(gone.editedReplies[0].text).toMatch(/^Vote failed/);
+    expect(gone.editedReplies[0].text).toContain('no longer pending');
+
+    const limited = deps();
+    limited.setVoteResult({ ok: false, status: 429, retryAfterSec: 3 });
+    await handleComponent(comp('vote:approve:req_xyz'), limited.deps);
+    expect(limited.editedReplies[0].text).toContain('3 seconds');
   });
 
   it('>15-min fallback: channel message mentions voter on vote failure too', async () => {
