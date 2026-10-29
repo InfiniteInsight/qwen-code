@@ -3370,22 +3370,29 @@ if (process.argv[2] === 'serve') {
   // deliberately OMITS the one-time owner pairing code (see upJson below);
   // only the human-readable terminal path prints that code.
   void (async () => {
-    const { up, down, status, upJson } = await import(
+    const { up, down, status, upJson, formatUpHuman } = await import(
       './launcher/orchestrator.js'
     );
     const { realRunCommand } = await import('./launcher/exec.js');
-    const wantJson = process.argv.includes('--json');
-    const portFlag = (() => {
-      const i = process.argv.indexOf('--port');
-      return i >= 0 ? Number(process.argv[i + 1]) : undefined;
-    })();
-    // A missing/non-numeric --port (NaN) must fall back to the default, not
-    // propagate into the URL / persisted state / serve argv as "NaN".
-    const port = Number.isFinite(portFlag) ? (portFlag as number) : 8443;
+    const { parseLauncherArgs } = await import('./launcher/args.js');
+    let launcherArgs;
+    try {
+      launcherArgs = parseLauncherArgs(process.argv.slice(3));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `qwen-rc ${process.argv[2]}: ${(err as Error).message}\nusage: qwen-rc ${process.argv[2]} [--json]${process.argv[2] === 'up' ? ' [--port <n>]' : ''}`,
+      );
+      process.exit(2);
+    }
+    const wantJson = launcherArgs.json;
+    // --port is `--port <n>` or `--port=<n>`; absent means the 8443 default.
+    const port = launcherArgs.port ?? 8443;
     const deps = {
       run: realRunCommand,
       dir: join(homedir(), '.qwen', 'rc'),
       port,
+      portExplicit: launcherArgs.port !== undefined,
       unit: 'qwen-rc-gateway',
       // PATH-independent self-invocation: [node, this cli.js] so the systemd
       // --user unit can exec qwen-rc even when it isn't on PATH.
@@ -3402,9 +3409,7 @@ if (process.argv[2] === 'serve') {
         console.log(JSON.stringify(upJson(r)));
       } else if (r.ok) {
         // eslint-disable-next-line no-console
-        console.log(
-          `\nConnect from your phone:\n  ${r.url}\n\nPairing code: ${r.bootstrapCode ?? '(see gateway logs)'}\n\n${r.qr ?? ''}`,
-        );
+        console.log(formatUpHuman(r));
       } else {
         // eslint-disable-next-line no-console
         console.error(`qwen-rc up: ${r.hint}`);
@@ -3412,10 +3417,17 @@ if (process.argv[2] === 'serve') {
       process.exit(r.ok ? 0 : 1);
     } else if (cmd === 'down') {
       const r = await down(deps);
+      if (!r.ok) {
+        // The unit is still running: do not claim "stopped".
+        if (wantJson)
+          console.log(JSON.stringify({ status: 'error', hint: r.hint })); // eslint-disable-line no-console
+        else console.error(`qwen-rc down: ${r.hint}`); // eslint-disable-line no-console
+        process.exit(1);
+      }
       if (wantJson)
         console.log(JSON.stringify({ status: 'stopped' })); // eslint-disable-line no-console
       else console.log('qwen-rc: stopped'); // eslint-disable-line no-console
-      process.exit(r.ok ? 0 : 1);
+      process.exit(0);
     } else {
       const r = await status(deps);
       if (wantJson)
