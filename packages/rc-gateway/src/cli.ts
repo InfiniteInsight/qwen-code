@@ -6,6 +6,7 @@
 
 import {
   existsSync,
+  mkdirSync,
   statSync,
   watch,
   readFileSync,
@@ -71,6 +72,8 @@ import {
   type PooledDaemonSpawn,
 } from './daemonPool.js';
 import { getFreePort } from './freePort.js';
+import { pruneWalDir, type WalRetentionBounds } from './wal.js';
+import { isSessionRelayLive } from './routes/sessionEvents.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
 import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
@@ -264,7 +267,7 @@ import {
   formatWhoami,
   type DaemonRow,
 } from './daemons/daemonsCli.js';
-import { AuditLog } from './auditLog.js';
+import { AuditLog, type AuditRecorder } from './auditLog.js';
 import {
   RecoveryOrchestrator,
   createReportOutcome,
@@ -393,6 +396,159 @@ export interface ServeOptions {
   acmeStaging?: boolean;
   /** Override the ACME directory URL (private CA / Pebble). */
   acmeDirectoryUrl?: string;
+  /**
+   * `--wal-dir <dir>` (env `QWEN_RC_WAL_DIR`): the directory the session WAL
+   * (#174) is written under: its segments go to `<dir>/wal/`. Default
+   * `~/.qwen/rc`, so the WAL is `~/.qwen/rc/wal/`; that `wal` subdirectory is
+   * created owner-only (0700). See {@link resolveSessionWalDir}.
+   */
+  walDir?: string;
+  /**
+   * `--no-wal` (env `QWEN_RC_NO_WAL=1`): run WAL-dark, the shape before #174:
+   * one daemon subscription per watcher, raw ids, no durable replay. Wins
+   * over `--wal-dir`.
+   */
+  noWal?: boolean;
+  /**
+   * `--wal-retention-days <n>` (env `QWEN_RC_WAL_RETENTION_DAYS`): a session
+   * whose WAL has not been written for this many days is removed. Default 7.
+   */
+  walRetentionDays?: number;
+  /**
+   * `--wal-max-mb <n>` (env `QWEN_RC_WAL_MAX_MB`): past this many MiB, the
+   * least recently written sessions are removed until the directory fits.
+   * Default 512.
+   */
+  walMaxMb?: number;
+}
+
+const DAY_MS = 86_400_000;
+const MIB = 1024 * 1024;
+/** How often the WAL directory is swept, after the sweep at boot. */
+const WAL_RETENTION_INTERVAL_MS = 60 * 60 * 1000;
+
+/** The WAL directory's retention bounds: 7 days, 512 MiB unless configured. */
+export function resolveWalRetention(
+  opts: Pick<ServeOptions, 'walRetentionDays' | 'walMaxMb'>,
+): WalRetentionBounds {
+  return {
+    maxAgeMs: (opts.walRetentionDays ?? 7) * DAY_MS,
+    maxBytes: (opts.walMaxMb ?? 512) * MIB,
+  };
+}
+
+/**
+ * One retention sweep of the WAL directory, with one `wal_pruned` audit row
+ * when it removed anything (an hourly sweep that finds nothing writes none).
+ * The row carries counts and the bounds, never a session id or a path.
+ */
+export function sweepWalDir(args: {
+  dir: string;
+  retention: WalRetentionBounds;
+  audit?: Pick<AuditRecorder, 'record'>;
+  keep?: (sessionId: string) => boolean;
+  now?: () => number;
+  log?: (line: string) => void;
+}): void {
+  const result = pruneWalDir(args.dir, {
+    ...args.retention,
+    ...(args.keep ? { keep: args.keep } : {}),
+    ...(args.now ? { now: args.now } : {}),
+  });
+  if (result.sessionsRemoved === 0) return;
+  void args.audit?.record({
+    action: 'wal_pruned',
+    detail: {
+      sessionsRemoved: result.sessionsRemoved,
+      removedForAge: result.removedForAge,
+      removedForSize: result.removedForSize,
+      bytesFreed: result.bytesFreed,
+      sessionsRetained: result.sessionsRetained,
+      bytesRetained: result.bytesRetained,
+      maxAgeDays: args.retention.maxAgeMs / DAY_MS,
+      maxBytes: args.retention.maxBytes,
+    },
+  });
+  args.log?.(
+    `session WAL: pruned ${result.sessionsRemoved} session(s), ` +
+      `freed ${result.bytesFreed} bytes`,
+  );
+}
+
+/**
+ * Sweep now and then every hour. Unref'd so it never holds the process open;
+ * the returned stop clears it. A failing sweep is logged and retried on the
+ * next tick rather than taking the gateway down.
+ */
+function startWalRetention(
+  args: Parameters<typeof sweepWalDir>[0],
+): () => void {
+  const run = () => {
+    try {
+      sweepWalDir(args);
+    } catch (err) {
+      args.log?.(
+        `session WAL: retention sweep failed: ${(err as Error).message}`,
+      );
+    }
+  };
+  run();
+  const timer = setInterval(run, WAL_RETENTION_INTERVAL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+/** A session WAL directory that cannot be used, reported before any spawn. */
+export class SessionWalDirError extends Error {}
+
+/**
+ * The root the session WAL is written under, or undefined when `--no-wal`
+ * turns the WAL off. Segments go to `<root>/wal/` (the layout SessionWal has
+ * always used under the directory it is handed), so the default root is the
+ * rc directory itself and the WAL lands at `~/.qwen/rc/wal/`.
+ */
+export function resolveSessionWalDir(
+  opts: Pick<ServeOptions, 'walDir' | 'noWal'>,
+  home: string,
+): string | undefined {
+  if (opts.noWal) return undefined;
+  const dir = opts.walDir;
+  if (dir === undefined) return join(home, '.qwen', 'rc');
+  if (dir === '~') return home;
+  return dir.startsWith('~/') ? join(home, dir.slice(2)) : dir;
+}
+
+/**
+ * Create the WAL's `wal` subdirectory under the root, owner-only (0700): the
+ * log holds conversation text. A root that does not exist yet is created the
+ * same way; an existing directory is used as it is. A path that is not a
+ * directory is refused here, before a daemon is spawned, rather than on the
+ * first watcher's append.
+ */
+export function prepareSessionWalDir(dir: string): void {
+  const walSubdir = join(dir, 'wal');
+  try {
+    mkdirSync(walSubdir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    throw new SessionWalDirError(
+      `--wal-dir / QWEN_RC_WAL_DIR: cannot create "${walSubdir}": ${(err as Error).message}`,
+    );
+  }
+  if (!statSync(walSubdir).isDirectory()) {
+    throw new SessionWalDirError(
+      `--wal-dir / QWEN_RC_WAL_DIR: "${walSubdir}" is not a directory`,
+    );
+  }
+}
+
+/**
+ * The boot line naming where the session WAL is written (the `wal`
+ * subdirectory of the `--wal-dir` root), or that it is off.
+ */
+export function formatSessionWalLine(dir: string | undefined): string {
+  return dir === undefined
+    ? 'session WAL: off (--no-wal): one daemon subscription per watcher, no durable replay'
+    : `session WAL: ${join(dir, 'wal')} (--wal-dir ${dir}; one shared subscription per session, durable replay; --no-wal to turn off)`;
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -503,6 +659,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   if (opts.mdnsInstanceName !== undefined) {
     validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
   }
+  // The session WAL directory (#174), settled before anything is spawned so an
+  // unusable one fails the boot cleanly instead of the first watcher's append.
+  const sessionWalDir = resolveSessionWalDir(opts, homedir());
+  if (sessionWalDir !== undefined) prepareSessionWalDir(sessionWalDir);
+  // eslint-disable-next-line no-console
+  console.log(formatSessionWalLine(sessionWalDir));
   // Which `qwen` every daemon runs, settled and logged before anything is
   // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
   // and the daemons used to run whatever `qwen` PATH held, so say which one
@@ -988,6 +1150,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       : {}),
     daemonQwenBin: daemonBin.path,
     daemonQwenBinHealthy: daemonProbe.healthy,
+    ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
@@ -1107,14 +1270,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // resumeSession) AND the app's promptQueue (hadInFlightTurn), so it can
   // only be built here, after both exist. reportOutcome appends the durable
   // marker frames, publishes them on the owner stream, writes the audit rows,
-  // and fans out the push kinds. In production the session WAL is dark (no
-  // walDir is wired), so createReportOutcome skips the durable frames + owner
-  // session_event publish and only audits + pushes — the saga still runs and
-  // sessions are resumed in place.
+  // and fans out the push kinds. The markers go to the same WAL directory the
+  // events route relays into, so their ids interleave with the relayed ones;
+  // under --no-wal there is none, and reportOutcome only audits and pushes.
   const recoveryOrchestrator = new RecoveryOrchestrator({
     pool: daemonPool,
     promptQueue,
     reportOutcome: createReportOutcome({
+      ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
       ownerEvents,
       audit,
       notifier,
@@ -1205,6 +1368,21 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     HEARTBEAT_INTERVAL_SEC * 1000,
   );
   bridgeReaper.unref();
+
+  // Session WAL retention (#174): a session's own log is bounded only when it
+  // is appended to, so the directory is swept at boot and hourly. A session
+  // being relayed right now is never removed.
+  const stopWalRetention =
+    sessionWalDir !== undefined
+      ? startWalRetention({
+          dir: sessionWalDir,
+          retention: resolveWalRetention(opts),
+          audit,
+          keep: (sessionId) => isSessionRelayLive(sessionWalDir, sessionId),
+          // eslint-disable-next-line no-console
+          log: (line) => console.log(line),
+        })
+      : () => {};
 
   // Load the policy fail-closed, layered over the same workspace cwd resolved
   // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
@@ -1804,6 +1982,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     rateReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     clearInterval(bridgeReaper);
+    stopWalRetention();
     for (const b of startedBridges) b.stop();
     // mDNS Goodbye (design D4): withdraw the advertisement so a stale record does
     // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
@@ -2078,6 +2257,13 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const daemonPort = flag('daemon-port');
   const acmeDomain = flag('acme-domain');
   const maxAttachmentFlag = flag('max-attachment-bytes');
+  const walDirFlag = flag('wal-dir');
+  if (walDirFlag !== undefined && walDirFlag.trim() === '') {
+    throw new Error('--wal-dir: expected a directory path, got ""');
+  }
+  const walDirEnv = process.env.QWEN_RC_WAL_DIR;
+  const walRetentionFlag = flag('wal-retention-days');
+  const walMaxMbFlag = flag('wal-max-mb');
   const qwenBinFromFlag =
     argv.includes('--qwen-bin') ||
     argv.some((a) => a.startsWith('--qwen-bin='));
@@ -2125,7 +2311,36 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     acmeDnsProvider: flag('acme-dns-provider'),
     acmeStaging: argv.includes('--acme-staging'),
     acmeDirectoryUrl: flag('acme-directory'),
+    // Session WAL (#174): the flag over the environment, like the other pairs;
+    // an empty environment value counts as unset.
+    walDir: walDirFlag ?? (walDirEnv ? walDirEnv : undefined),
+    noWal: argv.includes('--no-wal') || process.env.QWEN_RC_NO_WAL === '1',
+    walRetentionDays: parsePositiveIntFlag(
+      walRetentionFlag !== undefined
+        ? '--wal-retention-days'
+        : 'QWEN_RC_WAL_RETENTION_DAYS',
+      walRetentionFlag ?? process.env.QWEN_RC_WAL_RETENTION_DAYS,
+    ),
+    walMaxMb: parsePositiveIntFlag(
+      walMaxMbFlag !== undefined ? '--wal-max-mb' : 'QWEN_RC_WAL_MAX_MB',
+      walMaxMbFlag ?? process.env.QWEN_RC_WAL_MAX_MB,
+    ),
   };
+}
+
+/** A positive whole number, or undefined when unset (an empty env is unset). */
+function parsePositiveIntFlag(
+  name: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined || (raw === '' && !name.startsWith('--'))) {
+    return undefined;
+  }
+  const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    throw new Error(`${name}: expected a positive whole number, got "${raw}"`);
+  }
+  return n;
 }
 
 if (process.argv[2] === 'serve') {
@@ -2134,7 +2349,10 @@ if (process.argv[2] === 'serve') {
   //        --mdns-workspace-name <s>
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --host-actions <path>
-  //        --max-attachment-bytes <n> --qwen-bin <path> --acme-domain <d[,d]> --acme-email <e>
+  //        --max-attachment-bytes <n> --qwen-bin <path>
+  //        --wal-dir <dir> (WAL in <dir>/wal/, default ~/.qwen/rc) --no-wal
+  //        --wal-retention-days <n> --wal-max-mb <n>
+  //        --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
   try {
@@ -2151,7 +2369,8 @@ if (process.argv[2] === 'serve') {
     console.error(
       err instanceof BindSecurityError ||
         err instanceof MdnsConfigError ||
-        err instanceof DaemonBinError
+        err instanceof DaemonBinError ||
+        err instanceof SessionWalDirError
         ? `qwen-rc serve: ${err.message}`
         : `qwen-rc serve failed: ${err instanceof Error ? (err.stack ?? err.message) : err}`,
     );

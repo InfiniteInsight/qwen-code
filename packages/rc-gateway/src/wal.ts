@@ -132,7 +132,9 @@ export class SessionWal {
     this.horizonSec = opts.horizonSec ?? WAL_DEFAULTS.walHorizonSec;
     this.now = opts.now ?? Date.now;
 
-    mkdirSync(this.walDir, { recursive: true });
+    // Owner-only: the log holds conversation text. The CLI creates the root
+    // this subdirectory the same way at boot (cli.ts prepareSessionWalDir).
+    mkdirSync(this.walDir, { recursive: true, mode: 0o700 });
     this.recover();
   }
 
@@ -293,6 +295,22 @@ export class SessionWal {
     return { truncated: false, events };
   }
 
+  /**
+   * The newest retained frame matching `pred`, read from disk newest segment
+   * first, so a match in the active segment never decodes the rotated ones.
+   * Used to recover the relay's renumbering state from the log itself.
+   */
+  findLast(pred: (frame: WalFrame) => boolean): WalFrame | undefined {
+    const segments = this.segmentsOldestToNewest();
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const frames = [...decodeSegment(segments[i]!)];
+      for (let j = frames.length - 1; j >= 0; j--) {
+        if (pred(frames[j]!)) return frames[j];
+      }
+    }
+    return undefined;
+  }
+
   // -- internals ----------------------------------------------------------
 
   /**
@@ -318,7 +336,8 @@ export class SessionWal {
   private ensureOpen(): number {
     if (this.fd === null) {
       // 'a' => append mode; every write lands at end-of-file atomically.
-      this.fd = openSync(this.activePath, 'a');
+      // 0600 applies only when this creates the segment.
+      this.fd = openSync(this.activePath, 'a', 0o600);
       this.activeBytes = existsSync(this.activePath)
         ? fstatSync(this.fd).size
         : 0;
@@ -548,6 +567,145 @@ export function releaseSharedWal(dir: string, sessionId: string): void {
 /** Registry size, for tests. */
 export function sharedWalCount(): number {
   return sharedWalRegistry.size;
+}
+
+// ---------------------------------------------------------------------------
+// Directory retention
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounds on the whole WAL directory (#174). A session's own log is bounded on
+ * append (`maxEvents`, `horizonSec`), but only on append: a conversation
+ * nobody streams again keeps its files forever, and the directory grows by
+ * one session's worth for every conversation ever watched.
+ */
+export interface WalRetentionBounds {
+  /** A session whose newest WAL write is older than this is removed. */
+  maxAgeMs: number;
+  /** Then, least recently written first, until the directory fits in this. */
+  maxBytes: number;
+}
+
+export interface PruneWalDirOptions extends WalRetentionBounds {
+  /** Injectable clock (epoch ms). Defaults to Date.now. */
+  now?: () => number;
+  /** A session this holds is never removed: one being relayed right now. */
+  keep?: (sessionId: string) => boolean;
+}
+
+export interface WalPruneResult {
+  sessionsRemoved: number;
+  removedForAge: number;
+  removedForSize: number;
+  bytesFreed: number;
+  sessionsRetained: number;
+  bytesRetained: number;
+}
+
+/** A session's files: segments `<sid>.log[.N]`, the epoch sidecar and its tmp. */
+const WAL_SESSION_FILE =
+  /^([0-9a-fA-F-]{32,36})\.(?:log(?:\.\d+)?|epoch\.json(?:\.tmp)?)$/;
+
+/**
+ * Remove whole sessions from the WAL directory: every one idle past
+ * `maxAgeMs`, then, oldest newest-write first, as many as it takes to bring
+ * the directory within `maxBytes`. A session goes as a unit (segments and
+ * sidecar together), so what remains is always a complete log; its registry
+ * handle is dropped first, so a later writer starts from the empty disk
+ * instead of a snapshot of the files it no longer has. Files that are not a
+ * session's WAL are left alone. Never throws for a missing directory.
+ *
+ * A pruned session is one the gateway has not relayed: a watcher coming back
+ * to it with a cursor finds an empty WAL and is served from the daemon, the
+ * same as the first time (see the events route).
+ */
+export function pruneWalDir(
+  dir: string,
+  opts: PruneWalDirOptions,
+): WalPruneResult {
+  const walDir = join(dir, 'wal');
+  const result: WalPruneResult = {
+    sessionsRemoved: 0,
+    removedForAge: 0,
+    removedForSize: 0,
+    bytesFreed: 0,
+    sessionsRetained: 0,
+    bytesRetained: 0,
+  };
+  let entries: string[];
+  try {
+    entries = readdirSync(walDir);
+  } catch {
+    return result;
+  }
+
+  interface SessionFiles {
+    sessionId: string;
+    files: string[];
+    bytes: number;
+    newestMs: number;
+  }
+  const sessions = new Map<string, SessionFiles>();
+  for (const name of entries) {
+    const match = WAL_SESSION_FILE.exec(name);
+    if (match === null) continue;
+    let st;
+    try {
+      st = statSync(join(walDir, name));
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    const sessionId = match[1]!;
+    const entry = sessions.get(sessionId) ?? {
+      sessionId,
+      files: [],
+      bytes: 0,
+      newestMs: 0,
+    };
+    entry.files.push(name);
+    entry.bytes += st.size;
+    entry.newestMs = Math.max(entry.newestMs, st.mtimeMs);
+    sessions.set(sessionId, entry);
+  }
+
+  const remove = (entry: SessionFiles): void => {
+    releaseSharedWal(dir, entry.sessionId);
+    for (const name of entry.files) {
+      rmSync(join(walDir, name), { force: true });
+    }
+    result.sessionsRemoved += 1;
+    result.bytesFreed += entry.bytes;
+  };
+
+  const now = (opts.now ?? Date.now)();
+  const retained: SessionFiles[] = [];
+  for (const entry of sessions.values()) {
+    const held = opts.keep?.(entry.sessionId) ?? false;
+    if (!held && now - entry.newestMs > opts.maxAgeMs) {
+      remove(entry);
+      result.removedForAge += 1;
+    } else {
+      retained.push(entry);
+    }
+  }
+
+  let total = retained.reduce((n, e) => n + e.bytes, 0);
+  if (total > opts.maxBytes) {
+    const oldestFirst = retained
+      .filter((e) => !(opts.keep?.(e.sessionId) ?? false))
+      .sort((a, b) => a.newestMs - b.newestMs);
+    for (const entry of oldestFirst) {
+      if (total <= opts.maxBytes) break;
+      remove(entry);
+      result.removedForSize += 1;
+      total -= entry.bytes;
+      retained.splice(retained.indexOf(entry), 1);
+    }
+  }
+  result.sessionsRetained = retained.length;
+  result.bytesRetained = total;
+  return result;
 }
 
 // ---------------------------------------------------------------------------

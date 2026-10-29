@@ -154,7 +154,10 @@ import { InviteStore } from './bridges/inviteStore.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionRestRoute } from './routes/sessionRest.js';
-import { createSessionEventsRoute } from './routes/sessionEvents.js';
+import {
+  createSessionEventsRoute,
+  withGatewayResumeCursor,
+} from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js';
 import { createSessionExportRoute } from './routes/sessionExport.js';
@@ -369,11 +372,15 @@ export interface GatewayDeps {
    */
   idleStatus?: IdleStatusResolver;
   /**
-   * Root directory for per-session WAL files (add-session-forking,
-   * add-remote-rewind). When set, the fork and rewind routes seed durable
-   * WAL markers (`session_forked`/`child_forked`/`session_rewound`) that
-   * survive a reconnect. Omitted in production today — see the plan's
-   * Global Constraints note on this being a currently-dark wiring path.
+   * Root directory for per-session WAL files (#174; segments live under
+   * `<walDir>/wal/`). When set, the events route relays each session through
+   * one shared, WAL-backed subscription (durable replay, id renumbering), the
+   * fork and rewind routes seed durable markers (`session_forked`/
+   * `child_forked`/`session_rewound`), and the resume route hands back its
+   * watermark in the gateway's numbering. cli.ts wires `--wal-dir` (default
+   * `~/.qwen/rc`, so the WAL is `~/.qwen/rc/wal/`); `--no-wal` leaves it unset,
+   * and every one of those
+   * paths then behaves as it did before the WAL was wired.
    */
   walDir?: string;
   /** Live policy access for POST /policy/explain (P4). Absent → route not mounted. */
@@ -938,9 +945,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       registry,
       audit,
       deps.usageBroadcaster,
-      // deps.walDir keeps the route WAL-dark when the caller wires no WAL
-      // (production cli.ts passes none); tests pass one to exercise the
-      // durable replay + renumbering + marker path.
+      // deps.walDir selects the shape: unset, one daemon subscription per
+      // connection with raw passthrough (the `--no-wal` escape hatch); set,
+      // one shared WAL-backed subscription per session (#174).
       deps.walDir,
       promptEventBroadcaster,
       watchPresence,
@@ -1380,7 +1387,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before touching the daemon)
-    createSessionResumeRoute(deps.daemon, audit),
+    // With a WAL wired the page's next watch is read in the gateway's
+    // numbering, so the response's watermark is mapped into it (#174).
+    createSessionResumeRoute(
+      deps.walDir !== undefined
+        ? withGatewayResumeCursor(deps.daemon, deps.walDir)
+        : deps.daemon,
+      audit,
+    ),
   );
   // POST /session/:id/worktree-reset - hand a conversation that was working in
   // a temporary checkout over to the replacement checkout it now belongs on
@@ -1465,7 +1479,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
           return undefined;
         }
       },
-      { audit },
+      // The WAL markers only; the fork route's owner-bus publish stays unwired
+      // here as before.
+      { audit, walDir: deps.walDir },
     ),
   );
   // Per-session idle-suggestion toggle (`add-idle-suggestions` spec). WRITE scope

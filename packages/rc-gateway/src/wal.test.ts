@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,6 +22,7 @@ import {
   getSharedWal,
   releaseSharedWal,
   sharedWalCount,
+  pruneWalDir,
 } from './wal.js';
 import type { WalFrame } from './wal.js';
 
@@ -376,5 +384,122 @@ describe('shared WAL registry', () => {
     // with the live view rather than reading the out of order tail as the end.
     releaseSharedWal(dir, 'high-water');
     expect(getSharedWal(dir, 'high-water').latestId()).toBe(7);
+  });
+});
+
+describe('WAL directory retention (#174)', () => {
+  const DAY = 86_400_000;
+  const NOW = 1_800_000_000_000;
+  const A = 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0';
+  const B = 'b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0';
+  const C = 'c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0';
+
+  /** A session's WAL (rotated segment, active segment, sidecar), aged. */
+  function seed(dir: string, sid: string, ageMs: number, frames = 3): void {
+    const wal = new SessionWal({ dir, sessionId: sid, segmentMaxBytes: 64 });
+    for (let id = 1; id <= frames; id++) wal.append(makeFrame(id));
+    wal.close();
+    writeFileSync(join(dir, 'wal', `${sid}.epoch.json`), '{}');
+    const at = new Date(NOW - ageMs);
+    for (const name of readdirSync(join(dir, 'wal'))) {
+      if (name.startsWith(sid)) utimesSync(join(dir, 'wal', name), at, at);
+    }
+  }
+  const files = (dir: string, sid: string) =>
+    readdirSync(join(dir, 'wal')).filter((n) => n.startsWith(sid));
+
+  it('removes a session idle past the age bound, every file of it, and keeps the rest', () => {
+    const dir = makeTmpDir();
+    seed(dir, A, 10 * DAY);
+    seed(dir, B, 1 * DAY);
+    expect(files(dir, A).length).toBeGreaterThanOrEqual(3);
+
+    const result = pruneWalDir(dir, {
+      maxAgeMs: 7 * DAY,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+      now: () => NOW,
+    });
+
+    expect(files(dir, A)).toEqual([]);
+    expect(files(dir, B).length).toBeGreaterThanOrEqual(3);
+    expect(result).toMatchObject({
+      sessionsRemoved: 1,
+      sessionsRetained: 1,
+      removedForAge: 1,
+      removedForSize: 0,
+    });
+    expect(result.bytesFreed).toBeGreaterThan(0);
+  });
+
+  it('over the size bound, removes the least recently written sessions first until under it', () => {
+    const dir = makeTmpDir();
+    seed(dir, A, 3 * DAY);
+    seed(dir, B, 2 * DAY);
+    seed(dir, C, 1 * DAY);
+    const one = files(dir, C).reduce(
+      (n, f) => n + readFileSync(join(dir, 'wal', f)).length,
+      0,
+    );
+
+    // Room for a little more than one session: the two oldest go.
+    const result = pruneWalDir(dir, {
+      maxAgeMs: 30 * DAY,
+      maxBytes: one + 1,
+      now: () => NOW,
+    });
+
+    expect(files(dir, A)).toEqual([]);
+    expect(files(dir, B)).toEqual([]);
+    expect(files(dir, C).length).toBeGreaterThan(0);
+    expect(result).toMatchObject({ sessionsRemoved: 2, removedForSize: 2 });
+    expect(result.bytesRetained).toBeLessThanOrEqual(one + 1);
+  });
+
+  it('never removes a session the keep predicate holds (one being relayed live)', () => {
+    const dir = makeTmpDir();
+    seed(dir, A, 10 * DAY);
+    seed(dir, B, 10 * DAY);
+    const result = pruneWalDir(dir, {
+      maxAgeMs: 7 * DAY,
+      maxBytes: 0,
+      now: () => NOW,
+      keep: (sid) => sid === A,
+    });
+    expect(files(dir, A).length).toBeGreaterThan(0);
+    expect(files(dir, B)).toEqual([]);
+    expect(result.sessionsRemoved).toBe(1);
+  });
+
+  it("drops a pruned session's shared handle, so the next writer starts from the empty disk", () => {
+    const dir = makeTmpDir();
+    const held = getSharedWal(dir, A);
+    held.append(makeFrame(1));
+    held.append(makeFrame(2));
+    seed(dir, B, 0);
+    for (const name of files(dir, A)) {
+      const at = new Date(NOW - 10 * DAY);
+      utimesSync(join(dir, 'wal', name), at, at);
+    }
+    pruneWalDir(dir, {
+      maxAgeMs: 7 * DAY,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+      now: () => NOW,
+    });
+    expect(getSharedWal(dir, A)).not.toBe(held);
+    expect(getSharedWal(dir, A).latestId()).toBeNull();
+  });
+
+  it("leaves files that are not a session's WAL alone, and an absent directory is a no-op", () => {
+    const dir = makeTmpDir();
+    expect(
+      pruneWalDir(dir, { maxAgeMs: 0, maxBytes: 0, now: () => NOW }),
+    ).toMatchObject({ sessionsRemoved: 0, bytesFreed: 0 });
+    seed(dir, A, 10 * DAY);
+    writeFileSync(join(dir, 'wal', 'notes.txt'), 'keep');
+    const old = new Date(NOW - 10 * DAY);
+    utimesSync(join(dir, 'wal', 'notes.txt'), old, old);
+    pruneWalDir(dir, { maxAgeMs: DAY, maxBytes: 0, now: () => NOW });
+    expect(existsSync(join(dir, 'wal', 'notes.txt'))).toBe(true);
+    expect(files(dir, A)).toEqual([]);
   });
 });

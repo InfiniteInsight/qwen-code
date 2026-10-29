@@ -55,7 +55,8 @@ export interface ForkRouteDeps {
    * Root directory for WAL files. When provided (together with or without
    * `bus`), the fork route seeds two WAL entries:
    *  - `session_forked` on the parent session WAL at id = `fromEventId + 1`
-   *    (defaults to 1 when no `fromEventId` is supplied).
+   *    (defaults to 1 when no `fromEventId` is supplied), raised above the
+   *    parent WAL's end when the log already holds that id.
    *  - `child_forked` on the child session WAL at id = 1 (the child is fresh).
    */
   walDir?: string;
@@ -375,15 +376,25 @@ export function createForkRoute(
     }
 
     // 7. Seed the WAL and publish SSE events when deps are wired.
-    //    session_forked id = fromEventId + 1 (defaults to 1 when absent).
-    //    child_forked id = 1 (the child WAL is always fresh).
+    //    session_forked id = fromEventId + 1 (defaults to 1 when absent),
+    //    raised above the parent WAL's end; child_forked id = 1 (the child
+    //    WAL is always fresh).
     const parentEventId = fromEventId ?? 0;
-    const sessionForkedId = parentEventId + 1;
+    let sessionForkedId = parentEventId + 1;
 
     if (walDir) {
       // Registry handles for both, so the relay that already streams the
       // parent learns about this marker's id instead of reusing it.
       const parentWal = getSharedWal(walDir, parentId);
+      // fromEventId counts transcript records; it is not a WAL id. A parent
+      // whose events the gateway has relayed already holds ids past it, and
+      // appending under one of them puts two frames on one id (#174). Above
+      // the end, the marker still reaches every watcher whose cursor is at or
+      // past the fork point, and the bus event below carries the same id.
+      sessionForkedId = Math.max(
+        sessionForkedId,
+        (parentWal.latestId() ?? 0) + 1,
+      );
       parentWal.append({
         id: sessionForkedId,
         v: 1,
