@@ -272,6 +272,12 @@ export function createCapabilityRoute(deps: {
       ...(deps.daemonQwenBinHealthy !== undefined && audience === 'full'
         ? { daemonQwenBinHealthy: deps.daemonQwenBinHealthy }
         : {}),
+      // #110: GET /session/:id/agents, /agent-trace and
+      // /saved-workflows/:name are mounted. The page draws the agents strip,
+      // the Agents sheet and the trace only when this is set AND the daemon
+      // advertises `session_agents`, so an old gateway shows nothing new and
+      // an old daemon is never asked.
+      sessionAgents: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

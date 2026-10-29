@@ -179,6 +179,12 @@ import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
 import { createSessionStatsRoute } from './routes/sessionStats.js';
 import { createSessionResourcesRoute } from './routes/sessionResources.js';
+/** #110: the session's agents, their lineage, and one saved workflow. */
+import {
+  createSessionAgentsRoute,
+  createSessionAgentTraceRoute,
+  createSessionSavedWorkflowRoute,
+} from './routes/sessionAgents.js';
 /** #127: session artifacts (the read pair; the mutation pair needs a client id). */
 import {
   createSessionArtifactContentRoute,
@@ -1100,6 +1106,29 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionResourcesRoute(deps.daemon),
+  );
+  // #110: the session's agents. The roster (running and recently finished),
+  // their lineage, and one saved workflow by name, each 1:1 with the daemon's
+  // own route and read-scoped like the /tasks read above. Not audited, for the
+  // reason /tasks gives: a roster is a poll. Stopping one agent stays on the
+  // write-scoped /subagents/:subagentRef/cancel below.
+  app.get(
+    '/session/:id/agents',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionAgentsRoute(deps.daemon),
+  );
+  app.get(
+    '/session/:id/agent-trace',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionAgentTraceRoute(deps.daemon),
+  );
+  app.get(
+    '/session/:id/saved-workflows/:name',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionSavedWorkflowRoute(deps.daemon),
   );
   // POST /session/:id/end — write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.
