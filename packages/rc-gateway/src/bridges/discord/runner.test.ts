@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscordChannelStore } from './channelStore.js';
 import { DiscordBridge, type GatewayHandlers } from './runner.js';
+import { CursorStore } from '../cursorStore.js';
 import type { BridgeClient } from '../client.js';
 import type { DiscordRestApi } from './restApi.js';
 
@@ -41,6 +42,7 @@ function harness(
     /** Extra or replacement BridgeClient methods. */
     client?: Record<string, unknown>;
     log?: (msg: string) => void;
+    cursors?: CursorStore;
   } = {},
 ) {
   const created: Array<{
@@ -58,6 +60,10 @@ function harness(
   let nextId = 1;
   let nextThread = 1;
   const subscribed: string[] = [];
+  const streams = new Map<
+    string,
+    { signal?: AbortSignal; onEvent: (ev: unknown) => void }
+  >();
   let registered: Record<string, unknown> | undefined;
   let startedHandlers: GatewayHandlers | undefined;
   const timers: Array<() => void> = [];
@@ -99,8 +105,13 @@ function harness(
         ? { ok: true, status: 200, sessionId: 'sess_new' }
         : { ok: false, status: 400, body: { error: 'bad' } },
     heartbeat: async () => ({ ok: true, status: 200 }),
-    subscribeEvents: async (sessionId: string) => {
+    subscribeEvents: async (
+      sessionId: string,
+      onEvent: (ev: unknown) => void,
+      signal?: AbortSignal,
+    ) => {
       subscribed.push(sessionId);
+      streams.set(sessionId, { signal, onEvent });
     },
     ...opts.client,
   } as unknown as BridgeClient;
@@ -119,6 +130,7 @@ function harness(
     // test overrides this to exercise re-subscription.
     sleep: opts.sleep ?? (() => new Promise<void>(() => {})),
     ...(opts.log ? { log: opts.log } : {}),
+    ...(opts.cursors ? { cursors: opts.cursors, tokenId: 'tok_d' } : {}),
     setTimer: (_ms, fn) => {
       timers.push(fn);
       return () => {
@@ -134,6 +146,7 @@ function harness(
     edited,
     threadsMade,
     subscribed,
+    streams,
     isRegistered: () => !!registered,
     registration: () => registered,
     handlers: () => startedHandlers,
@@ -159,6 +172,33 @@ describe('DiscordBridge runner', () => {
       maxMessageChars: 2000,
     });
     expect(h.subscribed).toContain('sess_q');
+  });
+
+  it('a detach removes the session cursor and closes its stream; another channel keeps its own (#204)', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    await channels.bind('chan_2', 'g1', 'sess_keep');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_d', 'sess_q', 11);
+    await cursors.setLastEventId('tok_d', 'sess_keep', 22);
+    const h = harness({ cursors });
+    await h.bridge.start(new AbortController().signal);
+    await waitFor(() => h.streams.has('sess_q') && h.streams.has('sess_keep'));
+
+    h.handlers()!.onSlash({
+      interactionId: 'int_1',
+      interactionToken: 'tok',
+      channelId: 'chan_1',
+      guildId: 'g1',
+      userId: 'u1',
+      name: 'detach',
+      arg: '',
+    });
+    await waitFor(() => cursors.get('tok_d', 'sess_q') === undefined);
+    expect(cursors.get('tok_d', 'sess_keep')?.lastEventId).toBe(22);
+    expect(h.streams.get('sess_q')?.signal?.aborted).toBe(true);
+    expect(h.streams.get('sess_keep')?.signal?.aborted).toBe(false);
+    await cursors['inFlight'];
+    await cursors['queued'];
   });
 
   it('an attach via the gateway subscribes the newly-bound session', async () => {

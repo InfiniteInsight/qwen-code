@@ -8,7 +8,11 @@ import type { WriteResult } from '../client.js';
 import type { MatrixRestResult } from './restApi.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { subActorOf, voteForReaction, outcomeFor } from './render.js';
-import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import {
+  promptFailureNotice,
+  voteFailureNotice,
+  REQUEST_NO_LONGER_PENDING,
+} from '../gatewayReplies.js';
 import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
@@ -82,6 +86,18 @@ export interface TrackedEvent {
    *    guidance reply ("This decision requires the web client …").
    */
   surface: 'inline' | 'deeplink';
+  /**
+   * Epoch ms after which the bridge stops tracking this request (#204): the
+   * request's own timeout when the frame carried one, else an hour after it was
+   * posted. Absent = never expires.
+   */
+  expiresAt?: number;
+}
+
+/** A tracked request that expired unresolved; a reaction on it is answered. */
+export interface ExpiredEvent {
+  requestId: string;
+  roomId: string;
 }
 
 export interface MatrixDispatchDeps {
@@ -96,6 +112,11 @@ export interface MatrixDispatchDeps {
   encryptedRooms: Set<string>;
   /** eventId → tracked permission_request (for reaction → vote resolution). */
   tracked: Map<string, TrackedEvent>;
+  /**
+   * eventId → a request that expired unresolved (bounded by the runner). A
+   * reaction on one is told the request is no longer pending (#204).
+   */
+  expired?: Map<string, ExpiredEvent>;
   /**
    * requestIds for which the deeplink-guidance reply has already been sent
    * (once per requestId, to avoid repeating the notice on every reaction). The
@@ -305,7 +326,21 @@ export async function handleReaction(
   if (deps.bans.has(subActor)) return; // banned → never relayed (not redacted)
 
   const tracked = deps.tracked.get(reaction.targetEventId);
-  if (!tracked) return; // not one of our permission-request messages
+  if (!tracked) {
+    // Not tracked: either not ours, or a request that expired unresolved. Say
+    // "no longer pending" only to a thumb from the room it was posted to.
+    const gone = deps.expired?.get(reaction.targetEventId);
+    if (
+      gone &&
+      reaction.roomId === gone.roomId &&
+      voteForReaction(reaction.key)
+    )
+      await deps.rest.sendMessage(reaction.roomId, {
+        msgtype: 'm.text',
+        body: REQUEST_NO_LONGER_PENDING,
+      });
+    return;
+  }
 
   const refusal =
     reaction.roomId !== tracked.roomId

@@ -58,9 +58,10 @@ import { startDaemon, type DaemonHandle } from './daemonSupervisor.js';
 import {
   DaemonBinError,
   detectBuildDrift,
+  formatBrokenBuildWarning,
   formatDaemonBinLine,
   formatDriftWarning,
-  readDaemonVersion,
+  probeDaemonBin,
   resolveDaemonBin,
   validateQwenBinPath,
 } from './daemonBin.js';
@@ -104,7 +105,6 @@ import {
 import { SnoozeStore } from './routing/snooze.js';
 import {
   loadLayeredRoutingMatcher,
-  loadLayeredRoutingMatcherStrict,
   loadResolvedRoutingRules,
   formatResolvedRouting,
 } from './routing/rules.js';
@@ -201,9 +201,12 @@ import {
   FileQuotaWal,
   quotaLimitsFromPolicy,
 } from './policy/quotas.js';
-import { PolicyReloader } from './policy/reloader.js';
+import {
+  createPolicyHotReload,
+  createRoutingHotReload,
+  type HotReload,
+} from './policy/hotReload.js';
 import { PermissionOverlayStore } from './policy/overlays.js';
-import { DebouncedReloader } from './reload/debouncedReloader.js';
 import {
   checkPolicyFilePermissions,
   formatInsecurePolicyWarning,
@@ -516,13 +519,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       'qwen-rc serve: no `qwen` on PATH and no --qwen-bin; the daemon spawn will fail',
     );
   }
+  const daemonProbe = await probeDaemonBin(daemonBin.path);
   // eslint-disable-next-line no-console
-  console.log(
-    formatDaemonBinLine(
-      daemonBin.path,
-      await readDaemonVersion(daemonBin.path),
-    ),
-  );
+  console.log(formatDaemonBinLine(daemonBin.path, daemonProbe.version));
+  // A bundle that cannot load (a rebuilt `core` under a stale `cli`, #191)
+  // would otherwise be found by a terminal tab on the user's screen.
+  const brokenBuild = formatBrokenBuildWarning(daemonBin.path, daemonProbe);
+  if (brokenBuild) {
+    // eslint-disable-next-line no-console
+    console.warn(brokenBuild);
+  }
   const terminalArgv = terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN);
   const buildDrift = daemonBin.found
     ? detectBuildDrift(daemonBin.path, terminalArgv, process.env.PATH)
@@ -981,6 +987,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       ? { maxAttachmentBytes: opts.maxAttachmentBytes }
       : {}),
     daemonQwenBin: daemonBin.path,
+    daemonQwenBinHealthy: daemonProbe.healthy,
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
     nativeShellsCapability: () => {
@@ -1272,66 +1279,40 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // Policy hot-reload (cycle 45, Phase 3.1): watch both policy files; on a
   // debounced (250 ms) change, reload the LAYERED policy and, on success, swap
   // it into the enforcer AND rebuild the quota limits IN PLACE. A malformed
-  // reload RETAINS the previous ruleset (PolicyReloader never throws) and audits
-  // policy_reload_failed — a running gateway must not crash/widen on a half-typed
-  // save (spec "Parse error preserves previous ruleset"). NOTE: a rule id reused
-  // across a reload inherits its prior consumption counts (fail-safe: more
-  // prompting, not a loosening). The policy_load_error SSE frame is deferred —
-  // no gateway-level owner-broadcast surface exists yet (Phase 4).
+  // reload RETAINS the previous ruleset and audits policy_reload_failed (file
+  // and reason), a running gateway must not crash/widen on a half-typed save
+  // (spec "Parse error preserves previous ruleset"). The workspace file is
+  // model-writable (issue #156): the reload runs the same loader as boot, so it
+  // can only narrow, and createPolicyHotReload bounds how often it can run.
+  // NOTE: a rule id reused across a reload inherits its prior consumption
+  // counts (fail-safe: more prompting, not a loosening). The policy_load_error
+  // SSE frame is deferred: no gateway-level owner-broadcast surface exists yet
+  // (Phase 4).
   const watchers: FSWatcher[] = [];
-  let reloader: PolicyReloader | undefined;
+  let reloader: HotReload | undefined;
   // Routing hot-reload (notification-routing spec: "hot-reloaded on change with a
   // 250 ms debounce; on parse failure retain the previously-compiled ruleset and
   // emit routing_reload_failed"). Symmetric to the policy reloader above and
   // shares its dir watchers. The STRICT loader throws on a malformed layer so a
   // half-typed save RETAINS the prior rules (a silent fail-open would instead
   // WIDEN the fan-out). The swap is a sync notifier.setRouting; per-event
-  // atomicity is handled by notify() capturing the matcher once.
-  let routingReloader:
-    | DebouncedReloader<
-        Awaited<ReturnType<typeof loadLayeredRoutingMatcherStrict>>
-      >
-    | undefined;
+  // atomicity is handled by notify() capturing the matcher once. The workspace
+  // routing.yaml is held to the same bounds as the policy one (issue #156): it
+  // adds rules, it cannot remove or take over a user rule, and the reload is
+  // bounded and audited (routing_reloaded / routing_reload_failed with file).
+  let routingReloader: HotReload | undefined;
   if (enforcer) {
     const activeEnforcer = enforcer;
-    reloader = new PolicyReloader({
-      load: () =>
-        loadLayeredPolicy(
-          join(homedir(), '.qwen', 'rc', 'policy.yaml'),
-          workspaceCwd,
-          // eslint-disable-next-line no-console
-          (msg) => console.warn(msg),
-          // RELOAD semantics: a malformed workspace file must RETAIN the
-          // previous ruleset (throw → onError), not silently drop the layer and
-          // widen permissions. A deleted (ENOENT) workspace file still resolves
-          // to user-only (an intended layer removal).
-          { strictWorkspace: true },
-        ),
+    reloader = createPolicyHotReload({
+      userPath: join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+      workspaceCwd,
       // apply MUST stay synchronous (atomic vs handlePermission's await-vote).
       apply: (p) => {
         activeEnforcer.setPolicy(p);
         applyQuotaLimits(p);
         currentPolicy = p;
       },
-      onReloaded: (p) => {
-        void audit.record({
-          action: 'policy_reloaded',
-          detail: { ruleCount: p.rules.length },
-        });
-        // eslint-disable-next-line no-console
-        console.log(`policy: reloaded (${p.rules.length} rule(s))`);
-      },
-      onError: (err) => {
-        const reason = (err as Error)?.name ?? 'error';
-        void audit.record({
-          action: 'policy_reload_failed',
-          detail: { reason },
-        });
-        // eslint-disable-next-line no-console
-        console.warn(
-          `policy: reload failed, keeping previous ruleset (${reason})`,
-        );
-      },
+      audit,
     });
     const activeReloader = reloader;
     // Routing shares the same workspace cwd + parent dirs as policy, so build its
@@ -1340,31 +1321,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (notifier) {
       const activeNotifier = notifier;
       const routingPath = join(homedir(), '.qwen', 'rc', 'routing.yaml');
-      routingReloader = new DebouncedReloader({
-        load: () => loadLayeredRoutingMatcherStrict(routingPath, workspaceCwd),
+      routingReloader = createRoutingHotReload({
+        userPath: routingPath,
+        workspaceCwd,
         // Sync field swap; notify() captures the matcher once per event.
-        apply: ({ matcher }) => activeNotifier.setRouting(matcher),
-        onReloaded: ({ ruleCount }) => {
-          void audit.record({
-            action: 'routing_reloaded',
-            detail: { ruleCount },
-          });
-          // eslint-disable-next-line no-console
-          console.log(
-            `routing: reloaded (${ruleCount === 0 ? 'no' : ruleCount} rule(s))`,
-          );
-        },
-        onError: (err) => {
-          const reason = (err as Error)?.name ?? 'error';
-          void audit.record({
-            action: 'routing_reload_failed',
-            detail: { reason },
-          });
-          // eslint-disable-next-line no-console
-          console.warn(
-            `routing: reload failed, keeping previous ruleset (${reason})`,
-          );
-        },
+        apply: (matcher) => activeNotifier.setRouting(matcher),
+        audit,
       });
     }
     const activeRoutingReloader = routingReloader;
@@ -1381,10 +1343,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
             // filename can be null on some platforms/events → trigger anyway
             // (the watched dirs are tiny; debounce collapses spurious wakes).
             if (filename === null || filename === 'policy.yaml') {
-              activeReloader.trigger();
+              activeReloader.trigger(
+                filename === null ? undefined : join(dir, filename),
+              );
             }
             if (filename === null || filename === 'routing.yaml') {
-              activeRoutingReloader?.trigger();
+              activeRoutingReloader?.trigger(
+                filename === null ? undefined : join(dir, filename),
+              );
             }
           }),
         );

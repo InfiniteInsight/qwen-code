@@ -12,6 +12,7 @@ import { MatrixRoomStore } from './roomStore.js';
 import { MatrixBridge, MATRIX_INVITE_AUTOJOIN_CAP } from './runner.js';
 import { ENCRYPTED_ROOM_NOTICE } from './dispatch.js';
 import { initialMatrixHealthState, type MatrixHealthState } from './health.js';
+import { CursorStore } from '../cursorStore.js';
 import type { BridgeClient } from '../client.js';
 import type { MatrixInbound } from './runner.js';
 
@@ -45,6 +46,8 @@ function harness(
     /** Replaces the fake gateway prompt call (it records into `prompts`). */
     sendPrompt?: (sessionId: string, prompt: string) => Promise<unknown>;
     log?: (msg: string) => void;
+    cursors?: CursorStore;
+    now?: () => number;
   } = {},
 ) {
   const sent: Array<{ roomId: string; content: unknown }> = [];
@@ -73,6 +76,10 @@ function harness(
   } as unknown as MatrixInbound;
 
   const subscribed: string[] = [];
+  const streams = new Map<
+    string,
+    { signal?: AbortSignal; onEvent: (ev: unknown) => void }
+  >();
   const timers: Array<() => void> = [];
   let registered: Record<string, unknown> | undefined;
   const client = {
@@ -101,8 +108,13 @@ function harness(
       votes.push({ sessionId, requestId, outcome, subActor });
       return { ok: true, status: 200 };
     },
-    subscribeEvents: async (sessionId: string) => {
+    subscribeEvents: async (
+      sessionId: string,
+      onEvent: (ev: unknown) => void,
+      signal?: AbortSignal,
+    ) => {
       subscribed.push(sessionId);
+      streams.set(sessionId, { signal, onEvent });
     },
   } as unknown as BridgeClient;
 
@@ -126,6 +138,8 @@ function harness(
     ...(opts.runInbound ? { runInbound: opts.runInbound } : {}),
     ...(opts.health ? { health: opts.health } : {}),
     ...(opts.log ? { log: opts.log } : {}),
+    ...(opts.cursors ? { cursors: opts.cursors, tokenId: 'tok_m' } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
     sleep: () => new Promise<void>(() => {}), // park SSE reconnect after 1 subscribe
     setTimer: (_ms, fn) => {
       timers.push(fn);
@@ -144,6 +158,7 @@ function harness(
     prompts,
     votes,
     subscribed,
+    streams,
     syncCalls: () => syncCalls,
     registered: () => registered,
     fireTimers: () => {
@@ -361,6 +376,72 @@ describe('MatrixBridge runner — sync loop', () => {
     await h.bridge.start(h.ac.signal);
     await waitFor(() => h.subscribed.includes('sess_q'));
     expect(h.subscribed).toContain('sess_q');
+  });
+});
+
+describe('MatrixBridge runner, cursors of unbound sessions (#204)', () => {
+  it('removes the cursor of a session when its room is detached, and closes the stream', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    await rooms.bind('!keep:h', 'sess_keep');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_m', 'sess_q', 11);
+    await cursors.setLastEventId('tok_m', 'sess_keep', 22);
+    const h = harness([], { park: true, cursors });
+    void h.bridge.start(h.ac.signal);
+    await waitFor(() => h.streams.has('sess_q') && h.streams.has('sess_keep'));
+
+    await h.bridge.dispatchDecryptedMessage(
+      { roomId: '!r:h', sender: '@mod:h', body: '!qwen detach' },
+      50,
+    );
+
+    expect(rooms.sessionFor('!r:h')).toBeUndefined();
+    expect(cursors.get('tok_m', 'sess_q')).toBeUndefined();
+    expect(cursors.get('tok_m', 'sess_keep')?.lastEventId).toBe(22);
+    expect(h.streams.get('sess_q')?.signal?.aborted).toBe(true);
+    expect(h.streams.get('sess_keep')?.signal?.aborted).toBe(false);
+
+    // A frame still in flight on the closed stream does not bring it back.
+    h.streams.get('sess_q')?.onEvent({ id: 12, type: 'session_update' });
+    expect(cursors.get('tok_m', 'sess_q')).toBeUndefined();
+    h.ac.abort();
+    await cursors['inFlight'];
+    await cursors['queued'];
+  });
+
+  it('keeps the cursor while another room is still bound to the session', async () => {
+    await rooms.bind('!a:h', 'sess_q');
+    await rooms.bind('!b:h', 'sess_q');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_m', 'sess_q', 11);
+    const h = harness([], { park: true, cursors });
+    void h.bridge.start(h.ac.signal);
+    await waitFor(() => h.streams.has('sess_q'));
+    await h.bridge.dispatchDecryptedMessage(
+      { roomId: '!a:h', sender: '@mod:h', body: '!qwen detach' },
+      50,
+    );
+    expect(cursors.get('tok_m', 'sess_q')?.lastEventId).toBe(11);
+    expect(h.streams.get('sess_q')?.signal?.aborted).toBe(false);
+    h.ac.abort();
+  });
+
+  it('removes the cursor of the old session when a room is re-attached to another', async () => {
+    await rooms.bind('!r:h', 'sess_old');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_m', 'sess_old', 4);
+    const h = harness([], { park: true, cursors });
+    void h.bridge.start(h.ac.signal);
+    await waitFor(() => h.streams.has('sess_old'));
+    await h.bridge.dispatchDecryptedMessage(
+      { roomId: '!r:h', sender: '@mod:h', body: '!qwen attach tok123' },
+      50,
+    );
+    await waitFor(() => h.streams.has('sess_new'));
+    expect(cursors.get('tok_m', 'sess_old')).toBeUndefined();
+    h.ac.abort();
+    await cursors['inFlight'];
+    await cursors['queued'];
   });
 });
 
@@ -651,6 +732,119 @@ describe('MatrixBridge.dispatchReaction (E2EE vote routing seam)', () => {
       key: '👍',
     });
     expect(h.votes).toEqual([]);
+  });
+});
+
+describe('MatrixBridge, permission requests that never resolve (#204)', () => {
+  const HOUR = 60 * 60 * 1000;
+  const request = (requestId: string, extra: Record<string, unknown> = {}) =>
+    ({
+      type: 'permission_request',
+      data: {
+        requestId,
+        bridgeHints: {
+          argsSummaryShort: 'run ls',
+          recommendedSurface: 'inline',
+        },
+        ...extra,
+      },
+    }) as never;
+  const thumbsUp = (eventId: string) => ({
+    roomId: '!r:h',
+    sender: '@alice:h',
+    targetEventId: eventId,
+    key: '👍',
+  });
+  const texts = (h: ReturnType<typeof harness>) =>
+    h.sent.map((s) => (s.content as { body?: string }).body ?? '');
+
+  it('drops an unresolved request after an hour, logs it, and answers a late reaction "no longer pending"', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 1_000_000;
+    const logs: string[] = [];
+    const h = harness([], { now: () => t, log: (m) => logs.push(m) });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    expect(h.bridge['tracked'].size).toBe(1);
+
+    t += HOUR - 1;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toHaveLength(1); // still pending: the vote goes through
+
+    t += 2; // past the hour
+    h.votes.length = 0;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toEqual([]); // nothing is cast on an expired request
+    expect(texts(h).at(-1)).toBe(
+      'Vote failed: this request is no longer pending.',
+    );
+    expect(h.bridge['tracked'].size).toBe(0);
+    expect(h.bridge['sent'].size).toBe(0);
+    expect(logs.some((l) => l.includes('req1') && l.includes('expired'))).toBe(
+      true,
+    );
+  });
+
+  it('expires on the request’s own timeout when the frame carries one', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 5_000;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1', { timeoutMs: 30_000 }));
+    await waitFor(() => h.sent.length === 1);
+    t += 29_999;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toHaveLength(1);
+    t += 2;
+    h.votes.length = 0;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.votes).toEqual([]);
+    expect(texts(h).at(-1)).toContain('no longer pending');
+  });
+
+  it('a later request sweeps the expired ones out of memory', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 0;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    t += HOUR + 1;
+    h.bridge.deliverEvent('sess_q', request('req2'));
+    await waitFor(() => h.sent.length === 2);
+    expect([...h.bridge['tracked'].values()].map((x) => x.requestId)).toEqual([
+      'req2',
+    ]);
+    expect([...h.bridge['sent'].keys()]).toEqual(['req2']);
+  });
+
+  it('an expired request answers a reaction only in the room it was posted to', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 0;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    t += HOUR + 1;
+    await h.bridge.dispatchReaction({
+      ...thumbsUp('$evt_1'),
+      roomId: '!evil:attacker.org',
+    });
+    expect(h.sent).toHaveLength(1); // no reply into a stranger's room
+    expect(h.votes).toEqual([]);
+  });
+
+  it('a resolved request is not left in the expired record', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    let t = 0;
+    const h = harness([], { now: () => t });
+    h.bridge.deliverEvent('sess_q', request('req1'));
+    await waitFor(() => h.sent.length === 1);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_resolved',
+      data: { requestId: 'req1', outcome: 'allow_once' },
+    } as never);
+    await waitFor(() => h.sent.length === 2);
+    t += HOUR + 1;
+    await h.bridge.dispatchReaction(thumbsUp('$evt_1'));
+    expect(h.sent).toHaveLength(2); // a resolved request stays quiet, as before
   });
 });
 

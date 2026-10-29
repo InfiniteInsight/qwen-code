@@ -23,6 +23,7 @@ import { extractAgentText } from './streamFrame.js';
 import { runHeartbeatLoop } from '../heartbeat.js';
 import { heartbeatIntervalMsOf } from '../heartbeat.js';
 import type { CursorStore } from '../cursorStore.js';
+import { SubscriptionCursors } from '../sessionCursors.js';
 
 /**
  * The injected inbound transport. The runner only needs "start the gateway and
@@ -105,7 +106,7 @@ export class DiscordBridge {
   private readonly bans = new BanCache();
   private readonly subscribed = new Set<string>();
   /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
-  private readonly lastEventId = new Map<string, number>();
+  private readonly cursors: SubscriptionCursors;
   /** requestId → every channel message that rendered it (edited on resolve). */
   private readonly sent = new Map<string, SentRequest[]>();
   /** Streams agent prose into channels with buffering + threads-on-long-stream. */
@@ -114,6 +115,7 @@ export class DiscordBridge {
 
   constructor(cfg: DiscordBridgeConfig) {
     this.cfg = cfg;
+    this.cursors = new SubscriptionCursors(cfg.cursors, cfg.tokenId);
     this.log = cfg.log ?? (() => {});
     const poster: StreamPoster = {
       postMessage: async (dest, content) => {
@@ -166,12 +168,7 @@ export class DiscordBridge {
    */
   async start(signal: AbortSignal): Promise<void> {
     // Load durable cursors so SSE subscriptions resume from where they left off.
-    if (this.cfg.cursors && this.cfg.tokenId) {
-      for (const sessionId of this.cfg.channels.boundSessions()) {
-        const entry = this.cfg.cursors.get(this.cfg.tokenId, sessionId);
-        if (entry) this.lastEventId.set(sessionId, entry.lastEventId);
-      }
-    }
+    this.cursors.load(this.cfg.channels.boundSessions());
     const reg = await this.registerSelf();
     this.log(
       reg.ok
@@ -234,7 +231,13 @@ export class DiscordBridge {
    * aborts.
    */
   private reconcileSubscriptions(signal: AbortSignal): void {
-    for (const sessionId of this.cfg.channels.boundSessions()) {
+    const bound = this.cfg.channels.boundSessions();
+    // A session whose binding went (detach, or a channel re-attached elsewhere)
+    // loses its stream and its cursor entry (#204).
+    for (const sessionId of this.cursors.release(bound)) {
+      this.log(`discord bridge: session ${sessionId} unbound, cursor dropped`);
+    }
+    for (const sessionId of bound) {
       if (this.subscribed.has(sessionId)) continue;
       this.subscribed.add(sessionId);
       void this.subscriptionLoop(sessionId, signal);
@@ -247,8 +250,9 @@ export class DiscordBridge {
   ): Promise<void> {
     const sleep = this.cfg.sleep ?? defaultSleep;
     let backoff = RECONNECT_INITIAL_MS;
+    const stream = this.cursors.signalFor(sessionId, signal);
     try {
-      while (!signal.aborted) {
+      while (!stream.aborted) {
         // subscribeEvents resolves when the stream ends (or never opened); the
         // caller owns reconnection — that's this loop. Resume from the last frame
         // id seen so a reconnect catches frames that arrived during the blip.
@@ -256,23 +260,17 @@ export class DiscordBridge {
           sessionId,
           (ev) => {
             if (typeof ev.id === 'number') {
-              this.lastEventId.set(sessionId, ev.id);
-              // Persist the cursor so restarts resume from here.
-              if (this.cfg.cursors && this.cfg.tokenId) {
-                void this.cfg.cursors.setLastEventId(
-                  this.cfg.tokenId,
-                  sessionId,
-                  ev.id,
-                );
-              }
+              // Persist the cursor so restarts resume from here (not for a
+              // stream whose session was unbound meanwhile).
+              this.cursors.record(sessionId, ev.id, stream);
             }
             this.deliverEvent(sessionId, ev);
           },
-          signal,
-          this.lastEventId.get(sessionId),
+          stream,
+          this.cursors.lastEventId.get(sessionId),
         );
-        if (signal.aborted) break;
-        await sleep(jitter(backoff), signal);
+        if (stream.aborted) break;
+        await sleep(jitter(backoff), stream);
         backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
       }
     } finally {
