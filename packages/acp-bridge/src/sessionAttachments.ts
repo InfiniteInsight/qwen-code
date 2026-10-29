@@ -21,7 +21,27 @@ export {
   type SessionAttachmentUploadMetadata,
 } from './session-attachment-uploads.js';
 
-export const SESSION_ATTACHMENT_MAX_ITEM_BYTES = 8 * 1024 * 1024;
+import {
+  DEFAULT_SESSION_ATTACHMENT_MAX_ITEM_BYTES,
+  formatSessionAttachmentLimit,
+  getSessionAttachmentMaxItemBytes,
+} from './sessionAttachmentLimits.js';
+export {
+  DEFAULT_SESSION_ATTACHMENT_MAX_ITEM_BYTES,
+  SESSION_ATTACHMENT_MAX_ITEM_BYTES_ENV,
+  formatSessionAttachmentLimit,
+  SESSION_ATTACHMENT_MAX_STAGED_BYTES,
+  getSessionAttachmentMaxItemBytes,
+  resolveSessionAttachmentMaxItemBytes,
+} from './sessionAttachmentLimits.js';
+
+/**
+ * The default per-attachment cap. The cap in force is configurable at daemon
+ * start (`QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES`); read it with
+ * `getSessionAttachmentMaxItemBytes()`.
+ */
+export const SESSION_ATTACHMENT_MAX_ITEM_BYTES =
+  DEFAULT_SESSION_ATTACHMENT_MAX_ITEM_BYTES;
 const SESSION_ATTACHMENT_MAX_NAME_BYTES = 255;
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   'image/bmp',
@@ -409,8 +429,11 @@ export class SessionAttachmentStore {
     if (!Number.isSafeInteger(metadata.size) || metadata.size < 0) {
       throw new TypeError('Attachment size must be a non-negative integer');
     }
-    if (metadata.size > SESSION_ATTACHMENT_MAX_ITEM_BYTES) {
-      throw new RangeError('Session attachment must be at most 8 MiB');
+    const maxItemBytes = getSessionAttachmentMaxItemBytes();
+    if (metadata.size > maxItemBytes) {
+      throw new RangeError(
+        `Session attachment must be at most ${formatSessionAttachmentLimit(maxItemBytes)}`,
+      );
     }
     if (metadata.size === 0 && isSupportedImageMimeType(metadata.mimeType)) {
       throw new TypeError('Image attachments cannot be empty');
@@ -511,12 +534,10 @@ export class SessionAttachmentStore {
       throw new Error('Session attachment store is closed');
     }
     if (this.copying) throw new Error('Session attachments are being copied');
-    if (
-      (isImage && data.byteLength === 0) ||
-      data.byteLength > SESSION_ATTACHMENT_MAX_ITEM_BYTES
-    ) {
+    const maxItemBytes = getSessionAttachmentMaxItemBytes();
+    if ((isImage && data.byteLength === 0) || data.byteLength > maxItemBytes) {
       throw new RangeError(
-        `Session attachment must be at most ${SESSION_ATTACHMENT_MAX_ITEM_BYTES} bytes and images cannot be empty`,
+        `Session attachment must be at most ${maxItemBytes} bytes and images cannot be empty`,
       );
     }
     let filePath: string | undefined;

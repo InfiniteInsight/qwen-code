@@ -294,4 +294,14 @@ describe('maxAttachmentBytes (#196)', () => {
       await m.close();
     }
   });
+
+  it('reports the resolved number when the limit follows the daemon', async () => {
+    const m = await mount({ maxAttachmentBytes: async () => 31 * 1024 * 1024 });
+    try {
+      const body = await (await fetch(`${m.base}/rc/capabilities`)).json();
+      expect(body.remoteControl.maxAttachmentBytes).toBe(31 * 1024 * 1024);
+    } finally {
+      await m.close();
+    }
+  });
 });

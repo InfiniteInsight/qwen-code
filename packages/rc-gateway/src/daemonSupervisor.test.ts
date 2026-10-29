@@ -6,7 +6,11 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { startStubDaemon, type StubDaemon } from './testing/stubDaemon.js';
-import { startDaemon, buildServeArgs } from './daemonSupervisor.js';
+import {
+  startDaemon,
+  buildServeArgs,
+  buildDaemonEnv,
+} from './daemonSupervisor.js';
 
 let stub: StubDaemon | undefined;
 afterEach(async () => {
@@ -169,5 +173,36 @@ describe('daemonSupervisor', () => {
     // With no injected spawner, port 0 would silently poll http://127.0.0.1:0
     // forever; convert that latent gap into an immediate, clear error.
     await expect(startDaemon({ port: 0 })).rejects.toThrow(/non-zero port/);
+  });
+});
+
+describe('buildDaemonEnv', () => {
+  it('hands the gateway attachment limit to the daemon as its per-item cap', () => {
+    const env = buildDaemonEnv({ PATH: '/bin' }, 'tok', 20 * 1024 * 1024);
+    expect(env).toMatchObject({
+      PATH: '/bin',
+      QWEN_SERVER_TOKEN: 'tok',
+      QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES: String(20 * 1024 * 1024),
+    });
+  });
+
+  it('overrides an inherited value when the gateway limit is set', () => {
+    const env = buildDaemonEnv(
+      { QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES: '999' },
+      'tok',
+      1000,
+    );
+    expect(env.QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES).toBe('1000');
+  });
+
+  it('leaves an inherited value alone when the gateway limit is not set', () => {
+    const env = buildDaemonEnv(
+      { QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES: '999' },
+      'tok',
+    );
+    expect(env.QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES).toBe('999');
+    expect(buildDaemonEnv({}, 'tok')).not.toHaveProperty(
+      'QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES',
+    );
   });
 });

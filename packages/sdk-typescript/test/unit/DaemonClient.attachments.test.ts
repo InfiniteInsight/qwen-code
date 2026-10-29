@@ -534,7 +534,8 @@ describe('session attachment chunk client', () => {
     await expect(
       client.uploadSessionAttachment(
         's',
-        new Blob([new Uint8Array(8 * 1024 * 1024 + 1)]),
+        // Past the 128 MiB staged budget: refused before any request.
+        { size: 128 * 1024 * 1024 + 1 } as unknown as Blob,
         'x.bin',
         'application/octet-stream',
       ),

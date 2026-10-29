@@ -5,11 +5,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { SESSION_ATTACHMENT_MAX_STAGED_BYTES } from './sessionAttachmentLimits.js';
 import type { SessionAttachmentReference } from './sessionAttachments.js';
 
 export const SESSION_ATTACHMENT_CHUNK_BYTES = 512 * 1024;
 const UPLOAD_LIFETIME_MS = 5 * 60 * 1000;
-const MAX_STAGED_BYTES = 128 * 1024 * 1024;
+const MAX_STAGED_BYTES = SESSION_ATTACHMENT_MAX_STAGED_BYTES;
 const MAX_ACTIVE_UPLOADS = 32;
 const MAX_SESSION_UPLOADS = 8;
 const MAX_RECEIPTS = 1024;

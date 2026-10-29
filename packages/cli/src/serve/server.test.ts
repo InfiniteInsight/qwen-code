@@ -12983,24 +12983,57 @@ describe('createServeApp', () => {
       expect(downloaded.headers['x-content-type-options']).toBe('nosniff');
     });
 
-    it('reports the media route 8 MiB body limit accurately', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
-        undefined,
-        { bridge: fakeBridge() },
+    it('reports the media route body limit accurately', async () => {
+      vi.stubEnv(
+        'QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES',
+        String(8 * 1024 * 1024),
       );
-      const response = await request(app)
-        .post('/session/s-1/attachments')
-        .query({ name: 'image.png' })
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('Authorization', 'Bearer secret')
-        .set('Content-Type', 'image/png')
-        .send(Buffer.alloc(8 * 1024 * 1024 + 1));
+      try {
+        const app = createServeApp(
+          { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const response = await request(app)
+          .post('/session/s-1/attachments')
+          .query({ name: 'image.png' })
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('Content-Type', 'image/png')
+          .send(Buffer.alloc(8 * 1024 * 1024 + 1));
 
-      expect(response.status).toBe(413);
-      expect(response.body).toEqual({
-        error: 'Request body too large (max 8 MiB)',
-      });
+        expect(response.status).toBe(413);
+        expect(response.body).toEqual({
+          error: 'Request body too large (max 8 MiB)',
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('advertises the per-attachment cap in /capabilities limits', async () => {
+      vi.stubEnv(
+        'QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES',
+        String(12 * 1024 * 1024),
+      );
+      try {
+        const app = createServeApp(
+          { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(response.status).toBe(200);
+        expect(response.body.features).toContain('session_attachments');
+        expect(response.body.limits.maxSessionAttachmentItemBytes).toBe(
+          12 * 1024 * 1024,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
   });
 

@@ -184,7 +184,7 @@ import {
   createAttachmentUploadRoute,
   gateJsonBody,
   createRawAttachmentBody,
-  effectiveAttachmentLimit,
+  createAttachmentLimitResolver,
 } from './routes/sessionAttachments.js';
 import {
   installAsyncErrorCapture,
@@ -564,7 +564,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use(gateJsonBody(express.json()));
   // #196: one number for the upload parser, its 413 text and the capability
   // the page reads to size an image before sending it.
-  const attachmentLimit = effectiveAttachmentLimit(deps.maxAttachmentBytes);
+  // It follows the per-file cap the daemon advertises (read lazily, cached),
+  // so raising the daemon's cap raises this without a gateway change.
+  const attachmentLimit = createAttachmentLimitResolver(
+    deps.maxAttachmentBytes,
+    () => deps.daemon.capabilities(),
+  );
 
   const registry = new ConnectionRegistry();
 
