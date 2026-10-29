@@ -6,7 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import type { PromptContentBlock } from '@qwen-code/sdk';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
@@ -142,9 +142,20 @@ export function createPromptRoute(
           { prompt: blocks },
           timeoutAbort.signal,
         );
-      } catch {
+      } catch (err) {
         if (timeoutAbort.signal.aborted) {
           timedOut = true;
+        } else if (err instanceof UnknownSessionError) {
+          // The pool holds no binding for this session, so no turn started:
+          // 409 like the sibling session routes (resume restores the
+          // binding), and no `prompt_failed` push for a turn that never ran.
+          if (!res.closed) {
+            res.status(409).json({
+              error: 'Open this conversation before sending a prompt',
+              code: 'session_not_loaded',
+            });
+          }
+          return;
         } else {
           // Daemon error unrelated to the timeout. Respond only if the client
           // is still connected; the slot is released in the finally below.
