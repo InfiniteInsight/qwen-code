@@ -283,7 +283,12 @@ export function gateJsonBody(json: RequestHandler): RequestHandler {
     (req.method === 'POST' && req.path.endsWith('/attachments')) ||
     // #130: one chunk of a resumable upload is a slice of the file, whatever
     // media type the file has.
-    (req.method === 'PUT' && /\/attachment-uploads\/[^/]+\/chunks\/[^/]+$/.test(req.path))
+    (req.method === 'PUT' && /\/attachment-uploads\/[^/]+\/chunks\/[^/]+$/.test(req.path)) ||
+    // #123: a workspace file write, edit or upload reads its own body after
+    // the scope check, under the #196 limit rather than this parser's 100 KB
+    // (routes/workspaceFileWrites.ts, createWorkspaceFileBody).
+    (req.method === 'POST' &&
+      /^\/rc\/workspace\/file\/(write|edit|upload)$/.test(req.path))
       ? next()
       : json(req, res, next);
 }

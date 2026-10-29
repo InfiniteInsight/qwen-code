@@ -276,6 +276,12 @@ export function createCapabilityRoute(deps: {
       ...(deps.daemonQwenBinHealthy !== undefined && audience === 'full'
         ? { daemonQwenBinHealthy: deps.daemonQwenBinHealthy }
         : {}),
+      // #123: /rc/workspace/{stat,file/write,file/edit,file/upload,file/delete}
+      // are mounted. The page draws its file-write controls only when this is
+      // true, the token holds write (`writeScope`), and the daemon advertises
+      // the route's own tag, so an old gateway, a reader and an old daemon
+      // each see none.
+      workspaceFileWrites: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

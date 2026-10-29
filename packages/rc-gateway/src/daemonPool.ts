@@ -72,8 +72,55 @@ import {
   type DaemonWorkspaceMemoryStatus,
   type DaemonWorkspaceAgentsStatus,
 } from '@qwen-code/sdk/daemon';
+import {
+  requireWorkspaceCwd,
+  type DaemonWorkspaceFileWriteRequest,
+  type DaemonWorkspaceFileWriteResult,
+  type DaemonWorkspaceFileEditRequest,
+  type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileUploadRequest,
+  type DaemonWorkspaceFileUploadResult,
+} from '@qwen-code/sdk/daemon';
 import type { AuditRecorder } from './auditLog.js';
 import { asDaemonHttpError, isSessionLevelGone } from './daemonHttpError.js';
+
+/** What {@link deleteWorkspaceFileOnPrimary} needs from a client. */
+export type PrimaryWorkspaceDeleteClient = Pick<
+  DaemonClient,
+  'capabilities' | 'workspaceById' | 'workspaceByCwd'
+>;
+
+/**
+ * Delete one file in the daemon's own primary workspace (#123).
+ *
+ * The daemon mounts deletion only as `POST /workspaces/:workspace/file/delete`
+ * and the SDK carries `deleteWorkspaceFile` only on `WorkspaceDaemonClient`,
+ * so the call needs a workspace selector even for a daemon bound to one
+ * workspace. The daemon's own capabilities say which: the primary entry of
+ * `workspaces` by id when it lists them (newer daemons do, "so
+ * workspace-qualified features can address it by ID"), else `workspaceCwd`.
+ * Asking costs one round trip per delete, which is the price of never
+ * guessing at a path the daemon canonicalised differently. A daemon that
+ * names neither throws `DaemonCapabilityMissingError`.
+ *
+ * One implementation for the pool and for a route handed a bare client.
+ */
+export async function deleteWorkspaceFileOnPrimary(
+  client: PrimaryWorkspaceDeleteClient,
+  filePath: string,
+  clientId?: string,
+): Promise<void> {
+  const caps = await client.capabilities();
+  const primary = Array.isArray(caps.workspaces)
+    ? caps.workspaces.find(
+        (w) => w && w.primary === true && typeof w.id === 'string' && w.id,
+      )
+    : undefined;
+  const target = primary
+    ? client.workspaceById(primary.id)
+    : client.workspaceByCwd(requireWorkspaceCwd(caps));
+  await target.deleteWorkspaceFile(filePath, clientId);
+}
 
 /**
  * Per-id outcome of `POST /sessions/delete`. Named here because the SDK
@@ -590,6 +637,40 @@ export interface SessionDaemon {
     clientId?: string,
     workspaceCwd?: string,
   ): Promise<DaemonWorkspaceFileBytes>;
+
+  // -- Workspace file writes (#123) -------------------------------------
+  // Same convention as the reads above: the SDK's own names and shipped
+  // parameters, `workspaceCwd` appended and never forwarded. `fileStat` is
+  // the stat read the delete confirmation names a size from.
+  fileStat(filePath: string, workspaceCwd?: string): Promise<unknown>;
+  writeWorkspaceFile(
+    req: DaemonWorkspaceFileWriteRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileWriteResult>;
+  editWorkspaceFile(
+    req: DaemonWorkspaceFileEditRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileEditResult>;
+  uploadWorkspaceFile(
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult>;
+  /**
+   * OPTIONAL, unlike its siblings: the SDK name is `WorkspaceDaemonClient`'s,
+   * and a bare `DaemonClient` has no method of that name (the daemon serves
+   * deletion only under `/workspaces/:workspace`). Declaring it required
+   * would be the D61 trap, a member the bare client lacks at runtime while
+   * tsc stays clean. The delete route falls back to
+   * {@link deleteWorkspaceFileOnPrimary} when it is absent.
+   */
+  deleteWorkspaceFile?(
+    filePath: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
 
   // -- Sessions at rest (add-capability-parity #111) --------------------
   // Batch actions over stored transcripts, workspace-scoped like the block
@@ -2575,6 +2656,59 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonWorkspaceFileBytes> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.readWorkspaceFileBytes(filePath, opts, clientId),
+    );
+  }
+
+  // -- Workspace file writes (#123) -------------------------------------
+  // Each routes to the target workspace's daemon like the reads above. The
+  // daemon answers a stale replace with 409 `hash_mismatch` itself; the pool
+  // only carries the call.
+
+  fileStat(filePath: string, workspaceCwd?: string): Promise<unknown> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.fileStat(filePath),
+    );
+  }
+
+  writeWorkspaceFile(
+    req: DaemonWorkspaceFileWriteRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileWriteResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.writeWorkspaceFile(req, clientId),
+    );
+  }
+
+  editWorkspaceFile(
+    req: DaemonWorkspaceFileEditRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileEditResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.editWorkspaceFile(req, clientId),
+    );
+  }
+
+  uploadWorkspaceFile(
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.uploadWorkspaceFile(req, clientId),
+    );
+  }
+
+  /** Every pooled daemon is bound to its own workspace, so "its primary" is
+   * the target workspace whichever daemon answers. */
+  deleteWorkspaceFile(
+    filePath: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      deleteWorkspaceFileOnPrimary(client, filePath, clientId),
     );
   }
 
