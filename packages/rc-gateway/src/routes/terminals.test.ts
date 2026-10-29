@@ -58,13 +58,23 @@ function daemonWith(
   return (lookup ? { daemonEndpointForSession: lookup } : {}) as SessionDaemon;
 }
 
-async function call(daemon: SessionDaemon, body: unknown): Promise<Captured> {
+async function call(
+  daemon: SessionDaemon,
+  body: unknown,
+  isMirrored: (sessionId: string) => Promise<boolean> = async () => false,
+): Promise<Captured> {
   const { res, out } = fakeRes();
-  const handler = createTerminalOpenRoute(daemon, log, {
-    record: (r: Record<string, unknown>) => {
-      audits.push(r);
-    },
-  } as never);
+  const handler = createTerminalOpenRoute(
+    daemon,
+    log,
+    {
+      record: (r: Record<string, unknown>) => {
+        audits.push(r);
+      },
+    } as never,
+    {},
+    isMirrored,
+  );
   await handler({ body, rcClient: { id: 'tok-1' } } as never, res as never);
   return out;
 }
@@ -186,5 +196,58 @@ describe('POST /rc/terminals', () => {
     });
     expect(JSON.stringify(audits[0])).not.toContain('secret-tok');
     expect(JSON.stringify(audits[0])).not.toContain('/srv/work/proj');
+  });
+
+  it('answers 200 alreadyMirrored and queues nothing when a terminal is attached', async () => {
+    const asked: string[] = [];
+    const out = await call(
+      daemonWith(() => ENDPOINT),
+      { sessionId: SESSION },
+      async (id) => {
+        asked.push(id);
+        return true;
+      },
+    );
+    expect(out.status).toBe(200);
+    expect(out.body).toEqual({ alreadyMirrored: true, sessionId: SESSION });
+    expect(asked).toEqual([SESSION]);
+    expect(await log.readAll()).toEqual([]);
+    expect(audits).toEqual([]);
+    expect(JSON.stringify(out.body)).not.toContain('secret-tok');
+  });
+
+  it('still refuses an unknown session before looking for a mirror', async () => {
+    const out = await call(
+      daemonWith(() => {
+        throw new UnknownSessionError(SESSION);
+      }),
+      { sessionId: SESSION },
+      async () => true,
+    );
+    expect(out.status).toBe(404);
+  });
+
+  it('queues with 202 when nothing is attached to the session', async () => {
+    const out = await call(
+      daemonWith(() => ENDPOINT),
+      { sessionId: SESSION },
+      async () => false,
+    );
+    expect(out.status).toBe(202);
+    expect(out.body?.alreadyMirrored).toBeUndefined();
+    expect(await log.readAll()).toHaveLength(1);
+    expect(audits).toHaveLength(1);
+  });
+
+  it('queues with 202 when the mirror check itself fails', async () => {
+    const out = await call(
+      daemonWith(() => ENDPOINT),
+      { sessionId: SESSION },
+      async () => {
+        throw new Error('boom');
+      },
+    );
+    expect(out.status).toBe(202);
+    expect(await log.readAll()).toHaveLength(1);
   });
 });

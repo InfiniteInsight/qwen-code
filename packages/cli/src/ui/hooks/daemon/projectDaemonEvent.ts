@@ -497,6 +497,122 @@ function projectFrame(
   }
 }
 
+/**
+ * The transcript a daemon `session/load` returns, as
+ * `DaemonSessionClient.replaySnapshot` retains it: the compacted turns, then
+ * the live journal of the turn in flight since the last boundary. (A
+ * `lifecycleReplay` may ride along; the web shell feeds it only to its
+ * trajectory view, never the transcript, so it is not read here.)
+ */
+export interface DaemonReplaySnapshotFrames {
+  compactedReplay: readonly DaemonFrame[];
+  liveJournal: readonly DaemonFrame[];
+}
+
+export interface ReplaySeedOptions {
+  /** This client's daemon clientId; self-echo suppression arms AFTER replay. */
+  ownClientId?: string;
+  /**
+   * The cursor the live subscription resumes after (the load response's
+   * `lastEventId`). It becomes the dedup watermark, so the live loop continues
+   * from the seeded projection without re-applying anything the replay held.
+   */
+  lastEventId?: number;
+  /** The daemon reports a prompt in flight: leave the trailing turn live. */
+  hasActivePrompt?: boolean;
+  /** Older persisted records precede the snapshot (this view has no paging). */
+  historyHasMore?: boolean;
+  /** The persisted replay was only partly reconstructed. */
+  replayPartial?: boolean;
+  /** Compaction failed at least once, so the snapshot may lag live events. */
+  replayDegraded?: boolean;
+}
+
+export const REPLAY_HISTORY_HIDDEN_TEXT =
+  'Earlier messages in this conversation are not shown here.';
+
+function replayIncompleteText(partial: boolean, degraded: boolean): string {
+  const reasons = [
+    ...(partial ? ['only partly rebuilt'] : []),
+    ...(degraded ? ['reported degraded by the daemon'] : []),
+  ];
+  return `The conversation history shown here is incomplete (${reasons.join(
+    ', ',
+  )}), so some messages may be missing or out of date.`;
+}
+
+/**
+ * Seed the projection from a load response's replay snapshot, so a terminal
+ * attached to an existing conversation shows what was said before it opened.
+ * Pure: returns the committed history items (in order) and the state the live
+ * loop continues from.
+ *
+ * Semantics follow the web shell's `DaemonSessionProvider` injection:
+ * - `compactedReplay` first, then `liveJournal`, folded in array order.
+ * - Replay is history, not an echo of input this client just rendered, so no
+ *   user line is suppressed while folding (the web shell replays with
+ *   `suppressOwnUserEcho: false`). `ownClientId` is armed afterwards for the
+ *   live stream.
+ * - Frames are folded through `projectFrame`, bypassing the id watermark:
+ *   compaction stamps a merged event with the id of its LAST source chunk and
+ *   keeps latest-wins updates in their first slot, so ids inside a compacted
+ *   turn are not monotonic and the watermark would silently drop real history.
+ * - Turns are segmented by their compacted `turn_complete` boundary, or by the
+ *   next user message when a turn ended any other way (`turn_error`).
+ * - With no prompt in flight the trailing turn is committed and the state goes
+ *   Idle (no stuck spinner); with one in flight it stays pending and live.
+ * - Older history this view cannot page in (`historyHasMore`, or a
+ *   `history_truncated` marker in the window) gets ONE leading info line, and
+ *   a partial or degraded replay gets one more.
+ */
+export function projectReplaySnapshot(
+  snapshot: DaemonReplaySnapshotFrames,
+  opts: ReplaySeedOptions = {},
+): ProjectionResult {
+  const frames = [...snapshot.compactedReplay, ...snapshot.liveJournal];
+  const committed: HistoryItemWithoutId[] = [];
+  if (
+    opts.historyHasMore === true ||
+    frames.some((frame) => frame.type === 'history_truncated')
+  ) {
+    committed.push({ type: 'info', text: REPLAY_HISTORY_HIDDEN_TEXT });
+  }
+  if (opts.replayPartial === true || opts.replayDegraded === true) {
+    committed.push({
+      type: 'info',
+      text: replayIncompleteText(
+        opts.replayPartial === true,
+        opts.replayDegraded === true,
+      ),
+    });
+  }
+
+  let state = initialDaemonProjectionState();
+  let maxId: number | undefined;
+  for (const frame of frames) {
+    const result = projectFrame(state, frame);
+    state = result.state;
+    committed.push(...result.committed);
+    if (typeof frame.id === 'number') {
+      maxId = maxId === undefined ? frame.id : Math.max(maxId, frame.id);
+    }
+  }
+  if (opts.hasActivePrompt !== true) {
+    const flushed = projectFrame(state, { type: 'turn_complete', data: {} });
+    state = flushed.state;
+    committed.push(...flushed.committed);
+  }
+
+  return {
+    state: {
+      ...state,
+      ownClientId: opts.ownClientId,
+      lastEventId: frames.length > 0 ? (opts.lastEventId ?? maxId) : undefined,
+    },
+    committed,
+  };
+}
+
 /** Live tool-call display for the current turn (the UI's `pendingToolCalls`). */
 export function pendingToolCallsOf(
   state: DaemonProjectionState,

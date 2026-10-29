@@ -3,7 +3,9 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
+import { StrictMode } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
@@ -21,12 +23,27 @@ import type { DaemonFrame } from './projectDaemonEvent.js';
  * prompt/cancel/permission calls.
  */
 function makeFakeDriver(
-  opts: { clientId?: string; throwOnce?: string; manualPrompt?: boolean } = {},
+  opts: {
+    clientId?: string;
+    throwOnce?: string;
+    manualPrompt?: boolean;
+    /** Load-response transcript, as `DaemonSessionClient.load` retains it. */
+    replay?: { compactedReplay: DaemonFrame[]; liveJournal: DaemonFrame[] };
+    historyHasMore?: boolean;
+    replayPartial?: boolean;
+    replayDegraded?: boolean;
+    hasActivePrompt?: boolean;
+    lastEventId?: number;
+    /** Shared ordering log: `subscribe` is pushed when events() starts. */
+    log?: string[];
+  } = {},
 ) {
   const queue: DaemonFrame[] = [];
   let wake: (() => void) | null = null;
   let ended = false;
   let eventsCalls = 0;
+  let consumeCalls = 0;
+  let replay = opts.replay;
   let resolvePrompt: ((v: unknown) => void) | null = null;
   const prompts: Array<{ prompt: Array<{ type: 'text'; text: string }> }> = [];
   const permissions: Array<{
@@ -46,11 +63,29 @@ function makeFakeDriver(
       permissions: typeof permissions;
       cancels: number;
       aborted: boolean;
+      consumeCalls: number;
     };
   } = {
     clientId: opts.clientId,
+    get replaySnapshot() {
+      return replay;
+    },
+    consumeReplaySnapshot: opts.replay
+      ? () => {
+          consumeCalls += 1;
+          const snapshot = replay;
+          replay = { compactedReplay: [], liveJournal: [] };
+          return snapshot;
+        }
+      : undefined,
+    historyHasMore: opts.historyHasMore,
+    replayPartial: opts.replayPartial,
+    replayDegraded: opts.replayDegraded,
+    hasActivePrompt: opts.hasActivePrompt,
+    lastEventId: opts.lastEventId,
     async *events({ signal } = {}) {
       eventsCalls += 1;
+      opts.log?.push('subscribe');
       lastSignal = signal;
       if (opts.throwOnce && eventsCalls === 1) {
         throw new Error(opts.throwOnce);
@@ -106,6 +141,7 @@ function makeFakeDriver(
         permissions,
         cancels,
         aborted: lastSignal?.aborted ?? false,
+        consumeCalls,
       };
     },
   };
@@ -462,6 +498,251 @@ describe('useDaemonStream', () => {
       ]),
     );
     expect(result.current.initError).toBeNull();
+  });
+
+  describe('attach-time history (replay snapshot from load)', () => {
+    // Two compacted turns typed on the phone: user chunks carry no
+    // originatorClientId (verified against a live daemon), and compacted
+    // turns end with their turn_complete boundary.
+    const replayTurns = (): DaemonFrame[] => [
+      {
+        id: 4,
+        ...su({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'Please review the size' },
+        }),
+      },
+      {
+        id: 9,
+        ...su({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'It looks fine.' },
+        }),
+      },
+      { id: 10, type: 'turn_complete', data: { stopReason: 'end_turn' } },
+      {
+        id: 11,
+        ...su({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'Thanks' },
+        }),
+      },
+      {
+        id: 15,
+        ...su({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'You are welcome.' },
+        }),
+      },
+      { id: 16, type: 'turn_complete', data: { stopReason: 'end_turn' } },
+    ];
+
+    const recordingAddItem = (log: string[]) => {
+      const added: HistoryItemWithoutId[] = [];
+      const addItem = vi.fn((item: HistoryItemWithoutId) => {
+        added.push(item);
+        log.push(`add:${item.type}`);
+        return added.length;
+      });
+      return { added, addItem };
+    };
+
+    it('renders the replayed turns as history before any live frame', async () => {
+      const log: string[] = [];
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: { compactedReplay: replayTurns(), liveJournal: [] },
+        lastEventId: 16,
+        log,
+      });
+      const { added, addItem } = recordingAddItem(log);
+      const { result } = renderHook(() => useDaemonStream(driver, addItem));
+
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+      expect(added).toEqual([
+        { type: 'user', text: 'Please review the size' },
+        { type: 'gemini', text: 'It looks fine.' },
+        { type: 'user', text: 'Thanks' },
+        { type: 'gemini', text: 'You are welcome.' },
+      ]);
+      // Every seeded item was committed before the live subscription opened.
+      expect(log.indexOf('subscribe')).toBe(4);
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(result.current.pendingHistoryItems).toEqual([]);
+      // The raw snapshot is released once it is in history.
+      expect(driver.stats().consumeCalls).toBe(1);
+      expect(driver.replaySnapshot).toEqual({
+        compactedReplay: [],
+        liveJournal: [],
+      });
+    });
+
+    it('still drops a self-originated live echo after seeding, and renders the phone', async () => {
+      const log: string[] = [];
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: { compactedReplay: replayTurns(), liveJournal: [] },
+        lastEventId: 16,
+        log,
+      });
+      const { added, addItem } = recordingAddItem(log);
+      renderHook(() => useDaemonStream(driver, addItem));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+      expect(added).toHaveLength(4);
+
+      act(() => {
+        driver.push({
+          id: 17,
+          ...su(
+            {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'typed in this tab' },
+            },
+            'me',
+          ),
+        });
+        driver.push({ id: 18, type: 'turn_complete', data: {} });
+        driver.push({
+          id: 19,
+          ...su(
+            {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'from phone' },
+            },
+            'phone',
+          ),
+        });
+      });
+
+      await waitFor(() =>
+        expect(added.at(-1)).toEqual({ type: 'user', text: 'from phone' }),
+      );
+      expect(added.filter((i) => i.type === 'user')).toEqual([
+        { type: 'user', text: 'Please review the size' },
+        { type: 'user', text: 'Thanks' },
+        { type: 'user', text: 'from phone' },
+      ]);
+    });
+
+    it('commits one info line first when earlier history is not shown', async () => {
+      const log: string[] = [];
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: { compactedReplay: replayTurns(), liveJournal: [] },
+        historyHasMore: true,
+        log,
+      });
+      const { added, addItem } = recordingAddItem(log);
+      renderHook(() => useDaemonStream(driver, addItem));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+
+      expect(added[0]?.type).toBe('info');
+      expect(added.filter((i) => i.type === 'info')).toHaveLength(1);
+      expect(added.slice(1).map((i) => i.type)).toEqual([
+        'user',
+        'gemini',
+        'user',
+        'gemini',
+      ]);
+    });
+
+    it('commits one info line when the replay is partial or degraded', async () => {
+      const log: string[] = [];
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: { compactedReplay: replayTurns(), liveJournal: [] },
+        replayPartial: true,
+        replayDegraded: true,
+        log,
+      });
+      const { added, addItem } = recordingAddItem(log);
+      renderHook(() => useDaemonStream(driver, addItem));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+
+      expect(added.filter((i) => i.type === 'info')).toHaveLength(1);
+      expect(added[0]?.type).toBe('info');
+    });
+
+    it('seeds exactly once under StrictMode (effects run twice)', async () => {
+      const log: string[] = [];
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: { compactedReplay: replayTurns(), liveJournal: [] },
+        log,
+      });
+      const { added, addItem } = recordingAddItem(log);
+      renderHook(() => useDaemonStream(driver, addItem), {
+        wrapper: StrictMode,
+      });
+      await waitFor(() =>
+        expect(driver.stats().eventsCalls).toBeGreaterThanOrEqual(1),
+      );
+      expect(added).toHaveLength(4);
+      expect(driver.stats().consumeCalls).toBe(1);
+    });
+
+    it('keeps an in-flight replayed turn live when the daemon reports an active prompt', async () => {
+      const log: string[] = [];
+      const driver = makeFakeDriver({
+        clientId: 'me',
+        replay: {
+          compactedReplay: replayTurns(),
+          liveJournal: [
+            {
+              id: 17,
+              ...su(
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'still running' },
+                },
+                'phone',
+              ),
+            },
+            {
+              id: 18,
+              ...su(
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Work' },
+                },
+                'phone',
+              ),
+            },
+          ],
+        },
+        hasActivePrompt: true,
+        lastEventId: 18,
+        log,
+      });
+      const { added, addItem } = recordingAddItem(log);
+      const { result } = renderHook(() => useDaemonStream(driver, addItem));
+      await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+
+      expect(added.at(-1)).toEqual({ type: 'user', text: 'still running' });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(result.current.pendingHistoryItems).toEqual([
+        { type: 'gemini', text: 'Work' },
+      ]);
+
+      // The live stream continues the same turn and completes it.
+      act(() => {
+        driver.push({
+          id: 19,
+          ...su(
+            {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: ' done' },
+            },
+            'phone',
+          ),
+        });
+        driver.push({ id: 20, type: 'turn_complete', data: {} });
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+      expect(added.at(-1)).toEqual({ type: 'gemini', text: 'Work done' });
+    });
   });
 
   it('aborts the subscription on unmount', async () => {

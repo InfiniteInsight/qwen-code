@@ -168,6 +168,8 @@ describe('GET /rc/capabilities', () => {
       // #190: the page reads other folders' live state only when told the
       // route honours spawn=0.
       expect(rc.liveStateNoSpawn).toBe(true);
+      // #194: one host tab per session.
+      expect(rc.hostTerminalAlreadyMirrored).toBe(true);
     } finally {
       await close();
     }

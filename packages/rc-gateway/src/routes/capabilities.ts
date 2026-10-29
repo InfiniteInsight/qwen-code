@@ -106,6 +106,10 @@ export function createCapabilityRoute(deps: {
       // folder it is asked about. The page reads other folders only when this
       // says the switch is honoured.
       liveStateNoSpawn: true,
+      // #194: POST /rc/terminals answers 200 `{ alreadyMirrored: true }`
+      // instead of queueing a second tab when one is already attached. An old
+      // gateway answers 202 every time, so the page can tell the two apart.
+      hostTerminalAlreadyMirrored: true,
       // #194 slice D: a terminal on this host can start a conversation the
       // phone then sees (`qwen-rc attach`). The route itself is loopback-only
       // and never reachable from the phone; the flag is here so the page can
