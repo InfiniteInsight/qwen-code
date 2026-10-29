@@ -121,7 +121,7 @@ describe('TelegramBotApi', () => {
       json: { ok: true, result: updates },
     }));
     const got = await api(fetchImpl).getUpdates(5, 25);
-    expect(got).toEqual(updates);
+    expect(got).toEqual({ ok: true, status: 200, updates });
     expect(calls[0].body).toMatchObject({
       offset: 5,
       timeout: 25,
@@ -129,12 +129,37 @@ describe('TelegramBotApi', () => {
     });
   });
 
-  it('getUpdates returns [] on an error response (caller backs off)', async () => {
+  it('getUpdates reports an error response as not ok, so the caller can back off (#168)', async () => {
     const { fetchImpl } = mockFetch(() => ({
-      status: 500,
-      json: { ok: false },
+      status: 401,
+      json: { ok: false, description: 'Unauthorized' },
     }));
-    expect(await api(fetchImpl).getUpdates(0)).toEqual([]);
+    expect(await api(fetchImpl).getUpdates(0)).toEqual({
+      ok: false,
+      status: 401,
+      updates: [],
+    });
+  });
+
+  it('getUpdates carries a 429 retry_after and a network failure as status 0', async () => {
+    const limited = mockFetch(() => ({
+      status: 429,
+      json: { ok: false, parameters: { retry_after: 7 } },
+    }));
+    expect(await api(limited.fetchImpl).getUpdates(0)).toEqual({
+      ok: false,
+      status: 429,
+      retryAfterSec: 7,
+      updates: [],
+    });
+    const down = (async () => {
+      throw new Error('getaddrinfo ENOTFOUND');
+    }) as unknown as typeof fetch;
+    expect(await api(down).getUpdates(0)).toEqual({
+      ok: false,
+      status: 0,
+      updates: [],
+    });
   });
 
   it('a network throw degrades to a non-ok result, not an exception', async () => {

@@ -35,8 +35,13 @@ async function waitFor(
   }
 }
 
+/** A scripted poll: a batch of updates, or a failed getUpdates call. */
+type PollScript =
+  | TelegramUpdate[]
+  | { ok: false; status: number; retryAfterSec?: number };
+
 function fakes(
-  updateBatches: TelegramUpdate[][],
+  updateBatches: PollScript[],
   opts: {
     sendPrompt?: (
       sessionId: string,
@@ -52,6 +57,7 @@ function fakes(
     outcome: string;
   }> = [];
   let pollCalls = 0;
+  const sleeps: number[] = [];
   const sent: Array<{ chatId: number; text: string; keyboard?: unknown }> = [];
   const edited: Array<{
     chatId: number;
@@ -70,7 +76,9 @@ function fakes(
       const b = updateBatches[batch] ?? [];
       batch++;
       if (batch > updateBatches.length) ac.abort(); // stop after scripted batches
-      return b;
+      return Array.isArray(b)
+        ? { ok: true, status: 200, updates: b }
+        : { ...b, updates: [] };
     },
     sendMessage: async (
       chatId: number,
@@ -118,6 +126,7 @@ function fakes(
     edited,
     subscribed,
     votes,
+    sleeps,
     pollCalls: () => pollCalls,
     isRegistered: () => registered,
     bridge: new TelegramBridge({
@@ -127,6 +136,9 @@ function fakes(
       baseUrl: 'http://127.0.0.1:4170',
       pollTimeoutSec: 0,
       ...(opts.log ? { log: opts.log } : {}),
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
     }),
   };
 }
@@ -245,7 +257,7 @@ describe('TelegramBridge — cursor persistence', () => {
     const botApi = {
       getUpdates: async () => {
         ac.abort();
-        return [];
+        return { ok: true, status: 200, updates: [] };
       },
       sendMessage: async () => ({ ok: true, status: 200 }),
       answerCallbackQuery: async () => ({ ok: true, status: 200 }),
@@ -286,7 +298,7 @@ describe('TelegramBridge — cursor persistence', () => {
     const botApi = {
       getUpdates: async () => {
         ac.abort();
-        return [];
+        return { ok: true, status: 200, updates: [] };
       },
       sendMessage: async () => ({ ok: true, status: 200 }),
       answerCallbackQuery: async () => ({ ok: true, status: 200 }),
@@ -317,6 +329,72 @@ describe('TelegramBridge — cursor persistence', () => {
     await startDone;
     const entry = cursors.get('tok_b', 'sess-q');
     expect(entry?.lastEventId).toBe(42);
+  });
+});
+
+describe('TelegramBridge, a failing getUpdates (#168)', () => {
+  it('backs off exponentially between failed polls instead of spinning', async () => {
+    const logs: string[] = [];
+    const f = fakes(
+      [
+        { ok: false, status: 401 }, // revoked token
+        { ok: false, status: 401 },
+        { ok: false, status: 409 }, // another poller / webhook set
+        [],
+      ],
+      { log: (m) => logs.push(m) },
+    );
+    await f.bridge.start(f.ac.signal);
+    expect(f.pollCalls()).toBe(5);
+    expect(f.sleeps).toHaveLength(3); // one wait per failure, none on success
+    const [a, b, c] = f.sleeps;
+    expect(a).toBeGreaterThanOrEqual(800);
+    expect(a).toBeLessThanOrEqual(1200);
+    expect(b).toBeGreaterThanOrEqual(1600);
+    expect(b).toBeLessThanOrEqual(2400);
+    expect(c).toBeGreaterThanOrEqual(3200);
+    expect(c).toBeLessThanOrEqual(4800);
+    expect(logs.some((l) => /getUpdates failed.*401/.test(l))).toBe(true);
+  });
+
+  it('waits at least a 429 retry_after, and a good poll resets the backoff', async () => {
+    const f = fakes([
+      { ok: false, status: 429, retryAfterSec: 7 },
+      [],
+      { ok: false, status: 502 },
+    ]);
+    await f.bridge.start(f.ac.signal);
+    expect(f.sleeps).toHaveLength(2);
+    expect(f.sleeps[0]).toBeGreaterThanOrEqual(7000);
+    expect(f.sleeps[1]).toBeLessThanOrEqual(1200); // back to the first step
+  });
+
+  it('does not wait after a poll cut short by shutdown', async () => {
+    const ac = new AbortController();
+    const sleeps: number[] = [];
+    const botApi = {
+      getUpdates: async () => {
+        ac.abort(); // the fetch was aborted mid long-poll
+        return { ok: false, status: 0, updates: [] };
+      },
+    } as unknown as TelegramBotApi;
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      heartbeat: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async () => {},
+    } as unknown as BridgeClient;
+    const bridge = new TelegramBridge({
+      botApi,
+      client,
+      chats,
+      baseUrl: 'http://127.0.0.1:4170',
+      pollTimeoutSec: 0,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    await bridge.start(ac.signal);
+    expect(sleeps).toEqual([]);
   });
 });
 

@@ -46,7 +46,13 @@ export interface TelegramBridgeConfig {
   pollTimeoutSec?: number;
   /** Logger for boot/error lines (default no-op). */
   log?: (msg: string) => void;
+  /** Injectable backoff sleep (tests). Resolves early on abort. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
+
+/** Backoff after a failed getUpdates: initial 1s, max 30s, jitter ±20%. */
+const POLL_BACKOFF_INITIAL_MS = 1000;
+const POLL_BACKOFF_MAX_MS = 30_000;
 
 /**
  * The Telegram bridge runner (`add-telegram-bridge`): two cooperating loops over
@@ -180,9 +186,25 @@ export class TelegramBridge {
   private async pollLoop(signal: AbortSignal): Promise<void> {
     let offset = 0;
     const timeout = this.cfg.pollTimeoutSec ?? 25;
+    const sleep = this.cfg.sleep ?? defaultSleep;
+    let backoff = POLL_BACKOFF_INITIAL_MS;
     while (!signal.aborted) {
-      const updates = await this.cfg.botApi.getUpdates(offset, timeout, signal);
-      for (const u of updates) {
+      const res = await this.cfg.botApi.getUpdates(offset, timeout, signal);
+      if (!res.ok) {
+        if (signal.aborted) break; // the poll was cut short by shutdown
+        // A revoked token (401), a second poller or webhook (409), a 429 or a
+        // network outage answers at once, so without a wait this loop spun
+        // hot (#168). Wait out a 429's retry_after when it is longer.
+        const ms = Math.max(jitter(backoff), (res.retryAfterSec ?? 0) * 1000);
+        this.log(
+          `telegram bridge: getUpdates failed (status ${res.status}); retrying in ${Math.round(ms / 1000)}s`,
+        );
+        await sleep(ms, signal);
+        backoff = Math.min(backoff * 2, POLL_BACKOFF_MAX_MS);
+        continue;
+      }
+      backoff = POLL_BACKOFF_INITIAL_MS;
+      for (const u of res.updates) {
         offset = Math.max(offset, u.update_id + 1);
         const chatId =
           u.message?.text !== undefined ? u.message.chat.id : undefined;
@@ -295,4 +317,25 @@ export class TelegramBridge {
       );
     }
   }
+}
+
+/** Apply ±20% jitter to a backoff delay. */
+function jitter(ms: number): number {
+  return Math.round(ms * (0.8 + Math.random() * 0.4));
+}
+
+/** Sleep `ms`, resolving early if `signal` aborts (so shutdown is prompt). */
+function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
