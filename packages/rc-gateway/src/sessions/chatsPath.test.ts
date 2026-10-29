@@ -7,12 +7,21 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  rm,
+  mkdir,
+  writeFile,
+  symlink,
+  realpath,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import {
   sanitizeCwd,
   runtimeBaseDir,
   resolveChatsDir,
+  resolveSearchIndexDir,
+  canonicalWorkspaceRoot,
   isValidSessionId,
   SESSION_FILE_RE,
   findSessionChatsDir,
@@ -84,6 +93,55 @@ describe('resolveChatsDir', () => {
     expect(resolveChatsDir('/home/u/my_proj', {})).toBe(
       join(homedir(), '.qwen', 'projects', '-home-u-my-proj', 'chats'),
     );
+  });
+});
+
+describe('resolveChatsDir canonicalises the cwd like core (#170)', () => {
+  let root: string;
+  let real: string;
+  beforeEach(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'rc-canon-')));
+    real = join(root, 'real_ws');
+    await mkdir(real);
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const env = { QWEN_RUNTIME_DIR: '/rt' };
+  const expected = () => join('/rt', 'projects', sanitizeCwd(real), 'chats');
+
+  it('a trailing slash maps to the same project segment', () => {
+    expect(resolveChatsDir(`${real}/`, env)).toBe(expected());
+  });
+
+  it('a ./ and .. spelling maps to the same project segment', () => {
+    expect(resolveChatsDir(join(real, '.', 'x', '..'), env)).toBe(expected());
+  });
+
+  it('a symlink maps to the real directory segment', async () => {
+    const link = join(root, 'link-ws');
+    await symlink(real, link);
+    expect(resolveChatsDir(link, env)).toBe(expected());
+    expect(resolveSearchIndexDir(link, env)).toBe(
+      join('/rt', 'projects', sanitizeCwd(real), 'search-index'),
+    );
+  });
+
+  it('"." resolves against the process cwd', () => {
+    const here = process.cwd();
+    expect(resolveChatsDir('.', env)).toBe(
+      join(
+        '/rt',
+        'projects',
+        sanitizeCwd(canonicalWorkspaceRoot(here)),
+        'chats',
+      ),
+    );
+    expect(canonicalWorkspaceRoot('.')).toBe(canonicalWorkspaceRoot(here));
+  });
+
+  it('a path that does not exist falls back to its resolved form', () => {
+    expect(canonicalWorkspaceRoot('/no/such/ws/')).toBe('/no/such/ws');
   });
 });
 
