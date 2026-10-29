@@ -6,7 +6,10 @@
 
 import { createContext } from 'react';
 import type { useLlmStream } from '../use-llm-stream.js';
-import type { DaemonSessionDriver } from './useDaemonStream.js';
+import type {
+  DaemonLossHandling,
+  DaemonSessionDriver,
+} from './useDaemonStream.js';
 
 /**
  * Provides the attached daemon session driver to `useDaemonStreamAdapter`.
@@ -16,6 +19,12 @@ import type { DaemonSessionDriver } from './useDaemonStream.js';
 export const DaemonStreamContext = createContext<DaemonSessionDriver | null>(
   null,
 );
+
+/**
+ * How an attached TUI ends when its daemon is gone (exit 75, for `qwen-rc
+ * attach`). Set by `DaemonAppContainer`; `null` leaves loss handling off.
+ */
+export const DaemonLossContext = createContext<DaemonLossHandling | null>(null);
 
 /**
  * The stream hook `AppContainer` is driven by: `useLlmStream` in process, or the

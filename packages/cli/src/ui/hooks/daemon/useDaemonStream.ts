@@ -71,6 +71,12 @@ import {
 } from './projectDaemonEvent.js';
 import { buildDaemonConfirmation } from './daemonConfirmation.js';
 import {
+  DAEMON_GONE_MESSAGE,
+  classifyDaemonFailure,
+  confirmDaemonGone,
+  isTransportError,
+} from './daemon-loss.js';
+import {
   readDaemonModels,
   readDaemonModes,
   type DaemonSessionControl,
@@ -126,6 +132,32 @@ export interface DaemonSessionDriver extends DaemonSessionControl {
   ): Promise<boolean>;
 }
 
+/**
+ * What the hook needs to end an attached TUI whose daemon is gone (slice E of
+ * InfiniteInsight/Qwen-Code-Remote#194). Absent in tests that do not exercise
+ * loss; then every failure keeps its pre-slice-E handling.
+ */
+export interface DaemonLossHandling {
+  /** One cheap request to the daemon (`GET /health`); rejects when it fails. */
+  probeHealth(): Promise<unknown>;
+  /**
+   * End the process with exit code 75, through the normal exit cleanup. Called
+   * at most once, after the one-line notice has been added and given time to
+   * render. Injected so tests never call `process.exit`.
+   */
+  exitDaemonGone(): void | Promise<void>;
+  sleep?: (ms: number) => Promise<void>;
+  /** Wait before the health re-check (default 1 s). */
+  recheckDelayMs?: number;
+  /** Time for Ink to paint the notice before exiting (default 250 ms). */
+  flushMs?: number;
+}
+
+/** Healthy-daemon transport failures in a row before the error is shown. */
+const MAX_TRANSPORT_RETRIES = 5;
+const DEFAULT_FLUSH_MS = 250;
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 export type AddHistoryItem = (
   item: HistoryItemWithoutId,
   timestamp: number,
@@ -180,6 +212,7 @@ function withLoadState(
 export function useDaemonStream(
   driver: DaemonSessionDriver,
   addItem: AddHistoryItem,
+  loss?: DaemonLossHandling,
 ): UseDaemonStreamResult {
   // PRECONDITION: the driver must be ATTACHED (clientId set) before mount.
   // Without a clientId the reducer can't distinguish our own echo from a remote
@@ -194,6 +227,9 @@ export function useDaemonStream(
   const streamingResponseLengthRef = useRef(0);
   const addItemRef = useRef(addItem);
   addItemRef.current = addItem;
+  const lossRef = useRef(loss);
+  lossRef.current = loss;
+  const goneRef = useRef(false);
   // The driver whose replay snapshot has been committed. A ref (not state) so
   // StrictMode's effect re-run on the same instance sees it and never seeds a
   // second copy of the transcript.
@@ -239,6 +275,41 @@ export function useDaemonStream(
     [applyFrame],
   );
 
+  // The daemon is gone: say so on one plain line, give Ink a moment to paint it,
+  // then end the process (exit 75) so `qwen-rc attach` can find a new daemon.
+  // Once only: the stream loop and a failed prompt can both get here.
+  const declareDaemonGone = useCallback(async () => {
+    const handling = lossRef.current;
+    if (!handling || goneRef.current) return;
+    goneRef.current = true;
+    dbg('daemon gone: exiting 75');
+    addItemRef.current({ type: 'info', text: DAEMON_GONE_MESSAGE }, now());
+    await (handling.sleep ?? realSleep)(handling.flushMs ?? DEFAULT_FLUSH_MS);
+    await handling.exitDaemonGone();
+  }, []);
+
+  // A failure that classifies as `daemon_gone`. A 404 or `session_died` is the
+  // daemon's own word; a transport failure is only a suspicion until a re-check
+  // of the daemon (after a short delay) fails too, so a blip that the daemon
+  // recovers from never ends the tab. Resolves true once the tab is leaving.
+  const confirmAndDeclareGone = useCallback(
+    async (err: unknown): Promise<boolean> => {
+      const handling = lossRef.current;
+      if (!handling) return false;
+      if (isTransportError(err)) {
+        const gone = await confirmDaemonGone({
+          probe: () => handling.probeHealth(),
+          sleep: handling.sleep ?? realSleep,
+          delayMs: handling.recheckDelayMs,
+        });
+        if (!gone) return false;
+      }
+      await declareDaemonGone();
+      return true;
+    },
+    [declareDaemonGone],
+  );
+
   useEffect(() => {
     // Seed the conversation so far, ONCE per driver, synchronously, before the
     // live loop below subscribes, so no live frame can land ahead of it. Items
@@ -274,12 +345,21 @@ export function useDaemonStream(
     let disposed = false;
 
     void (async () => {
+      let transportFailures = 0;
       for (let attempt = 0; !disposed && !ac.signal.aborted; attempt++) {
         try {
           dbg(`subscribe attempt=${attempt} clientId=${driver.clientId}`);
           for await (const frame of driver.events({ signal: ac.signal })) {
             if (disposed) break;
+            transportFailures = 0;
             applyFrame(frame);
+            if (
+              lossRef.current &&
+              classifyDaemonFailure({ kind: 'frame', frame }) === 'daemon_gone'
+            ) {
+              await declareDaemonGone();
+              return;
+            }
           }
           dbg('stream ended');
           if (disposed || ac.signal.aborted) break;
@@ -300,9 +380,18 @@ export function useDaemonStream(
           // StrictMode's mount→unmount→remount can race the previous
           // subscription's teardown. Back off and retry rather than surfacing a
           // transient error to the user.
-          if (/already active/i.test(msg) && attempt < 20) {
+          const verdict = classifyDaemonFailure({ kind: 'error', error: err });
+          if (verdict === 'retry' && attempt < 20) {
             await new Promise((r) => setTimeout(r, 25));
             continue;
+          }
+          if (verdict === 'daemon_gone' && lossRef.current) {
+            if (await confirmAndDeclareGone(err)) break;
+            // The daemon answered the re-check: a blip. Subscribe again, but
+            // not forever if the stream keeps failing against a live daemon.
+            if (!disposed && ++transportFailures < MAX_TRANSPORT_RETRIES) {
+              continue;
+            }
           }
           setInitError(msg);
           break;
@@ -314,7 +403,13 @@ export function useDaemonStream(
       disposed = true;
       ac.abort();
     };
-  }, [driver, applyFrame, finalizeTurn]);
+  }, [
+    driver,
+    applyFrame,
+    finalizeTurn,
+    declareDaemonGone,
+    confirmAndDeclareGone,
+  ]);
 
   const submitQuery = useCallback(
     async (query: string) => {
@@ -322,14 +417,28 @@ export function useDaemonStream(
       // self-echo (matched by originatorClientId === our clientId).
       addItemRef.current({ type: 'user', text: query }, now());
       dbg(`submitQuery len=${query.length}`);
-      const result = await driver.prompt({
-        prompt: [{ type: 'text', text: query }],
-      });
+      let result: unknown;
+      try {
+        result = await driver.prompt({
+          prompt: [{ type: 'text', text: query }],
+        });
+      } catch (err) {
+        // The daemon dying mid-prompt ends the tab (exit 75). An error the
+        // daemon recovers from (it answers the re-check) is rethrown as before.
+        if (
+          classifyDaemonFailure({ kind: 'error', error: err }) ===
+            'daemon_gone' &&
+          (await confirmAndDeclareGone(err))
+        ) {
+          return;
+        }
+        throw err;
+      }
       dbg('prompt() resolved');
       // 0.17.x completion signal: prompt() resolves with the turn's stopReason.
       finalizeTurn((result as { stopReason?: unknown } | null)?.stopReason);
     },
-    [driver, finalizeTurn],
+    [driver, finalizeTurn, confirmAndDeclareGone],
   );
 
   const cancelOngoingRequest = useCallback(() => {
