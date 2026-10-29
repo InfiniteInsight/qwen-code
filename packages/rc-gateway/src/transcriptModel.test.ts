@@ -18,7 +18,8 @@ interface Sub {
   failed: boolean;
   type: string;
   text: string;
-  tools: Array<{ id: string; label: string; status: string }>;
+  // #110: textAt is how much of `text` had arrived when the call started.
+  tools: Array<{ id: string; label: string; status: string; textAt?: number }>;
 }
 interface Item {
   id: number;
@@ -397,10 +398,12 @@ describe('TranscriptModel', () => {
       text: 'one two',
     });
     expect(tool.sub?.startedAt).toBe(1000);
+    // #110: each call also records where it started in the child's words;
+    // all three started after 'one two' (7 characters) had arrived.
     expect(tool.sub?.tools).toEqual([
-      { id: 'c1', label: 'Grep', status: 'completed' },
-      { id: '', label: 'noid', status: '' },
-      { id: '', label: 'noid', status: '' },
+      { id: 'c1', label: 'Grep', status: 'completed', textAt: 7 },
+      { id: '', label: 'noid', status: '', textAt: 7 },
+      { id: '', label: 'noid', status: '', textAt: 7 },
     ]);
     expect(m.items.length).toBe(1);
 
@@ -416,6 +419,51 @@ describe('TranscriptModel', () => {
     m.setSubagentType('q', 'planner');
     m.appendSubagentText('q', 'hi');
     expect(m.items[1].sub?.type).toBe('planner');
+  });
+
+  it('a child call records where it started in the child words, and a status update does not move it (#110)', () => {
+    const { m } = setup();
+    m.upsertTool({ toolCallId: 'p', title: 'Agent', status: 'in_progress' });
+    m.appendSubagentText('p', 'abc');
+    m.upsertSubagentTool({ toolCallId: 'k1', title: 'one', status: 'pending' }, 'p');
+    m.appendSubagentText('p', 'de');
+    m.upsertSubagentTool({ toolCallId: 'k2', title: 'two', status: 'pending' }, 'p');
+    m.upsertSubagentTool({ toolCallId: 'k1', status: 'completed' }, 'p');
+    expect(m.items[0].sub?.tools.map((t) => [t.id, t.textAt])).toEqual([
+      ['k1', 3],
+      ['k2', 5],
+    ]);
+  });
+
+  it('an older page folded in front shifts the later calls by the words it adds (#110)', () => {
+    const { m } = setup();
+    m.upsertTool({ toolCallId: 'p', title: 'Agent', status: 'in_progress' });
+    m.appendSubagentText('p', 'de');
+    m.upsertSubagentTool({ toolCallId: 'k2', title: 'two', status: 'pending' }, 'p');
+    const ev = (n: number, data: Record<string, unknown>) => ({
+      v: 1,
+      type: 'session_update',
+      data: {
+        ...data,
+        _meta: {
+          ...((data['_meta'] as object | undefined) ?? {}),
+          timestamp: 1_000 + n,
+          'qwen.session.recordId': 'rec-' + n,
+        },
+      },
+    });
+    const older = api.replayStoredPage([
+      ev(1, { sessionUpdate: 'tool_call', toolCallId: 'p', title: 'Agent', status: 'in_progress' }),
+      ev(2, { sessionUpdate: 'agent_message_chunk', content: { text: 'abc' }, _meta: { parentToolCallId: 'p' } }),
+      ev(3, { sessionUpdate: 'tool_call', toolCallId: 'k1', title: 'one', status: 'completed', _meta: { parentToolCallId: 'p' } }),
+    ]);
+    m.prependItems(older);
+    const sub = m.items.find((i) => i.toolCallId === 'p')?.sub;
+    expect(sub?.text).toBe('abcde');
+    expect(sub?.tools.map((t) => [t.id, t.textAt])).toEqual([
+      ['k1', 3],
+      ['k2', 5],
+    ]);
   });
 
   it('settleAllSubagents finishes every running subagent as completed', () => {
