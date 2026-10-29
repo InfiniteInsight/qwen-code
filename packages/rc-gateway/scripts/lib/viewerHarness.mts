@@ -246,6 +246,13 @@ export interface BootViewerOptions {
    * unknown to it: a scenario using this reads the list, not a watch.
    */
   pool?: { liveState: (cwd: string) => unknown };
+  /**
+   * #110: the roster GET /session/:id/agents answers (default empty). A
+   * function is read per request, so a scenario can move an agent along.
+   */
+  sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
+  /** #110: the whole lineage GET /session/:id/agent-trace narrows. */
+  agentTraceResult?: unknown;
 }
 
 /** The label the harness's one host action carries. */
@@ -414,6 +421,8 @@ export async function bootViewer(
     artifactListResult: opts.artifactListResult,
     artifactListStatus: opts.artifactListStatus,
     artifactContentStatus: opts.artifactContentStatus,
+    sessionAgentsResult: opts.sessionAgentsResult,
+    agentTraceResult: opts.agentTraceResult,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));

@@ -3010,6 +3010,13 @@ type PageScenario =
          * so a scenario can count what the pool holds.
          */
         pool?: { liveState: (cwd: string) => unknown };
+        /**
+         * #110. The roster the stub's GET /session/:id/agents answers, or a
+         * function of the session id read per request.
+         */
+        sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
+        /** #110. The whole lineage the stub's agent-trace narrows. */
+        agentTraceResult?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22894,6 +22901,8 @@ async function runPageScenario(
     turnIndexStatusCode: s.stub?.turnIndexStatusCode,
     hostActions: s.stub?.hostActions,
     pool: s.stub?.pool,
+    sessionAgentsResult: s.stub?.sessionAgentsResult,
+    agentTraceResult: s.stub?.agentTraceResult,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -25710,6 +25719,754 @@ PAGE_SCENARIOS.push({
   },
 });
 
+
+// ---- #110: the conversation's agents ----------------------------------------
+// The chip in the status line, the Agents sheet (list and trace), Stop through
+// the subagent cancel route, the inline block's trace button, and the gates.
+// The roster comes from the stub daemon through the real gateway route, so the
+// path the page calls is the one the gateway mounts; the cancel and inspect
+// routes are answered here, as P70 to P73 answer them, because the stub does
+// not serve them.
+declare const agentsState: {
+  rows: unknown[] | null;
+  readAt: number;
+  err: string;
+};
+declare const agentSheet: { open: boolean; view: string; key: string | null };
+declare const turnRunning: () => boolean;
+// The two modules' globals, for the view scenarios that build a view of their own.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const TranscriptModel: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const TranscriptView: any;
+
+const AGENT_FEATURES = ['session_agents', 'session_agent_trace'];
+const AG_T0 = 1_767_225_600_000;
+function agentTask(o: Record<string, unknown>): Record<string, unknown> {
+  return {
+    kind: 'agent',
+    label: `${String(o['subagentType'] ?? 'agent')}: ${String(o['description'] ?? '')}`,
+    description: '',
+    status: 'running',
+    startTime: AG_T0,
+    runtimeMs: 30_000,
+    isBackgrounded: false,
+    ...o,
+  };
+}
+function agentRoster(sid: string, tasks: unknown[]): Record<string, unknown> {
+  return { v: 1, sessionId: sid, now: Date.now(), tasks };
+}
+/** A child frame of the Agent tool row `parent`, as SubAgentTracker stamps it. */
+function childUpdate(
+  parent: string,
+  u: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...u, _meta: { parentToolCallId: parent, subagentType: 'Explore' } };
+}
+
+/** One running Agent row with a line of its child's words (P70's shape, which
+ * is scoped to its own block). */
+function runningAgentFrames(): Frame[] {
+  const f = new Frames();
+  f.user('go');
+  f.toolCall('tc-1', 'Agent', 'in_progress');
+  f.upd(childUpdate('tc-1', { sessionUpdate: 'agent_message_chunk', content: { text: 'reading rc-gateway routes' } }));
+  return f.list;
+}
+
+async function agentsChipState(page: Page): Promise<{
+  hidden: boolean;
+  text: string;
+  h: number;
+  inLine: boolean;
+} | null> {
+  return page.evaluate(() => {
+    const c = document.getElementById('agents-chip');
+    if (!c) return null;
+    return {
+      hidden: c.hidden,
+      text: (c.textContent ?? '').trim(),
+      h: c.getBoundingClientRect().height,
+      inLine: !!c.closest('#h1-statusline'),
+    };
+  });
+}
+async function waitAgentsRead(page: Page, after = 0): Promise<void> {
+  await page.waitForFunction(
+    (t) => agentsState.rows !== null && agentsState.readAt > t,
+    after,
+    { timeout: 15_000 },
+  );
+}
+async function waitChip(page: Page, text: string | null): Promise<void> {
+  await page.waitForFunction(
+    (want) => {
+      const c = document.getElementById('agents-chip');
+      if (!c) return false;
+      return want === null
+        ? c.hidden
+        : !c.hidden && (c.textContent ?? '').trim() === want;
+    },
+    text,
+    { timeout: 15_000 },
+  );
+}
+async function openAgentsFromChip(page: Page): Promise<void> {
+  await page.click('#agents-chip');
+  await page.waitForSelector('#agents-sheet:not([hidden])', { timeout: 5_000 });
+}
+type SheetRow = {
+  key: string;
+  state: string;
+  text: string;
+  openH: number;
+  stop: { w: number; h: number } | null;
+};
+async function agentSheetRows(page: Page): Promise<SheetRow[]> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('#agents-body .ag-row[data-state]')).map(
+      (r) => {
+        const el = r as HTMLElement;
+        const open = el.querySelector('.ag-open')!.getBoundingClientRect();
+        const b = el.querySelector('.ag-stop') as HTMLElement | null;
+        const rc = b ? b.getBoundingClientRect() : null;
+        return {
+          key: el.dataset['key'] ?? '',
+          state: el.dataset['state'] ?? '',
+          text: el.textContent ?? '',
+          openH: open.height,
+          stop: rc ? { w: rc.width, h: rc.height } : null,
+        };
+      },
+    ),
+  );
+}
+async function waitSheetRows(page: Page, n: number): Promise<SheetRow[]> {
+  await page.waitForFunction(
+    (k) => document.querySelectorAll('#agents-body .ag-row[data-state]').length === k,
+    n,
+    { timeout: 10_000 },
+  );
+  return agentSheetRows(page);
+}
+/** Answers POST .../subagents/:ref/cancel; `answer` is the daemon's verdict. */
+async function routeAgentCancel(
+  page: Page,
+  asked: string[],
+  answer: () => boolean,
+): Promise<void> {
+  await page.route(/\/session\/[^/]+\/subagents\/[^/]+\/cancel$/, async (route) => {
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const ref = decodeURIComponent(parts[4]!);
+    asked.push(ref);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ sessionId: parts[2], subagentRef: ref, cancelled: answer() }),
+    });
+  });
+}
+async function traceSteps(page: Page): Promise<Array<{ kind: string; text: string }>> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('#agents-body .ag-steps > li')).map((li) => ({
+      kind: (li as HTMLElement).dataset['kind'] ?? '',
+      text: (li.textContent ?? '').trim(),
+    })),
+  );
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P400 the agents chip shows in the status line while agents run and not otherwise, and its coming moves no transcript row',
+  frames: () => replayFrames(14, 3),
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        ...(P400_FLAGS.running
+          ? [
+              agentTask({ id: 'agent-r1', toolUseId: 'tc-r1', subagentType: 'Explore', description: 'read the routes' }),
+              agentTask({ id: 'agent-r2', toolUseId: 'tc-r2', subagentType: 'general-purpose', description: 'check the tests', startTime: AG_T0 + 5_000 }),
+            ]
+          : []),
+        agentTask({ id: 'agent-d1', toolUseId: 'tc-d1', subagentType: 'Explore', description: 'an earlier look', status: 'completed', endTime: AG_T0 - 60_000, startTime: AG_T0 - 90_000 }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    P400_FLAGS.running = false;
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 14 * 8, 30_000);
+    await waitAgentsRead(page);
+    const idle = await agentsChipState(page);
+    expect(idle !== null && idle.hidden, `the chip shows with only a finished agent (${JSON.stringify(idle)})`);
+    // A turn starts here (the daemon's echo of a prompt sent elsewhere), which
+    // is what starts the roster poll; then the reader scrolls up to read.
+    const armed = Date.now();
+    await page.evaluate(() =>
+      __pg.update({ sessionUpdate: 'user_message_chunk', content: { text: 'one more question' } }),
+    );
+    await page.waitForFunction(() => turnRunning(), null, { timeout: 5_000 });
+    await waitAgentsRead(page, armed);
+    await page.evaluate(() => {
+      const s = document.getElementById('transcript')!;
+      s.scrollTop = Math.floor(s.scrollHeight / 2);
+    });
+    await settlePage(page, 400);
+    const measure = () =>
+      page.evaluate(() => {
+        const s = document.getElementById('transcript')!;
+        const box = s.getBoundingClientRect();
+        const line = document.getElementById('h1-statusline')!.getBoundingClientRect();
+        const rows = Array.from(s.querySelectorAll('.vrow'))
+          .map((r) => ({
+            id: r.getAttribute('data-id') ?? '',
+            top: Math.round(r.getBoundingClientRect().top),
+          }))
+          .filter((r) => r.top > box.top && r.top < box.bottom);
+        return { boxTop: box.top, boxH: box.height, lineH: line.height, rows };
+      });
+    const before = await measure();
+    expect(before.rows.length > 2, `no rows in view to measure (${JSON.stringify(before)})`);
+    expect(
+      (await agentsChipState(page))!.hidden,
+      'the chip showed before any agent ran',
+    );
+    P400_FLAGS.running = true;
+    await waitChip(page, '2 agents');
+    const shown = (await agentsChipState(page))!;
+    const after = await measure();
+    expect(shown.inLine && shown.h === 44, `the chip is not a 44px part of the status line (${JSON.stringify(shown)})`);
+    expect(
+      after.lineH === before.lineH && after.boxTop === before.boxTop && after.boxH === before.boxH,
+      `the chip changed the frame: status line ${before.lineH}->${after.lineH}, transcript top ${before.boxTop}->${after.boxTop}, height ${before.boxH}->${after.boxH}`,
+    );
+    const moved = before.rows.filter((r) => {
+      const a = after.rows.find((x) => x.id === r.id);
+      return !a || Math.abs(a.top - r.top) > 1;
+    });
+    expect(moved.length === 0, `rows moved when the chip came: ${JSON.stringify(moved)}`);
+    const more = await page.evaluate(() => ({
+      hidden: document.getElementById('more-agents')!.hidden,
+      val: document.getElementById('more-agents-val')!.textContent,
+    }));
+    expect(!more.hidden && more.val === '2 running', `More's Agents row reads ${JSON.stringify(more)}`);
+    // The agents finish: the next read takes the chip away.
+    P400_FLAGS.running = false;
+    await waitChip(page, null);
+    return `hidden with one finished agent; "2 agents" in the 44px status line once two ran, with the status line, the transcript box and ${before.rows.length} rows in view unmoved; gone once they finished`;
+  },
+});
+const P400_FLAGS = { running: false };
+
+const P401_ROSTER = (sid: string) =>
+  agentRoster(sid, [
+    agentTask({ id: 'agent-done-early', toolUseId: 'tc-de', subagentType: 'Explore', description: 'the first look', status: 'completed', startTime: AG_T0 - 300_000, endTime: AG_T0 - 240_000, runtimeMs: 60_000 }),
+    agentTask({ id: 'agent-new', toolUseId: 'tc-new', subagentType: 'general-purpose', description: 'write the fix', startTime: AG_T0 + 10_000 }),
+    agentTask({ id: 'agent-paused', subagentType: 'Explore', description: 'waiting on a slot', status: 'paused', isBackgrounded: true, startTime: AG_T0 - 50_000, endTime: AG_T0 - 20_000 }),
+    agentTask({ id: 'agent-old', toolUseId: 'tc-old', subagentType: 'Explore', description: 'read the gateway routes', startTime: AG_T0, stats: { totalTokens: 12_345, toolUses: 8, durationMs: 30_000 } }),
+    agentTask({ id: 'agent-done-late', toolUseId: 'tc-dl', subagentType: 'Explore', description: 'the second look', status: 'failed', error: 'model quota', startTime: AG_T0 - 200_000, endTime: AG_T0 - 100_000, runtimeMs: 100_000 }),
+  ]);
+
+PAGE_SCENARIOS.push({
+  name: 'P401 the Agents sheet lists running agents first (longest running on top), then paused, then finished (latest first), from the chip and from More > This conversation > Agents',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P401_ROSTER },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '2 agents');
+    await openAgentsFromChip(page);
+    const rows = await waitSheetRows(page, 5);
+    const order = rows.map((r) => r.key).join(',');
+    expect(
+      order === 'tc-old,tc-new,agent-paused,tc-dl,tc-de',
+      `the sheet's order is ${order}`,
+    );
+    const groups = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#agents-body .ag-grp')).map((g) => g.textContent),
+    );
+    expect(
+      groups.join('|') === 'Running (2)|Paused (1)|Finished (2)',
+      `the groups read ${JSON.stringify(groups)}`,
+    );
+    const short = rows.filter((r) => r.openH < 48);
+    expect(short.length === 0, `rows under 48px: ${JSON.stringify(short)}`);
+    const stops = rows.filter((r) => r.stop);
+    expect(
+      stops.map((r) => r.key).join(',') === 'tc-old,tc-new',
+      `Stop is offered on ${stops.map((r) => r.key).join(',')} rather than the two running agents`,
+    );
+    const small = stops.filter((r) => r.stop!.w < 44 || r.stop!.h < 44);
+    expect(small.length === 0, `Stop under 44px: ${JSON.stringify(small)}`);
+    const first = rows[0]!.text;
+    expect(
+      /Explore/.test(first) && /running/.test(first) && /read the gateway routes/.test(first) && /12\.3k tok/.test(first) && /8 tools/.test(first),
+      `the running row reads ${JSON.stringify(first)}`,
+    );
+    const done = rows.find((r) => r.key === 'tc-de')!.text;
+    expect(!/tok/.test(done), `a finished agent with no stats drew a token count (${JSON.stringify(done)})`);
+    expect(/1m00s/.test(done), `a finished agent's duration is not its runtime (${JSON.stringify(done)})`);
+    await page.click('#agents-close');
+    await page.waitForSelector('#agents-sheet', { state: 'hidden' });
+    // The other way in.
+    await page.click('#h1-more');
+    await page.waitForSelector('#more-agents', { state: 'visible' });
+    const val = await page.textContent('#more-agents-val');
+    expect(val === '2 running', `More's Agents row reads ${JSON.stringify(val)}`);
+    await page.click('#more-agents');
+    await page.waitForSelector('#agents-sheet:not([hidden])', { timeout: 5_000 });
+    const again = await waitSheetRows(page, 5);
+    const moreShut = await page.evaluate(() => document.getElementById('more-screen')!.hidden);
+    expect(moreShut, 'More stayed open under the sheet');
+    return `order ${order}; groups ${groups.join(', ')}; Stop on the 2 running rows at 44px or more; the same ${again.length} rows from More, which shut`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P402 Stop on a running agent asks first, then calls the subagent cancel route with the agent\'s reference, and says what the daemon answered',
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({ id: 'agent-r1', toolUseId: 'tc-run-1', subagentType: 'Explore', description: 'read the routes' }),
+        agentTask({ id: 'agent-bg', subagentType: 'general-purpose', description: 'a background run', isBackgrounded: true, startTime: AG_T0 + 1_000 }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    let verdict = true;
+    await routeAgentCancel(page, asked, () => verdict);
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '2 agents');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    // Backing out of the question sends nothing.
+    await page.click('#agents-body .ag-stop[data-ref="tc-run-1"]');
+    await page.waitForSelector('#h1-ask:not([hidden])', { timeout: 5_000 });
+    await page.click('#h1-ask button.cancel');
+    await page.waitForTimeout(500);
+    expect(asked.length === 0, `a cancelled question still sent ${JSON.stringify(asked)}`);
+    await page.click('#agents-body .ag-stop[data-ref="tc-run-1"]');
+    await page.waitForSelector('#h1-ask:not([hidden])', { timeout: 5_000 });
+    await page.click('#h1-ask button[data-value="stop"]');
+    await page.waitForFunction(
+      () => /stopped/.test(document.querySelector('#agents-body .ag-row[data-key="tc-run-1"] .ag-l3')?.textContent ?? ''),
+      null,
+      { timeout: 10_000 },
+    );
+    expect(
+      asked.join(',') === 'tc-run-1',
+      `the stop named ${JSON.stringify(asked)} rather than the tool call that launched the agent`,
+    );
+    // An agent with no tool call (a background one) is named by its own id,
+    // and a 200 that did not stop it does not read as stopped.
+    verdict = false;
+    await page.click('#agents-body .ag-stop[data-ref="agent-bg"]');
+    await page.waitForSelector('#h1-ask:not([hidden])', { timeout: 5_000 });
+    await page.click('#h1-ask button[data-value="stop"]');
+    const note = await page.waitForFunction(
+      () => {
+        const t = document.querySelector('#agents-body .ag-row[data-key="agent-bg"] .ag-l3')?.textContent ?? '';
+        return /did not stop|stopped/.test(t) ? t : null;
+      },
+      null,
+      { timeout: 10_000 },
+    );
+    const bgNote = (await note.jsonValue()) as string;
+    expect(asked[1] === 'agent-bg', `the background stop named ${JSON.stringify(asked[1])}`);
+    expect(
+      bgNote === 'the daemon did not stop it',
+      `a refused stop reads ${JSON.stringify(bgNote)}`,
+    );
+    return `Cancel sent nothing; Stop sent ${asked.join(' then ')}; the first reads stopped, the refused one ${JSON.stringify(bgNote)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P403 a row opens that agent\'s trace: its words and tool calls in the order they came, newest at the bottom and followed, Stop in the thumb zone, and what it spawned',
+  frames: () => {
+    const f = new Frames();
+    f.user('go');
+    f.toolCall('tc-1', 'Agent', 'in_progress');
+    f.upd(childUpdate('tc-1', { sessionUpdate: 'agent_message_chunk', content: { text: 'reading the routes' } }));
+    f.upd(childUpdate('tc-1', { sessionUpdate: 'tool_call', toolCallId: 'c-1', title: 'read_file server.ts', status: 'in_progress' }));
+    f.upd(childUpdate('tc-1', { sessionUpdate: 'tool_call_update', toolCallId: 'c-1', status: 'completed' }));
+    f.upd(childUpdate('tc-1', { sessionUpdate: 'agent_message_chunk', content: { text: 'found two reads' } }));
+    f.upd(childUpdate('tc-1', { sessionUpdate: 'tool_call', toolCallId: 'c-2', title: 'grep agents', status: 'in_progress' }));
+    return f.list;
+  },
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({ id: 'agent-a', toolUseId: 'tc-1', subagentType: 'Explore', description: 'read the gateway routes', prompt: 'Read the gateway routes and list the session reads.' }),
+      ]),
+    agentTraceResult: {
+      v: 1,
+      sessionId: 'any',
+      nodes: [
+        { agentId: 'agent-a', agentType: 'Explore', description: 'read the gateway routes', parentSessionId: 'any', parentAgentId: null, rootAgentId: 'agent-a', toolUseId: 'tc-1', depth: 0, status: 'running', createdAt: '2026-01-01T00:00:00.000Z', lineageState: 'complete' },
+        { agentId: 'agent-c', agentType: 'Explore', description: 'grep the routes', parentSessionId: 'any', parentAgentId: 'agent-a', rootAgentId: 'agent-a', depth: 1, status: 'completed', createdAt: '2026-01-01T00:00:10.000Z', lineageState: 'complete' },
+        { agentId: 'agent-z', agentType: 'general-purpose', description: 'another tree', parentSessionId: 'any', parentAgentId: null, rootAgentId: 'agent-z', depth: 0, status: 'completed', createdAt: '2026-01-01T00:00:20.000Z', lineageState: 'complete' },
+      ],
+      rootAgentIds: ['agent-a', 'agent-z'],
+      warnings: [],
+    },
+  },
+  run: async ({ page, viewer }) => {
+    const traceAsks: string[] = [];
+    page.on('request', (r) => {
+      if (/\/agent-trace/.test(r.url())) traceAsks.push(new URL(r.url()).search);
+    });
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 7, 15_000);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 1);
+    await page.click('#agents-body .ag-open[data-key="tc-1"]');
+    await page.waitForFunction(() => document.querySelectorAll('#agents-body .ag-steps > li').length === 4, null, { timeout: 10_000 });
+    const steps = await traceSteps(page);
+    expect(
+      steps.map((s) => s.kind).join(',') === 'msg,tool,msg,tool',
+      `the steps are not in the order they came: ${JSON.stringify(steps)}`,
+    );
+    expect(
+      steps[0]!.text === 'reading the routes' && /read_file server\.ts/.test(steps[1]!.text) && /completed/.test(steps[1]!.text) && steps[2]!.text === 'found two reads' && /grep agents/.test(steps[3]!.text),
+      `the steps read ${JSON.stringify(steps)}`,
+    );
+    const head = await page.evaluate(() => ({
+      title: document.getElementById('agents-title')!.textContent,
+      body: document.getElementById('agents-body')!.textContent ?? '',
+    }));
+    expect(head.title === 'Explore', `the trace is titled ${JSON.stringify(head.title)}`);
+    expect(/Read the gateway routes and list the session reads/.test(head.body), 'the task the agent was given is not shown');
+    await page.waitForFunction(() => /Spawned \(1\)/.test(document.getElementById('agents-body')!.textContent ?? ''), null, { timeout: 10_000 });
+    const lineage = await page.evaluate(() => document.getElementById('agents-body')!.textContent ?? '');
+    expect(/grep the routes/.test(lineage) && !/another tree/.test(lineage), `the lineage drew the wrong tree (${JSON.stringify(lineage.slice(0, 400))})`);
+    expect(traceAsks.includes('?rootAgentId=agent-a'), `the lineage was not asked for this agent's tree (${JSON.stringify(traceAsks)})`);
+    const stop = await page.evaluate(() => {
+      const b = document.getElementById('agent-stop')!;
+      const r = b.getBoundingClientRect();
+      return { hidden: b.hidden || !document.getElementById('agents-foot') || document.getElementById('agents-foot')!.hidden, h: r.height, w: r.width, bottom: r.bottom, vh: window.innerHeight };
+    });
+    expect(!stop.hidden && stop.h >= 44 && stop.w >= 44, `Stop is not a 44px control (${JSON.stringify(stop)})`);
+    expect(stop.vh - stop.bottom <= 120, `Stop is not in the thumb zone: ${stop.vh - stop.bottom}px above the bottom`);
+    // More arrives: the trace follows to the newest step, and a long message
+    // is clipped with a way to read it whole.
+    await page.evaluate(() => {
+      for (let i = 0; i < 10; i++) {
+        __pg.update({ sessionUpdate: 'agent_message_chunk', content: { text: (i === 4 ? 'L'.repeat(1500) : 'note ' + i + ' ' + 'lorem ipsum '.repeat(12)) }, _meta: { parentToolCallId: 'tc-1', subagentType: 'Explore' } });
+        __pg.update({ sessionUpdate: 'tool_call', toolCallId: 'more-' + i, title: 'tool-' + i, status: 'in_progress', _meta: { parentToolCallId: 'tc-1', subagentType: 'Explore' } });
+      }
+    });
+    await page.waitForFunction(() => document.querySelectorAll('#agents-body .ag-steps > li').length === 24, null, { timeout: 10_000 });
+    await page.waitForTimeout(300);
+    const followed = await page.evaluate(() => {
+      const b = document.getElementById('agents-body')!;
+      const lis = b.querySelectorAll('.ag-steps > li');
+      return { gap: b.scrollHeight - b.scrollTop - b.clientHeight, over: b.scrollHeight > b.clientHeight, last: (lis[lis.length - 1]!.textContent ?? '').trim() };
+    });
+    expect(followed.over && followed.gap < 8, `the trace did not follow to the newest step (${JSON.stringify(followed)})`);
+    expect(/tool-9/.test(followed.last), `the newest step is not at the bottom (${JSON.stringify(followed.last)})`);
+    const clipped = await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('#agents-body [data-expand]')).find((b) => /1500 characters/.test(b.textContent ?? '')) as HTMLElement | undefined;
+      return btn ? btn.dataset['expand'] : null;
+    });
+    expect(clipped !== null, 'a 1500-character message was not clipped with a way to read it');
+    // A reader who scrolled up to read is left there when more arrives.
+    await page.evaluate(() => {
+      document.getElementById('agents-body')!.scrollTop = 0;
+    });
+    await page.evaluate(() =>
+      __pg.update({ sessionUpdate: 'tool_call', toolCallId: 'late', title: 'tool-late', status: 'in_progress', _meta: { parentToolCallId: 'tc-1', subagentType: 'Explore' } }),
+    );
+    await page.waitForFunction(() => document.querySelectorAll('#agents-body .ag-steps > li').length === 25, null, { timeout: 10_000 });
+    const kept = await page.evaluate(() => document.getElementById('agents-body')!.scrollTop);
+    expect(kept === 0, `a reader who scrolled up was carried to ${kept}`);
+    await page.click(`#agents-body [data-expand="${clipped}"]`);
+    await page.waitForFunction(() => (document.getElementById('agents-body')!.textContent ?? '').includes('L'.repeat(1500)), null, { timeout: 5_000 });
+    return `steps msg,tool,msg,tool in order; titled Explore with its task; spawned 1 (asked ?rootAgentId=agent-a); Stop ${stop.h}px, ${stop.vh - stop.bottom}px off the bottom; followed to tool-9, left alone once scrolled up; a 1500-character message opened whole`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P404 the inline subagent block\'s trace opens the same trace, and its Stop calls the cancel route and tells the block too',
+  frames: () => runningAgentFrames(),
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [agentTask({ id: 'agent-a', toolUseId: 'tc-1', subagentType: 'Explore', description: 'read rc-gateway routes' })]),
+  },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    await routeAgentCancel(page, asked, () => true);
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('.subagent-trace', { state: 'visible', timeout: 15_000 });
+    await page.click('.subagent-trace');
+    await page.waitForSelector('#agents-sheet:not([hidden])', { timeout: 5_000 });
+    await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'tc-1', null, { timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelectorAll('#agents-body .ag-steps > li').length >= 1, null, { timeout: 10_000 });
+    const steps = await traceSteps(page);
+    expect(steps.some((s) => s.kind === 'msg' && /reading rc-gateway routes/.test(s.text)), `the trace from the block reads ${JSON.stringify(steps)}`);
+    await page.click('#agent-stop');
+    await page.waitForSelector('#h1-ask:not([hidden])', { timeout: 5_000 });
+    await page.click('#h1-ask button[data-value="stop"]');
+    await page.waitForFunction(() => document.getElementById('agent-stop-note')!.textContent === 'stopped', null, { timeout: 10_000 });
+    expect(asked.join(',') === 'tc-1', `the trace's Stop named ${JSON.stringify(asked)}`);
+    await page.click('#agents-close');
+    const inline = await page.evaluate(() => document.querySelector('.subagent-cancel-note')?.textContent ?? null);
+    expect(inline === 'stopped', `the inline block was not told (${JSON.stringify(inline)})`);
+    return `trace from the block shows ${steps.length} step(s); Stop sent ${asked[0]}; the block reads ${JSON.stringify(inline)}`;
+  },
+});
+
+/** What a gated-off page must not show or ask, after a few poll intervals. */
+async function agentsAbsent(page: Page, asks: string[]): Promise<string> {
+  await page.waitForSelector('.subagent-cancel', { state: 'visible', timeout: 15_000 });
+  await page.waitForTimeout(6_500);
+  const seen = await page.evaluate(() => ({
+    chip: !document.getElementById('agents-chip')!.hidden,
+    more: !document.getElementById('more-agents')!.hidden,
+    trace: Array.from(document.querySelectorAll('.subagent-trace')).some((b) => !(b as HTMLElement).hidden),
+    sheet: !document.getElementById('agents-sheet')!.hidden,
+  }));
+  expect(!seen.chip && !seen.more && !seen.trace && !seen.sheet, `something new showed: ${JSON.stringify(seen)}`);
+  expect(asks.length === 0, `the page asked ${JSON.stringify(asks)}`);
+  return 'no chip, no More row, no trace button, no sheet, and no agent read in 6.5s with a running subagent';
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P405 an old gateway (no sessionAgents flag) shows nothing new and never reads the agents',
+  frames: () => runningAgentFrames(),
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [agentTask({ id: 'agent-a', toolUseId: 'tc-1', subagentType: 'Explore' })]),
+  },
+  before: async (page) => {
+    await page.route('**/rc/capabilities', async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { remoteControl?: Record<string, unknown> };
+      if (body.remoteControl) delete body.remoteControl['sessionAgents'];
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page, viewer }) => {
+    const asks: string[] = [];
+    page.on('request', (r) => {
+      if (/\/session\/[^/]+\/(agents|agent-trace)/.test(r.url())) asks.push(r.url());
+    });
+    await watch(page, viewer.sessionId);
+    return agentsAbsent(page, asks);
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P406 a daemon that does not advertise session_agents is never asked, even by a gateway that mounts the route',
+  frames: () => runningAgentFrames(),
+  stub: {
+    capabilitiesFeatures: [],
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [agentTask({ id: 'agent-a', toolUseId: 'tc-1', subagentType: 'Explore' })]),
+  },
+  run: async ({ page, viewer }) => {
+    const asks: string[] = [];
+    page.on('request', (r) => {
+      if (/\/session\/[^/]+\/(agents|agent-trace)/.test(r.url())) asks.push(r.url());
+    });
+    await watch(page, viewer.sessionId);
+    return agentsAbsent(page, asks);
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P407 a finished agent\'s trace offers no Stop and says what it used from the inspect read; a background agent the page never saw shows the daemon\'s recent activity',
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({ id: 'agent-done', toolUseId: 'tc-0', subagentType: 'Explore', description: 'the first look', status: 'completed', endTime: AG_T0 + 40_000 }),
+        agentTask({
+          id: 'agent-bg',
+          subagentType: 'general-purpose',
+          description: 'run the suite',
+          isBackgrounded: true,
+          startTime: AG_T0 + 1_000,
+          recentActivities: [
+            { name: 'read_file', description: 'package.json', at: Date.now() - 20_000 },
+            { name: 'run_shell_command', description: 'npm test', at: Date.now() - 12_000 },
+          ],
+        }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    const inspected: string[] = [];
+    await page.route(/\/session\/[^/]+\/subagents\/[^/]+$/, async (route) => {
+      inspected.push(decodeURIComponent(new URL(route.request().url()).pathname.split('/')[4]!));
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sessionId: 'v', taskId: 'agent-done', title: 'the first look', status: 'completed', durationMs: 40_000, totalTokens: 4321, inputTokens: 4000, outputTokens: 321 }),
+      });
+    });
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    await page.click('#agents-body .ag-open[data-key="tc-0"]');
+    await page.waitForFunction(() => /used 4\.3k tok \(4k in \/ 321 out\)/.test(document.getElementById('agents-body')!.textContent ?? ''), null, { timeout: 10_000 });
+    const done = await page.evaluate(() => ({
+      foot: !document.getElementById('agents-foot')!.hidden,
+      stop: !document.getElementById('agent-stop')!.hidden,
+      body: document.getElementById('agents-body')!.textContent ?? '',
+    }));
+    expect(!done.foot && !done.stop, `a finished agent offers Stop (${JSON.stringify(done)})`);
+    expect(inspected.join(',') === 'tc-0', `the usage was read for ${JSON.stringify(inspected)}`);
+    expect(/holds no steps/.test(done.body), 'a finished agent with no steps on the page does not say so');
+    await page.click('#agents-back');
+    await waitSheetRows(page, 2);
+    await page.click('#agents-body .ag-open[data-key="agent-bg"]');
+    await page.waitForFunction(() => document.querySelectorAll('#agents-body .ag-steps > li').length === 2, null, { timeout: 10_000 });
+    const acts = await traceSteps(page);
+    expect(
+      acts.every((a) => a.kind === 'act') && /read_file: package\.json/.test(acts[0]!.text) && /run_shell_command: npm test/.test(acts[1]!.text) && /ago/.test(acts[1]!.text),
+      `the daemon's activity reads ${JSON.stringify(acts)}`,
+    );
+    const src = await page.evaluate(() => document.getElementById('agents-body')!.textContent ?? '');
+    expect(/as the daemon reports them/.test(src), 'the trace does not say its steps are the daemon\'s');
+    return `finished: no Stop, ${JSON.stringify('used 4.3k tok')} from ${inspected[0]}; background: ${acts.map((a) => a.text).join(' | ')}`;
+  },
+});
+
+// The inline block's trace button, on the view alone: offered only when the
+// page says it can draw a trace, kept once the child settles, and a tap hands
+// the page the parent Agent row. Each builds a view of its own over a fresh
+// model, so the shared harness view is untouched. The bodies are strings
+// because tsx's keepNames turns a named arrow inside an evaluate callback into
+// a __name(...) call the page does not define.
+VIEW_SCENARIOS.push({
+  name: 'V23 the subagent block offers trace only when the page says it can, and a tap hands the page the parent Agent row',
+  run: async (page) => {
+    const r = (await page.evaluate(String.raw`(async () => {
+      const box = document.createElement('div');
+      box.style.cssText = 'position:fixed;left:0;top:0;width:390px;height:600px;overflow:auto';
+      document.body.appendChild(box);
+      const model = TranscriptModel.createTranscriptModel();
+      let can = false;
+      const tapped = [];
+      const view = TranscriptView.createTranscriptView({
+        model: model,
+        scroller: box,
+        virtualCore: null,
+        onTraceSubagent: function (item) { tapped.push(item.toolCallId); },
+        canTraceSubagent: function () { return can; },
+      });
+      model.upsertTool({ sessionUpdate: 'tool_call', toolCallId: 'tc-9', title: 'Agent', status: 'in_progress' });
+      model.appendSubagentText('tc-9', 'looking');
+      await __vt.settle(200);
+      const first = box.querySelector('.subagent-trace');
+      const off = first ? first.hidden : null;
+      can = true;
+      model.appendSubagentText('tc-9', ' more');
+      await __vt.settle(200);
+      const again = box.querySelector('.subagent-trace');
+      const on = again ? again.hidden : null;
+      if (again) again.click();
+      view.destroy();
+      box.remove();
+      return { off: off, on: on, tapped: tapped };
+    })()`)) as { off: boolean | null; on: boolean | null; tapped: string[] };
+    expect(r.off === true, `trace showed while the page said it cannot draw one (${JSON.stringify(r)})`);
+    expect(r.on === false, `trace stayed hidden once the page said it can (${JSON.stringify(r)})`);
+    expect(r.tapped.join(',') === 'tc-9', `a tap handed the page ${JSON.stringify(r.tapped)}`);
+    return `hidden while the page cannot trace, shown once it can, a tap hands over ${r.tapped[0]}`;
+  },
+});
+
+VIEW_SCENARIOS.push({
+  name: 'V24 the trace stays offered once the child settles, unlike cancel, and a view given no handler draws none',
+  run: async (page) => {
+    const r = (await page.evaluate(String.raw`(async () => {
+      const make = function (withHandler) {
+        const box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:0;top:0;width:390px;height:600px;overflow:auto';
+        document.body.appendChild(box);
+        const model = TranscriptModel.createTranscriptModel();
+        const opts = { model: model, scroller: box, virtualCore: null };
+        if (withHandler) {
+          opts.onTraceSubagent = function () {};
+          opts.canTraceSubagent = function () { return true; };
+        }
+        return { box: box, model: model, view: TranscriptView.createTranscriptView(opts) };
+      };
+      const hiddenOf = function (box, sel) {
+        const el = box.querySelector(sel);
+        return el ? el.hidden : null;
+      };
+      const a = make(true);
+      a.model.upsertTool({ sessionUpdate: 'tool_call', toolCallId: 'tc-1', title: 'Agent', status: 'in_progress' });
+      a.model.appendSubagentText('tc-1', 'working');
+      a.model.upsertTool({ sessionUpdate: 'tool_call_update', toolCallId: 'tc-1', status: 'completed' });
+      a.model.finishSubagent('tc-1', 'completed');
+      await __vt.settle(200);
+      const settled = { trace: hiddenOf(a.box, '.subagent-trace'), cancel: hiddenOf(a.box, '.subagent-cancel') };
+      a.view.destroy();
+      a.box.remove();
+      const b = make(false);
+      b.model.upsertTool({ sessionUpdate: 'tool_call', toolCallId: 'tc-2', title: 'Agent', status: 'in_progress' });
+      b.model.appendSubagentText('tc-2', 'working');
+      await __vt.settle(200);
+      const bare = hiddenOf(b.box, '.subagent-trace');
+      b.view.destroy();
+      b.box.remove();
+      return { settled: settled, bare: bare };
+    })()`)) as { settled: { trace: boolean | null; cancel: boolean | null }; bare: boolean | null };
+    expect(r.settled.trace === false && r.settled.cancel === true, `a settled child reads ${JSON.stringify(r.settled)}`);
+    expect(r.bare === true, `a view with no trace handler drew one (${JSON.stringify(r.bare)})`);
+    return `settled: trace shown, cancel withdrawn; no handler: no trace`;
+  },
+});
+
+VIEW_SCENARIOS.push({
+  name: 'V25 the model records where each child call started in the child\'s words, and an older page folded in front keeps that order',
+  run: async (page) => {
+    const r = (await page.evaluate(String.raw`(() => {
+      const subOf = function (m) {
+        return m.items.find(function (i) { return i.kind === 'tool' && i.toolCallId === 'tc-1'; }).sub;
+      };
+      const at = function (sub) {
+        return sub.tools.map(function (t) { return t.id + '@' + t.textAt; }).join(',');
+      };
+      const model = TranscriptModel.createTranscriptModel();
+      model.upsertTool({ sessionUpdate: 'tool_call', toolCallId: 'tc-1', title: 'Agent', status: 'in_progress' });
+      model.appendSubagentText('tc-1', 'abc');
+      model.upsertSubagentTool({ toolCallId: 'k-1', title: 'one', status: 'in_progress' }, 'tc-1');
+      model.appendSubagentText('tc-1', 'de');
+      model.upsertSubagentTool({ toolCallId: 'k-2', title: 'two', status: 'in_progress' }, 'tc-1');
+      model.upsertSubagentTool({ toolCallId: 'k-1', status: 'completed' }, 'tc-1');
+      const one = subOf(model);
+      // The same child read in two halves: the live stream holds its later
+      // words and call, a stored page its earlier ones.
+      const live = TranscriptModel.createTranscriptModel();
+      live.upsertTool({ sessionUpdate: 'tool_call', toolCallId: 'tc-1', title: 'Agent', status: 'in_progress' });
+      live.appendSubagentText('tc-1', 'de');
+      live.upsertSubagentTool({ toolCallId: 'k-2', title: 'two', status: 'in_progress' }, 'tc-1');
+      const ev = function (n, data) {
+        const meta = Object.assign({}, data._meta || {}, { timestamp: 1000 + n, 'qwen.session.recordId': 'rec-' + n });
+        return { v: 1, type: 'session_update', data: Object.assign({}, data, { _meta: meta }) };
+      };
+      const older = TranscriptModel.replayStoredPage([
+        ev(1, { sessionUpdate: 'tool_call', toolCallId: 'tc-1', title: 'Agent', status: 'in_progress' }),
+        ev(2, { sessionUpdate: 'agent_message_chunk', content: { text: 'abc' }, _meta: { parentToolCallId: 'tc-1' } }),
+        ev(3, { sessionUpdate: 'tool_call', toolCallId: 'k-1', title: 'one', status: 'completed', _meta: { parentToolCallId: 'tc-1' } }),
+      ]);
+      live.prependItems(older);
+      const two = subOf(live);
+      return { live: at(one), text: one.text, merged: at(two), mergedText: two.text };
+    })()`)) as { live: string; text: string; merged: string; mergedText: string };
+    expect(r.text === 'abcde' && r.live === 'k-1@3,k-2@5', `the calls were placed at ${r.live} in ${JSON.stringify(r.text)}`);
+    expect(r.mergedText === 'abcde' && r.merged === 'k-1@3,k-2@5', `folding the older page in front placed the calls at ${r.merged} in ${JSON.stringify(r.mergedText)}`);
+    return `live: k-1 at 3 and k-2 at 5 of "abcde", a status update did not move k-1; folded from two halves: ${r.merged} of ${JSON.stringify(r.mergedText)}`;
+  },
+});
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
