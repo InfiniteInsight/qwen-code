@@ -11704,6 +11704,9 @@
         // #201: its files can never be sent, the session is gone.
         pendingAttachmentsBySession.delete(watchedSessionId);
         watchedSessionId = null;
+        // #190: its cards go with it, as a switch takes them (a push deep
+        // link's card for the conversation being opened stays).
+        dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments();
         syncStoredForSession();
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
@@ -11737,6 +11740,9 @@
         // Unwatch that left it set kept polling the daemon every 5s (#59).
         noteConversationSwitch(); // #172: nor anything asked for it before
         watchedSessionId = null;
+        // #190: the cards of the conversation left go with it, as a switch
+        // takes them, rather than staying pinned over a chat that is empty.
+        dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments(); // #201: nothing watched, nothing staged
         syncStoredForSession();
         // #50: redrawn after the clear for the same reason as in

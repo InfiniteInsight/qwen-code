@@ -19369,6 +19369,29 @@ PAGE_SCENARIOS.push({
       return `Enter on ≡ landed on the first row; Tab walked all ${MORE_ROWS.length} rows in reading order and Shift+Tab back; Enter on Trust and policy opened onto its back button with the next Tab inside; Escape went to the row, then to ≡`;
     },
   });
+
+  // #190: Unwatch takes the conversation's cards with it, as a switch does.
+  PAGE_SCENARIOS.push({
+    name: 'P326 Unwatch takes a pinned card down with the conversation it belonged to',
+    frames: () => new Frames().ev('client_joined').user('clean up').ev('permission_request', permFrame('p326', 'rm -rf ./build')).list,
+    stub: { sessionStatus: statusBody([permPending('p326', 'rm -rf ./build')]) },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p326');
+      await page.evaluate(`document.getElementById('stop').click()`);
+      await frames3(page);
+      await page.waitForTimeout(300);
+      const r = (await page.evaluate(`({
+        cards: document.querySelectorAll('#cards .pcard').length,
+        pinned: !!pinnedCard(),
+        state: document.getElementById('h1-status').dataset.state,
+        watched: watchedSessionId,
+      })`)) as { cards: number; pinned: boolean; state: string; watched: string | null };
+      expect(r.watched === null && r.cards === 0 && !r.pinned && r.state !== 'wait', `after Unwatch: ${JSON.stringify(r)}`);
+      return `after Unwatch no card is left (${JSON.stringify(r)})`;
+    },
+  });
 }
 
 // #188 (h1). The laptop, derived from the phone: at 1100px and wider the List
