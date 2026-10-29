@@ -535,3 +535,139 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #169: `@file` arguments, home dotfiles and the shell `directory`.
+// tsc (and any script `npm run` hands the extra argument to) reads `@<path>` as
+// a response file and echoes each line back in a TS6231 error, so an `@` token
+// is a file read and must be confined like any other path.
+// ---------------------------------------------------------------------------
+describe('classifyReviewToolCall: @file and home dotfiles (#169)', () => {
+  const inDir = (command: string, directory: unknown) => ({
+    kind: 'execute',
+    title: command,
+    rawInput: { command, directory },
+  });
+
+  it('escalates an @file argument that names a path outside the workspace', () => {
+    for (const c of [
+      'tsc @/home/u/.ssh/id_rsa', // the reproduced audit case
+      'tsc @/etc/passwd',
+      'tsc @../../../etc/passwd',
+      'tsc --noEmit @../secrets.txt',
+      'npm run build @/home/u/.ssh/id_rsa', // npm hands it to the script
+      'tsc -p @/etc/passwd', // path-flag value carrying an @
+      'tsc @', // bare @ names nothing provable
+    ]) {
+      // Paired with the command so a failure names the case.
+      expect([c, classifyReviewToolCall(shell(c), AUTO)]).toEqual([
+        c,
+        'escalate',
+      ]);
+    }
+  });
+
+  it('approves an in-tree @file response file', () => {
+    expect(classifyReviewToolCall(shell('tsc @build/args.txt'), AUTO)).toBe(
+      'approve',
+    );
+  });
+
+  it('escalates every @file when the workspace root is unknown', () => {
+    expect(
+      classifyReviewToolCall(shell('tsc @build/args.txt'), {
+        ...AUTO,
+        worktreeRoot: null,
+      }),
+    ).toBe('escalate');
+  });
+
+  it('escalates a path under a home directory dotfile even inside the workspace', () => {
+    // A daemon whose workspace IS the home directory puts ~/.ssh "in tree".
+    const HOME_WS: ReviewPolicy = { ...AUTO, worktreeRoot: '/home/u' };
+    for (const c of [
+      'tsc @.ssh/id_rsa',
+      'tsc -p .aws/credentials',
+      'git diff .ssh/id_rsa',
+      'cargo build .config/x',
+    ]) {
+      expect([c, classifyReviewToolCall(shell(c), HOME_WS)]).toEqual([
+        c,
+        'escalate',
+      ]);
+    }
+    const ROOT_WS: ReviewPolicy = { ...AUTO, worktreeRoot: '/root' };
+    expect(classifyReviewToolCall(shell('tsc @.netrc'), ROOT_WS)).toBe(
+      'escalate',
+    );
+    // Ordinary files of a home-directory workspace still approve.
+    expect(classifyReviewToolCall(shell('tsc @src/args.txt'), HOME_WS)).toBe(
+      'approve',
+    );
+  });
+
+  it('keeps approving a workspace that itself lives under a home dotdir', () => {
+    // The repo's own files are not credentials just because the clone sits in
+    // ~/.local: only a dot entry BELOW the workspace root is refused.
+    const DOT_WS: ReviewPolicy = {
+      ...AUTO,
+      worktreeRoot: '/home/u/.local/src/repo',
+    };
+    expect(classifyReviewToolCall(shell('tsc -p tsconfig.json'), DOT_WS)).toBe(
+      'approve',
+    );
+    expect(classifyReviewToolCall(shell('tsc @build/args.txt'), DOT_WS)).toBe(
+      'approve',
+    );
+  });
+
+  it('resolves relative paths against the shell directory and confines it', () => {
+    // The shell tool runs in rawInput.directory when one is given, so a
+    // relative @file is read from THERE, not from the workspace root.
+    expect(
+      classifyReviewToolCall(inDir('tsc @.ssh/id_rsa', '/home/u'), AUTO),
+    ).toBe('escalate');
+    expect(
+      classifyReviewToolCall(inDir('git status', '/tmp/elsewhere'), AUTO),
+    ).toBe('escalate');
+    expect(
+      classifyReviewToolCall(inDir('git status', '../outside'), AUTO),
+    ).toBe('escalate');
+    expect(classifyReviewToolCall(inDir('git status', 42), AUTO)).toBe(
+      'escalate',
+    );
+    // A directory with no root to confine it against escalates.
+    expect(
+      classifyReviewToolCall(inDir('git status', '/proj/worktree'), {
+        ...AUTO,
+        worktreeRoot: null,
+      }),
+    ).toBe('escalate');
+    // The fetch-pr worktree under the workspace is the normal case.
+    expect(
+      classifyReviewToolCall(
+        inDir('tsc @args.txt', '/proj/worktree/.qwen/tmp/review-pr-7'),
+        AUTO,
+      ),
+    ).toBe('approve');
+    expect(
+      classifyReviewToolCall(inDir('git diff --stat', '.qwen/tmp/x'), AUTO),
+    ).toBe('approve');
+    // An empty directory means "the default", exactly as the shell tool reads it.
+    expect(classifyReviewToolCall(inDir('git status', ''), AUTO)).toBe(
+      'approve',
+    );
+  });
+
+  it('confines mkdir relative to the shell directory', () => {
+    expect(
+      classifyReviewToolCall(
+        inDir('mkdir -p .qwen/reviews', '/proj/worktree/sub'),
+        AUTO,
+      ),
+    ).toBe('approve');
+    expect(
+      classifyReviewToolCall(inDir('mkdir -p .qwen/reviews', '/proj'), AUTO),
+    ).toBe('escalate');
+  });
+});
