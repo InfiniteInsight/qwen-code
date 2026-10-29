@@ -258,6 +258,10 @@ export function createCapabilityRoute(deps: {
       // cancel) are mounted, so a phone can resume a dropped upload. An old
       // gateway omits this and the page uses the single POST.
       resumableAttachmentUploads: true,
+      // #131: GET /session/:id/turns/current is mounted, so the status line's
+      // sheet can show the running turn. An old gateway omits this and the
+      // sheet shows no "This turn" row.
+      currentTurn: true,
       // #190: the host's name and $HOME, for the list's folder line (`on
       // lovelace`, `~/projects`). Host facts, so owner and write only, as the
       // paths below (#165).
@@ -278,6 +282,12 @@ export function createCapabilityRoute(deps: {
       // advertises `session_agents`, so an old gateway shows nothing new and
       // an old daemon is never asked.
       sessionAgents: true,
+      // #123: /rc/workspace/{stat,file/write,file/edit,file/upload,file/delete}
+      // are mounted. The page draws its file-write controls only when this is
+      // true, the token holds write (`writeScope`), and the daemon advertises
+      // the route's own tag, so an old gateway, a reader and an old daemon
+      // each see none.
+      workspaceFileWrites: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
