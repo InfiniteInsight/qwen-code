@@ -5296,7 +5296,7 @@
         // The group heads say where Workspace and Host point, as drawn.
         const ws = wsTargetCwd || (caps && caps.workspaceCwd) || '';
         $('more-ws').textContent = ws
-          ? ' \u00b7 ' + ws.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~')
+          ? ' \u00b7 ' + shortFolder(ws)
           : '';
         const host = listHostLabel();
         $('more-host').textContent = host ? ' \u00b7 ' + host : '';
@@ -13926,6 +13926,12 @@
       // lovelace.tail1234.ts.net) and an address is kept whole. A home
       // directory reads as ~, as drawn; the full path is the line's title.
       function listHostLabel() {
+        // #190: the gateway names its host when the token may know it.
+        const named =
+          caps && caps.remoteControl && typeof caps.remoteControl.hostName === 'string'
+            ? caps.remoteControl.hostName
+            : '';
+        if (named) return named.split('.')[0];
         const h = String(location.hostname || '');
         if (!h || h.includes(':') || /^[0-9.]+$/.test(h)) return h;
         return h.split('.')[0];
@@ -13934,6 +13940,17 @@
       // for the title. #193: one rule for the folder line, each row's folder
       // and the folder screen, so a folder reads the same wherever it is.
       function shortFolder(cwd) {
+        // #190: the host's own $HOME when the gateway says it, so a folder
+        // under another user's home, or a home outside /home, reads as it is.
+        const home =
+          caps && caps.remoteControl && typeof caps.remoteControl.homeDir === 'string'
+            ? caps.remoteControl.homeDir.replace(/\/+$/, '')
+            : '';
+        if (home) {
+          return cwd === home || cwd.startsWith(home + '/')
+            ? '~' + cwd.slice(home.length)
+            : cwd;
+        }
         return cwd.replace(/^\/(home|Users)\/[^/]+(?=\/|$)/, '~');
       }
       // U+2066..U+2069 isolate the path as a left-to-right run inside the

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { homedir, hostname } from 'node:os';
 import type { RequestHandler } from 'express';
 import type { DaemonCapabilities } from '@qwen-code/sdk';
 import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
@@ -184,6 +185,10 @@ export function createCapabilityRoute(deps: {
    * never its version. Omitted when not wired.
    */
   daemonQwenBin?: string;
+  /** #190: the host's name and home directory; os.hostname() and os.homedir()
+   * when omitted (tests pin them). Reported to owner and write tokens only. */
+  hostName?: string;
+  homeDir?: string;
   /**
    * Whether the boot import probe of that binary passed (#191). Reported as
    * `daemonQwenBinHealthy`; `false` means its build is inconsistent. Omitted
@@ -248,6 +253,12 @@ export function createCapabilityRoute(deps: {
                 ? deps.maxAttachmentBytes
                 : await deps.maxAttachmentBytes(),
           }
+        : {}),
+      // #190: the host's name and $HOME, for the list's folder line (`on
+      // lovelace`, `~/projects`). Host facts, so owner and write only, as the
+      // paths below (#165).
+      ...(audience === 'full'
+        ? { hostName: deps.hostName ?? hostname(), homeDir: deps.homeDir ?? homedir() }
         : {}),
       // A host path: owner and write only (#165).
       ...(deps.daemonQwenBin !== undefined && audience === 'full'

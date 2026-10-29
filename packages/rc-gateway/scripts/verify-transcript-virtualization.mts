@@ -24111,6 +24111,47 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P334 the folder line names the host the gateway reports and the list reads its real $HOME as ~, not any /home/<user>, at 390 and 1100',
+  waitView: false,
+  before: async (page) => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { remoteControl: Record<string, unknown> };
+      body.remoteControl.hostName = 'lovelace.tail1234.ts.net';
+      body.remoteControl.homeDir = '/srv/me';
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    await page.waitForFunction(`caps && caps.remoteControl && caps.remoteControl.homeDir === '/srv/me'`, null, { timeout: 10_000 });
+    await h190ListFixture(page, {
+      '/srv/me/proj': [{ sessionId: '33400000-0000-0000-0000-000000000001', title: 'mine', updatedAt: h190Now }],
+      '/home/other/x': [{ sessionId: '33400000-0000-0000-0000-000000000002', title: 'theirs', updatedAt: h190Now }],
+    }, { '/srv/me/proj': { parent: null, entries: [] } });
+    await page.evaluate(`localStorage.setItem('qwen-rc-workspaces', JSON.stringify(['/home/other/x'])); renderRecentWorkspaces(); browseTo('/srv/me/proj', true)`);
+    await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 10_000 });
+    const lines: string[] = [];
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await openList(page);
+      await h190Settle(page);
+      const r = (await page.evaluate(`({
+        host: document.getElementById('list-host').textContent,
+        dirs: Array.from(document.querySelectorAll('#past-list .s .dir .cwd')).map((e) => e.textContent.replace(/[\\u2066-\\u2069]/g, '')),
+      })`)) as { host: string; dirs: string[] };
+      expect(r.host === 'on lovelace', `${size.width}: the folder line names ${JSON.stringify(r.host)}`);
+      expect(
+        r.dirs.includes('~/proj') && r.dirs.includes('/home/other/x'),
+        `${size.width}: the rows' folders read ${JSON.stringify(r.dirs)}`,
+      );
+      await shot(page, `p334-list-${size.width}`);
+      lines.push(`${size.width}: "${r.host}", folders ${JSON.stringify(r.dirs)}`);
+    }
+    return lines.join('; ');
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];
