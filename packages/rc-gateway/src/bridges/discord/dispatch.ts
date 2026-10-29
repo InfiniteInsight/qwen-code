@@ -8,6 +8,8 @@ import type { WriteResult } from '../client.js';
 import type { DiscordRestResult } from './restApi.js';
 import type { DiscordChannelStore } from './channelStore.js';
 import { subActorOf, parseCustomId, outcomeFor } from './render.js';
+import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
  * Pure inbound dispatch for the Discord bridge (`add-discord-bridge`): given a
@@ -69,8 +71,8 @@ export interface DiscordDispatchDeps {
   channels: DiscordChannelStore;
   /** This bridge's stable id (for the invite-redeem route path). */
   bridgeId: string;
-  /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
-  bans: Set<string>;
+  /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
+  bans: BanCacheLike;
   /**
    * Called when a NEW inbound prompt is accepted for a session — a turn boundary
    * (spec: "the next inbound user prompt"). The runner uses it to end the prior
@@ -130,7 +132,7 @@ export async function handleMessage(
   if (deps.bans.has(subActor)) return; // locally banned → silent drop
 
   const r = await deps.bridge.sendPrompt(sessionId, content, subActor);
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor); // gateway banned this sub-actor → cache + drop
     return;
   }
@@ -144,7 +146,12 @@ export async function handleMessage(
       msg.channelId,
       `Slow down — try again in ${secs} seconds.`,
     );
+    return;
   }
+  // A prompt the gateway did not take (502/503/504 and the like) is said in
+  // the channel; it used to vanish without a word (#168).
+  const notice = promptFailureNotice(r);
+  if (notice) await deps.rest.createMessage(msg.channelId, notice);
   // Success is silent; the agent's reply arrives via the SSE echo loop.
 }
 
@@ -236,17 +243,14 @@ export async function handleComponent(
     outcomeFor(parsed.action),
     subActor,
   );
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     await replyOrFallback(deps, comp, 'You are blocked.');
     return;
   }
-  if (!r.ok) {
-    await replyOrFallback(
-      deps,
-      comp,
-      'Vote failed — try again from the web client.',
-    );
+  const failed = voteFailureNotice(r);
+  if (failed) {
+    await replyOrFallback(deps, comp, failed);
     return;
   }
   await replyOrFallback(deps, comp, `You voted ${parsed.action}.`);

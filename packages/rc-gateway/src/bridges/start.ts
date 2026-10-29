@@ -23,6 +23,7 @@
 
 import { join } from 'node:path';
 import { BridgeClient } from './client.js';
+import { CursorStore, cursorPartitionOf } from './cursorStore.js';
 import type { SidecarConfig } from './sidecarConfig.js';
 import { TelegramBotApi } from './telegram/botApi.js';
 import { TelegramChatStore } from './telegram/chatStore.js';
@@ -106,6 +107,15 @@ export async function startBridge(
   const client = new BridgeClient({ baseUrl: cfg.gatewayUrl, token });
   const deeplinkUrl = opts.deeplinkUrl ?? cfg.gatewayUrl;
   const abort = new AbortController();
+  // Durable SSE resume cursors (spec: "SSE consumer per binding", persisted to
+  // $QWEN_BRIDGE_STATE_DIR/cursors.json). Every runner supported them but none
+  // was given a store, so a restart always resubscribed from "now" and lost the
+  // frames in between (#168). Partitioned by a fingerprint of the token, never
+  // the token itself.
+  const resume = {
+    cursors: await CursorStore.open(join(cfg.stateDir, 'cursors.json')),
+    tokenId: cursorPartitionOf(token),
+  };
 
   // Launch a runner's loops without letting a boot-time rejection escape as an
   // UNHANDLED rejection. A runner's start() awaits registerSelf(), which THROWS
@@ -130,6 +140,7 @@ export async function startBridge(
       botApi: new TelegramBotApi({ botToken: cfg.botToken }),
       client,
       chats: await TelegramChatStore.open(join(cfg.stateDir, 'chats.json')),
+      ...resume,
       baseUrl: deeplinkUrl,
       log,
     });
@@ -153,6 +164,7 @@ export async function startBridge(
         guildId: cfg.guildId,
         log,
       }),
+      ...resume,
       baseUrl: deeplinkUrl,
       log,
     });
@@ -211,6 +223,7 @@ export async function startBridge(
     // plain fetch REST. Both satisfy MatrixInbound.
     rest: adapter ?? mxRest,
     rooms,
+    ...resume,
     botUserId: cfg.userId,
     baseUrl: deeplinkUrl,
     commandPrefix: cfg.commandPrefix,

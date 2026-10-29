@@ -198,6 +198,63 @@ describe('extractSync — messages + power levels', () => {
     };
     expect(extractSync(sync, ctx()).messages).toEqual([]);
   });
+
+  it('does not turn an m.replace edit into a second prompt (#168)', () => {
+    const sync = {
+      rooms: {
+        join: {
+          '!r:h': {
+            timeline: {
+              events: [
+                {
+                  type: 'm.room.message',
+                  sender: '@alice:h',
+                  content: {
+                    msgtype: 'm.text',
+                    body: '* run the tests',
+                    'm.new_content': {
+                      msgtype: 'm.text',
+                      body: 'run the tests',
+                    },
+                    'm.relates_to': {
+                      rel_type: 'm.replace',
+                      event_id: '$orig',
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+    expect(extractSync(sync, ctx()).messages).toEqual([]);
+  });
+
+  it('still forwards a threaded reply (only edits are dropped)', () => {
+    const sync = {
+      rooms: {
+        join: {
+          '!r:h': {
+            timeline: {
+              events: [
+                {
+                  type: 'm.room.message',
+                  sender: '@alice:h',
+                  content: {
+                    msgtype: 'm.text',
+                    body: 'and the lint too',
+                    'm.relates_to': { rel_type: 'm.thread', event_id: '$t' },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+    expect(extractSync(sync, ctx()).messages).toHaveLength(1);
+  });
 });
 
 describe('extractSync — reactions', () => {

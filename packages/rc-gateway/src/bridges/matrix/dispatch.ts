@@ -8,6 +8,8 @@ import type { WriteResult } from '../client.js';
 import type { MatrixRestResult } from './restApi.js';
 import type { MatrixRoomStore } from './roomStore.js';
 import { subActorOf, voteForReaction, outcomeFor } from './render.js';
+import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
  * Pure inbound dispatch for the Matrix bridge (`add-matrix-bridge`): given a
@@ -69,6 +71,11 @@ export interface TrackedEvent {
   requestId: string;
   sessionId: string;
   /**
+   * The room the permission_request message was sent to. A reaction votes only
+   * from this room, and only while it is still bound to `sessionId` (#168).
+   */
+  roomId: string;
+  /**
    * The rendering surface for this request:
    *  - `'inline'`  → reaction-votable (👍/👎 cast a vote).
    *  - `'deeplink'`→ NOT reaction-votable; a reaction triggers a one-time
@@ -83,8 +90,8 @@ export interface MatrixDispatchDeps {
   rooms: MatrixRoomStore;
   /** This bridge's stable id (for the invite-redeem route path). */
   bridgeId: string;
-  /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
-  bans: Set<string>;
+  /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
+  bans: BanCacheLike;
   /** Rooms detected as E2EE → attach refused, messages can't be read. */
   encryptedRooms: Set<string>;
   /** eventId → tracked permission_request (for reaction → vote resolution). */
@@ -104,6 +111,11 @@ export interface MatrixDispatchDeps {
    * turn (its m.thread isn't reused). Optional (pure-dispatch tests omit it).
    */
   onTurnBoundary?: (sessionId: string) => void;
+  /**
+   * Audit sink for refused votes (the runner passes its log). Optional: pure
+   * dispatch tests that do not check the audit line omit it.
+   */
+  log?: (msg: string) => void;
 }
 
 /** A non-bot `m.room.message` (m.text) in a room, with the sender's power level. */
@@ -175,7 +187,7 @@ export async function handleMessage(
   if (deps.bans.has(subActor)) return;
 
   const r = await deps.bridge.sendPrompt(sessionId, body, subActor);
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     return;
   }
@@ -186,7 +198,16 @@ export async function handleMessage(
       msgtype: 'm.text',
       body: `Slow down — try again in ${secs} seconds.`,
     });
+    return;
   }
+  // A prompt the gateway did not take (502/503/504 and the like) is said in
+  // the room; it used to vanish without a word (#168).
+  const notice = promptFailureNotice(r);
+  if (notice)
+    await deps.rest.sendMessage(msg.roomId, {
+      msgtype: 'm.text',
+      body: notice,
+    });
 }
 
 async function handleCommand(
@@ -267,6 +288,14 @@ export const DEEPLINK_REACTION_GUIDANCE =
  * triggers a ONE-TIME threaded guidance reply ("This decision requires the web
  * client …") so the user knows to open the URL. Subsequent reactions on the same
  * requestId are silently dropped.
+ *
+ * Room check (#168): an `m.annotation` can name ANY event id, and the homeserver
+ * does not require the target to be in the reaction's room. The bot auto-joins
+ * invites, so a stranger who learns a permission event id could react from a
+ * room of their own. A reaction is a vote only when it was sent in the room the
+ * request was posted to AND that room is still bound to the request's session;
+ * anything else is refused and written to the audit log. Being in that room
+ * timeline means the sender is a joined member of the bound room.
  */
 export async function handleReaction(
   reaction: NormalizedMatrixReaction,
@@ -277,6 +306,21 @@ export async function handleReaction(
 
   const tracked = deps.tracked.get(reaction.targetEventId);
   if (!tracked) return; // not one of our permission-request messages
+
+  const refusal =
+    reaction.roomId !== tracked.roomId
+      ? 'sent from a room other than the one the request was posted to'
+      : deps.rooms.sessionFor(reaction.roomId) !== tracked.sessionId
+        ? 'the room is no longer bound to the request session'
+        : undefined;
+  if (refusal) {
+    deps.log?.(
+      `matrix bridge: refused reaction vote by ${reaction.sender} in ` +
+        `${reaction.roomId} on ${reaction.targetEventId} (request ` +
+        `${tracked.requestId}, posted to ${tracked.roomId}): ${refusal}`,
+    );
+    return;
+  }
 
   const vote = voteForReaction(reaction.key);
   if (!vote) return; // not 👍/👎
@@ -301,5 +345,16 @@ export async function handleReaction(
     outcomeFor(vote),
     subActor,
   );
-  if (r.status === 403) deps.bans.add(subActor);
+  if (isSubActorBan(r)) {
+    deps.bans.add(subActor);
+    return;
+  }
+  // Matrix has no per-user ack, so a vote the gateway did not count is said
+  // in the room; otherwise the reactor believes it was counted (#168).
+  const failed = voteFailureNotice(r);
+  if (failed)
+    await deps.rest.sendMessage(reaction.roomId, {
+      msgtype: 'm.text',
+      body: failed,
+    });
 }

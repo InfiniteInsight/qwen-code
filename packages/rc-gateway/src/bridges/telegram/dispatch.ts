@@ -9,6 +9,8 @@ import type { TgApiResult } from './botApi.js';
 import type { TelegramUpdate } from './botApi.js';
 import type { TelegramChatStore } from './chatStore.js';
 import { subActorOf, parseCallbackData, outcomeFor } from './render.js';
+import { promptFailureNotice, voteFailureNotice } from '../gatewayReplies.js';
+import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /** The bridge-client surface the dispatcher needs (subset → easy to mock). */
 export interface PromptVoter {
@@ -58,8 +60,8 @@ export interface DispatchDeps {
   chats: TelegramChatStore;
   /** This bridge's stable id (for the invite-redeem route path). */
   bridgeId: string;
-  /** Local ban cache (sub-actor ids) — mirrors gateway 403s to avoid re-hitting. */
-  bans: Set<string>;
+  /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
+  bans: BanCacheLike;
   /**
    * Map of requestId → sent messages (for editing on permission_resolved).
    * When provided, `handleCallback` records the sent message id from the
@@ -150,7 +152,7 @@ async function handleMessage(
   if (deps.bans.has(subActor)) return; // locally banned → silent drop
 
   const r = await deps.bridge.sendPrompt(sessionId, text, subActor);
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor); // gateway banned this sub-actor → cache + drop
     return;
   }
@@ -160,7 +162,12 @@ async function handleMessage(
       chatId,
       `Slow down — try again in ${secs} seconds.`,
     );
+    return;
   }
+  // A prompt the gateway did not take (502/503/504 and the like) is said in
+  // the chat; it used to vanish without a word (#168).
+  const notice = promptFailureNotice(r);
+  if (notice) await deps.tg.sendMessage(chatId, notice);
   // Success is silent here; the agent's reply arrives via the SSE echo loop.
 }
 
@@ -197,9 +204,16 @@ async function handleCallback(
     outcomeFor(parsed.action),
     subActor,
   );
-  if (r.status === 403) {
+  if (isSubActorBan(r)) {
     deps.bans.add(subActor);
     await deps.tg.answerCallbackQuery(cbq.id, 'You are blocked.');
+    return;
+  }
+  // Only a counted vote is acked with its outcome; 404/409/429/5xx used to
+  // be acked "Approved" too (#168).
+  const failed = voteFailureNotice(r);
+  if (failed) {
+    await deps.tg.answerCallbackQuery(cbq.id, failed);
     return;
   }
   await deps.tg.answerCallbackQuery(

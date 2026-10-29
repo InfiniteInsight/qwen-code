@@ -25,16 +25,13 @@
  * exceeds the budget.
  */
 
-const FENCE = '```';
-
-/** A line that toggles fenced-code state, plus the opener's language tag. */
-function fenceToggle(line: string): { toggle: boolean; lang: string } {
-  const t = line.trimStart();
-  if (!t.startsWith(FENCE)) return { toggle: false, lang: '' };
-  // Opener `\`\`\`lang` → lang is the first token after the fence; closer is bare.
-  const rest = t.slice(FENCE.length).trim();
-  return { toggle: true, lang: rest };
-}
+import {
+  FENCE,
+  NO_FENCE,
+  fenceToggle,
+  skipCarriedClose,
+  type FenceState,
+} from '../fence.js';
 
 /** Render a message body, prepending a reopen fence and/or appending a close. */
 function render(
@@ -66,24 +63,35 @@ function splitLongLine(line: string, budget: number): string[] {
   return out;
 }
 
-export function splitForDiscord(text: string, max = 2000): string[] {
+/**
+ * `start` is the fence state the text begins in: a stream router flushes a
+ * turn in pieces and carries the state from one flush to the next (#168), so
+ * a piece that starts inside a block reopens it with the same language on its
+ * first message. Defaults to outside any fence.
+ */
+export function splitForDiscord(
+  text: string,
+  max = 2000,
+  start: FenceState = NO_FENCE,
+): string[] {
+  ({ text, start } = skipCarriedClose(text, start));
   if (text.length === 0) return [];
   // Fast path: already fits and balanced (no need to even scan fences).
-  if (text.length <= max && countFences(text) % 2 === 0) return [text];
+  if (!start.inFence && text.length <= max && countFences(text) % 2 === 0)
+    return [text];
 
   const lines = text.split('\n');
   const messages: string[] = [];
 
   // Fence state as lines are CONSUMED (global across the whole text). Annotated
-  // ternary results (nextInFence/nextLang) below break the circular inference;
-  // these can stay literal-inferred.
-  let inFence = false;
-  let fenceLang = '';
+  // ternary results (nextInFence/nextLang) below break the circular inference.
+  let inFence: boolean = start.inFence;
+  let fenceLang: string = start.lang;
 
   // The message currently being accumulated.
   let curLines: string[] = [];
-  let openedInFence = false; // started inside a fence (needs reopen)
-  let openLang = '';
+  let openedInFence: boolean = start.inFence; // started inside a fence (needs reopen)
+  let openLang: string = start.lang;
 
   const flush = () => {
     if (curLines.length === 0 && !openedInFence) return;

@@ -5,6 +5,7 @@
  */
 
 import type { BridgeClient, BridgeEvent } from '../client.js';
+import { BanCache } from '../banCache.js';
 import type { DiscordRestApi } from './restApi.js';
 import type { DiscordChannelStore } from './channelStore.js';
 import {
@@ -100,7 +101,8 @@ const DISCORD_BRIDGE_ID = 'discord';
 
 export class DiscordBridge {
   private readonly cfg: DiscordBridgeConfig;
-  private readonly bans = new Set<string>();
+  /** Expiring, bounded mirror of gateway bans (#168). */
+  private readonly bans = new BanCache();
   private readonly subscribed = new Set<string>();
   /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
   private readonly lastEventId = new Map<string, number>();

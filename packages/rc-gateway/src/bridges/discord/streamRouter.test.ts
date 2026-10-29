@@ -81,6 +81,59 @@ describe('StreamBuffer', () => {
     expect(b.take()).toBe('abc');
     expect(b.isEmpty()).toBe(true);
   });
+
+  it('a blank line inside an open fence is code, not a paragraph break (#168)', () => {
+    const b = new StreamBuffer();
+    b.append('```py\nx = 1\n\ny = 2');
+    expect(b.hardDue()).toBe(false);
+  });
+
+  it('a block carried in from the last flush is due once it closes', () => {
+    const b = new StreamBuffer();
+    b.append('y = 2\n```');
+    expect(b.hardDue({ inFence: true, lang: 'py' })).toBe(true);
+  });
+});
+
+describe('StreamRouter, a code block across flushes (#168)', () => {
+  it('reopens a fence the cap flush closed, so prose and code do not swap', async () => {
+    const h = harness(() => ['chan_1']);
+    // A code block longer than the 1800-char cap: flushed while still open.
+    h.router.onChunk('sess', 'Here:\n```js\n' + 'x();\n'.repeat(400));
+    await h.router.whenIdle();
+    expect(h.posts.length).toBeGreaterThan(0);
+    for (const p of h.posts) expect(p.content.endsWith('```')).toBe(true);
+    const before = h.posts.length;
+    h.router.onChunk('sess', 'y();\n```\nprose after\n\n');
+    await h.router.whenIdle();
+    expect(h.posts.slice(before).map((p) => p.content)).toEqual([
+      '```js\ny();\n```\nprose after\n\n',
+    ]);
+  });
+
+  it('an idle flush inside a block: the closing line in the next flush ends it, no empty block', async () => {
+    const h = harness(() => ['chan_1']);
+    h.router.onChunk('sess', 'Run:\n```sh\nls -la\n');
+    h.fireTimers(); // the model paused inside the block
+    await h.router.whenIdle();
+    h.router.onChunk('sess', '```\nThat lists files.\n\n');
+    await h.router.whenIdle();
+    expect(h.posts.map((p) => p.content)).toEqual([
+      'Run:\n```sh\nls -la\n\n```',
+      'That lists files.\n\n',
+    ]);
+  });
+
+  it('a new turn does not inherit a fence the last turn left open', async () => {
+    const h = harness(() => ['chan_1']);
+    h.router.onChunk('sess', '```\nunterminated');
+    h.fireTimers();
+    await h.router.whenIdle();
+    h.router.bumpTurn('sess'); // next inbound prompt
+    h.router.onChunk('sess', 'Fresh prose.\n\n');
+    await h.router.whenIdle();
+    expect(h.posts.at(-1)!.content).toBe('Fresh prose.\n\n');
+  });
 });
 
 describe('StreamRouter — buffering + flush', () => {

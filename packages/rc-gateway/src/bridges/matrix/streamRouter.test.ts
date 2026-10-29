@@ -60,6 +60,33 @@ describe('MatrixStreamBuffer', () => {
   });
 });
 
+describe('MatrixStreamRouter, a code block across flushes (#168)', () => {
+  it('does not cut a block at a blank line inside it', async () => {
+    const h = harness(() => ['!r:h']);
+    h.router.onChunk('s', 'Code:\n```py\nx = 1\n\n');
+    await h.router.whenIdle();
+    expect(h.sent).toEqual([]); // the blank line is code, not a paragraph
+    h.router.onChunk('s', 'y = 2\n```\n');
+    await h.router.whenIdle();
+    expect(h.sent.map((m) => m.text)).toEqual([
+      'Code:\n```py\nx = 1\n\ny = 2\n```\n',
+    ]);
+  });
+
+  it('closes a block an idle flush cut, and reopens it in the next event', async () => {
+    const h = harness(() => ['!r:h']);
+    h.router.onChunk('s', 'Run:\n```sh\nls');
+    h.fireTimers();
+    await h.router.whenIdle();
+    h.router.onChunk('s', '\npwd\n```\nok\n\n');
+    await h.router.whenIdle();
+    expect(h.sent.map((m) => m.text)).toEqual([
+      'Run:\n```sh\nls\n```',
+      '```sh\n\npwd\n```\nok\n\n',
+    ]);
+  });
+});
+
 describe('MatrixStreamRouter', () => {
   it('buffers then sends a single event to the room on a hard trigger', async () => {
     const h = harness(() => ['!r:h']);
