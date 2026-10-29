@@ -5,7 +5,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  isRunning,
+  listDescendants,
   spawnTui,
   startTerminalGuard,
   terminalGoneReason,
@@ -235,5 +240,80 @@ describe('spawnTui', () => {
     };
     await spawnTui('true', [], {}, guard);
     expect(undone).toBe(1);
+  });
+});
+
+describe('listDescendants and isRunning', () => {
+  async function fakeProc(
+    rows: Array<{ pid: number; ppid: number; comm?: string; state?: string }>,
+  ): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'rc-proc-'));
+    for (const r of rows) {
+      await mkdir(join(root, String(r.pid)));
+      // The command name may hold spaces and parentheses.
+      await writeFile(
+        join(root, String(r.pid), 'stat'),
+        `${r.pid} (${r.comm ?? 'node'}) ${r.state ?? 'S'} ${r.ppid} 1 1 0 -1 0`,
+      );
+    }
+    await mkdir(join(root, 'self'));
+    return root;
+  }
+
+  it('walks children and grandchildren, and nothing else', async () => {
+    const root = await fakeProc([
+      { pid: 10, ppid: 1 },
+      { pid: 11, ppid: 10 },
+      { pid: 12, ppid: 11, comm: 'a (b) c' },
+      { pid: 13, ppid: 10 },
+      { pid: 20, ppid: 1 },
+      { pid: 21, ppid: 20 },
+    ]);
+    try {
+      expect(listDescendants(10, root).sort()).toEqual([11, 12, 13]);
+      expect(listDescendants(12, root)).toEqual([]);
+      expect(listDescendants(99, root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('is empty when /proc cannot be read, and isRunning is false for zombies and the absent', async () => {
+    expect(listDescendants(1, '/nonexistent-proc-dir')).toEqual([]);
+    const root = await fakeProc([
+      { pid: 30, ppid: 1, state: 'Z' },
+      { pid: 31, ppid: 1, state: 'S' },
+    ]);
+    try {
+      expect(isRunning(30, root)).toBe(false);
+      expect(isRunning(31, root)).toBe(true);
+      expect(isRunning(32, root)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('spawnTui ends the whole tree (#207: the TUI is two processes)', () => {
+  it('kills a grandchild that survives its parent and ignores SIGTERM, before resolving', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rc-tree-'));
+    const pidFile = join(dir, 'grandchild.pid');
+    try {
+      const { guard, end } = guardGoneOnDemand();
+      // The outer sh dies on SIGTERM, as the real launcher does; the inner sh
+      // is the UI process that is left behind and ignores it.
+      const script = `sh -c 'trap "" TERM; echo $$ > ${pidFile}; sleep 20; sleep 20' & wait`;
+      const run = spawnTui('sh', ['-c', script], {}, guard, {
+        killGraceMs: 400,
+      });
+      await new Promise((r) => setTimeout(r, 400));
+      const grandchild = Number((await readFile(pidFile, 'utf8')).trim());
+      expect(isRunning(grandchild)).toBe(true);
+      end();
+      await run;
+      expect(isRunning(grandchild)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
