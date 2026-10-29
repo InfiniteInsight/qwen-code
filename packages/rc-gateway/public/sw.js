@@ -36,7 +36,7 @@ async function originDaemonName() {
       }
     }
   } catch {
-    /* unreachable, refused or corrupt — no prefix */
+    /* unreachable, refused or corrupt: no prefix */
   } finally {
     clearTimeout(timer);
   }
