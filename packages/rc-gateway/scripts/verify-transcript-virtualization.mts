@@ -2313,8 +2313,11 @@ function replayFrames(turns: number, chunks: number): Frame[] {
 }
 
 /**
- * One event as the transcript ROUTE relays it (not as the live stream sends it):
- * the same DaemonEvent envelope, with the send time on the envelope's `_meta`.
+ * One event as the transcript ROUTE relays it (not as the live stream sends it),
+ * in the shape the daemon serves a stored page: the ACP update spread onto
+ * `data`, its clock at `data._meta.timestamp` beside the record id, and nothing
+ * on the envelope. The envelope clock (`_meta.serverTimestamp`) belongs to the
+ * live stream and the WAL; a fixture that put it here hid #171.
  */
 function storedEvent(
   id: number,
@@ -2323,11 +2326,13 @@ function storedEvent(
   ts: number,
 ): Record<string, unknown> {
   return {
-    id,
     v: 1,
     type: 'session_update',
-    data: { update: { sessionUpdate, ...update } },
-    _meta: { serverTimestamp: ts },
+    data: {
+      sessionUpdate,
+      ...update,
+      _meta: { timestamp: ts, 'qwen.session.recordId': `rec-${id}` },
+    },
   };
 }
 
@@ -22291,6 +22296,124 @@ async function runOnePageScenario(s: PageScenario): Promise<Result> {
     };
   }
 }
+
+// #202. The frame the in-band resume replay draws can carry its clock on the
+// update (`data.update._meta.timestamp`) instead of the envelope, and the page
+// read only the envelope, so every such row lost its time (the bug `stampOf`
+// had on a stored page). The frame here has no envelope clock at all.
+PAGE_SCENARIOS.push({
+  name: 'P290 a replayed frame stamped only on its update draws its row with that time',
+  frames: () =>
+    new Frames()
+      .upd({
+        sessionUpdate: 'user_message_chunk',
+        content: { text: 'stamped on the update' },
+        _meta: { timestamp: 1_700_000_123_000 },
+      })
+      .upd({
+        sessionUpdate: 'agent_message_chunk',
+        content: { text: 'and so is the answer' },
+        _meta: { timestamp: 1_700_000_124_000 },
+      }).list,
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 2, 30_000);
+    await settlePage(page);
+    const rows = await page.evaluate(() =>
+      transcriptModel.items
+        .filter((i) => i.kind === 'user' || i.kind === 'asst')
+        .map((i) => `${i.kind}:${i.time ?? ''}`),
+    );
+    expect(
+      rows.join('|') === 'user:1700000123000|asst:1700000124000',
+      `the rows read ${JSON.stringify(rows)}`,
+    );
+    return 'both rows drew the time carried on their update';
+  },
+});
+
+// #202. A message sent as a picture then a caption can end up split by a page
+// boundary: the picture closes the older page and the caption opens the newer
+// one. The two pages are read newest first, so the caption is on screen when
+// the picture arrives above it, and the two have to end as one row.
+PAGE_SCENARIOS.push({
+  name: 'P291 load earlier joins a message whose picture ends the older page and whose caption opens the newer one into one row',
+  frames: () => new Frames().user('live question').asst('live answer').list,
+  run: async ({ page, viewer }) => {
+    const stored = (sessionUpdate: string, content: unknown, ts: number, rec: string) => ({
+      v: 1,
+      type: 'session_update',
+      data: { sessionUpdate, content, _meta: { timestamp: ts, 'qwen.session.recordId': rec } },
+    });
+    const asked: string[] = [];
+    await page.route(
+      (u) => /^\/session\/[^/]+\/transcript$/.test(u.pathname),
+      (route) => {
+        const u = new URL(route.request().url());
+        asked.push(u.search);
+        const body = u.searchParams.get('cursor')
+          ? {
+              v: 1,
+              events: [
+                stored(
+                  'user_message_chunk',
+                  { type: 'image', attachmentId: 'IMG_1.jpg', mimeType: 'image/jpeg', size: 10 },
+                  1_700_000_000_000,
+                  'r-1',
+                ),
+              ],
+              hasMore: false,
+            }
+          : {
+              v: 1,
+              events: [
+                stored('user_message_chunk', { type: 'text', text: 'what is this?' }, 1_700_000_001_000, 'r-2'),
+                stored('agent_message_chunk', { type: 'text', text: 'a cat' }, 1_700_000_002_000, 'r-3'),
+              ],
+              nextCursor: 'p291-cursor',
+              hasMore: true,
+            };
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(body),
+        });
+      },
+    );
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 2, 30_000);
+    await settlePage(page);
+
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      () => transcriptModel.items.some((i) => i.text === 'what is this?'),
+      null,
+      { timeout: 10_000 },
+    );
+    await settlePage(page);
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      () => (document.getElementById('load-earlier') as HTMLElement).hidden,
+      null,
+      { timeout: 10_000 },
+    );
+    await settlePage(page);
+    const users = await page.evaluate(() =>
+      transcriptModel.items
+        .filter((i) => i.kind === 'user')
+        .map((i) => ({ text: i.text, parts: i.parts ? i.parts.length : 0, time: i.time })),
+    );
+    expect(
+      users.length === 2 &&
+        users[0]!.text === 'what is this?' &&
+        users[0]!.parts === 1 &&
+        users[0]!.time === 1_700_000_000_000,
+      `the user rows read ${JSON.stringify(users)} after reads ${JSON.stringify(asked)}`,
+    );
+    return `the picture and its caption drew as one row (${JSON.stringify(users[0])}) after ${asked.length} reads`;
+  },
+});
+
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

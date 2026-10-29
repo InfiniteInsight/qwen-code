@@ -6,6 +6,19 @@
 
 import type { ForkRecord } from './forkTranscript.js';
 
+/**
+ * User-role subtypes the daemon's rewind snapshot index does not count.
+ * `Session.getRewindableUserTurnCount` counts API-history user prompts with
+ * `excludeTaskNotifications`: a delivered notification never produced a
+ * client-visible turn or a file-history snapshot, and a mid-turn user message
+ * is merged into the tool-result entry. A `cron` turn is deliberately absent:
+ * the daemon documents that cron and loop turns keep counting.
+ */
+const NOT_A_TURN_SUBTYPES: ReadonlySet<unknown> = new Set([
+  'notification',
+  'mid_turn_user_message',
+]);
+
 /** Typed rejection reasons for {@link resolveTurn}. */
 export type ResolveTurnError = 'invalid_turn' | 'rewind_not_applicable';
 
@@ -67,7 +80,8 @@ export function resolveTurn(
 
   const userTurnIndices: number[] = [];
   for (let i = checkpointIdx + 1; i < records.length; i++) {
-    if (records[i]!['type'] === 'user') {
+    const r = records[i]!;
+    if (r['type'] === 'user' && !NOT_A_TURN_SUBTYPES.has(r['subtype'])) {
       userTurnIndices.push(i);
     }
   }

@@ -414,6 +414,12 @@ describe('fork route', () => {
     expect(header.transcriptMode).toBe('include');
     expect(header.forkedAt).toBe('2026-07-10T00:00:00.000Z');
     expect('parentEventId' in header).toBe(false);
+    // `qwen-rc fork` only POSTs here, so CLI forks get their lineage from this
+    // header; without `forkedFrom` they would list as roots.
+    expect(header.forkedFrom).toEqual({
+      sessionId: PARENT_ID,
+      messageUuid: null,
+    });
     // The copied records come AFTER the header.
     expect(lines.length).toBe(2); // 1 header + 1 copied record
     expect(JSON.parse(lines[1]).sessionId).toBe(NEW_ID);
@@ -777,6 +783,46 @@ describe('fromTurn addressing after a rewind (dead branch)', () => {
 
   it('a mid turn keeps the live records before it and none of the dead ones', async () => {
     expect(await forkedUuids(1)).toEqual(['u0', 'a0', 'rw']);
+  });
+});
+
+describe('a full fork after a rewind (dead branch)', () => {
+  it('copies only the live branch when neither fromEventId nor fromTurn is given', async () => {
+    await mkdir(chatsDir, { recursive: true });
+    const base = { sessionId: PARENT_ID, cwd: CWD };
+    const records = [
+      { ...base, uuid: 'u0', parentUuid: null, type: 'user' },
+      { ...base, uuid: 'a0', parentUuid: 'u0', type: 'assistant' },
+      { ...base, uuid: 'u1', parentUuid: 'a0', type: 'user' },
+      { ...base, uuid: 'a1', parentUuid: 'u1', type: 'assistant' },
+      {
+        ...base,
+        uuid: 'rw',
+        parentUuid: 'a0',
+        type: 'system',
+        subtype: 'rewind',
+      },
+      { ...base, uuid: 'u1b', parentUuid: 'rw', type: 'user' },
+      { ...base, uuid: 'a1b', parentUuid: 'u1b', type: 'assistant' },
+    ];
+    await writeFile(
+      join(chatsDir, `${PARENT_ID}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf8',
+    );
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(200);
+    const copied = (await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8'))
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r['type'] !== 'fork')
+      .map((r) => (r['forkedFrom'] as { messageUuid: string }).messageUuid);
+    expect(copied).toEqual(['u0', 'a0', 'rw', 'u1b', 'a1b']);
+    expect(audit.calls[0]?.detail).toMatchObject({ copiedCount: 5 });
   });
 });
 

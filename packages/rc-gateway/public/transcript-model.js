@@ -187,6 +187,14 @@
 
   function createTranscriptModel(opts) {
     var now = (opts && opts.now) || Date.now;
+    // A stored page is read newest to oldest, so a subagent's child frames can
+    // land on a page whose parent Agent call is on an older one. The live model
+    // drops those (nothing could ever attach them); the page reducer keeps them
+    // so prependItems can attach them when the parent arrives (#202).
+    var keepOrphans = !!(opts && opts.keepOrphans);
+    var orphanSubs = new Map(); // parentToolCallId -> sub, parent not seen yet
+    // Orphans carried by earlier pages that no row on screen has claimed yet.
+    var pendingOrphans = new Map();
     var items = [];
     var listeners = [];
     var nextId = 1;
@@ -481,22 +489,38 @@
 
     // Parent tool_call always precedes child frames: a parent the model has
     // not seen yields null and the child frame is dropped.
+    function newSub(parentId) {
+      var sub = {
+        startedAt: now(),
+        endedAt: null,
+        done: false,
+        failed: false,
+        type: subagentTypes.get(parentId) || '',
+        text: '',
+        tools: [],
+      };
+      subToolIndex.set(sub, new Map());
+      return sub;
+    }
     function subagentOf(parentId) {
       var tool = toolIndex.get(parentId);
       if (!tool) return null;
-      if (!tool.sub) {
-        tool.sub = {
-          startedAt: now(),
-          endedAt: null,
-          done: false,
-          failed: false,
-          type: subagentTypes.get(parentId) || '',
-          text: '',
-          tools: [],
-        };
-        subToolIndex.set(tool.sub, new Map());
-      }
+      if (!tool.sub) tool.sub = newSub(parentId);
       return tool;
+    }
+    // Where a child frame's text and tools go: the parent's row, or (for a page
+    // reducer) a sub held aside for a parent that has not been seen. null when
+    // the frame has nowhere to go. `tool` is null for a held-aside sub.
+    function holderOf(parentId) {
+      var tool = subagentOf(parentId);
+      if (tool) return { tool: tool, sub: tool.sub };
+      if (!keepOrphans || !parentId) return null;
+      var sub = orphanSubs.get(parentId);
+      if (!sub) {
+        sub = newSub(parentId);
+        orphanSubs.set(parentId, sub);
+      }
+      return { tool: null, sub: sub };
     }
 
     // Returns the tool item when something changed (caller emits).
@@ -531,32 +555,42 @@
         tool.sub.type = t;
         emitUpdate(tool);
       }
+      var held = orphanSubs.get(parentId);
+      if (held && !held.type) held.type = t;
     }
 
     function appendSubagentText(parentId, text) {
-      var tool = subagentOf(parentId);
-      if (!tool) return;
-      tool.sub.text += clean(text);
-      emitUpdate(tool);
+      var h = holderOf(parentId);
+      if (!h) return;
+      h.sub.text += clean(text);
+      if (h.tool) emitUpdate(h.tool);
     }
 
     function upsertSubagentTool(u, parentId) {
-      var tool = subagentOf(parentId);
-      if (!tool) return;
+      var h = holderOf(parentId);
+      if (!h) return;
       var id = strOr(u.toolCallId, '');
       var status = strOr(u.status, '');
-      var idx = subToolIndex.get(tool.sub);
+      var idx = subToolIndex.get(h.sub);
+      if (!idx) {
+        // A sub built on a page model and merged in: index what it holds.
+        idx = new Map();
+        h.sub.tools.forEach(function (e) {
+          if (e.id) idx.set(e.id, e);
+        });
+        subToolIndex.set(h.sub, idx);
+      }
       var entry = id ? idx.get(id) : null;
       if (!entry) {
         entry = { id: id, label: '', status: '' };
-        tool.sub.tools.push(entry);
+        h.sub.tools.push(entry);
         if (id) idx.set(id, entry);
       }
       entry.label = toolLabel(u, id, entry.label);
       // An update that names no status (a note, a rename) leaves the one the
       // call had; assigning '' made a running child read as not started.
       if (status) entry.status = status;
-      emitUpdate(tool);
+      if (h.tool) emitUpdate(h.tool);
     }
 
     // The call itself and what came back, kept verbatim for the view to render
@@ -596,6 +630,12 @@
         if (input !== undefined) tool.input = input;
         if (result !== undefined) tool.result = result;
         if (id) toolIndex.set(id, tool);
+        // Child frames that came before their parent's row on this page.
+        var early = id ? orphanSubs.get(id) : undefined;
+        if (early) {
+          tool.sub = early;
+          orphanSubs.delete(id);
+        }
       }
       // The parent agent tool reaching a terminal status settles the nested
       // subagent indicator.
@@ -762,6 +802,35 @@
     }
     // Give a nameless row what the call's own row knows. The row already on
     // screen is the later one, so its status and result stand.
+    // Fold a subagent's earlier frames (`from`, the older page) into the one
+    // already held (`into`). The same frames can sit in both when a page
+    // overlaps the live replay, so text `into` already holds is not doubled and
+    // a child call is matched by its id.
+    function mergeSub(into, from) {
+      if (!from || from === into) return into;
+      if (from.text && into.text.indexOf(from.text) < 0)
+        into.text = from.text + into.text;
+      var known = {};
+      into.tools.forEach(function (t) {
+        if (t.id) known[t.id] = t;
+      });
+      var older = [];
+      from.tools.forEach(function (t) {
+        var have = t.id ? known[t.id] : null;
+        if (!have) older.push(t);
+        else if (!have.label && t.label) have.label = t.label;
+      });
+      into.tools.splice.apply(into.tools, [0, 0].concat(older));
+      subToolIndex.delete(into);
+      if (!into.type) into.type = from.type;
+      if (from.startedAt < into.startedAt) into.startedAt = from.startedAt;
+      if (from.done && !into.done) {
+        into.done = true;
+        into.failed = from.failed;
+        into.endedAt = from.endedAt;
+      }
+      return into;
+    }
     function fillTool(into, from) {
       if (nameless(into) && !nameless(from)) into.label = from.label;
       if (into.input === undefined && from.input !== undefined)
@@ -770,6 +839,60 @@
         into.result = from.result;
       if (!into.status && from.status) into.status = from.status;
       if (!into.sub && from.sub) into.sub = from.sub;
+      else if (into.sub && from.sub) mergeSub(into.sub, from.sub);
+    }
+    // A user message split by a page boundary: the older page ends in the first
+    // part of it, the row already on screen opens with the rest. The same two
+    // shapes the live path joins (addUserPart, addUserChunk): a picture opening
+    // a row of its own, or a caption arriving after a text-less picture row.
+    function joinsAcross(last, first) {
+      if (!last || !first || last.kind !== 'user' || first.kind !== 'user')
+        return false;
+      var lp = last.parts && last.parts.length;
+      var fp = first.parts && first.parts.length;
+      if (!first.text && fp) return true;
+      return !!(first.text && !fp && !last.text && lp);
+    }
+    function absorb(last, first) {
+      first.text = last.text || first.text;
+      first.parts = (last.parts || []).concat(first.parts || []);
+      if (typeof last.time === 'number') first.time = last.time;
+      emitUpdate(first);
+    }
+    // Hand the child frames a newer page held for parents it did not have to
+    // whichever row on screen is their parent, or keep them for a later page.
+    function takeOrphans(orphans) {
+      if (!orphans) return;
+      for (var i = 0; i < orphans.length; i++) {
+        var id = orphans[i].id;
+        var sub = orphans[i].sub;
+        var row = null;
+        for (var k = 0; k < items.length && !row; k++) {
+          if (items[k].kind === 'tool' && items[k].toolCallId === id)
+            row = items[k];
+        }
+        if (row) {
+          if (row.sub) mergeSub(row.sub, sub);
+          else row.sub = sub;
+          emitUpdate(row);
+        } else if (pendingOrphans.has(id)) {
+          mergeSub(pendingOrphans.get(id), sub);
+        } else {
+          pendingOrphans.set(id, sub);
+        }
+      }
+    }
+    // A row arriving on an older page may be the parent of held child frames.
+    function claimOrphans(list) {
+      if (!pendingOrphans.size) return;
+      for (var i = 0; i < list.length; i++) {
+        var r = list[i];
+        if (r.kind !== 'tool' || !r.toolCallId) continue;
+        var held = pendingOrphans.get(r.toolCallId);
+        if (!held) continue;
+        pendingOrphans.delete(r.toolCallId);
+        r.sub = r.sub ? mergeSub(held, r.sub) : held;
+      }
     }
     // Two rows are the same record unless both know when they were sent and
     // the times differ: a chat of "continue" and "ok" repeats its words, not
@@ -821,6 +944,9 @@
     // do (the page anchors the reader there; anchoring for a splice that adds
     // nothing would leave a hold behind). Returns the number of rows added.
     function prependItems(list, beforeSplice) {
+      var orphans = list && list.orphans;
+      if (list && list.length) claimOrphans(list);
+      takeOrphans(orphans);
       if (!list || !list.length) return 0;
       // The page's to-do list is older than the one on screen: the daemon
       // re-emits the whole list on every change, so only the newest stands.
@@ -868,7 +994,13 @@
       }
       list = fresh;
       if (!list.length) return 0;
+      var joins = joinsAcross(list[list.length - 1], items[0]);
       if (beforeSplice) beforeSplice();
+      if (joins) {
+        absorb(list[list.length - 1], items[0]);
+        list = list.slice(0, -1);
+        if (!list.length) return 0;
+      }
       for (var i = 0; i < list.length; i++) {
         if (adopted.indexOf(list[i]) < 0) list[i].id = nextId++;
       }
@@ -930,6 +1062,13 @@
       touch: touch,
       clear: clear,
       prependItems: prependItems,
+      heldSubagents: function () {
+        var out = [];
+        orphanSubs.forEach(function (sub, id) {
+          out.push({ id: id, sub: sub });
+        });
+        return out;
+      },
     };
   }
 
@@ -1057,6 +1196,7 @@
       now: function () {
         return stamp || Date.now();
       },
+      keepOrphans: true,
     });
     for (var i = 0; i < list.length; i++) {
       var t = stampOf(list[i]);
@@ -1066,6 +1206,11 @@
     // The page can end inside a thought, which nothing then closes: on the live
     // path the next non-thought frame folds it.
     m.finishThought();
+    // Child frames whose parent call is on an older page ride along, out of the
+    // way of the rows (non-enumerable: a page compares and spreads as its rows).
+    var orphans = m.heldSubagents();
+    if (orphans.length)
+      Object.defineProperty(m.items, 'orphans', { value: orphans });
     return m.items;
   }
 
@@ -1073,6 +1218,10 @@
     clean: clean,
     createTranscriptModel: createTranscriptModel,
     replayStoredPage: replayStoredPage,
+    // The send time of one frame as the viewer reads it, or undefined (#202).
+    frameStamp: function (ev) {
+      return stampOf(ev) || undefined;
+    },
     turnErrorText: turnErrorText,
     userPartOf: userPartOf,
     userBlockOf: userBlockOf,
