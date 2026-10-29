@@ -272,3 +272,72 @@ describe('POST /session/:id/approval-mode', () => {
     expect(raw).not.toMatch(/prompt|args|path/i);
   });
 });
+
+describe('approval-mode: a session that is not live (fake daemon)', () => {
+  async function callWith(thrown: unknown, mode = 'plan') {
+    const { default: express } = await import('express');
+    const { createApprovalModeRoute } = await import('./approvalMode.js');
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.rcClient = { id: 'tok', scopes: ['owner'] };
+      next();
+    });
+    app.post(
+      '/session/:id/approval-mode',
+      createApprovalModeRoute({
+        setSessionApprovalMode: async () => {
+          throw thrown;
+        },
+      } as never),
+    );
+    const s: Server = await new Promise((resolve) => {
+      const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
+    });
+    server = s;
+    const { port } = s.address() as AddressInfo;
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${SESSION_ID}/approval-mode`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      },
+    );
+    return { status: res.status, body: await res.json() };
+  }
+
+  const daemonError = (status: number, body: unknown) =>
+    Object.assign(new Error('daemon'), {
+      name: 'DaemonHttpError',
+      status,
+      body,
+    });
+
+  it('the pool holding no record of the session is 404 session_not_found, like its siblings', async () => {
+    const { UnknownSessionError } = await import('../daemonPool.js');
+    const out = await callWith(new UnknownSessionError(SESSION_ID));
+    expect(out.status).toBe(404);
+    expect(out.body).toMatchObject({ code: 'session_not_found' });
+  });
+
+  it('a daemon 404 that names the session is 404 session_not_found, not unsupported', async () => {
+    const out = await callWith(
+      daemonError(404, { code: 'session_not_found', error: 'no such session' }),
+    );
+    expect(out.status).toBe(404);
+    expect(out.body).toMatchObject({ code: 'session_not_found' });
+  });
+
+  it('a bare daemon 404 is still approval_mode_unsupported', async () => {
+    const out = await callWith(daemonError(404, undefined));
+    expect(out.status).toBe(502);
+    expect(out.body).toMatchObject({ code: 'approval_mode_unsupported' });
+  });
+
+  it('any other daemon 4xx keeps its status instead of becoming a 502', async () => {
+    const out = await callWith(daemonError(409, { error: 'session busy' }));
+    expect(out.status).toBe(409);
+    expect(out.body).toMatchObject({ code: 'daemon_rejected' });
+  });
+});

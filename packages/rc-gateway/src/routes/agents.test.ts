@@ -468,4 +468,35 @@ describe('steer + cancel', () => {
       expect(calls[i].startedAt).toBeGreaterThanOrEqual(calls[i - 1].endedAt);
     }
   });
+
+  it('a queued steer keeps the agent running until the LAST prompt settles', async () => {
+    const { url, registry } = await setup({ promptDelayMs: 200 });
+    const spawn = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 't' }),
+    });
+    const { agentId } = (await spawn.json()) as { agentId: string };
+    const m = await fetch(`${url}/rc/agents/${agentId}/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'steer' }),
+    });
+    expect(m.status).toBe(202);
+
+    // The spawn prompt settles at ~200ms; the steer turn runs ~200-400ms.
+    // Sample inside the steer turn: the agent must still be running and the
+    // message/cancel routes must still accept it.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(registry.get(agentId)?.status).toBe('running');
+    const again = await fetch(`${url}/rc/agents/${agentId}/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'another' }),
+    });
+    expect(again.status).toBe(202);
+
+    await waitFor(() => registry.get(agentId)?.status === 'completed', 4000);
+    expect(registry.get(agentId)?.status).toBe('completed');
+  });
 });

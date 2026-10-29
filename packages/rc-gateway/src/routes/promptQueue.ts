@@ -72,10 +72,11 @@ export class PromptQueue {
         }),
       ]);
     } catch (err) {
-      // We timed out waiting for the slot.  Remove ourselves from the chain
-      // so that the NEXT waiter chains off `next` (which we'll resolve now so
-      // the chain isn't stuck).  The in-flight prompt continues unaffected.
-      release();
+      // We timed out waiting for the slot.  We stay in the chain as a
+      // pass-through: `next` resolves only once `current` (the holder, or the
+      // waiter ahead of us) has resolved, so a caller arriving later still
+      // waits for the real holder instead of taking the slot mid-turn.
+      void current.then(release);
       throw err;
     } finally {
       if (timer !== undefined) clearTimeout(timer);

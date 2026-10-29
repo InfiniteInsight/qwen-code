@@ -24,6 +24,9 @@ import { resolveChatsDir, archiveChatsDirOf } from '../sessions/chatsPath.js';
 import { createForkRoute } from './fork.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import { decodeSegment } from '../wal.js';
+import { listSessions } from '../sessions/sessionList.js';
+import { parentOf } from '../sessions/lineage.js';
+import { readParentRecords } from '../sessions/forkStore.js';
 
 // A cwd whose sanitizeCwd is stable and lands under our tmp runtime base.
 const CWD = '/fork-test/ws';
@@ -725,5 +728,75 @@ describe('fromTurn addressing', () => {
     const res = await postFork(url, { fromTurn: -1 });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ code: 'invalid_turn' });
+  });
+});
+
+describe('fromTurn addressing after a rewind (dead branch)', () => {
+  async function forkedUuids(fromTurn: number): Promise<string[]> {
+    await mkdir(chatsDir, { recursive: true });
+    const base = { sessionId: PARENT_ID, cwd: CWD };
+    const records = [
+      { ...base, uuid: 'u0', parentUuid: null, type: 'user' },
+      { ...base, uuid: 'a0', parentUuid: 'u0', type: 'assistant' },
+      { ...base, uuid: 'u1', parentUuid: 'a0', type: 'user' },
+      { ...base, uuid: 'a1', parentUuid: 'u1', type: 'assistant' },
+      {
+        ...base,
+        uuid: 'rw',
+        parentUuid: 'a0',
+        type: 'system',
+        subtype: 'rewind',
+      },
+      { ...base, uuid: 'u1b', parentUuid: 'rw', type: 'user' },
+      { ...base, uuid: 'a1b', parentUuid: 'u1b', type: 'assistant' },
+    ];
+    await writeFile(
+      join(chatsDir, `${PARENT_ID}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf8',
+    );
+    const { daemon } = fakeDaemon(async () => ({}));
+    const url = await mount({
+      daemon,
+      audit: fakeAudit(),
+      randomId: () => NEW_ID,
+    });
+    const res = await postFork(url, { fromTurn });
+    expect(res.status).toBe(200);
+    return (await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8'))
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r['type'] !== 'fork')
+      .map((r) => (r['forkedFrom'] as { messageUuid: string }).messageUuid);
+  }
+
+  it('the tip is the live tip: abandoned records are not resurrected', async () => {
+    expect(await forkedUuids(2)).toEqual(['u0', 'a0', 'rw', 'u1b', 'a1b']);
+  });
+
+  it('a mid turn keeps the live records before it and none of the dead ones', async () => {
+    expect(await forkedUuids(1)).toEqual(['u0', 'a0', 'rw']);
+  });
+});
+
+describe('a route-made fork is visible to lineage', () => {
+  it('lists with its parent and reports the parent as its lineage parent', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const url = await mount({
+      daemon,
+      audit: fakeAudit(),
+      randomId: () => NEW_ID,
+    });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(200);
+
+    const listed = await listSessions(chatsDir);
+    const child = listed.sessions.find((s) => s.sessionId === NEW_ID);
+    expect(child?.parentSessionId).toBe(PARENT_ID);
+
+    const records = await readParentRecords(chatsDir, NEW_ID);
+    expect(parentOf(records)).toBe(PARENT_ID);
   });
 });

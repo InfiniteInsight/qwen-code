@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createFsBrowseRoute } from './fsBrowse.js';
@@ -57,6 +57,26 @@ describe('GET /rc/fs', () => {
     expect(body.parent).toBe(dirname(tmp));
     expect(body.entries.map((e) => e.name).sort()).toEqual(['a', 'b']);
     expect(body.entries.every((e) => e.isDir)).toBe(true);
+  });
+
+  it('lists a symlinked directory, not a symlinked file or a dangling link', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'qwen-fsbrowse-'));
+    await mkdir(join(tmp, 'real'));
+    await writeFile(join(tmp, 'f.txt'), 'hi');
+    await symlink(join(tmp, 'real'), join(tmp, 'linked-dir'));
+    await symlink(join(tmp, 'f.txt'), join(tmp, 'linked-file'));
+    await symlink(join(tmp, 'nowhere'), join(tmp, 'dangling'));
+
+    const url = await mountGateway();
+    const res = await fetch(`${url}/rc/fs?path=${encodeURIComponent(tmp)}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entries: Array<{ name: string; isDir: boolean }>;
+    };
+    expect(body.entries.map((e) => e.name).sort()).toEqual([
+      'linked-dir',
+      'real',
+    ]);
   });
 
   it('404s a file path', async () => {

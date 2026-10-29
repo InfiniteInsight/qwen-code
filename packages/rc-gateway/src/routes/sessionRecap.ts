@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * POST /session/:id/recap - ask the daemon for its one-sentence "where did I
@@ -102,6 +103,7 @@ export function createSessionRecapRoute(
     try {
       result = await daemon.recapSession(sessionId);
     } catch (err) {
+      if (relayDaemonAuthFailure(res, err, 'recap')) return;
       const status = (err as { status?: unknown }).status;
       if (typeof status === 'number' && status >= 400 && status < 500) {
         // A 404 with nothing behind it is a daemon with no recap route at all;

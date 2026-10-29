@@ -9,6 +9,7 @@ import { BTW_MAX_INPUT_LENGTH } from '@qwen-code/qwen-code-core';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * The daemon's "this id resolves to no session, or to a workspace that is not
@@ -213,6 +214,7 @@ export function createSessionBtwRoute(
       // The caller stopped listening. There is no response to send and nothing
       // to report to anyone; the daemon stopped generating for the same reason.
       if (abort.signal.aborted) return;
+      if (relayDaemonAuthFailure(res, err, 'btw')) return;
       const status = (err as { status?: unknown }).status;
       if (typeof status === 'number' && status >= 400 && status < 500) {
         if (status === 404) {

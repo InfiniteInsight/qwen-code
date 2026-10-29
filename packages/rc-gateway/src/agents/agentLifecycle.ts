@@ -135,4 +135,43 @@ export class AgentLifecycle {
       );
     }
   }
+
+  /** Daemon prompts still outstanding per agent (spawn prompt plus steers). */
+  private readonly pendingPrompts = new Map<string, number>();
+
+  /**
+   * Drive the agent's status off one daemon prompt. An agent can have several
+   * prompts in flight (the spawn prompt plus queued steers), so `completed`
+   * lands only when the LAST of them resolves; otherwise the first prompt to
+   * settle would end the agent while a steer turn is still running, and
+   * `/message` and `/cancel` would then 409. A rejected turn fails the agent
+   * at once. A prompt that only timed out waiting for the per-session slot
+   * (`queue_timeout`) never ran, so it says nothing about the agent.
+   */
+  watchPrompt(agentId: string, prompt: Promise<unknown>): Promise<void> {
+    this.pendingPrompts.set(
+      agentId,
+      (this.pendingPrompts.get(agentId) ?? 0) + 1,
+    );
+    const done = (): number => {
+      const left = (this.pendingPrompts.get(agentId) ?? 1) - 1;
+      if (left <= 0) this.pendingPrompts.delete(agentId);
+      else this.pendingPrompts.set(agentId, left);
+      return left;
+    };
+    return prompt
+      .then(
+        async () => {
+          if (done() === 0) await this.onPromptSettled(agentId, 'completed');
+        },
+        async (err: unknown) => {
+          done();
+          if ((err as { code?: unknown } | null)?.code === 'queue_timeout') {
+            return;
+          }
+          await this.onPromptSettled(agentId, 'failed');
+        },
+      )
+      .catch(() => {});
+  }
 }

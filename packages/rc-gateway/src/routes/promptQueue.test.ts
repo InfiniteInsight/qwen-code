@@ -66,3 +66,39 @@ describe('PromptQueue.isInFlight', () => {
     expect(order).toEqual(['first', 'second']);
   });
 });
+
+describe('PromptQueue timed-out waiter', () => {
+  it('does not let a later caller take the slot while the holder still runs', async () => {
+    const q = new PromptQueue();
+    const holder = await q.acquire('s1', 10_000);
+
+    // A times out while H still holds the slot.
+    await expect(q.acquire('s1', 20)).rejects.toBeInstanceOf(QueueTimeoutError);
+
+    // B arrives after A gave up. It must wait for H, not for A.
+    let bAcquired = false;
+    const b = q.acquire('s1', 10_000).then((release) => {
+      bAcquired = true;
+      return release;
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bAcquired).toBe(false);
+
+    holder();
+    const releaseB = await b;
+    expect(bAcquired).toBe(true);
+    releaseB();
+  });
+
+  it('a timed-out middle waiter still passes the slot on in order', async () => {
+    const q = new PromptQueue();
+    const holder = await q.acquire('s1', 10_000);
+    const middle = q.acquire('s1', 20);
+    const last = q.acquire('s1', 10_000);
+    await expect(middle).rejects.toBeInstanceOf(QueueTimeoutError);
+    holder();
+    const releaseLast = await last;
+    releaseLast();
+    expect(q.isInFlight('s1')).toBe(false);
+  });
+});

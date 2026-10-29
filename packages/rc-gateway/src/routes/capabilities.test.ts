@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import type { DaemonCapabilities } from '@qwen-code/sdk';
 import { createCapabilityRoute } from './capabilities.js';
 import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
+import { KNOWN_SCOPES } from '../scopes.js';
 
 async function mount(
   deps: Parameters<typeof createCapabilityRoute>[0],
@@ -161,8 +162,18 @@ describe('GET /rc/capabilities', () => {
     try {
       const body = await (await fetch(`${base}/rc/capabilities`)).json();
       const rc = body.remoteControl;
-      expect(rc.supportedTransports).toEqual(['sse', 'ws']);
-      expect(rc.supportedScopes).toEqual(['owner', 'write', 'approve', 'read']);
+      // Only what is actually served: nothing speaks WebSocket, and minting
+      // takes `session:read`, not `read`.
+      expect(rc.supportedTransports).toEqual(['sse']);
+      expect(rc.supportedScopes).toEqual([
+        'owner',
+        'write',
+        'approve',
+        'session:read',
+      ]);
+      for (const scope of rc.supportedScopes) {
+        expect(KNOWN_SCOPES).toContain(scope);
+      }
       expect(rc.pairingEnabled).toBe(true);
       expect(rc.auditEnabled).toBe(true);
       expect(rc.walHorizonSec).toBe(86400);

@@ -122,6 +122,40 @@ describe('AgentLifecycle', () => {
     expect(registry.get(rec.agentId)?.status).toBe('completed');
   });
 
+  it('watchPrompt: completed only after the last prompt; queue_timeout is ignored; a rejection fails at once', async () => {
+    const { registry, lifecycle } = await setup();
+    const mk = () =>
+      registry.register({
+        sessionId: `s-${Math.random()}`,
+        parentSessionId: null,
+        agentType: 'general',
+        task: 't',
+        spawnedByTokenId: 'tkn1',
+      });
+    const a = await mk();
+    let resolveFirst!: () => void;
+    const first = new Promise<void>((r) => (resolveFirst = r));
+    let resolveSecond!: () => void;
+    const second = new Promise<void>((r) => (resolveSecond = r));
+    const w1 = lifecycle.watchPrompt(a.agentId, first);
+    const w2 = lifecycle.watchPrompt(a.agentId, second);
+    resolveFirst();
+    await w1;
+    expect(registry.get(a.agentId)?.status).toBe('running');
+    resolveSecond();
+    await w2;
+    expect(registry.get(a.agentId)?.status).toBe('completed');
+
+    const b = await mk();
+    await lifecycle.watchPrompt(
+      b.agentId,
+      Promise.reject(Object.assign(new Error('q'), { code: 'queue_timeout' })),
+    );
+    expect(registry.get(b.agentId)?.status).toBe('running');
+    await lifecycle.watchPrompt(b.agentId, Promise.reject(new Error('boom')));
+    expect(registry.get(b.agentId)?.status).toBe('failed');
+  });
+
   it('ignores events for sessions that back no agent', async () => {
     const { lifecycle, ownerSeen } = await setup();
     await lifecycle.handleSessionEvent('not-an-agent', {

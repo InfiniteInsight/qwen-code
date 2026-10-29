@@ -9,6 +9,9 @@ import type { DaemonApprovalMode, DaemonClient } from '@qwen-code/sdk';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import { OWNER, hasScope } from '../scopes.js';
+import { UnknownSessionError } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface this route needs: just `setSessionApprovalMode`. */
 export type ApprovalModeDaemon = Pick<DaemonClient, 'setSessionApprovalMode'>;
@@ -51,9 +54,13 @@ const POWER_MODES = new Set(['auto-edit', 'auto', 'yolo']);
  * The daemon's own trust-folder gate (core's `setApprovalMode` refusing a
  * power mode in an untrusted folder) responds 403; that status/body is
  * surfaced UNCHANGED so a remote client can distinguish "you lack scope"
- * from "the daemon's folder isn't trusted" and learn the real reason. A 404
- * (older daemon, route absent) maps to 502 `approval_mode_unsupported`; any
- * other failure (network, 5xx, timeout) maps to 502 `daemon_unavailable`.
+ * from "the daemon's folder isn't trusted" and learn the real reason. A
+ * session the pool or daemon does not know is 404 `session_not_found`; a bare
+ * 404 (older daemon, route absent) maps to 502 `approval_mode_unsupported`;
+ * a daemon 401 is the gateway's own credential failing, 502
+ * `daemon_auth_failed`; any other daemon 4xx keeps its status as
+ * `daemon_rejected`; any other failure (network, 5xx, timeout) maps to 502
+ * `daemon_unavailable`.
  *
  * On success, audits `session_approval_mode_set` with ONLY
  * `{ mode, previous, persisted, planExitedOutOfBand }` — never args, paths,
@@ -146,6 +153,7 @@ async function handleApprovalMode(
       persist ? { persist: true } : {},
     );
   } catch (err) {
+    if (relayDaemonAuthFailure(res, err, 'approval_mode')) return;
     const status = (err as { status?: unknown }).status;
     const eBody = (err as { body?: unknown }).body as
       | {
@@ -180,10 +188,27 @@ async function handleApprovalMode(
       });
       return;
     }
+    // A session the gateway or daemon cannot find is the session's absence,
+    // as it is for the sibling session routes, not a missing capability.
+    if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+      res
+        .status(404)
+        .json({ error: 'Session not found', code: 'session_not_found' });
+      return;
+    }
     if (status === 404) {
       res.status(502).json({
         error: 'Daemon does not support approval-mode control',
         code: 'approval_mode_unsupported',
+      });
+      return;
+    }
+    // Any other daemon verdict (a busy session, a refused body) keeps its own
+    // status rather than reading as an outage.
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      res.status(status).json({
+        error: 'Daemon rejected the approval-mode change',
+        code: 'daemon_rejected',
       });
       return;
     }

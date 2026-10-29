@@ -447,3 +447,24 @@ describe('prompt route onTurnEnd hook (#40)', () => {
     await expect(p).rejects.toThrow();
   });
 });
+
+describe('prompt route: a session the pool does not hold', () => {
+  it('is 409 session_not_loaded, with no prompt_failed push', async () => {
+    const { UnknownSessionError } = await import('../daemonPool.js');
+    const daemon = {
+      prompt: async () => {
+        throw new UnknownSessionError('sess-1');
+      },
+    } as unknown as DaemonClient;
+    const seen: unknown[] = [];
+    const url = await mount(daemon, fakeAudit(), {
+      queue: new PromptQueue(),
+      onTurnEnd: (sid, outcome) => void seen.push({ sid, outcome }),
+    });
+    const res = await postPrompt(url, { prompt: 'hello' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('session_not_loaded');
+    // No turn ran, so there is no failed turn to tell a backgrounded client.
+    expect(seen).toHaveLength(0);
+  });
+});

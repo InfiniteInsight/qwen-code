@@ -21,7 +21,13 @@ import {
   mapDeclaredScope,
 } from '../routes/commands.js';
 import { requireScope, enforceSessionLock } from '../auth.js';
-import { SESSION_READ, WRITE, APPROVE, type RcScope } from '../scopes.js';
+import {
+  SESSION_READ,
+  WRITE,
+  APPROVE,
+  OWNER,
+  type RcScope,
+} from '../scopes.js';
 import type { RequestHandler } from 'express';
 
 class FakeAudit implements AuditRecorder {
@@ -88,6 +94,22 @@ describe('mapDeclaredScope', () => {
 });
 
 describe('GET /rc/commands', () => {
+  it('an owner-only token sees invocableByYou true', async () => {
+    await writeFile(join(workspaceDir, 'triage.md'), cmd('triage'));
+    const app = express();
+    app.get(
+      '/rc/commands',
+      fakeClient([OWNER]),
+      createListCommandsRoute(commandLoader()),
+    );
+    const url = await listen(app);
+    const res = await fetch(`${url}/rc/commands`);
+    const body = (await res.json()) as {
+      commands: Array<{ invocableByYou: boolean }>;
+    };
+    expect(body.commands[0]?.invocableByYou).toBe(true);
+  });
+
   it('returns {v:1, commands:[...]} with the expected shape', async () => {
     await writeFile(join(workspaceDir, 'triage.md'), cmd('triage'));
     const app = express();
@@ -335,6 +357,21 @@ describe('POST /rc/session/:id/command/:name', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'direct_tool_unsupported',
     );
+  });
+
+  it('an owner-only token runs a command: owner implies write and approve', async () => {
+    await writeFile(
+      join(workspaceDir, 'a.md'),
+      `---\nname: a\ndescription: approve cmd\nscope: approve\n---\nbody`,
+    );
+    const { url } = await bootInvoke({ scopes: [OWNER] });
+    const res = await fetch(`${url}/session/s1/command/a`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it('403s when the caller lacks the declared scope (and audits scope_denied)', async () => {
