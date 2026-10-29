@@ -121,6 +121,23 @@ export class ApnsStore {
     return removed;
   }
 
+  /**
+   * Cascade-remove every device bound to any of `tokenIds` in ONE persist
+   * (#205 revoke cascade, also used by revoke-all) and return the removed
+   * records so the caller can count them per token. Persists only if something
+   * changed.
+   */
+  async removeByTokens(
+    tokenIds: Iterable<string>,
+  ): Promise<ApnsSubscriptionRecord[]> {
+    const doomed = new Set(tokenIds);
+    const removed = this.records.filter((r) => doomed.has(r.tokenId));
+    if (removed.length === 0) return [];
+    this.records = this.records.filter((r) => !doomed.has(r.tokenId));
+    await this.persist();
+    return removed;
+  }
+
   private async persist(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
     const body: PersistShape = { subscriptions: this.records };

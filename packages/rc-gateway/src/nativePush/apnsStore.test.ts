@@ -118,6 +118,29 @@ describe('ApnsStore', () => {
     expect(await store.removeByToken('victim')).toBe(0); // idempotent
   });
 
+  it('removeByTokens drops the devices of every given token and returns them (#205)', async () => {
+    const store = await open();
+    const reg = (tokenId: string, deviceToken: string) =>
+      store.register({
+        tokenId,
+        deviceToken,
+        bundleId: 'b',
+        shellVersion: '1',
+      });
+    const v1 = await reg('v1', 'd1');
+    const v2 = await reg('v1', 'd2');
+    const w1 = await reg('v2', 'd3');
+    await reg('keep', 'd4');
+    const removed = await store.removeByTokens(['v1', 'v2', 'absent']);
+    expect(removed.map((r) => r.id).sort()).toEqual(
+      [v1.id, v2.id, w1.id].sort(),
+    );
+    expect(store.listAll().map((r) => r.tokenId)).toEqual(['keep']);
+    expect(await store.removeByTokens(['v1', 'v2'])).toEqual([]);
+    const reopened = await ApnsStore.open(path, () => clock);
+    expect(reopened.listAll().map((r) => r.tokenId)).toEqual(['keep']);
+  });
+
   it('persists across reopen and stores at mode 0600', async () => {
     const store = await open();
     await store.register({

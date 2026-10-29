@@ -20,6 +20,7 @@ import {
   createMintTokenRoute,
   createRevokeTokenRoute,
   createRevokeAllTokensRoute,
+  type TokenRevokedHook,
 } from './tokens.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 
@@ -45,7 +46,7 @@ beforeEach(async () => {
   audit = fakeAudit();
 });
 
-async function mount(): Promise<string> {
+async function mount(onTokenRevoked?: TokenRevokedHook): Promise<string> {
   const app = express();
   app.use(express.json());
   app.use(bearerResolve(store, audit));
@@ -62,12 +63,12 @@ async function mount(): Promise<string> {
   app.delete(
     '/rc/tokens/:id',
     requireScope(OWNER, audit),
-    createRevokeTokenRoute(store, registry, audit),
+    createRevokeTokenRoute(store, registry, audit, onTokenRevoked),
   );
   app.post(
     '/rc/tokens/revoke-all',
     requireScope(OWNER, audit),
-    createRevokeAllTokensRoute(store, registry, audit),
+    createRevokeAllTokensRoute(store, registry, audit, onTokenRevoked),
   );
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
@@ -370,5 +371,124 @@ describe('POST /rc/tokens/revoke-all', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { revokedIds: string[] };
     expect(body.revokedIds).toEqual([]);
+  });
+});
+
+describe('#205 revoke cascade hook', () => {
+  const countsFor =
+    (
+      map: Record<string, { subscriptions: number; devices: number }>,
+    ): TokenRevokedHook =>
+    async (ids) =>
+      new Map(ids.map((id) => [id, map[id]!] as const));
+
+  it('DELETE calls the hook once with the id, after the revoke, and puts counts (only) on the audit row', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const victim = await store.issue([SESSION_READ], 'victim');
+    const calls: string[][] = [];
+    const url = await mount(async (ids) => {
+      calls.push([...ids]);
+      // The token is already dead and evicted by the time the cascade runs.
+      expect(store.resolve(`Bearer ${victim.token}`)).toBeNull();
+      return new Map([[victim.id, { subscriptions: 2, devices: 1 }]]);
+    });
+    const res = await fetch(`${url}/rc/tokens/${victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(res.status).toBe(204);
+    expect(calls).toEqual([[victim.id]]);
+    const rows = audit.calls.filter((c) => c.action === 'token_revoked');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.target).toBe(victim.id);
+    expect(rows[0]!.detail).toEqual({ subscriptions: 2, devices: 1 });
+  });
+
+  it('DELETE of an unknown id never runs the hook', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    let ran = false;
+    const url = await mount(async () => {
+      ran = true;
+    });
+    const res = await fetch(`${url}/rc/tokens/nope`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(res.status).toBe(404);
+    expect(ran).toBe(false);
+  });
+
+  it('revoke-all calls the hook ONCE with every revoked id and writes one counted row per token', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const b = await store.issue([SESSION_READ], 'b');
+    const c = await store.issue([SESSION_READ], 'c');
+    const calls: string[][] = [];
+    const counts = countsFor({
+      [owner.id]: { subscriptions: 0, devices: 0 },
+      [b.id]: { subscriptions: 1, devices: 0 },
+      [c.id]: { subscriptions: 0, devices: 3 },
+    });
+    const url = await mount(async (ids) => {
+      calls.push([...ids]);
+      return counts(ids);
+    });
+    const res = await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revokedIds: string[] };
+    expect(Object.keys(body)).toEqual(['revokedIds']);
+    expect(calls).toHaveLength(1);
+    expect([...calls[0]!].sort()).toEqual([owner.id, b.id, c.id].sort());
+    const byTarget = new Map(
+      audit.calls
+        .filter((a) => a.action === 'token_revoked')
+        .map((a) => [a.target, a.detail] as const),
+    );
+    expect(byTarget.get(b.id)).toEqual({ subscriptions: 1, devices: 0 });
+    expect(byTarget.get(c.id)).toEqual({ subscriptions: 0, devices: 3 });
+  });
+
+  it('revoke-all with except:self leaves the caller out of the cascade', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const b = await store.issue([SESSION_READ], 'b');
+    const calls: string[][] = [];
+    const url = await mount(async (ids) => {
+      calls.push([...ids]);
+    });
+    await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    expect(calls).toEqual([[b.id]]);
+    // A hook that returns nothing leaves the audit row without a detail.
+    const row = audit.calls.find((a) => a.action === 'token_revoked');
+    expect(row!.detail).toBeUndefined();
+  });
+
+  it('revoke-all with nothing to revoke does not run the hook', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    let ran = false;
+    const url = await mount(async () => {
+      ran = true;
+    });
+    await fetch(`${url}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    expect(ran).toBe(false);
   });
 });

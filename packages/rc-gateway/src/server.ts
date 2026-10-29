@@ -218,6 +218,8 @@ import {
   createListTokensRoute,
   createMintTokenRoute,
   createRevokeTokenRoute,
+  createRevokeAllTokensRoute,
+  type RevokeCascadeCounts,
 } from './routes/tokens.js';
 import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
@@ -1741,28 +1743,56 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(OWNER, audit),
     createMintTokenRoute(deps.store, audit),
   );
+  // #205: THE revoke cascade. Both revoke routes call this once, after the
+  // revoke and the stream eviction, with every newly revoked token id. A new
+  // token-bound store joins here and nowhere else. It never throws (the token
+  // is already dead; a store error must not turn the revoke into a 500), and a
+  // failing store is reflected only as a zero count for it plus a console line.
+  // `notifier` is assigned further down; it is read at call time, not here.
+  const onTokenRevoked = async (
+    tokenIds: string[],
+  ): Promise<Map<string, RevokeCascadeCounts>> => {
+    const counts = new Map<string, RevokeCascadeCounts>(
+      tokenIds.map((id) => [id, { subscriptions: 0, devices: 0 }] as const),
+    );
+    // Web push subscriptions, plus the in-memory state keyed by them (rate
+    // window, coalescer, and the quiet-hours digest entries).
+    if (deps.pushStore) {
+      try {
+        for (const rec of await deps.pushStore.removeByTokens(tokenIds)) {
+          notifier?.forgetRateLimit(rec.id);
+          const c = counts.get(rec.tokenId);
+          if (c) c.subscriptions += 1;
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('revoke cascade: web push removal failed', err);
+      }
+    }
+    // APNs devices (add-native-mobile-shells "On token revocation the APNs
+    // subscription SHALL be removed").
+    if (deps.apnsStore) {
+      try {
+        for (const rec of await deps.apnsStore.removeByTokens(tokenIds)) {
+          const c = counts.get(rec.tokenId);
+          if (c) c.devices += 1;
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('revoke cascade: APNs removal failed', err);
+      }
+    }
+    return counts;
+  };
   app.delete(
     '/rc/tokens/:id',
     requireScope(OWNER, audit),
-    createRevokeTokenRoute(
-      deps.store,
-      registry,
-      audit,
-      // Cascade APNs subscriptions bound to the revoked token (add-native-mobile
-      // -shells "On token revocation the APNs subscription SHALL be removed").
-      deps.apnsStore
-        ? async (tokenId) => {
-            const removed = await deps.apnsStore!.removeByToken(tokenId);
-            if (removed > 0) {
-              void audit.record({
-                action: 'apns_subscription_removed',
-                target: tokenId,
-                detail: { reason: 'token_revoked', count: removed },
-              });
-            }
-          }
-        : undefined,
-    ),
+    createRevokeTokenRoute(deps.store, registry, audit, onTokenRevoked),
+  );
+  app.post(
+    '/rc/tokens/revoke-all',
+    requireScope(OWNER, audit),
+    createRevokeAllTokensRoute(deps.store, registry, audit, onTokenRevoked),
   );
   app.get(
     '/rc/audit',

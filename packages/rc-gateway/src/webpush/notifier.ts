@@ -204,8 +204,8 @@ export class PushNotifier {
    *
    * The scope gate is re-checked at SEND time (#169): the counts were recorded
    * hours earlier, and a token revoked or expired since then must not reach its
-   * device. Revocation cascades only to APNs records, so a revoked token's web
-   * push record is still in the store here. Only kinds the token may still
+   * device. Revocation now removes the token's web push records (#205), but a
+   * token that expired, or a cascade that failed, can still leave one here. Only kinds the token may still
    * receive are counted; nothing left means no digest.
    *
    * Sync and never throws: `sender.send` is best-effort/never-throwing and is

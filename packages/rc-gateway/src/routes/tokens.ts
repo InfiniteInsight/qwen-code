@@ -77,19 +77,50 @@ export function createMintTokenRoute(
   };
 }
 
+/** What one token's revoke cascade removed. Counts only, never endpoints. */
+export interface RevokeCascadeCounts {
+  /** Web push subscriptions removed. */
+  subscriptions: number;
+  /** APNs devices removed. */
+  devices: number;
+}
+
 /**
- * DELETE /rc/tokens/:id → revoke + evict live streams. `onTokenRevoked` (when
- * supplied) runs AFTER the revoke+evict and is awaited before the 204, so a
- * caller can cascade-delete token-bound resources in the same request (e.g. APNs
- * subscriptions, add-native-mobile-shells "On token revocation the APNs
- * subscription SHALL be removed"). The hook must not throw — it is awaited and
- * an error would surface as a 500; wrap risky work inside it.
+ * The single revoke cascade (#205). Called once per revoke request with every
+ * newly revoked token id, AFTER the revoke and the live-stream eviction and
+ * before the response, so a future token-bound store joins in one place (the
+ * wiring in server.ts), not in each route. It returns the per-token counts the
+ * routes put on the `token_revoked` audit row, or nothing when no cascade ran.
+ * It must not throw: it is awaited, and an error would surface as a 500 after
+ * the token is already dead.
+ */
+export type TokenRevokedHook = (
+  tokenIds: string[],
+) =>
+  | void
+  | ReadonlyMap<string, RevokeCascadeCounts>
+  | Promise<void | ReadonlyMap<string, RevokeCascadeCounts>>;
+
+/** Audit detail for a revoke: the cascade counts, or none when no cascade ran. */
+function revokeDetail(
+  counts: void | ReadonlyMap<string, RevokeCascadeCounts>,
+  id: string,
+): Record<string, unknown> | undefined {
+  const c = counts ? counts.get(id) : undefined;
+  return c ? { ...c } : undefined;
+}
+
+/**
+ * DELETE /rc/tokens/:id → revoke + evict live streams, then run
+ * `onTokenRevoked([id])` (awaited before the 204) to cascade-delete the
+ * token-bound resources in the same request. One `token_revoked` audit row,
+ * carrying the cascade counts.
  */
 export function createRevokeTokenRoute(
   store: TokenStore,
   registry: ConnectionRegistry,
   audit?: AuditRecorder,
-  onTokenRevoked?: (tokenId: string) => void | Promise<void>,
+  onTokenRevoked?: TokenRevokedHook,
 ): RequestHandler {
   return async (req, res) => {
     const id = req.params.id;
@@ -98,11 +129,12 @@ export function createRevokeTokenRoute(
       return;
     }
     registry.evict(id);
-    if (onTokenRevoked) await onTokenRevoked(id);
+    const counts = onTokenRevoked ? await onTokenRevoked([id]) : undefined;
     void audit?.record({
       action: 'token_revoked',
       actorTokenId: req.rcClient?.id,
       target: id,
+      detail: revokeDetail(counts, id),
     });
     res.status(204).end();
   };
@@ -116,13 +148,15 @@ export function createRevokeTokenRoute(
  * tokens (including the caller's) are revoked.
  *
  * Response 200: `{ revokedIds: string[] }` — ids of every newly-revoked token.
- * One `token_revoked` audit entry is written per revoked id.
- * Live SSE/WS streams are evicted for every revoked token.
+ * One `token_revoked` audit entry is written per revoked id (with its cascade
+ * counts). Live SSE/WS streams are evicted for every revoked token, and
+ * `onTokenRevoked(revokedIds)` runs once for the whole batch.
  */
 export function createRevokeAllTokensRoute(
   store: TokenStore,
   registry: ConnectionRegistry,
   audit?: AuditRecorder,
+  onTokenRevoked?: TokenRevokedHook,
 ): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { except?: unknown };
@@ -133,12 +167,17 @@ export function createRevokeAllTokensRoute(
 
     const { revokedIds } = await store.revokeAll({ exceptTokenId });
 
+    for (const id of revokedIds) registry.evict(id);
+    const counts =
+      onTokenRevoked && revokedIds.length > 0
+        ? await onTokenRevoked([...revokedIds])
+        : undefined;
     for (const id of revokedIds) {
-      registry.evict(id);
       void audit?.record({
         action: 'token_revoked',
         actorTokenId: callerTokenId,
         target: id,
+        detail: revokeDetail(counts, id),
       });
     }
 
