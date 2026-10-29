@@ -3334,6 +3334,43 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('session turn status', () => {
+    it('GETs the current turn over direct REST', async () => {
+      const body = {
+        sessionId: 'with/slash',
+        state: 'running' as const,
+        promptId: 'p-1',
+        promptText: 'hi',
+        queuedAt: 1_000,
+        startedAt: 1_500,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getCurrentSessionTurn('with/slash', { clientId: 'client-1' }),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/session/with%2Fslash/turns/current',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('GETs one turn by prompt id and throws the daemon 404', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'nope', code: 'prompt_not_found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getSessionTurn('s-1', 'prompt/1'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/turns/prompt%2F1');
+    });
+  });
+
   describe('resolveSubagentSession', () => {
     it('resolves an encoded parent tool call to a detail session', async () => {
       const body = {

@@ -1145,6 +1145,14 @@
         height: 6px;
         background: var(--g1-link);
       }
+      /* #131: the prompt the running turn answers, one muted line. */
+      #turn-prompt {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       #session-footer .cwd {
         font-family: ui-monospace, monospace;
         overflow-wrap: anywhere;
@@ -1762,6 +1770,172 @@
       #h1-ask button.cancel {
         text-align: center;
         background: transparent;
+      }
+      /* #123. The workspace file editor: a screen over the panel screen with
+         the path at the top, a full-height monospace field, and Cancel and
+         Save in the thumb zone. While the keyboard is up it is the height the
+         keyboard leaves, so the two buttons ride on the keys. */
+      #wsf-editor {
+        position: fixed;
+        top: env(safe-area-inset-top, 0px);
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 92;
+        display: flex;
+        flex-direction: column;
+        background: var(--g1-page);
+      }
+      #wsf-editor[hidden] {
+        display: none;
+      }
+      :root.kb-open #wsf-editor {
+        bottom: auto;
+        height: calc(var(--app-h, 100dvh) - env(safe-area-inset-top, 0px));
+      }
+      #wsf-editor .wsf-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        background: var(--g1-band);
+        border-bottom: 1px solid var(--g1-line);
+      }
+      #wsf-editor .wsf-path {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--g1-ink-hi);
+        font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+      }
+      #wsf-editor .wsf-dirty {
+        flex: none;
+        color: var(--g1-warn);
+        font-size: 12px;
+      }
+      #wsf-text {
+        flex: 1 1 auto;
+        min-height: 0;
+        width: 100%;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 0;
+        resize: none;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        /* 16px: iOS zooms into any field under 16px when it takes focus. */
+        font: 16px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        tab-size: 4;
+      }
+      #wsf-editor .wsf-status {
+        padding: 6px 12px;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      #wsf-editor .wsf-status:empty {
+        display: none;
+      }
+      #wsf-editor .wsf-status[data-tone='error'] {
+        color: var(--g1-danger);
+      }
+      #wsf-editor .wsf-foot {
+        display: flex;
+        gap: 8px;
+        padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-line);
+      }
+      :root.kb-open #wsf-editor .wsf-foot {
+        padding-bottom: 8px;
+      }
+      #wsf-editor .wsf-foot button {
+        flex: 1 1 0;
+        min-height: 48px;
+        border-radius: 10px;
+        font-size: 15px;
+      }
+      #wsf-editor .wsf-foot button.primary,
+      #wsf-ask button.primary {
+        background: var(--g1-accent);
+        border-color: transparent;
+        color: #fff;
+      }
+      /* #123. The file browser's own sheet: a new file's name, an unsaved
+         edit's discard, a delete's confirmation. In the thumb zone over a
+         scrim, and over the editor, which one of them is asked from. */
+      #wsf-ask {
+        position: fixed;
+        inset: 0;
+        z-index: 95;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        background: rgba(1, 4, 9, 0.6);
+      }
+      #wsf-ask[hidden] {
+        display: none;
+      }
+      :root.kb-open #wsf-ask {
+        bottom: auto;
+        height: var(--app-h, 100dvh);
+      }
+      #wsf-ask .ask-card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 16px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-edge);
+        border-radius: 16px 16px 0 0;
+      }
+      #wsf-ask .ask-title {
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        font-weight: 600;
+      }
+      #wsf-ask .ask-sub {
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+      }
+      #wsf-ask .wsf-path {
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+        font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+      }
+      #wsf-ask input {
+        width: 100%;
+        min-height: 44px;
+        box-sizing: border-box;
+        font-size: 16px;
+      }
+      #wsf-ask .wsf-note {
+        color: var(--g1-danger);
+        font-size: 13px;
+      }
+      #wsf-ask .wsf-note:empty {
+        display: none;
+      }
+      #wsf-ask .wsf-acts {
+        display: flex;
+        gap: 8px;
+      }
+      #wsf-ask .wsf-acts button {
+        flex: 1 1 0;
+        min-height: 48px;
+        border-radius: 10px;
+        font-size: 15px;
+      }
+      #wsf-ask button.danger {
+        background: var(--g1-danger);
+        border-color: transparent;
+        color: #1b0b10;
+        font-weight: 600;
       }
       /* #185 (h1). The List screen (List.dc.html), the folder screen behind
          its `change` and the archived screen behind its `Archived (n)`. Each
@@ -7097,6 +7271,16 @@
       // { total, window, estimated } from GET /session/:id/context-usage, or
       // null when that read has not answered or reported no window.
       let ctxUsage = null;
+      // #131. The daemon's record of the turn now running or queued, for the
+      // sheet's "This turn" row: { sid, state, promptText, base, readAt } where
+      // `base` is how old the turn was (ms) when it was read, taken against the
+      // GATEWAY's clock (its Date header) so a phone clock that disagrees with
+      // the host's does not show a negative or hour-long turn. null when the
+      // daemon reports none, the gateway predates the route, or the sheet is
+      // shut.
+      let turnLive = null;
+      let turnPollTimer = null;
+      const TURN_POLL_MS = 4000;
 
       const fmtK = (n) =>
         typeof n === 'number' && n >= 1000
@@ -7532,6 +7716,37 @@
           }
           f.append(col);
         }
+        // #131: the daemon's record of the turn in flight, only while it is
+        // live here and the daemon reports it running or queued.
+        if (turnLive && turnLive.sid === watchedSessionId && turnRunning()) {
+          const col = document.createElement('div');
+          col.id = 'turn-row';
+          col.className = 'sh-col';
+          const v = document.createElement('span');
+          const el = document.createElement('span');
+          el.id = 'turn-elapsed';
+          el.textContent = h1Clock(turnLiveSecs());
+          const t0 = new Date(turnLive.readAt - turnLive.base);
+          v.append(
+            turnLive.state === 'queued' ? 'queued' : 'running',
+            ' \u00b7 since ' +
+              t0.toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              }) +
+              ' \u00b7 ',
+            el,
+          );
+          col.append(row('This turn', v));
+          if (turnLive.promptText) {
+            const p = document.createElement('div');
+            p.id = 'turn-prompt';
+            p.textContent = turnLive.promptText;
+            col.append(p);
+          }
+          f.append(col);
+        }
         if (ctxInfo.cwd) {
           const c = document.createElement('span');
           c.className = 'cwd';
@@ -7602,6 +7817,8 @@
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
         syncPromptPlaceholder();
+        syncTurnPoll();
+        h1Text($('turn-elapsed'), h1Clock(turnLiveSecs()));
         if (running && !runClock) {
           runClock = setInterval(renderStatusLine, 1000);
         } else if (!running && runClock) {
@@ -7638,6 +7855,7 @@
         if (sheet.hidden === !open) return;
         sheet.hidden = !open;
         $('h1-status').setAttribute('aria-expanded', String(open));
+        syncTurnPoll(); // #131: starts with the sheet, stops when it shuts
         if (!open) return;
         closeH1Menu(false);
         if (paneLayout()) setMoreOpen(false);
@@ -9618,7 +9836,12 @@
         const status = wsSectionStatusEl('ws-files-status');
         if (data.truncated)
           status.textContent = 'listing truncated at the daemon cap';
-        body.append(head, findRow, list, status);
+        // #123: New file and Upload act on the directory the head names, so
+        // they sit right under it; null when this gateway, token or daemon
+        // cannot write.
+        const acts = wsfListingActions(path);
+        if (acts) body.append(head, acts, findRow, list, status);
+        else body.append(head, findRow, list, status);
       }
 
       // GET /rc/workspace/glob. The daemon returns names only and no kinds,
@@ -9727,6 +9950,11 @@
           close.textContent = 'close';
           close.addEventListener('click', () => view.remove());
           head.append(title, close);
+          // #123: Delete is offered on the open file, text or binary; Edit
+          // joins it once the read below says the file is text.
+          if (wsfGate('workspace_file_delete')) {
+            head.insertBefore(wsfFileButton('Delete', () => wsfDelete(relPath)), close);
+          }
           view.appendChild(head);
         }
         const status = wsSectionStatusEl('ws-files-file-status');
@@ -9761,6 +9989,19 @@
             view.appendChild(pre);
           }
           if (typeof data.content === 'string') pre.textContent += data.content;
+          // #123: the first page of a text read is where Edit becomes
+          // possible. The editor reads the file again itself, whole and with
+          // its hash, so what this page showed is never what gets saved.
+          if (
+            !cursor &&
+            wsfGate('workspace_file_write') &&
+            !view.querySelector('[data-wsf=edit]')
+          ) {
+            const head = view.firstElementChild;
+            const edit = wsfFileButton('Edit', () => wsfStartEdit(relPath));
+            edit.dataset.wsf = 'edit';
+            if (head) head.insertBefore(edit, head.children[1] || null);
+          }
           const bits = [];
           if (typeof data.sizeBytes === 'number')
             bits.push(data.sizeBytes + ' bytes');
@@ -9832,6 +10073,709 @@
         } catch (err) {
           if (gen !== wsViewGen) return;
           status.textContent = 'byte read failed: ' + err.message;
+        }
+      }
+
+      // -- Workspace file writes (#123) ------------------------------------
+      // New file, Edit, Upload and Delete in the browser above. A control is
+      // drawn only when all three say yes: this gateway mounts the routes
+      // (remoteControl.workspaceFileWrites, which an older gateway omits),
+      // this token holds write (remoteControl.writeScope, false for a reader
+      // and absent for a share guest), and the daemon advertises that route's
+      // own tag. Any one missing and the browser stays as #107 shipped it.
+      function wsfGate(tag) {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc.workspaceFileWrites === true &&
+          rc.writeScope === true &&
+          daemonHasFeature(tag)
+        );
+      }
+
+      // The editor takes a file of up to 256 KB: the most the daemon hands
+      // over in one read (MAX_READ_BYTES, cli/src/serve/fs/policy.ts). The
+      // text and the hash a save is checked against then come from one read,
+      // and a file the daemon would only give out in pages is never edited
+      // from part of it.
+      const WSF_EDIT_MAX_BYTES = 256 * 1024;
+
+      function wsfAuth(extra) {
+        return Object.assign(
+          { Authorization: 'Bearer ' + token() },
+          extra || {},
+        );
+      }
+
+      // A JSON post to one of the write routes, with the workspace target
+      // the rest of the section uses. A 204 has no body to read.
+      async function wsfPost(url, body) {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: wsfAuth({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify(Object.assign({}, body, wsTargetBody())),
+        });
+        const data =
+          res.status === 204 ? {} : await res.json().catch(() => ({}));
+        return { res, data };
+      }
+
+      // The #196 words, the same ones the composer's attach uses for a file
+      // over the limit.
+      function wsfTooLargeText(name, size, limit) {
+        return (
+          name +
+          ': ' +
+          formatBytes(size) +
+          ' is over the ' +
+          formatBytes(limit) +
+          ' limit'
+        );
+      }
+
+      // A path on the host in full, for a sheet that has to name it: the
+      // target workspace's folder, when known, and the path inside it.
+      function wsfFullPath(rel) {
+        const root = wsTargetCwd || (caps && caps.workspaceCwd) || '';
+        const inside = !rel || rel === '.' ? '' : rel;
+        if (!root) return inside || '.';
+        const base = root.replace(/\/+$/, '');
+        return inside ? base + '/' + inside : base;
+      }
+
+      function wsfFileButton(label, onClick) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.style.minHeight = '44px';
+        b.addEventListener('click', () => void onClick());
+        return b;
+      }
+
+      // The browser's one sheet, for a new file's name, an unsaved edit's
+      // discard and a delete's confirmation. Resolves with the typed name
+      // (or true) for the go button, and null for Cancel, Escape or a tap on
+      // the scrim. Cancel is first in the tab order, and it takes the focus
+      // when nothing is typed, so a stray Enter cannot delete anything.
+      function wsfAsk(o) {
+        let box = $('wsf-ask');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'wsf-ask';
+          box.setAttribute('role', 'dialog');
+          box.setAttribute('aria-modal', 'true');
+          box.setAttribute('aria-labelledby', 'wsf-ask-title');
+          box.hidden = true;
+          $('app-body').appendChild(box);
+        }
+        const back = document.activeElement;
+        return new Promise((resolve) => {
+          box.textContent = '';
+          const card = document.createElement('div');
+          card.className = 'ask-card';
+          const t = document.createElement('div');
+          t.className = 'ask-title';
+          t.id = 'wsf-ask-title';
+          t.textContent = o.title;
+          card.appendChild(t);
+          if (o.path) {
+            const p = document.createElement('div');
+            p.className = 'wsf-path';
+            p.dataset.wsf = 'path';
+            p.textContent = o.path;
+            card.appendChild(p);
+          }
+          if (o.sub) {
+            const d = document.createElement('div');
+            d.className = 'ask-sub';
+            d.dataset.wsf = 'sub';
+            d.textContent = o.sub;
+            card.appendChild(d);
+          }
+          let input = null;
+          if (o.input) {
+            input = document.createElement('input');
+            input.type = 'text';
+            input.value = o.input.value || '';
+            input.placeholder = o.input.placeholder || '';
+            input.setAttribute('aria-label', o.input.label);
+            input.setAttribute('autocapitalize', 'off');
+            input.setAttribute('autocorrect', 'off');
+            input.spellcheck = false;
+            card.appendChild(input);
+          }
+          const note = document.createElement('div');
+          note.className = 'wsf-note';
+          note.setAttribute('role', 'alert');
+          card.appendChild(note);
+          const acts = document.createElement('div');
+          acts.className = 'wsf-acts';
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.dataset.wsf = 'cancel';
+          cancel.textContent = 'Cancel';
+          const go = document.createElement('button');
+          go.type = 'button';
+          go.dataset.wsf = 'go';
+          go.className = o.danger ? 'danger' : 'primary';
+          go.textContent = o.go;
+          acts.append(cancel, go);
+          card.appendChild(acts);
+          box.appendChild(card);
+          const done = (v) => {
+            box.hidden = true;
+            box.textContent = '';
+            box.onkeydown = null;
+            box.onclick = null;
+            if (back && back.isConnected) back.focus({ preventScroll: true });
+            resolve(v);
+          };
+          cancel.onclick = () => done(null);
+          go.onclick = () => {
+            if (!input) return done(true);
+            const v = input.value.trim();
+            const why = o.input.check ? o.input.check(v) : '';
+            if (why) {
+              note.textContent = why;
+              input.focus({ preventScroll: true });
+              return;
+            }
+            done(v);
+          };
+          if (input) {
+            input.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                go.click();
+              }
+            });
+          }
+          box.onclick = (e) => {
+            if (e.target === box) done(null);
+          };
+          box.onkeydown = (e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              done(null);
+            }
+          };
+          box.hidden = false;
+          (input || cancel).focus({ preventScroll: true });
+        });
+      }
+
+      // A line under the listing's actions for what New file and Upload did.
+      // Kept across re-renders: an upload reloads the listing when it ends,
+      // and its lines have to survive that.
+      let wsfNoteEl = null;
+      function wsfNote() {
+        if (!wsfNoteEl) {
+          wsfNoteEl = document.createElement('div');
+          wsfNoteEl.id = 'ws-files-write-note';
+          wsfNoteEl.setAttribute('role', 'status');
+          wsfNoteEl.setAttribute('aria-live', 'polite');
+          wsfNoteEl.style.cssText =
+            'font-size:12px;display:flex;flex-direction:column;gap:2px';
+        }
+        return wsfNoteEl;
+      }
+
+      function wsfSetNote(text) {
+        const n = wsfNote();
+        n.textContent = '';
+        if (text) {
+          const line = document.createElement('div');
+          line.textContent = text;
+          n.appendChild(line);
+        }
+      }
+
+      // The listing's New file and Upload, for the directory it shows.
+      function wsfListingActions(dir) {
+        const canNew = wsfGate('workspace_file_write');
+        const canUp = wsfGate('workspace_file_upload');
+        if (!canNew && !canUp) return null;
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px';
+        if (canNew) {
+          const b = wsfFileButton('New file', () => wsfNewFile(dir));
+          b.dataset.wsf = 'new';
+          row.appendChild(b);
+        }
+        if (canUp) {
+          const b = wsfFileButton('Upload', () => wsfPickUpload(dir));
+          b.dataset.wsf = 'upload';
+          row.appendChild(b);
+        }
+        wrap.append(row, wsfNote());
+        return wrap;
+      }
+
+      // New file: ask for a name, create it empty (mode create, which the
+      // daemon refuses rather than clobbers when the name is taken), then
+      // open it in the editor with the hash the create returned.
+      async function wsfNewFile(dir) {
+        const name = await wsfAsk({
+          title: 'New file',
+          path: wsfFullPath(dir) + '/',
+          sub: 'An empty file in this folder. It opens in the editor once it exists.',
+          input: {
+            label: 'File name',
+            placeholder: 'notes.md',
+            check: (v) =>
+              !v
+                ? 'Type a name for the file.'
+                : v.includes('/')
+                  ? 'A name, not a path: open the folder first.'
+                  : v === '.' || v === '..'
+                    ? 'That is not a file name.'
+                    : '',
+          },
+          go: 'Create',
+        });
+        if (name === null) return;
+        const rel = wsFilesJoin(dir, name);
+        wsfSetNote('creating ' + rel + '...');
+        try {
+          const { res, data } = await wsfPost('/rc/workspace/file/write', {
+            path: rel,
+            content: '',
+            mode: 'create',
+          });
+          if (!res.ok) {
+            wsfSetNote(
+              data.code === 'file_already_exists'
+                ? rel + ' already exists: open it from the list instead'
+                : 'not created: ' + wsFilesErrorText(res.status, data),
+            );
+            return;
+          }
+          wsfSetNote('created ' + rel);
+          void loadWorkspaceFiles(false);
+          wsfOpenEditor(rel, '', data.hash);
+        } catch (err) {
+          wsfSetNote('not created: ' + err.message);
+        }
+      }
+
+      // Edit: read the file whole, with its hash, and open the editor on it.
+      // Refused here, with the reason, when the daemon would not give the
+      // whole file in one read or sends no hash to check a save against.
+      async function wsfStartEdit(relPath) {
+        const status = wsSectionStatusEl('ws-files-file-status');
+        status.textContent = 'opening ' + relPath + ' to edit...';
+        try {
+          const res = await fetch(
+            wsTargetQuery(
+              '/rc/workspace/file?path=' +
+                encodeURIComponent(relPath) +
+                '&maxBytes=' +
+                WSF_EDIT_MAX_BYTES,
+            ),
+            { headers: wsfAuth() },
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            status.textContent =
+              data.code === 'binary_file'
+                ? 'not editable here: a binary file'
+                : 'cannot edit: ' + wsFilesErrorText(res.status, data);
+            return;
+          }
+          const size = typeof data.sizeBytes === 'number' ? data.sizeBytes : 0;
+          if (data.truncated || data.hasMore || size > WSF_EDIT_MAX_BYTES) {
+            status.textContent =
+              'too large to edit here: ' +
+              formatBytes(size) +
+              ', the editor takes files up to ' +
+              formatBytes(WSF_EDIT_MAX_BYTES);
+            return;
+          }
+          if (typeof data.hash !== 'string' || !data.hash) {
+            status.textContent =
+              'not editable: this daemon sends no content hash, so a save could not be checked against a change made on the host';
+            return;
+          }
+          status.textContent = '';
+          wsfOpenEditor(
+            relPath,
+            typeof data.content === 'string' ? data.content : '',
+            data.hash,
+          );
+        } catch (err) {
+          status.textContent = 'cannot edit: ' + err.message;
+        }
+      }
+
+      // The open edit: its path, the text as opened (as the field holds it,
+      // so a CRLF file does not read as changed the moment it opens), and the
+      // hash the daemon checks a save against.
+      let wsfEditing = null;
+
+      function wsfEditorEls() {
+        let box = $('wsf-editor');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'wsf-editor';
+          box.setAttribute('role', 'dialog');
+          box.setAttribute('aria-modal', 'true');
+          box.setAttribute('aria-labelledby', 'wsf-editor-path');
+          box.hidden = true;
+          const head = document.createElement('div');
+          head.className = 'wsf-head';
+          const path = document.createElement('div');
+          path.className = 'wsf-path';
+          path.id = 'wsf-editor-path';
+          path.tabIndex = -1;
+          const dirty = document.createElement('div');
+          dirty.className = 'wsf-dirty';
+          dirty.id = 'wsf-editor-dirty';
+          head.append(path, dirty);
+          const text = document.createElement('textarea');
+          text.id = 'wsf-text';
+          text.spellcheck = false;
+          text.setAttribute('autocapitalize', 'off');
+          text.setAttribute('autocorrect', 'off');
+          text.setAttribute('autocomplete', 'off');
+          text.setAttribute('aria-label', 'File contents');
+          text.addEventListener('input', wsfRenderDirty);
+          const status = document.createElement('div');
+          status.className = 'wsf-status';
+          status.id = 'wsf-editor-status';
+          status.setAttribute('role', 'status');
+          status.setAttribute('aria-live', 'polite');
+          const foot = document.createElement('div');
+          foot.className = 'wsf-foot';
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.id = 'wsf-cancel';
+          cancel.textContent = 'Cancel';
+          cancel.addEventListener('click', () => void wsfCloseEditor());
+          const save = document.createElement('button');
+          save.type = 'button';
+          save.id = 'wsf-save';
+          save.className = 'primary';
+          save.textContent = 'Save';
+          save.addEventListener('click', () => void wsfSave());
+          foot.append(cancel, save);
+          box.append(head, text, status, foot);
+          box.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && $('wsf-ask')?.hidden !== false) {
+              e.preventDefault();
+              e.stopPropagation();
+              void wsfCloseEditor();
+            }
+          });
+          $('app-body').appendChild(box);
+        }
+        return {
+          box,
+          path: $('wsf-editor-path'),
+          dirty: $('wsf-editor-dirty'),
+          text: $('wsf-text'),
+          status: $('wsf-editor-status'),
+          save: $('wsf-save'),
+          cancel: $('wsf-cancel'),
+        };
+      }
+
+      function wsfDirty() {
+        return !!wsfEditing && $('wsf-text').value !== wsfEditing.original;
+      }
+
+      function wsfRenderDirty() {
+        const d = $('wsf-editor-dirty');
+        if (d) d.textContent = wsfDirty() ? 'unsaved changes' : '';
+      }
+
+      function wsfEditorStatus(text, tone) {
+        const s = $('wsf-editor-status');
+        if (!s) return;
+        s.textContent = text;
+        if (tone) s.dataset.tone = tone;
+        else delete s.dataset.tone;
+      }
+
+      function wsfOpenEditor(path, text, hash) {
+        const ed = wsfEditorEls();
+        ed.path.textContent = path;
+        ed.text.value = text;
+        wsfEditing = { path, original: ed.text.value, hash, saving: false };
+        wsfEditorStatus('');
+        wsfRenderDirty();
+        ed.save.disabled = false;
+        ed.cancel.disabled = false;
+        ed.box.hidden = false;
+        // The heading, not the field: focusing the field would raise a
+        // phone's keyboard over a file the reader may only want to look at.
+        ed.path.focus({ preventScroll: true });
+      }
+
+      function wsfHideEditor() {
+        const box = $('wsf-editor');
+        if (box) box.hidden = true;
+        wsfEditing = null;
+      }
+
+      // Cancel, Escape: closes, and asks first when there is unsaved text.
+      async function wsfCloseEditor() {
+        if (!wsfEditing || wsfEditing.saving) return;
+        if (wsfDirty()) {
+          const ok = await wsfAsk({
+            title: 'Discard your changes?',
+            path: wsfFullPath(wsfEditing.path),
+            sub: 'What you typed has not been saved.',
+            go: 'Discard',
+            danger: true,
+          });
+          if (!ok) return;
+        }
+        wsfHideEditor();
+      }
+
+      // Save: the whole text through file/write in replace mode, carrying the
+      // hash of the version opened. The daemon compares it under its own lock
+      // and answers 409 hash_mismatch when the file changed since, and then
+      // nothing is written and the reader's text stays in the field.
+      async function wsfSave() {
+        const ed = wsfEditorEls();
+        const cur = wsfEditing;
+        if (!cur || cur.saving) return;
+        const text = ed.text.value;
+        if (text === cur.original) {
+          wsfHideEditor();
+          setStatus('no changes to save in ' + cur.path);
+          return;
+        }
+        const size = new Blob([text]).size;
+        const limit = attachmentLimit();
+        if (size > limit) {
+          wsfEditorStatus('Not saved: ' + wsfTooLargeText(cur.path, size, limit), 'error');
+          return;
+        }
+        cur.saving = true;
+        ed.save.disabled = true;
+        ed.cancel.disabled = true;
+        wsfEditorStatus('saving...');
+        try {
+          const { res, data } = await wsfPost('/rc/workspace/file/write', {
+            path: cur.path,
+            content: text,
+            mode: 'replace',
+            expectedHash: cur.hash,
+          });
+          if (res.ok) {
+            wsfHideEditor();
+            setStatus(
+              'saved ' +
+                cur.path +
+                (typeof data.sizeBytes === 'number'
+                  ? ' (' + formatBytes(data.sizeBytes) + ')'
+                  : ''),
+            );
+            void openWorkspaceFile(cur.path);
+            return;
+          }
+          if (data.code === 'hash_mismatch') {
+            wsfEditorStatus(
+              'Not saved: ' +
+                cur.path +
+                ' changed on the host after you opened it, and saving would overwrite that change. Your text is still here: copy what you need, then Cancel and open the file again to see the current version.',
+              'error',
+            );
+          } else if (res.status === 413 || data.code === 'file_too_large') {
+            wsfEditorStatus(
+              'Not saved: ' +
+                wsfTooLargeText(
+                  cur.path,
+                  size,
+                  typeof data.maxBytes === 'number' ? data.maxBytes : limit,
+                ),
+              'error',
+            );
+          } else if (data.code === 'path_not_found') {
+            wsfEditorStatus(
+              'Not saved: ' + cur.path + ' is no longer there on the host.',
+              'error',
+            );
+          } else {
+            wsfEditorStatus(
+              'Not saved: ' + wsFilesErrorText(res.status, data),
+              'error',
+            );
+          }
+        } catch (err) {
+          wsfEditorStatus('Not saved: ' + err.message, 'error');
+        } finally {
+          cur.saving = false;
+          ed.save.disabled = false;
+          ed.cancel.disabled = false;
+        }
+      }
+
+      // Upload: the phone's own picker, then one POST per file, in turn, each
+      // with its own progress line. A file over the #196 limit is refused here
+      // with the number rather than sent to be refused; one the gateway or
+      // the daemon refuses anyway gets the same words with the limit it named.
+      let wsfUploadInput = null;
+      function wsfPickUpload(dir) {
+        if (!wsfUploadInput) {
+          wsfUploadInput = document.createElement('input');
+          wsfUploadInput.type = 'file';
+          wsfUploadInput.multiple = true;
+          wsfUploadInput.id = 'ws-files-upload-input';
+          wsfUploadInput.hidden = true;
+          // Outside the listing body, which every reload empties.
+          ($('ws-files') || document.body).appendChild(wsfUploadInput);
+        }
+        const input = wsfUploadInput;
+        input.value = '';
+        input.onchange = () => {
+          const files = Array.from(input.files || []);
+          input.value = '';
+          if (files.length) void wsfUploadAll(dir, files);
+        };
+        input.click();
+      }
+
+      function wsfUploadOne(rel, file, onProgress) {
+        return new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open(
+            'POST',
+            wsTargetQuery(
+              '/rc/workspace/file/upload?path=' + encodeURIComponent(rel),
+            ),
+          );
+          xhr.setRequestHeader('Authorization', 'Bearer ' + token());
+          xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) onProgress(e.loaded, e.total);
+          };
+          xhr.onload = () => {
+            let data = {};
+            try {
+              data = JSON.parse(xhr.responseText || '{}');
+            } catch {
+              data = {};
+            }
+            resolve({
+              ok: xhr.status >= 200 && xhr.status < 300,
+              status: xhr.status,
+              data,
+            });
+          };
+          xhr.onerror = () =>
+            resolve({ ok: false, status: 0, data: { error: 'network error' } });
+          xhr.send(file);
+        });
+      }
+
+      async function wsfUploadAll(dir, files) {
+        const note = wsfNote();
+        note.textContent = '';
+        const limit = attachmentLimit();
+        for (const file of files) {
+          const line = document.createElement('div');
+          line.dataset.wsf = 'upload-line';
+          note.appendChild(line);
+          if (file.size > limit) {
+            line.textContent = wsfTooLargeText(file.name, file.size, limit);
+            continue;
+          }
+          const rel = wsFilesJoin(dir, file.name);
+          const show = (pct) => {
+            line.textContent =
+              file.name + ' ' + pct + '% (' + formatBytes(file.size) + ')';
+          };
+          show(0);
+          const r = await wsfUploadOne(rel, file, (loaded, total) =>
+            show(total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0),
+          );
+          if (r.ok) {
+            // The daemon never overwrites, so a taken name comes back
+            // numbered; say which name the file got.
+            const got = typeof r.data.path === 'string' ? r.data.path : rel;
+            line.textContent =
+              file.name + ' uploaded' + (got !== rel ? ' as ' + got : '');
+          } else if (r.status === 413 || r.data.code === 'file_too_large') {
+            line.textContent = wsfTooLargeText(
+              file.name,
+              file.size,
+              typeof r.data.maxBytes === 'number' ? r.data.maxBytes : limit,
+            );
+          } else {
+            line.textContent =
+              file.name + ': not uploaded, ' + wsFilesErrorText(r.status, r.data);
+          }
+        }
+        void loadWorkspaceFiles(false);
+      }
+
+      // Delete: stat first, so the sheet can name the size and refuse a path
+      // that is not a regular file (the daemon deletes files only), then a
+      // confirmation that names the full path, then the delete itself.
+      async function wsfDelete(relPath) {
+        const status = wsSectionStatusEl('ws-files-file-status');
+        status.textContent = 'checking ' + relPath + '...';
+        let size = 0;
+        try {
+          const res = await fetch(
+            wsTargetQuery(
+              '/rc/workspace/stat?path=' + encodeURIComponent(relPath),
+            ),
+            { headers: wsfAuth() },
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            status.textContent =
+              'cannot delete: ' + wsFilesErrorText(res.status, data);
+            return;
+          }
+          if (data.type && data.type !== 'file') {
+            status.textContent =
+              relPath + ' is a ' + data.type + ': only files can be deleted here';
+            return;
+          }
+          size = typeof data.sizeBytes === 'number' ? data.sizeBytes : 0;
+        } catch (err) {
+          status.textContent = 'cannot delete: ' + err.message;
+          return;
+        }
+        status.textContent = '';
+        const ok = await wsfAsk({
+          title: 'Delete this file?',
+          path: wsfFullPath(relPath),
+          sub:
+            'Size ' +
+            formatBytes(size) +
+            ' (' +
+            size +
+            ' bytes). It is removed from the host, not moved to a trash.',
+          go: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+        status.textContent = 'deleting ' + relPath + '...';
+        try {
+          const { res, data } = await wsfPost('/rc/workspace/file/delete', {
+            path: relPath,
+          });
+          if (!res.ok) {
+            status.textContent =
+              'not deleted: ' + wsFilesErrorText(res.status, data);
+            return;
+          }
+          const view = $('ws-files-view');
+          if (view) view.remove();
+          wsfSetNote('deleted ' + relPath);
+          setStatus('deleted ' + relPath);
+          void loadWorkspaceFiles(false);
+        } catch (err) {
+          status.textContent = 'not deleted: ' + err.message;
         }
       }
 
@@ -9963,6 +10907,77 @@
           if (ctxInfo) renderFooter();
         } catch {
           /* transient; leave the fill as-is */
+        }
+      }
+
+      // #131. Read GET /session/:id/turns/current. Only a running or queued turn
+      // is kept: an ended one is not "this turn", and `idle` says there is none.
+      // A failed read leaves what is drawn, as the fill read does.
+      const currentTurnOn = () =>
+        !!(caps && caps.remoteControl && caps.remoteControl.currentTurn === true);
+      async function readCurrentTurn() {
+        const id = watchedSessionId;
+        if (!id || !token() || !currentTurnOn()) return;
+        const gen = switchGen;
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/turns/current',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) return;
+          const body = await res.json();
+          if (gen !== switchGen || id !== watchedSessionId) return;
+          const live =
+            body && (body.state === 'running' || body.state === 'queued');
+          const t0 = live
+            ? typeof body.startedAt === 'number'
+              ? body.startedAt
+              : body.queuedAt
+            : undefined;
+          if (!live || typeof t0 !== 'number') {
+            if (turnLive === null) return;
+            turnLive = null;
+          } else {
+            const readAt = Date.now();
+            const hdr = Date.parse(res.headers.get('Date') || '');
+            const serverNow = Number.isNaN(hdr) ? readAt : hdr;
+            turnLive = {
+              sid: id,
+              state: body.state,
+              promptText:
+                typeof body.promptText === 'string' ? body.promptText : '',
+              base: Math.max(0, serverNow - t0),
+              readAt,
+            };
+          }
+          if (ctxInfo) renderFooter();
+        } catch {
+          /* transient; leave the row as-is */
+        }
+      }
+      function turnLiveSecs() {
+        return turnLive
+          ? Math.floor((turnLive.base + (Date.now() - turnLive.readAt)) / 1000)
+          : 0;
+      }
+      // The poll runs only while the sheet is open and a turn is live here: a
+      // closed sheet or an idle conversation costs the daemon nothing.
+      function syncTurnPoll() {
+        const want =
+          currentTurnOn() &&
+          !$('h1-sheet').hidden &&
+          turnRunning() &&
+          !!token();
+        if (want && !turnPollTimer) {
+          turnPollTimer = setInterval(readCurrentTurn, TURN_POLL_MS);
+          void readCurrentTurn();
+        } else if (!want && turnPollTimer) {
+          clearInterval(turnPollTimer);
+          turnPollTimer = null;
+        }
+        if (!want && turnLive) {
+          turnLive = null;
+          if (ctxInfo) renderFooter();
         }
       }
 

@@ -172,6 +172,7 @@ export {
   type DaemonPendingPromptSummary,
   type DaemonPendingPromptsResult,
   type DaemonRemovePendingPromptResult,
+  type DaemonSessionTurnStatus,
   type DaemonRemoveMidTurnMessageResult,
   type DaemonSendMidTurnMessagesNowResult,
   // Daemon-emitted resync

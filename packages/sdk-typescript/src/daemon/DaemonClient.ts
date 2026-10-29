@@ -212,6 +212,7 @@ import type {
   DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
+  DaemonSessionTurnStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -3640,6 +3641,39 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonSessionTurnIndexPage>(
       `/session/${urlEncode(sessionId)}/turn-index${turnIndexPageSuffix(opts)}`,
       'GET /session/:id/turn-index',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
+  /**
+   * Read the session's current turn: the running one, else the oldest queued
+   * one, else the newest ended one, else `{ state: 'idle' }`. Wraps
+   * `GET /session/:id/turns/current`.
+   */
+  async getCurrentSessionTurn(
+    sessionId: string,
+    opts: { clientId?: string } = {},
+  ): Promise<DaemonSessionTurnStatus> {
+    return await this.jsonRequest<DaemonSessionTurnStatus>(
+      `/session/${urlEncode(sessionId)}/turns/current`,
+      'GET /session/:id/turns/current',
+      { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
+  /**
+   * Read one turn by its prompt id. Wraps `GET /session/:id/turns/:promptId`;
+   * a prompt the daemon does not hold is a 404 `prompt_not_found`, thrown as a
+   * `DaemonHttpError`.
+   */
+  async getSessionTurn(
+    sessionId: string,
+    promptId: string,
+    opts: { clientId?: string } = {},
+  ): Promise<DaemonSessionTurnStatus> {
+    return await this.jsonRequest<DaemonSessionTurnStatus>(
+      `/session/${urlEncode(sessionId)}/turns/${urlEncode(promptId)}`,
+      'GET /session/:id/turns/:promptId',
       { clientId: opts.clientId, mode: 'rest' },
     );
   }

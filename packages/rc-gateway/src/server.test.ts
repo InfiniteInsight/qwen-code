@@ -2556,3 +2556,66 @@ describe('resumable attachment uploads (#130) behind the gateway', () => {
     expect(rows.filter((x) => x.action === 'attachment_uploaded')).toHaveLength(1);
   });
 });
+
+describe('GET /session/:id/turns/current (#131) behind the gateway', () => {
+  const SID = '11111111-1111-1111-1111-111111111111';
+  const RUNNING = {
+    sessionId: SID,
+    state: 'running',
+    promptId: 'p-1',
+    promptText: 'go',
+    queuedAt: 1,
+    startedAt: 2,
+  };
+  async function tokenFor(
+    url: string,
+    pairing: PairingService,
+    scopes: string[],
+  ) {
+    const { code } = pairing.mint(scopes);
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    return ((await r.json()) as { token: string }).token;
+  }
+
+  it('answers a read-scope token with the daemon turn, and a caller with no token with 401', async () => {
+    const { url, pairing } = await boot({ currentTurn: RUNNING });
+    const reader = await tokenFor(url, pairing, [SESSION_READ]);
+    const ok = await fetch(`${url}/session/${SID}/turns/current`, {
+      headers: { Authorization: `Bearer ${reader}` },
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual(RUNNING);
+    const bare = await fetch(`${url}/session/${SID}/turns/current`);
+    expect(bare.status).toBe(401);
+  });
+
+  it('keeps a session-locked share token to its own session', async () => {
+    const { url, pairing } = await boot({ currentTurn: RUNNING });
+    const owner = await tokenFor(url, pairing, [SESSION_READ, OWNER]);
+    const mint = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner}`,
+      },
+      body: JSON.stringify({ sessionId: SID, ttlSec: 3600 }),
+    });
+    const share = (await mint.json()) as { token: string };
+    const own = await fetch(`${url}/session/${SID}/turns/current`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(own.status).toBe(200);
+    const other = await fetch(
+      `${url}/session/22222222-2222-2222-2222-222222222222/turns/current`,
+      { headers: { Authorization: `Bearer ${share.token}` } },
+    );
+    expect(other.status).toBe(403);
+    expect(((await other.json()) as { code: string }).code).toBe(
+      'session_locked',
+    );
+  });
+});

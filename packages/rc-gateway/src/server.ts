@@ -124,6 +124,14 @@ import {
   createWorkspaceGlobRoute,
   createWorkspaceListRoute,
 } from './routes/workspaceFiles.js';
+import {
+  createWorkspaceFileBody,
+  createWorkspaceFileDeleteRoute,
+  createWorkspaceFileEditRoute,
+  createWorkspaceFileUploadRoute,
+  createWorkspaceFileWriteRoute,
+  createWorkspaceStatRoute,
+} from './routes/workspaceFileWrites.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import { createPermissionOverlayRoutes } from './routes/permissionOverlays.js';
@@ -163,6 +171,7 @@ import { createSessionContextUsageRoute } from './routes/sessionContextUsage.js'
 import { createSessionExportRoute } from './routes/sessionExport.js';
 import { createSessionTranscriptRoute } from './routes/sessionTranscript.js';
 import { createSessionTurnIndexRoute } from './routes/sessionTurnIndex.js';
+import { createSessionTurnCurrentRoute } from './routes/sessionTurnCurrent.js';
 import { createSessionRecapRoute } from './routes/sessionRecap.js';
 import { createSessionBtwRoute } from './routes/sessionBtw.js';
 import {
@@ -1008,6 +1017,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionTurnIndexRoute(deps.daemon, audit),
+  );
+  // GET /session/:id/turns/current: read-scope (#131). The daemon's record of
+  // the turn a conversation is on: running, queued or the last one ended. The
+  // status line's sheet polls it while open and a turn is live. Relayed
+  // untouched and not audited (a poll). Bare namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/turns/current',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionTurnCurrentRoute(deps.daemon),
   );
   // POST /session/:id/recap — asks the daemon for its one-sentence
   // 'where did I leave off' summary of one conversation. It is a POST
@@ -2495,6 +2514,59 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceFileBytesRoute(deps.daemon),
+  );
+  // Workspace file writes (#123). WRITE, the floor the reads above already
+  // sit on: a token that may read host file contents and prompt an agent that
+  // writes files may write them itself, and every share token (session:read
+  // plus at most approve) is refused here by requireScope before any body is
+  // read. The stat read is WRITE too, not session:read: it answers whether a
+  // path exists and how big it is, the same host fact `list` gives, and the
+  // browser that uses it is unreachable below WRITE anyway. The three body
+  // routes read their own body after the scope check, under the #196 limit
+  // (`createWorkspaceFileBody`); the global parser stands aside for them
+  // (gateJsonBody). Each write leaves an audit row without its path.
+  app.get(
+    '/rc/workspace/stat',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceStatRoute(deps.daemon),
+  );
+  app.post(
+    '/rc/workspace/file/write',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('json', attachmentLimit),
+    createWorkspaceFileWriteRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/file/edit',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('json', attachmentLimit),
+    createWorkspaceFileEditRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/file/upload',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('raw', attachmentLimit),
+    createWorkspaceFileUploadRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/file/delete',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceFileDeleteRoute(deps.daemon, audit),
   );
 
   if (deps.snooze) {
