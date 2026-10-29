@@ -859,7 +859,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Defaulted stream hook (see AppContainerProps.useStream). Stable per mount:
   // `startInteractiveUI` never passes it (→ in-process), `DaemonAppContainer`
   // always passes the daemon adapter.
-  const useStream = props.useStream ?? useLlmStream;
+  const useStream: DaemonAwareStreamHook = props.useStream ?? useLlmStream;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
