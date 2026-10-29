@@ -204,15 +204,28 @@ describe('dedupeAndSortDaemons', () => {
     ...over,
   });
 
-  it('dedupes by name (latest wins) and sorts by host then port', () => {
+  it('dedupes the same announcement seen twice (latest wins) and sorts by host then port', () => {
     const out = dedupeAndSortDaemons([
       rec({ name: 'a', host: 'z.local', port: 2 }),
       rec({ name: 'b', host: 'a.local', port: 9 }),
-      rec({ name: 'a', host: 'z.local', port: 5 }), // dup name → replaces
+      rec({ name: 'a', host: 'z.local', port: 2, version: '2' }), // same daemon again
       rec({ name: 'c', host: 'a.local', port: 3 }),
     ]);
     expect(out.map((r) => r.name)).toEqual(['c', 'b', 'a']);
-    expect(out.find((r) => r.name === 'a')?.port).toBe(5); // latest won
+    expect(out.find((r) => r.name === 'a')?.version).toBe('2'); // latest won
+  });
+
+  it('keeps distinct daemons that share a name (same workspace basename) on different hosts or ports', () => {
+    const out = dedupeAndSortDaemons([
+      rec({ name: 'dev-app', host: 'dev.local', port: 7070 }),
+      rec({ name: 'dev-app', host: 'dev.local', port: 7071 }), // second workspace, same basename
+      rec({ name: 'dev-app', host: 'other.local', port: 7070 }), // another host, same name
+    ]);
+    expect(out.map((r) => `${r.host}:${r.port}`)).toEqual([
+      'dev.local:7070',
+      'dev.local:7071',
+      'other.local:7070',
+    ]);
   });
 
   it('returns [] for empty input', () => {
