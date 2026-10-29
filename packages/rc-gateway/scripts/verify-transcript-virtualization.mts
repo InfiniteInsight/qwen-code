@@ -19451,6 +19451,28 @@ PAGE_SCENARIOS.push({
       return `transcript ${r.tr}px, Allow and Deny whole above the keys at ${r.vv}, ${r.lines} lines of the command`;
     },
   });
+  PAGE_SCENARIOS.push({
+    name: 'P332 at 360x780 with the keys up the field and Send stay above them, and a pinned card keeps its buttons over a transcript with room',
+    keyboard: true,
+    frames: () => {
+      const f = new Frames().ev('client_joined').user('clear the stale alpine caches');
+      f.asst('The old alpine entries are dead weight; I can clear them.');
+      return f.ev('permission_request', permFrame('p332', BIG_CMD)).list;
+    },
+    stub: { sessionStatus: statusBody([permPending('p332', BIG_CMD)]) },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitPinned(page, 'p332');
+      await page.waitForSelector('#composer', { state: 'visible' });
+      // A 360x780 phone's keys cover about 290px, leaving 490.
+      const r = await h190KeysUpRoom(page, { width: 360, height: 780 }, 290);
+      expect(r.visible === 490, `the keys left ${r.visible}px visible`);
+      expect(r.field && r.allow && r.deny && r.lines >= 2 && r.cmdMine && r.tr >= 60, `at 360x780 with the keys up: ${JSON.stringify(r)}`);
+      await shot(page, 'p332-keys-360x780');
+      await keyboardDown(page);
+      return `360x780, keys up to ${r.vv}: field and Send on screen, Allow and Deny whole, transcript ${r.tr}px, ${r.lines} lines of the command`;
+    },
+  });
 }
 
 // #188 (h1). The laptop, derived from the phone: at 1100px and wider the List
