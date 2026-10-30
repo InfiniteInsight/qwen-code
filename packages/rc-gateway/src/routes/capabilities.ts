@@ -173,6 +173,8 @@ export function createCapabilityRoute(deps: {
   nativeShells?: () => NativeShellsCapability;
   /** True when the loopback `POST /rc/host/attach` routes are mounted. */
   hostAttach?: boolean;
+  /** #212: true when the /rc/host/tabs routes are mounted. */
+  hostTabs?: boolean;
   /**
    * The upload size limit the attachment route enforces (#196), so the page
    * can shrink an image to fit before sending it. Omitted when not wired; the
@@ -236,7 +238,9 @@ export function createCapabilityRoute(deps: {
       // requires. A watch that 412s past the WAL horizon recovers by resuming
       // the conversation, and the page asks only when this says it may.
       writeScope: hasScope(
-        Array.isArray(req.rcClient.scopes) ? (req.rcClient.scopes as string[]) : [],
+        Array.isArray(req.rcClient.scopes)
+          ? (req.rcClient.scopes as string[])
+          : [],
         WRITE,
       ),
       // #194 slice D: a terminal on this host can start a conversation the
@@ -266,7 +270,10 @@ export function createCapabilityRoute(deps: {
       // lovelace`, `~/projects`). Host facts, so owner and write only, as the
       // paths below (#165).
       ...(audience === 'full'
-        ? { hostName: deps.hostName ?? hostname(), homeDir: deps.homeDir ?? homedir() }
+        ? {
+            hostName: deps.hostName ?? hostname(),
+            homeDir: deps.homeDir ?? homedir(),
+          }
         : {}),
       // A host path: owner and write only (#165).
       ...(deps.daemonQwenBin !== undefined && audience === 'full'
@@ -333,6 +340,11 @@ export function createCapabilityRoute(deps: {
       // hold write (`writeScope`). The daemon advertises no tag for goals, so
       // a daemon without the routes answers `goal_unsupported` on the read.
       sessionGoal: true,
+      // #212: GET /rc/host/tabs and its reopen, dismiss and remove are
+      // mounted. The page reads the tabs only when this is set and the token
+      // holds write (`writeScope`), so a reader and an older gateway see no
+      // badge and no tab line.
+      hostTabs: deps.hostTabs === true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

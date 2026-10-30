@@ -258,6 +258,13 @@ import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { createHookIngestRoute } from './routes/hookIngest.js';
 import { createHostAttachRoutes } from './routes/hostAttach.js';
+import {
+  createHostTabEndRoute,
+  createHostTabRoutes,
+  sessionEndpointResolver,
+  type TabEndpointAnswer,
+} from './routes/hostTabs.js';
+import type { HostTabRegistry } from './hostTabs.js';
 import { WorkflowRunRegistry } from './workflows/workflowRegistry.js';
 import {
   createStartWorkflowRoute,
@@ -570,6 +577,33 @@ export interface GatewayDeps {
    * request log alone, as before.
    */
   hostAttachedWorkspaces?: HostAttachedWorkspaces;
+  /**
+   * The host tab registry (#212, hostTabs.ts). With `hostAttach` also set,
+   * the attach routes open a record per tab and `POST
+   * /rc/host/tabs/:tabId/end` (loopback, host-attach token) closes it.
+   * Omitted: tabs are not tracked and nothing about them mounts.
+   */
+  hostTabs?: {
+    registry: HostTabRegistry;
+    /**
+     * Where a reopened tab attaches (routes/hostTabs.ts). Defaults to the
+     * pool's endpoint for the session, restoring it when no daemon holds it;
+     * the page harness answers a fixed one.
+     */
+    endpointFor?: (
+      sessionId: string,
+      cwd: string,
+    ) => Promise<TabEndpointAnswer>;
+    /** Whether a terminal already shows the session; defaults to the /proc scan. */
+    isMirrored?: (sessionId: string) => Promise<boolean>;
+    /**
+     * `--reopen-crashed-tabs`: reopen a crashed tab without being asked,
+     * once per record, only while the launcher is live. Off by default. The
+     * sweep is exposed as `hostTabSweep` for the boot wiring to run on a
+     * timer; an end report that leaves a tab crashed runs one at once.
+     */
+    autoReopen?: boolean;
+  };
   /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
   workflows?: {
     runsDir?: string;
@@ -634,6 +668,12 @@ export interface GatewayApp {
   reviewLifecycle?: ReviewLifecycle;
   /** Present only when both deps.workflows AND deps.agents are supplied. */
   workflowRuns?: WorkflowRunRegistry;
+  /**
+   * #212: one pass of the automatic reopen of crashed host tabs. Present
+   * only when deps.hostTabs is supplied; a no-op unless its autoReopen is
+   * on. Kept out of createGatewayApp's own timers, like the bridge reaper.
+   */
+  hostTabSweep?: () => Promise<void>;
 }
 
 /**
@@ -894,6 +934,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // TokenStore token never opens these routes and this token never reaches
   // a phone route. Same `QWEN_RC_TERMINAL_QWEN` argv as /rc/terminals, so
   // both hand out one command shape.
+  // #212: the host tab routes, built once: the wrapper's end report mounts
+  // here, before bearerResolve, and the phone's verbs further down.
+  const hostTabRoutes = deps.hostTabs
+    ? createHostTabRoutes({
+        registry: deps.hostTabs.registry,
+        requests: deps.terminalRequests,
+        audit,
+        planOpts: {
+          qwenArgv: deps.terminalQwenArgv,
+          rcArgv: deps.terminalRcArgv,
+        },
+        endpointFor:
+          deps.hostTabs.endpointFor ?? sessionEndpointResolver(deps.daemon),
+        isMirrored: deps.hostTabs.isMirrored,
+        autoReopen: deps.hostTabs.autoReopen === true,
+      })
+    : undefined;
   if (deps.hostAttach) {
     const hostAttach = createHostAttachRoutes({
       daemon: deps.daemon,
@@ -901,10 +958,29 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       audit,
       planOpts: { qwenArgv: deps.terminalQwenArgv },
       attachedWorkspaces: deps.hostAttachedWorkspaces,
+      tabs: deps.hostTabs?.registry,
     });
     const hostAttachJson = jsonForBearer(deps.hostAttach.token);
     app.post('/rc/host/attach', hostAttachJson, hostAttach.create);
     app.post('/rc/host/attach/:sessionId', hostAttachJson, hostAttach.attach);
+    // #212: the wrapper's end report, on the same token and gates. Only the
+    // `/end` path is claimed here; the phone's verbs on /rc/host/tabs mount
+    // after bearerResolve.
+    if (deps.hostTabs && hostTabRoutes) {
+      app.post(
+        '/rc/host/tabs/:tabId/end',
+        hostAttachJson,
+        createHostTabEndRoute({
+          registry: deps.hostTabs.registry,
+          token: deps.hostAttach.token,
+          audit,
+          // A crash is reopened as soon as it is reported, not on the next tick.
+          onEnded: (tab) => {
+            if (tab.state === 'crashed') void hostTabRoutes.sweep();
+          },
+        }),
+      );
+    }
   }
 
   const webRoot =
@@ -1586,6 +1662,30 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       }),
     );
   }
+  // #212: the host's tabs as the phone sees them: a crashed or lost tab can be
+  // reopened (through the same request log as /rc/terminals), dismissed or
+  // removed. WRITE like /rc/terminals; a reader or a share never reaches them.
+  if (hostTabRoutes) {
+    app.get('/rc/host/tabs', requireScope(WRITE, audit), hostTabRoutes.list);
+    app.post(
+      '/rc/host/tabs/:tabId/reopen',
+      requireScope(WRITE, audit),
+      subActorBan,
+      hostTabRoutes.reopen,
+    );
+    app.post(
+      '/rc/host/tabs/:tabId/dismiss',
+      requireScope(WRITE, audit),
+      subActorBan,
+      hostTabRoutes.dismiss,
+    );
+    app.delete(
+      '/rc/host/tabs/:tabId',
+      requireScope(WRITE, audit),
+      subActorBan,
+      hostTabRoutes.remove,
+    );
+  }
   // POST /session/:id/resume — reactivate a past (ended) conversation on its
   // workspace's daemon so a phone can pick it back up (add-resume-conversations).
   // Write-scoped; bare namespace. enforceSessionLock binds a session-locked
@@ -1662,6 +1762,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
       hostAttach: deps.hostAttach !== undefined,
+      hostTabs: deps.hostTabs !== undefined,
       maxAttachmentBytes: attachmentLimit,
       daemonQwenBin: deps.daemonQwenBin,
       daemonQwenBinHealthy: deps.daemonQwenBinHealthy,
@@ -2955,5 +3056,6 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     agentLifecycle,
     reviewLifecycle,
     workflowRuns,
+    ...(hostTabRoutes ? { hostTabSweep: hostTabRoutes.sweep } : {}),
   };
 }

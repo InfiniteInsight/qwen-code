@@ -3046,6 +3046,8 @@ type PageScenario =
         artifactMutationErrorBody?: unknown;
         /** #135: the stub's session goal routes. */
         goal?: StubDaemonOptions['goal'];
+        /** #212: the host tab routes over a real registry (see BootViewerOptions). */
+        hostTabs?: { mirrored?: string[] };
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22998,6 +23000,7 @@ async function runPageScenario(
     artifactMutationStatus: s.stub?.artifactMutationStatus,
     artifactMutationErrorBody: s.stub?.artifactMutationErrorBody,
     goal: s.stub?.goal,
+    hostTabs: s.stub?.hostTabs,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -30859,6 +30862,431 @@ PAGE_SCENARIOS.push({
     return JSON.stringify(lines);
   },
 });
+
+// ---- #212: crashed and lost host tabs ---------------------------------------
+// The harness mounts the host tab routes over a real registry and request log
+// (BootViewerOptions.hostTabs) with a /proc probe the scenario edits, so every
+// badge and line below is drawn from the gateway's own derivation, and every
+// verb goes through the real routes. Nothing on the host is ever launched.
+{
+  const TB_CWD = '/home/evan/scratch';
+  const TB = (n: number) => `aaaa0212-0000-4000-8000-00000000000${n}`;
+  type Tabs = NonNullable<Viewer['hostTabs']>;
+  const tabsOf = (viewer: Viewer): Tabs => {
+    if (!viewer.hostTabs) throw new Error('booted without hostTabs');
+    return viewer.hostTabs;
+  };
+  /** One record in a given state: crashed (an exit code), lost, live, quit or closed. */
+  let tbPid = 7000;
+  const tbSeed = async (
+    viewer: Viewer,
+    sessionId: string,
+    kind: 'crashed' | 'lost' | 'live' | 'quit' | 'closed',
+    exitCode = 137,
+  ): Promise<string> => {
+    const t = tabsOf(viewer);
+    const pid = ++tbPid;
+    t.live.add(pid);
+    const rec = await t.registry.start({ sessionId, cwd: TB_CWD, pid });
+    if (kind === 'live') return rec.tabId;
+    if (kind === 'lost') {
+      t.live.delete(pid);
+      return rec.tabId;
+    }
+    t.live.delete(pid);
+    await t.registry.end(rec.tabId, kind === 'quit' ? 0 : kind === 'closed' ? 129 : exitCode);
+    return rec.tabId;
+  };
+  /** Every request the page sends to the tab routes, as "METHOD path". */
+  const tbSent = (page: Page): string[] => {
+    const sent: string[] = [];
+    page.on('request', (r) => {
+      const path = new URL(r.url()).pathname;
+      if (path.startsWith('/rc/host/tabs')) sent.push(`${r.method()} ${path}`);
+    });
+    return sent;
+  };
+  const tbCaps = (edit: (rc: Record<string, unknown>) => void) => async (page: Page) => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+      if (j.remoteControl) edit(j.remoteControl);
+      await route.fulfill({ response: res, json: j });
+    });
+  };
+  /** Watch the conversation and wait for the sheet's rows to exist. */
+  const tbWatch = async (page: Page, viewer: Viewer) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    await page.waitForFunction(`document.getElementById('session-footer').style.display !== 'none'`);
+  };
+  type TbLine = { shown: boolean; state: string; note: string; btns: Array<{ text: string; h: number; w: number; right: number; disabled: boolean }>; labels: string[]; vw: number };
+  const tbLine = (page: Page) =>
+    page.evaluate(String.raw`(() => {
+      const box = document.getElementById('h1-host-tab');
+      const shown = !!box && box.isConnected && box.getClientRects().length > 0;
+      const btns = box ? Array.from(box.querySelectorAll('.ht-acts button')).map((b) => {
+        const r = b.getBoundingClientRect();
+        return { text: b.textContent, h: Math.round(r.height), w: Math.round(r.width), right: Math.round(r.right), disabled: b.disabled };
+      }) : [];
+      return {
+        shown,
+        state: box ? box.querySelector('#host-tab-state').textContent : '',
+        note: box && !box.querySelector('#host-tab-note').hidden ? box.querySelector('#host-tab-note').textContent : '',
+        btns,
+        labels: Array.from(document.querySelectorAll('#session-footer .sh-lbl')).filter((l) => l.getClientRects().length > 0).map((l) => l.textContent),
+        vw: innerWidth,
+      };
+    })()`) as Promise<TbLine>;
+  /** Read the tabs now and wait until the sheet's line is `shown`. */
+  const tbRead = async (page: Page, shown: boolean) => {
+    await page.evaluate('readHostTabs()');
+    await page.waitForFunction(
+      `(() => { const b = document.getElementById('h1-host-tab'); return !!b && (b.isConnected && b.getClientRects().length > 0) === ${shown}; })()`,
+      null,
+      { timeout: 10_000 },
+    );
+  };
+  type TbBadge = { id: string; badge: string | null; state: string | null; rowH: number; rowRight: number; badgeRight: number; name: string };
+  const tbBadges = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+      const s = w.querySelector('.s');
+      const b = s.querySelector('.tabbadge');
+      return {
+        id: w.dataset.session,
+        badge: b ? b.textContent : null,
+        state: b ? b.dataset.state : null,
+        rowH: Math.round(s.getBoundingClientRect().height),
+        rowRight: Math.round(w.getBoundingClientRect().right),
+        badgeRight: b ? Math.round(b.getBoundingClientRect().right) : 0,
+        name: s.textContent,
+      };
+    })`) as Promise<TbBadge[]>;
+  const tbRow = (id: string, title: string) => ({
+    sessionId: id,
+    title,
+    titleSource: 'manual',
+    forks: [],
+    updatedAt: new Date().toISOString(),
+    preview: 'p212 ' + title,
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P520 a conversation whose host tab crashed has a "tab crashed" badge on its row and one whose tab was lost "tab lost"; live, quit, closed and dismissed tabs have none, and the row stays 64px at 390 and 1280',
+    waitView: false,
+    stub: { hostTabs: {} },
+    run: async ({ page, viewer }) => {
+      await tbWatch(page, viewer);
+      await tbSeed(viewer, TB(1), 'crashed');
+      await tbSeed(viewer, TB(2), 'lost');
+      await tbSeed(viewer, TB(3), 'live');
+      await tbSeed(viewer, TB(4), 'quit');
+      await tbSeed(viewer, TB(5), 'closed');
+      const dis = await tbSeed(viewer, TB(6), 'crashed');
+      await tabsOf(viewer).registry.dismiss(dis);
+      await serveList(page, TB_CWD, {
+        list: [1, 2, 3, 4, 5, 6].map((n) => tbRow(TB(n), 'p212 row ' + n + ' with a long title that has to give way to the badge')),
+      });
+      await openList(page);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .tabbadge').length === 2`, null, { timeout: 10_000 });
+      const at390 = await tbBadges(page);
+      const by = Object.fromEntries(at390.map((r) => [r.id, r]));
+      expect(by[TB(1)]!.badge === 'tab crashed' && by[TB(1)]!.state === 'crashed', `the crashed row reads ${JSON.stringify(by[TB(1)])}`);
+      expect(by[TB(2)]!.badge === 'tab lost' && by[TB(2)]!.state === 'ghost', `the lost row reads ${JSON.stringify(by[TB(2)])}`);
+      for (const n of [3, 4, 5, 6]) expect(by[TB(n)]!.badge === null, `row ${n} has a badge: ${JSON.stringify(by[TB(n)])}`);
+      expect(at390.every((r) => r.rowH === 64), `rows are ${JSON.stringify(at390.map((r) => r.rowH))}px, not 64`);
+      expect(at390.every((r) => r.rowRight <= 390 && r.badgeRight <= r.rowRight), `a badge runs off the row: ${JSON.stringify(at390.map((r) => [r.badgeRight, r.rowRight]))}`);
+      expect(by[TB(1)]!.name.includes('tab crashed'), 'the badge is not part of the row a screen reader names');
+      const inks = (await page.evaluate(`Array.from(document.querySelectorAll('#past-list .tabbadge')).map((b) => getComputedStyle(b).color)`)) as string[];
+      expect(new Set(inks).size === 2, `crashed and lost are drawn in one ink: ${JSON.stringify(inks)}`);
+      await shot(page, 'p520-badges-390');
+      await closeList(page);
+      await page.setViewportSize(LAPTOP);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .tabbadge').length === 2`, null, { timeout: 10_000 });
+      const at1280 = await tbBadges(page);
+      expect(at1280.every((r) => r.rowH === 64), `rows at 1280 are ${JSON.stringify(at1280.map((r) => r.rowH))}px`);
+      expect(at1280.filter((r) => r.badge).every((r) => r.badgeRight <= r.rowRight), 'a badge runs off the pane at 1280');
+      await shot(page, 'p520-badges-1280');
+      return 'crashed: "tab crashed", lost: "tab lost", in two inks; live, quit, closed and dismissed: none; 64px rows at 390 and 1280';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P521 the sheet has a Host tab line for the conversation on screen when its tab crashed: what happened with the exit code, then Reopen, Dismiss and Remove at 44px in one row, and no line when it has no crashed tab',
+    waitView: false,
+    stub: { hostTabs: {} },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      await tbWatch(page, viewer);
+      await openSheet(page);
+      await tbRead(page, false);
+      const none = await tbLine(page);
+      expect(!none.shown && !none.labels.includes('Host tab'), 'a Host tab line shows with no crashed tab');
+      await tbSeed(viewer, viewer.sessionId, 'crashed', 137);
+      await tbRead(page, true);
+      const line = await tbLine(page);
+      expect(line.state === 'crashed (exit 137), just now', `the line says ${JSON.stringify(line.state)}`);
+      expect(line.labels.includes('Host tab'), `no Host tab label: ${JSON.stringify(line.labels)}`);
+      expect(line.labels.indexOf('Host tab') > line.labels.indexOf('Folder on host'), 'the line is not under the folder');
+      expect(line.note === 'no launcher has ever checked in here, so Reopen cannot open a tab now', `the launcher note is ${JSON.stringify(line.note)}`);
+      expect(line.btns.map((b) => b.text).join() === 'Reopen,Dismiss,Remove', `the verbs are ${JSON.stringify(line.btns.map((b) => b.text))}`);
+      expect(line.btns.every((b) => b.h >= 44 && b.w >= 44 && b.right <= line.vw && !b.disabled), `the verbs measure ${JSON.stringify(line.btns)}`);
+      // A later tab of the same conversation, killed by SIGTERM, says so.
+      tabsOf(viewer).advance(1_000);
+      await tbSeed(viewer, viewer.sessionId, 'crashed', 143);
+      await page.evaluate('readHostTabs()');
+      await page.waitForFunction(`document.getElementById('host-tab-state').textContent.startsWith('ended by SIGTERM (exit 143)')`);
+      expect(sent.every((s) => s === 'GET /rc/host/tabs'), `the sheet sent ${JSON.stringify(sent)}`);
+      await shot(page, 'p521-sheet-line-390');
+      return `"${line.state}", note "${line.note}", three 44px verbs; SIGTERM reads "ended by SIGTERM (exit 143)"`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P522 Reopen with the launcher live posts once, queues one terminal request for the conversation, says it is reopening, and the line goes when the reopened tab attaches',
+    waitView: false,
+    stub: { hostTabs: {} },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      const t = tabsOf(viewer);
+      await t.poll();
+      const tabId = await tbSeed(viewer, viewer.sessionId, 'crashed', 137);
+      await tbWatch(page, viewer);
+      await openSheet(page);
+      await tbRead(page, true);
+      expect((await tbLine(page)).note === '', 'a live launcher still gets a note');
+      await page.click('#host-tab-reopen');
+      await page.waitForFunction(`document.getElementById('status').textContent === 'tab reopening on the host…'`, null, { timeout: 10_000 });
+      const posts = sent.filter((s) => s.startsWith('POST'));
+      expect(posts.length === 1 && posts[0] === `POST /rc/host/tabs/${tabId}/reopen`, `the page sent ${JSON.stringify(posts)}`);
+      const queued = await t.requests.readAll();
+      expect(queued.length === 1 && queued[0]!.sessionId === viewer.sessionId, `the request log holds ${JSON.stringify(queued.map((q) => q.sessionId))}`);
+      expect(queued[0]!.linuxArgv.join(' ') === `qwen-rc attach --session ${viewer.sessionId} ${TB_CWD}`, `the queued tab runs ${queued[0]!.linuxArgv.join(' ')}`);
+      await page.waitForFunction(`document.getElementById('host-tab-note').textContent === 'reopen asked just now'`, null, { timeout: 10_000 });
+      // The launcher opens the tab and its wrapper attaches: a new record.
+      t.live.add(9999);
+      await t.registry.start({ sessionId: viewer.sessionId, cwd: TB_CWD, pid: 9999 });
+      await tbRead(page, false);
+      const view = await t.registry.view(tabId);
+      expect(view?.state === 'replaced', `the crashed record is ${view?.state}`);
+      return `one POST, one request queued for ${viewer.sessionId.slice(0, 8)}, "tab reopening on the host…", then "reopen asked just now"; the line went once the new tab attached`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P523 Reopen while the launcher has never checked in, or stopped, is refused in words with the launcher\'s state and how long ago, nothing is queued, and the line stays',
+    waitView: false,
+    stub: { hostTabs: {} },
+    run: async ({ page, viewer }) => {
+      const t = tabsOf(viewer);
+      await tbSeed(viewer, viewer.sessionId, 'crashed', 1);
+      await tbWatch(page, viewer);
+      await openSheet(page);
+      await tbRead(page, true);
+      await page.click('#host-tab-reopen');
+      await page.waitForFunction(`document.getElementById('status').textContent === 'no tab reopened: no launcher has ever checked in here'`, null, { timeout: 10_000 });
+      await t.poll();
+      t.advance(60_000);
+      await page.evaluate('readHostTabs()');
+      await page.waitForFunction(`document.getElementById('host-tab-note').textContent === 'the launcher stopped checking in 60 s ago, so Reopen cannot open a tab now'`, null, { timeout: 10_000 });
+      await page.click('#host-tab-reopen');
+      await page.waitForFunction(`document.getElementById('status').textContent === 'no tab reopened: the launcher stopped checking in 60 s ago'`, null, { timeout: 10_000 });
+      expect((await t.requests.readAll()).length === 0, 'a refused reopen queued a request');
+      const line = await tbLine(page);
+      expect(line.shown && line.state.startsWith('crashed (exit 1)') && line.btns.every((b) => !b.disabled), `after the refusals the line is ${JSON.stringify(line)}`);
+      await shot(page, 'p523-launcher-stale-390');
+      return 'never: "no launcher has ever checked in here"; stale: "stopped checking in 60 s ago"; nothing queued; the line and its verbs stay';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P524 Dismiss posts once, the line and the row\'s badge go at once, and the record stays on the host marked dismissed',
+    waitView: false,
+    stub: { hostTabs: {} },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      const tabId = await tbSeed(viewer, viewer.sessionId, 'crashed', 137);
+      await tbWatch(page, viewer);
+      await serveList(page, TB_CWD, { list: [tbRow(viewer.sessionId, 'p524 on screen')] });
+      await page.setViewportSize(LAPTOP); // the list pane and the sheet pane side by side
+      await openSheet(page);
+      await tbRead(page, true);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .tabbadge').length === 1`, null, { timeout: 10_000 });
+      await page.click('#host-tab-dismiss');
+      await tbRead(page, false);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .tabbadge').length === 0`, null, { timeout: 10_000 });
+      const posts = sent.filter((s) => !s.startsWith('GET'));
+      expect(posts.length === 1 && posts[0] === `POST /rc/host/tabs/${tabId}/dismiss`, `the page sent ${JSON.stringify(posts)}`);
+      const view = await tabsOf(viewer).registry.view(tabId);
+      expect(view?.dismissed === true && view.state === 'crashed', `the record is ${JSON.stringify(view && { state: view.state, dismissed: view.dismissed })}`);
+      return 'one POST /dismiss; the line and the badge went; the record is still crashed, now dismissed';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P525 Remove asks first: Cancel sends nothing and keeps the line, OK sends one DELETE and the record is gone from the host',
+    waitView: false,
+    stub: { hostTabs: {} },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      const tabId = await tbSeed(viewer, viewer.sessionId, 'lost');
+      await tbWatch(page, viewer);
+      await openSheet(page);
+      await tbRead(page, true);
+      expect((await tbLine(page)).state === 'lost: no process on the host shows it, noticed just now', 'the lost line is not drawn');
+      const asked: string[] = [];
+      page.removeAllListeners('dialog');
+      page.once('dialog', (d) => {
+        asked.push(d.message());
+        void d.dismiss();
+      });
+      await page.click('#host-tab-remove');
+      await page.waitForTimeout(400);
+      expect(asked.length === 1 && asked[0]!.startsWith('Remove the record of this crashed tab?'), `the question was ${JSON.stringify(asked)}`);
+      expect(sent.every((s) => s.startsWith('GET')), `Cancel sent ${JSON.stringify(sent)}`);
+      expect((await tbLine(page)).shown, 'Cancel took the line away');
+      page.once('dialog', (d) => {
+        asked.push(d.message());
+        void d.accept();
+      });
+      await page.click('#host-tab-remove');
+      await tbRead(page, false);
+      const changes = sent.filter((s) => !s.startsWith('GET'));
+      expect(changes.length === 1 && changes[0] === `DELETE /rc/host/tabs/${tabId}`, `OK sent ${JSON.stringify(changes)}`);
+      expect(tabsOf(viewer).registry.get(tabId) === undefined, 'the record is still on the host');
+      return `asked "${asked[0]}"; Cancel sent nothing; OK sent one DELETE and the record went`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P526 a reader (no write scope) never reads the host tabs and sees no badge and no Host tab line, though the gateway holds a crashed tab',
+    waitView: false,
+    stub: { hostTabs: {} },
+    before: tbCaps((rc) => {
+      rc['writeScope'] = false;
+    }),
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      await tbSeed(viewer, viewer.sessionId, 'crashed', 137);
+      await tbWatch(page, viewer);
+      await serveList(page, TB_CWD, { list: [tbRow(viewer.sessionId, 'p526 on screen')] });
+      await openList(page);
+      await closeList(page);
+      await openSheet(page);
+      await page.evaluate('readHostTabs()');
+      await page.waitForTimeout(600);
+      const line = await tbLine(page);
+      const badges = (await page.evaluate(`document.querySelectorAll('#past-list .tabbadge').length`)) as number;
+      expect(sent.length === 0, `a reader sent ${JSON.stringify(sent)}`);
+      expect(!line.shown && badges === 0, `a reader sees ${JSON.stringify({ line: line.shown, badges })}`);
+      return 'no request to /rc/host/tabs, no badge, no line';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P527 on a gateway that does not report hostTabs the page never reads the host tabs and draws no badge and no line',
+    waitView: false,
+    stub: { hostTabs: {} },
+    before: tbCaps((rc) => {
+      delete rc['hostTabs'];
+    }),
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      await tbSeed(viewer, viewer.sessionId, 'crashed', 137);
+      await tbWatch(page, viewer);
+      await serveList(page, TB_CWD, { list: [tbRow(viewer.sessionId, 'p527 on screen')] });
+      await openList(page);
+      await closeList(page);
+      await openSheet(page);
+      await page.evaluate('readHostTabs()');
+      await page.waitForTimeout(600);
+      const line = await tbLine(page);
+      const badges = (await page.evaluate(`document.querySelectorAll('#past-list .tabbadge').length`)) as number;
+      expect(sent.length === 0, `the page sent ${JSON.stringify(sent)}`);
+      expect(!line.shown && badges === 0, `an old gateway shows ${JSON.stringify({ line: line.shown, badges })}`);
+      return 'no request to /rc/host/tabs, no badge, no line';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P528 the tabs are read as the list opens and on each 30 s tick while the page is visible, not while it is hidden, and again on return',
+    waitView: false,
+    stub: { hostTabs: {} },
+    before: async (page) => {
+      // Keep the 30 s intervals the page starts, to fire them by hand.
+      await page.addInitScript({
+        content: `(() => { const real = window.setInterval; window.__iv30 = []; window.setInterval = function (fn, ms, ...rest) { if (ms === 30000) window.__iv30.push(fn); return real.call(window, fn, ms, ...rest); }; })();`,
+      });
+    },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      await tbWatch(page, viewer);
+      await page.waitForFunction('hostTabs.pollId !== null', null, { timeout: 10_000 });
+      await page.waitForTimeout(300);
+      const reads = () => sent.filter((s) => s === 'GET /rc/host/tabs').length;
+      const atBoot = reads();
+      await openList(page);
+      await page.waitForTimeout(300);
+      const afterOpen = reads();
+      expect(afterOpen === atBoot + 1, `opening the list read ${afterOpen - atBoot} times`);
+      await closeList(page);
+      const tick = () => page.evaluate(`window.__iv30.forEach((f) => f())`);
+      await tick();
+      await page.waitForTimeout(300);
+      const afterTick = reads();
+      expect(afterTick === afterOpen + 1, `a 30 s tick read ${afterTick - afterOpen} times`);
+      await page.evaluate(String.raw`(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        document.dispatchEvent(new Event('visibilitychange'));
+      })()`);
+      await tick();
+      await page.waitForTimeout(300);
+      const hidden = reads();
+      expect(hidden === afterTick, `a tick while hidden read ${hidden - afterTick} times`);
+      await page.evaluate(String.raw`(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+        document.dispatchEvent(new Event('visibilitychange'));
+      })()`);
+      await page.waitForTimeout(300);
+      const back = reads();
+      expect(back === hidden + 1, `the return read ${back - hidden} times`);
+      expect((await page.evaluate('HOST_TAB_POLL_MS')) === 30000, 'the poll is not 30 s');
+      return `boot ${atBoot}, list open +1, tick +1, hidden tick +0, return +1`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P529 a lost tab turns crashed once the grace window passes, on the row and in the line, and Reopen of a conversation a terminal already shows queues nothing and says so',
+    waitView: false,
+    // The harness's watched conversation (SESSION_ID): a terminal on the host
+    // already shows it, as hostMirrors' scan would find.
+    stub: { hostTabs: { mirrored: ['11111111-2222-3333-4444-555555555555'] } },
+    run: async ({ page, viewer }) => {
+      const t = tabsOf(viewer);
+      await t.poll();
+      await tbSeed(viewer, viewer.sessionId, 'lost');
+      await tbWatch(page, viewer);
+      await serveList(page, TB_CWD, { list: [tbRow(viewer.sessionId, 'p529 on screen')] });
+      await page.setViewportSize(LAPTOP);
+      await openSheet(page);
+      await tbRead(page, true);
+      await page.waitForFunction(`(document.querySelector('#past-list .tabbadge') || {}).textContent === 'tab lost'`, null, { timeout: 10_000 });
+      expect((await tbLine(page)).state === 'lost: no process on the host shows it, noticed just now', 'the lost line is not drawn');
+      t.advance(12_000);
+      await t.poll();
+      await page.evaluate('readHostTabs()');
+      await page.waitForFunction(`(document.querySelector('#past-list .tabbadge') || {}).textContent === 'tab crashed'`, null, { timeout: 10_000 });
+      await page.waitForFunction(`document.getElementById('host-tab-state').textContent.startsWith('crashed: its process went without a word')`);
+      await shot(page, 'p529-lost-to-crashed-1280');
+      await page.click('#host-tab-reopen');
+      await page.waitForFunction(`document.getElementById('status').textContent === 'already open on the host'`, null, { timeout: 10_000 });
+      expect((await t.requests.readAll()).length === 0, 'a reopen of a conversation already on screen queued a request');
+      return 'lost, then 12 s later crashed, on the row and in the line; Reopen said "already open on the host" and queued nothing';
+    },
+  });
+}
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

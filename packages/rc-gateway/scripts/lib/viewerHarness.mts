@@ -36,6 +36,8 @@ import {
   HostActions,
   type HostActionRunner,
 } from '../../src/hostActions.js';
+import { HostTabRegistry, type TabProcProbe } from '../../src/hostTabs.js';
+import { TerminalRequestLog } from '../../src/terminals.js';
 
 /**
  * `_meta` is the envelope the real EventBus stamps when it publishes
@@ -283,6 +285,15 @@ export interface BootViewerOptions {
   artifactMutationErrorBody?: unknown;
   /** #135: the stub's session goal routes: the goal each session holds, what moves it, a refusal. */
   goal?: StubDaemonOptions['goal'];
+  /**
+   * #212: mount the host tab routes over a real registry and request log in
+   * the boot's temp dir, with a /proc probe that is a table the scenario
+   * edits (`viewer.hostTabs.live`): a pid in it is a live tab, any other pid
+   * is gone. A reopen attaches to a fixed endpoint and nothing is ever
+   * launched; the scenario reads the request log to see what was queued.
+   * `mirrored` names sessions a terminal already shows.
+   */
+  hostTabs?: { mirrored?: string[] };
 }
 
 /** The label the harness's one host action carries. */
@@ -325,6 +336,17 @@ export interface Viewer {
   sessionId: string;
   /** Set when booted with `pool`: what the pool holds and has spawned. */
   pool?: { workspaces(): string[]; spawned: string[] };
+  /** #212: set when booted with `hostTabs`. */
+  hostTabs?: {
+    registry: HostTabRegistry;
+    requests: TerminalRequestLog;
+    /** Pids the probe reads as live tabs; edit it to kill or start one. */
+    live: Set<number>;
+    /** The registry's clock: `advance(ms)` moves it on. */
+    advance(ms: number): void;
+    /** A launcher poll, now on the registry's clock. */
+    poll(): Promise<void>;
+  };
   close(): Promise<void>;
 }
 
@@ -496,7 +518,47 @@ export async function bootViewer(
         },
       })
     : undefined;
+  // #212: the host tab registry and its request log, on a clock the
+  // scenario can move, so a ghost can turn crashed without a 12 s wait.
+  let tabClock = Date.now();
+  const tabLive = new Set<number>();
+  const tabProbe: TabProcProbe = {
+    startTime: async (pid) => (tabLive.has(pid) ? '1' : undefined),
+    stdinTarget: async (pid) => (tabLive.has(pid) ? '/dev/pts/1' : undefined),
+    bootId: async () => 'harness-boot',
+  };
+  const tabRequests = opts.hostTabs
+    ? TerminalRequestLog.open(join(dir, 'terminal-requests.jsonl'), {
+        now: () => tabClock,
+      })
+    : undefined;
+  const tabRegistry = opts.hostTabs
+    ? await HostTabRegistry.open(join(dir, 'host-tabs.json'), {
+        now: () => tabClock,
+        probe: tabProbe,
+        ghostGraceMs: 12_000,
+      })
+    : undefined;
+  const mirrored = new Set(opts.hostTabs?.mirrored ?? []);
   const { app } = createGatewayApp({
+    ...(tabRegistry && tabRequests
+      ? {
+          terminalRequests: tabRequests,
+          terminalRcArgv: ['qwen-rc'],
+          hostTabs: {
+            registry: tabRegistry,
+            endpointFor: async (_sessionId: string, cwd: string) => ({
+              ok: true as const,
+              endpoint: {
+                url: stub.baseUrl,
+                token: 'harness-daemon-token',
+                workspaceCwd: cwd,
+              },
+            }),
+            isMirrored: async (id: string) => mirrored.has(id),
+          },
+        }
+      : {}),
     daemon: daemonPool ?? new DaemonClient({ baseUrl: stub.baseUrl }),
     store,
     pairing: new PairingService(),
@@ -534,6 +596,19 @@ export async function bootViewer(
     sessionId: SESSION_ID,
     ...(daemonPool
       ? { pool: { workspaces: () => daemonPool.workspaces(), spawned } }
+      : {}),
+    ...(tabRegistry && tabRequests
+      ? {
+          hostTabs: {
+            registry: tabRegistry,
+            requests: tabRequests,
+            live: tabLive,
+            advance: (ms: number) => {
+              tabClock += ms;
+            },
+            poll: () => tabRequests.recordPoll(0),
+          },
+        }
       : {}),
     async close() {
       if (closed) return;

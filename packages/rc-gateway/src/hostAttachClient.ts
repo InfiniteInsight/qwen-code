@@ -23,10 +23,13 @@
 
 import { X509Certificate } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { SpawnSyncOptions, SpawnSyncReturns } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 import { join, resolve } from 'node:path';
+import { writeFileAtomic } from './atomicWrite.js';
+import { hostTabEndsDir, isValidTabId } from './hostTabs.js';
 import { readState } from './launcher/state.js';
 import { readLocalToken } from './localCredential.js';
 import { runWithReattach, type ReattachAttempt } from './reattachLoop.js';
@@ -406,6 +409,56 @@ export function watchWaitInterrupts(onInterrupt: () => void): () => void {
   };
 }
 
+/**
+ * How long the end report (#212) may take. The wrapper is exiting, often
+ * because its tab is already gone, so this is a short wait, never a hang; an
+ * answer that does not come in time is left on disk instead.
+ */
+export const TAB_END_REPORT_TIMEOUT_MS = 1_500;
+
+/**
+ * Leave an end the gateway did not take on disk, under `host-tab-ends/`
+ * beside its registry, for the gateway to read in on its next look (#212).
+ * One small file per tab, written whole and renamed into place, 0600 in a
+ * 0700 directory. Never throws.
+ */
+export async function leaveTabEnd(
+  rcDir: string,
+  tabId: string,
+  exitCode: number,
+  endedAt: number,
+): Promise<boolean> {
+  if (!isValidTabId(tabId)) return false;
+  const dir = hostTabEndsDir(rcDir);
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFileAtomic(
+      `${dir}/${tabId}.json`,
+      JSON.stringify({ tabId, exitCode, endedAt }),
+      { mode: 0o600 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Keep SIGTERM and SIGHUP from ending the wrapper while it reports its end:
+ * the report is bounded by {@link TAB_END_REPORT_TIMEOUT_MS}, and a signal
+ * that lands in that window would otherwise leave the tab looking lost
+ * instead of ended. Returns the undo.
+ */
+export function holdExitSignals(): () => void {
+  const hold = (): void => {};
+  process.on('SIGTERM', hold);
+  process.on('SIGHUP', hold);
+  return () => {
+    process.off('SIGTERM', hold);
+    process.off('SIGHUP', hold);
+  };
+}
+
 /** The fields the CLI needs from a 200, or undefined when any is missing. */
 function readAttachment(
   body: Record<string, unknown>,
@@ -472,6 +525,10 @@ export interface HostAttachRunDeps {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => number;
   watchInterrupt?: (onInterrupt: () => void) => () => void;
+  /** This wrapper's pid, sent so the gateway can track the tab (#212); default `process.pid`. */
+  pid?: number;
+  /** Signal hold during the end report (#212); the default is the real one. */
+  holdSignals?: () => () => void;
 }
 
 /**
@@ -511,7 +568,11 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
 
   let res: HostAttachResponse;
   try {
-    res = await request(target, token, path, { cwd: args.cwd });
+    // #212: the pid lets the gateway open a tab record and watch it.
+    res = await request(target, token, path, {
+      cwd: args.cwd,
+      pid: deps.pid ?? process.pid,
+    });
   } catch (err) {
     stderr(describeTransportError(err, target));
     return 1;
@@ -528,6 +589,10 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     );
     return 1;
   }
+
+  // #212: the gateway's record of this tab, when it keeps one (an older
+  // gateway answers none, and then nothing is reported).
+  const tabId = isValidTabId(res.body.tabId) ? res.body.tabId : undefined;
 
   stderr(`attached ${attachment.sessionId} in ${attachment.workspaceCwd}`);
   // Node has no execvp, so the TUI runs as a child with this terminal handed
@@ -574,47 +639,92 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
   };
   const reattachPath = `/rc/host/attach/${encodeURIComponent(attachment.sessionId)}`;
   const watchInterrupt = deps.watchInterrupt ?? watchWaitInterrupts;
-  const code = await runWithReattach(
-    { linuxArgv: attachment.linuxArgv, workspaceCwd: attachment.workspaceCwd },
-    {
-      sessionId: attachment.sessionId,
-      run: runTui,
-      terminalGone: () => guard.gone(),
-      attach: async () => {
-        // The token is read again each time: a gateway restart does not change
-        // it, but an operator who rotated the file while the tab waited should
-        // not have to close the tab.
-        const fresh = (await readLocalToken(tokenPath)) ?? token;
-        // The target is resolved again too, so a gateway that came back on a
-        // new port or with a renewed cert is found.
-        const where = resolveGatewayLoopback(deps.rcDir);
-        try {
-          return classifyReattach(
-            {
-              res: await request(where, fresh, reattachPath, {
-                cwd: attachment.workspaceCwd,
-              }),
-            },
-            reattachArgs,
-            where,
-          );
-        } catch (err) {
-          return classifyReattach({ err }, reattachArgs, where);
-        }
+  // #212: the end report. The gateway classifies the code (0 quit, 129 the
+  // tab was closed, anything else crashed); this only delivers it, from every
+  // way the loop can end: the TUI's own exit, the terminal guard (129), a
+  // SIGTERM forwarded to the TUI (143) or one during the wait (130). A
+  // gateway that does not take it (down, restarting) gets it from disk later.
+  const reportEnd = async (exitCode: number): Promise<void> => {
+    if (tabId === undefined) return;
+    const release = (deps.holdSignals ?? holdExitSignals)();
+    try {
+      const fresh = (await readLocalToken(tokenPath)) ?? token;
+      const where = resolveGatewayLoopback(deps.rcDir);
+      let taken = false;
+      try {
+        const answer = await request(
+          where,
+          fresh,
+          `/rc/host/tabs/${tabId}/end`,
+          { exitCode },
+          TAB_END_REPORT_TIMEOUT_MS,
+        );
+        // 404: the record was removed from the phone; nothing to keep.
+        taken = answer.status === 200 || answer.status === 404;
+      } catch {
+        taken = false;
+      }
+      if (!taken) await leaveTabEnd(deps.rcDir, tabId, exitCode, Date.now());
+    } catch {
+      // Best effort: the gateway's scan finds the tab gone either way.
+    } finally {
+      release();
+    }
+  };
+  let code = 1;
+  try {
+    code = await runWithReattach(
+      {
+        linuxArgv: attachment.linuxArgv,
+        workspaceCwd: attachment.workspaceCwd,
       },
-      sleep: deps.sleep ?? sleepUnlessAborted,
-      now: deps.now ?? Date.now,
-      log: stderr,
-      // A terminal that goes during the wait aborts it like Ctrl-C does.
-      watchInterrupt: (onInterrupt) => {
-        const undoInterrupt = watchInterrupt(onInterrupt);
-        const undoGone = guard.onGone(onInterrupt);
-        return () => {
-          undoInterrupt();
-          undoGone();
-        };
+      {
+        sessionId: attachment.sessionId,
+        run: runTui,
+        terminalGone: () => guard.gone(),
+        attach: async () => {
+          // The token is read again each time: a gateway restart does not change
+          // it, but an operator who rotated the file while the tab waited should
+          // not have to close the tab.
+          const fresh = (await readLocalToken(tokenPath)) ?? token;
+          // The target is resolved again too, so a gateway that came back on a
+          // new port or with a renewed cert is found.
+          const where = resolveGatewayLoopback(deps.rcDir);
+          try {
+            return classifyReattach(
+              {
+                res: await request(where, fresh, reattachPath, {
+                  cwd: attachment.workspaceCwd,
+                  // #212: the same tab coming back, not a new one.
+                  ...(tabId !== undefined ? { tabId } : {}),
+                }),
+              },
+              reattachArgs,
+              where,
+            );
+          } catch (err) {
+            return classifyReattach({ err }, reattachArgs, where);
+          }
+        },
+        sleep: deps.sleep ?? sleepUnlessAborted,
+        now: deps.now ?? Date.now,
+        log: stderr,
+        // A terminal that goes during the wait aborts it like Ctrl-C does.
+        watchInterrupt: (onInterrupt) => {
+          const undoInterrupt = watchInterrupt(onInterrupt);
+          const undoGone = guard.onGone(onInterrupt);
+          return () => {
+            undoInterrupt();
+            undoGone();
+          };
+        },
       },
-    },
-  ).finally(() => guard.stop());
-  return guard.reason() !== undefined ? TERMINAL_GONE_EXIT : code;
+    );
+    if (guard.reason() !== undefined) code = TERMINAL_GONE_EXIT;
+    // Before the guard stops, so its SIGHUP listener still holds the signal.
+    await reportEnd(code);
+  } finally {
+    guard.stop();
+  }
+  return code;
 }
