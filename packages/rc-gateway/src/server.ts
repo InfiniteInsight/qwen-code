@@ -308,6 +308,11 @@ import {
   createSessionSourceRemoveRoute,
   createSessionSourcesRoute,
 } from './routes/sessionSources.js';
+import {
+  createSessionGoalClearRoute,
+  createSessionGoalReadRoute,
+  createSessionGoalSetRoute,
+} from './routes/sessionGoal.js';
 
 export interface GatewayDeps {
   daemon: SessionDaemon;
@@ -1281,6 +1286,33 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user -> 403
     createSessionSourceRemoveRoute(deps.daemon, audit),
+  );
+  // #135: the session goal. The read is session-read (the objective and its
+  // reason are words the transcript already holds); setting and clearing it
+  // are writes, so a share token is refused by requireScope. Setting starts
+  // autonomous work, so it gets the guard set a prompt gets, minus the rate
+  // limiter: a goal is typed by a person once. See routes/sessionGoal.ts.
+  app.get(
+    '/session/:id/goal',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionGoalReadRoute(deps.daemon),
+  );
+  app.post(
+    '/session/:id/goal',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionGoalSetRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/session/:id/goal/clear',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionGoalClearRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',

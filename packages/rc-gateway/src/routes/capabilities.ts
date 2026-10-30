@@ -320,6 +320,12 @@ export function createCapabilityRoute(deps: {
       // sends the daemon-issued client id the daemon requires). Nothing on
       // the page reads this yet: the display decision is #127's.
       sessionArtifactWrites: true,
+      // #135: GET, POST and POST .../clear on /session/:id/goal are mounted.
+      // The page draws the Goal row when this is set (a reader included, who
+      // sees the goal and no Set or Clear); Set and Clear need the token to
+      // hold write (`writeScope`). The daemon advertises no tag for goals, so
+      // a daemon without the routes answers `goal_unsupported` on the read.
+      sessionGoal: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

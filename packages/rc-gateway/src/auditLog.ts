@@ -222,7 +222,12 @@ export type AuditAction =
   | 'session_artifact_added'
   | 'session_artifact_add_failed'
   | 'session_artifact_removed'
-  | 'session_artifact_remove_failed';
+  | 'session_artifact_remove_failed'
+  // #135: the session goal.
+  | 'session_goal_set'
+  | 'session_goal_set_failed'
+  | 'session_goal_cleared'
+  | 'session_goal_clear_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -366,6 +371,10 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_artifact_add_failed',
   'session_artifact_removed',
   'session_artifact_remove_failed',
+  'session_goal_set',
+  'session_goal_set_failed',
+  'session_goal_cleared',
+  'session_goal_clear_failed',
 ];
 
 export interface AuditEntry {
