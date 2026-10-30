@@ -23,6 +23,14 @@ import { TokenStore } from '../tokenStore.js';
 import { PairingService } from '../pairing.js';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { HostTabRegistry, type TabProcProbe } from '../hostTabs.js';
+import { TerminalRequestLog } from '../terminals.js';
+import { SESSION_READ, SHARE, WRITE } from '../scopes.js';
+import { sessionEndpointResolver, type TabEndpointAnswer } from './hostTabs.js';
+import {
+  UnknownSessionError,
+  WorkspacePoolFullError,
+  type DaemonEndpoint,
+} from '../daemonPool.js';
 import { FRONT_ATTESTATION, PEER_HEADER } from '../tls/http2Front.js';
 import { AUDIT_ACTIONS } from '../auditLog.js';
 
@@ -53,18 +61,50 @@ function tableProbe(): TabProcProbe & { fd0: Map<number, string> } {
   };
 }
 
-async function boot() {
+interface BootOpts {
+  /** Mount the tab routes at all (an older gateway does not). */
+  tabs?: boolean;
+  endpointFor?: (sessionId: string, cwd: string) => Promise<TabEndpointAnswer>;
+  isMirrored?: (sessionId: string) => Promise<boolean>;
+  /** Wire no request log, as a gateway without host terminals. */
+  noRequests?: boolean;
+}
+
+const ENDPOINT = (cwd: string): TabEndpointAnswer => ({
+  ok: true,
+  endpoint: {
+    url: 'http://127.0.0.1:46135',
+    token: 'daemon-secret',
+    workspaceCwd: cwd,
+  },
+});
+
+async function boot(opts: BootOpts = {}) {
   base = await mkdtemp(join(tmpdir(), 'rc-host-tabs-route-'));
   stub = await startStubDaemon();
   const probe = tableProbe();
   let clock = 1_000_000;
+  const now = () => clock;
   const registry = await HostTabRegistry.open(join(base, 'host-tabs.json'), {
-    now: () => clock,
+    now,
     probe,
     ghostGraceMs: 12_000,
   });
+  const requests = TerminalRequestLog.open(
+    join(base, 'terminal-requests.jsonl'),
+    { now },
+  );
   const store = await TokenStore.open(join(base, 'tokens.json'));
   const { token: owner } = await store.issue(['owner'], 'o');
+  const { token: write } = await store.issue([WRITE, SESSION_READ], 'w');
+  const { token: reader } = await store.issue([SESSION_READ], 'r');
+  const share = await store.issueShare({
+    scopes: [SHARE, SESSION_READ],
+    label: 'guest',
+    sessionLockId: S1,
+    ttlSec: 3600,
+    parentId: 'owner',
+  });
   const auditPath = join(base, 'audit.log');
   const gw = createGatewayApp({
     daemon: new DaemonClient({ baseUrl: stub.baseUrl }),
@@ -72,7 +112,17 @@ async function boot() {
     pairing: new PairingService(),
     auditPath,
     hostAttach: { token: HOST_TOKEN },
-    hostTabs: { registry },
+    ...(opts.noRequests ? {} : { terminalRequests: requests }),
+    terminalRcArgv: ['qwen-rc'],
+    ...(opts.tabs === false
+      ? {}
+      : {
+          hostTabs: {
+            registry,
+            endpointFor: opts.endpointFor ?? (async (_s, cwd) => ENDPOINT(cwd)),
+            isMirrored: opts.isMirrored ?? (async () => false),
+          },
+        }),
   });
   server = await new Promise<Server>((resolve) => {
     const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
@@ -81,12 +131,18 @@ async function boot() {
   return {
     url: `http://127.0.0.1:${port}`,
     owner,
+    write,
+    reader,
+    share: share.token,
     registry,
+    requests,
     probe,
     auditPath,
     tick: (ms: number) => {
       clock += ms;
     },
+    /** The launcher polls now. */
+    poll: () => requests.recordPoll(0),
   };
 }
 
@@ -234,5 +290,431 @@ describe('POST /rc/host/tabs/:tabId/end (the wrapper)', () => {
     expect([remote.status, remote.body.code]).toEqual([403, 'loopback_only']);
     expect([phone.status, none.status]).toEqual([401, 401]);
     expect(registry.get(t.tabId)?.endedAt).toBeUndefined();
+  });
+});
+
+const S2 = 'b9a5ddef-edc9-472e-8c52-ea6da2609e81';
+
+/** A crashed record of S1 (exit 137) and a live one of S2. */
+async function seed(g: Awaited<ReturnType<typeof boot>>) {
+  g.probe.fd0.set(11, '/dev/pts/1');
+  g.probe.fd0.set(12, '/dev/pts/2');
+  const crashed = await g.registry.start({
+    sessionId: S1,
+    cwd: '/srv/w',
+    pid: 11,
+  });
+  await g.registry.end(crashed.tabId, 137);
+  g.tick(1_000);
+  const live = await g.registry.start({
+    sessionId: S2,
+    cwd: '/srv/v',
+    pid: 12,
+  });
+  return { crashed, live };
+}
+
+describe('GET /rc/host/tabs', () => {
+  it('lists every record with its derived state and the launcher, to owner and write tokens', async () => {
+    const g = await boot();
+    const { crashed, live } = await seed(g);
+    await g.poll();
+    for (const token of [g.owner, g.write]) {
+      const res = await send(g.url, '/rc/host/tabs', { method: 'GET', token });
+      expect(res.status).toBe(200);
+      const tabs = res.body.tabs as Array<Record<string, unknown>>;
+      expect(tabs.map((t) => [t.tabId, t.state, t.reason, t.exitCode])).toEqual(
+        [
+          [live.tabId, 'live', null, null],
+          [crashed.tabId, 'crashed', 'crashed', 137],
+        ],
+      );
+      expect(tabs[1]).toMatchObject({
+        sessionId: S1,
+        cwd: '/srv/w',
+        dismissed: false,
+      });
+      expect(tabs[1]).not.toHaveProperty('pidStart');
+      expect(res.body.launcher).toEqual({ state: 'live', seenMsAgo: 0 });
+    }
+  });
+
+  it('refuses a reader and a share, and is absent on a gateway without the registry', async () => {
+    const g = await boot();
+    for (const token of [g.reader, g.share]) {
+      const res = await send(g.url, '/rc/host/tabs', { method: 'GET', token });
+      expect([res.status, res.body.code]).toEqual([403, 'scope_required']);
+    }
+    const caps = await send(g.url, '/rc/capabilities', {
+      method: 'GET',
+      token: g.owner,
+    });
+    expect((caps.body.remoteControl as Record<string, unknown>).hostTabs).toBe(
+      true,
+    );
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+    await stub!.close();
+    stub = undefined;
+    await rm(base!, { recursive: true, force: true });
+    const old = await boot({ tabs: false });
+    const res = await send(old.url, '/rc/host/tabs', {
+      method: 'GET',
+      token: old.owner,
+    });
+    expect(res.status).toBe(404);
+    const oldCaps = await send(old.url, '/rc/capabilities', {
+      method: 'GET',
+      token: old.owner,
+    });
+    expect(
+      (oldCaps.body.remoteControl as Record<string, unknown>).hostTabs,
+    ).toBe(false);
+  });
+});
+
+describe('POST /rc/host/tabs/:tabId/reopen', () => {
+  it('queues a terminal request for the crashed tab, notes the reopen and audits it without a path', async () => {
+    const g = await boot();
+    const { crashed } = await seed(g);
+    await g.poll();
+    const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.write,
+    });
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      tabId: crashed.tabId,
+      requestId: expect.any(String),
+      launcherState: 'live',
+      launcherSeenMsAgo: 0,
+    });
+    expect(JSON.stringify(res.body)).not.toContain('daemon-secret');
+    const queued = await g.requests.readAll();
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({
+      id: res.body.requestId,
+      sessionId: S1,
+      workspaceCwd: '/srv/w',
+      daemonToken: 'daemon-secret',
+      linuxArgv: ['qwen-rc', 'attach', '--session', S1, '/srv/w'],
+    });
+    expect(g.registry.get(crashed.tabId)?.reopenedAt).toBeDefined();
+    expect(g.registry.get(crashed.tabId)?.autoReopenedAt).toBeUndefined();
+    const rows = await auditRows(g.auditPath, 'host_tab_reopened', 1);
+    expect(rows[0]).toMatchObject({
+      target: S1,
+      outcome: 'ok',
+      detail: {
+        tabId: crashed.tabId,
+        requestId: res.body.requestId,
+        auto: false,
+      },
+    });
+    expect(JSON.stringify(rows)).not.toContain('/srv/w');
+    // The tab the launcher opens attaches with a pid: it replaces the record.
+    g.probe.fd0.set(13, '/dev/pts/3');
+    const next = await g.registry.start({
+      sessionId: S1,
+      cwd: '/srv/w',
+      pid: 13,
+    });
+    expect(next.origin).toBe('reopen');
+    const list = await send(g.url, '/rc/host/tabs', {
+      method: 'GET',
+      token: g.owner,
+    });
+    const states = Object.fromEntries(
+      (list.body.tabs as Array<{ tabId: string; state: string }>).map((t) => [
+        t.tabId,
+        t.state,
+      ]),
+    );
+    expect(states[crashed.tabId]).toBe('replaced');
+    expect(states[next.tabId]).toBe('live');
+  });
+
+  it('reopens a ghost too: an open record whose wrapper is gone', async () => {
+    const g = await boot();
+    g.probe.fd0.set(21, '/dev/pts/1');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 21 });
+    g.probe.fd0.delete(21);
+    await g.poll();
+    const res = await send(g.url, `/rc/host/tabs/${t.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(res.status).toBe(202);
+  });
+
+  it('refuses with the launcher liveness when the launcher is stale or never ran, and queues nothing', async () => {
+    const g = await boot();
+    const { crashed } = await seed(g);
+    const never = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(never.status).toBe(409);
+    expect(never.body).toMatchObject({
+      code: 'launcher_unavailable',
+      launcherState: 'never',
+      launcherSeenMsAgo: null,
+    });
+    await g.poll();
+    g.tick(60_000);
+    const stale = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body).toMatchObject({
+      code: 'launcher_unavailable',
+      launcherState: 'stale',
+      launcherSeenMsAgo: 60_000,
+    });
+    expect(await g.requests.readAll()).toEqual([]);
+    expect(g.registry.get(crashed.tabId)?.reopenedAt).toBeUndefined();
+    const rows = await auditRows(g.auditPath, 'host_tab_reopened', 2);
+    expect(
+      rows.map((r) => [r['outcome'], (r['detail'] as { code: string }).code]),
+    ).toEqual([
+      ['failed', 'launcher_unavailable'],
+      ['failed', 'launcher_unavailable'],
+    ]);
+  });
+
+  it('refuses a live tab, a quit one, an unknown one, and a gateway with no request log', async () => {
+    const g = await boot();
+    const { live } = await seed(g);
+    await g.poll();
+    const quit = await g.registry.start({
+      sessionId: 'c0000000-0000-4000-8000-000000000001',
+      cwd: '/srv/w',
+      pid: 31,
+    });
+    await g.registry.end(quit.tabId, 0);
+    const a = await send(g.url, `/rc/host/tabs/${live.tabId}/reopen`, {
+      token: g.owner,
+    });
+    const b = await send(g.url, `/rc/host/tabs/${quit.tabId}/reopen`, {
+      token: g.owner,
+    });
+    const c = await send(
+      g.url,
+      '/rc/host/tabs/00000000-0000-4000-8000-000000000999/reopen',
+      { token: g.owner },
+    );
+    const d = await send(g.url, '/rc/host/tabs/x/reopen', { token: g.owner });
+    expect([a.status, a.body.code, a.body.state]).toEqual([
+      409,
+      'tab_live',
+      'live',
+    ]);
+    expect([b.status, b.body.code, b.body.state]).toEqual([
+      409,
+      'tab_not_reopenable',
+      'quit',
+    ]);
+    expect([c.status, c.body.code]).toEqual([404, 'tab_not_found']);
+    expect([d.status, d.body.code]).toEqual([404, 'tab_not_found']);
+    expect(await g.requests.readAll()).toEqual([]);
+  });
+
+  it('answers alreadyMirrored and queues nothing when a terminal already shows the conversation', async () => {
+    const g = await boot({ isMirrored: async (id) => id === S1 });
+    const { crashed } = await seed(g);
+    await g.poll();
+    const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      alreadyMirrored: true,
+      sessionId: S1,
+      tabId: crashed.tabId,
+    });
+    expect(await g.requests.readAll()).toEqual([]);
+  });
+
+  it('passes on why no daemon could take the session, and queues nothing', async () => {
+    const g = await boot({
+      endpointFor: async () => ({
+        ok: false,
+        status: 404,
+        code: 'session_not_found',
+        error: 'Session not found',
+      }),
+    });
+    const { crashed } = await seed(g);
+    await g.poll();
+    const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect([res.status, res.body.code]).toEqual([404, 'session_not_found']);
+    expect(await g.requests.readAll()).toEqual([]);
+  });
+
+  it('is never reachable on read scope', async () => {
+    const g = await boot();
+    const { crashed } = await seed(g);
+    await g.poll();
+    for (const token of [g.reader, g.share]) {
+      const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+        token,
+      });
+      expect(res.status).toBe(403);
+    }
+    expect(await g.requests.readAll()).toEqual([]);
+  });
+});
+
+describe('dismiss and remove', () => {
+  it('dismiss keeps the record and marks it; remove deletes it; both audited', async () => {
+    const g = await boot();
+    const { crashed } = await seed(g);
+    const dis = await send(g.url, `/rc/host/tabs/${crashed.tabId}/dismiss`, {
+      token: g.write,
+    });
+    expect(dis.status).toBe(200);
+    expect(dis.body.tab).toMatchObject({
+      tabId: crashed.tabId,
+      state: 'crashed',
+      dismissed: true,
+    });
+    const del = await send(g.url, `/rc/host/tabs/${crashed.tabId}`, {
+      method: 'DELETE',
+      token: g.write,
+    });
+    expect(del.body).toEqual({ tabId: crashed.tabId, removed: true });
+    const again = await send(g.url, `/rc/host/tabs/${crashed.tabId}`, {
+      method: 'DELETE',
+      token: g.write,
+    });
+    expect([again.status, again.body.code]).toEqual([404, 'tab_not_found']);
+    expect(g.registry.get(crashed.tabId)).toBeUndefined();
+    const d = await auditRows(g.auditPath, 'host_tab_dismissed', 1);
+    const r = await auditRows(g.auditPath, 'host_tab_removed', 1);
+    expect(d[0]).toMatchObject({
+      target: S1,
+      detail: { tabId: crashed.tabId },
+    });
+    expect(r[0]).toMatchObject({
+      target: S1,
+      detail: { tabId: crashed.tabId },
+    });
+  });
+
+  it('refuses a live tab, and a reader', async () => {
+    const g = await boot();
+    const { crashed, live } = await seed(g);
+    const a = await send(g.url, `/rc/host/tabs/${live.tabId}/dismiss`, {
+      token: g.owner,
+    });
+    const b = await send(g.url, `/rc/host/tabs/${live.tabId}`, {
+      method: 'DELETE',
+      token: g.owner,
+    });
+    expect([a.status, a.body.code, b.status, b.body.code]).toEqual([
+      409,
+      'tab_live',
+      409,
+      'tab_live',
+    ]);
+    const c = await send(g.url, `/rc/host/tabs/${crashed.tabId}/dismiss`, {
+      token: g.reader,
+    });
+    const d = await send(g.url, `/rc/host/tabs/${crashed.tabId}`, {
+      method: 'DELETE',
+      token: g.reader,
+    });
+    expect([c.status, d.status]).toEqual([403, 403]);
+    expect(g.registry.get(crashed.tabId)?.dismissedAt).toBeUndefined();
+  });
+});
+
+describe('sessionEndpointResolver', () => {
+  const EP: DaemonEndpoint = {
+    url: 'http://127.0.0.1:1',
+    token: 't',
+    workspaceCwd: '/srv/w',
+  };
+  function pool(over: {
+    known?: boolean;
+    resume?: () => Promise<unknown>;
+    token?: string;
+    noLookup?: boolean;
+  }) {
+    let known = over.known ?? false;
+    const resumed: Array<[string, string]> = [];
+    return {
+      resumed,
+      daemon: {
+        resumeSession: async (id: string, req: { workspaceCwd: string }) => {
+          resumed.push([id, req.workspaceCwd]);
+          if (over.resume) await over.resume();
+          known = true;
+          return {};
+        },
+        ...(over.noLookup
+          ? {}
+          : {
+              daemonEndpointForSession: (id: string) => {
+                if (!known) throw new UnknownSessionError(id);
+                return { ...EP, token: over.token ?? EP.token };
+              },
+            }),
+      } as never,
+    };
+  }
+
+  it('answers the pooled endpoint, or restores the session in the tab folder first', async () => {
+    const pooled = pool({ known: true });
+    expect(await sessionEndpointResolver(pooled.daemon)(S1, '/srv/w')).toEqual({
+      ok: true,
+      endpoint: EP,
+    });
+    expect(pooled.resumed).toEqual([]);
+    const cold = pool({});
+    expect(await sessionEndpointResolver(cold.daemon)(S1, '/srv/w')).toEqual({
+      ok: true,
+      endpoint: EP,
+    });
+    expect(cold.resumed).toEqual([[S1, '/srv/w']]);
+  });
+
+  it('names each failure', async () => {
+    const code = async (p: ReturnType<typeof pool>) => {
+      const a = await sessionEndpointResolver(p.daemon)(S1, '/srv/w');
+      return a.ok ? 'ok' : `${a.status} ${a.code}`;
+    };
+    expect(await code(pool({ noLookup: true }))).toBe(
+      '501 host_terminals_unsupported',
+    );
+    expect(
+      await code(
+        pool({
+          resume: async () => {
+            throw new UnknownSessionError(S1);
+          },
+        }),
+      ),
+    ).toBe('404 session_not_found');
+    expect(
+      await code(
+        pool({
+          resume: async () => {
+            throw new WorkspacePoolFullError(4);
+          },
+        }),
+      ),
+    ).toBe('503 workspace_pool_full');
+    expect(
+      await code(
+        pool({
+          resume: async () => {
+            throw new Error('boom');
+          },
+        }),
+      ),
+    ).toBe('502 daemon_unavailable');
+    expect(await code(pool({ known: true, token: '' }))).toBe(
+      '409 daemon_unavailable',
+    );
   });
 });

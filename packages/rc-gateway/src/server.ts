@@ -258,7 +258,12 @@ import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { createHookIngestRoute } from './routes/hookIngest.js';
 import { createHostAttachRoutes } from './routes/hostAttach.js';
-import { createHostTabEndRoute } from './routes/hostTabs.js';
+import {
+  createHostTabEndRoute,
+  createHostTabRoutes,
+  sessionEndpointResolver,
+  type TabEndpointAnswer,
+} from './routes/hostTabs.js';
 import type { HostTabRegistry } from './hostTabs.js';
 import { WorkflowRunRegistry } from './workflows/workflowRegistry.js';
 import {
@@ -580,6 +585,17 @@ export interface GatewayDeps {
    */
   hostTabs?: {
     registry: HostTabRegistry;
+    /**
+     * Where a reopened tab attaches (routes/hostTabs.ts). Defaults to the
+     * pool's endpoint for the session, restoring it when no daemon holds it;
+     * the page harness answers a fixed one.
+     */
+    endpointFor?: (
+      sessionId: string,
+      cwd: string,
+    ) => Promise<TabEndpointAnswer>;
+    /** Whether a terminal already shows the session; defaults to the /proc scan. */
+    isMirrored?: (sessionId: string) => Promise<boolean>;
   };
   /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
   workflows?: {
@@ -1612,6 +1628,42 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       }),
     );
   }
+  // #212: the host's tabs as the phone sees them: a crashed or lost tab can be
+  // reopened (through the same request log as /rc/terminals), dismissed or
+  // removed. WRITE like /rc/terminals; a reader or a share never reaches them.
+  if (deps.hostTabs) {
+    const hostTabRoutes = createHostTabRoutes({
+      registry: deps.hostTabs.registry,
+      requests: deps.terminalRequests,
+      audit,
+      planOpts: {
+        qwenArgv: deps.terminalQwenArgv,
+        rcArgv: deps.terminalRcArgv,
+      },
+      endpointFor:
+        deps.hostTabs.endpointFor ?? sessionEndpointResolver(deps.daemon),
+      isMirrored: deps.hostTabs.isMirrored,
+    });
+    app.get('/rc/host/tabs', requireScope(WRITE, audit), hostTabRoutes.list);
+    app.post(
+      '/rc/host/tabs/:tabId/reopen',
+      requireScope(WRITE, audit),
+      subActorBan,
+      hostTabRoutes.reopen,
+    );
+    app.post(
+      '/rc/host/tabs/:tabId/dismiss',
+      requireScope(WRITE, audit),
+      subActorBan,
+      hostTabRoutes.dismiss,
+    );
+    app.delete(
+      '/rc/host/tabs/:tabId',
+      requireScope(WRITE, audit),
+      subActorBan,
+      hostTabRoutes.remove,
+    );
+  }
   // POST /session/:id/resume — reactivate a past (ended) conversation on its
   // workspace's daemon so a phone can pick it back up (add-resume-conversations).
   // Write-scoped; bare namespace. enforceSessionLock binds a session-locked
@@ -1688,6 +1740,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       mdnsStatus: deps.mdnsStatus,
       nativeShells: deps.nativeShellsCapability,
       hostAttach: deps.hostAttach !== undefined,
+      hostTabs: deps.hostTabs !== undefined,
       maxAttachmentBytes: attachmentLimit,
       daemonQwenBin: deps.daemonQwenBin,
       daemonQwenBinHealthy: deps.daemonQwenBinHealthy,
