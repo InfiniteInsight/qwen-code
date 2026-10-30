@@ -3318,9 +3318,15 @@ export interface DaemonSessionAgentTaskStatus {
   runtimeMs: number;
   outputFile?: string;
   subagentType?: string;
+  /**
+   * Concrete model ID the agent runs with. Absent on daemons that predate
+   * the field and on persisted agents whose record never named one.
+   */
+  model?: string;
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;
+  /** Live for running agents; the persisted final stats for finished ones. */
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
