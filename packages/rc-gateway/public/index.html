@@ -2752,6 +2752,90 @@
           animation: none;
         }
       }
+      /* #110. A workflow run in the Runs list (owner and write tokens only):
+         its name, a line of facts, then its controls at 44px. The name is a
+         button too, because tapping it opens the saved workflow it came from. */
+      #runs-body .wf-run {
+        padding: 6px 0 10px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #runs-body .wf-run .wf-name {
+        display: block;
+        width: 100%;
+        min-height: 44px;
+        padding: 6px 0;
+        border: 0;
+        background: transparent;
+        color: var(--g1-link, inherit);
+        font-size: 15px;
+        font-weight: 600;
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
+      #runs-body .wf-run span.wf-name {
+        color: var(--g1-ink-hi);
+      }
+      #runs-body .wf-run .wf-facts {
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      #runs-body .wf-run .wf-acts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      #runs-body .wf-run button.wf-act {
+        min-width: 64px;
+        min-height: 44px;
+        padding: 0 16px;
+      }
+      #runs-body .wf-run button.wf-act[data-act='stop'] {
+        color: #ff7b72;
+      }
+      #runs-body .wf-run .wf-note {
+        margin-top: 6px;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      #runs-body .wf-run .wf-note:empty {
+        display: none;
+      }
+      #wf-sheet .wf-meta {
+        margin: 8px 16px 0;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+        overflow-wrap: anywhere;
+      }
+      #wf-sheet .wf-steps {
+        margin: 4px 0 0;
+        padding: 0 16px 0 40px;
+      }
+      #wf-sheet .wf-steps li {
+        padding: 8px 0;
+        border-top: 1px solid var(--g1-line);
+        overflow-wrap: anywhere;
+      }
+      #wf-sheet .wf-steps .wf-st-t {
+        font-weight: 600;
+        color: var(--g1-ink-hi);
+      }
+      #wf-sheet .wf-steps .wf-st-d {
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+      }
+      #wf-sheet .wf-script {
+        margin: 8px 16px 0;
+        padding: 10px 12px;
+        max-height: 40vh;
+        overflow: auto;
+        border: 1px solid var(--g1-line);
+        border-radius: 8px;
+        font-size: 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
       /* #110. The Agents sheet: at the foot of the screen over a scrim, the
          shape of the Fork question's sheet, so the list and the trace's Stop
          are in the thumb zone. One card, two views: the roster, and one
@@ -4715,6 +4799,22 @@
               </div>
             </section>
           </div>
+        </div>
+      </div>
+      <!-- #110. A saved workflow, read: the name, what it says it is for, and
+           the steps it declares (its phases) as text. Opened from the name of a
+           workflow run in the Runs list, which owner and write tokens alone get.
+           Filled by renderWfSheet. -->
+      <div id="wf-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="wf-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="wf-title" class="cv-title">Workflow</strong>
+            <button id="wf-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="wf-body"></div>
         </div>
       </div>
       <!-- #110. The Agents sheet. The list view is the conversation's agents,
@@ -25693,6 +25793,289 @@
         }
       };
 
+      // ---- #110. Workflow runs in the Runs list --------------------------
+      // The daemon lists a workflow run in GET /session/:id/tasks only for a
+      // trusted folder with workflows on, and the gateway asks for them only
+      // when the token holds write or owner. A run carries its name, status,
+      // start, the phase it is in, how many agents it has dispatched and
+      // finished, and what is waiting on approval; its prompts, logs and output
+      // path are on the row and are not drawn.
+      function workflowRunsOn() {
+        const rc = caps && caps.remoteControl;
+        return !!rc && rc.workflowRuns === true && rc.writeScope !== false;
+      }
+      function wfWhen(ms) {
+        if (!Number.isFinite(ms) || ms <= 0) return '';
+        const d = new Date(ms);
+        const today = new Date();
+        const sameDay = d.toDateString() === today.toDateString();
+        return (
+          'started ' +
+          (sameDay
+            ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : d.toLocaleString([], {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+              }))
+        );
+      }
+      function wfFacts(t) {
+        const bits = [t.status];
+        const when = wfWhen(t.startTime);
+        if (when) bits.push(when);
+        if (t.currentPhase) bits.push('phase ' + t.currentPhase);
+        if (Number.isFinite(t.agentsDispatched) && t.agentsDispatched > 0) {
+          bits.push(
+            (t.agentsCompleted || 0) + ' of ' + t.agentsDispatched + ' agents done',
+          );
+        }
+        if (t.pendingApprovalCount > 0) {
+          bits.push(t.pendingApprovalCount + ' waiting for approval');
+        }
+        if (t.error) bits.push('error: ' + String(t.error).slice(0, 200));
+        return bits.join('  ');
+      }
+      // What the daemon's 'disabled' means, in words. The cancel route sends it
+      // for a workflow on a folder that is not trusted; the daemon gives no
+      // other reasons today, and any other it sends is printed as it came.
+      function wfRefusalWords(reason) {
+        if (reason === 'disabled') {
+          return 'the daemon did not stop it: workflow controls are off for this folder (it is not trusted, or workflows are not enabled)';
+        }
+        return reason
+          ? 'the daemon did not stop it (reason: ' + reason + ')'
+          : 'the daemon did not stop it';
+      }
+      const WF_CHANGED_NOTHING =
+        'The daemon changed nothing, and it gives no reason. The folder may not be trusted, workflows may be off, or the run may already have moved on.';
+      function drawWorkflowRun(t, sessionId) {
+        const row = document.createElement('div');
+        row.className = 'wf-run';
+        row.dataset.id = t.id;
+        row.dataset.status = t.status;
+        const name = t.workflowName || t.label || t.id;
+        let head;
+        if (t.workflowName) {
+          head = document.createElement('button');
+          head.type = 'button';
+          head.title = 'Read the saved workflow';
+          head.addEventListener('click', () =>
+            openWfSheet(sessionId, t.workflowName, head),
+          );
+        } else {
+          head = document.createElement('span');
+        }
+        head.className = 'wf-name';
+        head.textContent = name;
+        row.appendChild(head);
+        const facts = document.createElement('div');
+        facts.className = 'wf-facts';
+        facts.textContent = wfFacts(t);
+        row.appendChild(facts);
+        const acts = document.createElement('div');
+        acts.className = 'wf-acts';
+        row.appendChild(acts);
+        const note = document.createElement('div');
+        note.className = 'wf-note';
+        note.setAttribute('role', 'status');
+        row.appendChild(note);
+        const say = (text, bad) => {
+          note.textContent = text;
+          if (bad) note.dataset.tone = 'err';
+          else delete note.dataset.tone;
+        };
+        const act = (key, labelText, run) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'wf-act';
+          b.dataset.act = key;
+          b.textContent = labelText;
+          b.addEventListener('click', async () => {
+            b.disabled = true;
+            try {
+              await run();
+            } finally {
+              b.disabled = false;
+            }
+          });
+          acts.appendChild(b);
+        };
+        const live = t.status === 'running' || t.status === 'paused' || t.status === 'pausing';
+        const url = (tail) =>
+          '/session/' +
+          encodeURIComponent(sessionId) +
+          '/tasks/' +
+          encodeURIComponent(t.id) +
+          '/' +
+          tail;
+        // The controls the daemon's own state allows, and no others: Pause and
+        // Resume only apply to a live run that is not already in that state,
+        // Retry to a run that ended badly and kept the arguments to start it
+        // again (a historical one needs a daemon feature this page cannot see).
+        const control = async (action, did, ask) => {
+          if (ask && !window.confirm(ask)) return;
+          say('working…');
+          const c = await rcCall(url('workflow-action'), {
+            method: 'POST',
+            body: JSON.stringify({ action }),
+          });
+          if (!c.ok) {
+            say(did + ' failed: ' + rcDetail(c), true);
+          } else if (c.body && c.body.changed === true) {
+            say(did + ': done' + (c.body.status ? ' (now ' + c.body.status + ')' : ''));
+          } else {
+            // changed:false is not a success, and not a failure the daemon
+            // explains: it is a no.
+            say(WF_CHANGED_NOTHING, true);
+          }
+        };
+        if (live) {
+          act('stop', 'Stop', async () => {
+            if (!window.confirm('Stop the workflow run "' + name + '"? It will not continue.')) return;
+            say('stopping…');
+            const c = await rcCall(url('cancel'), {
+              method: 'POST',
+              body: JSON.stringify({ kind: 'workflow' }),
+            });
+            // c.ok is not the verdict: the daemon answers 200 for a refusal.
+            if (!c.ok) {
+              say('stop failed: ' + rcDetail(c), true);
+            } else if (c.body && c.body.cancelled === true) {
+              say('stopped');
+              facts.textContent = 'stopped  ' + facts.textContent.replace(/^\S+/, '').trim();
+            } else {
+              say(wfRefusalWords(c.body && c.body.reason), true);
+            }
+          });
+        }
+        if (t.status === 'running') act('pause', 'Pause', () => control('pause', 'pause'));
+        if (t.status === 'paused') act('resume', 'Resume', () => control('resume', 'resume'));
+        if (
+          (t.status === 'failed' || t.status === 'cancelled') &&
+          !t.argsUnavailable &&
+          !t.isHistorical
+        ) {
+          act('retry', 'Retry', () =>
+            control('retry', 'retry', 'Run "' + name + '" again from the start?'),
+          );
+        }
+        return row;
+      }
+
+      // The saved workflow, read. It is a read the gateway serves at read
+      // scope, but the only way here is the name on a workflow run, which
+      // owner and write tokens alone see.
+      const wfSheet = { open: false, opener: null, gen: 0 };
+      function wfSheetBody(parts) {
+        const body = $('wf-body');
+        body.textContent = '';
+        for (const p of parts) body.appendChild(p);
+      }
+      function wfEl(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text !== undefined) e.textContent = text;
+        return e;
+      }
+      function renderWfSheet(name, r) {
+        $('wf-title').textContent = name;
+        if (!r) {
+          wfSheetBody([wfEl('p', 'cv-note', 'reading…')]);
+          return;
+        }
+        if (!r.ok) {
+          const n = wfEl('p', 'cv-note', 'The workflow could not be read: ' + rcDetail(r));
+          n.dataset.tone = 'err';
+          wfSheetBody([n]);
+          return;
+        }
+        const w = r.body && r.body.workflow;
+        if (!w) {
+          wfSheetBody([
+            wfEl(
+              'p',
+              'cv-note',
+              'No saved workflow named "' + name + '" is available here. It may have been removed, or the folder is not trusted.',
+            ),
+          ]);
+          return;
+        }
+        const parts = [];
+        const meta = w.meta;
+        if (meta && meta.description) parts.push(wfEl('p', 'wf-meta', meta.description));
+        if (meta && meta.whenToUse) parts.push(wfEl('p', 'wf-meta', 'Use it when: ' + meta.whenToUse));
+        parts.push(wfEl('p', 'wf-meta', 'From the ' + w.source + ' definitions.'));
+        const phases = meta && Array.isArray(meta.phases) ? meta.phases : [];
+        if (phases.length > 0) {
+          parts.push(wfEl('div', 'cv-grp', 'Steps (' + phases.length + ')'));
+          const ol = wfEl('ol', 'wf-steps');
+          for (const ph of phases) {
+            const li = wfEl('li');
+            li.appendChild(wfEl('div', 'wf-st-t', ph.title));
+            if (ph.detail) li.appendChild(wfEl('div', 'wf-st-d', ph.detail));
+            if (ph.model) li.appendChild(wfEl('div', 'wf-st-d', 'model ' + ph.model));
+            ol.appendChild(li);
+          }
+          parts.push(ol);
+        } else {
+          // A definition that declares no phases has no steps to list, so its
+          // script is the only text there is to show. The file's path is not.
+          parts.push(
+            wfEl(
+              'p',
+              'cv-note',
+              w.metaError
+                ? 'This workflow declares no steps its reader can parse (' + w.metaError + '). Its script:'
+                : 'This workflow declares no steps. Its script:',
+            ),
+          );
+          parts.push(wfEl('pre', 'wf-script', String(w.script || '')));
+        }
+        wfSheetBody(parts);
+      }
+      function openWfSheet(sessionId, name, opener) {
+        wfSheet.gen += 1;
+        const gen = wfSheet.gen;
+        if (!wfSheet.open) {
+          wfSheet.opener = opener || document.activeElement;
+          wfSheet.open = true;
+          $('wf-sheet').hidden = false;
+        }
+        renderWfSheet(name, null);
+        $('wf-close').focus({ preventScroll: true });
+        void (async () => {
+          const r = await rcCall(
+            '/session/' +
+              encodeURIComponent(sessionId) +
+              '/saved-workflows/' +
+              encodeURIComponent(name),
+          );
+          if (gen !== wfSheet.gen || !wfSheet.open) return;
+          renderWfSheet(name, r);
+        })();
+      }
+      function closeWfSheet(refocus) {
+        if (!wfSheet.open) return;
+        wfSheet.open = false;
+        wfSheet.gen += 1;
+        $('wf-sheet').hidden = true;
+        const back = wfSheet.opener;
+        wfSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      $('wf-close').addEventListener('click', () => closeWfSheet(true));
+      $('wf-sheet').addEventListener('click', (e) => {
+        if (e.target === $('wf-sheet')) closeWfSheet(true);
+      });
+      $('wf-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeWfSheet(true);
+      });
+
       $('runs-list').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('runs-body');
@@ -25707,13 +26090,23 @@
           out.textContent = 'list failed: ' + rcDetail(r);
           return;
         }
-        const tasks = r.body.tasks || [];
+        const tasks = (r.body.tasks || []).filter(
+          (t) => t.kind !== 'workflow' || workflowRunsOn(),
+        );
         if (tasks.length === 0) {
           out.textContent = '(no runs)';
           return;
         }
         out.textContent = '';
         for (const t of tasks) {
+          if (t.kind === 'workflow') {
+            // #110. Owner and write tokens alone are sent these (the gateway
+            // asks the daemon only for them), and the page holds the same line
+            // a second time: no gateway flag, or a token that cannot write,
+            // draws none, whatever arrived.
+            if (workflowRunsOn()) out.appendChild(drawWorkflowRun(t, id));
+            continue;
+          }
           const row = document.createElement('div');
           const label = document.createElement('span');
           // Every field here is read off the daemon's own task shape
@@ -25771,11 +26164,10 @@
                 label.textContent =
                   bits.join('  ') + '  [stop failed: ' + rcDetail(c) + ']';
               } else {
-                // #110: no branch for reason 'disabled'. The daemon sends it
-                // only for a workflow cancel on an untrusted workspace, and a
-                // workflow row is listed only on a trusted one that opted in,
-                // which this page never asks for, so it could not fire. This
-                // line is the honest answer for every refusal.
+                // #110: no branch for reason 'disabled' here. The daemon sends
+                // it only for a workflow cancel, and workflow rows are drawn
+                // by drawWorkflowRun, which words it. This line is the honest
+                // answer for every refusal of the three kinds drawn here.
                 label.textContent =
                   bits.join('  ') + '  [the daemon did not stop it]';
               }
