@@ -264,6 +264,13 @@ export interface BootViewerOptions {
   agentTraceResult?: unknown;
   /** #132: what the boot stub's POST /sessions/catalog serves (unset: no route). */
   catalog?: StubDaemonOptions['catalog'];
+  /** #123 (directories): the tree the stub's list and stat answer from. */
+  workspaceTree?: StubDaemonOptions['workspaceTree'];
+  /** #123 (directories): force the stub's directory routes to refuse. */
+  directoryCreateStatus?: number;
+  directoryCreateErrorBody?: unknown;
+  directoryDeleteStatus?: number;
+  directoryDeleteErrorBody?: unknown;
 }
 
 /** The label the harness's one host action carries. */
@@ -437,6 +444,11 @@ export async function bootViewer(
     sessionAgentsResult: opts.sessionAgentsResult,
     agentTraceResult: opts.agentTraceResult,
     catalog: opts.catalog,
+    workspaceTree: opts.workspaceTree,
+    directoryCreateStatus: opts.directoryCreateStatus,
+    directoryCreateErrorBody: opts.directoryCreateErrorBody,
+    directoryDeleteStatus: opts.directoryDeleteStatus,
+    directoryDeleteErrorBody: opts.directoryDeleteErrorBody,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
