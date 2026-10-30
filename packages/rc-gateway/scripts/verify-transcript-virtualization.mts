@@ -10507,7 +10507,9 @@ PAGE_SCENARIOS.push({
     // OpenStringUnion), so a kind this page has never heard of has to arrive
     // with the daemon's own word on it. Dropping the row or relabeling it as
     // 'other' would hide a produced file from the only screen that lists them.
-    // The third entry is `missing`, which has nothing to save.
+    // The third entry is `missing`. #127 moved the rows into the Artifacts
+    // sheet, where Open is offered on a saved webpage (kind html in published
+    // storage, the one body the content read serves) and on nothing else.
     stub: {
       artifactListResult: {
         v: 1,
@@ -10518,6 +10520,7 @@ PAGE_SCENARIOS.push({
           {
             id: 'a1',
             kind: 'html',
+            storage: 'published',
             status: 'available',
             title: 'paging notes',
             sizeBytes: 2048,
@@ -10542,15 +10545,15 @@ PAGE_SCENARIOS.push({
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await press(page, 'artifacts', 'artifacts-toggle');
-      await drawn(page, 'artifacts-list');
+      await page.waitForFunction(
+        () => document.querySelectorAll('#art-list .art-row').length === 3,
+        null,
+        { timeout: 20_000 },
+      );
       const rows = await page.evaluate(() =>
-        Array.from(document.getElementById('artifacts-list')?.children || []).map(
+        Array.from(document.querySelectorAll('#art-list .art-hd')).map(
           (c) => (c.textContent || '').trim(),
         ),
-      );
-      const buttons = await page.evaluate(
-        () =>
-          document.querySelectorAll('#artifacts-list button').length,
       );
       expect(
         rows.length === 3,
@@ -10568,13 +10571,18 @@ PAGE_SCENARIOS.push({
         rows.some((r) => r.includes('gone.txt') && r.includes('missing')),
         `a missing artifact did not say so (${JSON.stringify(rows)})`,
       );
-      // Two available rows get a Save; the missing one must not, since the
-      // content read could only answer with the daemon's refusal.
+      // Each row's actions, one row open at a time: Open on the saved
+      // webpage alone, since the content read serves nothing else.
+      const opens: string[] = [];
+      for (const id of ['a1', 'a2', 'a3']) {
+        await page.click(`#art-list .art-hd[data-id="${id}"]`);
+        if (await page.isVisible(`#art-list .art-open[data-id="${id}"]`)) opens.push(id);
+      }
       expect(
-        buttons === 2,
-        `Save buttons did not track availability (${buttons} for ${JSON.stringify(rows)})`,
+        opens.join() === 'a1',
+        `Open was offered on ${JSON.stringify(opens)}, not on the saved webpage alone`,
       );
-      return `3 rows drawn, unknown kind kept, ${buttons} Save buttons`;
+      return `3 rows drawn, unknown kind kept, Open on ${opens.join()} only`;
     },
   });
 
@@ -10586,7 +10594,8 @@ PAGE_SCENARIOS.push({
     // thing that must never happen is the text landing in the DOM. A row that
     // rendered it would pass every other scenario in this file. It carries its
     // own one-row envelope so the asserted file name is this scenario's title
-    // rather than whatever the stub happens to default to.
+    // rather than whatever the stub happens to default to; the extension is
+    // the one the daemon's Content-Disposition names.
     stub: {
       artifactListResult: {
         v: 1,
@@ -10597,6 +10606,7 @@ PAGE_SCENARIOS.push({
           {
             id: 'a1',
             kind: 'html',
+            storage: 'published',
             status: 'available',
             title: 'paging notes',
             sizeBytes: 2048,
@@ -10607,23 +10617,22 @@ PAGE_SCENARIOS.push({
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await press(page, 'artifacts', 'artifacts-toggle');
-      await drawn(page, 'artifacts-list');
+      await page.waitForSelector('#art-list .art-hd[data-id="a1"]');
+      await page.click('#art-list .art-hd[data-id="a1"]');
       const dl = page
         .waitForEvent('download', { timeout: 15_000 })
         .catch(() => null);
-      await page.evaluate(() => {
-        const b = document.querySelector(
-          '#artifacts-list button',
-        ) as HTMLButtonElement | null;
-        b?.click();
-      });
-      const note = await drawn(page, 'artifacts-note');
-      const download = await dl;
-      const body = await page.evaluate(
-        () => document.getElementById('artifacts')?.innerHTML ?? '',
+      await page.click('#art-list .art-open[data-id="a1"]');
+      await page.waitForFunction(() =>
+        (document.getElementById('art-note')?.textContent || '').startsWith('Downloaded '),
       );
+      const note = await page.evaluate(
+        () => (document.getElementById('art-note')?.textContent || '').trim(),
+      );
+      const download = await dl;
+      const body = await page.evaluate(() => document.body.innerHTML);
       expect(
-        note.startsWith('saved '),
+        note.startsWith('Downloaded '),
         `a save did not report the file (${JSON.stringify(note)})`,
       );
       expect(
@@ -10640,8 +10649,8 @@ PAGE_SCENARIOS.push({
       );
       const name = download ? download.suggestedFilename() : '';
       expect(
-        name === 'paging notes',
-        `download name was not the title (${JSON.stringify(name)})`,
+        name === 'paging notes.html',
+        `download name was not the title with the daemon's extension (${JSON.stringify(name)})`,
       );
       return `saved as ${JSON.stringify(name)}, body never entered the DOM`;
     },
@@ -10651,18 +10660,21 @@ PAGE_SCENARIOS.push({
     name: 'P87 a refused artifact list names its reason instead of an empty box',
     waitView: false,
     // The gateway answers this route with several different failures and the
-    // box has nowhere to show the difference except this note. An empty box
-    // and a refusal are different facts to an operator.
+    // sheet has nowhere to show the difference except this note. An empty
+    // list and a refusal are different facts to an operator. A daemon 404 is
+    // the gateway's session_not_found.
     stub: { artifactListStatus: 404 },
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await press(page, 'artifacts', 'artifacts-toggle');
-      await drawn(page, 'artifacts-note');
+      await page.waitForFunction(() =>
+        /daemon/.test(document.getElementById('art-list-note')?.textContent || ''),
+      );
       const note = await page.evaluate(
-        () => (document.getElementById('artifacts-note')?.textContent ?? '').trim(),
+        () => (document.getElementById('art-list-note')?.textContent ?? '').trim(),
       );
       expect(
-        note.includes('artifacts failed'),
+        note === 'The daemon does not have this conversation open.',
         `a refused list did not say so (${JSON.stringify(note)})`,
       );
       return `a refused list reports ${JSON.stringify(note)}`;
@@ -14579,15 +14591,17 @@ PAGE_SCENARIOS.push({
         const chooser = page.waitForEvent('filechooser', { timeout: 5_000 });
         await page.click('#attach');
         await chooser;
-        for (const [btn, box] of [
-          ['stored-toggle', 'stored'],
-          ['artifacts-toggle', 'artifacts'],
+        // #127: Artifacts opens a sheet over the screen, which its own
+        // close shuts, rather than a box its pill toggles.
+        for (const [btn, box, shut] of [
+          ['stored-toggle', 'stored', 'stored-toggle'],
+          ['artifacts-toggle', 'art-sheet', 'art-close'],
         ] as const) {
           await page.click('#' + btn);
           await page.waitForSelector('#' + box, { state: 'visible' });
           const expanded = await page.getAttribute('#' + btn, 'aria-expanded');
           expect(expanded === 'true', `#${btn} opened its list but reads aria-expanded ${expanded}`);
-          await page.click('#' + btn);
+          await page.click('#' + shut);
           await page.waitForSelector('#' + box, { state: 'hidden' });
         }
         await page.click('#h1-plus');
