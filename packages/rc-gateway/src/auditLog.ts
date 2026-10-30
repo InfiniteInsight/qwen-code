@@ -227,7 +227,13 @@ export type AuditAction =
   | 'session_goal_set'
   | 'session_goal_set_failed'
   | 'session_goal_cleared'
-  | 'session_goal_clear_failed';
+  | 'session_goal_clear_failed'
+  // #212: host tabs, from the wrapper's start and end and the phone's verbs.
+  | 'host_tab_started'
+  | 'host_tab_ended'
+  | 'host_tab_reopened'
+  | 'host_tab_dismissed'
+  | 'host_tab_removed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -375,6 +381,11 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_goal_set_failed',
   'session_goal_cleared',
   'session_goal_clear_failed',
+  'host_tab_started',
+  'host_tab_ended',
+  'host_tab_reopened',
+  'host_tab_dismissed',
+  'host_tab_removed',
 ];
 
 export interface AuditEntry {

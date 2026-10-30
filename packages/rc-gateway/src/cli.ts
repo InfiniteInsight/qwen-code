@@ -137,6 +137,12 @@ import {
   defaultHostAttachedWorkspacesPath,
 } from './hostAttachedWorkspaces.js';
 import {
+  HostTabRegistry,
+  defaultHostTabsPath,
+  hostTabEndsDir,
+} from './hostTabs.js';
+import { LAUNCHER_STALE_MS } from './routes/terminals.js';
+import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
   loadRateTableFile,
@@ -1017,6 +1023,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const hostAttachToken = await loadOrCreateLocalToken(
     hostAttachTokenPath(join(homedir(), '.qwen', 'rc')),
   );
+  // #212: one record per `qwen-rc attach` tab, so a tab that ends without
+  // /quit shows on the phone as crashed. An open record whose wrapper is gone
+  // stays a ghost for one launcher stale window (the time a closing tab's end
+  // report takes to land), then counts as crashed.
+  const hostTabs = await HostTabRegistry.open(defaultHostTabsPath(homedir()), {
+    ghostGraceMs: LAUNCHER_STALE_MS,
+    endsDir: hostTabEndsDir(join(homedir(), '.qwen', 'rc')),
+  });
   // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
   // function is handed to both `agents.costFor` and `review.costFor` so the
   // two control planes never disagree on a session's cost.
@@ -1259,6 +1273,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     hostAttachedWorkspaces: HostAttachedWorkspaces.open(
       defaultHostAttachedWorkspacesPath(homedir()),
     ),
+    hostTabs: { registry: hostTabs },
   });
   // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
   // app's audit recorder (constructed inside createGatewayApp, so the pool

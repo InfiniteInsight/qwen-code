@@ -22,6 +22,7 @@ import {
   type TerminalPlanOptions,
 } from '../terminals.js';
 import { isSessionNotFoundError } from './sessionResume.js';
+import { isValidTabId } from '../hostTabs.js';
 
 /** The slice of the pool these routes call. */
 export type HostAttachDaemon = Pick<
@@ -42,6 +43,21 @@ export interface HostAttachDeps {
    * the launcher opens a tab for every line in that.
    */
   attachedWorkspaces?: { record(cwd: string): Promise<void> };
+  /**
+   * The host tab registry (#212, hostTabs.ts). A 200 whose body carries the
+   * wrapper's `pid` opens a record and answers its `tabId`; one that carries
+   * a `tabId` it already holds for the same session (a re-attach of the same
+   * tab) opens nothing and answers it back. Best effort: a record that cannot
+   * be written costs the tab its tracking, never the attach.
+   */
+  tabs?: {
+    start(input: {
+      sessionId: string;
+      cwd: string;
+      pid: number;
+    }): Promise<{ tabId: string }>;
+    get(tabId: string): { sessionId: string } | undefined;
+  };
 }
 
 /** How the session in a 200 was reached. */
@@ -84,6 +100,12 @@ export interface HostAttachRoutes {
  * directory the TUI must run in. `via` (`created` | `pooled` | `resumed`) says
  * which path was taken.
  *
+ * Tabs (#212): with a tab registry wired, a body that carries the wrapper's
+ * `pid` opens a tab record and the 200 adds its `tabId`; the wrapper sends
+ * that `tabId` back on each re-attach, which answers it again and opens
+ * nothing, and posts its exit code to `/rc/host/tabs/:tabId/end` when it
+ * ends. A body with neither (an older wrapper) is answered as before.
+ *
  * Gates, in order: loopback peer (403 `loopback_only`, read through
  * `forwardedPeer` so the HTTP/2 front's loopback hop does not count), then the
  * host-attach bearer in constant time (401). Mounted BEFORE bearerResolve:
@@ -110,11 +132,16 @@ export interface HostAttachRoutes {
  * valid one, and `via` (or the failing step plus its code). Never a path,
  * never a token.
  */
-export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
-  const { daemon, audit } = deps;
-
-  /** The two gates. Answers and audits a refusal; true when the call may go on. */
-  const admit = (req: Request, res: Response): boolean => {
+/**
+ * The two gates every host-attach-token route shares (this file's and the
+ * tab end report, routes/hostTabs.ts): loopback peer, then the bearer in
+ * constant time. Answers and audits a refusal; true when the call may go on.
+ */
+export function hostAttachGate(
+  token: string,
+  audit?: AuditRecorder,
+): (req: Request, res: Response) => boolean {
+  return (req, res) => {
     if (!isLoopbackRemote(forwardedPeer(req))) {
       void audit?.record({
         action: 'host_attach_rejected',
@@ -123,7 +150,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       res.status(403).json({ error: 'Loopback only', code: 'loopback_only' });
       return false;
     }
-    if (!bearerMatches(req.headers.authorization, deps.token)) {
+    if (!bearerMatches(req.headers.authorization, token)) {
       void audit?.record({
         action: 'host_attach_rejected',
         detail: { reason: 'bad_token' },
@@ -132,6 +159,48 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       return false;
     }
     return true;
+  };
+}
+
+export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
+  const { daemon, audit } = deps;
+
+  /** The two gates. Answers and audits a refusal; true when the call may go on. */
+  const admit = hostAttachGate(deps.token, audit);
+
+  /**
+   * The tab this attach belongs to (#212), or undefined when it is not
+   * tracked: no registry, a body with neither a known `tabId` nor a `pid`
+   * (an older wrapper), or a registry that could not write.
+   */
+  const noteTab = async (
+    req: Request,
+    sessionId: string,
+    cwd: string,
+  ): Promise<string | undefined> => {
+    const tabs = deps.tabs;
+    if (!tabs) return undefined;
+    const body = (req.body ?? {}) as { pid?: unknown; tabId?: unknown };
+    if (isValidTabId(body.tabId)) {
+      const known = tabs.get(body.tabId);
+      if (known && known.sessionId === sessionId) return body.tabId;
+    }
+    const pid = body.pid;
+    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {
+      return undefined;
+    }
+    try {
+      const { tabId } = await tabs.start({ sessionId, cwd, pid });
+      void audit?.record({
+        action: 'host_tab_started',
+        target: sessionId,
+        outcome: 'ok',
+        detail: { tabId },
+      });
+      return tabId;
+    } catch {
+      return undefined;
+    }
   };
 
   const fail = (
@@ -158,6 +227,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
    * attach.
    */
   const answer = async (
+    req: Request,
     res: Response,
     step: Step,
     via: Via,
@@ -199,6 +269,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       outcome: 'ok',
       detail: { via },
     });
+    const tabId = await noteTab(req, sessionId, endpoint.workspaceCwd);
     res.status(200).json({
       sessionId,
       workspaceCwd: endpoint.workspaceCwd,
@@ -207,6 +278,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       linuxArgv,
       title: `qwen ${sessionId.slice(0, 8)}`,
       via,
+      ...(tabId !== undefined ? { tabId } : {}),
     });
   };
 
@@ -303,7 +375,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       );
       return;
     }
-    await answer(res, 'create', 'created', sessionId, endpoint);
+    await answer(req, res, 'create', 'created', sessionId, endpoint);
   };
 
   const attach: RequestHandler = async (req, res) => {
@@ -348,7 +420,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       tracked = false;
     }
     if (tracked) {
-      await answer(res, 'attach', 'pooled', sessionId, pooled);
+      await answer(req, res, 'attach', 'pooled', sessionId, pooled);
       return;
     }
 
@@ -408,7 +480,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       );
       return;
     }
-    await answer(res, 'resume', 'resumed', sessionId, endpoint);
+    await answer(req, res, 'resume', 'resumed', sessionId, endpoint);
   };
 
   return { create, attach };

@@ -34,6 +34,7 @@ import { OWNER, SESSION_READ, APPROVE, WRITE } from '../scopes.js';
 import type { SessionDaemon } from '../daemonPool.js';
 import { HostAttachedWorkspaces } from '../hostAttachedWorkspaces.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { HostTabRegistry, isValidTabId } from '../hostTabs.js';
 
 const TOKEN = 'host-attach-token-1';
 const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -794,5 +795,99 @@ describe('the attached-workspaces record', () => {
       if (prior === undefined) delete process.env['QWEN_RUNTIME_DIR'];
       else process.env['QWEN_RUNTIME_DIR'] = prior;
     }
+  });
+});
+
+describe('tab records (#212)', () => {
+  /** A registry whose probe sees every pid as a live tab. */
+  async function registry() {
+    return HostTabRegistry.open(join(dir, 'host-tabs.json'), {
+      ghostGraceMs: 12_000,
+      probe: {
+        startTime: async () => '1',
+        stdinTarget: async () => '/dev/pts/1',
+        bootId: async () => 'boot',
+      },
+    });
+  }
+
+  it('opens a record for a body with a pid and answers its tabId, then answers it back on a re-attach', async () => {
+    const tabs = await registry();
+    const { daemon } = fakePool();
+    const { url, audit } = await mount(daemon, { tabs });
+    const first = await post(url, '/rc/host/attach', {
+      cwd: workspace,
+      pid: 4242,
+    });
+    expect(first.status).toBe(200);
+    const tabId = first.body.tabId as string;
+    expect(isValidTabId(tabId)).toBe(true);
+    expect(tabs.get(tabId)).toMatchObject({
+      sessionId: SESSION,
+      cwd: workspace,
+      pid: 4242,
+    });
+    // The re-attach loop sends the tabId back: the same record, no new one.
+    const again = await post(url, `/rc/host/attach/${SESSION}`, {
+      cwd: workspace,
+      tabId,
+    });
+    expect(again.body.tabId).toBe(tabId);
+    expect((await tabs.list()).map((t) => t.tabId)).toEqual([tabId]);
+    expect(audit.calls.filter((c) => c.action === 'host_tab_started')).toEqual([
+      {
+        action: 'host_tab_started',
+        target: SESSION,
+        outcome: 'ok',
+        detail: { tabId },
+      },
+    ]);
+    // Never a path in a tab audit row.
+    expect(JSON.stringify(audit.calls)).not.toContain(dir);
+  });
+
+  it('opens nothing for a body without a pid (an older wrapper), and answers no tabId', async () => {
+    const tabs = await registry();
+    const { daemon } = fakePool();
+    const { url } = await mount(daemon, { tabs });
+    const res = await post(url, '/rc/host/attach', { cwd: workspace });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('tabId');
+    expect(await tabs.list()).toEqual([]);
+  });
+
+  it('does not answer a tabId that belongs to another conversation', async () => {
+    const tabs = await registry();
+    const other = await tabs.start({
+      sessionId: 'b9a5ddef-edc9-472e-8c52-ea6da2609e81',
+      cwd: workspace,
+      pid: 1,
+    });
+    const { daemon } = fakePool({ known: [SESSION] });
+    const { url } = await mount(daemon, { tabs });
+    const res = await post(url, `/rc/host/attach/${SESSION}`, {
+      cwd: workspace,
+      tabId: other.tabId,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('tabId');
+  });
+
+  it('still attaches when the registry cannot write', async () => {
+    const { daemon } = fakePool();
+    const { url } = await mount(daemon, {
+      tabs: {
+        start: async () => {
+          throw new Error('EACCES');
+        },
+        get: () => undefined,
+      },
+    });
+    const res = await post(url, '/rc/host/attach', {
+      cwd: workspace,
+      pid: 7,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('tabId');
   });
 });

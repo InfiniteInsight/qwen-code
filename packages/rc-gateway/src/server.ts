@@ -258,6 +258,8 @@ import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { createHookIngestRoute } from './routes/hookIngest.js';
 import { createHostAttachRoutes } from './routes/hostAttach.js';
+import { createHostTabEndRoute } from './routes/hostTabs.js';
+import type { HostTabRegistry } from './hostTabs.js';
 import { WorkflowRunRegistry } from './workflows/workflowRegistry.js';
 import {
   createStartWorkflowRoute,
@@ -570,6 +572,15 @@ export interface GatewayDeps {
    * request log alone, as before.
    */
   hostAttachedWorkspaces?: HostAttachedWorkspaces;
+  /**
+   * The host tab registry (#212, hostTabs.ts). With `hostAttach` also set,
+   * the attach routes open a record per tab and `POST
+   * /rc/host/tabs/:tabId/end` (loopback, host-attach token) closes it.
+   * Omitted: tabs are not tracked and nothing about them mounts.
+   */
+  hostTabs?: {
+    registry: HostTabRegistry;
+  };
   /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
   workflows?: {
     runsDir?: string;
@@ -901,10 +912,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       audit,
       planOpts: { qwenArgv: deps.terminalQwenArgv },
       attachedWorkspaces: deps.hostAttachedWorkspaces,
+      tabs: deps.hostTabs?.registry,
     });
     const hostAttachJson = jsonForBearer(deps.hostAttach.token);
     app.post('/rc/host/attach', hostAttachJson, hostAttach.create);
     app.post('/rc/host/attach/:sessionId', hostAttachJson, hostAttach.attach);
+    // #212: the wrapper's end report, on the same token and gates. Only the
+    // `/end` path is claimed here; the phone's verbs on /rc/host/tabs mount
+    // after bearerResolve.
+    if (deps.hostTabs) {
+      app.post(
+        '/rc/host/tabs/:tabId/end',
+        hostAttachJson,
+        createHostTabEndRoute({
+          registry: deps.hostTabs.registry,
+          token: deps.hostAttach.token,
+          audit,
+        }),
+      );
+    }
   }
 
   const webRoot =
