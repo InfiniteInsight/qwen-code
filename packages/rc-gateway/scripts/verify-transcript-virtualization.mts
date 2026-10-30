@@ -27757,6 +27757,175 @@ VIEW_SCENARIOS.push({
   });
 }
 
+// ---- #208. The Agents sheet shows the model and a finished row's tokens ----
+
+type P44Look = { key: string; text: string; model: string | null; modelColor: string | null; nameColor: string | null; modelAfterName: boolean };
+async function p44Looks(page: Page): Promise<P44Look[]> {
+  return (await page.evaluate(String.raw`(() => {
+    return Array.from(document.querySelectorAll('#agents-body .ag-row[data-state]')).map(function (r) {
+      var m = r.querySelector('.ag-model');
+      var n = r.querySelector('.ag-name');
+      return {
+        key: r.dataset.key || '',
+        text: r.textContent || '',
+        model: m ? m.textContent : null,
+        modelColor: m ? getComputedStyle(m).color : null,
+        nameColor: n ? getComputedStyle(n).color : null,
+        modelAfterName: !!(m && n && (n.compareDocumentPosition(m) & Node.DOCUMENT_POSITION_FOLLOWING)),
+      };
+    });
+  })()`)) as P44Look[];
+}
+const P44_STATS = { totalTokens: 4_321, outputTokens: 321, toolUses: 7, durationMs: 40_000 };
+const P44_ROSTER = (sid: string) =>
+  agentRoster(sid, [
+    agentTask({ id: 'agent-live', toolUseId: 'tc-live', subagentType: 'general-purpose', description: 'write the fix', model: 'qwen3-coder-plus', startTime: AG_T0 + 10_000 }),
+    agentTask({ id: 'agent-done', toolUseId: 'tc-done', subagentType: 'Explore', description: 'the first look', status: 'completed', model: 'qwen3-max', stats: P44_STATS, startTime: AG_T0 - 60_000, endTime: AG_T0 - 20_000, runtimeMs: 40_000 }),
+  ]);
+const P44_NO_INSPECT = async (page: Page, asked: string[]): Promise<void> => {
+  await page.route(/\/session\/[^/]+\/subagents\/[^/]+$/, async (route) => {
+    asked.push(decodeURIComponent(new URL(route.request().url()).pathname.split('/')[4]!));
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessionId: 'v', totalTokens: 999, inputTokens: 900, outputTokens: 99 }) });
+  });
+};
+
+PAGE_SCENARIOS.push({
+  name: 'P440 a finished agent\'s row shows its model (muted, after the type) and its tokens and tools from the daemon\'s stats',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P44_ROSTER },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    const done = (await p44Looks(page)).find((r) => r.key === 'tc-done')!;
+    expect(done.model === 'qwen3-max', `the finished row's model is ${JSON.stringify(done.model)}`);
+    expect(done.modelAfterName, 'the model is not after the type');
+    expect(done.modelColor !== null && done.modelColor !== done.nameColor, `the model is not muted (${done.modelColor} against ${done.nameColor})`);
+    expect(/Explore/.test(done.text) && /done/.test(done.text) && /4\.3k tok/.test(done.text) && /7 tools/.test(done.text), `the finished row reads ${JSON.stringify(done.text)}`);
+    return `finished row reads ${JSON.stringify(done.text)}; model ${done.model} in ${done.modelColor}, name in ${done.nameColor}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P441 a running agent\'s row shows its model after the type',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P44_ROSTER },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    const live = (await p44Looks(page)).find((r) => r.key === 'tc-live')!;
+    expect(live.model === 'qwen3-coder-plus' && live.modelAfterName, `the running row's model is ${JSON.stringify(live)}`);
+    expect(/general-purpose/.test(live.text) && /running/.test(live.text), `the running row reads ${JSON.stringify(live.text)}`);
+    return `running row reads ${JSON.stringify(live.text)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P442 a daemon that sends neither model nor stats draws the rows as before: no model, no token count, and the trace still reads the inspect route',
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({ id: 'agent-live', toolUseId: 'tc-live', subagentType: 'general-purpose', description: 'write the fix', startTime: AG_T0 + 10_000 }),
+        agentTask({ id: 'agent-done', toolUseId: 'tc-done', subagentType: 'Explore', description: 'the first look', status: 'completed', startTime: AG_T0 - 60_000, endTime: AG_T0 - 20_000, runtimeMs: 40_000 }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    await P44_NO_INSPECT(page, asked);
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    const looks = await p44Looks(page);
+    expect(looks.every((r) => r.model === null), `a model was drawn: ${JSON.stringify(looks.map((r) => r.model))}`);
+    const done = looks.find((r) => r.key === 'tc-done')!;
+    expect(!/tok/.test(done.text), `a finished row with no stats drew tokens (${JSON.stringify(done.text)})`);
+    await page.click('#agents-body .ag-open[data-key="tc-done"]');
+    await page.waitForFunction(() => /used 999 tok/.test(document.getElementById('agents-body')!.textContent ?? ''), null, { timeout: 10_000 });
+    expect(asked.join(',') === 'tc-done', `the inspect read asked ${JSON.stringify(asked)}`);
+    return 'no .ag-model on either row; the finished row has no token count; its trace read the inspect route and said "used 999 tok"';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P443 a finished agent\'s trace takes its usage line from the stats and does not read the inspect route; the header carries the model',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P44_ROSTER },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    await P44_NO_INSPECT(page, asked);
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    await page.click('#agents-body .ag-open[data-key="tc-done"]');
+    await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'tc-done', null, { timeout: 5_000 });
+    await page.waitForTimeout(800);
+    const head = await page.evaluate(() => ({
+      model: (document.querySelector('#agents-body .ag-sum .ag-model') || {}).textContent || null,
+      text: document.getElementById('agents-body')!.textContent ?? '',
+    }));
+    expect(head.model === 'qwen3-max', `the trace header's model is ${JSON.stringify(head.model)}`);
+    expect(/4\.3k tok/.test(head.text) && /7 tools/.test(head.text), `the trace reads ${JSON.stringify(head.text)}`);
+    expect(!/used 999|reading what it used/.test(head.text), `the trace showed the inspect read (${JSON.stringify(head.text)})`);
+    expect(asked.length === 0, `the inspect route was read for ${JSON.stringify(asked)}`);
+    return 'trace header carries qwen3-max; usage reads 4.3k tok, 7 tools from the stats; the inspect route was never read';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P444 a long model name shortens before the type does, the row stays 48px and the sheet does not scroll sideways at phone width',
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({
+          id: 'agent-done',
+          toolUseId: 'tc-done',
+          subagentType: 'general-purpose',
+          description: 'the first look',
+          status: 'completed',
+          model: 'accounts/example/models/a-very-long-model-name-that-goes-on-and-on-v2-instruct-fp8',
+          stats: P44_STATS,
+          startTime: AG_T0 - 60_000,
+          endTime: AG_T0 - 20_000,
+          runtimeMs: 40_000,
+        }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.click('#h1-more');
+    await page.waitForSelector('#more-agents', { state: 'visible' });
+    await page.click('#more-agents');
+    await page.waitForSelector('#agents-sheet:not([hidden])', { timeout: 5_000 });
+    const rows = await waitSheetRows(page, 1);
+    const m = await page.evaluate(() => {
+      const row = document.querySelector('#agents-body .ag-row')!;
+      const name = row.querySelector('.ag-name') as HTMLElement;
+      const model = row.querySelector('.ag-model') as HTMLElement;
+      const st = row.querySelector('.ag-st') as HTMLElement;
+      const clock = row.querySelector('.ag-clock') as HTMLElement;
+      const body = document.getElementById('agents-body')!;
+      return {
+        nameCut: name.scrollWidth > name.clientWidth,
+        nameW: name.clientWidth,
+        modelCut: model.scrollWidth > model.clientWidth,
+        stRight: st.getBoundingClientRect().right,
+        clockRight: clock.getBoundingClientRect().right,
+        rowRight: row.getBoundingClientRect().right,
+        sideways: body.scrollWidth > body.clientWidth,
+      };
+    });
+    expect(m.modelCut && !m.nameCut, `the model did not give way first (${JSON.stringify(m)})`);
+    expect(!m.sideways, `the sheet scrolls sideways (${JSON.stringify(m)})`);
+    expect(m.clockRight <= m.rowRight + 0.5 && m.stRight <= m.rowRight + 0.5, `the state or clock left the row (${JSON.stringify(m)})`);
+    expect(rows[0]!.openH >= 48, `the row is ${rows[0]!.openH}px`);
+    return `model ellipsized, type whole (${m.nameW}px), state and clock inside the row, row ${rows[0]!.openH}px, no sideways scroll`;
+  },
+});
+
 // #110. Organize and Sources, two rows of More > This conversation. Organize
 // files the conversation on screen under a group of its folder or a colour
 // tag through PATCH /session/:id/organization, the groups read from the

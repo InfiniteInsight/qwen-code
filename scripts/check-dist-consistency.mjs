@@ -118,10 +118,12 @@ export function newestFile(dir, skipSource = false) {
 }
 
 /**
- * Check every workspace package under `root`. Returns the problems found (an
- * empty array is consistent), plus the packages that were compared.
+ * Compare every workspace package under `root`. Returns structured findings
+ * (`kind` is 'source' for a dist older than its own src, 'dependency' for a
+ * dist older than a workspace dependency's dist), plus the packages compared.
+ * `checkDistConsistency` and `findStaleDependents` are both views of this.
  */
-export function checkDistConsistency(root) {
+export function analyzeDist(root) {
   const packages = [];
   for (const dir of findWorkspaceDirs(root)) {
     const pkg = readJson(join(dir, 'package.json'));
@@ -136,7 +138,7 @@ export function checkDistConsistency(root) {
     });
   }
   const byName = new Map(packages.map((p) => [p.name, p]));
-  const problems = [];
+  const findings = [];
   const checked = [];
   const rel = (p) => relative(root, p) || '.';
   const stamp = (ms) => new Date(ms).toISOString();
@@ -147,26 +149,65 @@ export function checkDistConsistency(root) {
     const srcDir = join(p.dir, 'src');
     const src = isDir(srcDir) ? newestFile(srcDir, true) : undefined;
     if (src && src.mtimeMs > p.dist.mtimeMs) {
-      problems.push(
-        `${p.name}: dist (${stamp(p.dist.mtimeMs)}) is older than its source ${rel(src.path)} (${stamp(src.mtimeMs)})`,
-      );
+      findings.push({
+        kind: 'source',
+        name: p.name,
+        dir: p.dir,
+        message: `${p.name}: dist (${stamp(p.dist.mtimeMs)}) is older than its source ${rel(src.path)} (${stamp(src.mtimeMs)})`,
+      });
     }
     for (const depName of p.deps) {
       const dep = byName.get(depName);
       if (!dep?.dist) continue;
       if (dep.dist.mtimeMs > p.dist.mtimeMs) {
-        problems.push(
-          `${p.name}: dist (${stamp(p.dist.mtimeMs)}) is older than the dist of its dependency ${depName} (${stamp(dep.dist.mtimeMs)}, ${rel(dep.dist.path)})`,
-        );
+        findings.push({
+          kind: 'dependency',
+          name: p.name,
+          dir: p.dir,
+          dependency: depName,
+          message: `${p.name}: dist (${stamp(p.dist.mtimeMs)}) is older than the dist of its dependency ${depName} (${stamp(dep.dist.mtimeMs)}, ${rel(dep.dist.path)})`,
+        });
       }
     }
   }
-  return { problems, checked };
+  return { findings, checked };
+}
+
+/**
+ * Check every workspace package under `root`. Returns the problems found (an
+ * empty array is consistent), plus the packages that were compared.
+ */
+export function checkDistConsistency(root) {
+  const { findings, checked } = analyzeDist(root);
+  return { problems: findings.map((f) => f.message), findings, checked };
+}
+
+/**
+ * Packages whose dist is older than the dist of a workspace dependency, each
+ * with the dependencies that outdate it (Qwen-Code-Remote#209). A package
+ * built with `tsc --build` is incremental on its own sources and treats a
+ * rebuilt dependency as no reason to emit, so a plain rebuild leaves it in
+ * exactly this state; the root build forces these packages (see
+ * rebuild-stale-dependents.mjs).
+ */
+export function findStaleDependents(root) {
+  const stale = new Map();
+  for (const f of analyzeDist(root).findings) {
+    if (f.kind !== 'dependency') continue;
+    const entry = stale.get(f.name) ?? {
+      name: f.name,
+      dir: f.dir,
+      dependencies: [],
+    };
+    entry.dependencies.push(f.dependency);
+    stale.set(f.name, entry);
+  }
+  return [...stale.values()];
 }
 
 function main() {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-  const { problems, checked } = checkDistConsistency(root);
+  const { problems, findings, checked } = checkDistConsistency(root);
   if (problems.length === 0) {
     console.log(
       `check-dist-consistency: ok (${checked.length} packages with a dist)`,
@@ -178,8 +219,17 @@ function main() {
   );
   for (const line of problems) console.error(`  - ${line}`);
   console.error(
-    '\nFix: run `npm run build` at the repository root, which rebuilds every package in dependency order.',
+    '\nFix: run `npm run build` at the repository root. It rebuilds every package in dependency order and force-rebuilds a package whose dist only lags a dependency (#209).',
   );
+  const dependents = findings.filter((f) => f.kind === 'dependency');
+  if (dependents.length > 0) {
+    console.error(
+      'If a plain root build leaves a dependency line standing, force-rebuild that package by hand: `npx tsc --build --force` in its directory (packages built with `tsc --build`), e.g.',
+    );
+    for (const dir of new Set(dependents.map((f) => relative(root, f.dir)))) {
+      console.error(`  (cd ${dir} && npx tsc --build --force)`);
+    }
+  }
   return 1;
 }
 

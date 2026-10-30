@@ -413,6 +413,100 @@ describe('buildSessionAgentsStatus', () => {
       fs.rmSync(projectDir, { recursive: true, force: true });
     }
   });
+
+  it('reads model, stats and recent activities of finished agents from their sidecars', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
+    const sessionDir = path.join(projectDir, 'subagents', 'session-1');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const writeMeta = (id: string, value: Record<string, unknown>) =>
+      fs.writeFileSync(
+        path.join(sessionDir, `agent-${id}.meta.json`),
+        JSON.stringify({
+          agentId: id,
+          agentType: 'general-purpose',
+          description: `stored ${id}`,
+          parentSessionId: 'session-1',
+          parentAgentId: null,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          status: 'completed',
+          isBackgrounded: true,
+          lastUpdatedAt: '2026-08-26T00:00:01.000Z',
+          ...value,
+        }),
+      );
+    try {
+      const activities = Array.from({ length: 12 }, (_, i) => ({
+        name: 'Read',
+        description: `file-${i}`,
+        at: 1_000 + i,
+      }));
+      writeMeta('done', {
+        model: 'qwen3-coder-plus',
+        stats: {
+          totalTokens: 4321,
+          outputTokens: 321,
+          toolUses: 7,
+          durationMs: 9000,
+        },
+        recentActivities: activities,
+      });
+      writeMeta('paused-one', { status: 'running', model: 'qwen3-max' });
+      writeMeta('legacy', {});
+      writeMeta('bad-stats', {
+        stats: { totalTokens: 'lots' },
+        recentActivities: [{ name: 1 }],
+      });
+      writeMeta('live', { model: 'stale-disk-model' });
+
+      const snapshot = await buildSessionAgentsStatus(
+        'session-1',
+        configWith(
+          [
+            agentTask({
+              id: 'live',
+              agentId: 'live',
+              model: 'qwen3-live',
+              stats: {
+                totalTokens: 10,
+                outputTokens: 2,
+                toolUses: 1,
+                durationMs: 5,
+              },
+            }),
+          ],
+          [],
+          projectDir,
+        ),
+        Date.parse('2026-08-26T00:00:02.000Z'),
+      );
+      const byId = (id: string) => snapshot.tasks.find((t) => t.id === id);
+
+      expect(byId('done')).toMatchObject({
+        status: 'completed',
+        model: 'qwen3-coder-plus',
+        stats: { totalTokens: 4321, toolUses: 7, durationMs: 9000 },
+      });
+      // Capped at the last ten, same as the persisted record.
+      expect(byId('done')?.recentActivities).toHaveLength(10);
+      expect(byId('done')?.recentActivities?.[9]).toEqual(activities[11]);
+      expect(byId('paused-one')).toMatchObject({
+        status: 'paused',
+        model: 'qwen3-max',
+      });
+      expect(byId('legacy')).not.toHaveProperty('model');
+      expect(byId('legacy')).not.toHaveProperty('stats');
+      expect(byId('legacy')).not.toHaveProperty('recentActivities');
+      expect(byId('bad-stats')).not.toHaveProperty('stats');
+      expect(byId('bad-stats')).not.toHaveProperty('recentActivities');
+      // A live row is not overwritten by its disk record.
+      expect(byId('live')).toMatchObject({
+        model: 'qwen3-live',
+        stats: { totalTokens: 10 },
+      });
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function workflowSnapshot(

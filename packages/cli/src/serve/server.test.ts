@@ -15,6 +15,7 @@ import {
   resetHomeEnvBootstrapForTesting,
 } from '../config/settings.js';
 import { updateModelContextWindow } from './model-configuration.js';
+import { buildSessionAgentsStatus } from '../acp-integration/session/tasksSnapshot.js';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -11435,6 +11436,82 @@ describe('createServeApp', () => {
       ]);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
       expect(bridge.sessionResourcesCalls).toEqual(['s-1']);
+    });
+
+    it('GET /session/:id/agents carries model, stats and recent activities of a finished agent from its sidecar', async () => {
+      const projectDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'serve-agents-route-'),
+      );
+      try {
+        const sessionDir = path.join(projectDir, 'subagents', 's-1');
+        await fsp.mkdir(sessionDir, { recursive: true });
+        const meta = (id: string, extra: Record<string, unknown>) =>
+          fsp.writeFile(
+            path.join(sessionDir, `agent-${id}.meta.json`),
+            JSON.stringify({
+              agentId: id,
+              agentType: 'general-purpose',
+              description: `stored ${id}`,
+              parentSessionId: 's-1',
+              parentAgentId: null,
+              createdAt: '2026-08-26T00:00:00.000Z',
+              lastUpdatedAt: '2026-08-26T00:00:05.000Z',
+              isBackgrounded: true,
+              ...extra,
+            }),
+          );
+        await meta('finished', {
+          status: 'completed',
+          model: 'qwen3-coder-plus',
+          stats: {
+            totalTokens: 4321,
+            outputTokens: 321,
+            toolUses: 7,
+            durationMs: 5000,
+          },
+          recentActivities: [
+            { name: 'Read', description: 'a.ts', at: 1_700_000_000_000 },
+          ],
+        });
+        await meta('old', { status: 'completed' });
+        const config = {
+          storage: { getProjectDir: () => projectDir },
+          getBackgroundTaskRegistry: () => ({ getAll: () => [] }),
+        } as unknown as Parameters<typeof buildSessionAgentsStatus>[1];
+        const bridge = fakeBridge({
+          sessionAgentsImpl: (sessionId) =>
+            buildSessionAgentsStatus(sessionId, config, 1_700_000_001_000),
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, primaryWorkspaceTrusted: true },
+        );
+
+        const res = await request(app)
+          .get('/session/s-1/agents')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        const rows = res.body.tasks as Array<Record<string, unknown>>;
+        const finished = rows.find((row) => row['id'] === 'finished');
+        expect(finished).toMatchObject({
+          status: 'completed',
+          subagentType: 'general-purpose',
+          model: 'qwen3-coder-plus',
+          stats: { totalTokens: 4321, toolUses: 7, durationMs: 5000 },
+          recentActivities: [
+            { name: 'Read', description: 'a.ts', at: 1_700_000_000_000 },
+          ],
+        });
+        // A record without the fields draws exactly as before.
+        const old = rows.find((row) => row['id'] === 'old');
+        expect(old).toBeDefined();
+        expect(old).not.toHaveProperty('model');
+        expect(old).not.toHaveProperty('stats');
+      } finally {
+        await fsp.rm(projectDir, { recursive: true, force: true });
+      }
     });
 
     it('dispatches read-only session snapshots through the live owner runtime', async () => {

@@ -6,12 +6,14 @@
 
 import {
   buildBackgroundEntryLabel,
+  getAgentMetaTerminalSummary,
   getSubagentSessionDir,
   MAX_AGENT_TRACE_NODES,
   MAX_RETAINED_TERMINAL_AGENTS,
   readAgentMetaAsync,
   sanitizeFilenameComponent,
   snapshotArgsUnavailable,
+  type AgentMeta,
   type AgentTask,
   type Config,
   type MonitorTask,
@@ -102,6 +104,21 @@ function retainAgentTasks(
     .sort((a, b) => a.startTime - b.startTime || a.id.localeCompare(b.id));
 }
 
+function persistedTerminalSummary(
+  meta: AgentMeta,
+): Pick<ServeSessionAgentTaskStatus, 'stats' | 'recentActivities'> {
+  const summary = getAgentMetaTerminalSummary(
+    meta.stats,
+    meta.recentActivities,
+  );
+  return {
+    ...optionalField('stats', summary.stats),
+    ...(summary.recentActivities && summary.recentActivities.length > 0
+      ? { recentActivities: summary.recentActivities }
+      : {}),
+  };
+}
+
 function serializeAgentTask(
   entry: AgentTask,
   now: number,
@@ -117,6 +134,7 @@ function serializeAgentTask(
     outputFile: entry.outputFile,
     ...optionalField('endTime', entry.endTime),
     ...optionalField('subagentType', entry.subagentType),
+    ...optionalField('model', entry.model),
     isBackgrounded: entry.isBackgrounded,
     // Nested-agent lineage for client-side tree rendering. AgentTask uses
     // `null` parentAgentId for top-level launches — normalize to absent.
@@ -481,8 +499,17 @@ export async function buildSessionAgentsStatus(
             `agent-${sanitizeFilenameComponent(meta.agentId)}.jsonl`,
           ),
           subagentType,
+          ...optionalField(
+            'model',
+            typeof meta.model === 'string' && meta.model.length > 0
+              ? meta.model
+              : undefined,
+          ),
           isBackgrounded: meta.isBackgrounded === true,
           ...optionalField('error', meta.lastError),
+          // The sidecar's terminal summary, same shape as the live fields;
+          // absent on legacy sidecars and on agents that never finished.
+          ...persistedTerminalSummary(meta),
           ...optionalField('toolUseId', meta.toolUseId),
           ...optionalField('parentAgentId', meta.parentAgentId ?? undefined),
           ...optionalField('depth', meta.depth),
