@@ -632,6 +632,16 @@ export class HostTabRegistry {
    * the automatic reopen never reopens a tab it opened itself.
    */
   start(input: StartTabInput): Promise<HostTabRecord> {
+    // The same rules the file is read back with: a record the next start of
+    // the gateway would drop is never written.
+    if (
+      !isValidSessionId(input.sessionId) ||
+      !isAbsolute(input.cwd) ||
+      !Number.isSafeInteger(input.pid) ||
+      input.pid <= 0
+    ) {
+      return Promise.reject(new Error('not a tab this registry can keep'));
+    }
     return this.serial(async () => {
       const now = this.now();
       const rec: HostTabRecord = {

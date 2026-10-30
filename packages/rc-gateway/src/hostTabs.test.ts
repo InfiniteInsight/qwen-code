@@ -556,6 +556,20 @@ describe('HostTabRegistry', () => {
     expect(left).toEqual([crashed.tabId, live.tabId, newest.tabId].sort());
   });
 
+  it('refuses to open a record its own reader would drop', async () => {
+    const reg = await open();
+    await expect(
+      reg.start({ sessionId: 'stub-agent-1', cwd: '/srv/w', pid: 1 }),
+    ).rejects.toThrow();
+    await expect(
+      reg.start({ sessionId: S1, cwd: 'relative', pid: 1 }),
+    ).rejects.toThrow();
+    await expect(
+      reg.start({ sessionId: S1, cwd: '/srv/w', pid: 0 }),
+    ).rejects.toThrow();
+    expect(await reg.list()).toEqual([]);
+  });
+
   it('starts empty on a file that is not the stored shape', async () => {
     await writeFile(file, JSON.stringify({ tabs: [{ nope: true }] }));
     const reg = await open();
