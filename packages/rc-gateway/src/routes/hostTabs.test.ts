@@ -10,7 +10,7 @@
  * daemon, with a real registry whose /proc probe is a table the test edits.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -38,6 +38,10 @@ import {
 } from '../daemonPool.js';
 import { FRONT_ATTESTATION, PEER_HEADER } from '../tls/http2Front.js';
 import { AUDIT_ACTIONS } from '../auditLog.js';
+
+// Every test boots the real app and issues real argon2id tokens (about 0.4 s
+// each), so a loaded machine needs more than the default 15 s.
+vi.setConfig({ testTimeout: 60_000 });
 
 const HOST_TOKEN = 'host-attach-token-212';
 const S1 = 'a9a5ddef-edc9-472e-8c52-ea6da2609e80';
@@ -75,6 +79,8 @@ interface BootOpts {
   noRequests?: boolean;
   /** `--reopen-crashed-tabs`. */
   autoReopen?: boolean;
+  /** Also issue write, reader and share tokens (each is a real argon2id hash). */
+  scoped?: boolean;
 }
 
 const ENDPOINT = (cwd: string): TabEndpointAnswer => ({
@@ -103,15 +109,22 @@ async function boot(opts: BootOpts = {}) {
   );
   const store = await TokenStore.open(join(base, 'tokens.json'));
   const { token: owner } = await store.issue(['owner'], 'o');
-  const { token: write } = await store.issue([WRITE, SESSION_READ], 'w');
-  const { token: reader } = await store.issue([SESSION_READ], 'r');
-  const share = await store.issueShare({
-    scopes: [SHARE, SESSION_READ],
-    label: 'guest',
-    sessionLockId: S1,
-    ttlSec: 3600,
-    parentId: 'owner',
-  });
+  let write = '';
+  let reader = '';
+  let shareToken = '';
+  if (opts.scoped) {
+    write = (await store.issue([WRITE, SESSION_READ], 'w')).token;
+    reader = (await store.issue([SESSION_READ], 'r')).token;
+    shareToken = (
+      await store.issueShare({
+        scopes: [SHARE, SESSION_READ],
+        label: 'guest',
+        sessionLockId: S1,
+        ttlSec: 3600,
+        parentId: 'owner',
+      })
+    ).token;
+  }
   const auditPath = join(base, 'audit.log');
   const gw = createGatewayApp({
     daemon: new DaemonClient({ baseUrl: stub.baseUrl }),
@@ -141,7 +154,7 @@ async function boot(opts: BootOpts = {}) {
     owner,
     write,
     reader,
-    share: share.token,
+    share: shareToken,
     registry,
     requests,
     probe,
@@ -325,7 +338,7 @@ async function seed(g: Awaited<ReturnType<typeof boot>>) {
 
 describe('GET /rc/host/tabs', () => {
   it('lists every record with its derived state and the launcher, to owner and write tokens', async () => {
-    const g = await boot();
+    const g = await boot({ scoped: true });
     const { crashed, live } = await seed(g);
     await g.poll();
     for (const token of [g.owner, g.write]) {
@@ -348,8 +361,8 @@ describe('GET /rc/host/tabs', () => {
     }
   });
 
-  it('refuses a reader and a share, and is absent on a gateway without the registry', async () => {
-    const g = await boot();
+  it('refuses a reader and a share; capabilities say hostTabs', async () => {
+    const g = await boot({ scoped: true });
     for (const token of [g.reader, g.share]) {
       const res = await send(g.url, '/rc/host/tabs', { method: 'GET', token });
       expect([res.status, res.body.code]).toEqual([403, 'scope_required']);
@@ -361,11 +374,9 @@ describe('GET /rc/host/tabs', () => {
     expect((caps.body.remoteControl as Record<string, unknown>).hostTabs).toBe(
       true,
     );
-    await new Promise<void>((r) => server!.close(() => r()));
-    server = undefined;
-    await stub!.close();
-    stub = undefined;
-    await rm(base!, { recursive: true, force: true });
+  });
+
+  it('is absent on a gateway without the registry, and capabilities say so', async () => {
     const old = await boot({ tabs: false });
     const res = await send(old.url, '/rc/host/tabs', {
       method: 'GET',
@@ -384,7 +395,7 @@ describe('GET /rc/host/tabs', () => {
 
 describe('POST /rc/host/tabs/:tabId/reopen', () => {
   it('queues a terminal request for the crashed tab, notes the reopen and audits it without a path', async () => {
-    const g = await boot();
+    const g = await boot({ scoped: true });
     const { crashed } = await seed(g);
     await g.poll();
     const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
@@ -560,7 +571,7 @@ describe('POST /rc/host/tabs/:tabId/reopen', () => {
   });
 
   it('is never reachable on read scope', async () => {
-    const g = await boot();
+    const g = await boot({ scoped: true });
     const { crashed } = await seed(g);
     await g.poll();
     for (const token of [g.reader, g.share]) {
@@ -575,7 +586,7 @@ describe('POST /rc/host/tabs/:tabId/reopen', () => {
 
 describe('dismiss and remove', () => {
   it('dismiss keeps the record and marks it; remove deletes it; both audited', async () => {
-    const g = await boot();
+    const g = await boot({ scoped: true });
     const { crashed } = await seed(g);
     const dis = await send(g.url, `/rc/host/tabs/${crashed.tabId}/dismiss`, {
       token: g.write,
@@ -610,7 +621,7 @@ describe('dismiss and remove', () => {
   });
 
   it('refuses a live tab, and a reader', async () => {
-    const g = await boot();
+    const g = await boot({ scoped: true });
     const { crashed, live } = await seed(g);
     const a = await send(g.url, `/rc/host/tabs/${live.tabId}/dismiss`, {
       token: g.owner,
