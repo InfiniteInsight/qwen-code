@@ -317,9 +317,16 @@ export function createCapabilityRoute(deps: {
       workspaceReload: true,
       // #128: POST /session/:id/artifacts and DELETE
       // /session/:id/artifacts/:artifactId are mounted (relays; the pool
-      // sends the daemon-issued client id the daemon requires). Nothing on
-      // the page reads this yet: the display decision is #127's.
+      // sends the daemon-issued client id the daemon requires). The page's
+      // Artifacts sheet (#127) draws Add and Remove only when this is set
+      // and the token holds write (`writeScope`).
       sessionArtifactWrites: true,
+      // #127: GET /session/:id/artifacts (session-read) and
+      // GET /session/:id/artifacts/:artifactId/content (WRITE) are mounted.
+      // The page draws the Artifacts pill only when this is set, so a page
+      // served to an older gateway shows no control it cannot back; Open
+      // also needs `writeScope`, the content read's own scope.
+      sessionArtifacts: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
