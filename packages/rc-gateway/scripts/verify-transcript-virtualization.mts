@@ -37,7 +37,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page, Route } from 'playwright';
-import { bootViewer, harnessRuntimeRoot, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, harnessRuntimeRoot, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type BootViewerOptions, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 import type { StubDaemonOptions } from '../src/testing/stubDaemon.js';
 
@@ -3046,6 +3046,8 @@ type PageScenario =
         artifactMutationErrorBody?: unknown;
         /** #135: the stub's session goal routes. */
         goal?: StubDaemonOptions['goal'];
+        /** #110 (workflow runs): see bootViewer's `runs`. */
+        runs?: BootViewerOptions['runs'];
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22998,6 +23000,7 @@ async function runPageScenario(
     artifactMutationStatus: s.stub?.artifactMutationStatus,
     artifactMutationErrorBody: s.stub?.artifactMutationErrorBody,
     goal: s.stub?.goal,
+    runs: s.stub?.runs,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -30857,6 +30860,367 @@ PAGE_SCENARIOS.push({
     expect(lines['srcInvalid'] === 'A link cannot carry a password', `the daemon's own source refusal changed: ${JSON.stringify(lines['srcInvalid'])}`);
     expect(lines['orgGone'] === "That group is not in this conversation's folder.", `the group sentence changed: ${JSON.stringify(lines['orgGone'])}`);
     return JSON.stringify(lines);
+  },
+});
+
+// ---- #110 workflow runs in the Runs list (P540 to P549) --------------------
+// The daemon lists a workflow run only for a trusted folder when asked, and the
+// gateway asks only for owner and write tokens. The harness gateway wraps a bare
+// DaemonClient, which has no `cancelSessionTask`, so a Stop is answered here by
+// page.route (as P41 does); the workflow-action route and the task list are
+// served by the real gateway and the stub.
+const WR_T0 = Date.now() - 90_000;
+const wrRun = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  kind: 'workflow',
+  id: 'wf-run-1',
+  label: 'release',
+  description: 'ship the release',
+  workflowName: 'release',
+  status: 'running',
+  startTime: WR_T0,
+  runtimeMs: 90_000,
+  isBackgrounded: true,
+  currentPhase: 'Build',
+  phaseVisits: [],
+  dispatches: [{ id: 'd1', label: 'x', prompt: 'WR-SECRET-PROMPT', status: 'running', dependsOn: [], queuedAt: 0 }],
+  agentsDispatched: 3,
+  agentsCompleted: 1,
+  tokensSpent: 1200,
+  tokenBudgetTotal: null,
+  recentLogs: ['WR-SECRET-LOG'],
+  pendingApprovalCount: 1,
+  outputFile: '/home/evan/.qwen/WR-secret-output.log',
+  ...over,
+});
+const wrShell = {
+  kind: 'shell',
+  id: 'sh-1',
+  label: 'pnpm test',
+  description: 'd',
+  status: 'completed',
+  startTime: 0,
+  runtimeMs: 2000,
+  command: 'pnpm test',
+  cwd: '/stub/workspace',
+  exitCode: 0,
+};
+const wrFlow = {
+  name: 'release',
+  source: 'project',
+  scriptPath: '/home/evan/WR-secret-project/.qwen/workflows/release.js',
+  script: 'export const meta = {}',
+  meta: {
+    name: 'release',
+    description: 'Cut and publish a release',
+    whenToUse: 'when a version is ready to ship',
+    phases: [
+      { title: 'Build', detail: 'compile every package' },
+      { title: 'Test', detail: 'run the suite', model: 'qwen-max' },
+      { title: 'Publish' },
+    ],
+  },
+};
+const wrOwner = (over: Record<string, unknown> = {}): NonNullable<BootViewerOptions['runs']> =>
+  ({ tasks: [wrShell], workflowTasks: [wrRun()], savedWorkflow: wrFlow, ...over });
+
+async function wrList(page: Page, sid: string): Promise<string[]> {
+  await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope !== undefined', null, { timeout: 15_000 });
+  await openPanel(page, 'runs');
+  await page.fill('#runs-id', sid);
+  await page.click('#runs-list');
+  await page.waitForFunction(
+    () => !(document.getElementById('runs-body')!.textContent ?? '').includes('loading'),
+    null,
+    { timeout: 8000 },
+  );
+  return page.evaluate(() => Array.from(document.querySelectorAll('#runs-body > div')).map((d) => d.textContent ?? ''));
+}
+const wrRows = (page: Page) => page.evaluate(() => Array.from(document.querySelectorAll('#runs-body .wf-run')).map((d) => d.textContent ?? ''));
+const wrBox = (page: Page, sel: string) =>
+  page.evaluate((q) => {
+    const e = document.querySelector(q) as HTMLElement | null;
+    if (!e) return null;
+    const r = e.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height) };
+  }, sel);
+/** A confirm() that records what it was asked and answers as told. */
+const wrConfirm = (page: Page, answer: boolean) =>
+  page.evaluate(`window.__wrAsked = []; window.__wrAnswer = ${answer}; window.confirm = (m) => { window.__wrAsked.push(m); return window.__wrAnswer; }`);
+const wrAsked = (page: Page) => page.evaluate('window.__wrAsked') as Promise<string[]>;
+const wrNote = (page: Page) => page.evaluate(() => document.querySelector('#runs-body .wf-run .wf-note')?.textContent ?? '');
+/** Answers POST .../tasks/:id/cancel from `verdict`, recording each body. */
+async function wrCancelRoute(page: Page, sent: Array<{ path: string; body: Record<string, unknown> }>, verdict: () => Record<string, unknown>): Promise<void> {
+  await page.route(/\/session\/[^/]+\/tasks\/[^/]+\/cancel$/, (route) => {
+    sent.push({ path: new URL(route.request().url()).pathname, body: JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown> });
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(verdict()) });
+  });
+}
+const wrWaitNote = (page: Page, re: RegExp, nth = 0) =>
+  page.waitForFunction(
+    ([src, n]) => new RegExp(src as string).test(document.querySelectorAll('#runs-body .wf-run')[n as number]?.querySelector('.wf-note')?.textContent ?? ''),
+    [re.source, nth],
+    { timeout: 8000 },
+  );
+
+PAGE_SCENARIOS.push({
+  name: 'P540 an owner on a trusted folder sees a workflow run in the Runs list with its name, status, start, phase and agents, the gateway having asked the daemon for it, and none of its prompts, logs or paths',
+  waitView: false,
+  stub: { runs: wrOwner() },
+  run: async ({ page, viewer }) => {
+    const rows = await wrList(page, viewer.sessionId);
+    expect(rows.length === 2, `two rows were sent, ${rows.length} drew: ${JSON.stringify(rows)}`);
+    const wf = (await wrRows(page))[0] ?? '';
+    for (const want of ['release', 'running', 'started', 'phase Build', '1 of 3 agents done', '1 waiting for approval']) {
+      expect(wf.includes(want), `the workflow row lacks ${JSON.stringify(want)}: ${JSON.stringify(wf)}`);
+    }
+    for (const leak of ['WR-SECRET-PROMPT', 'WR-SECRET-LOG', 'WR-secret-output']) {
+      expect(!wf.includes(leak), `the workflow row drew ${leak}`);
+    }
+    expect(rows.some((r) => r.includes('pnpm test')), 'the plain shell row is gone');
+    const asked = viewer.stub.tasksQueries.map((q) => q['includeWorkflows']);
+    expect(asked.length > 0 && asked.every((a) => a === 'true'), `the daemon was asked ${JSON.stringify(viewer.stub.tasksQueries)}`);
+    const stop = await wrBox(page, '#runs-body .wf-run button[data-act="stop"]');
+    const pause = await wrBox(page, '#runs-body .wf-run button[data-act="pause"]');
+    const name = await wrBox(page, '#runs-body .wf-run .wf-name');
+    expect(stop !== null && stop.h >= 44 && stop.w >= 44, `Stop is ${JSON.stringify(stop)}`);
+    expect(pause !== null && pause.h >= 44, `Pause is ${JSON.stringify(pause)}`);
+    expect(name !== null && name.h >= 44, `the name is ${JSON.stringify(name)}`);
+    await shot(page, 'p540-workflow-run');
+    return `owner: ${rows.length} rows, workflow row "${wf.slice(0, 90)}", Stop ${stop!.w}x${stop!.h}, opt-in sent`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P541 a read-only token sees no workflow run, and the gateway never asks the daemon for them; the plain rows are unchanged',
+  waitView: false,
+  stub: { runs: wrOwner({ readerToken: true }) },
+  run: async ({ page, viewer }) => {
+    const rows = await wrList(page, viewer.sessionId);
+    const wf = await wrRows(page);
+    expect(wf.length === 0, `a reader was shown workflow rows: ${JSON.stringify(wf)}`);
+    expect(rows.length === 1 && rows[0]!.includes('pnpm test'), `the reader's list is ${JSON.stringify(rows)}`);
+    expect(!rows.join(' ').includes('release'), 'the workflow name reached a reader');
+    const q = viewer.stub.tasksQueries;
+    expect(q.length > 0 && q.every((x) => x['includeWorkflows'] === undefined), `the daemon was asked ${JSON.stringify(q)}`);
+    const writable = (await page.evaluate('caps.remoteControl.writeScope')) as boolean;
+    expect(writable === false, 'the harness token is not read-only');
+    return 'reader token: plain list only, no includeWorkflows query';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P542 on an untrusted folder an owner sees no workflow run, only the plain rows',
+  waitView: false,
+  stub: { runs: wrOwner({ trusted: false }) },
+  run: async ({ page, viewer }) => {
+    const rows = await wrList(page, viewer.sessionId);
+    expect((await wrRows(page)).length === 0, 'a workflow row drew on an untrusted folder');
+    expect(rows.length === 1 && rows[0]!.includes('pnpm test'), `the list is ${JSON.stringify(rows)}`);
+    const q = viewer.stub.tasksQueries;
+    expect(q.some((x) => x['includeWorkflows'] === 'true'), 'the owner was not opted in; the daemon, not the gateway, should have withheld the rows');
+    return 'owner opted in, the daemon withheld the rows, the page drew none';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P543 Stop on a workflow run asks first: No sends nothing, Yes sends kind workflow to the cancel route and the row reads stopped only on the daemon\'s cancelled:true',
+  waitView: false,
+  stub: { runs: wrOwner() },
+  run: async ({ page, viewer }) => {
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const verdict: Record<string, unknown> = { cancelled: true };
+    await wrCancelRoute(page, sent, () => verdict);
+    await wrList(page, viewer.sessionId);
+    await wrConfirm(page, false);
+    await page.click('#runs-body .wf-run button[data-act="stop"]');
+    await page.waitForTimeout(300);
+    const first = await wrAsked(page);
+    expect(first.length === 1 && first[0]!.includes('release'), `the question was ${JSON.stringify(first)}`);
+    expect(sent.length === 0, `declining still sent ${JSON.stringify(sent)}`);
+    await wrConfirm(page, true);
+    await page.click('#runs-body .wf-run button[data-act="stop"]');
+    await wrWaitNote(page, /stopped/);
+    expect(sent.length === 1, `Yes sent ${sent.length} requests`);
+    expect(sent[0]!.path.endsWith('/tasks/wf-run-1/cancel'), `the path was ${sent[0]!.path}`);
+    expect(sent[0]!.body['kind'] === 'workflow', `the body was ${JSON.stringify(sent[0]!.body)}`);
+    const row = (await wrRows(page))[0]!;
+    expect(row.startsWith('release') && row.includes('stopped'), `the row reads ${JSON.stringify(row)}`);
+    return 'No: nothing sent; Yes: POST .../wf-run-1/cancel {kind:"workflow"}, row reads stopped';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P544 a Stop the daemon refuses is told in words: reason disabled names the folder and workflows, no reason says it did not stop, and neither reads as stopped',
+  waitView: false,
+  stub: { runs: wrOwner() },
+  run: async ({ page, viewer }) => {
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let verdict: Record<string, unknown> = { cancelled: false, reason: 'disabled' };
+    await wrCancelRoute(page, sent, () => verdict);
+    await wrList(page, viewer.sessionId);
+    await wrConfirm(page, true);
+    await page.click('#runs-body .wf-run button[data-act="stop"]');
+    await wrWaitNote(page, /did not stop/);
+    const disabled = await wrNote(page);
+    expect(/not trusted/.test(disabled) && /workflows are not enabled/.test(disabled), `disabled reads ${JSON.stringify(disabled)}`);
+    expect(!/stopped/.test((await wrRows(page))[0]!), 'a refused stop read as stopped');
+    verdict = { cancelled: false };
+    await page.click('#runs-body .wf-run button[data-act="stop"]');
+    await page.waitForFunction(() => !/not trusted/.test(document.querySelector('#runs-body .wf-run .wf-note')?.textContent ?? ''), null, { timeout: 8000 });
+    const bare = await wrNote(page);
+    expect(/did not stop/.test(bare) && !/reason/.test(bare), `no reason reads ${JSON.stringify(bare)}`);
+    verdict = { cancelled: false, reason: 'busy' };
+    await page.click('#runs-body .wf-run button[data-act="stop"]');
+    await page.waitForFunction(() => /reason: busy/.test(document.querySelector('#runs-body .wf-run .wf-note')?.textContent ?? ''), null, { timeout: 8000 });
+    return `disabled: "${disabled}"; none: "${bare}"; other reasons printed as sent`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P545 Pause goes to the workflow-action route as {action:"pause"}, a paused run offers Resume, a failed one Retry that asks first; only the controls a run\'s state allows are drawn',
+  waitView: false,
+  stub: {
+    runs: wrOwner({
+      workflowTasks: [
+        wrRun({ id: 'wf-run-1' }),
+        wrRun({ id: 'wf-run-2', status: 'paused', label: 'nightly', workflowName: 'nightly' }),
+        wrRun({ id: 'wf-run-3', status: 'failed', label: 'cleanup', workflowName: 'cleanup', error: 'agent crashed' }),
+        wrRun({ id: 'wf-run-4', status: 'failed', label: 'old', workflowName: 'old', argsUnavailable: true }),
+        wrRun({ id: 'wf-run-5', status: 'completed', label: 'done', workflowName: 'done' }),
+      ],
+    }),
+  },
+  run: async ({ page, viewer }) => {
+    await wrList(page, viewer.sessionId);
+    const acts = (await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#runs-body .wf-run')).map((r) =>
+        Array.from(r.querySelectorAll('button.wf-act')).map((b) => (b as HTMLElement).dataset['act']).join(','),
+      ),
+    )) as string[];
+    expect(
+      JSON.stringify(acts) === JSON.stringify(['stop,pause', 'stop,resume', 'retry', '', '']),
+      `the controls offered are ${JSON.stringify(acts)}`,
+    );
+    await page.locator('#runs-body .wf-run').nth(0).locator('button[data-act="pause"]').click();
+    await wrWaitNote(page, /pause: done/, 0);
+    expect(viewer.stub.workflowActions.length === 1, `${viewer.stub.workflowActions.length} actions reached the daemon`);
+    const a = viewer.stub.workflowActions[0]!;
+    expect(a.taskId === 'wf-run-1' && JSON.stringify(a.body) === '{"action":"pause"}', `the daemon was sent ${JSON.stringify(a)}`);
+    await page.locator('#runs-body .wf-run').nth(1).locator('button[data-act="resume"]').click();
+    await wrWaitNote(page, /resume: done/, 1);
+    // Retry asks first.
+    await wrConfirm(page, false);
+    await page.locator('#runs-body .wf-run').nth(2).locator('button[data-act="retry"]').click();
+    await page.waitForTimeout(300);
+    expect(viewer.stub.workflowActions.length === 2, 'declining the Retry question still sent a request');
+    expect((await wrAsked(page)).length === 1, 'Retry did not ask');
+    await wrConfirm(page, true);
+    await page.locator('#runs-body .wf-run').nth(2).locator('button[data-act="retry"]').click();
+    await wrWaitNote(page, /retry: done/, 2);
+    expect(viewer.stub.workflowActions[2]!.body['action'] === 'retry', 'Retry did not send retry');
+    return `controls ${JSON.stringify(acts)}; pause, resume and retry reached the daemon`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P546 a changed:false answer from the daemon reads as a no with the reasons it could be, never as done',
+  waitView: false,
+  stub: { runs: wrOwner({ actionChanged: false }) },
+  run: async ({ page, viewer }) => {
+    await wrList(page, viewer.sessionId);
+    await page.click('#runs-body .wf-run button[data-act="pause"]');
+    await wrWaitNote(page, /changed nothing/);
+    const note = await wrNote(page);
+    expect(/not be trusted/.test(note) && /already have moved on/.test(note) && !/done/.test(note), `the note is ${JSON.stringify(note)}`);
+    const tone = await page.evaluate(() => (document.querySelector('#runs-body .wf-run .wf-note') as HTMLElement).dataset['tone']);
+    expect(tone === 'err', `the note is not marked as a refusal (${tone})`);
+    return note;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P547 tapping a workflow run\'s name opens the saved workflow in a sheet: its description and steps as text, 44px Close, the file path never drawn, at 390 and 1100',
+  waitView: false,
+  stub: { runs: wrOwner() },
+  run: async ({ page, viewer }) => {
+    const lines: string[] = [];
+    await wrList(page, viewer.sessionId);
+    for (const size of H190_SIZES) {
+      await page.setViewportSize(size);
+      await page.click('#runs-body .wf-run .wf-name');
+      await page.waitForSelector('#wf-sheet:not([hidden])', { timeout: 5000 });
+      await page.waitForFunction(() => document.querySelectorAll('#wf-body .wf-steps li').length > 0, null, { timeout: 8000 });
+      const text = (await page.textContent('#wf-body')) ?? '';
+      for (const want of ['Cut and publish a release', 'when a version is ready to ship', 'Steps (3)', 'Build', 'compile every package', 'Test', 'run the suite', 'qwen-max', 'Publish']) {
+        expect(text.includes(want), `the sheet lacks ${JSON.stringify(want)}: ${JSON.stringify(text)}`);
+      }
+      expect(!text.includes('WR-secret-project') && !text.includes('.js'), `the sheet drew the file path: ${JSON.stringify(text)}`);
+      expect(((await page.textContent('#wf-title')) ?? '') === 'release', 'the sheet is not titled with the workflow');
+      const close = await wrBox(page, '#wf-close');
+      expect(close !== null && close.w >= 44 && close.h >= 44, `Close is ${JSON.stringify(close)}`);
+      const sideways = await page.evaluate(() => { const b = document.getElementById('wf-body')!; return b.scrollWidth > b.clientWidth; });
+      expect(!sideways, 'the sheet scrolls sideways');
+      await shot(page, `p547-workflow-sheet-${size.width}`);
+      await page.click('#wf-close');
+      await page.waitForSelector('#wf-sheet', { state: 'hidden' });
+      lines.push(`${size.width}: 3 steps, Close ${close!.w}x${close!.h}`);
+    }
+    expect(viewer.stub.lastSavedWorkflow?.name === 'release', 'the saved workflow read named another workflow');
+    return lines.join('; ');
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P548 the saved workflow sheet says so when there is no such workflow, shows the script when none declares steps, and prints the gateway\'s refusal when the read fails',
+  waitView: false,
+  stub: { runs: wrOwner({ savedWorkflow: null }) },
+  run: async ({ page, viewer }) => {
+    await wrList(page, viewer.sessionId);
+    await page.click('#runs-body .wf-run .wf-name');
+    await page.waitForFunction(() => /No saved workflow named/.test(document.getElementById('wf-body')!.textContent ?? ''), null, { timeout: 8000 });
+    await page.click('#wf-close');
+    // A definition with no phases: its script is the only text.
+    await page.route(/\/session\/[^/]+\/saved-workflows\//, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ v: 1, sessionId: viewer.sessionId, name: 'release', workflow: { ...wrFlow, meta: null, metaError: 'meta is not a literal', script: 'agent("WR-SCRIPT-TEXT")' } }) }),
+    );
+    await page.click('#runs-body .wf-run .wf-name');
+    await page.waitForFunction(() => /WR-SCRIPT-TEXT/.test(document.getElementById('wf-body')!.textContent ?? ''), null, { timeout: 8000 });
+    const t = (await page.textContent('#wf-body')) ?? '';
+    expect(/meta is not a literal/.test(t) && !t.includes('WR-secret-project'), `the fallback reads ${JSON.stringify(t)}`);
+    await page.click('#wf-close');
+    await page.unroute(/\/session\/[^/]+\/saved-workflows\//);
+    await page.route(/\/session\/[^/]+\/saved-workflows\//, (route) =>
+      route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: 'Daemon unavailable', code: 'daemon_unavailable' }) }),
+    );
+    await page.click('#runs-body .wf-run .wf-name');
+    await page.waitForFunction(() => /could not be read/.test(document.getElementById('wf-body')!.textContent ?? ''), null, { timeout: 8000 });
+    const e = (await page.textContent('#wf-body')) ?? '';
+    expect(/daemon_unavailable/.test(e) && /HTTP 502/.test(e), `the failure reads ${JSON.stringify(e)}`);
+    return 'no such workflow, script fallback, and a printed failure';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P549 on a gateway that does not flag workflowRuns the Runs list draws no workflow run and the page never asks for a saved workflow, whatever the daemon sent',
+  waitView: false,
+  stub: { runs: wrOwner() },
+  before: async (page) => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+      if (j.remoteControl) delete j.remoteControl['workflowRuns'];
+      await route.fulfill({ response: res, json: j });
+    });
+  },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    page.on('request', (r) => { if (/saved-workflows|workflow-action/.test(r.url())) asked.push(r.url()); });
+    const rows = await wrList(page, viewer.sessionId);
+    expect((await wrRows(page)).length === 0, 'a workflow row drew without the capability');
+    expect(rows.length === 1 && rows[0]!.includes('pnpm test'), `the list is ${JSON.stringify(rows)}`);
+    expect(!rows.join(' ').includes('release'), 'the workflow name reached the list');
+    expect(asked.length === 0, `the page asked ${JSON.stringify(asked)}`);
+    return 'no capability, no workflow row, no workflow request; the plain rows unchanged';
   },
 });
 
