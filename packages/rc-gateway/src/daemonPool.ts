@@ -128,16 +128,55 @@ export async function deleteWorkspaceFileOnPrimary(
   filePath: string,
   clientId?: string,
 ): Promise<void> {
+  const target = await primaryWorkspaceOf(client);
+  await target.deleteWorkspaceFile(filePath, clientId);
+}
+
+/**
+ * The qualified client for the daemon's own primary workspace, from its own
+ * capabilities (the primary entry of `workspaces` by id, else
+ * `workspaceCwd`). Shared by the file delete above and the directory pair
+ * below, which are all reachable only on a workspace-qualified client.
+ */
+async function primaryWorkspaceOf(client: PrimaryWorkspaceDeleteClient) {
   const caps = await client.capabilities();
   const primary = Array.isArray(caps.workspaces)
     ? caps.workspaces.find(
         (w) => w && w.primary === true && typeof w.id === 'string' && w.id,
       )
     : undefined;
-  const target = primary
+  return primary
     ? client.workspaceById(primary.id)
     : client.workspaceByCwd(requireWorkspaceCwd(caps));
-  await target.deleteWorkspaceFile(filePath, clientId);
+}
+
+/**
+ * Create one directory in the daemon's primary workspace (#123). The SDK
+ * carries `createWorkspaceDirectory` on `WorkspaceDaemonClient` only, so a
+ * bare `DaemonClient` has no member of that name: the same trap, the same
+ * way round as {@link deleteWorkspaceFileOnPrimary}.
+ */
+export async function createWorkspaceDirectoryOnPrimary(
+  client: PrimaryWorkspaceDeleteClient,
+  dirPath: string,
+  clientId?: string,
+): Promise<void> {
+  const target = await primaryWorkspaceOf(client);
+  await target.createWorkspaceDirectory(dirPath, clientId);
+}
+
+/**
+ * Delete one directory and everything in it, in the daemon's primary
+ * workspace (#123). The daemon removes it recursively; the SDK name is
+ * `WorkspaceDaemonClient.deleteWorkspaceDirectory`.
+ */
+export async function deleteWorkspaceDirectoryOnPrimary(
+  client: PrimaryWorkspaceDeleteClient,
+  dirPath: string,
+  clientId?: string,
+): Promise<void> {
+  const target = await primaryWorkspaceOf(client);
+  await target.deleteWorkspaceDirectory(dirPath, clientId);
 }
 
 /**
@@ -760,6 +799,21 @@ export interface SessionDaemon {
    */
   deleteWorkspaceFile?(
     filePath: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
+  /**
+   * OPTIONAL for the same reason as {@link deleteWorkspaceFile}: the SDK puts
+   * both names on `WorkspaceDaemonClient` alone (#123, directories). The
+   * routes fall back to the `...OnPrimary` helpers on a bare client.
+   */
+  createWorkspaceDirectory?(
+    dirPath: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
+  deleteWorkspaceDirectory?(
+    dirPath: string,
     clientId?: string,
     workspaceCwd?: string,
   ): Promise<void>;
@@ -3078,6 +3132,26 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<void> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       deleteWorkspaceFileOnPrimary(client, filePath, clientId),
+    );
+  }
+
+  createWorkspaceDirectory(
+    dirPath: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      createWorkspaceDirectoryOnPrimary(client, dirPath, clientId),
+    );
+  }
+
+  deleteWorkspaceDirectory(
+    dirPath: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      deleteWorkspaceDirectoryOnPrimary(client, dirPath, clientId),
     );
   }
 

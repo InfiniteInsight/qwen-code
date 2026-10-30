@@ -1899,6 +1899,10 @@
       #wsf-ask .ask-sub {
         color: var(--g1-ink-mid);
         font-size: 13px;
+        white-space: pre-line;
+      }
+      #wsf-ask .wsf-acts button:disabled {
+        opacity: 0.45;
       }
       #wsf-ask .wsf-path {
         padding: 8px 10px;
@@ -10476,10 +10480,12 @@
         const path = typeof data.path === 'string' ? data.path : wsFilesPath;
         wsFilesPath = path;
         const head = document.createElement('div');
-        head.style.cssText = 'display:flex;align-items:center;gap:8px';
+        // Wraps (#123): with Delete beside up and refresh, a long folder name
+        // would otherwise be squeezed to a sliver on a phone.
+        head.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:8px';
         const here = document.createElement('strong');
         here.textContent = path || '.';
-        here.style.cssText = 'font-size:12px;flex:1;word-break:break-all';
+        here.style.cssText = 'font-size:12px;flex:1 1 40%;word-break:break-all';
         head.appendChild(here);
         if (path && path !== '.') {
           const up = document.createElement('button');
@@ -10494,6 +10500,13 @@
         refresh.textContent = 'refresh';
         refresh.addEventListener('click', () => void loadWorkspaceFiles(false));
         head.appendChild(refresh);
+        // #123: Delete on an open folder (never the workspace root, which
+        // the daemon refuses and the head does not offer).
+        if (path && path !== '.' && wsfDirGate('workspace_directory_delete')) {
+          const del = wsfFileButton('Delete', () => wsfDeleteFolder(path));
+          del.dataset.wsf = 'deldir';
+          head.appendChild(del);
+        }
 
         const findRow = document.createElement('div');
         findRow.style.cssText = 'display:flex;gap:6px';
@@ -10806,6 +10819,19 @@
         );
       }
 
+      // The directory pair (#123) has its own gateway flag, because a gateway
+      // can have the file writes and not these; the rest of the gate is the
+      // same: write scope and the daemon's own tag for the route.
+      function wsfDirGate(tag) {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc.workspaceDirectoryWrites === true &&
+          rc.writeScope === true &&
+          daemonHasFeature(tag)
+        );
+      }
+
       // The editor takes a file of up to 256 KB: the most the daemon hands
       // over in one read (MAX_READ_BYTES, cli/src/serve/fs/policy.ts). The
       // text and the hash a save is checked against then come from one read,
@@ -10898,12 +10924,13 @@
             p.textContent = o.path;
             card.appendChild(p);
           }
-          if (o.sub) {
-            const d = document.createElement('div');
-            d.className = 'ask-sub';
-            d.dataset.wsf = 'sub';
-            d.textContent = o.sub;
-            card.appendChild(d);
+          let subEl = null;
+          if (o.sub || o.onOpen) {
+            subEl = document.createElement('div');
+            subEl.className = 'ask-sub';
+            subEl.dataset.wsf = 'sub';
+            subEl.textContent = o.sub || '';
+            card.appendChild(subEl);
           }
           let input = null;
           if (o.input) {
@@ -10932,6 +10959,7 @@
           go.dataset.wsf = 'go';
           go.className = o.danger ? 'danger' : 'primary';
           go.textContent = o.go;
+          if (o.goDisabled) go.disabled = true;
           acts.append(cancel, go);
           card.appendChild(acts);
           box.appendChild(card);
@@ -10975,6 +11003,20 @@
           };
           box.hidden = false;
           (input || cancel).focus({ preventScroll: true });
+          // A sheet whose words arrive after it opens (a folder's count)
+          // gets two handles: the sub line and the go button. Cancel stays
+          // first and focused throughout.
+          if (o.onOpen) {
+            o.onOpen({
+              setSub: (t) => {
+                if (subEl) subEl.textContent = t;
+              },
+              setGo: (enabled) => {
+                go.disabled = !enabled;
+              },
+              isOpen: () => !box.hidden && box.contains(go),
+            });
+          }
         });
       }
 
@@ -11008,7 +11050,11 @@
       function wsfListingActions(dir) {
         const canNew = wsfGate('workspace_file_write');
         const canUp = wsfGate('workspace_file_upload');
-        if (!canNew && !canUp) return null;
+        const canDir = wsfDirGate('workspace_directory_create');
+        // The folder delete sits in the listing's head, but its outcome is
+        // told on the line under the actions, so that line has to be drawn.
+        const canDirDel = wsfDirGate('workspace_directory_delete');
+        if (!canNew && !canUp && !canDir && !canDirDel) return null;
         const wrap = document.createElement('div');
         wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px';
         const row = document.createElement('div');
@@ -11018,12 +11064,18 @@
           b.dataset.wsf = 'new';
           row.appendChild(b);
         }
+        if (canDir) {
+          const b = wsfFileButton('New folder', () => wsfNewFolder(dir));
+          b.dataset.wsf = 'newdir';
+          row.appendChild(b);
+        }
         if (canUp) {
           const b = wsfFileButton('Upload', () => wsfPickUpload(dir));
           b.dataset.wsf = 'upload';
           row.appendChild(b);
         }
-        wrap.append(row, wsfNote());
+        if (row.childNodes.length) wrap.append(row);
+        wrap.append(wsfNote());
         return wrap;
       }
 
@@ -11489,6 +11541,261 @@
           void loadWorkspaceFiles(false);
         } catch (err) {
           status.textContent = 'not deleted: ' + err.message;
+        }
+      }
+
+      // New folder: ask for a name, create it in the folder the listing
+      // shows, and reload the listing so it appears. The daemon refuses a
+      // taken name (409) rather than reusing it, and says so.
+      async function wsfNewFolder(dir) {
+        const name = await wsfAsk({
+          title: 'New folder',
+          path: wsfFullPath(dir) + '/',
+          sub: 'An empty folder inside this one.',
+          input: {
+            label: 'Folder name',
+            placeholder: 'docs',
+            check: (v) =>
+              !v
+                ? 'Type a name for the folder.'
+                : v.includes('/')
+                  ? 'A name, not a path: open the folder first.'
+                  : v === '.' || v === '..'
+                    ? 'That is not a folder name.'
+                    : '',
+          },
+          go: 'Create',
+        });
+        if (name === null) return;
+        const rel = wsFilesJoin(dir, name);
+        wsfSetNote('creating ' + rel + '...');
+        try {
+          const { res, data } = await wsfPost('/rc/workspace/directory/create', {
+            path: rel,
+          });
+          if (!res.ok) {
+            wsfSetNote(
+              data.code === 'file_already_exists'
+                ? rel + ' already exists: open it from the list instead'
+                : 'not created: ' + wsFilesErrorText(res.status, data),
+            );
+            return;
+          }
+          wsfSetNote('created folder ' + rel);
+          void loadWorkspaceFiles(false);
+        } catch (err) {
+          wsfSetNote('not created: ' + err.message);
+        }
+      }
+
+      // What deleting a folder will take, counted from the listing. The
+      // daemon's delete is recursive and nothing at the route says how much
+      // that is (stat gives no tree size), so the page walks the folder with
+      // the same list route the browser uses, a level at a time, and stats
+      // each file for its size. It stops at WSF_WALK_MAX_ENTRIES entries or
+      // WSF_WALK_MAX_DEPTH levels and says which, so a count that stopped is
+      // never shown as the whole. The listing leaves out what the project's
+      // ignore rules hide (node_modules and the like); the delete does not,
+      // and the sheet says so rather than implying the count is everything.
+      const WSF_WALK_MAX_ENTRIES = 500;
+      const WSF_WALK_MAX_DEPTH = 3;
+      const WSF_WALK_STAT_PARALLEL = 6;
+
+      async function wsfWalkFolder(root, signal, onProgress) {
+        const r = {
+          files: 0,
+          folders: 0,
+          bytes: 0,
+          sizeUnknown: 0,
+          stopped: '',
+          failed: '',
+          done: false,
+        };
+        const queue = [{ path: root, depth: 1 }];
+        const total = () => r.files + r.folders;
+        try {
+          while (queue.length) {
+            if (total() >= WSF_WALK_MAX_ENTRIES) {
+              r.stopped = 'entries';
+              break;
+            }
+            const { path, depth } = queue.shift();
+            const res = await fetch(
+              wsTargetQuery('/rc/workspace/list?path=' + encodeURIComponent(path)),
+              { headers: wsfAuth(), signal },
+            );
+            if (!res.ok) {
+              const e = await res.json().catch(() => ({}));
+              r.failed = wsFilesErrorText(res.status, e);
+              break;
+            }
+            const data = await res.json();
+            if (data.truncated && !r.stopped) r.stopped = 'truncated';
+            const toStat = [];
+            const entries = Array.isArray(data.entries) ? data.entries : [];
+            for (const entry of entries) {
+              if (!entry || typeof entry.name !== 'string') continue;
+              if (total() >= WSF_WALK_MAX_ENTRIES) {
+                r.stopped = 'entries';
+                break;
+              }
+              const child = wsFilesJoin(path, entry.name);
+              if (entry.kind === 'directory') {
+                r.folders++;
+                if (depth < WSF_WALK_MAX_DEPTH) {
+                  queue.push({ path: child, depth: depth + 1 });
+                } else if (!r.stopped) {
+                  r.stopped = 'depth';
+                }
+              } else {
+                r.files++;
+                // A link or a special file is counted but not sized: stat
+                // would follow a link to something the delete does not touch.
+                if (entry.kind === 'file') toStat.push(child);
+                else r.sizeUnknown++;
+              }
+            }
+            let next = 0;
+            const worker = async () => {
+              while (next < toStat.length) {
+                const rel = toStat[next++];
+                try {
+                  const sr = await fetch(
+                    wsTargetQuery('/rc/workspace/stat?path=' + encodeURIComponent(rel)),
+                    { headers: wsfAuth(), signal },
+                  );
+                  const sd = await sr.json().catch(() => ({}));
+                  if (sr.ok && typeof sd.sizeBytes === 'number') r.bytes += sd.sizeBytes;
+                  else r.sizeUnknown++;
+                } catch (err) {
+                  if (signal && signal.aborted) throw err;
+                  r.sizeUnknown++;
+                }
+              }
+            };
+            await Promise.all(
+              Array.from(
+                { length: Math.min(WSF_WALK_STAT_PARALLEL, toStat.length) },
+                worker,
+              ),
+            );
+            onProgress(r);
+            if (r.stopped === 'entries') break;
+          }
+        } catch (err) {
+          if (signal && signal.aborted) return null;
+          r.failed = 'could not read the folder: ' + err.message;
+        }
+        r.done = true;
+        return r;
+      }
+
+      function wsfPlural(n, one, many) {
+        return n + ' ' + (n === 1 ? one : many);
+      }
+
+      // The sheet's words for a count, finished or still running.
+      function wsfWalkText(r) {
+        const ignoredNote =
+          "Files hidden by the project's ignore rules (such as node_modules) are not counted here, and they are deleted too.";
+        const trash = 'It is removed from the host, not moved to a trash.';
+        if (r.failed) {
+          return (
+            'Could not count what is inside (' +
+            r.failed +
+            '), so there is nothing to confirm against. Close this and try again.'
+          );
+        }
+        if (!r.done) {
+          const some = r.files + r.folders;
+          return some
+            ? 'Counting what is inside... ' +
+                wsfPlural(r.files, 'file', 'files') +
+                ' and ' +
+                wsfPlural(r.folders, 'folder', 'folders') +
+                ' so far.'
+            : 'Counting what is inside...';
+        }
+        if (!r.stopped && r.files + r.folders === 0) {
+          return 'This folder is empty. ' + trash + '\n' + ignoredNote;
+        }
+        const parts = [];
+        const more = r.stopped ? 'More than ' : '';
+        parts.push(more + wsfPlural(r.files, 'file', 'files'));
+        parts.push(wsfPlural(r.folders, 'folder', 'folders'));
+        let line = parts.join(' and ');
+        const size = formatBytes(r.bytes) + ' (' + r.bytes + ' bytes)';
+        line += r.stopped
+          ? ', and more than ' + size + ' in the files counted.'
+          : ', ' + size + ' in total.';
+        if (r.stopped === 'entries') {
+          line +=
+            ' Counting stopped at ' +
+            WSF_WALK_MAX_ENTRIES +
+            ' entries; everything else inside goes too.';
+        } else if (r.stopped === 'depth') {
+          line +=
+            ' Counting stopped ' +
+            WSF_WALK_MAX_DEPTH +
+            ' levels down; everything deeper goes too.';
+        } else if (r.stopped === 'truncated') {
+          line +=
+            ' The daemon cut a listing short; everything it left out goes too.';
+        }
+        if (r.sizeUnknown) {
+          line +=
+            ' The size of ' +
+            wsfPlural(r.sizeUnknown, 'item', 'items') +
+            ' could not be read.';
+        }
+        return line + ' ' + trash + '\n' + ignoredNote;
+      }
+
+      // Delete a folder: a sheet that names the full path and, once the walk
+      // has finished or stopped, what it counted. Delete stays disabled until
+      // then, and stays disabled if the count itself failed. Cancel, Escape
+      // and the scrim all end the walk. After the delete the browser returns
+      // to the parent folder.
+      async function wsfDeleteFolder(relPath) {
+        const ac = new AbortController();
+        let walked = null;
+        const ok = await wsfAsk({
+          title: 'Delete this folder and everything in it?',
+          path: wsfFullPath(relPath),
+          sub: wsfWalkText({ files: 0, folders: 0, done: false }),
+          go: 'Delete',
+          danger: true,
+          goDisabled: true,
+          onOpen: (api) => {
+            void wsfWalkFolder(relPath, ac.signal, (r) => {
+              if (api.isOpen()) api.setSub(wsfWalkText(r));
+            }).then((r) => {
+              if (!r || !api.isOpen()) return;
+              walked = r;
+              api.setSub(wsfWalkText(r));
+              api.setGo(!r.failed);
+            });
+          },
+        });
+        ac.abort();
+        if (!ok || !walked || walked.failed) return;
+        wsfSetNote('deleting ' + relPath + '...');
+        try {
+          const { res, data } = await wsfPost('/rc/workspace/directory/delete', {
+            path: relPath,
+          });
+          if (!res.ok) {
+            wsfSetNote('not deleted: ' + wsFilesErrorText(res.status, data));
+            return;
+          }
+          const view = $('ws-files-view');
+          if (view) view.remove();
+          wsFilesPath = wsFilesParent(relPath);
+          wsfSetNote('deleted folder ' + relPath);
+          setStatus('deleted folder ' + relPath);
+          void loadWorkspaceFiles(false);
+        } catch (err) {
+          wsfSetNote('not deleted: ' + err.message);
         }
       }
 

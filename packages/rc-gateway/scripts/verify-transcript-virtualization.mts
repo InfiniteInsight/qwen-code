@@ -3028,6 +3028,13 @@ type PageScenario =
         agentTraceResult?: unknown;
         /** #132: what the boot daemon's POST /sessions/catalog serves. */
         catalog?: StubDaemonOptions['catalog'];
+        /** #123 (directories): the tree the stub's list and stat answer from. */
+        workspaceTree?: StubDaemonOptions['workspaceTree'];
+        /** #123 (directories): force the stub's directory routes to refuse. */
+        directoryCreateStatus?: number;
+        directoryCreateErrorBody?: unknown;
+        directoryDeleteStatus?: number;
+        directoryDeleteErrorBody?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22943,6 +22950,11 @@ async function runPageScenario(
     sessionAgentsResult: s.stub?.sessionAgentsResult,
     agentTraceResult: s.stub?.agentTraceResult,
     catalog: s.stub?.catalog,
+    workspaceTree: s.stub?.workspaceTree,
+    directoryCreateStatus: s.stub?.directoryCreateStatus,
+    directoryCreateErrorBody: s.stub?.directoryCreateErrorBody,
+    directoryDeleteStatus: s.stub?.directoryDeleteStatus,
+    directoryDeleteErrorBody: s.stub?.directoryDeleteErrorBody,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -27756,6 +27768,539 @@ VIEW_SCENARIOS.push({
     },
   });
 }
+
+// -- #123, directories: New folder and folder Delete (P450 to P459) -----------
+// The same whole chain as P410 to P419: the page, the gateway's directory
+// routes, a bare DaemonClient (so the qualified-client fallback runs) and the
+// stub's tree, which the listing and the delete confirmation's walk both read.
+
+const DIR_TAGS = [...WSF_TAGS, 'workspace_directory_create', 'workspace_directory_delete'];
+
+/** Every POST the page makes to a directory route, with what it carried. */
+function wsfdCapture(page: Page): Array<{ path: string; body: string }> {
+  const out: Array<{ path: string; body: string }> = [];
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (r.method() !== 'POST' || !u.pathname.startsWith('/rc/workspace/directory/')) return;
+    out.push({ path: u.pathname, body: r.postData() ?? '' });
+  });
+  return out;
+}
+
+/** The paths the page asked the list and stat routes about, in order. */
+function wsfdReads(page: Page): { lists: string[]; stats: string[] } {
+  const seen = { lists: [] as string[], stats: [] as string[] };
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === '/rc/workspace/list') seen.lists.push(u.searchParams.get('path') ?? '');
+    if (u.pathname === '/rc/workspace/stat') seen.stats.push(u.searchParams.get('path') ?? '');
+  });
+  return seen;
+}
+
+/** Open a folder from the root listing and wait for the head to name it. */
+async function wsfdEnter(page: Page, name: string): Promise<void> {
+  await wsfTap(page, `${name}/`);
+  await page.waitForFunction(
+    (n) => document.querySelector('#ws-files-body strong')?.textContent === n,
+    name,
+    { timeout: 15_000 },
+  );
+}
+
+/** Tap the open folder's Delete and wait for the sheet. */
+async function wsfdAskDelete(page: Page): Promise<void> {
+  await page.click('#ws-files-body [data-wsf=deldir]');
+  await page.waitForSelector('#wsf-ask:not([hidden]) [data-wsf=go]', { timeout: 10_000 });
+}
+
+/** Wait for the delete sheet's count to finish (Delete enabled, or failed). */
+async function wsfdCounted(page: Page): Promise<string> {
+  await page.waitForFunction(
+    () => {
+      const sub = document.querySelector('#wsf-ask [data-wsf=sub]')?.textContent || '';
+      return !/^Counting/.test(sub);
+    },
+    null,
+    { timeout: 20_000 },
+  );
+  return (await page.textContent('#wsf-ask [data-wsf=sub]')) || '';
+}
+
+const wsfdGoEnabled = (page: Page): Promise<boolean> =>
+  page.evaluate(() => !(document.querySelector('#wsf-ask [data-wsf=go]') as HTMLButtonElement).disabled);
+
+const P451_GATE: { open: () => void; wait: Promise<void> } = (() => {
+  let open!: () => void;
+  const wait = new Promise<void>((r) => {
+    open = r;
+  });
+  return { open, wait };
+})();
+
+PAGE_SCENARIOS.push({
+  name: 'P450 New folder sits beside New file, asks for a name in a sheet, posts one create, and the folder appears in the listing; a taken name says so',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: DIR_TAGS },
+  run: async ({ page }) => {
+    const posts = wsfdCapture(page);
+    await wsfOpenListing(page);
+    const row = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body [data-wsf]')).map((b) => ({
+        mark: (b as HTMLElement).dataset.wsf,
+        label: b.textContent,
+        h: b.getBoundingClientRect().height,
+      })),
+    );
+    expect(
+      JSON.stringify(row.map((r) => r.label)) === '["New file","New folder","Upload"]',
+      `the actions read ${JSON.stringify(row.map((r) => r.label))}`,
+    );
+    expect(row.every((r) => r.h >= 44), `a control is under 44px: ${JSON.stringify(row)}`);
+
+    await page.click('#ws-files-body [data-wsf=newdir]');
+    await page.waitForSelector('#wsf-ask:not([hidden]) input', { timeout: 10_000 });
+    const sheet = await page.evaluate(() => ({
+      title: document.querySelector('#wsf-ask .ask-title')?.textContent || '',
+      where: document.querySelector('#wsf-ask [data-wsf=path]')?.textContent || '',
+      focused: document.activeElement === document.querySelector('#wsf-ask input'),
+    }));
+    expect(sheet.title === 'New folder', `the sheet is titled ${JSON.stringify(sheet.title)}`);
+    expect(sheet.where === '/stub/workspace/', `the sheet names the folder as ${JSON.stringify(sheet.where)}`);
+    expect(sheet.focused, 'the name field does not have the focus');
+    await page.click('#wsf-ask [data-wsf=go]');
+    expect(/Type a name/.test((await page.textContent('#wsf-ask .wsf-note')) || ''), 'an empty name was not refused in the sheet');
+    await page.fill('#wsf-ask input', 'a/b');
+    await page.click('#wsf-ask [data-wsf=go]');
+    expect(/not a path/.test((await page.textContent('#wsf-ask .wsf-note')) || ''), 'a path was not refused in the sheet');
+    expect(posts.length === 0, `a refused name still posted: ${JSON.stringify(posts)}`);
+
+    await page.fill('#wsf-ask input', 'docs');
+    await page.press('#wsf-ask input', 'Enter');
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('#ws-files-body button')).some((b) => b.textContent === 'docs/'),
+      null,
+      { timeout: 15_000 },
+    );
+    expect(
+      posts.length === 1 && posts[0].path === '/rc/workspace/directory/create' && JSON.parse(posts[0].body).path === 'docs',
+      `the create carried ${JSON.stringify(posts)}`,
+    );
+    const note = (await page.textContent('#ws-files-write-note')) || '';
+    expect(note.includes('created folder docs'), `the note reads ${JSON.stringify(note)}`);
+
+    // A name that is taken: the daemon refuses, the page says which and posts nothing more.
+    await page.click('#ws-files-body [data-wsf=newdir]');
+    await page.waitForSelector('#wsf-ask:not([hidden]) input', { timeout: 10_000 });
+    await page.fill('#wsf-ask input', 'src');
+    await page.press('#wsf-ask input', 'Enter');
+    await page.waitForFunction(
+      () => /already exists/.test(document.getElementById('ws-files-write-note')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const taken = (await page.textContent('#ws-files-write-note')) || '';
+    expect(taken.includes('src already exists'), `a taken name said ${JSON.stringify(taken)}`);
+    expect(posts.length === 2, `${posts.length} creates for two tries`);
+    return 'New file, New folder, Upload in that order at 44px or more; the sheet refused an empty name and a path, one create made docs/, which is in the listing, and a taken name was refused by the daemon and said so';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P451 Delete on an open folder counts it from the listing, names the full path, files, folders and size, keeps Delete disabled until the count is done, and only Delete calls the route, then returns to the parent',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: DIR_TAGS,
+    workspaceTree: {
+      'proj/a.txt': 100,
+      'proj/b.txt': 2048,
+      'proj/sub/c.txt': 1_000_000,
+      'proj/sub/deep/d.txt': 52,
+    },
+  },
+  // The sizes come from stat; hold the first answers so the sheet can be read
+  // mid-count, with Delete disabled.
+  before: async (page) => {
+    await page.route(/\/rc\/workspace\/stat\?/, async (route) => {
+      await P451_GATE.wait;
+      await route.continue();
+    });
+  },
+  run: async ({ page }) => {
+    const posts = wsfdCapture(page);
+    const reads = wsfdReads(page);
+    await wsfOpenListing(page);
+    expect(!(await page.$('#ws-files-body [data-wsf=deldir]')), 'the root listing offers to delete the workspace');
+    await wsfdEnter(page, 'proj');
+    const head = await page.evaluate(() => {
+      const d = document.querySelector('#ws-files-body [data-wsf=deldir]') as HTMLElement | null;
+      return d ? { label: d.textContent, h: d.getBoundingClientRect().height } : null;
+    });
+    expect(head !== null && head.label === 'Delete' && head.h >= 44, `the folder head offers ${JSON.stringify(head)}`);
+
+    await wsfdAskDelete(page);
+    const early = await page.evaluate(() => {
+      const acts = Array.from(document.querySelectorAll('#wsf-ask .wsf-acts button')) as HTMLButtonElement[];
+      return {
+        title: document.querySelector('#wsf-ask .ask-title')?.textContent || '',
+        path: document.querySelector('#wsf-ask [data-wsf=path]')?.textContent || '',
+        sub: document.querySelector('#wsf-ask [data-wsf=sub]')?.textContent || '',
+        order: acts.map((b) => b.textContent),
+        focused: (document.activeElement as HTMLElement | null)?.textContent || '',
+        goDisabled: acts[1].disabled,
+      };
+    });
+    expect(/^Delete this folder/.test(early.title), `titled ${JSON.stringify(early.title)}`);
+    expect(early.path === '/stub/workspace/proj', `the sheet names ${JSON.stringify(early.path)}`);
+    expect(/^Counting/.test(early.sub), `mid-count the sheet reads ${JSON.stringify(early.sub)}`);
+    expect(early.goDisabled, 'Delete was enabled before the count finished');
+    expect(JSON.stringify(early.order) === '["Cancel","Delete"]', `tab order ${JSON.stringify(early.order)}`);
+    expect(early.focused === 'Cancel', `focus starts on ${JSON.stringify(early.focused)}`);
+    P451_GATE.open();
+    const text = await wsfdCounted(page);
+    expect(
+      /^4 files and 2 folders, 978\.7 KB \(1002200 bytes\) in total\./.test(text),
+      `the count reads ${JSON.stringify(text)}`,
+    );
+    expect(/not moved to a trash/.test(text) && /ignore rules/.test(text), `the sheet leaves out the trash or ignore words: ${JSON.stringify(text)}`);
+    const done = await page.evaluate(() => {
+      const del = document.querySelector('#wsf-ask [data-wsf=go]') as HTMLButtonElement;
+      return {
+        enabled: !del.disabled,
+        cls: del.className,
+        bg: getComputedStyle(del).backgroundColor,
+        h: del.getBoundingClientRect().height,
+        cancelH: document.querySelector('#wsf-ask [data-wsf=cancel]')!.getBoundingClientRect().height,
+      };
+    });
+    expect(done.enabled, 'Delete stayed disabled after the count');
+    expect(done.cls === 'danger' && done.bg === 'rgb(243, 139, 168)', `Delete is ${done.cls} on ${done.bg}`);
+    expect(done.h >= 44 && done.cancelH >= 44, `Delete ${done.h}px, Cancel ${done.cancelH}px tall`);
+    expect(
+      JSON.stringify(reads.lists.slice(-3)) === JSON.stringify(['proj', 'proj/sub', 'proj/sub/deep']),
+      `the walk listed ${JSON.stringify(reads.lists)}`,
+    );
+    expect(
+      JSON.stringify([...reads.stats].sort()) ===
+        JSON.stringify(['proj/a.txt', 'proj/b.txt', 'proj/sub/c.txt', 'proj/sub/deep/d.txt']),
+      `the walk statted ${JSON.stringify(reads.stats)}`,
+    );
+
+    // Cancel: nothing is deleted, the folder is still open.
+    await page.click('#wsf-ask [data-wsf=cancel]');
+    await page.waitForSelector('#wsf-ask', { state: 'hidden' });
+    expect(posts.length === 0, `Cancel still posted ${JSON.stringify(posts)}`);
+    expect(
+      (await page.textContent('#ws-files-body strong')) === 'proj',
+      'Cancel left the folder',
+    );
+
+    // Delete: one post naming the folder, and the browser returns to the parent.
+    await wsfdAskDelete(page);
+    await wsfdCounted(page);
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(
+      () => document.querySelector('#ws-files-body strong')?.textContent === '.',
+      null,
+      { timeout: 15_000 },
+    );
+    expect(
+      posts.length === 1 && posts[0].path === '/rc/workspace/directory/delete' && JSON.parse(posts[0].body).path === 'proj',
+      `posts: ${JSON.stringify(posts)}`,
+    );
+    const after = await page.evaluate(() => ({
+      buttons: Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent),
+      status: document.getElementById('status')?.textContent || '',
+      note: document.getElementById('ws-files-write-note')?.textContent || '',
+    }));
+    expect(!after.buttons.includes('proj/'), `proj/ is still listed: ${JSON.stringify(after.buttons)}`);
+    expect(/deleted folder proj/.test(after.status) && /deleted folder proj/.test(after.note), `status ${after.status}, note ${after.note}`);
+    return 'the sheet counted 4 files, 2 folders and 978.7 KB over three listings and four stats, held Delete off until then, Cancel sent nothing, Delete sent one post and the browser is back at the root without proj/';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P452 a folder with more than 500 entries is counted to 500 and no further, says "more than", and still lets the delete go ahead',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: DIR_TAGS,
+    workspaceTree: Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`big/f${String(i).padStart(3, '0')}.dat`, 10])),
+  },
+  run: async ({ page }) => {
+    const reads = wsfdReads(page);
+    await wsfOpenListing(page);
+    await wsfdEnter(page, 'big');
+    await wsfdAskDelete(page);
+    const text = await wsfdCounted(page);
+    expect(
+      /^More than 500 files and 0 folders, and more than 4\.9 KB \(5000 bytes\) in the files counted\./.test(text),
+      `the count reads ${JSON.stringify(text)}`,
+    );
+    expect(/stopped at 500 entries/.test(text), `the sheet does not say where it stopped: ${JSON.stringify(text)}`);
+    expect(!/ in total/.test(text), `a stopped count claims a total: ${JSON.stringify(text)}`);
+    expect(reads.stats.length === 500, `${reads.stats.length} stats for a 500 entry count`);
+    expect(await wsfdGoEnabled(page), 'Delete stayed disabled after the count stopped');
+    return 'a 600 file folder read "More than 500 files", 4.9 KB as a floor, stopped at 500 entries after exactly 500 stats, with Delete enabled';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P453 a folder nested deeper than 3 levels is counted down to the third and says where it stopped',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: DIR_TAGS,
+    workspaceTree: { 'deep/x.txt': 7, 'deep/a/b/c/e.txt': 9 },
+  },
+  run: async ({ page }) => {
+    const reads = wsfdReads(page);
+    await wsfOpenListing(page);
+    await wsfdEnter(page, 'deep');
+    await wsfdAskDelete(page);
+    const text = await wsfdCounted(page);
+    expect(
+      /^More than 1 file and 3 folders, and more than 7 B \(7 bytes\) in the files counted\./.test(text),
+      `the count reads ${JSON.stringify(text)}`,
+    );
+    expect(/stopped 3 levels down/.test(text), `the sheet does not say where it stopped: ${JSON.stringify(text)}`);
+    expect(
+      JSON.stringify(reads.lists.slice(-3)) === JSON.stringify(['deep', 'deep/a', 'deep/a/b']),
+      `the walk listed ${JSON.stringify(reads.lists)}`,
+    );
+    return 'three listings (deep, deep/a, deep/a/b) and no fourth; the count is a floor and says it stopped 3 levels down';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P454 an empty folder says it is empty, enables Delete with no stat, and the delete returns to the parent',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: DIR_TAGS, workspaceTree: { hollow: 'dir' } },
+  run: async ({ page }) => {
+    const posts = wsfdCapture(page);
+    const reads = wsfdReads(page);
+    await wsfOpenListing(page);
+    await wsfdEnter(page, 'hollow');
+    await wsfdAskDelete(page);
+    const text = await wsfdCounted(page);
+    expect(/^This folder is empty\./.test(text), `an empty folder reads ${JSON.stringify(text)}`);
+    expect(!/\d+ files?/.test(text), `an empty folder still counts: ${JSON.stringify(text)}`);
+    expect(/ignore rules/.test(text), 'the sheet drops the ignored-files caveat for an empty listing');
+    expect(reads.stats.length === 0, `an empty folder was statted: ${JSON.stringify(reads.stats)}`);
+    expect(await wsfdGoEnabled(page), 'Delete stayed disabled for an empty folder');
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(
+      () => document.querySelector('#ws-files-body strong')?.textContent === '.',
+      null,
+      { timeout: 15_000 },
+    );
+    expect(posts.length === 1 && JSON.parse(posts[0].body).path === 'hollow', `posts: ${JSON.stringify(posts)}`);
+    return '"This folder is empty." with the ignored-files line kept, no stat call, Delete enabled, one post and back at the root';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P455 a read-only share token sees no New folder or folder Delete, and the gateway refuses both directory routes with 403',
+  waitView: false,
+  stub: { capabilitiesFeatures: DIR_TAGS },
+  run: async ({ page, viewer }) => {
+    const minted = await page.evaluate(async (sid) => {
+      const res = await fetch('/rc/share', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, ttlSec: 600, scope: 'approve', label: 'guest' }),
+      });
+      return { status: res.status, token: (await res.json()).token as string };
+    }, viewer.sessionId);
+    expect(minted.status === 201 && !!minted.token, `minting a share answered ${minted.status}`);
+    await page.addInitScript((t) => localStorage.setItem('qwen-rc-token', t), minted.token);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof startWatch === 'function');
+    await page.waitForFunction(() => !!(caps && caps.remoteControl), null, { timeout: 15_000 });
+    const gate = await page.evaluate(() => ({
+      writeScope: caps.remoteControl.writeScope,
+      flag: caps.remoteControl.workspaceDirectoryWrites,
+      gates: ['workspace_directory_create', 'workspace_directory_delete'].map((t) => wsfDirGate(t)),
+    }));
+    expect(gate.writeScope === false && gate.flag === true, `the guest's capabilities read ${JSON.stringify(gate)}`);
+    expect(gate.gates.every((g) => g === false), `a gate opened for the guest: ${JSON.stringify(gate.gates)}`);
+    const forced = await page.evaluate((tags) => {
+      caps.remoteControl.daemon = { available: true, features: tags };
+      return ['workspace_directory_create', 'workspace_directory_delete'].map((t) => wsfDirGate(t));
+    }, DIR_TAGS);
+    expect(forced.every((g) => g === false), `with the tags present a gate opened for the guest: ${JSON.stringify(forced)}`);
+
+    await openPanel(page, 'files');
+    const drawn = await page.evaluate(() => {
+      document.getElementById('ws-files')!.hidden = false;
+      renderWorkspaceListing({
+        kind: 'list',
+        path: 'sub',
+        entries: [{ name: 'inner', kind: 'directory', ignored: false }],
+        truncated: false,
+      });
+      return {
+        labels: Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent),
+        marked: document.querySelectorAll('#ws-files-body [data-wsf]').length,
+      };
+    });
+    for (const label of ['New folder', 'Delete']) {
+      expect(!drawn.labels.includes(label), `a reader sees ${label}: ${JSON.stringify(drawn.labels)}`);
+    }
+    expect(drawn.marked === 0, `${drawn.marked} write controls drawn for a reader`);
+
+    const refused = await page.evaluate(async () => {
+      const out: Array<{ status: number; code: string }> = [];
+      for (const route of ['create', 'delete']) {
+        const res = await fetch('/rc/workspace/directory/' + route, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: 'sub' }),
+        });
+        out.push({ status: res.status, code: (await res.json()).code });
+      }
+      return out;
+    });
+    expect(
+      refused.every((r) => r.status === 403 && r.code === 'scope_required'),
+      `the reader's directory posts answered ${JSON.stringify(refused)}`,
+    );
+    return 'writeScope false, both gates shut even with the tags forced open, no New folder or Delete drawn, and create and delete both answered 403 scope_required';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P456 a gateway without workspaceDirectoryWrites gets no folder controls, though the daemon advertises the tags and the file writes stay',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: DIR_TAGS, workspaceTree: { 'proj/a.txt': 5 } },
+  before: async (page) => {
+    await page.route('**/rc/capabilities', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      delete body.remoteControl.workspaceDirectoryWrites;
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    await wsfOpenListing(page);
+    const root = await page.evaluate(() => ({
+      flag: caps.remoteControl.workspaceDirectoryWrites,
+      files: caps.remoteControl.workspaceFileWrites,
+      features: caps.remoteControl.daemon.features,
+      marks: Array.from(document.querySelectorAll('#ws-files-body [data-wsf]')).map((b) => (b as HTMLElement).dataset.wsf),
+    }));
+    expect(root.flag === undefined && root.files === true, `flags read ${JSON.stringify(root)}`);
+    expect(root.features.includes('workspace_directory_create'), 'the daemon tag is missing, so this is not the old-gateway case');
+    expect(JSON.stringify(root.marks) === '["new","upload"]', `the root drew ${JSON.stringify(root.marks)}`);
+    await wsfdEnter(page, 'proj');
+    const inner = await page.evaluate(() => ({
+      deldir: document.querySelectorAll('#ws-files-body [data-wsf=deldir]').length,
+      labels: Array.from(document.querySelectorAll('#ws-files-body button')).map((b) => b.textContent),
+    }));
+    expect(inner.deldir === 0 && !inner.labels.includes('Delete'), `an old gateway's folder head drew ${JSON.stringify(inner.labels)}`);
+    return 'with the daemon tags but no gateway flag the browser drew New file and Upload as before, no New folder, and no Delete on the folder head';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P457 each folder control follows its own daemon tag: create alone gives New folder and no folder Delete, delete alone the reverse',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: ['workspace_file_read', 'workspace_directory_create'], workspaceTree: { 'proj/a.txt': 5 } },
+  run: async ({ page }) => {
+    await wsfOpenListing(page);
+    const root = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body [data-wsf]')).map((b) => (b as HTMLElement).dataset.wsf),
+    );
+    expect(JSON.stringify(root) === '["newdir"]', `the root drew ${JSON.stringify(root)}`);
+    await wsfdEnter(page, 'proj');
+    const inner = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body [data-wsf]')).map((b) => (b as HTMLElement).dataset.wsf),
+    );
+    expect(JSON.stringify(inner) === '["newdir"]', `the folder drew ${JSON.stringify(inner)}`);
+    // Now the daemon advertises delete only.
+    await page.evaluate(() => {
+      caps.remoteControl.daemon = { available: true, features: ['workspace_file_read', 'workspace_directory_delete'] };
+      void loadWorkspaceFiles(false);
+    });
+    await page.waitForFunction(
+      () => document.querySelectorAll('#ws-files-body [data-wsf=deldir]').length === 1,
+      null,
+      { timeout: 10_000 },
+    );
+    const only = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ws-files-body [data-wsf]')).map((b) => (b as HTMLElement).dataset.wsf),
+    );
+    expect(JSON.stringify(only) === '["deldir"]', `with delete alone the folder drew ${JSON.stringify(only)}`);
+    // The note line is drawn for it, so a refusal has somewhere to be told.
+    expect(!!(await page.$('#ws-files-write-note')), 'the note line is not drawn when only folder Delete is offered');
+    return 'create alone drew New folder and no folder Delete; delete alone drew Delete and no New folder, with the note line for its outcome';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P458 a delete the daemon refuses says why in the note and leaves the browser in the folder',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: DIR_TAGS,
+    workspaceTree: { 'proj/a.txt': 5 },
+    directoryDeleteStatus: 403,
+    directoryDeleteErrorBody: { errorKind: 'untrusted_workspace', error: 'Workspace is not trusted for deletion', status: 403 },
+  },
+  run: async ({ page }) => {
+    const posts = wsfdCapture(page);
+    await wsfOpenListing(page);
+    await wsfdEnter(page, 'proj');
+    await wsfdAskDelete(page);
+    await wsfdCounted(page);
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(
+      () => /not deleted/.test(document.getElementById('ws-files-write-note')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const note = (await page.textContent('#ws-files-write-note')) || '';
+    expect(note.includes('Workspace is not trusted for deletion') && note.includes('(403)'), `the note reads ${JSON.stringify(note)}`);
+    expect((await page.textContent('#ws-files-body strong')) === 'proj', 'the browser left the folder after a refused delete');
+    expect(posts.length === 1, `${posts.length} posts for one delete`);
+    return `the daemon's 403 was passed through as ${JSON.stringify(note)} and the browser stayed in proj`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P459 when the count itself fails the sheet says so and Delete stays disabled, so nothing is deleted unconfirmed',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: DIR_TAGS, workspaceTree: { 'proj/a.txt': 5 } },
+  before: async (page) => {
+    // The listing of proj answers once (the browser opening it) and then
+    // fails, which is the walk's read.
+    let seen = 0;
+    await page.route(/\/rc\/workspace\/list\?path=proj$/, async (route) => {
+      seen += 1;
+      if (seen === 1) return route.continue();
+      return route.fulfill({ status: 502, json: { error: 'Daemon unavailable', code: 'daemon_unavailable' } });
+    });
+  },
+  run: async ({ page }) => {
+    const posts = wsfdCapture(page);
+    await wsfOpenListing(page);
+    await wsfdEnter(page, 'proj');
+    await wsfdAskDelete(page);
+    const text = await wsfdCounted(page);
+    expect(/^Could not count what is inside/.test(text), `the sheet reads ${JSON.stringify(text)}`);
+    expect(!(await wsfdGoEnabled(page)), 'Delete was enabled though the count failed');
+    await page.click('#wsf-ask [data-wsf=cancel]');
+    await page.waitForSelector('#wsf-ask', { state: 'hidden' });
+    expect(posts.length === 0, `a failed count still posted ${JSON.stringify(posts)}`);
+    return 'a failed listing read "Could not count what is inside", Delete stayed disabled, Cancel closed it with no post';
+  },
+});
 
 // ---- #208. The Agents sheet shows the model and a finished row's tokens ----
 

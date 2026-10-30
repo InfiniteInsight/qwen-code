@@ -132,6 +132,10 @@ import {
   createWorkspaceFileWriteRoute,
   createWorkspaceStatRoute,
 } from './routes/workspaceFileWrites.js';
+import {
+  createWorkspaceDirectoryCreateRoute,
+  createWorkspaceDirectoryDeleteRoute,
+} from './routes/workspaceDirectories.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import { createPermissionOverlayRoutes } from './routes/permissionOverlays.js';
@@ -2643,6 +2647,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceFileDeleteRoute(deps.daemon, audit),
+  );
+  // Workspace directory create and delete (#123), at WRITE like the file
+  // writes above. The delete is recursive on the daemon; the page builds its
+  // confirmation from the listing (see routes/workspaceDirectories.ts).
+  app.post(
+    '/rc/workspace/directory/create',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceDirectoryCreateRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/directory/delete',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceDirectoryDeleteRoute(deps.daemon, audit),
   );
   // #110: POST /rc/workspace/session-groups?workspace=<cwd> makes a named
   // group in that folder's organization store, so a conversation can be

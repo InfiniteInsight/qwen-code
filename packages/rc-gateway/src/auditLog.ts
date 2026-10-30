@@ -205,6 +205,8 @@ export type AuditAction =
   | 'workspace_file_edited'
   | 'workspace_file_uploaded'
   | 'workspace_file_deleted'
+  | 'workspace_directory_created'
+  | 'workspace_directory_deleted'
   // #110: filing a conversation and its sources.
   | 'session_organized'
   | 'session_organize_failed'
@@ -341,6 +343,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'workspace_file_edited',
   'workspace_file_uploaded',
   'workspace_file_deleted',
+  'workspace_directory_created',
+  'workspace_directory_deleted',
   'session_organized',
   'session_organize_failed',
   'session_group_created',

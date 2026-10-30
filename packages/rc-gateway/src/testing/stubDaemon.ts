@@ -149,6 +149,17 @@ export interface StubDaemon {
    * client would, to drive a stale save.
    */
   workspaceFiles: Map<string, string>;
+  /** #123 (directories): the decoded workspace selector and path of the most
+   * recent POST /workspaces/:workspace/directory/create. */
+  lastDirectoryCreate: { workspace: string; path: unknown } | undefined;
+  /** #123 (directories): same, for directory/delete. */
+  lastDirectoryDelete: { workspace: string; path: unknown } | undefined;
+  /**
+   * #123 (directories): the stub's tree, workspace-relative path -> 'dir' or
+   * a file's size in bytes. Seeded from `workspaceTree`, changed by the
+   * directory routes, and read by GET /list and GET /stat.
+   */
+  workspaceTree: Map<string, 'dir' | number>;
   /**
    * Query the most recent GET /session/:id/transcript request carried. The
    * gateway relays the caller's paging parameters untouched, so a test can
@@ -706,6 +717,21 @@ export interface StubDaemonOptions {
   fileUploadErrorBody?: unknown;
   fileDeleteStatus?: number;
   fileDeleteErrorBody?: unknown;
+  /**
+   * #123 (directories): a tree for GET /list and GET /stat to answer from,
+   * workspace-relative path -> 'dir' or a file's size in bytes. Parents are
+   * implied. The root listing keeps its default entries (src, README.md,
+   * node_modules) and adds the tree's top level; a path that is a 'dir' here
+   * lists only its children. Without this option /list answers as it always
+   * has, except that a directory made through directory/create lists empty.
+   */
+  workspaceTree?: Record<string, 'dir' | number>;
+  /** Force a status on POST /workspaces/:workspace/directory/create or
+   * /directory/delete, answering the error body instead of acting. */
+  directoryCreateStatus?: number;
+  directoryCreateErrorBody?: unknown;
+  directoryDeleteStatus?: number;
+  directoryDeleteErrorBody?: unknown;
   /** Status for POST /session/:id/attachments (default 201). */
   attachmentUploadStatus?: number;
   /** JSON body to return on a non-201 POST /session/:id/attachments. */
@@ -896,6 +922,12 @@ export async function startStubDaemon(
       | { path: unknown; contentType: string | undefined; byteLength: number }
       | undefined,
     lastFileDelete: undefined as
+      | { workspace: string; path: unknown }
+      | undefined,
+    lastDirectoryCreate: undefined as
+      | { workspace: string; path: unknown }
+      | undefined,
+    lastDirectoryDelete: undefined as
       | { workspace: string; path: unknown }
       | undefined,
     lastTranscriptQuery: undefined as Record<string, unknown> | undefined,
@@ -2348,15 +2380,32 @@ export async function startStubDaemon(
       res.status(status).json(opts.listErrorBody ?? { error: 'stub error' });
       return;
     }
+    // #123 (directories): a directory the tree knows lists its own children.
+    const listPath = String(req.query['path'] ?? '.');
+    if (!opts.listResult && stubTree.get(listPath) === 'dir') {
+      res.status(200).json({
+        kind: 'list',
+        path: listPath,
+        entries: stubChildren(listPath),
+        truncated: false,
+        matchedIgnore: null,
+      });
+      return;
+    }
+    const defaults = [
+      { name: 'src', kind: 'directory', ignored: false },
+      { name: 'README.md', kind: 'file', ignored: false },
+      { name: 'node_modules', kind: 'directory', ignored: true },
+    ].filter((e) => !stubRootGone.has(e.name));
+    const rootExtras =
+      !opts.listResult && (listPath === '.' || listPath === '')
+        ? stubChildren('.').filter((e) => !defaults.some((d) => d.name === e.name))
+        : [];
     res.status(200).json(
       opts.listResult ?? {
         kind: 'list',
-        path: String(req.query['path'] ?? '.'),
-        entries: [
-          { name: 'src', kind: 'directory', ignored: false },
-          { name: 'README.md', kind: 'file', ignored: false },
-          { name: 'node_modules', kind: 'directory', ignored: true },
-        ],
+        path: listPath,
+        entries: [...defaults, ...rootExtras],
         truncated: false,
         matchedIgnore: null,
       },
@@ -2422,6 +2471,40 @@ export async function startStubDaemon(
       ? undefined
       : (stubFiles.written.get(p) ?? STUB_FILE_TEXT);
 
+  // #123 (directories): the tree behind GET /list and GET /stat. Ancestors of
+  // every seeded path are directories. The default root's own directories
+  // (src, node_modules) are known to the delete route without being nodes, so
+  // an unseeded stub lists exactly as before.
+  const stubTree = new Map<string, 'dir' | number>();
+  const stubTreeAdd = (p: string, v: 'dir' | number): void => {
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      stubTree.set(parts.slice(0, i).join('/'), 'dir');
+    }
+    stubTree.set(p, v);
+  };
+  for (const [p, v] of Object.entries(opts.workspaceTree ?? {})) {
+    stubTreeAdd(p, v);
+  }
+  const STUB_DEFAULT_ROOT_DIRS = ['src', 'node_modules'];
+  const stubRootGone = new Set<string>();
+  const stubIsDir = (p: string): boolean =>
+    stubTree.get(p) === 'dir' ||
+    (STUB_DEFAULT_ROOT_DIRS.includes(p) && !stubRootGone.has(p));
+  const stubChildren = (
+    dir: string,
+  ): Array<{ name: string; kind: 'file' | 'directory'; ignored: boolean }> => {
+    const prefix = dir === '.' ? '' : `${dir}/`;
+    const out: Array<{ name: string; kind: 'file' | 'directory'; ignored: boolean }> = [];
+    for (const [p, v] of stubTree) {
+      if (!p.startsWith(prefix)) continue;
+      const rest = p.slice(prefix.length);
+      if (!rest || rest.includes('/')) continue;
+      out.push({ name: rest, kind: v === 'dir' ? 'directory' : 'file', ignored: false });
+    }
+    return out;
+  };
+
   app.get('/file', (req, res) => {
     state.lastFileQuery = Object.fromEntries(
       Object.entries(req.query as Record<string, unknown>),
@@ -2478,6 +2561,17 @@ export async function startStubDaemon(
     const target = req.query['path'];
     if (typeof target !== 'string' || target.length === 0) {
       res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      return;
+    }
+    const node = stubTree.get(target);
+    if (node !== undefined) {
+      res.status(200).json({
+        kind: 'stat',
+        path: target,
+        type: node === 'dir' ? 'directory' : 'file',
+        sizeBytes: node === 'dir' ? 4096 : node,
+        modifiedMs: STUB_FILE_MTIME_MS,
+      });
       return;
     }
     const text = stubFileText(target);
@@ -2711,6 +2805,95 @@ export async function startStubDaemon(
     stubFiles.written.delete(target);
     stubFiles.deleted.add(target);
     res.status(200).json({ kind: 'file_delete', path: target });
+  });
+
+  // -- Workspace directories (#123) --------------------------------------
+  // Shapes copied from handlePostDirectoryCreate / handlePostDirectoryDelete
+  // in cli/src/serve/routes/workspace-file-write.ts: create answers 201
+  // {kind:'directory_create', path}, delete 200 {kind:'directory_delete',
+  // path}; refusals use the fs envelope.
+  const stubDirGate = (
+    req: express.Request,
+    res: express.Response,
+  ): string | null => {
+    if (req.params.workspace !== (opts.workspaceCwd ?? '/stub/workspace')) {
+      res.status(400).json({
+        error: 'Requested workspace does not match this daemon',
+        code: 'workspace_mismatch',
+      });
+      return null;
+    }
+    const target = (req.body ?? {})['path'];
+    if (typeof target !== 'string' || target.length === 0) {
+      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      return null;
+    }
+    if (target.endsWith('/') || target === '.' || target.endsWith('/..')) {
+      res.status(400).json(stubFsError('parse_error', 'path must name a directory', 400));
+      return null;
+    }
+    return target;
+  };
+
+  app.post('/workspaces/:workspace/directory/create', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.lastDirectoryCreate = { workspace: req.params.workspace, path: body['path'] };
+    if (opts.directoryCreateStatus !== undefined) {
+      res
+        .status(opts.directoryCreateStatus)
+        .json(opts.directoryCreateErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = stubDirGate(req, res);
+    if (target === null) return;
+    const slash = target.lastIndexOf('/');
+    const parent = slash < 0 ? '.' : target.slice(0, slash);
+    if (parent !== '.' && !stubIsDir(parent)) {
+      res.status(404).json(stubFsError('path_not_found', `no such directory: ${parent}`, 404));
+      return;
+    }
+    const taken =
+      stubTree.has(target) ||
+      (parent === '.' &&
+        ((STUB_DEFAULT_ROOT_DIRS.includes(target) && !stubRootGone.has(target)) ||
+          (target === 'README.md' && stubFileText(target) !== undefined))) ||
+      (stubFiles.written.has(target) && !stubFiles.deleted.has(target));
+    if (taken) {
+      res.status(409).json(stubFsError('file_already_exists', 'path already exists', 409));
+      return;
+    }
+    stubTreeAdd(target, 'dir');
+    res.status(201).json({ kind: 'directory_create', path: target });
+  });
+
+  app.post('/workspaces/:workspace/directory/delete', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.lastDirectoryDelete = { workspace: req.params.workspace, path: body['path'] };
+    if (opts.directoryDeleteStatus !== undefined) {
+      res
+        .status(opts.directoryDeleteStatus)
+        .json(opts.directoryDeleteErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const target = stubDirGate(req, res);
+    if (target === null) return;
+    if (!stubIsDir(target)) {
+      const isFile =
+        typeof stubTree.get(target) === 'number' ||
+        (stubFiles.written.has(target) && !stubFiles.deleted.has(target)) ||
+        (target === 'README.md' && stubFileText(target) !== undefined);
+      if (isFile) {
+        res.status(400).json(stubFsError('parse_error', 'Only directories can be deleted', 400));
+        return;
+      }
+      res.status(404).json(stubFsError('path_not_found', `no such directory: ${target}`, 404));
+      return;
+    }
+    for (const key of Array.from(stubTree.keys())) {
+      if (key === target || key.startsWith(`${target}/`)) stubTree.delete(key);
+    }
+    if (STUB_DEFAULT_ROOT_DIRS.includes(target)) stubRootGone.add(target);
+    res.status(200).json({ kind: 'directory_delete', path: target });
   });
 
   app.get('/session/:id/status', (req, res) => {
@@ -3884,6 +4067,13 @@ export async function startStubDaemon(
       return state.lastFileDelete;
     },
     workspaceFiles: stubFiles.written,
+    get lastDirectoryCreate() {
+      return state.lastDirectoryCreate;
+    },
+    get lastDirectoryDelete() {
+      return state.lastDirectoryDelete;
+    },
+    workspaceTree: stubTree,
     get lastTranscriptQuery() {
       return state.lastTranscriptQuery;
     },
