@@ -844,6 +844,11 @@ export interface ServeSessionAgentTaskStatus {
   runtimeMs: number;
   outputFile?: string;
   subagentType?: string;
+  /**
+   * Concrete model ID the agent runs with. Present for live agents and for
+   * persisted ones whose sidecar recorded it; absent otherwise.
+   */
+  model?: string;
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;

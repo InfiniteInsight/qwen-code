@@ -21,6 +21,7 @@ export * from './background-tasks.js';
 export * from './background-agent-resume.js';
 export {
   MAX_AGENT_TRACE_NODES,
+  getAgentMetaTerminalSummary,
   getSubagentSessionDir,
   getSubagentsRootDir,
   readAgentMeta,
@@ -28,7 +29,11 @@ export {
   readAgentTrace,
   sanitizeFilenameComponent,
 } from './agent-transcript.js';
-export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
+export type {
+  AgentMeta,
+  AgentTrace,
+  AgentTraceNode,
+} from './agent-transcript.js';
 export {
   buildRemoteSessionAgentSystemPrompt,
   resolveAgentPersona,
