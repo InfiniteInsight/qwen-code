@@ -3520,6 +3520,95 @@
       #goal-edit .cv-note {
         margin: 0;
       }
+      /* #135. The Hooks sheet: what is configured to run at points in the
+         agent's work, one bordered card per hook (event and matcher first, what
+         it runs under that, then source, kind and timeout), the daemon's own
+         words for any hook problem above them, Refresh pinned in the thumb
+         zone. */
+      #hooks-banner,
+      #hooks-problems {
+        margin: 12px 16px 0;
+        padding: 10px 12px;
+        border: 1px solid var(--g1-warn);
+        border-radius: 10px;
+        font-size: 13px;
+        color: var(--g1-ink);
+        overflow-wrap: anywhere;
+      }
+      #hooks-banner[hidden],
+      #hooks-problems[hidden] {
+        display: none;
+      }
+      #hooks-problems .hp {
+        margin: 0;
+      }
+      #hooks-problems .hp + .hp {
+        margin-top: 8px;
+      }
+      #hooks-problems .hp-k {
+        font-weight: 600;
+        color: var(--g1-warn);
+      }
+      #hooks-list .hk {
+        margin: 8px 16px 0;
+        padding: 10px 12px;
+        border: 1px solid var(--g1-line);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        overflow-wrap: anywhere;
+      }
+      #hooks-list .hk[data-enabled='false'] {
+        opacity: 0.7;
+      }
+      #hooks-list .hk-top {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 2px 8px;
+      }
+      #hooks-list .hk-ev {
+        font-size: 15px;
+        color: var(--g1-ink-hi);
+      }
+      #hooks-list .hk-m {
+        font-size: 13px;
+        color: var(--g1-link);
+      }
+      #hooks-list .hk-off {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--g1-warn);
+      }
+      #hooks-list .hk-what {
+        margin-top: 4px;
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+        color: var(--g1-ink);
+      }
+      #hooks-list .hk-desc {
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--g1-ink);
+      }
+      #hooks-list .hk-meta {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #hooks-foot {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #hooks-foot .cv-note {
+        margin: 0;
+      }
+      #more-hooks-val .hv-bad {
+        color: var(--g1-warn);
+      }
       @media (min-width: 1100px) {
         .cv-sheet {
           left: var(--h1-left);
@@ -3707,6 +3796,16 @@
                  routes, to a reader too (who sees it and cannot change it). -->
             <button type="button" class="row" id="more-goal" data-action="goal" hidden>
               <span class="lbl">Goal</span><span class="val" id="more-goal-val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <!-- #135. The hooks configured to run in this conversation. The
+                 value reads how many there are and, when the daemon reports a
+                 problem reading them, how many problems, in the warning
+                 colour. The daemon keeps no run history, so there is no "last
+                 failed" to count. Drawn on a gateway that serves the read, to a
+                 reader too. -->
+            <button type="button" class="row" id="more-hooks" data-action="hooks" hidden>
+              <span class="lbl">Hooks</span><span class="val" id="more-hooks-val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
             <button type="button" class="row" id="more-sources" data-action="sources" hidden>
@@ -4918,6 +5017,37 @@
               <button id="goal-set" class="cv-btn" type="button">Set</button>
             </div>
             <p class="cv-note" id="goal-note" role="status"></p>
+          </div>
+        </div>
+      </div>
+      <!-- #135. Hooks: what is configured to run at points in the agent's work
+           (before a tool, when a turn stops), as the daemon lists it: each
+           hook's event, matcher, the first words of what it runs, where it
+           came from, kind, timeout and whether it is on. The daemon records
+           no run history, so the sheet says so instead of drawing a "last
+           run". The daemon's own words for a hook problem sit above the list.
+           Read again when it opens, on Refresh and when a turn ends. Filled
+           by renderHooksSheet. -->
+      <div id="hooks-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="hooks-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="hooks-title" class="cv-title">Hooks</strong>
+            <button id="hooks-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="hooks-body">
+            <p class="cv-lede">Commands and requests that run at points in the agent's work, such as before a tool or when a turn stops. This lists what is configured. The daemon does not record when a hook last ran or whether it failed.</p>
+            <div id="hooks-banner" hidden></div>
+            <div id="hooks-problems" hidden></div>
+            <p class="cv-note" id="hooks-empty"></p>
+            <div id="hooks-list"></div>
+            <p class="cv-note" id="hooks-scope"></p>
+          </div>
+          <div id="hooks-foot">
+            <button id="hooks-refresh" class="cv-btn" type="button">Refresh</button>
+            <p class="cv-note" id="hooks-note" role="status"></p>
           </div>
         </div>
       </div>
@@ -13457,6 +13587,9 @@
             // #135: a turn is what moves a goal on (it can finish, pause or
             // block), so the row and an open sheet read it again.
             goalRefreshSoon();
+            // #135: hooks are configuration, so a turn rarely moves them, but one
+            // can register a hook (a skill does), so the row reads again.
+            hooksRefreshSoon();
             if (asstThisTurn && transcriptModel.curAsst) placeForkButton();
             return;
           case 'turn_error': {
@@ -15240,6 +15373,11 @@
         if (gl.hidden !== !onGoal) gl.hidden = !onGoal;
         gl.disabled = !sid;
         h1Text($('more-goal-val'), sid ? goalRowValue(goalHeld(sid)) : '');
+        const hk = $('more-hooks');
+        const onHooks = hooksOn();
+        if (hk.hidden !== !onHooks) hk.hidden = !onHooks;
+        hk.disabled = !sid;
+        hooksRowRender($('more-hooks-val'), sid ? hooksHeld(sid) : null);
       }
       new MutationObserver(() => {
         if (!$('more-screen').hidden) renderConvRows();
@@ -16105,6 +16243,390 @@
         e.preventDefault();
         e.stopPropagation();
         closeGoalSheet(true);
+      });
+
+      // -- #135: Hooks (More > This conversation) --------------------------
+      // The hooks configured to run in this conversation: an event (PreToolUse,
+      // Stop, ...), an optional matcher, and what runs (a command, an http
+      // call, a prompt, a function). Two lists. The session's own, which any
+      // token reads (GET /session/:id/hooks): the hooks a skill or the agent
+      // registered while it ran. And, for a token that can write, the ones in
+      // the settings files, from the workspace read the Operations page already
+      // uses (/rc/workspace/hooks, write floor, which also hands this page the
+      // whole command, so the first words are taken here by the same rule the
+      // gateway applies to the session's). The daemon keeps no run history, so
+      // there is no last run, exit code or output to draw, and the sheet says
+      // so. What it can show of a failure is the daemon's own status cells (a
+      // hook system that failed to initialize, say), in full, and the row
+      // counts them. Read when More opens, when the sheet opens, on Refresh and
+      // when a turn ends.
+      var hooksSheet = {
+        open: false,
+        opener: null,
+        sid: null,
+        gen: 0,
+        known: new Map(), // session id -> { session, ws, wsNote, at }
+        reading: new Map(),
+        readNote: '',
+        note: '',
+        timer: null,
+        oldDaemon: false, // a read answered hooks_unsupported: stop asking
+      };
+      function hooksOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.sessionHooks === true);
+      }
+      function hooksHeld(sid) {
+        return sid ? hooksSheet.known.get(sid) || null : null;
+      }
+      // The first words of a command: the program, and one plain word after it.
+      // Leading NAME=value assignments are skipped. The same rule as
+      // commandPreview in src/routes/sessionHooks.ts.
+      function hooksPreview(command) {
+        if (typeof command !== 'string') return '';
+        const words = command.trim().split(/\s+/).filter(Boolean);
+        let i = 0;
+        while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
+        if (i >= words.length) return '';
+        const out = [words[i]];
+        const next = words[i + 1];
+        if (next !== undefined && next.length <= 40 && /^[A-Za-z0-9_.\/~@+][A-Za-z0-9_.\/~@+-]*$/.test(next)) out.push(next);
+        const t = out.join(' ');
+        return t.length > 80 ? t.slice(0, 80) + '…' : t;
+      }
+      // One list row for either source: a session entry as the gateway projects
+      // it, or a settings entry as the workspace read sends it.
+      function hooksItemFromSession(h) {
+        return {
+          origin: 'session',
+          eventName: strOr(h.eventName, '(unknown event)'),
+          matcher: strOr(h.matcher, ''),
+          source: strOr(h.source, 'session'),
+          enabled: h.enabled === true,
+          type: strOr(h.type, 'unknown'),
+          name: strOr(h.name, ''),
+          description: strOr(h.description, ''),
+          timeout: typeof h.timeout === 'number' ? h.timeout : null,
+          command: strOr(h.command, ''),
+          host: strOr(h.host, ''),
+          skill: strOr(h.skill, ''),
+        };
+      }
+      function hooksItemFromSettings(e) {
+        const c = e && e.config && typeof e.config === 'object' ? e.config : {};
+        let host = '';
+        if (c.type === 'http' && typeof c.url === 'string') {
+          try {
+            host = new URL(c.url).host;
+          } catch {
+            host = '';
+          }
+        }
+        return {
+          origin: 'settings',
+          eventName: strOr(e && e.eventName, '(unknown event)'),
+          matcher: strOr(e && e.matcher, ''),
+          source: strOr(e && e.source, 'settings'),
+          enabled: !!e && e.enabled === true,
+          type: strOr(c.type, 'unknown'),
+          name: strOr(c.name, ''),
+          description: strOr(c.description, ''),
+          timeout: typeof c.timeout === 'number' ? c.timeout : null,
+          command: c.type === 'command' ? hooksPreview(c.command) : '',
+          host,
+          skill: '',
+        };
+      }
+      function hooksItems(held) {
+        if (!held) return { session: [], settings: [] };
+        const sh = Array.isArray(held.session && held.session.hooks) ? held.session.hooks : [];
+        const wh = held.ws && Array.isArray(held.ws.hooks) ? held.ws.hooks : [];
+        return {
+          session: sh.map(hooksItemFromSession),
+          settings: wh.map(hooksItemFromSettings),
+        };
+      }
+      // The daemon's status cells, from both reads, as lines in its own words.
+      function hooksProblems(held) {
+        const out = [];
+        const take = (where, cells) => {
+          for (const c of Array.isArray(cells) ? cells : []) {
+            if (!c || typeof c !== 'object') continue;
+            let line = strOr(c.kind, 'hooks') + ': ' + strOr(c.status, 'unknown');
+            if (typeof c.error === 'string' && c.error) line += ' - ' + c.error;
+            if (typeof c.errorKind === 'string' && c.errorKind) line += ' (' + c.errorKind + ')';
+            if (typeof c.hint === 'string' && c.hint) line += ' - ' + c.hint;
+            out.push({ where, line });
+          }
+        };
+        if (held) {
+          take('This conversation', held.session && held.session.errors);
+          take('Settings', held.ws && held.ws.errors);
+        }
+        return out;
+      }
+      function hooksTimeoutWord(it) {
+        if (it.timeout === null) return '';
+        // Seconds for a command, http or prompt hook; a function hook, and a
+        // legacy command value of 1000 or more, are milliseconds.
+        const secs = it.type === 'function' || it.timeout >= 1000 ? it.timeout / 1000 : it.timeout;
+        return 'timeout ' + (Math.round(secs * 10) / 10) + 's';
+      }
+      var HOOKS_ORIGIN_WORDS = {
+        session: 'this conversation',
+        project: 'project settings',
+        user: 'user settings',
+        system: 'system settings',
+        extensions: 'an extension',
+        workspace: 'workspace settings',
+      };
+      function hooksWhat(it) {
+        if (it.type === 'command') return it.command || 'a command';
+        if (it.type === 'http') return it.host ? 'http ' + it.host : 'an http request';
+        if (it.type === 'prompt') return 'a prompt to the model';
+        if (it.type === 'function') return 'a function';
+        return it.type;
+      }
+      function hooksCountWord(n) {
+        return n + (n === 1 ? ' hook' : ' hooks');
+      }
+      // The row: how many hooks, and how many problems in the warning colour.
+      // Nothing until the page has read them.
+      function hooksRowRender(el, held) {
+        if (!el) return;
+        let text = '';
+        let bad = '';
+        if (held) {
+          const it = hooksItems(held);
+          const probs = hooksProblems(held).length;
+          const disabled = held.session && held.session.disabled === true;
+          text = hooksCountWord(it.session.length + it.settings.length) + (disabled ? ', all off' : '');
+          if (probs > 0) bad = probs + (probs === 1 ? ' error' : ' errors');
+        }
+        const key = text + '|' + bad;
+        if (el.dataset.key === key) return;
+        el.dataset.key = key;
+        el.textContent = '';
+        if (text) el.appendChild(document.createTextNode(text));
+        if (bad) {
+          if (text) el.appendChild(document.createTextNode(' · '));
+          const s = document.createElement('span');
+          s.className = 'hv-bad';
+          s.textContent = bad;
+          el.appendChild(s);
+        }
+      }
+      function hooksCard(it) {
+        const card = document.createElement('div');
+        card.className = 'hk';
+        card.dataset.enabled = it.enabled ? 'true' : 'false';
+        card.dataset.origin = it.origin;
+        const top = document.createElement('div');
+        top.className = 'hk-top';
+        const ev = document.createElement('strong');
+        ev.className = 'hk-ev';
+        ev.textContent = it.eventName;
+        top.appendChild(ev);
+        if (it.matcher) {
+          const m = document.createElement('span');
+          m.className = 'hk-m';
+          m.textContent = 'matches ' + it.matcher;
+          top.appendChild(m);
+        }
+        if (!it.enabled) {
+          const off = document.createElement('span');
+          off.className = 'hk-off';
+          off.textContent = 'off';
+          top.appendChild(off);
+        }
+        card.appendChild(top);
+        const what = document.createElement('div');
+        what.className = 'hk-what';
+        what.textContent = hooksWhat(it);
+        card.appendChild(what);
+        if (it.name || it.description) {
+          const d = document.createElement('div');
+          d.className = 'hk-desc';
+          d.textContent = it.name && it.description ? it.name + ': ' + it.description : it.name || it.description;
+          card.appendChild(d);
+        }
+        const meta = [HOOKS_ORIGIN_WORDS[it.source] || it.source];
+        if (it.skill) meta.push('skill ' + it.skill);
+        meta.push(it.type);
+        const tw = hooksTimeoutWord(it);
+        if (tw) meta.push(tw);
+        const mt = document.createElement('div');
+        mt.className = 'hk-meta';
+        mt.textContent = meta.join(' · ');
+        card.appendChild(mt);
+        return card;
+      }
+      function renderHooksSheet() {
+        if (!hooksSheet.open) return;
+        const held = hooksHeld(hooksSheet.sid);
+        const it = hooksItems(held);
+        const writable = goalWritable();
+        const banner = $('hooks-banner');
+        const off = !!(held && held.session && held.session.disabled === true);
+        banner.hidden = !off;
+        h1Text(banner, off ? 'All hooks are switched off in this conversation. They are listed, and none will run.' : '');
+        const probs = hooksProblems(held);
+        const pbox = $('hooks-problems');
+        pbox.hidden = probs.length === 0;
+        pbox.textContent = '';
+        for (const p of probs) {
+          const row = document.createElement('p');
+          row.className = 'hp';
+          const k = document.createElement('span');
+          k.className = 'hp-k';
+          k.textContent = p.where + ': ';
+          row.appendChild(k);
+          row.appendChild(document.createTextNode(p.line));
+          pbox.appendChild(row);
+        }
+        const list = $('hooks-list');
+        list.textContent = '';
+        const group = (title, items) => {
+          if (items.length === 0) return;
+          const g = document.createElement('div');
+          g.className = 'cv-grp';
+          g.textContent = title + ' (' + items.length + ')';
+          list.appendChild(g);
+          for (const x of items) list.appendChild(hooksCard(x));
+        };
+        group('In this conversation', it.session);
+        group('From your settings', it.settings);
+        const none = it.session.length + it.settings.length === 0;
+        h1Text(
+          $('hooks-empty'),
+          hooksSheet.readNote ||
+            (held === null
+              ? hooksSheet.oldDaemon
+                ? 'This daemon does not report hooks.'
+                : 'Reading the hooks...'
+              : none
+                ? writable
+                  ? 'No hooks are configured for this conversation.'
+                  : 'No hooks have been registered in this conversation.'
+                : ''),
+        );
+        h1Text(
+          $('hooks-scope'),
+          held === null
+            ? ''
+            : writable
+              ? held.wsNote
+              : 'Hooks from the settings files are listed for a token that can write. This one shows only what this conversation registered.',
+        );
+        $('hooks-scope').dataset.tone = writable && held && held.wsNote ? 'err' : '';
+        $('hooks-refresh').disabled = hooksSheet.reading.has(hooksSheet.sid);
+        h1Text($('hooks-note'), hooksSheet.note);
+      }
+      function hooksReadNote(r) {
+        if (r.code === 'hooks_unsupported') return 'This daemon does not report hooks.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        return 'The hooks could not be read: ' + rcDetail(r);
+      }
+      // One read at a time per session; what it finds is what the page holds.
+      function hooksRead(sid) {
+        if (!sid || hooksSheet.oldDaemon) return Promise.resolve(null);
+        const inflight = hooksSheet.reading.get(sid);
+        if (inflight) return inflight;
+        const p = (async () => {
+          try {
+            const r = await convCall('/session/' + encodeURIComponent(sid) + '/hooks');
+            if (!(r.ok && r.body && Array.isArray(r.body.hooks))) {
+              if (!r.ok && r.code === 'hooks_unsupported') hooksSheet.oldDaemon = true;
+              if (hooksSheet.open && hooksSheet.sid === sid) {
+                hooksSheet.readNote = r.ok ? 'The hooks could not be read.' : hooksReadNote(r);
+              }
+              return null;
+            }
+            let ws = null;
+            let wsNote = '';
+            if (goalWritable()) {
+              const cwd = typeof r.body.workspaceCwd === 'string' ? r.body.workspaceCwd : '';
+              const w = await convCall('/rc/workspace/hooks' + (cwd ? '?workspace=' + encodeURIComponent(cwd) : ''));
+              if (w.ok && w.body && Array.isArray(w.body.hooks)) ws = w.body;
+              else wsNote = 'The hooks from your settings could not be read: ' + rcDetail(w);
+            }
+            hooksSheet.known.set(sid, { session: r.body, ws, wsNote, at: Date.now() });
+            if (hooksSheet.open && hooksSheet.sid === sid) hooksSheet.readNote = '';
+            return hooksHeld(sid);
+          } finally {
+            hooksSheet.reading.delete(sid);
+            if (hooksSheet.open && hooksSheet.sid === sid) renderHooksSheet();
+            renderConvRows();
+          }
+        })();
+        hooksSheet.reading.set(sid, p);
+        return p;
+      }
+      // A turn ending asks again; a burst of frames asks once.
+      function hooksRefreshSoon() {
+        if (!hooksOn() || !watchedSessionId || hooksSheet.oldDaemon) return;
+        const sid = watchedSessionId;
+        if (hooksSheet.timer) clearTimeout(hooksSheet.timer);
+        hooksSheet.timer = setTimeout(() => {
+          hooksSheet.timer = null;
+          void hooksRead(sid);
+        }, 250);
+      }
+      // Opening More reads the hooks once, so the row says what it holds.
+      new MutationObserver(() => {
+        if ($('more-screen').hidden || !hooksOn() || !watchedSessionId) return;
+        const k = hooksSheet.known.get(watchedSessionId);
+        if (!k || Date.now() - k.at > 15000) void hooksRead(watchedSessionId);
+      }).observe($('more-screen'), { attributes: true, attributeFilter: ['hidden'] });
+      function openHooksSheet() {
+        if (!hooksOn() || !watchedSessionId) return;
+        hooksSheet.gen += 1;
+        if (!hooksSheet.open) {
+          hooksSheet.opener = document.activeElement;
+          hooksSheet.open = true;
+          $('hooks-sheet').hidden = false;
+        }
+        closeH1Menu(false);
+        hooksSheet.sid = watchedSessionId;
+        hooksSheet.readNote = '';
+        hooksSheet.note = '';
+        renderHooksSheet();
+        void hooksRead(hooksSheet.sid);
+        $('hooks-close').focus({ preventScroll: true });
+      }
+      function closeHooksSheet(refocus) {
+        if (!hooksSheet.open) return;
+        hooksSheet.open = false;
+        hooksSheet.gen += 1;
+        $('hooks-sheet').hidden = true;
+        const back = hooksSheet.opener;
+        hooksSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      async function hooksRefresh() {
+        const sid = hooksSheet.sid;
+        if (!sid || hooksSheet.reading.has(sid)) return;
+        hooksSheet.note = 'Reading the hooks...';
+        renderHooksSheet();
+        const held = await hooksRead(sid);
+        if (!hooksSheet.open || hooksSheet.sid !== sid) return;
+        hooksSheet.note = held ? 'Read just now.' : '';
+        renderHooksSheet();
+      }
+      $('more-hooks').addEventListener('click', () => {
+        setMoreOpen(false);
+        openHooksSheet();
+      });
+      $('hooks-close').addEventListener('click', () => closeHooksSheet(true));
+      $('hooks-refresh').addEventListener('click', () => void hooksRefresh());
+      $('hooks-sheet').addEventListener('click', (e) => {
+        if (e.target === $('hooks-sheet')) closeHooksSheet(true);
+      });
+      $('hooks-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeHooksSheet(true);
       });
 
       const token = () => localStorage.getItem(TOKEN_KEY);
