@@ -264,6 +264,18 @@ export interface StubDaemon {
     body?: unknown;
     sourceId?: string;
   }>;
+  /**
+   * #128: every POST and DELETE on /session/:id/artifacts, in order, with the
+   * `X-Qwen-Client-Id` it carried (the daemon refuses a mutation without a
+   * session-bound one, with `stampClientIds`, as the sources writes are held).
+   */
+  artifactMutationCalls: Array<{
+    method: string;
+    sessionId: string;
+    clientId: string | undefined;
+    body?: unknown;
+    artifactId?: string;
+  }>;
   /** #110: every PATCH /session/:id/organization body, in order. */
   organizationCalls: Array<{ sessionId: string; body: unknown }>;
   /** #110: every POST /workspace/:id/session-groups, in order. */
@@ -871,6 +883,10 @@ export interface StubDaemonOptions {
   /** #110: status for POST /workspace/:id/session-groups (default 201). */
   groupCreateStatus?: number;
   groupCreateErrorBody?: unknown;
+  /** #128: status for POST and DELETE on /session/:id/artifacts (default 200). */
+  artifactMutationStatus?: number;
+  /** #128: body sent with a non-200 `artifactMutationStatus`. */
+  artifactMutationErrorBody?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -3964,6 +3980,190 @@ export async function startStubDaemon(
     res.status(200).json({ revision: held.revision, removed });
   });
 
+  // -- #128: the artifact mutation pair --------------------------------------
+  // The daemon's POST and DELETE (cli/src/serve/routes/session.ts:7347 and
+  // :7396). Both refuse a request without a client id (403 client_id_required,
+  // :468) and the bridge one the session never registered (400
+  // invalid_client_id); both only with stampClientIds. A validation refusal is
+  // the route's `{ v: 1, error: { code, message, field } }`, and a client may
+  // not change an artifact another client owns (403 session_artifact_forbidden,
+  // error-response.ts:830). The result is DaemonSessionArtifactMutationResult.
+  const s128 = {
+    artifacts: new Map<string, Map<string, Record<string, unknown>>>(),
+    calls: [] as StubDaemon['artifactMutationCalls'],
+    seq: 0,
+  };
+  const s128Refused = (
+    req: express.Request,
+    res: express.Response,
+  ): boolean => {
+    if (!opts.stampClientIds) return false;
+    const clientId = req.get('X-Qwen-Client-Id');
+    if (clientId === undefined) {
+      res.status(403).json({
+        error: 'Session artifact access requires a session-bound client id',
+        code: 'client_id_required',
+        errorKind: 'client_id_required',
+      });
+      return true;
+    }
+    if (!s110.clientIds.get(req.params.id!)?.has(clientId)) {
+      res.status(400).json({
+        error: `Invalid client id "${clientId}" for session ${req.params.id}`,
+        code: 'invalid_client_id',
+        sessionId: req.params.id,
+        clientId,
+      });
+      return true;
+    }
+    return false;
+  };
+  const s128Invalid = (
+    res: express.Response,
+    message: string,
+    field?: string,
+  ): void => {
+    res.status(400).json({
+      v: 1,
+      error: { code: 'VALIDATION_FAILED', message, ...(field ? { field } : {}) },
+    });
+  };
+  app.post('/session/:id/artifacts', (req, res) => {
+    const sessionId = req.params.id;
+    const clientId = req.get('X-Qwen-Client-Id');
+    s128.calls.push({ method: 'POST', sessionId, clientId, body: req.body });
+    const status = opts.artifactMutationStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.artifactMutationErrorBody ?? { error: 'stub' });
+      return;
+    }
+    if (s128Refused(req, res)) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof body['title'] !== 'string' || body['title'].trim() === '') {
+      return s128Invalid(res, 'title is required', 'title');
+    }
+    if (body['storage'] === 'published') {
+      return s128Invalid(
+        res,
+        'published artifacts are reserved for trusted publishers',
+        'storage',
+      );
+    }
+    const locators = ['workspacePath', 'managedId', 'url'].filter(
+      (k) => typeof body[k] === 'string' && body[k] !== '',
+    );
+    if (locators.length !== 1) {
+      return s128Invalid(
+        res,
+        'provide exactly one of workspacePath, managedId, or url',
+      );
+    }
+    if (
+      typeof body['workspacePath'] === 'string' &&
+      body['workspacePath'].startsWith('/')
+    ) {
+      // The bridge's own wording carries the host's error text.
+      return s128Invalid(
+        res,
+        `workspacePath could not be inspected: ENOENT ${body['workspacePath']}`,
+        'workspacePath',
+      );
+    }
+    const held = s128.artifacts.get(sessionId) ?? new Map();
+    s128.artifacts.set(sessionId, held);
+    const locator = String(body[locators[0]!]);
+    const existing = [...held.values()].find(
+      (a) => a['locator'] === locator,
+    );
+    if (existing && existing['clientId'] !== clientId) {
+      res.status(403).json({
+        error: `Session artifact ${String(existing['id'])} belongs to another client`,
+        code: 'session_artifact_forbidden',
+        sessionId,
+        artifactId: existing['id'],
+      });
+      return;
+    }
+    const now = '2026-10-29T12:00:00.000Z';
+    const id = existing ? String(existing['id']) : `art-stub-${(s128.seq += 1)}`;
+    const artifact: Record<string, unknown> = {
+      id,
+      kind: body['kind'] ?? 'file',
+      storage:
+        body['storage'] ??
+        (body['workspacePath']
+          ? 'workspace'
+          : body['managedId']
+            ? 'managed'
+            : 'external_url'),
+      source: 'client',
+      status: 'available',
+      title: String(body['title']).trim(),
+      ...(body['description'] ? { description: body['description'] } : {}),
+      ...(body['workspacePath'] ? { workspacePath: body['workspacePath'] } : {}),
+      ...(body['managedId'] ? { managedId: body['managedId'] } : {}),
+      ...(body['url'] ? { url: body['url'] } : {}),
+      ...(body['mimeType'] ? { mimeType: body['mimeType'] } : {}),
+      ...(typeof body['sizeBytes'] === 'number'
+        ? { sizeBytes: body['sizeBytes'] }
+        : {}),
+      retention: body['retention'] ?? 'ephemeral',
+      clientRetained: body['clientRetained'] === true,
+      createdAt: now,
+      updatedAt: now,
+      ...(clientId ? { clientId } : {}),
+    };
+    held.set(id, { ...artifact, locator });
+    res.status(200).json({
+      v: 1,
+      sessionId,
+      changes: [
+        {
+          action: existing ? 'updated' : 'created',
+          artifactId: id,
+          artifact,
+        },
+      ],
+    });
+  });
+  app.delete('/session/:id/artifacts/:artifactId', (req, res) => {
+    const sessionId = req.params.id;
+    const artifactId = req.params.artifactId;
+    const clientId = req.get('X-Qwen-Client-Id');
+    s128.calls.push({ method: 'DELETE', sessionId, clientId, artifactId });
+    const status = opts.artifactMutationStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.artifactMutationErrorBody ?? { error: 'stub' });
+      return;
+    }
+    if (s128Refused(req, res)) return;
+    const held = s128.artifacts.get(sessionId);
+    const existing = held?.get(artifactId);
+    if (!held || !existing) {
+      res.status(200).json({ v: 1, sessionId, changes: [] });
+      return;
+    }
+    if (existing['clientId'] !== clientId) {
+      res.status(403).json({
+        error: `Session artifact ${artifactId} belongs to another client`,
+        code: 'session_artifact_forbidden',
+        sessionId,
+        artifactId,
+      });
+      return;
+    }
+    held.delete(artifactId);
+    res.status(200).json({
+      v: 1,
+      sessionId,
+      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+    });
+  });
+
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -4160,6 +4360,9 @@ export async function startStubDaemon(
     },
     get sourceCalls() {
       return s110.sourceCalls;
+    },
+    get artifactMutationCalls() {
+      return s128.calls;
     },
     get organizationCalls() {
       return s110.organizationCalls;
