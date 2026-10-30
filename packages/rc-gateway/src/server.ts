@@ -198,11 +198,15 @@ import {
   createSessionAgentTraceRoute,
   createSessionSavedWorkflowRoute,
 } from './routes/sessionAgents.js';
-/** #127: session artifacts (the read pair; the mutation pair needs a client id). */
+/** #127: session artifacts (the read pair); #128: the mutation pair. */
 import {
   createSessionArtifactContentRoute,
   createSessionArtifactListRoute,
 } from './routes/sessionArtifacts.js';
+import {
+  createSessionArtifactAddRoute,
+  createSessionArtifactRemoveRoute,
+} from './routes/sessionArtifactMutations.js';
 /** #109: session attachments (uploads + the list that confirms them). */
 import {
   createAttachmentListRoute,
@@ -1412,9 +1416,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // GET /session/:id/artifacts - what the session PRODUCED, which is a
   // different fact from the uploads above (what someone sent in). Session-read
   // like the attachment list: the names are ones the transcript already
-  // implies. Not audited, matching that sibling. The mutation pair the issue
-  // counts is NOT mounted here - see routes/sessionArtifacts.ts for the 403
-  // client_id_required that makes it a different slice.
+  // implies. Not audited, matching that sibling. The mutation pair (#128) is
+  // mounted after the content read below.
   app.get(
     '/session/:id/artifacts',
     requireScope(SESSION_READ, audit),
@@ -1432,6 +1435,27 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
     createSessionArtifactContentRoute(deps.daemon),
+  );
+  // #128: POST /session/:id/artifacts records one artifact and DELETE
+  // /session/:id/artifacts/:artifactId drops one. Relays: the pool sends the
+  // client id the daemon requires (see routes/sessionArtifactMutations.ts).
+  // WRITE, so every share token is refused by requireScope, and the handler
+  // asks for a share again before it reads the body. Audited without content.
+  app.post(
+    '/session/:id/artifacts',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionArtifactAddRoute(deps.daemon, audit),
+  );
+  app.delete(
+    '/session/:id/artifacts/:artifactId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionArtifactRemoveRoute(deps.daemon, audit),
   );
   // GET /session/:id/pending-prompts — session-read-scope, mirroring /export.
   // The queue is part of the conversation's own state, and seeing it is the

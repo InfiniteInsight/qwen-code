@@ -14,7 +14,8 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  *   GET /session/:id/artifacts                      -> the daemon's list
  *   GET /session/:id/artifacts/:artifactId/content  -> one saved snapshot
  *
- * WHY ONLY TWO OF THE FOUR ROUTES
+ * WHY ONLY TWO OF THE FOUR ROUTES (as of #127; the pair landed in #128, in
+ * routes/sessionArtifactMutations.ts, once the pool kept a client id)
  *
  * The daemon also has `POST /session/:id/artifacts` and
  * `DELETE /session/:id/artifacts/:artifactId`, and the issue counted four
