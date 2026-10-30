@@ -30820,6 +30820,46 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P518 the Organize and Sources sheets print status, code and message for a refusal they have no sentence for, and the sentences they do have are unchanged',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope === true', null, { timeout: 15_000 });
+    await page.route(/\/session\/[^/]+\/organization$/, (route) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'organization store is read-only', code: 'organization_write_failed' }) }),
+    );
+    await page.route(/\/session\/[^/]+\/sources$/, (route) =>
+      route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: 'Daemon unavailable', code: 'daemon_unavailable', daemon: { status: 500, message: 'source list is locked' } }) }),
+    );
+    await page.route(/\/session\/[^/]+\/sources\/x$/, (route) =>
+      route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'A link cannot carry a password', code: 'invalid_source' }) }),
+    );
+    const lines = (await page.evaluate(async () => {
+      const org = await convCall('/session/s1/organization');
+      const src = await convCall('/session/s1/sources');
+      const bad = await convCall('/session/s1/sources/x');
+      return {
+        orgChange: orgRefusalText(org),
+        srcChange: srcRefusalText(src),
+        srcInvalid: srcRefusalText(bad),
+        srcRead: 'The sources could not be read: ' + rcDetail(src),
+        orgGone: orgRefusalText({ code: 'group_not_found', status: 404 }),
+      };
+    })) as Record<string, string>;
+    const need: Array<[string, string[]]> = [
+      ['orgChange', ['Not changed: ', 'organization_write_failed', 'HTTP 500', 'organization store is read-only']],
+      ['srcChange', ['Not changed: ', 'daemon_unavailable', 'HTTP 502', 'the daemon answered HTTP 500: source list is locked']],
+      ['srcRead', ['daemon_unavailable', 'HTTP 502', 'source list is locked']],
+    ];
+    for (const [key, wants] of need) {
+      for (const want of wants) expect(lines[key]!.includes(want), `${key} lacks ${JSON.stringify(want)}: ${JSON.stringify(lines[key])}`);
+    }
+    expect(lines['srcInvalid'] === 'A link cannot carry a password', `the daemon's own source refusal changed: ${JSON.stringify(lines['srcInvalid'])}`);
+    expect(lines['orgGone'] === "That group is not in this conversation's folder.", `the group sentence changed: ${JSON.stringify(lines['orgGone'])}`);
+    return JSON.stringify(lines);
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

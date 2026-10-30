@@ -15074,7 +15074,7 @@
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.code === 'organization_unsupported') return 'This daemon cannot file conversations.';
         if (r.status === 403) return 'Filing needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       // One PATCH, and what the daemon says it now holds: the list's catalog
       // row takes the daemon's answer, not the request, and the next list
@@ -15158,7 +15158,7 @@
             orgSheet.note =
               r.code === 'invalid_group_name'
                 ? 'A group name is 1 to 64 characters.'
-                : 'The group was not made: ' + (r.error || r.code);
+                : 'The group was not made: ' + rcDetail(r);
             orgSheet.tone = 'err';
             renderOrgSheet();
             return;
@@ -15277,7 +15277,7 @@
               ? 'This daemon keeps no sources.'
               : r.code === 'session_not_found'
                 ? 'The daemon does not have this conversation open.'
-                : 'The sources could not be read: ' + (r.error || r.code);
+                : 'The sources could not be read: ' + rcDetail(r);
         }
         renderSrcSheet();
         renderConvRows();
@@ -15348,7 +15348,7 @@
         if (r.code === 'source_limit_reached') return 'This conversation already has 200 sources.';
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.status === 403) return 'Changing sources needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       async function srcAdd() {
         const where = ($('src-where').value || '').trim();
