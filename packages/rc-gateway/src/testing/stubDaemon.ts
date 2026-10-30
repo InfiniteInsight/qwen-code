@@ -256,6 +256,15 @@ export interface StubDaemon {
   lastAgentTraceQuery: Record<string, unknown> | undefined;
   /** #110: what the most recent GET .../saved-workflows/:name named. */
   lastSavedWorkflow: { sessionId: string; name: string } | undefined;
+  /**
+   * #110: the query of every GET /session/:id/tasks, in order. Whether the
+   * gateway opted in to workflow rows is `includeWorkflows` here.
+   */
+  tasksQueries: Array<Record<string, unknown>>;
+  /** #110: every POST .../tasks/:taskId/cancel, in order, with its body. */
+  taskCancels: Array<{ sessionId: string; taskId: string; body: unknown }>;
+  /** #110: every POST .../tasks/:taskId/workflow-action, in order. */
+  workflowActions: Array<{ sessionId: string; taskId: string; body: unknown }>;
   /** #132: every POST /sessions/catalog body, in order. */
   catalogRequests: unknown[];
   /**
@@ -881,6 +890,31 @@ export interface StubDaemonOptions {
   /** #110: status for GET .../saved-workflows/:name (default 200). */
   savedWorkflowStatus?: number;
   /**
+   * #110: the NON-workflow rows GET /session/:id/tasks answers (default none),
+   * as the daemon shapes them. A function is read per request.
+   */
+  tasksResult?: unknown[] | ((sessionId: string) => unknown[]);
+  /**
+   * #110: workflow rows (`DaemonSessionWorkflowTaskStatus`). The daemon adds
+   * them only when the query says `includeWorkflows=true` AND the workspace is
+   * trusted, so the stub does the same: a request that does not opt in, or any
+   * request while `workspaceTrusted` is false, gets the list without them.
+   */
+  workflowTasksResult?: unknown[] | ((sessionId: string) => unknown[]);
+  /** #110: false stands for an untrusted workspace (default trusted). */
+  workspaceTrusted?: boolean;
+  /**
+   * #110: the verdict a non-workflow cancel answers (default
+   * `{cancelled: true}`). A workflow cancel on an untrusted workspace answers
+   * `{cancelled: false, reason: 'disabled'}` whatever this says.
+   */
+  taskCancelVerdict?: { cancelled: boolean; reason?: string };
+  /**
+   * #110: `changed` for POST .../workflow-action (default true). The daemon
+   * answers `{changed: false}` for an untrusted workspace regardless.
+   */
+  workflowActionChanged?: boolean;
+  /**
    * #132: the workspaces this daemon has registered, each with what POST
    * /sessions/catalog answers for it: its rows (`DaemonSessionSummary`, any
    * order; the stub sorts them the way the daemon does), its group records,
@@ -1071,6 +1105,9 @@ export async function startStubDaemon(
     lastSavedWorkflow: undefined as
       | { sessionId: string; name: string }
       | undefined,
+    tasksQueries: [] as Array<Record<string, unknown>>,
+    taskCancels: [] as StubDaemon['taskCancels'],
+    workflowActions: [] as StubDaemon['workflowActions'],
     catalogRequests: [] as unknown[],
   };
   const app = express();
@@ -2460,6 +2497,67 @@ export async function startStubDaemon(
       name,
       workflow: opts.savedWorkflowResult ?? null,
     });
+  });
+
+  // -- Session tasks and workflow runs (#110) ---------------------------
+  // GET /session/:id/tasks answers the plain list, and adds the workflow rows
+  // only for `?includeWorkflows=true` on a trusted workspace, which is the
+  // daemon's own rule (cli/src/serve/routes/session.ts, includeWorkflows:
+  // runtime.trusted && query === 'true'). The two POSTs answer the shapes of
+  // the daemon's `cancel` and `workflow-action` handlers, including their
+  // untrusted-workspace answers.
+  const s110Trusted = (): boolean => opts.workspaceTrusted !== false;
+  const s110Rows = (
+    given: unknown[] | ((sessionId: string) => unknown[]) | undefined,
+    sessionId: string,
+  ): unknown[] =>
+    (typeof given === 'function' ? given(sessionId) : given) ?? [];
+
+  app.get('/session/:id/tasks', (req, res) => {
+    const sessionId = String(req.params.id);
+    state.tasksQueries.push(
+      Object.fromEntries(
+        Object.entries(req.query as Record<string, unknown>),
+      ),
+    );
+    const withWorkflows =
+      s110Trusted() && req.query['includeWorkflows'] === 'true';
+    res.status(200).json({
+      v: 1,
+      sessionId,
+      now: Date.now(),
+      tasks: [
+        ...s110Rows(opts.tasksResult, sessionId),
+        ...(withWorkflows
+          ? s110Rows(opts.workflowTasksResult, sessionId)
+          : []),
+      ],
+    });
+  });
+
+  app.post('/session/:id/tasks/:taskId/cancel', (req, res) => {
+    const sessionId = String(req.params.id);
+    const taskId = String(req.params.taskId);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.taskCancels.push({ sessionId, taskId, body });
+    if (body['kind'] === 'workflow' && !s110Trusted()) {
+      res.status(200).json({ cancelled: false, reason: 'disabled' });
+      return;
+    }
+    res.status(200).json(opts.taskCancelVerdict ?? { cancelled: true });
+  });
+
+  app.post('/session/:id/tasks/:taskId/workflow-action', (req, res) => {
+    const sessionId = String(req.params.id);
+    const taskId = String(req.params.taskId);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.workflowActions.push({ sessionId, taskId, body });
+    if (!s110Trusted()) {
+      res.status(200).json({ changed: false });
+      return;
+    }
+    const changed = opts.workflowActionChanged !== false;
+    res.status(200).json(changed ? { changed: true, taskId } : { changed: false });
   });
 
   // -- Workspace file reads (add-capability-parity #107) ----------------
@@ -4748,6 +4846,15 @@ export async function startStubDaemon(
     },
     get lastSavedWorkflow() {
       return state.lastSavedWorkflow;
+    },
+    get tasksQueries() {
+      return state.tasksQueries;
+    },
+    get taskCancels() {
+      return state.taskCancels;
+    },
+    get workflowActions() {
+      return state.workflowActions;
     },
     get catalogRequests() {
       return state.catalogRequests;

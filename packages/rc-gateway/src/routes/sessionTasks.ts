@@ -7,6 +7,7 @@
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { WRITE, hasScope } from '../scopes.js';
 
 /**
  * GET /session/:id/tasks — relay the daemon's task list, which is the run log
@@ -16,6 +17,11 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * Read-scoped, bare namespace (transparent-proxy topology — 1:1 with the
  * daemon's own `GET /session/:id/tasks`). Not audited: a task read is a poll
  * with no mutation, like the status and context reads beside it.
+ *
+ * Workflow runs are listed for owner and write tokens only (#110, the user's
+ * decision of 2026-10-30): for those the daemon is asked with its
+ * `includeWorkflows` opt-in, for everyone else it is not. The daemon adds
+ * them only on a trusted workspace even then.
  *
  * The payload is passed through verbatim, including each shell task's `cwd` and
  * `outputFile`. That is a deliberate call, not an oversight, and it is recorded
@@ -28,7 +34,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * is the exact failure this issue is filed against.
  */
 export function createSessionTasksRoute(
-  daemon: Pick<SessionDaemon, 'sessionTasks'>,
+  daemon: Pick<SessionDaemon, 'sessionTasks' | 'sessionWorkflowTasks'>,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -41,7 +47,22 @@ export function createSessionTasksRoute(
       return;
     }
     try {
-      const status = await daemon.sessionTasks(sessionId);
+      // #110: workflow rows carry a run's prompts, logs, output path and
+      // approvals, which is more than the agent, shell and monitor rows say.
+      // The user's call (2026-10-30) is that only owner and write tokens get
+      // them, so the daemon is asked to expand them only for those. A reader,
+      // an approve-only token and a share link (session-locked, never write)
+      // get the list as it was before: the daemon's default shape, which has
+      // no workflow rows. Scope decides the QUERY, not a filter on the answer,
+      // so a reader's request never makes the daemon assemble the rows.
+      const scopes = req.rcClient?.scopes;
+      const mayHaveWorkflows =
+        Array.isArray(scopes) &&
+        req.rcClient?.sessionLockId === undefined &&
+        hasScope(scopes, WRITE);
+      const status = mayHaveWorkflows
+        ? await daemon.sessionWorkflowTasks(sessionId)
+        : await daemon.sessionTasks(sessionId);
       res.status(200).json(status);
     } catch (err) {
       // `UnknownSessionError` says only "Unknown session: <id>", which a
