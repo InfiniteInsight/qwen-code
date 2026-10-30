@@ -450,7 +450,8 @@ export interface StartTabInput {
 export class HostTabRegistry {
   /** Serializes every read-modify-write, so concurrent calls all land. */
   private chain: Promise<unknown> = Promise.resolve();
-  private readonly now: () => number;
+  /** The registry's clock, which every time it stores is read from. */
+  readonly now: () => number;
   private readonly newId: () => string;
   private readonly probe: TabProcProbe;
 

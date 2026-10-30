@@ -25,7 +25,12 @@ import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { HostTabRegistry, type TabProcProbe } from '../hostTabs.js';
 import { TerminalRequestLog } from '../terminals.js';
 import { SESSION_READ, SHARE, WRITE } from '../scopes.js';
-import { sessionEndpointResolver, type TabEndpointAnswer } from './hostTabs.js';
+import {
+  AUTO_REOPEN_WINDOW_MS,
+  autoReopenEligible,
+  sessionEndpointResolver,
+  type TabEndpointAnswer,
+} from './hostTabs.js';
 import {
   UnknownSessionError,
   WorkspacePoolFullError,
@@ -68,6 +73,8 @@ interface BootOpts {
   isMirrored?: (sessionId: string) => Promise<boolean>;
   /** Wire no request log, as a gateway without host terminals. */
   noRequests?: boolean;
+  /** `--reopen-crashed-tabs`. */
+  autoReopen?: boolean;
 }
 
 const ENDPOINT = (cwd: string): TabEndpointAnswer => ({
@@ -121,6 +128,7 @@ async function boot(opts: BootOpts = {}) {
             registry,
             endpointFor: opts.endpointFor ?? (async (_s, cwd) => ENDPOINT(cwd)),
             isMirrored: opts.isMirrored ?? (async () => false),
+            autoReopen: opts.autoReopen === true,
           },
         }),
   });
@@ -143,6 +151,7 @@ async function boot(opts: BootOpts = {}) {
     },
     /** The launcher polls now. */
     poll: () => requests.recordPoll(0),
+    sweep: gw.hostTabSweep,
   };
 }
 
@@ -716,5 +725,190 @@ describe('sessionEndpointResolver', () => {
     expect(await code(pool({ known: true, token: '' }))).toBe(
       '409 daemon_unavailable',
     );
+  });
+});
+
+describe('the automatic reopen (--reopen-crashed-tabs)', () => {
+  /** Wait for `n` queued requests (the end route's sweep runs after it answers). */
+  async function queued(g: Awaited<ReturnType<typeof boot>>, n: number) {
+    const deadline = Date.now() + 2000;
+    let all = await g.requests.readAll();
+    while (all.length < n && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+      all = await g.requests.readAll();
+    }
+    return all;
+  }
+  const end = (
+    g: Awaited<ReturnType<typeof boot>>,
+    tabId: string,
+    exitCode: number,
+  ) => send(g.url, `/rc/host/tabs/${tabId}/end`, { body: { exitCode } });
+
+  it('reopens a tab as soon as its end report says crashed, once, and marks the record', async () => {
+    const g = await boot({ autoReopen: true });
+    await g.poll();
+    g.probe.fd0.set(41, '/dev/pts/1');
+    const a = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 41 });
+    expect((await end(g, a.tabId, 137)).status).toBe(200);
+    const q = await queued(g, 1);
+    expect(q.map((r) => r.sessionId)).toEqual([S1]);
+    expect(g.registry.get(a.tabId)?.autoReopenedAt).toBeDefined();
+    const rows = await auditRows(g.auditPath, 'host_tab_reopened', 1);
+    expect(rows[0]).toMatchObject({
+      outcome: 'ok',
+      detail: { tabId: a.tabId, auto: true },
+    });
+    // Later passes leave it alone.
+    await g.sweep!();
+    await g.sweep!();
+    expect(await g.requests.readAll()).toHaveLength(1);
+    // The tab that answered it crashes too: that one is left to the user.
+    g.probe.fd0.set(42, '/dev/pts/2');
+    const b = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 42 });
+    expect(b.origin).toBe('auto_reopen');
+    await end(g, b.tabId, 137);
+    await g.sweep!();
+    expect(await queued(g, 2)).toHaveLength(1);
+    const list = await send(g.url, '/rc/host/tabs', {
+      method: 'GET',
+      token: g.owner,
+    });
+    expect(list.body.autoReopen).toBe(true);
+    const tabs = list.body.tabs as Array<{ tabId: string; state: string }>;
+    expect(tabs.find((t) => t.tabId === b.tabId)?.state).toBe('crashed');
+  });
+
+  it('never reopens a tab the user quit, closed or interrupted', async () => {
+    const g = await boot({ autoReopen: true });
+    await g.poll();
+    for (const [i, code] of [0, 129, 130].entries()) {
+      g.probe.fd0.set(50 + i, '/dev/pts/1');
+      const sid = `c0000000-0000-4000-8000-00000000000${i}`;
+      const t = await g.registry.start({
+        sessionId: sid,
+        cwd: '/srv/w',
+        pid: 50 + i,
+      });
+      await end(g, t.tabId, code);
+    }
+    await g.sweep!();
+    expect(await queued(g, 1)).toEqual([]);
+  });
+
+  it('waits for a live launcher, with no audit row while it waits, then reopens', async () => {
+    const g = await boot({ autoReopen: true });
+    g.probe.fd0.set(61, '/dev/pts/1');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 61 });
+    await end(g, t.tabId, 1);
+    await g.sweep!();
+    expect(await g.requests.readAll()).toEqual([]);
+    await g.poll();
+    g.tick(20_000); // polled once, then silent past the stale window
+    await g.sweep!();
+    expect(await g.requests.readAll()).toEqual([]);
+    expect(await auditRows(g.auditPath, 'host_tab_reopened', 0)).toEqual([]);
+    await g.poll();
+    await g.sweep!();
+    expect(await queued(g, 1)).toHaveLength(1);
+  });
+
+  it('reopens a tab whose wrapper vanished (SIGKILL) once it turns crashed', async () => {
+    const g = await boot({ autoReopen: true });
+    g.probe.fd0.set(71, '/dev/pts/1');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 71 });
+    g.probe.fd0.delete(71);
+    await g.poll();
+    await g.sweep!(); // a ghost: not yet
+    expect(await g.requests.readAll()).toEqual([]);
+    g.tick(12_000);
+    await g.poll();
+    await g.sweep!();
+    expect(await queued(g, 1)).toHaveLength(1);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeDefined();
+  });
+
+  it('leaves a dismissed crash and an old crash alone, and does nothing when it is off', async () => {
+    const g = await boot({ autoReopen: true });
+    const old = await g.registry.start({
+      sessionId: S1,
+      cwd: '/srv/w',
+      pid: 81,
+    });
+    await g.registry.end(old.tabId, 137);
+    g.tick(AUTO_REOPEN_WINDOW_MS + 1);
+    const dis = await g.registry.start({
+      sessionId: S2,
+      cwd: '/srv/w',
+      pid: 82,
+    });
+    await g.registry.end(dis.tabId, 137);
+    await g.registry.dismiss(dis.tabId);
+    await g.poll();
+    await g.sweep!();
+    expect(await g.requests.readAll()).toEqual([]);
+
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+    await stub!.close();
+    stub = undefined;
+    await rm(base!, { recursive: true, force: true });
+    const off = await boot();
+    await off.poll();
+    const t = await off.registry.start({
+      sessionId: S1,
+      cwd: '/srv/w',
+      pid: 83,
+    });
+    await end(off, t.tabId, 137);
+    await off.sweep!();
+    expect(await queued(off, 1)).toEqual([]);
+    const list = await send(off.url, '/rc/host/tabs', {
+      method: 'GET',
+      token: off.owner,
+    });
+    expect(list.body.autoReopen).toBe(false);
+  });
+});
+
+describe('autoReopenEligible', () => {
+  const tab = {
+    tabId: '00000000-0000-4000-8000-000000000001',
+    sessionId: S1,
+    cwd: '/srv/w',
+    startedAt: 0,
+    pid: 1,
+    dismissed: false,
+  };
+  it('takes a recent crash and nothing else', () => {
+    const now = 100_000;
+    const yes = {
+      ...tab,
+      state: 'crashed' as const,
+      endedAt: now - 1,
+      exitCode: 137,
+      reason: 'crashed' as const,
+    };
+    expect(autoReopenEligible(yes, now)).toBe(true);
+    expect(
+      autoReopenEligible({ ...tab, state: 'crashed', lostAt: now - 1 }, now),
+    ).toBe(true);
+    expect(autoReopenEligible({ ...yes, state: 'ghost' }, now)).toBe(false);
+    expect(autoReopenEligible({ ...yes, dismissed: true }, now)).toBe(false);
+    expect(autoReopenEligible({ ...yes, autoReopenedAt: 5 }, now)).toBe(false);
+    expect(autoReopenEligible({ ...yes, origin: 'auto_reopen' }, now)).toBe(
+      false,
+    );
+    expect(autoReopenEligible({ ...yes, origin: 'reopen' }, now)).toBe(true);
+    expect(autoReopenEligible({ ...yes, reason: 'interrupted' }, now)).toBe(
+      false,
+    );
+    expect(autoReopenEligible({ ...yes, reason: 'killed' }, now)).toBe(true);
+    expect(
+      autoReopenEligible(
+        { ...yes, endedAt: now - AUTO_REOPEN_WINDOW_MS - 1 },
+        now,
+      ),
+    ).toBe(false);
   });
 });

@@ -188,6 +188,54 @@ export interface HostTabRoutesDeps {
   /** Whether a terminal on this host already shows the session (hostMirrors.ts). */
   isMirrored?: (sessionId: string) => Promise<boolean>;
   launcherStaleMs?: number;
+  /**
+   * Reopen a crashed tab without being asked (`--reopen-crashed-tabs`, off
+   * by default). See {@link autoReopenEligible} for the rules.
+   */
+  autoReopen?: boolean;
+  /** Clock for the automatic reopen's window; defaults to the registry's. */
+  now?: () => number;
+}
+
+/** How often the automatic reopen looks, when it is on. */
+export const HOST_TAB_SWEEP_MS = 5_000;
+
+/**
+ * How recent a crash must be for the automatic reopen to act on it, measured
+ * from its moment (the end, or the first read that found the tab gone). It
+ * keeps the switch from reopening a pile of old crashes the moment it is
+ * turned on, and keeps a launcher that comes back after a long absence from
+ * opening tabs nobody is waiting for. A reboot still counts: its tabs are
+ * found gone by the gateway's first read after it starts.
+ */
+export const AUTO_REOPEN_WINDOW_MS = 10 * 60_000;
+
+/** Reasons the automatic reopen never acts on: the user's own acts. */
+const NEVER_AUTO: ReadonlySet<string> = new Set([
+  'quit',
+  'terminal_closed',
+  'interrupted',
+]);
+
+/**
+ * Whether the automatic reopen may reopen this record now: crashed, not
+ * dismissed, never automatically reopened before, not itself a tab the
+ * automatic reopen opened (so a tab that crashes again after its reopen is
+ * left to the user), not ended by the user (quit, a closed tab, Ctrl-C in
+ * the wait), and crashed within {@link AUTO_REOPEN_WINDOW_MS}. The launcher
+ * gate is the caller's.
+ */
+export function autoReopenEligible(
+  t: HostTabView,
+  now: number,
+  windowMs: number = AUTO_REOPEN_WINDOW_MS,
+): boolean {
+  if (t.state !== 'crashed' || t.dismissed) return false;
+  if (t.autoReopenedAt !== undefined) return false;
+  if (t.origin === 'auto_reopen') return false;
+  if (t.reason !== undefined && NEVER_AUTO.has(t.reason)) return false;
+  const at = t.endedAt ?? t.lostAt;
+  return at !== undefined && now - at <= windowMs;
 }
 
 /** What one reopen came to, for the route and for the automatic reopen. */
@@ -230,6 +278,11 @@ export interface HostTabRoutes {
     tabId: string,
     opts: { auto: boolean; actorTokenId?: string },
   ): Promise<ReopenOutcome>;
+  /**
+   * One pass of the automatic reopen; a no-op unless it is on. Never throws,
+   * and never runs twice at once.
+   */
+  sweep(): Promise<void>;
 }
 
 /**
@@ -239,8 +292,9 @@ export interface HostTabRoutes {
  * `bearerResolve`.
  *
  * - `GET /rc/host/tabs`: every record with its derived state (see
- *   hostTabs.ts), newest first, and the launcher's liveness, so the page can
- *   say whether Reopen can work before it is pressed.
+ *   hostTabs.ts), newest first, the launcher's liveness, so the page can
+ *   say whether Reopen can work before it is pressed, and `autoReopen`,
+ *   whether the gateway reopens crashed tabs on its own.
  * - `POST /rc/host/tabs/:tabId/reopen`: queue a terminal request for the
  *   record's conversation through the same request log POST /rc/terminals
  *   writes, so the launcher opens it like any other. Only a crashed or ghost
@@ -405,6 +459,7 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       launcher: launcher
         ? { state: launcher.state, seenMsAgo: launcher.seenMsAgo }
         : null,
+      autoReopen: deps.autoReopen === true,
     });
   };
 
@@ -451,11 +506,38 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       res.status(200).json({ tab: after ? publicTab(after) : null });
     };
 
+  // The automatic reopen. Each record is tried at most once per gateway
+  // run whatever came of it (a refusal is not retried every five seconds),
+  // and a success is written on the record, so it holds across restarts too.
+  // Nothing is tried while the launcher is not live: the pass returns before
+  // reading a single record, so a launcher that is away costs no audit rows.
+  const tried = new Set<string>();
+  let sweeping = false;
+  const sweep = async (): Promise<void> => {
+    if (!deps.autoReopen || !deps.requests || sweeping) return;
+    sweeping = true;
+    try {
+      const l = await deps.requests.launcherLiveness(staleMs);
+      if (l.state !== 'live') return;
+      const now = (deps.now ?? registry.now)();
+      for (const t of await registry.list()) {
+        if (tried.has(t.tabId) || !autoReopenEligible(t, now)) continue;
+        tried.add(t.tabId);
+        await reopenTab(t.tabId, { auto: true });
+      }
+    } catch {
+      // The next pass tries again; a sweep never takes the gateway down.
+    } finally {
+      sweeping = false;
+    }
+  };
+
   return {
     list,
     reopen,
     dismiss: change('dismiss'),
     remove: change('remove'),
     reopenTab,
+    sweep,
   };
 }
