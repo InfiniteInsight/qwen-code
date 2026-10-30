@@ -203,20 +203,23 @@ export function deriveTabStates(
     own.set(r.tabId, deriveTabState(r, pidLive(r), now, ghostGraceMs));
   }
   const out = new Map<string, HostTabState>();
-  for (const r of records) {
+  records.forEach((r, i) => {
     const s = own.get(r.tabId)!;
     if (s === 'ghost' || s === 'crashed') {
+      // Newer: started later, or in the same millisecond and recorded later.
       const superseded = records.some(
-        (o) =>
-          o.tabId !== r.tabId &&
+        (o, j) =>
+          j !== i &&
           o.sessionId === r.sessionId &&
-          (o.startedAt > r.startedAt || own.get(o.tabId) === 'live'),
+          (o.startedAt > r.startedAt ||
+            (o.startedAt === r.startedAt && j > i) ||
+            own.get(o.tabId) === 'live'),
       );
       out.set(r.tabId, superseded ? 'replaced' : s);
     } else {
       out.set(r.tabId, s);
     }
-  }
+  });
   return out;
 }
 

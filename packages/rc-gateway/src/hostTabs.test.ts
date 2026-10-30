@@ -128,6 +128,15 @@ describe('deriveTabStates', () => {
     );
     expect(states.get(crashed.tabId)).toBe('replaced');
   });
+  it('breaks a tie of start times by the order the records were made', () => {
+    const a = rec(1, { startedAt: 5, endedAt: 6, exitCode: 137 });
+    const b = rec(2, { startedAt: 5, endedAt: 6, exitCode: 143 });
+    const states = deriveTabStates([a, b], () => false, 10_000, GRACE);
+    expect([states.get(a.tabId), states.get(b.tabId)]).toEqual([
+      'replaced',
+      'crashed',
+    ]);
+  });
   it('leaves quit and closed alone', () => {
     const a = rec(1, { endedAt: 1_500, exitCode: 0 });
     const b = rec(2, { endedAt: 2_500, exitCode: 129 });
