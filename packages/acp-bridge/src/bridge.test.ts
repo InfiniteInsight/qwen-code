@@ -6401,6 +6401,122 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  // #213: a tab that attaches after a model switch seeds its footer from the
+  // load state, so that state must name the model the session runs now, not
+  // the one captured when the session was first restored or spawned.
+  const withSetSessionModel = (handle: ChannelHandle): string[] => {
+    const calls: string[] = [];
+    (
+      handle.agent as unknown as {
+        unstable_setSessionModel: (params: {
+          sessionId: string;
+          modelId: string;
+        }) => Promise<Record<string, unknown>>;
+      }
+    ).unstable_setSessionModel = async (params) => {
+      calls.push(params.modelId);
+      return {};
+    };
+    return calls;
+  };
+
+  it('gives a late attacher the model the restored session switched to (#213)', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () =>
+        ({
+          models: {
+            currentModelId: 'old-model',
+            availableModels: [
+              { modelId: 'old-model', name: 'old-model' },
+              { modelId: 'new-model', name: 'new-model' },
+            ],
+          },
+          configOptions: [
+            {
+              id: 'model',
+              name: 'Model',
+              type: 'select',
+              currentValue: 'old-model',
+              options: [],
+            },
+          ],
+        }) as unknown as LoadSessionResponse,
+    });
+    const setModelCalls = withSetSessionModel(handle);
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-model-switch',
+      workspaceCwd: WS_A,
+    });
+    expect(loaded.attached).toBe(false);
+    expect(loaded.state.models?.currentModelId).toBe('old-model');
+
+    await bridge.setSessionModel('persisted-model-switch', {
+      sessionId: 'persisted-model-switch',
+      modelId: 'new-model',
+    });
+    expect(setModelCalls).toEqual(['new-model']);
+
+    const attached = await bridge.loadSession({
+      sessionId: 'persisted-model-switch',
+      workspaceCwd: WS_A,
+    });
+    expect(attached.attached).toBe(true);
+    expect(attached.state.models?.currentModelId).toBe('new-model');
+    expect(attached.state.models?.availableModels).toHaveLength(2);
+    expect(
+      attached.state.configOptions?.find((option) => option.id === 'model'),
+    ).toMatchObject({ currentValue: 'new-model' });
+
+    await bridge.shutdown();
+  });
+
+  it('gives a late attacher of a spawned session the model it runs (#213)', async () => {
+    const handle = makeChannel({
+      newSessionImpl: (params) => ({
+        sessionId: `spawned:${params.cwd}`,
+        models: {
+          currentModelId: 'old-model',
+          availableModels: [
+            { modelId: 'old-model', name: 'old-model' },
+            { modelId: 'new-model', name: 'new-model' },
+          ],
+        },
+        modes: {
+          currentModeId: ApprovalMode.DEFAULT,
+          availableModes: [],
+        },
+      }),
+    });
+    withSetSessionModel(handle);
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = await bridge.loadSession({
+      sessionId: spawned.sessionId,
+      workspaceCwd: WS_A,
+    });
+    expect(first.attached).toBe(true);
+    expect(first.state.models?.currentModelId).toBe('old-model');
+    expect(first.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(first.state).not.toHaveProperty('sessionId');
+
+    await bridge.setSessionModel(spawned.sessionId, {
+      sessionId: spawned.sessionId,
+      modelId: 'new-model',
+    });
+
+    const later = await bridge.loadSession({
+      sessionId: spawned.sessionId,
+      workspaceCwd: WS_A,
+    });
+    expect(later.attached).toBe(true);
+    expect(later.state.models?.currentModelId).toBe('new-model');
+
+    await bridge.shutdown();
+  });
+
   it('surfaces replayDegraded on loadSession when compaction fails', async () => {
     const handle = makeChannel({
       promptImpl: async (p) => {
@@ -31073,6 +31189,84 @@ describe('createAcpSessionBridge', () => {
       releasePrompt?.();
       await promptDone;
       abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('publishes model_switched once, with the final model, when the agent update was suppressed mid-roundtrip (#213)', async () => {
+      // The real child emits current_model_update from inside
+      // Session.setModel, i.e. while the bridge roundtrip is still in flight.
+      // That update is suppressed; the bridge's own model_switched must still
+      // reach a subscriber exactly once, and the reconcile read that follows
+      // (which reports the same model) must not add a second one.
+      const handle = makeChannel({
+        extMethodImpl: (method, params) =>
+          method === SERVE_STATUS_EXT_METHODS.sessionContext
+            ? {
+                v: 1,
+                sessionId: params['sessionId'],
+                state: { models: { currentModelId: 'flint' } },
+              }
+            : {},
+      });
+      (
+        handle.agent as unknown as {
+          unstable_setSessionModel: (params: {
+            sessionId: string;
+            modelId: string;
+          }) => Promise<Record<string, unknown>>;
+        }
+      ).unstable_setSessionModel = async (params) => {
+        await handle.agentConnection.extNotification(
+          'qwen/notify/session/model-update',
+          {
+            v: 1,
+            sessionId: params.sessionId,
+            currentModelId: params.modelId,
+          },
+        );
+        await new Promise((r) => setTimeout(r, 10));
+        return {};
+      };
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionModel(session.sessionId, {
+        sessionId: session.sessionId,
+        modelId: 'flint',
+      });
+      // Let the post-roundtrip reconcile read settle.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const abort = new AbortController();
+      const seen: Array<{ type: string; data: unknown }> = [];
+      const collecting = (async () => {
+        for await (const e of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+          lastEventId: 0,
+        })) {
+          seen.push({ type: e.type, data: e.data });
+        }
+      })();
+      await new Promise((r) => setTimeout(r, 20));
+      abort.abort();
+      await collecting;
+
+      const suppressed = stderr.mock.calls.some((call) =>
+        String(call[0]).includes(
+          'type=current_model_update action=suppressed reason=bridge_roundtrip_in_flight',
+        ),
+      );
+      stderr.mockRestore();
+      expect(suppressed).toBe(true);
+      expect(seen.filter((e) => e.type === 'model_switched')).toEqual([
+        {
+          type: 'model_switched',
+          data: { sessionId: session.sessionId, modelId: 'flint' },
+        },
+      ]);
       await bridge.shutdown();
     });
   });

@@ -1044,8 +1044,10 @@ interface SessionEntry {
    * ACP state captured at `session/load` / `session/resume` time so
    * late attachers (existing-byId early-return + coalesced restore
    * waiters) get the same payload the original restore caller did.
-   * `undefined` for sessions created via `doSpawn` — those have never
-   * had an ACP load/resume response, so attaches return `state: {}`.
+   * A session created via `doSpawn` keeps its `session/new` state here
+   * (without the `sessionId`), so its attachers learn the model and mode
+   * too. The current model and mode are kept in sync by
+   * `publishModelSwitched` and `publishApprovalModeChanged` (#213).
    */
   restoreState?: BridgeSessionState;
   /** Response-mode `session/load` can return a partial replay prefix. */
@@ -5759,6 +5761,13 @@ export function createSessionControlPlane(
       sessionRegistered = true;
       onSessionRegistered?.();
       seedSnapshotCaches(entry, newSessionResp);
+      // A tab that attaches later seeds its footer from the load state, so a
+      // spawned session hands attachers its create state the way a restored
+      // one hands them its restore state (#213).
+      const { sessionId: _createdSessionId, ...createdState } = newSessionResp;
+      entry.restoreState = publicRestoreState(
+        createdState as BridgeSessionState,
+      );
       const clientId = registerClient(entry, requestedClientId);
       // Persist the parent lineage into the child's transcript so it survives a
       // daemon restart (rehydrated by `listSessions`). The live `SessionEntry`
@@ -7195,12 +7204,32 @@ export function createSessionControlPlane(
   // §2.3 publish helpers — centralise cache + generation + bus publish so
   // every `model_switched` / `approval_mode_changed` site stays atomic.
 
+  // The model half of `syncRestoreStateApprovalMode`: a client that attaches
+  // after a switch reads the model from this state, so it must name the
+  // current one, not the one captured at restore or spawn (#213).
+  const syncRestoreStateModel = (
+    entry: SessionEntry,
+    modelId: string,
+  ): void => {
+    const state = entry.restoreState;
+    if (!state) return;
+    if (state.models) {
+      state.models = { ...state.models, currentModelId: modelId };
+    }
+    if (Array.isArray(state.configOptions)) {
+      state.configOptions = state.configOptions.map((option) =>
+        option.id === 'model' ? { ...option, currentValue: modelId } : option,
+      );
+    }
+  };
+
   const publishModelSwitched = (
     entry: SessionEntry,
     modelId: string,
     originatorClientId: string | undefined,
   ): void => {
     entry.currentModelId = modelId;
+    syncRestoreStateModel(entry, modelId);
     entry.modelPublishGeneration++;
     // `EventBus.publish` never throws (a closed bus is a return-undefined
     // no-op); per its documented contract we don't wrap it — a try/catch
@@ -8524,8 +8553,8 @@ export function createSessionControlPlane(
         ...(existing.sourceId !== undefined
           ? { sourceId: existing.sourceId }
           : {}),
-        // Late attachers get the same ACP state the original restore
-        // caller saw; spawn-only sessions don't carry a state payload.
+        // Late attachers get the ACP state the original restore (or spawn)
+        // caller saw, with the current model and mode kept in sync.
         state: existing.restoreState ?? {},
         hasRunningBackgroundTasks: existing.hasRunningBackgroundTasks,
         hasActivePrompt:
