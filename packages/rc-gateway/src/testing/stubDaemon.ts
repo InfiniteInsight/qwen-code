@@ -282,6 +282,13 @@ export interface StubDaemon {
     body?: unknown;
     artifactId?: string;
   }>;
+  /**
+   * The last artifact list and snapshot read the stub answered. The getters
+   * were returned without being declared here, so a test that read them did
+   * not typecheck.
+   */
+  lastArtifactListSessionId: string | undefined;
+  lastArtifactContent: { sessionId: string; artifactId: string } | undefined;
   /** #110: every PATCH /session/:id/organization body, in order. */
   organizationCalls: Array<{ sessionId: string; body: unknown }>;
   /** #110: every POST /workspace/:id/session-groups, in order. */

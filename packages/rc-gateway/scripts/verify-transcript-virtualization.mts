@@ -10636,7 +10636,7 @@ PAGE_SCENARIOS.push({
         `a save did not report the file (${JSON.stringify(note)})`,
       );
       expect(
-        download,
+        download !== null,
         'the save offered no download',
       );
       expect(
