@@ -37,9 +37,12 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * The id names the owner of what the call records: an artifact added with it
  * is client-owned by this gateway's attachment, and the daemon refuses another
  * client's change to it (403 `session_artifact_forbidden`, relayed as is). So
- * every phone served by one gateway acts as the same client, and an artifact
- * the model or a hook recorded cannot be removed from the phone either. That
- * is the daemon's rule, relayed, not restated.
+ * every phone served by one gateway acts as the same client. The refusal is
+ * only for a `client` artifact another client owns: what a tool or a hook
+ * recorded "may be removed by any caller that already passed session mutation
+ * auth" (acp-bridge sessionArtifacts.ts, `remove` and
+ * `denyCrossClientMutation`), so the phone can remove the model's artifacts.
+ * That is the daemon's rule, relayed, not restated.
  *
  * WHAT THIS ROUTE CHECKS AND WHAT IT LEAVES TO THE DAEMON
  *
