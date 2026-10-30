@@ -19278,7 +19278,10 @@ PAGE_SCENARIOS.push({
           // row in the markup and not drawn is a regression.
           const undrawn = g.rows.filter((x) => !x.drawn);
           expect(
-            undrawn.every((x) => x.action === 'agents'),
+            // #110's Organize and Sources and #123's Reload workspace are the
+            // same kind: offered only where the gateway, the daemon and the
+            // token allow them, and not by this stub's defaults.
+            undrawn.every((x) => ['agents', 'organize', 'sources', 'reload-workspace'].includes(x.action ?? '')),
             `rows in the markup and not drawn at ${at}: ${JSON.stringify(undrawn.map((x) => x.label))}`,
           );
           const drawnRows = g.rows.filter((x) => x.drawn);
