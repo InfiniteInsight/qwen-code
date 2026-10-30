@@ -309,6 +309,8 @@ export interface StubDaemon {
     sessionId: string;
     body?: unknown;
   }>;
+  /** #135: the session ids GET /session/:id/hooks was asked for, in order. */
+  hooksCalls: string[];
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -962,6 +964,29 @@ export interface StubDaemonOptions {
    * its create, replace and clear rules.
    */
   goal?: StubGoalOptions;
+  /**
+   * #135: GET /session/:id/hooks, with the daemon's body
+   * (DaemonSessionHooksStatus): the hooks registered in the session, every
+   * entry source 'session', `env` and `headers` UNMASKED as acpAgent's
+   * serializeHookConfig sends them. The daemon keeps no run history, so the
+   * stub has none to give.
+   */
+  hooks?: StubHooksOptions;
+}
+
+/** #135: the hooks the stub's session routes answer with. */
+export interface StubHooksOptions {
+  /** The hook entries each session holds (a session not listed has none). */
+  seed?: Record<string, Array<Record<string, unknown>>>;
+  /** Called on every read: a list replaces the held one, undefined leaves it. */
+  change?: (sessionId: string) => Array<Record<string, unknown>> | undefined;
+  /** `disabled` in the body: every hook switched off. */
+  disabled?: boolean;
+  /** Status cells in the body (the daemon's own account of a failed read). */
+  errors?: Array<Record<string, unknown>>;
+  /** Status for the route (default 200); `errorBody` rides with it. */
+  status?: number;
+  errorBody?: unknown;
 }
 
 /** #135: what a goal in the stub is seeded with; the rest is filled in. */
@@ -4376,6 +4401,33 @@ export async function startStubDaemon(
     });
   });
 
+  // -- #135: the session hooks read ------------------------------------------
+  // The daemon's GET /session/:id/hooks (cli/src/serve/routes/session.ts:7202,
+  // answered by acpAgent.buildSessionHooksStatus): { v: 1, sessionId,
+  // workspaceCwd, disabled, hooks, errors? }. The session's own hooks only, so
+  // every entry is source 'session'; a settings-file hook is the workspace's.
+  // An entry is configuration: no last run, exit code or output exists.
+  const s135hooks = { calls: [] as string[] };
+  app.get('/session/:id/hooks', (req, res) => {
+    const sessionId = req.params.id!;
+    s135hooks.calls.push(sessionId);
+    const status = opts.hooks?.status ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.hooks?.errorBody ?? { error: 'stub' });
+      return;
+    }
+    const hooks =
+      opts.hooks?.change?.(sessionId) ?? opts.hooks?.seed?.[sessionId] ?? [];
+    res.status(200).json({
+      v: 1,
+      sessionId,
+      workspaceCwd: opts.workspaceCwd ?? '/proj',
+      disabled: opts.hooks?.disabled === true,
+      hooks,
+      ...(opts.hooks?.errors ? { errors: opts.hooks.errors } : {}),
+    });
+  });
+
   // -- #128: the artifact mutation pair --------------------------------------
   // The daemon's POST and DELETE (cli/src/serve/routes/session.ts:7347 and
   // :7396). Both refuse a request without a client id (403 client_id_required,
@@ -4873,6 +4925,9 @@ export async function startStubDaemon(
     },
     get goalCalls() {
       return s135.calls;
+    },
+    get hooksCalls() {
+      return s135hooks.calls;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

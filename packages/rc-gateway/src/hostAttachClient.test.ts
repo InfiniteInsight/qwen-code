@@ -5,7 +5,16 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SpawnSyncReturns } from 'node:child_process';
@@ -14,10 +23,12 @@ import {
   classifyReattach,
   DEFAULT_GATEWAY_PORT,
   hostAttachTokenPath,
+  leaveTabEnd,
   parseAttachArgs,
   postHostAttach,
   resolveGatewayLoopback,
   runHostAttach,
+  TAB_END_REPORT_TIMEOUT_MS,
   type GatewayLoopbackTarget,
   type HostAttachRunDeps,
 } from './hostAttachClient.js';
@@ -746,5 +757,208 @@ describe('runHostAttach re-attach', () => {
       });
       expect(out.code).toBe(7);
     });
+  });
+});
+
+describe('the end report (#212)', () => {
+  const TAB = '00000000-0000-4000-8000-000000000212';
+  const READY = (tag: string, withTab = true) => ({
+    status: 200,
+    body: {
+      sessionId: SESSION,
+      workspaceCwd: '/srv/w',
+      linuxArgv: ['fake-qwen', `--${tag}`],
+      ...(withTab ? { tabId: TAB } : {}),
+    },
+  });
+
+  type Answer = { status: number; body: Record<string, unknown> } | Error;
+
+  /**
+   * Run the wrapper with a scripted gateway: `answers` for the attach calls in
+   * order, and `end` for the end report. Records every call's path, body and
+   * timeout, and how often the exit signals were held.
+   */
+  async function endRun(opts: {
+    statuses: Array<number | null>;
+    answers: Answer[];
+    end?: Answer;
+    deps?: Partial<HostAttachRunDeps>;
+  }) {
+    await loadOrCreateLocalToken(hostAttachTokenPath(rcDir));
+    const statuses = [...opts.statuses];
+    const answers = [...opts.answers];
+    const calls: Array<{ path: string; body: unknown; timeoutMs?: number }> =
+      [];
+    let held = 0;
+    let released = 0;
+    const code = await runHostAttach({
+      argv: ['--session', SESSION, '/srv/w'],
+      cwd: rcDir,
+      rcDir,
+      stderr: () => {},
+      pid: 4242,
+      spawn: (() => ({
+        status: statuses.shift() ?? 0,
+        signal: null,
+        pid: 1,
+        output: [],
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+      })) as unknown as HostAttachRunDeps['spawn'],
+      request: (async (
+        _t: unknown,
+        _tok: string,
+        path: string,
+        body: unknown,
+        timeoutMs?: number,
+      ) => {
+        calls.push({ path, body, timeoutMs });
+        const a = path.endsWith('/end') ? opts.end : answers.shift();
+        if (a === undefined) throw new Error('unscripted request');
+        if (a instanceof Error) throw a;
+        return a;
+      }) as unknown as HostAttachRunDeps['request'],
+      shieldSignals: () => () => {},
+      holdSignals: () => {
+        held++;
+        return () => void released++;
+      },
+      sleep: async () => {},
+      now: () => 0,
+      watchInterrupt: () => () => {},
+      ...opts.deps,
+    });
+    return { code, calls, held, released };
+  }
+
+  it('sends the pid on the first attach and the tabId on each re-attach', async () => {
+    const out = await endRun({
+      statuses: [75, 0],
+      answers: [READY('first'), READY('second')],
+      end: { status: 200, body: {} },
+    });
+    expect(out.calls.map((c) => c.body)).toEqual([
+      { cwd: '/srv/w', pid: 4242 },
+      { cwd: '/srv/w', tabId: TAB },
+      { exitCode: 0 },
+    ]);
+  });
+
+  it("posts the TUI's exit code to the tab's end route with the short timeout, holding the exit signals", async () => {
+    const out = await endRun({
+      statuses: [137],
+      answers: [READY('first')],
+      end: { status: 200, body: { state: 'crashed' } },
+    });
+    expect(out.code).toBe(137);
+    expect(out.calls.at(-1)).toEqual({
+      path: `/rc/host/tabs/${TAB}/end`,
+      body: { exitCode: 137 },
+      timeoutMs: TAB_END_REPORT_TIMEOUT_MS,
+    });
+    expect(TAB_END_REPORT_TIMEOUT_MS).toBeLessThanOrEqual(2_000);
+    expect([out.held, out.released]).toEqual([1, 1]);
+    expect(await leftEnds()).toEqual([]);
+  });
+
+  it('reports 129 when the terminal went, and 130 for a Ctrl-C during the wait', async () => {
+    let gone = false;
+    const guard: TerminalGuard = {
+      gone: () => gone,
+      reason: () => (gone ? 'SIGHUP' : undefined),
+      onGone: () => () => {},
+      stop: () => {},
+    };
+    const closed = await endRun({
+      statuses: [],
+      answers: [READY('first')],
+      end: { status: 200, body: {} },
+      deps: {
+        terminalGuard: guard,
+        spawn: (async () => {
+          gone = true;
+          return { status: 75, signal: null };
+        }) as unknown as HostAttachRunDeps['spawn'],
+      },
+    });
+    expect(closed.code).toBe(129);
+    expect(closed.calls.at(-1)?.body).toEqual({ exitCode: 129 });
+
+    let interrupt: (() => void) | undefined;
+    const ctrlC = await endRun({
+      statuses: [75],
+      answers: [READY('first'), { status: 503, body: {} }],
+      end: { status: 200, body: {} },
+      deps: {
+        watchInterrupt: (fn) => {
+          interrupt = fn;
+          return () => {};
+        },
+        sleep: async () => interrupt?.(),
+      },
+    });
+    expect(ctrlC.code).toBe(130);
+    expect(ctrlC.calls.at(-1)?.body).toEqual({ exitCode: 130 });
+  });
+
+  async function leftEnds(): Promise<string[]> {
+    try {
+      return await readdir(join(rcDir, 'host-tab-ends'));
+    } catch {
+      return [];
+    }
+  }
+
+  it('leaves the end on disk, 0600, when the gateway does not answer or refuses it', async () => {
+    const down = await endRun({
+      statuses: [143],
+      answers: [READY('first')],
+      end: Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }),
+    });
+    expect(down.code).toBe(143);
+    const file = join(rcDir, 'host-tab-ends', `${TAB}.json`);
+    const left = JSON.parse(await readFile(file, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(left).toEqual({
+      tabId: TAB,
+      exitCode: 143,
+      endedAt: expect.any(Number),
+    });
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(rcDir, 'host-tab-ends'))).mode & 0o777).toBe(0o700);
+    await rm(file);
+    await endRun({
+      statuses: [1],
+      answers: [READY('first')],
+      end: { status: 503, body: {} },
+    });
+    expect(await leftEnds()).toEqual([`${TAB}.json`]);
+  });
+
+  it('leaves nothing for a 404: the record was removed from the phone', async () => {
+    await endRun({
+      statuses: [1],
+      answers: [READY('first')],
+      end: { status: 404, body: { code: 'tab_not_found' } },
+    });
+    expect(await leftEnds()).toEqual([]);
+  });
+
+  it('reports nothing to a gateway that keeps no tab record (no tabId)', async () => {
+    const out = await endRun({
+      statuses: [137],
+      answers: [READY('first', false)],
+    });
+    expect(out.code).toBe(137);
+    expect(out.calls).toHaveLength(1);
+    expect(out.held).toBe(0);
+  });
+
+  it('leaveTabEnd refuses a tab id that is not one', async () => {
+    expect(await leaveTabEnd(rcDir, '../escape', 1, 1)).toBe(false);
+    expect(await leftEnds()).toEqual([]);
   });
 });

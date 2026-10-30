@@ -33,6 +33,7 @@ const {
   formatSessionWalLine,
   resolveWalRetention,
   sweepWalDir,
+  formatHostTabsLine,
 } = await import('./cli.js');
 
 /** A handle that only records that it was stopped, plus a call counter. */
@@ -383,5 +384,30 @@ describe('session WAL retention (#174)', () => {
 
     sweepWalDir({ dir, retention, audit, now: () => now });
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('--reopen-crashed-tabs (#212)', () => {
+  it('is off by default, on with the flag or QWEN_RC_REOPEN_CRASHED_TABS=1, and the boot line says which', () => {
+    const prior = process.env['QWEN_RC_REOPEN_CRASHED_TABS'];
+    try {
+      delete process.env['QWEN_RC_REOPEN_CRASHED_TABS'];
+      expect(parseServeFlags([]).reopenCrashedTabs).toBe(false);
+      expect(parseServeFlags(['--reopen-crashed-tabs']).reopenCrashedTabs).toBe(
+        true,
+      );
+      process.env['QWEN_RC_REOPEN_CRASHED_TABS'] = '0';
+      expect(parseServeFlags([]).reopenCrashedTabs).toBe(false);
+      process.env['QWEN_RC_REOPEN_CRASHED_TABS'] = '1';
+      expect(parseServeFlags([]).reopenCrashedTabs).toBe(true);
+    } finally {
+      if (prior === undefined)
+        delete process.env['QWEN_RC_REOPEN_CRASHED_TABS'];
+      else process.env['QWEN_RC_REOPEN_CRASHED_TABS'] = prior;
+    }
+    expect(formatHostTabsLine(false)).toContain(
+      '--reopen-crashed-tabs to reopen automatically',
+    );
+    expect(formatHostTabsLine(true)).toContain('reopened automatically once');
   });
 });
