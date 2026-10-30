@@ -31191,6 +31191,84 @@ describe('createAcpSessionBridge', () => {
       abort.abort();
       await bridge.shutdown();
     });
+
+    it('publishes model_switched once, with the final model, when the agent update was suppressed mid-roundtrip (#213)', async () => {
+      // The real child emits current_model_update from inside
+      // Session.setModel, i.e. while the bridge roundtrip is still in flight.
+      // That update is suppressed; the bridge's own model_switched must still
+      // reach a subscriber exactly once, and the reconcile read that follows
+      // (which reports the same model) must not add a second one.
+      const handle = makeChannel({
+        extMethodImpl: (method, params) =>
+          method === SERVE_STATUS_EXT_METHODS.sessionContext
+            ? {
+                v: 1,
+                sessionId: params['sessionId'],
+                state: { models: { currentModelId: 'flint' } },
+              }
+            : {},
+      });
+      (
+        handle.agent as unknown as {
+          unstable_setSessionModel: (params: {
+            sessionId: string;
+            modelId: string;
+          }) => Promise<Record<string, unknown>>;
+        }
+      ).unstable_setSessionModel = async (params) => {
+        await handle.agentConnection.extNotification(
+          'qwen/notify/session/model-update',
+          {
+            v: 1,
+            sessionId: params.sessionId,
+            currentModelId: params.modelId,
+          },
+        );
+        await new Promise((r) => setTimeout(r, 10));
+        return {};
+      };
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionModel(session.sessionId, {
+        sessionId: session.sessionId,
+        modelId: 'flint',
+      });
+      // Let the post-roundtrip reconcile read settle.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const abort = new AbortController();
+      const seen: Array<{ type: string; data: unknown }> = [];
+      const collecting = (async () => {
+        for await (const e of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+          lastEventId: 0,
+        })) {
+          seen.push({ type: e.type, data: e.data });
+        }
+      })();
+      await new Promise((r) => setTimeout(r, 20));
+      abort.abort();
+      await collecting;
+
+      const suppressed = stderr.mock.calls.some((call) =>
+        String(call[0]).includes(
+          'type=current_model_update action=suppressed reason=bridge_roundtrip_in_flight',
+        ),
+      );
+      stderr.mockRestore();
+      expect(suppressed).toBe(true);
+      expect(seen.filter((e) => e.type === 'model_switched')).toEqual([
+        {
+          type: 'model_switched',
+          data: { sessionId: session.sessionId, modelId: 'flint' },
+        },
+      ]);
+      await bridge.shutdown();
+    });
   });
 
   describe('extNotification — followup_suggestion', () => {
