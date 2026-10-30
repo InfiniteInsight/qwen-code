@@ -278,6 +278,9 @@ export interface BootViewerOptions {
   reloadStatus?: number;
   reloadErrorBody?: unknown;
   reloadResult?: unknown;
+  /** #211: force the stub's artifact add and remove to refuse. */
+  artifactMutationStatus?: number;
+  artifactMutationErrorBody?: unknown;
   /** #135: the stub's session goal routes: the goal each session holds, what moves it, a refusal. */
   goal?: StubDaemonOptions['goal'];
 }
@@ -463,6 +466,8 @@ export async function bootViewer(
     reloadStatus: opts.reloadStatus,
     reloadErrorBody: opts.reloadErrorBody,
     reloadResult: opts.reloadResult,
+    artifactMutationStatus: opts.artifactMutationStatus,
+    artifactMutationErrorBody: opts.artifactMutationErrorBody,
     goal: opts.goal,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));

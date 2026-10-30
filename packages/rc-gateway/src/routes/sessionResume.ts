@@ -13,6 +13,7 @@ import {
 } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { daemonUnavailableBody } from '../daemonHttpError.js';
 
 /**
  * POST /session/:id/resume — reactivate a past (ended) conversation on its
@@ -110,9 +111,9 @@ export function createSessionResumeRoute(
           .json({ error: 'Session not found', code: 'session_not_found' });
         return;
       }
-      res
-        .status(502)
-        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+      // #211: a write or owner caller also gets what the daemon said (its
+      // status, code and message) in `daemon`; the sentence stays as it was.
+      res.status(502).json(daemonUnavailableBody(req, err));
       return;
     }
 

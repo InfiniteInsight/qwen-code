@@ -218,6 +218,30 @@ describe('POST /session/:id/resume', () => {
     expect(body.code).toBe('daemon_unavailable');
   });
 
+  it("a write token is told what the daemon said when the resume fails (#211), in `daemon`, with the sentence unchanged", async () => {
+    const dir = makeTmpDir('qwen-session-resume-detail-');
+    const url = await mountGateway({
+      async resumeSession() {
+        throw Object.assign(new Error('HTTP 500'), {
+          name: 'DaemonHttpError',
+          status: 500,
+          body: { error: 'could not load the transcript', code: 'transcript_unreadable' },
+        });
+      },
+    });
+    const res = await fetch(`${url}/session/${SID}/resume`, post({ cwd: dir }));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: 'Daemon unavailable',
+      code: 'daemon_unavailable',
+      daemon: {
+        status: 500,
+        code: 'transcript_unreadable',
+        message: 'could not load the transcript',
+      },
+    });
+  });
+
   it('audits session_resumed with the id + never the cwd path', async () => {
     const secretDir = makeTmpDir('qwen-session-resume-secret-');
     const pool = fakePool();

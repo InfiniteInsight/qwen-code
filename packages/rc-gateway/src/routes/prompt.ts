@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import type { PromptContentBlock } from '@qwen-code/sdk';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { daemonUnavailableBody } from '../daemonHttpError.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
 
@@ -160,10 +161,8 @@ export function createPromptRoute(
           // Daemon error unrelated to the timeout. Respond only if the client
           // is still connected; the slot is released in the finally below.
           if (!res.closed) {
-            res.status(502).json({
-              error: 'Daemon unavailable',
-              code: 'daemon_unavailable',
-            });
+            // #211: a write or owner caller also gets the daemon's answer.
+            res.status(502).json(daemonUnavailableBody(req, err));
           }
           // #40: the turn ended in failure — a backgrounded client should
           // still hear about it (fires even when the client is gone).

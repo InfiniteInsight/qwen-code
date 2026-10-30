@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { hasScope, WRITE } from './scopes.js';
+
 /**
  * Read a daemon HTTP failure without asking which copy of the class threw it.
  *
@@ -73,4 +75,103 @@ export function isSessionLevelGone(err: unknown): boolean {
   if (body?.['code'] !== 'session_not_found') return false;
   const toolCallId = body['toolCallId'];
   return toolCallId === undefined || toolCallId === null;
+}
+
+/**
+ * Issue #211: failure details for the person holding the phone.
+ *
+ * The owner's rule is that a failure names what failed and what the answer
+ * was, so a relay that turns a daemon refusal into a fixed gateway sentence
+ * ("Daemon unavailable", "The daemon refused this request") hides the one thing
+ * the owner needs. A relay therefore passes the daemon's own status, code and
+ * message through to a caller who holds write or owner, and keeps the fixed
+ * sentence for anyone else.
+ *
+ * WHO SEES THE DAEMON'S WORDS: {@link canSeeDaemonDetail}. A share guest never
+ * does, whatever scopes the share carries (a share holds `session:read` and
+ * `approve`, and may hold `write` on an older token), and a request with no
+ * resolved client is treated as a reader, so a route mounted without auth in a
+ * test or a future refactor fails closed.
+ *
+ * WHAT A READER GETS INSTEAD: today, the relay's fixed sentence and the code,
+ * which is the strictest reduction (nothing the daemon said). The routes that
+ * use this are mounted at write scope, so no reader reaches them; the branch is
+ * the guard for the day one does. Text a reader can reach on the page is cut
+ * down by `reduceFailureTextForReader` in `public/index.html`, which is the one
+ * place host paths, client ids, ids of things in the conversation and internal
+ * error strings are taken out of a failure line.
+ */
+export interface DaemonFailureDetail {
+  /** The daemon's HTTP status, when the failure was an HTTP answer. */
+  status?: number;
+  /** The daemon's error code (top level, or inside the validation envelope). */
+  code?: string;
+  /** The daemon's message, or the transport error's, bounded. */
+  message?: string;
+  /** The thrown error's name when it was not an HTTP answer (a dead socket). */
+  errorName?: string;
+}
+
+const MAX_DETAIL_MESSAGE = 500;
+
+function boundedString(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t.length === 0 ? undefined : t.slice(0, MAX_DETAIL_MESSAGE);
+}
+
+/** What a failed daemon call said, read without trusting its shape. */
+export function daemonFailureDetail(err: unknown): DaemonFailureDetail {
+  const http = asDaemonHttpError(err);
+  const body = daemonErrorBody(err);
+  if (http === undefined) {
+    if (typeof err === 'object' && err !== null) {
+      const shaped = err as { name?: unknown; message?: unknown };
+      return {
+        errorName: boundedString(shaped.name),
+        message: boundedString(shaped.message),
+      };
+    }
+    return { message: boundedString(err) };
+  }
+  const nested = body?.['error'];
+  const nestedObj =
+    typeof nested === 'object' && nested !== null && !Array.isArray(nested)
+      ? (nested as Record<string, unknown>)
+      : undefined;
+  return {
+    status: http.status,
+    code: boundedString(body?.['code']) ?? boundedString(nestedObj?.['code']),
+    message:
+      boundedString(nested) ??
+      boundedString(nestedObj?.['message']) ??
+      boundedString(body?.['message']) ??
+      (typeof http.body === 'string' ? boundedString(http.body) : undefined),
+  };
+}
+
+/** True when the caller holds write or owner and is not a share guest. */
+export function canSeeDaemonDetail(req: {
+  rcClient?: { scopes?: readonly string[]; shareId?: string };
+}): boolean {
+  const client = req.rcClient;
+  if (client === undefined || client.shareId !== undefined) return false;
+  return hasScope(client.scopes ?? [], WRITE);
+}
+
+/**
+ * The 502 body the relays send when a daemon call failed in a way they have no
+ * better sentence for. The fixed `error` and `code` are what every caller has
+ * always had; a caller who {@link canSeeDaemonDetail} also gets `daemon`, the
+ * status, code and message the daemon (or the socket) gave, which is what the
+ * page prints after "the daemon answered". Additive: an older page ignores it.
+ */
+export function daemonUnavailableBody(
+  req: { rcClient?: { scopes?: readonly string[]; shareId?: string } },
+  err: unknown,
+): { error: string; code: string; daemon?: DaemonFailureDetail } {
+  const base = { error: 'Daemon unavailable', code: 'daemon_unavailable' };
+  if (!canSeeDaemonDetail(req)) return base;
+  const detail = daemonFailureDetail(err);
+  return Object.keys(detail).length === 0 ? base : { ...base, daemon: detail };
 }

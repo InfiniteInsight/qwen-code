@@ -280,10 +280,14 @@ describe('mid-turn recovery integration', () => {
     await attachDone;
     const promptRes = await promptPromise;
     expect(promptRes.status).toBe(502);
-    expect(await promptRes.json()).toEqual({
+    // #211: the sentence and code are unchanged; a write or owner caller also
+    // gets `daemon`, what the dead socket threw.
+    const promptBody = (await promptRes.json()) as Record<string, unknown>;
+    expect(promptBody).toMatchObject({
       error: 'Daemon unavailable',
       code: 'daemon_unavailable',
     });
+    expect(promptBody['daemon']).toMatchObject({ errorName: expect.any(String) });
 
     // 6. The saga settles: one respawn (stubC), the SAME session id
     //    resumed on it, and a sticky recovered outcome with the

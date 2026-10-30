@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import { stat } from 'node:fs/promises';
 import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { daemonUnavailableBody } from '../daemonHttpError.js';
 
 /**
  * POST /session — create (or attach to) a daemon session so a freshly-paired
@@ -86,9 +87,8 @@ export function createSessionCreateRoute(
         });
         return;
       }
-      res
-        .status(502)
-        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+      // #211: the daemon's own answer rides along for a write or owner caller.
+      res.status(502).json(daemonUnavailableBody(req, err));
       return;
     }
 

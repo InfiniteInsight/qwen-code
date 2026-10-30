@@ -7086,6 +7086,9 @@
       // than one that refuses.
       stampZoneSelect.onchange = async () => {
         const next = stampZoneSelect.value;
+        // #211: the refusal's status, code and message, or the network error,
+        // rather than "could not save" alone.
+        const did = 'saving the stamp timezone ' + next;
         try {
           const res = await fetch('/rc/ui-prefs', {
             method: 'PUT',
@@ -7095,12 +7098,17 @@
             },
             body: JSON.stringify({ stampZone: next }),
           });
-          if (!res.ok) throw new Error('http ' + res.status);
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            stampZoneSelect.value = stampZone || '';
+            setStatus(describeFailure(res, body, did));
+            return;
+          }
           stampZone = next;
           applyStampZone();
-        } catch {
+        } catch (e) {
           stampZoneSelect.value = stampZone || '';
-          setStatus('could not save the stamp timezone');
+          setStatus(describeFailure(null, null, { did, err: e }));
         }
       };
 
@@ -7147,6 +7155,182 @@
       const setStatus = (m) => {
         $('status').textContent = m;
       };
+      // ---- Failure lines (issue #211) ------------------------------------
+      // The owner's rule: a failure names what was attempted, the HTTP status,
+      // the error code, the answer's own message and the next step when the
+      // answer carries one. "resume failed" alone is a bug. EVERY failed fetch
+      // or non-2xx answer on this page goes through describeFailure, so the
+      // shape is the same everywhere:
+      //
+      //   <what was attempted> failed: <code> (HTTP <status>): <message>
+      //     [(the daemon answered HTTP <s> <code>: <message>)]
+      //     [. Next: <step>]
+      //   could not reach the gateway at <origin>: <error name> (<message>)
+      //     during <what was attempted>
+      //
+      // `context` is the attempted thing as a noun phrase ('resume of "x"'), or
+      // { did, err } where err is the exception a dead network threw (pass res
+      // = null). Nothing here shortens or hides the message for a token that
+      // holds write or owner.
+      //
+      // READERS (a share token, session:read): the same shape, with the host
+      // paths, client ids, ids of things in the conversation and internal error
+      // strings taken out. That reduction is reduceFailureTextForReader, the
+      // only place it is done on the page. The gateway reduces what it sends a
+      // reader by the same rules (src/daemonHttpError.ts, reduceDetailForReader),
+      // so this is the second layer, for a gateway that does not. The reduction
+      // is also applied when the token's scope is unknown (an old gateway that
+      // does not say): hiding a path from an owner is cheaper than showing one
+      // to a guest.
+      const FAILURE_NEXT = {
+        reload: 'reload the conversation to redraw its history',
+        retry: 'try again',
+        repair: 'pair this phone again',
+      };
+      function failureDetailAllowed() {
+        return !!(
+          typeof caps !== 'undefined' &&
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.writeScope === true
+        );
+      }
+      function reduceFailureTextForReader(text) {
+        let t = String(text == null ? '' : text);
+        // An internal error string (an errno, an exception class, a stack
+        // frame, a module path) says nothing a reader can act on.
+        if (
+          /\b(E[A-Z]{3,}|errno|SQLITE_\w+|(?:Type|Range|Syntax|Reference|Eval|URI)Error|node_modules|stack trace)\b|\bat\s+\S+\s+\(/.test(
+            t,
+          )
+        ) {
+          return 'the daemon reported an internal error';
+        }
+        t = t
+          // absolute paths, POSIX and Windows
+          .replace(/(?:[A-Za-z]:\\|\/)(?:[\w.@~ -]+[\\/])+[\w.@~ -]*/g, '<path>')
+          .replace(/\bclient_[A-Za-z0-9_-]+/g, '<client>')
+          .replace(
+            /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+            '<id>',
+          )
+          // the id after "artifact", "client" or "session" (it has a digit or
+          // a separator; plain words are left alone)
+          .replace(
+            /\b(artifact|client|session)\s+(?!artifact\b|id\b)["']?[A-Za-z0-9._:-]*[0-9_:-][A-Za-z0-9._:-]*["']?/gi,
+            '$1 <id>',
+          );
+        return t;
+      }
+      // A helper that has to throw (a page reader shared by two callers) throws
+      // an Error whose message is already a describeFailure line and marks it;
+      // the catch turns it back into a line, or describes a network error.
+      function failureError(res, body, did) {
+        const e = new Error(describeFailure(res, body, did));
+        e.failureLine = true;
+        return e;
+      }
+      function failureOf(err, did) {
+        return err && err.failureLine
+          ? err.message
+          : describeFailure(null, null, { did, err });
+      }
+      // The text of a refused answer: "<code> (HTTP <status>): <message>", the
+      // daemon's own answer in brackets when the gateway passes it, and the
+      // next step. The code leads so a caller that prints "<did> failed: " in
+      // front of it still reads "<did> failed: <code>".
+      function failureDetailLine(res, body) {
+        const full = failureDetailAllowed();
+        const shown = (s) => (full ? s : reduceFailureTextForReader(s));
+        const str = (v) =>
+          typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : '';
+        const b = body && typeof body === 'object' ? body : null;
+        const nested =
+          b && b.error && typeof b.error === 'object' ? b.error : null;
+        const data = b && b.data && typeof b.data === 'object' ? b.data : null;
+        const code =
+          str(b && b.code) || str(nested && nested.code) || str(b && b.type);
+        let message =
+          str(b && b.error) ||
+          str(nested && nested.message) ||
+          str(b && b.message) ||
+          str(data && data.reason);
+        message = message ? shown(message) : '';
+        let line = code ? code + ' (HTTP ' + res.status + ')' : 'HTTP ' + res.status;
+        if (message && message !== code) line += ': ' + message;
+        else if (!message && !code && res.statusText) {
+          line += ' ' + res.statusText;
+        }
+        const d = b && b.daemon && typeof b.daemon === 'object' ? b.daemon : null;
+        if (d) {
+          const dm = str(d.message);
+          line +=
+            ' (the daemon answered' +
+            (Number.isFinite(d.status) ? ' HTTP ' + d.status : '') +
+            (str(d.code) ? ' ' + str(d.code) : '') +
+            (dm ? ': ' + shown(dm) : '') +
+            ')';
+        }
+        const recovery = str(b && b.recovery) || str(data && data.recovery);
+        let next = recovery
+          ? FAILURE_NEXT[recovery] || recovery
+          : str(b && b.next) || str(b && b.hint);
+        if (!next && res.status === 401) next = FAILURE_NEXT.repair;
+        const retryAfter =
+          res.headers && typeof res.headers.get === 'function'
+            ? res.headers.get('retry-after')
+            : null;
+        if (!next && retryAfter) next = 'try again in ' + retryAfter + ' s';
+        if (next) line += '. Next: ' + shown(next);
+        return line;
+      }
+      // A fetch that threw: the dead network (or a refused preflight, which the
+      // browser reports the same way), named by origin and by error.
+      function networkFailureLine(err) {
+        const full = failureDetailAllowed();
+        const name = (err && err.name) || 'Error';
+        let msg =
+          err && typeof err.message === 'string' ? err.message.trim() : '';
+        if (msg && !full) msg = reduceFailureTextForReader(msg);
+        return (
+          'could not reach the gateway at ' +
+          location.origin +
+          ': ' +
+          name +
+          (msg && msg !== name ? ' (' + msg.slice(0, 300) + ')' : '')
+        );
+      }
+      function describeFailure(res, body, context) {
+        const ctx =
+          typeof context === 'string' ? { did: context } : context || {};
+        const did = ctx.did || 'the request';
+        if (!res) {
+          const err = ctx.err;
+          // A SyntaxError is an answer that arrived and was not JSON, not a
+          // dead network: say what it was.
+          if (err && err.name === 'SyntaxError') {
+            return (
+              did +
+              ' failed: the answer could not be read (SyntaxError: ' +
+              String(err.message || '').slice(0, 200) +
+              ')'
+            );
+          }
+          return networkFailureLine(err) + ' during ' + did;
+        }
+        return did + ' failed: ' + failureDetailLine(res, body);
+      }
+      // #211: a peer daemon's failed read, as { error: 'TypeError (Failed to
+      // fetch)' } for a fetch that threw, so its row can say which.
+      function peerErrorLabel(e) {
+        const name = (e && e.name) || 'Error';
+        const msg = e && typeof e.message === 'string' ? e.message.trim() : '';
+        return name + (msg && msg !== name ? ' (' + msg.slice(0, 200) + ')' : '');
+      }
+      // What a call made through rcCall printed after "<did> failed: ".
+      function rcDetail(r) {
+        return (r && (r.detail || r.code)) || 'unknown';
+      }
       // Raw-frame log, bounded: every SSE frame is logged, so an uncapped
       // textContent += grew without limit and re-flattened the whole string
       // per frame. Keep only the newest LOG_MAX_LINES lines (one text node
@@ -7705,8 +7889,8 @@
         );
         if (gen !== switchGen) return null;
         if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(strOr(body.error, 'HTTP ' + res.status));
+          const body = await res.json().catch(() => null);
+          throw failureError(res, body, 'reading earlier messages');
         }
         const page = await res.json();
         if (gen !== switchGen) return null;
@@ -7759,10 +7943,7 @@
           if (gen !== switchGen) return;
           // A failed page costs nothing already on screen and leaves the cursor
           // where it was, so the next tap retries the same page.
-          setStatus(
-            'earlier messages failed: ' +
-              (err && err.message ? err.message : String(err)),
-          );
+          setStatus(failureOf(err, 'reading earlier messages'));
         } finally {
           // #172: after a switch the flag is the new visit's, and
           // noteConversationSwitch already let go of this one's hold on it.
@@ -7884,9 +8065,9 @@
           }
         } catch (err) {
           if (gen !== switchGen) return;
+          // #211: the error's name too, and that it was the jump that failed.
           setStatus(
-            'could not reach ' + turnName(jumpTarget || turn) + ': ' +
-              (err && err.message ? err.message : String(err)),
+            failureOf(err, 'the jump to ' + turnName(jumpTarget || turn)),
           );
         } finally {
           if (gen === switchGen) {
@@ -9570,7 +9751,9 @@
               st.textContent = 'not authorized — needs an owner token';
               throw new Error('unauthorized');
             }
-            if (!res.ok) throw new Error('query failed (' + res.status + ')');
+            if (!res.ok) {
+              throw failureError(res, await res.json().catch(() => null), 'the query');
+            }
             const rows = await res.json();
             return Array.isArray(rows) ? rows : [];
           };
@@ -9625,9 +9808,9 @@
             line.textContent = parts.join('  ');
             rowsEl.appendChild(line);
           }
-        } catch {
+        } catch (e) {
           if (st.textContent !== 'not authorized — needs an owner token') {
-            st.textContent = 'query failed';
+            st.textContent = failureOf(e, 'the query');
           }
         }
       }
@@ -9810,9 +9993,9 @@
           permOverlays = Array.isArray(data.overlays) ? data.overlays : [];
           st.textContent = '';
           renderPermOverlaysRows();
-        } catch {
-          st.textContent = 'load failed';
-          if (notify) setStatus('load failed');
+        } catch (e) {
+          st.textContent = failureOf(e, 'loading the permission overlays');
+          if (notify) setStatus(st.textContent);
         }
       }
 
@@ -9845,9 +10028,9 @@
           }
           st.textContent = 'set';
           await loadPermOverlays(false);
-        } catch {
-          st.textContent = 'set failed';
-          setStatus('set failed');
+        } catch (e) {
+          st.textContent = failureOf(e, 'setting the permission overlay');
+          setStatus(st.textContent);
         }
       }
 
@@ -9867,16 +10050,16 @@
             const msg =
               body.code === 'overlay_not_found'
                 ? 'already expired'
-                : body.error || 'revoke failed';
+                : describeFailure(res, body, 'revoking the permission overlay');
             st.textContent = msg;
             setStatus(msg);
             return;
           }
           st.textContent = 'revoked';
           await loadPermOverlays(false);
-        } catch {
-          st.textContent = 'revoke failed';
-          setStatus('revoke failed');
+        } catch (e) {
+          st.textContent = failureOf(e, 'revoking the permission overlay');
+          setStatus(st.textContent);
         }
       }
 
@@ -13389,7 +13572,7 @@
           startWatch(data.sessionId, 0);
         } catch (e) {
           if (gen !== switchGen) return show(false, '');
-          show(false, 'fork error: ' + e);
+          show(false, failureOf(e, 'forking'));
         }
       }
 
@@ -13432,7 +13615,7 @@
             '/cancel',
           { method: 'POST' },
         );
-        if (!r.ok) return show(false, 'stop failed: ' + r.code);
+        if (!r.ok) return show(false, 'stop failed: ' + rcDetail(r));
         show(false, 'stopped');
       }
 
@@ -13477,7 +13660,7 @@
             '/subagents/' +
             encodeURIComponent(ref),
         );
-        if (!r.ok) return show(false, 'cost failed: ' + r.code);
+        if (!r.ok) return show(false, 'cost failed: ' + rcDetail(r));
         const b = (r && r.body) || {};
         // Only what the daemon actually sent. A resolution with no usage
         // fields says so rather than drawing 0, because 0 is a number nobody
@@ -14481,7 +14664,7 @@
           ref,
           false,
           !r.ok
-            ? 'stop failed: ' + r.code
+            ? 'stop failed: ' + rcDetail(r)
             : r.body && r.body.cancelled === true
               ? 'stopped'
               : 'the daemon did not stop it',
@@ -14634,7 +14817,15 @@
             },
           });
         } catch (e) {
-          return { ok: false, status: 0, code: 'network', error: 'the gateway did not answer' };
+          // #211: `error` stays the short word callers compare against; `detail`
+          // names the origin and the error for the line a sheet prints.
+          return {
+            ok: false,
+            status: 0,
+            code: 'network',
+            error: 'the gateway did not answer',
+            detail: networkFailureLine(e),
+          };
         }
         let body = null;
         try {
@@ -14653,6 +14844,8 @@
           status: res.status,
           code: body && typeof body.code === 'string' ? body.code : String(res.status),
           error: body && typeof body.error === 'string' ? body.error : '',
+          // #211: status, code, message, the daemon's answer and the next step.
+          detail: failureDetailLine(res, body),
         };
       }
       function orgMark(c) {
@@ -14881,7 +15074,7 @@
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.code === 'organization_unsupported') return 'This daemon cannot file conversations.';
         if (r.status === 403) return 'Filing needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       // One PATCH, and what the daemon says it now holds: the list's catalog
       // row takes the daemon's answer, not the request, and the next list
@@ -14965,7 +15158,7 @@
             orgSheet.note =
               r.code === 'invalid_group_name'
                 ? 'A group name is 1 to 64 characters.'
-                : 'The group was not made: ' + (r.error || r.code);
+                : 'The group was not made: ' + rcDetail(r);
             orgSheet.tone = 'err';
             renderOrgSheet();
             return;
@@ -15084,7 +15277,7 @@
               ? 'This daemon keeps no sources.'
               : r.code === 'session_not_found'
                 ? 'The daemon does not have this conversation open.'
-                : 'The sources could not be read: ' + (r.error || r.code);
+                : 'The sources could not be read: ' + rcDetail(r);
         }
         renderSrcSheet();
         renderConvRows();
@@ -15155,7 +15348,7 @@
         if (r.code === 'source_limit_reached') return 'This conversation already has 200 sources.';
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.status === 403) return 'Changing sources needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       async function srcAdd() {
         const where = ($('src-where').value || '').trim();
@@ -15385,7 +15578,7 @@
       function goalReadNote(r) {
         if (r.code === 'goal_unsupported') return 'This daemon keeps no goals.';
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
-        return 'The goal could not be read: ' + (r.error || r.code);
+        return 'The goal could not be read: ' + rcDetail(r);
       }
       // One read at a time per session; what it finds is what the page holds.
       function goalRead(sid) {
@@ -15468,7 +15661,7 @@
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.code === 'invalid_goal') return r.error || 'That is not a goal.';
         if (r.status === 403) return 'Changing the goal needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       async function goalSet() {
         if (goalSheet.busy) return;
@@ -15813,10 +16006,11 @@
             body: JSON.stringify({ code, label: 'web' }),
           });
           if (!res.ok) {
+            const failBody = await res.json().catch(() => null);
             pairFeedback(
               res.status === 400
                 ? '✗ invalid or expired code — get a fresh one and retry'
-                : '✗ pair failed (' + res.status + ')',
+                : '✗ ' + describeFailure(res, failBody, 'pairing'),
               false,
             );
             return;
@@ -15877,7 +16071,10 @@
             true,
           );
         } catch (e) {
-          pairFeedback('✗ pair failed: ' + e, false);
+          pairFeedback(
+            '✗ ' + describeFailure(null, null, { did: 'pairing', err: e }),
+            false,
+          );
         } finally {
           $('pair').disabled = false;
         }
@@ -15952,13 +16149,14 @@
             // did land comes back 404 and retires then.
             else {
               entry.busy(false);
-              entry.note('vote failed (' + res.status + ')');
+              const failBody = await res.json().catch(() => null);
+              entry.note(describeFailure(res, failBody, 'the vote'));
             }
           }
         } catch (e) {
           if (entry) {
             entry.busy(false);
-            entry.note('vote error: ' + e);
+            entry.note(describeFailure(null, null, { did: 'the vote', err: e }));
           }
         }
       }
@@ -16669,8 +16867,16 @@
       function retryPastWalHorizon(data) {
         lastSeenEventId = replayCursorFromData(data);
         scheduleWatchRetry(412);
+        const oldest = data && data.earliestAvailableId;
         setStatus(
-          'earlier history is not displayed: it is older than the gateway keeps',
+          'earlier history is not displayed: it is older than the gateway keeps' +
+            (Number.isFinite(oldest)
+              ? ' (HTTP 412 ' +
+                ((data && data.reason) || 'replay_truncated') +
+                ', the oldest id kept is ' +
+                oldest +
+                ')'
+              : ' (HTTP 412)'),
         );
       }
       async function reloadPastWalHorizon(id, cwd, title, data) {
@@ -17293,8 +17499,9 @@
             if (gen !== switchGen) return;
             renderIdleToggle(s); // reflect EFFECTIVE state
           } else {
+            const failBody = await res.json().catch(() => null);
             if (gen !== switchGen) return;
-            setStatus('idle toggle failed (' + res.status + ')');
+            setStatus(describeFailure(res, failBody, 'the idle toggle'));
             await refreshIdleToggle();
           }
         } catch {
@@ -17371,10 +17578,14 @@
           return Array.isArray(arr)
             ? arr.filter((t) => typeof t === 'string' && t.trim())
             : [];
-        } catch {
+        } catch (e) {
           // A corrupt record is reported rather than swallowed: it holds text
-          // the reader believes is waiting.
-          setStatus('a queued message could not be read and was dropped');
+          // the reader believes is waiting. #211: and why it could not be read.
+          setStatus(
+            'a queued message could not be read and was dropped: ' +
+              ((e && e.name) || 'Error') +
+              (e && e.message ? ' (' + e.message + ')' : ''),
+          );
           return [];
         }
       }
@@ -17387,8 +17598,13 @@
         }
         try {
           localStorage.setItem(outboxKey(watchedSessionId), JSON.stringify(outbox));
-        } catch {
-          setStatus('could not keep the queued message across a reload');
+        } catch (e) {
+          // #211: the browser's own reason (a full or blocked store says so).
+          setStatus(
+            'could not keep the queued message across a reload: ' +
+              ((e && e.name) || 'Error') +
+              (e && e.message ? ' (' + e.message + ')' : ''),
+          );
         }
       }
 
@@ -17454,7 +17670,7 @@
               { method: 'POST', body: JSON.stringify({ message: outbox[0] }) },
             );
             if (!r.ok) {
-              setStatus('send now failed: ' + r.code + '; it still sends after this turn');
+              setStatus('send now failed: ' + rcDetail(r) + '; it still sends after this turn');
               return;
             }
             if (r.body.accepted === false) {
@@ -18266,17 +18482,19 @@
               encodeURIComponent(entry.attachmentId),
             { headers: { Authorization: 'Bearer ' + token() } },
           );
-        } catch {
+        } catch (e) {
           if (watchedSessionId !== id) return;
-          storedPreviewNote = 'could not reach the gateway';
+          storedPreviewNote = describeFailure(null, null, {
+            did: 'opening a stored file',
+            err: e,
+          });
           renderStoredPreview();
           return;
         }
         const body = await res.json().catch(() => null);
         if (watchedSessionId !== id) return;
         if (!res.ok || !body || typeof body.data !== 'string') {
-          const code = (body && body.code) || String(res.status);
-          storedPreviewNote = 'could not open (' + code + ')';
+          storedPreviewNote = describeFailure(res, body, 'opening a stored file');
           renderStoredPreview();
           return;
         }
@@ -18329,9 +18547,12 @@
             '/session/' + encodeURIComponent(id) + '/attachments',
             { headers: { Authorization: 'Bearer ' + token() } },
           );
-        } catch {
+        } catch (e) {
           if (watchedSessionId !== id) return;
-          storedNote = 'could not reach the gateway';
+          storedNote = describeFailure(null, null, {
+            did: 'listing the stored files',
+            err: e,
+          });
           storedFiles = [];
           renderStored();
           return;
@@ -18339,8 +18560,7 @@
         const body = await res.json().catch(() => null);
         if (watchedSessionId !== id) return;
         if (!res.ok || !body || !Array.isArray(body.attachments)) {
-          const code = (body && body.code) || String(res.status);
-          storedNote = 'refused (' + code + ')';
+          storedNote = describeFailure(res, body, 'listing the stored files');
           storedFiles = [];
           renderStored();
           return;
@@ -18387,17 +18607,19 @@
               encodeURIComponent(entry.attachmentId),
             { method: 'DELETE', headers: { Authorization: 'Bearer ' + token() } },
           );
-        } catch {
+        } catch (e) {
           if (watchedSessionId !== id) return;
-          storedNote = 'could not reach the gateway';
+          storedNote = describeFailure(null, null, {
+            did: 'removing a stored file',
+            err: e,
+          });
           renderStored();
           return;
         }
         const body = await res.json().catch(() => null);
         if (watchedSessionId !== id) return;
         if (!res.ok || !body) {
-          const code = (body && body.code) || String(res.status);
-          storedNote = 'remove refused (' + code + ')';
+          storedNote = describeFailure(res, body, 'removing a stored file');
           renderStored();
           return;
         }
@@ -18666,7 +18888,7 @@
               ? r.error || 'Open this conversation before reading its artifacts.'
               : r.code === 'session_not_found'
                 ? 'The daemon does not have this conversation open.'
-                : 'The artifacts could not be read: ' + (r.error || r.code);
+                : 'The artifacts could not be read: ' + rcDetail(r);
         }
         renderArtSheet();
       }
@@ -18752,7 +18974,8 @@
         if (e && e.code === 'artifact_snapshot_unsupported') return 'This daemon cannot read saved webpages.';
         if (e && e.code === 'session_not_loaded') return e.error || 'Open this conversation before reading its artifacts.';
         if (status === 403) return 'Opening a saved webpage needs a token that can write.';
-        return 'Not opened: ' + ((e && (e.error || e.code)) || status);
+        // #211: status, code and message, not whichever of them came first.
+        return 'Not opened: ' + failureDetailLine({ status }, e);
       }
       // Open. The text never enters this document and is never navigated to
       // as HTML: a blob: URL takes this page's origin, so an HTML blob opened
@@ -18780,10 +19003,13 @@
             { headers: { Authorization: 'Bearer ' + token() } },
           );
           bytes = res.ok ? await res.arrayBuffer() : null;
-        } catch {
+        } catch (e) {
           if (gen !== artSheet.gen || !artSheet.open) return;
           artSheet.busy = false;
-          artSheet.note = 'The gateway did not answer.';
+          artSheet.note = describeFailure(null, null, {
+            did: 'opening ' + title,
+            err: e,
+          });
           artSheet.tone = 'err';
           renderArtSheet();
           return;
@@ -18828,7 +19054,7 @@
         if (r.code === 'artifact_mutations_unsupported') return 'This daemon cannot change artifacts.';
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.status === 403) return 'Changing artifacts needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       // A 200 can still be no change: the daemon keeps a live artifact whose
       // removal it could not persist, and says so in `warnings`.
@@ -19009,9 +19235,12 @@
               body: '{}',
             },
           );
-        } catch {
+        } catch (e) {
           if (watchedSessionId !== id) return;
-          recapNote = 'could not reach the gateway';
+          recapNote = describeFailure(null, null, {
+            did: 'asking for the recap',
+            err: e,
+          });
           renderRecap();
           return;
         }
@@ -19025,7 +19254,7 @@
           recapNote =
             code === 'recap_unsupported'
               ? 'this daemon cannot summarise yet'
-              : 'refused (' + code + ')';
+              : describeFailure(res, body, 'asking for the recap');
           renderRecap();
           return;
         }
@@ -19130,9 +19359,12 @@
             },
             body: JSON.stringify({ question }),
           });
-        } catch {
+        } catch (e) {
           if (watchedSessionId === id) {
-            btwNote = 'could not reach the gateway';
+            btwNote = describeFailure(null, null, {
+              did: 'asking the side question',
+              err: e,
+            });
             renderBtw();
           }
           if (ask) ask.disabled = false;
@@ -19150,7 +19382,7 @@
                 ? 'open this conversation before asking it'
                 : code === 'rate_limited'
                   ? 'too many questions just now'
-                  : 'refused (' + code + ')';
+                  : describeFailure(res, body, 'asking the side question');
           renderBtw();
           return;
         }
@@ -19288,13 +19520,15 @@
               body: JSON.stringify({}),
             },
           );
-        } catch {
+        } catch (e) {
           // The press that got here was a real decision, so a failed trip to the
           // gateway disarms: making them read the warning again is cheaper than
           // a second accidental send.
           disarmWtReset();
           if (btn) btn.disabled = false;
-          return setStatus('could not reach the gateway');
+          return setStatus(
+            describeFailure(null, null, { did: 'the worktree reset', err: e }),
+          );
         }
         const body = await res.json().catch(() => null);
         if (btn) btn.disabled = false;
@@ -19491,7 +19725,10 @@
               setStatus('not authorized');
               refused = 'not authorized';
             } else if (res.status === 502) {
-              setStatus('daemon unavailable');
+              // #211: the daemon's answer rides the 502 body (the gateway adds
+              // it for a write token), so the line says what it said.
+              const failBody = await res.json().catch(() => null);
+              setStatus(describeFailure(res, failBody, 'sending the prompt'));
               refused = 'daemon unavailable';
             } else if (res.status === 503) {
               // The per-session slot was still held when queueWaitMs ran out:
@@ -19501,7 +19738,8 @@
             } else {
               // 504 is a turn the gateway cancelled after it ran, and any other
               // status says nothing about delivery: report, mark nothing.
-              setStatus('send failed (' + res.status + ')');
+              const failBody = await res.json().catch(() => null);
+              setStatus(describeFailure(res, failBody, 'sending the prompt'));
             }
           }
         } catch (e) {
@@ -19520,7 +19758,11 @@
             // app's socket dying mid-turn, the daemon keeps running the turn,
             // so this is not a failed send; the reply streams in when the
             // watch reconnects (visibilitychange).
-            setStatus('connection dropped, the reply may still be streaming');
+            setStatus(
+              'connection dropped, the reply may still be streaming (' +
+                networkFailureLine(e) +
+                ' during sending the prompt)',
+            );
           }
         } finally {
           clearTimeout(sendWatchdog);
@@ -20205,20 +20447,20 @@
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (!res.ok) {
-            let msg = 'browse failed (' + res.status + ')';
-            try {
-              const b = await res.json();
-              if (b && b.error) msg = b.error;
-            } catch {
-              /* non-JSON error body */
+            const b = await res.json().catch(() => null);
+            if (!quiet) {
+              setStatus(describeFailure(res, b, 'listing the folder'));
             }
-            if (!quiet) setStatus(msg);
             return false;
           }
           renderDirList(await res.json());
           return true;
         } catch (e) {
-          if (!quiet) setStatus('browse error: ' + e);
+          if (!quiet) {
+            setStatus(
+              describeFailure(null, null, { did: 'listing the folder', err: e }),
+            );
+          }
           return false;
         }
       }
@@ -21547,7 +21789,11 @@
       // another folder gets its live dot, Rename and End session while it is
       // open without the list starting (and keeping from idling out) a daemon
       // per recent folder. The listing itself is a disk scan.
+      // #211: why the last read of a folder failed, by folder, so the status
+      // line can say it instead of "could not read".
+      const folderReadFailures = new Map();
       async function readFolderRows(cwd, spawn) {
+        const did = 'reading the conversations in ' + cwd;
         try {
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
@@ -21559,15 +21805,21 @@
             ),
             spawn || liveStateNoSpawn() ? readLiveStates(cwd, spawn) : null,
           ]);
-          if (!res.ok) return null;
+          if (!res.ok) {
+            const failBody = await res.json().catch(() => null);
+            folderReadFailures.set(cwd, describeFailure(res, failBody, did));
+            return null;
+          }
           const body = await res.json();
+          folderReadFailures.delete(cwd);
           // issue #36: pass the server's `truncated` flag through so the
           // 500-file cap is visible in the list.
           return {
             sessions: mergeLiveSessions(body.sessions, states),
             truncated: Boolean(body.truncated),
           };
-        } catch {
+        } catch (e) {
+          folderReadFailures.set(cwd, failureOf(e, did));
           return null;
         }
       }
@@ -21602,9 +21854,9 @@
           if (folderReadFailedFor !== cwd) {
             folderReadFailedFor = cwd;
             setStatus(
-              'could not read the conversations in ' +
-                cwd +
-                (last ? ', showing the last list' : ''),
+              (folderReadFailures.get(cwd) ||
+                'reading the conversations in ' + cwd + ' failed') +
+                (last ? '; showing the last list' : ''),
             );
           }
           renderPastConversations(
@@ -21774,20 +22026,26 @@
             // non-blocking rather than silent: requestHostTerminal reports why.
             if (opts && opts.hostTerminal) void requestHostTerminal(j.sessionId);
             return true;
-          } else if (res.status === 400) {
-            setStatus('invalid workspace — pick a valid folder');
-          } else if (res.status === 404) {
-            setStatus('session not found');
-          } else if (res.status === 503) {
-            setStatus('workspace busy — try again');
-          } else if (res.status === 401 || res.status === 403) {
-            setStatus('not authorized');
           } else {
-            setStatus('resume failed (' + res.status + ')');
+            // #211: the answer's own status, code and message, and the next
+            // step when it names one (a 412 says `recovery: reload`), never a
+            // bare "resume failed". The folder, "session not found" and
+            // "workspace busy" lines these replaced are in the message the
+            // gateway sent (invalid_workspace, session_not_found,
+            // workspace_pool_full); the body is the cause and the page only
+            // adds what was attempted.
+            const body = await res.json().catch(() => null);
+            if (gen !== switchGen) return false;
+            const base = describeFailure(res, body, 'resume of ' + label);
+            setStatus(
+              res.status === 401 || res.status === 403
+                ? 'not authorized: ' + base
+                : base,
+            );
           }
         } catch (e) {
           if (gen !== switchGen) return false;
-          setStatus('resume failed: ' + e);
+          setStatus(describeFailure(null, null, { did: 'resume of ' + label, err: e }));
         }
         return false;
       }
@@ -21807,7 +22065,7 @@
           method: 'POST',
           body: JSON.stringify(req),
         });
-        if (!r.ok) return setStatus('delete failed: ' + r.code);
+        if (!r.ok) return setStatus('delete failed: ' + rcDetail(r));
         const gone = (r.body && r.body.removed) || [];
         if (!gone.includes(sessionId)) return setStatus('not deleted');
         if (sessionId === watchedSessionId) $('stop').onclick();
@@ -21845,7 +22103,7 @@
           // fix is a specific act (end the call) rather than a retry.
           if (r.code === 'live_session_active')
             return setStatus('a live call holds this conversation - end it first');
-          return setStatus('archive failed: ' + r.code);
+          return setStatus('archive failed: ' + rcDetail(r));
         }
         const done = (r.body && r.body.archived) || [];
         const already = (r.body && r.body.alreadyArchived) || [];
@@ -21872,7 +22130,7 @@
           method: 'POST',
           body: JSON.stringify(req),
         });
-        if (!r.ok) return setStatus('restore failed: ' + r.code);
+        if (!r.ok) return setStatus('restore failed: ' + rcDetail(r));
         const done = (r.body && r.body.unarchived) || [];
         const already = (r.body && r.body.alreadyActive) || [];
         if (!done.includes(sessionId))
@@ -22060,7 +22318,10 @@
         } catch (e) {
           // Still cannot interrupt a working conversation, but it is said: this
           // is the gateway being unreachable, not the feature declining.
-          setStatus('no terminal on the host: the gateway did not answer');
+          setStatus(
+            'no terminal on the host: the gateway did not answer, ' +
+              networkFailureLine(e),
+          );
         }
       }
 
@@ -22136,15 +22397,25 @@
             void requestHostTerminal(j.sessionId);
           } else if (gen !== switchGen) {
             // #172: a refusal for a create the reader has moved on from.
-          } else if (res.status === 401 || res.status === 403) {
-            setStatus('not authorized — needs a write/owner token');
-          } else if (res.status === 502) {
-            setStatus('daemon unavailable');
           } else {
-            setStatus('create failed (' + res.status + ')');
+            const failBody = await res.json().catch(() => null);
+            if (gen !== switchGen) return;
+            const base = describeFailure(res, failBody, 'creating the conversation');
+            setStatus(
+              res.status === 401 || res.status === 403
+                ? 'not authorized, this needs a write or owner token: ' + base
+                : base,
+            );
           }
         } catch (e) {
-          if (gen === switchGen) setStatus('create failed: ' + e);
+          if (gen === switchGen) {
+            setStatus(
+              describeFailure(null, null, {
+                did: 'creating the conversation',
+                err: e,
+              }),
+            );
+          }
         } finally {
           $('new-session').disabled = false;
         }
@@ -22266,12 +22537,22 @@
           if (!res.ok) {
             const terminal =
               res.status === 401 || res.status === 403 || res.status === 404;
+            // A clone, because the 412 branch below reads the body itself.
+            const failBody = await res
+              .clone()
+              .json()
+              .catch(() => null);
+            const failLine = describeFailure(
+              res,
+              failBody,
+              'connecting to the event stream',
+            );
             if (res.status === 401 || res.status === 403) {
-              setStatus('not authorized (' + res.status + ') — re-pair');
+              setStatus('not authorized, re-pair: ' + failLine);
             } else if (res.status === 404) {
-              setStatus('session gone (404) — pick another conversation');
+              setStatus('session gone, pick another conversation: ' + failLine);
             } else {
-              setStatus('connect failed (' + res.status + ')');
+              setStatus(failLine);
             }
             if (terminal) {
               // Re-pair / gone session: nothing to re-attach to.
@@ -22450,7 +22731,7 @@
           // watch's status with its own 'stopped'/'stream error'.
           if (controller !== myController) return;
           const aborted = myController.signal.aborted;
-          setStatus(aborted ? 'stopped' : 'stream error: ' + e);
+          setStatus(aborted ? 'stopped' : failureOf(e, 'the event stream'));
           // Self-heal: a network-level death (not an Unwatch abort)
           // retries from where we last saw.
           if (!aborted) scheduleWatchRetry(0);
@@ -22587,10 +22868,14 @@
           });
           idbPutToken(token());
           if (subRes.status !== 201) {
-            failure = 'subscribe failed (' + subRes.status + ')';
+            failure = describeFailure(
+              subRes,
+              await subRes.json().catch(() => null),
+              'subscribing',
+            );
           }
         } catch (e) {
-          failure = 'subscribe failed (' + ((e && e.message) || e) + ')';
+          failure = describeFailure(null, null, { did: 'subscribing', err: e });
         }
         if (failure) {
           try {
@@ -22722,7 +23007,7 @@
                   : 'notifications not enabled (permission not granted)',
           );
         } catch (e) {
-          setStatus('enable failed: ' + e);
+          setStatus(failureOf(e, 'enabling notifications'));
         } finally {
           $('enable').disabled = false;
           void refreshNotifToggle();
@@ -22835,7 +23120,7 @@
           eventLog('stream ended');
         } catch (e) {
           eventLog(
-            eventsController.signal.aborted ? 'stopped' : 'stream error: ' + e,
+            eventsController.signal.aborted ? 'stopped' : failureOf(e, 'the event stream'),
           );
         } finally {
           $('watch-events').disabled = false;
@@ -22864,7 +23149,7 @@
             out.textContent =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs an owner token'
-                : 'query failed (' + res.status + ')';
+                : describeFailure(res, await res.json().catch(() => null), 'the query');
             return;
           }
           const rows = await res.json();
@@ -22882,7 +23167,7 @@
             })
             .join('\n');
         } catch (e) {
-          out.textContent = 'query error: ' + e;
+          out.textContent = failureOf(e, 'the query');
         }
       };
 
@@ -22911,11 +23196,13 @@
           else if (res.status === 404) row.textContent = 'already gone: ' + id;
           else {
             btn.disabled = false;
-            setStatus('revoke failed (' + res.status + ')');
+            setStatus(
+              describeFailure(res, await res.json().catch(() => null), 'revoking the token'),
+            );
           }
         } catch (e) {
           btn.disabled = false;
-          setStatus('revoke error: ' + e);
+          setStatus(failureOf(e, 'revoking'));
         }
       }
       $('list-tokens').onclick = async () => {
@@ -22930,7 +23217,7 @@
             out.textContent =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs an owner token'
-                : 'list failed (' + res.status + ')';
+                : describeFailure(res, await res.json().catch(() => null), 'the list');
             return;
           }
           const list = await res.json();
@@ -22962,7 +23249,7 @@
             out.appendChild(row);
           }
         } catch (e) {
-          out.textContent = 'list error: ' + e;
+          out.textContent = failureOf(e, 'the list');
         }
       };
 
@@ -23020,7 +23307,7 @@
                 ? 'not authorized — needs an owner token'
                 : res.status === 502
                   ? 'no workspace (daemon unavailable)'
-                  : 'list failed (' + res.status + ')';
+                  : describeFailure(res, await res.json().catch(() => null), 'the list');
             return;
           }
           const body = await res.json();
@@ -23031,7 +23318,7 @@
             : sessions.length;
           out.textContent = buildSessionTree(sessions, !!body.truncated);
         } catch (e) {
-          out.textContent = 'list error: ' + e;
+          out.textContent = failureOf(e, 'the list');
         }
       };
 
@@ -23386,7 +23673,11 @@
               sessions: Array.isArray(body.sessions) ? body.sessions : [],
             };
           }
-          return { ok: false, status: res.status };
+          return {
+            ok: false,
+            status: res.status,
+            detail: failureDetailLine(res, await res.json().catch(() => null)),
+          };
         } catch (e) {
           // Browsers surface BOTH a refused CORS preflight and a dead
           // network as TypeError('Failed to fetch') — they are
@@ -23394,6 +23685,7 @@
           return {
             ok: false,
             kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network',
+            error: peerErrorLabel(e),
           };
         }
       }
@@ -23410,11 +23702,16 @@
             signal: AbortSignal.timeout(10000),
           });
           if (res.ok) return { ok: true, data: await res.json() };
-          return { ok: false, status: res.status };
+          return {
+            ok: false,
+            status: res.status,
+            detail: failureDetailLine(res, await res.json().catch(() => null)),
+          };
         } catch (e) {
           return {
             ok: false,
             kind: e && e.name === 'TimeoutError' ? 'timeout' : 'network',
+            error: peerErrorLabel(e),
           };
         }
       }
@@ -23473,7 +23770,11 @@
             // host, so the link opens its /ui/).
             daemonStatusRow(d, out, 'RE-PAIR REQUIRED', base + '/ui/');
           } else if (r.status !== undefined && r.status >= 500) {
-            daemonStatusRow(d, out, 'ERROR — daemon returned ' + r.status);
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR \u2014 daemon returned ' + (r.detail || r.status),
+            );
           } else if (r.status === 403) {
             daemonStatusRow(
               d,
@@ -23485,7 +23786,9 @@
             daemonStatusRow(
               d,
               out,
-              'UNREACHABLE — last seen ' +
+              'UNREACHABLE \u2014 ' +
+                (r.error ? r.error + ' reaching ' + d.url + ' · ' : '') +
+                'last seen ' +
                 seen +
                 ' · if this daemon is up: origin not admitted on ' +
                 d.name +
@@ -23493,7 +23796,11 @@
                 location.origin,
             );
           } else {
-            daemonStatusRow(d, out, 'ERROR — daemon returned ' + r.status);
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR \u2014 daemon returned ' + (r.detail || r.status),
+            );
           }
         });
         // Unified list, sorted by updatedAt desc ACROSS daemons (spec 4.5).
@@ -23658,7 +23965,9 @@
             daemonStatusRow(
               d,
               out,
-              'UNREACHABLE — last seen ' +
+              'UNREACHABLE \u2014 ' +
+                (r.error ? r.error + ' reaching ' + d.url + ' · ' : '') +
+                'last seen ' +
                 seen +
                 ' · if this daemon is up: origin not admitted on ' +
                 d.name +
@@ -23666,7 +23975,11 @@
                 location.origin,
             );
           } else {
-            daemonStatusRow(d, out, 'ERROR — ' + (r.status || r.kind));
+            daemonStatusRow(
+              d,
+              out,
+              'ERROR \u2014 ' + (r.detail || r.status || r.kind),
+            );
           }
         });
       }
@@ -23688,7 +24001,7 @@
             return;
           }
           if (!res.ok) {
-            empty.textContent = 'failed to reach gateway (' + res.status + ')';
+            empty.textContent = describeFailure(res, await res.json().catch(() => null), 'reading the model server status');
             return;
           }
           const data = await res.json();
@@ -23889,13 +24202,13 @@
             out.textContent =
               res.status === 401 || res.status === 403
                 ? ' not authorized — needs an owner token'
-                : ' test failed (' + res.status + ')';
+                : ' ' + describeFailure(res, await res.json().catch(() => null), 'the test notification');
             return;
           }
           const b = await res.json();
           out.textContent = ' test push sent to ' + b.sent + ' subscription(s)';
         } catch (e) {
-          out.textContent = ' test error: ' + e;
+          out.textContent = ' ' + failureOf(e, 'the test notification');
         }
       };
 
@@ -24008,11 +24321,13 @@
           else if (res.status === 404) row.textContent = 'already gone: ' + id;
           else {
             btn.disabled = false;
-            setStatus('unsubscribe failed (' + res.status + ')');
+            setStatus(
+              describeFailure(res, await res.json().catch(() => null), 'unsubscribing'),
+            );
           }
         } catch (e) {
           btn.disabled = false;
-          setStatus('unsubscribe error: ' + e);
+          setStatus(failureOf(e, 'unsubscribing'));
         }
       }
       async function saveSub(id, fields, btn, note) {
@@ -24060,7 +24375,7 @@
             note.textContent = ' failed: ' + code;
           }
         } catch (e) {
-          note.textContent = ' error: ' + e;
+          note.textContent = ' ' + failureOf(e, 'the request');
         } finally {
           btn.disabled = false;
         }
@@ -24079,7 +24394,7 @@
                 ? 'not authorized — needs an owner token'
                 : res.status === 404
                   ? 'push not configured on this gateway'
-                  : 'list failed (' + res.status + ')';
+                  : describeFailure(res, await res.json().catch(() => null), 'the list');
             return;
           }
           const body = await res.json();
@@ -24093,7 +24408,7 @@
           }
           for (const s of subs) out.appendChild(subRow(s));
         } catch (e) {
-          out.textContent = 'list error: ' + e;
+          out.textContent = failureOf(e, 'the list');
         }
       };
 
@@ -24255,7 +24570,16 @@
                         signal: AbortSignal.timeout(aggTimeoutMs()),
                       },
                     );
-                    if (!res2.ok) return { d, status: res2.status };
+                    if (!res2.ok) {
+                      return {
+                        d,
+                        status: res2.status,
+                        detail: failureDetailLine(
+                          res2,
+                          await res2.json().catch(() => null),
+                        ),
+                      };
+                    }
                     const b2 = await res2.json();
                     return { d, hits: Array.isArray(b2.hits) ? b2.hits : [] };
                   } catch (e2) {
@@ -24268,6 +24592,7 @@
                         e2 && e2.name === 'TimeoutError'
                           ? 'timeout'
                           : 'network',
+                      error: peerErrorLabel(e2),
                     };
                   }
                 }),
@@ -24306,7 +24631,9 @@
                   });
                 } else if (v.status !== undefined) {
                   notes.push(
-                    v.d.name + ': ERROR — daemon returned ' + v.status,
+                    v.d.name +
+                      ': ERROR \u2014 daemon returned ' +
+                      (v.detail || v.status),
                   );
                 } else if (v.kind) {
                   const seen =
@@ -24315,7 +24642,9 @@
                       : 'never';
                   notes.push(
                     v.d.name +
-                      ': UNREACHABLE — last seen ' +
+                      ': UNREACHABLE \u2014 ' +
+                      (v.error ? v.error + ' reaching ' + v.d.url + ' · ' : '') +
+                      'last seen ' +
                       seen +
                       (v.kind === 'timeout' ? ' (timeout)' : '') +
                       ' · origin not admitted on ' +
@@ -24345,7 +24674,7 @@
             }
           }
         } catch (e) {
-          out.textContent = 'search error: ' + e;
+          out.textContent = failureOf(e, 'the search');
         }
       }
       $('search-btn').onclick = runSearch;
@@ -24454,7 +24783,7 @@
           out.appendChild(copyBtn);
           out.appendChild(copyNote);
         } catch (e) {
-          out.textContent = 'create error: ' + e;
+          out.textContent = failureOf(e, 'creating');
         }
       };
 
@@ -24478,11 +24807,13 @@
           else if (res.status === 404) row.textContent = 'already gone: ' + id;
           else {
             btn.disabled = false;
-            setStatus('revoke failed (' + res.status + ')');
+            setStatus(
+              describeFailure(res, await res.json().catch(() => null), 'revoking the token'),
+            );
           }
         } catch (e) {
           btn.disabled = false;
-          setStatus('revoke error: ' + e);
+          setStatus(failureOf(e, 'revoking'));
         }
       }
       $('list-shares').onclick = async () => {
@@ -24497,7 +24828,7 @@
             out.textContent =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs an owner token'
-                : 'list failed (' + res.status + ')';
+                : describeFailure(res, await res.json().catch(() => null), 'the list');
             return;
           }
           const body = await res.json();
@@ -24539,7 +24870,7 @@
             out.appendChild(row);
           }
         } catch (e) {
-          out.textContent = 'list error: ' + e;
+          out.textContent = failureOf(e, 'the list');
         }
       };
 
@@ -24599,7 +24930,7 @@
             note.textContent = ' failed: ' + code;
           }
         } catch (e) {
-          note.textContent = ' error: ' + e;
+          note.textContent = ' ' + failureOf(e, 'the request');
         } finally {
           btn.disabled = false;
         }
@@ -24630,7 +24961,7 @@
               'gateway commands: ' +
                 (res.status === 401 || res.status === 403
                   ? 'not authorized'
-                  : 'failed (' + res.status + ')'),
+                  : failureDetailLine(res, await res.json().catch(() => null))),
             );
           }
         } catch (e) {
@@ -24657,7 +24988,7 @@
                 'session commands: ' +
                   (res.status === 401 || res.status === 403
                     ? 'not authorized'
-                    : 'failed (' + res.status + ')'),
+                    : failureDetailLine(res, await res.json().catch(() => null))),
               );
             }
           } catch (e) {
@@ -24757,7 +25088,7 @@
             out.textContent =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs an owner token'
-                : 'digest failed (' + res.status + ')';
+                : describeFailure(res, await res.json().catch(() => null), 'the digest');
             return;
           }
           const body = await res.json();
@@ -24781,7 +25112,7 @@
             out.appendChild(row);
           }
         } catch (e) {
-          out.textContent = 'digest error: ' + e;
+          out.textContent = failureOf(e, 'the digest');
         }
       };
 
@@ -24797,7 +25128,7 @@
             el.textContent =
               res.status === 401 || res.status === 403
                 ? 'not authorized — needs owner token'
-                : 'status failed (' + res.status + ')';
+                : describeFailure(res, await res.json().catch(() => null), 'reading the status');
             return;
           }
           const s = await res.json();
@@ -24830,7 +25161,7 @@
             list.appendChild(row);
           }
         } catch (e) {
-          el.textContent = 'status error: ' + e;
+          el.textContent = failureOf(e, 'reading the status');
         }
       }
 
@@ -24849,12 +25180,12 @@
           );
           if (!res.ok && res.status !== 204) {
             $('snooze-status').textContent =
-              'unsnooze failed (' + res.status + ')';
+              describeFailure(res, await res.json().catch(() => null), 'the unsnooze');
             return;
           }
           await refreshSnooze();
         } catch (e) {
-          $('snooze-status').textContent = 'unsnooze error: ' + e;
+          $('snooze-status').textContent = failureOf(e, 'unsnoozing');
         }
       }
       $('snooze-status-btn').onclick = () => {
@@ -24896,7 +25227,7 @@
           }
           await refreshSnooze();
         } catch (e) {
-          $('snooze-status').textContent = 'snooze error: ' + e;
+          $('snooze-status').textContent = failureOf(e, 'snoozing');
         }
       };
       $('unsnooze-btn').onclick = async () => {
@@ -24908,12 +25239,12 @@
           });
           if (!res.ok && res.status !== 204) {
             $('snooze-status').textContent =
-              'unsnooze failed (' + res.status + ')';
+              describeFailure(res, await res.json().catch(() => null), 'the unsnooze');
             return;
           }
           await refreshSnooze();
         } catch (e) {
-          $('snooze-status').textContent = 'unsnooze error: ' + e;
+          $('snooze-status').textContent = failureOf(e, 'unsnoozing');
         }
       };
 
@@ -24947,6 +25278,7 @@
             ok: false,
             status: 0,
             code: 'network: ' + (e && e.message ? e.message : e),
+            detail: networkFailureLine(e),
           };
         }
         if (res.ok) {
@@ -24960,19 +25292,31 @@
           } catch (e) {
             // 2xx with a truncated or non-JSON body — a proxy cutting the
             // response mid-flight looks exactly like this.
-            return { ok: false, status: res.status, code: 'bad response body' };
+            return {
+              ok: false,
+              status: res.status,
+              code: 'bad response body',
+              detail:
+                'bad response body (HTTP ' +
+                res.status +
+                '): the answer was not JSON, so it was cut or rewritten on the way',
+            };
           }
         }
         let code = String(res.status);
+        let failBody = null;
         try {
           const b = await res.json();
+          failBody = b;
           if (b && b.code) code = b.code;
         } catch {
           /* non-JSON error body */
         }
+        // #211: `code` stays what callers compare; `detail` is what they print.
+        const detail = failureDetailLine(res, failBody);
         if (res.status === 401 || res.status === 403)
           code = 'not authorized (' + code + ')';
-        return { ok: false, status: res.status, code };
+        return { ok: false, status: res.status, code, detail };
       }
 
       /** The session these verbs act on: explicit field, else the watched one. */
@@ -25008,7 +25352,7 @@
           },
         );
         // Idempotent by design — a repeated cancel is not an error.
-        out.textContent = r.ok ? 'turn cancelled' : 'cancel failed: ' + r.code;
+        out.textContent = r.ok ? 'turn cancelled' : 'cancel failed: ' + rcDetail(r);
       };
 
       $('end-session').onclick = async () => {
@@ -25036,7 +25380,7 @@
           // a switch this Unwatch would drop the conversation gone to.
           if (gen === switchGen) $('stop').onclick();
         } else {
-          out.textContent = 'end failed: ' + r.code;
+          out.textContent = 'end failed: ' + rcDetail(r);
         }
       };
 
@@ -25165,7 +25509,7 @@
         // not do is re-watch A over the conversation the reader went to.
         if (gen !== switchGen) return;
         if (!r.ok) {
-          out.textContent = 'rewind failed: ' + r.code;
+          out.textContent = 'rewind failed: ' + rcDetail(r);
           return;
         }
         rewindPick.style.display = 'none';
@@ -25232,7 +25576,7 @@
           },
         );
         if (!r.ok) {
-          out.textContent = 'rewind failed: ' + r.code;
+          out.textContent = 'rewind failed: ' + rcDetail(r);
           return;
         }
         renderRows(out, [
@@ -25251,7 +25595,7 @@
             (status ? '?status=' + encodeURIComponent(status) : ''),
         );
         if (!r.ok) {
-          out.textContent = 'list failed: ' + r.code;
+          out.textContent = 'list failed: ' + rcDetail(r);
           return;
         }
         const reviews = r.body.reviews || [];
@@ -25288,7 +25632,7 @@
               );
               label.textContent = c.ok
                 ? 'cancelled  ' + rev.reviewId
-                : label.textContent + '  [cancel failed: ' + c.code + ']';
+                : label.textContent + '  [cancel failed: ' + rcDetail(c) + ']';
             };
             row.appendChild(btn);
           }
@@ -25302,7 +25646,7 @@
         out.textContent = 'loading…';
         const r = await rcCall('/rc/workflows');
         if (!r.ok) {
-          out.textContent = 'list failed: ' + r.code;
+          out.textContent = 'list failed: ' + rcDetail(r);
           return;
         }
         const runs = r.body.workflows || [];
@@ -25341,7 +25685,7 @@
               );
               label.textContent = c.ok
                 ? 'cancelling  ' + run.runId
-                : label.textContent + '  [cancel failed: ' + c.code + ']';
+                : label.textContent + '  [cancel failed: ' + rcDetail(c) + ']';
             };
             row.appendChild(btn);
           }
@@ -25360,7 +25704,7 @@
         out.textContent = 'loading…';
         const r = await rcCall('/session/' + encodeURIComponent(id) + '/tasks');
         if (!r.ok) {
-          out.textContent = 'list failed: ' + r.code;
+          out.textContent = 'list failed: ' + rcDetail(r);
           return;
         }
         const tasks = r.body.tasks || [];
@@ -25425,7 +25769,7 @@
                 label.textContent = 'stopped  ' + (t.label || t.id);
               } else if (!c.ok) {
                 label.textContent =
-                  bits.join('  ') + '  [stop failed: ' + c.code + ']';
+                  bits.join('  ') + '  [stop failed: ' + rcDetail(c) + ']';
               } else {
                 // #110: no branch for reason 'disabled'. The daemon sends it
                 // only for a workflow cancel on an untrusted workspace, and a
@@ -25459,7 +25803,7 @@
           // display_name_too_long and invalid_metadata are both about the name
           // and both come back as 400, so the code is what tells the reader
           // which one they hit.
-          return 'rename failed: ' + r.code;
+          return 'rename failed: ' + rcDetail(r);
         }
         const stored = r.body && r.body.displayName;
         return typeof stored === 'string' && stored !== ''
@@ -25503,7 +25847,7 @@
           // with no errorKind into queue_unsupported
           // (src/routes/sessionQueue.ts:73), so there is nothing for this page
           // to pre-flight. The code is the reason and it is printed as-is.
-          out.textContent = 'list failed: ' + r.code;
+          out.textContent = 'list failed: ' + rcDetail(r);
           return;
         }
         const prompts = r.body.pendingPrompts || [];
@@ -25563,7 +25907,7 @@
               label.textContent = 'dropped  ' + p.text;
             } else if (!c.ok) {
               label.textContent =
-                bits.join('  ') + '  [drop failed: ' + c.code + ']';
+                bits.join('  ') + '  [drop failed: ' + rcDetail(c) + ']';
             } else {
               label.textContent =
                 bits.join('  ') + '  [the daemon did not drop it]';
@@ -25594,7 +25938,7 @@
           // which maps a bare 404 to queue_unsupported
           // (src/routes/sessionQueue.ts:73), so the code is the reason and it
           // is printed as it arrived.
-          out.textContent = 'list failed: ' + r.code;
+          out.textContent = 'list failed: ' + rcDetail(r);
           return;
         }
         const held = r.body.messages || [];
@@ -25635,7 +25979,7 @@
               label.textContent = 'withdrawn  ' + m.text;
             } else if (!c.ok) {
               label.textContent =
-                m.text + '  [withdraw failed: ' + c.code + ']';
+                m.text + '  [withdraw failed: ' + rcDetail(c) + ']';
             } else {
               label.textContent = m.text + '  [the daemon did not withdraw it]';
             }
@@ -25669,7 +26013,7 @@
           { method: 'POST', body: JSON.stringify({ message: text }) },
         );
         if (!r.ok) {
-          out.textContent = 'send failed: ' + r.code;
+          out.textContent = 'send failed: ' + rcDetail(r);
           return;
         }
         if (r.body.accepted === false) {
@@ -25704,7 +26048,7 @@
           { method: 'POST' },
         );
         if (!r.ok) {
-          out.textContent = 'deliver failed: ' + r.code;
+          out.textContent = 'deliver failed: ' + rcDetail(r);
           return;
         }
         // requested:true means messages were waiting and the agent was asked,
@@ -25754,7 +26098,7 @@
           // all three on: a conversation the pool has no binding for is
           // session_not_loaded (src/routes/sessionStats.ts), which is an
           // instruction to open it, not a missing conversation.
-          out.textContent = 'stats failed: ' + r.code;
+          out.textContent = 'stats failed: ' + rcDetail(r);
           return;
         }
         const st = r.body || {};
@@ -25867,7 +26211,7 @@
           // session_not_loaded means the pool holds no binding for it, which is
           // an instruction to open the conversation rather than a claim that it
           // is missing (src/routes/sessionTurnIndex.ts).
-          out.textContent = 'turns failed: ' + r.code;
+          out.textContent = 'turns failed: ' + rcDetail(r);
           return;
         }
         const page = r.body || {};
@@ -25946,7 +26290,7 @@
           // session_not_loaded means the pool holds no binding for it, which is
           // an instruction to open the conversation rather than a claim that it
           // is missing (src/routes/sessionResources.ts).
-          out.textContent = 'resources failed: ' + r.code;
+          out.textContent = 'resources failed: ' + rcDetail(r);
           return;
         }
         const st = r.body || {};
@@ -26030,7 +26374,7 @@
           // verdicts from two routes, and the page passes both through rather
           // than collapsing them, so a daemon that answers one and not the
           // other says so (src/routes/workspaceDiagnostics.ts).
-          out.textContent = 'diagnostics failed: ' + r.code;
+          out.textContent = 'diagnostics failed: ' + rcDetail(r);
           return;
         }
         const st = r.body || {};
@@ -26100,7 +26444,7 @@
           // route named it, so a daemon that serves skills but not hooks says
           // which one it will not answer
           // (src/routes/workspaceInventory.ts).
-          out.textContent = 'inventory failed: ' + r.code;
+          out.textContent = 'inventory failed: ' + rcDetail(r);
           return;
         }
         const st = r.body || {};
@@ -26200,7 +26544,7 @@
           // Two routes, two verdicts, each passed through as the route named it
           // (src/routes/workspaceContext.ts), because a daemon can serve one and
           // not the other.
-          out.textContent = 'context failed: ' + r.code;
+          out.textContent = 'context failed: ' + rcDetail(r);
           return;
         }
         const st = r.body || {};
@@ -26340,7 +26684,7 @@
           out.appendChild(a);
           out.appendChild(b);
         } catch (e) {
-          out.textContent = 'fork error: ' + e;
+          out.textContent = failureOf(e, 'forking');
         }
       };
 
@@ -26572,7 +26916,7 @@
             );
           }
         } catch (e) {
-          out.textContent = 'explain error: ' + e;
+          out.textContent = failureOf(e, 'the explanation');
         }
       };
 
@@ -26635,7 +26979,7 @@
                 }
               } catch (e) {
                 btn.disabled = false;
-                setStatus('remove error: ' + e);
+                setStatus(failureOf(e, 'removing'));
               }
             };
             row.appendChild(btn);
@@ -26671,7 +27015,7 @@
           $('cors-origin').value = '';
           await listCorsOrigins();
         } catch (e) {
-          out.textContent = 'admit error: ' + e;
+          out.textContent = failureOf(e, 'admitting the origin');
         }
       };
 
@@ -26718,7 +27062,7 @@
             ),
           );
         } catch (e) {
-          out.textContent = 'whoami error: ' + e;
+          out.textContent = failureOf(e, 'the whoami lookup');
         }
       };
 
@@ -26843,7 +27187,7 @@
                 res.ok ? 'steered' : 'steer failed: ' + (await codeOf(res)),
               );
             } catch (e) {
-              setStatus('steer error: ' + e);
+              setStatus(failureOf(e, 'steering the turn'));
             }
             steer.disabled = false;
           };
@@ -26864,7 +27208,7 @@
               }
             } catch (e) {
               stop.disabled = false;
-              setStatus('stop error: ' + e);
+              setStatus(failureOf(e, 'stopping the turn'));
             }
           };
           row.appendChild(stop);
@@ -27007,7 +27351,7 @@
           try {
             rec.start();
           } catch (e) {
-            setStatus('voice start failed: ' + e);
+            setStatus(failureOf(e, 'starting voice input'));
             reset();
           }
         };
