@@ -333,6 +333,13 @@ export function createCapabilityRoute(deps: {
       // hold write (`writeScope`). The daemon advertises no tag for goals, so
       // a daemon without the routes answers `goal_unsupported` on the read.
       sessionGoal: true,
+      // #110: GET /session/:id/tasks lists workflow runs for owner and write
+      // tokens, and POST /session/:id/tasks/:taskId/workflow-action is
+      // mounted. The page draws workflow rows (and their Pause, Resume, Retry
+      // and Stop) only when this is set and the token holds write
+      // (`writeScope`); a daemon whose workspace is untrusted, or has
+      // workflows off, simply sends no rows.
+      workflowRuns: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
