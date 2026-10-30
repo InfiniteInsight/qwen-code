@@ -307,6 +307,14 @@ export function createCapabilityRoute(deps: {
       // advertises `session_sources`, and its add and remove controls only
       // for a token that holds write.
       sessionSources: true,
+      // #123: POST /rc/workspace/memory is mounted. The page draws Edit on
+      // the workspace's context file only when this is set, the token holds
+      // write (`writeScope`), and the daemon advertises `workspace_memory`.
+      workspaceMemoryWrite: true,
+      // #123: POST /rc/workspace/reload is mounted. The page draws the
+      // Reload workspace row only when this is set, the token holds write,
+      // and the daemon advertises `workspace_reload`.
+      workspaceReload: true,
       // #128: POST /session/:id/artifacts and DELETE
       // /session/:id/artifacts/:artifactId are mounted (relays; the pool
       // sends the daemon-issued client id the daemon requires). Nothing on

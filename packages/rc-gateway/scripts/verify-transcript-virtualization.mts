@@ -3035,6 +3035,12 @@ type PageScenario =
         directoryCreateErrorBody?: unknown;
         directoryDeleteStatus?: number;
         directoryDeleteErrorBody?: unknown;
+        /** #123 (memory): force the stub's memory write and reload to refuse. */
+        memoryWriteStatus?: number;
+        memoryWriteErrorBody?: unknown;
+        reloadStatus?: number;
+        reloadErrorBody?: unknown;
+        reloadResult?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -19272,7 +19278,10 @@ PAGE_SCENARIOS.push({
           // row in the markup and not drawn is a regression.
           const undrawn = g.rows.filter((x) => !x.drawn);
           expect(
-            undrawn.every((x) => x.action === 'agents'),
+            // #110's Organize and Sources and #123's Reload workspace are the
+            // same kind: offered only where the gateway, the daemon and the
+            // token allow them, and not by this stub's defaults.
+            undrawn.every((x) => ['agents', 'organize', 'sources', 'reload-workspace'].includes(x.action ?? '')),
             `rows in the markup and not drawn at ${at}: ${JSON.stringify(undrawn.map((x) => x.label))}`,
           );
           const drawnRows = g.rows.filter((x) => x.drawn);
@@ -22955,6 +22964,11 @@ async function runPageScenario(
     directoryCreateErrorBody: s.stub?.directoryCreateErrorBody,
     directoryDeleteStatus: s.stub?.directoryDeleteStatus,
     directoryDeleteErrorBody: s.stub?.directoryDeleteErrorBody,
+    memoryWriteStatus: s.stub?.memoryWriteStatus,
+    memoryWriteErrorBody: s.stub?.memoryWriteErrorBody,
+    reloadStatus: s.stub?.reloadStatus,
+    reloadErrorBody: s.stub?.reloadErrorBody,
+    reloadResult: s.stub?.reloadResult,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -29022,6 +29036,516 @@ PAGE_SCENARIOS.push({
     },
   });
 }
+
+// -- #123, memory: Edit on the workspace's context file and Reload workspace
+// (P480 to P489). The whole chain again: the page, the gateway's own two
+// routes, a bare DaemonClient and the stub, whose memory write replaces the
+// file in the same store the file read answers from. P489 alone fakes a
+// gateway, because its point is one that predates the routes.
+
+const WSM_TAGS = ['workspace_file_read', 'workspace_memory', 'workspace_reload'];
+
+/** Open Memory and skills and read the context files. */
+async function wsmOpenContext(page: Page): Promise<void> {
+  await openPanel(page, 'memory');
+  await page.waitForSelector('#ctx-load', { state: 'visible', timeout: 15_000 });
+  await page.click('#ctx-load');
+  await page.waitForFunction(
+    () => /context files/.test(document.getElementById('ctx-body')?.textContent || ''),
+    null,
+    { timeout: 15_000 },
+  );
+}
+
+/** Every POST the page makes to the memory write or the reload. */
+function wsmCapture(page: Page): Array<{ path: string; body: string }> {
+  const out: Array<{ path: string; body: string }> = [];
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (r.method() !== 'POST') return;
+    if (u.pathname !== '/rc/workspace/memory' && u.pathname !== '/rc/workspace/reload') return;
+    out.push({ path: u.pathname, body: r.postData() ?? '' });
+  });
+  return out;
+}
+
+/** Open the workspace file's Edit and wait for the editor. */
+async function wsmOpenEditor(page: Page): Promise<void> {
+  await page.click('#ctx-body [data-wsm=edit]');
+  await page.waitForSelector('#wsf-editor:not([hidden])', { timeout: 15_000 });
+}
+
+/** Open More and wait for the Reload workspace row to be decided. */
+async function wsmOpenMore(page: Page): Promise<void> {
+  await page.click('#h1-more');
+  await page.waitForSelector('#more-find', { state: 'visible' });
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P480 the context list draws Edit for the workspace file only, and it opens the text in the editor with the note that a save is not checked',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSM_TAGS },
+  run: async ({ page }) => {
+    const reads: string[] = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname === '/rc/workspace/memory' && r.method() === 'GET') reads.push(u.search);
+    });
+    await wsmOpenContext(page);
+    const drawn = await page.evaluate(() => ({
+      labels: Array.from(document.querySelectorAll('#ctx-body [data-wsm=edit]')).map((b) => b.textContent),
+      heights: Array.from(document.querySelectorAll('#ctx-body [data-wsm=edit]')).map((b) => b.getBoundingClientRect().height),
+      rows: Array.from(document.querySelectorAll('#ctx-body > div')).map((d) => d.textContent || ''),
+    }));
+    expect(JSON.stringify(drawn.labels) === '["Edit QWEN.md"]', `Edit controls: ${JSON.stringify(drawn.labels)}`);
+    expect(drawn.heights.every((h) => h >= 44), `Edit is ${drawn.heights}px tall`);
+    expect(drawn.rows.some((r) => /\[global\]/.test(r)), 'the global file is not even listed, so the check below proves nothing');
+    expect(reads.every((q) => !/content/.test(q)), `the list asked for file content: ${JSON.stringify(reads)}`);
+
+    await wsmOpenEditor(page);
+    const ed = await page.evaluate(() => {
+      const ta = document.getElementById('wsf-text') as HTMLTextAreaElement;
+      const save = document.getElementById('wsf-save')!.getBoundingClientRect();
+      const note = document.getElementById('wsf-editor-note')!;
+      return {
+        path: document.getElementById('wsf-editor-path')?.textContent || '',
+        text: ta.value,
+        note: note.textContent || '',
+        noteShown: getComputedStyle(note).display !== 'none',
+        saveH: save.height,
+        vh: window.innerHeight,
+        saveBottom: save.bottom,
+        dirty: document.getElementById('wsf-editor-dirty')?.textContent || '',
+      };
+    });
+    expect(ed.path === 'QWEN.md (workspace memory)', `the editor heading reads ${JSON.stringify(ed.path)}`);
+    expect(ed.text === '# hello\n', `the editor holds ${JSON.stringify(ed.text)}`);
+    expect(ed.noteShown && /does not check whether it changed on the host/.test(ed.note), `the note reads ${JSON.stringify(ed.note)}`);
+    expect(ed.saveH >= 44 && ed.vh - ed.saveBottom < 40, `Save is ${ed.saveH}px tall, ${ed.vh - ed.saveBottom}px above the bottom`);
+    expect(ed.dirty === '', `an untouched file reads ${JSON.stringify(ed.dirty)}`);
+    return 'one Edit QWEN.md (global listed, none for it), 44px+, opened the file text under the standing note; the list never asked for content';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P481 Edit then Save replaces the context file through the memory route with the text and nothing else, and the file reads back as typed',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSM_TAGS },
+  run: async ({ page }) => {
+    const posts = wsmCapture(page);
+    await wsmOpenContext(page);
+    await wsmOpenEditor(page);
+    const typed = '# hello\nalways answer in French\n';
+    await page.fill('#wsf-text', typed);
+    expect((await page.textContent('#wsf-editor-dirty')) === 'unsaved changes', 'typing did not mark the text unsaved');
+    await page.click('#wsf-save');
+    await page.waitForSelector('#wsf-editor', { state: 'hidden', timeout: 15_000 });
+    expect(posts.length === 1 && posts[0].path === '/rc/workspace/memory', `posts: ${JSON.stringify(posts)}`);
+    const sent = JSON.parse(posts[0].body) as Record<string, unknown>;
+    expect(
+      JSON.stringify(Object.keys(sent).sort()) === '["content","mode","scope"]' &&
+        sent.scope === 'workspace' &&
+        sent.mode === 'replace' &&
+        sent.content === typed,
+      `the save carried ${posts[0].body}`,
+    );
+    const status = await page.textContent('#status');
+    expect(/^saved QWEN\.md \(/.test(status || ''), `the status line reads ${JSON.stringify(status)}`);
+    const back = await wsfReadBack(page, 'QWEN.md');
+    expect(back.status === 200 && back.content === typed, `QWEN.md reads back ${JSON.stringify(back)}`);
+    // Edit again: the editor opens on what was saved.
+    await wsmOpenEditor(page);
+    const again = await page.evaluate(() => (document.getElementById('wsf-text') as HTMLTextAreaElement).value);
+    expect(again === typed, `the second open holds ${JSON.stringify(again)}`);
+    return 'one post to /rc/workspace/memory with scope, mode replace and the text only; the status said saved; the file reads back as typed and re-opens as typed';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P482 a save the daemon refuses says so in its words, keeps the text in the field, and writes nothing',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: WSM_TAGS,
+    memoryWriteStatus: 403,
+    memoryWriteErrorBody: { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+  },
+  run: async ({ page }) => {
+    const posts = wsmCapture(page);
+    await wsmOpenContext(page);
+    await wsmOpenEditor(page);
+    await page.fill('#wsf-text', 'my phone edit\n');
+    await page.click('#wsf-save');
+    await page.waitForFunction(
+      () => (document.getElementById('wsf-editor-status')?.textContent || '').startsWith('Not saved'),
+      null,
+      { timeout: 15_000 },
+    );
+    const after = await page.evaluate(() => ({
+      open: !document.getElementById('wsf-editor')!.hidden,
+      status: document.getElementById('wsf-editor-status')?.textContent || '',
+      tone: document.getElementById('wsf-editor-status')?.dataset.tone || '',
+      text: (document.getElementById('wsf-text') as HTMLTextAreaElement).value,
+      saveEnabled: !(document.getElementById('wsf-save') as HTMLButtonElement).disabled,
+      cancelEnabled: !(document.getElementById('wsf-cancel') as HTMLButtonElement).disabled,
+    }));
+    expect(posts.length === 1, `${posts.length} posts for one save`);
+    expect(after.open && after.text === 'my phone edit\n', `the editor kept ${JSON.stringify(after)}`);
+    expect(
+      after.status === 'Not saved: Workspace is not trusted. (403). Your text is still here.',
+      `the status reads ${JSON.stringify(after.status)}`,
+    );
+    expect(after.tone === 'error', `the status tone is ${JSON.stringify(after.tone)}`);
+    expect(after.saveEnabled && after.cancelEnabled, 'a refused save left the buttons disabled');
+    const back = await wsfReadBack(page, 'QWEN.md');
+    expect(back.content === '# hello\n', `a refused save changed the file: ${JSON.stringify(back)}`);
+    return 'the daemon 403 reached the editor as "Not saved: Workspace is not trusted. (403)", the text stayed, both buttons came back, the file is unchanged';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P483 the memory write has no hash to check, so a change made on the host while the editor is open is overwritten, as the standing note says',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSM_TAGS },
+  run: async ({ page }) => {
+    await wsmOpenContext(page);
+    await wsmOpenEditor(page);
+    const note = await page.textContent('#wsf-editor-note');
+    expect(/overwritten/.test(note || ''), `the note reads ${JSON.stringify(note)}`);
+    // Another client replaces the file meanwhile (through the hash-checked
+    // file write, which is the route a stale phone save would be refused by).
+    const opened = await wsfHash('# hello\n');
+    const other = await page.evaluate(async (h) => {
+      const res = await fetch('/rc/workspace/file/write', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'QWEN.md', content: 'changed on the host\n', mode: 'replace', expectedHash: h }),
+      });
+      return res.status;
+    }, opened);
+    expect(other === 200, `the other client's write answered ${other}`);
+    await page.fill('#wsf-text', 'my phone edit\n');
+    await page.click('#wsf-save');
+    await page.waitForSelector('#wsf-editor', { state: 'hidden', timeout: 15_000 });
+    const back = await wsfReadBack(page, 'QWEN.md');
+    expect(back.content === 'my phone edit\n', `the file reads ${JSON.stringify(back)}`);
+    return 'the host change was overwritten without a refusal, which is what the note under the field told the reader before they saved';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P484 Edit refuses a context file a replace would change (Windows line endings), says why, and opens no editor',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: WSM_TAGS,
+    workspaceMemoryResult: {
+      v: 1,
+      workspaceCwd: '/stub/workspace',
+      initialized: true,
+      files: [
+        { kind: 'memory_file', path: '/stub/workspace/QWEN.md', scope: 'workspace', bytes: 8 },
+        { kind: 'memory_file', path: '/stub/workspace/AGENTS.md', scope: 'workspace', bytes: 30 },
+      ],
+      totalBytes: 38,
+      fileCount: 2,
+      ruleCount: 0,
+    },
+  },
+  before: async (page) => {
+    await page.route(/\/rc\/workspace\/file\?path=AGENTS\.md/, async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.lineEnding = 'crlf';
+      body.content = 'line one\r\nline two\r\n';
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    const posts = wsmCapture(page);
+    await wsmOpenContext(page);
+    const labels = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ctx-body [data-wsm=edit]')).map((b) => b.textContent),
+    );
+    expect(JSON.stringify(labels) === '["Edit QWEN.md","Edit AGENTS.md"]', `Edit controls: ${JSON.stringify(labels)}`);
+    await page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('#ctx-body [data-wsm=edit]')).find((x) => x.textContent === 'Edit AGENTS.md') as HTMLButtonElement;
+      b.click();
+    });
+    await page.waitForFunction(
+      () => /not editable here/.test(document.querySelector('#ctx-body [data-wsm=status]')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const said = await page.textContent('#ctx-body [data-wsm=status]');
+    expect(
+      said === 'not editable here: AGENTS.md uses Windows line endings, which a memory save would not keep',
+      `the status reads ${JSON.stringify(said)}`,
+    );
+    expect(await page.evaluate(() => document.getElementById('wsf-editor')?.hidden !== false), 'an editor opened on the refused file');
+    expect(posts.length === 0, `a refusal still posted ${JSON.stringify(posts)}`);
+    // The other file is not affected.
+    await page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('#ctx-body [data-wsm=edit]')).find((x) => x.textContent === 'Edit QWEN.md') as HTMLButtonElement;
+      b.click();
+    });
+    await page.waitForSelector('#wsf-editor:not([hidden])', { timeout: 15_000 });
+    return 'AGENTS.md read as CRLF was refused in words with no editor and no post; QWEN.md beside it opened as usual';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P485 Reload workspace sits in More under Workspace at 44px or more, asks first, calls the daemon once, and shows what it answered',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSM_TAGS },
+  run: async ({ page }) => {
+    const posts = wsmCapture(page);
+    await wsmOpenMore(page);
+    await page.waitForSelector('#more-reload:not([hidden])', { timeout: 10_000 });
+    const row = await page.evaluate(() => {
+      const r = document.getElementById('more-reload')!;
+      const grp = r.closest('.mgrp');
+      return {
+        h: r.getBoundingClientRect().height,
+        group: grp?.querySelector('.grp')?.textContent || '',
+        label: r.querySelector('.lbl')?.textContent || '',
+        chev: !!r.querySelector('.chev'),
+      };
+    });
+    expect(row.h >= 44, `the row is ${row.h}px tall`);
+    expect(/^Workspace/.test(row.group) && row.label === 'Reload workspace', `the row is ${JSON.stringify(row)}`);
+    expect(!row.chev, 'an action row drew a chevron');
+
+    await page.click('#more-reload');
+    await page.waitForSelector('#wsf-ask:not([hidden])', { timeout: 10_000 });
+    const sheet = await page.evaluate(() => ({
+      title: document.querySelector('#wsf-ask .ask-title')?.textContent || '',
+      where: document.querySelector('#wsf-ask [data-wsf=path]')?.textContent || '',
+      cwd: caps.workspaceCwd,
+      go: document.querySelector('#wsf-ask [data-wsf=go]')?.textContent || '',
+      focused: document.activeElement === document.querySelector('#wsf-ask [data-wsf=cancel]'),
+    }));
+    expect(sheet.title === 'Reload workspace?' && sheet.go === 'Reload', `the sheet reads ${JSON.stringify(sheet)}`);
+    expect(sheet.where === sheet.cwd && !!sheet.cwd, `the sheet names ${JSON.stringify(sheet.where)} for ${JSON.stringify(sheet.cwd)}`);
+    expect(sheet.focused, 'Cancel does not have the focus');
+    await page.click('#wsf-ask [data-wsf=cancel]');
+    await page.waitForSelector('#wsf-ask', { state: 'hidden' });
+    expect(posts.length === 0, `Cancel still posted ${JSON.stringify(posts)}`);
+
+    await page.click('#more-reload');
+    await page.waitForSelector('#wsf-ask:not([hidden])');
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(
+      () => /^Reloaded/.test(document.getElementById('more-reload-result')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    expect(posts.length === 1 && posts[0].path === '/rc/workspace/reload', `posts: ${JSON.stringify(posts)}`);
+    const out = await page.evaluate(() => ({
+      text: document.getElementById('more-reload-result')?.textContent || '',
+      tone: document.getElementById('more-reload-result')?.dataset.tone || '',
+      busy: (document.getElementById('more-reload') as HTMLButtonElement).disabled,
+      val: document.getElementById('more-reload-val')?.textContent || '',
+    }));
+    expect(
+      out.text === 'Reloaded: 1 setting changed (QWEN_MODEL). agent reloaded, 1 conversation refreshed.',
+      `the answer reads ${JSON.stringify(out.text)}`,
+    );
+    expect(out.tone === '' && !out.busy && out.val === '', `the row after: ${JSON.stringify(out)}`);
+    return 'the row (Workspace group, no chevron) asked first, Cancel sent nothing, Reload sent one post and the line under the row told the daemon answer';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P486 a reload the daemon refuses says so in its words and leaves the row usable',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: WSM_TAGS,
+    reloadStatus: 403,
+    reloadErrorBody: { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+  },
+  run: async ({ page }) => {
+    const posts = wsmCapture(page);
+    await wsmOpenMore(page);
+    await page.waitForSelector('#more-reload:not([hidden])', { timeout: 10_000 });
+    await page.click('#more-reload');
+    await page.waitForSelector('#wsf-ask:not([hidden])');
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(
+      () => /^Not reloaded/.test(document.getElementById('more-reload-result')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const out = await page.evaluate(() => ({
+      text: document.getElementById('more-reload-result')?.textContent || '',
+      tone: document.getElementById('more-reload-result')?.dataset.tone || '',
+      busy: (document.getElementById('more-reload') as HTMLButtonElement).disabled,
+    }));
+    expect(posts.length === 1, `${posts.length} posts for one reload`);
+    expect(out.text === 'Not reloaded: Workspace is not trusted. (403)', `the line reads ${JSON.stringify(out.text)}`);
+    expect(out.tone === 'error' && !out.busy, `the row after: ${JSON.stringify(out)}`);
+    return 'the daemon 403 read "Not reloaded: Workspace is not trusted. (403)" in the error tone and the row came back enabled';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P487 a reload the daemon answers with a child error is told as the daemon told it: not reloaded, and the agent said why',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: WSM_TAGS,
+    reloadResult: {
+      env: { updatedKeys: [], removedKeys: [] },
+      changedKeys: [],
+      childReloaded: false,
+      childError: 'ACP child not running',
+      runtimeEnvironmentApplied: false,
+    },
+  },
+  run: async ({ page }) => {
+    await wsmOpenMore(page);
+    await page.waitForSelector('#more-reload:not([hidden])', { timeout: 10_000 });
+    await page.click('#more-reload');
+    await page.waitForSelector('#wsf-ask:not([hidden])');
+    await page.click('#wsf-ask [data-wsf=go]');
+    await page.waitForFunction(
+      () => /^Reloaded/.test(document.getElementById('more-reload-result')?.textContent || ''),
+      null,
+      { timeout: 15_000 },
+    );
+    const text = await page.textContent('#more-reload-result');
+    expect(
+      text === 'Reloaded: nothing changed. agent not reloaded. the agent said: ACP child not running. the environment was not applied to the daemon.',
+      `the line reads ${JSON.stringify(text)}`,
+    );
+    return 'a 200 with childError and runtimeEnvironmentApplied false read as nothing changed, agent not reloaded, the agent said why, the environment not applied';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P488 a read-only share token sees no Edit and no Reload workspace, and the gateway refuses both direct posts with 403',
+  waitView: false,
+  stub: { capabilitiesFeatures: WSM_TAGS },
+  run: async ({ page, viewer }) => {
+    const minted = await page.evaluate(async (sid) => {
+      const res = await fetch('/rc/share', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, ttlSec: 600, scope: 'approve', label: 'guest' }),
+      });
+      return { status: res.status, token: (await res.json()).token as string };
+    }, viewer.sessionId);
+    expect(minted.status === 201 && !!minted.token, `minting a share answered ${minted.status}`);
+    await page.addInitScript((t) => localStorage.setItem('qwen-rc-token', t), minted.token);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof startWatch === 'function');
+    await page.waitForFunction(() => !!(caps && caps.remoteControl), null, { timeout: 15_000 });
+    const gate = await page.evaluate(() => ({
+      writeScope: caps.remoteControl.writeScope,
+      flags: [caps.remoteControl.workspaceMemoryWrite, caps.remoteControl.workspaceReload],
+      gates: [wsmGate('workspaceMemoryWrite', 'workspace_memory'), wsmGate('workspaceReload', 'workspace_reload')],
+    }));
+    expect(gate.writeScope === false && gate.flags.every((f) => f === true), `the guest's capabilities read ${JSON.stringify(gate)}`);
+    expect(gate.gates.every((g) => g === false), `a gate opened for the guest: ${JSON.stringify(gate.gates)}`);
+    // The daemon's tags put in front of the page change nothing: write scope is the gate doing it.
+    const forced = await page.evaluate((tags) => {
+      caps.remoteControl.daemon = { available: true, features: tags };
+      const out = document.createElement('div');
+      wsmDrawEdits(out, { workspaceCwd: '/w', files: [{ kind: 'memory_file', path: '/w/QWEN.md', scope: 'workspace', bytes: 1 }] });
+      setMoreOpen(true);
+      return {
+        gates: [wsmGate('workspaceMemoryWrite', 'workspace_memory'), wsmGate('workspaceReload', 'workspace_reload')],
+        edits: out.querySelectorAll('[data-wsm]').length,
+      };
+    }, WSM_TAGS);
+    await page.waitForTimeout(150);
+    const row = await page.evaluate(() => (document.getElementById('more-reload') as HTMLElement).hidden);
+    expect(forced.gates.every((g) => g === false) && forced.edits === 0, `with the tags present: ${JSON.stringify(forced)}`);
+    expect(row === true, 'the Reload workspace row is shown to a guest');
+    const refused = await page.evaluate(async () => {
+      const h = { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/json' };
+      const a = await fetch('/rc/workspace/memory', {
+        method: 'POST',
+        headers: h,
+        body: JSON.stringify({ scope: 'workspace', content: 'x', mode: 'replace' }),
+      });
+      const b = await fetch('/rc/workspace/reload', { method: 'POST', headers: h, body: '{}' });
+      return [
+        { status: a.status, code: (await a.json()).code as string },
+        { status: b.status, code: (await b.json()).code as string },
+      ];
+    });
+    expect(
+      refused.every((r) => r.status === 403 && r.code === 'scope_required'),
+      `the guest's direct posts answered ${JSON.stringify(refused)}`,
+    );
+    return 'write scope false, both gates shut even with the daemon tags in front of the page, no Edit drawn, the row hidden, and both direct posts answered 403 scope_required';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P489 a gateway that reports neither flag gets no Edit and no Reload row though the daemon advertises every tag, and each gate follows its own flag and tag',
+  waitView: false,
+  noConsoleErrors: true,
+  stub: { capabilitiesFeatures: WSM_TAGS },
+  before: async (page) => {
+    await page.route('**/rc/capabilities', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      delete body.remoteControl.workspaceMemoryWrite;
+      delete body.remoteControl.workspaceReload;
+      await route.fulfill({ response: res, json: body });
+    });
+  },
+  run: async ({ page }) => {
+    const posts = wsmCapture(page);
+    await wsmOpenContext(page);
+    await page.waitForTimeout(200);
+    const seen = await page.evaluate(() => ({
+      flags: [caps.remoteControl.workspaceMemoryWrite, caps.remoteControl.workspaceReload],
+      features: caps.remoteControl.daemon.features,
+      edits: document.querySelectorAll('#ctx-body [data-wsm]').length,
+      rows: Array.from(document.querySelectorAll('#ctx-body > div')).map((d) => d.textContent),
+    }));
+    expect(seen.flags.every((f) => f === undefined), `a flag survived the strip: ${JSON.stringify(seen.flags)}`);
+    expect(seen.features.includes('workspace_memory') && seen.features.includes('workspace_reload'), 'the daemon tags are missing, so this is not the old-gateway case');
+    expect(seen.edits === 0, `${seen.edits} Edit controls on an old gateway: ${JSON.stringify(seen.rows)}`);
+    expect(seen.rows.some((r) => /\[workspace\]/.test(r || '')), 'the context list itself did not draw');
+    await openPanel(page, 'chat');
+    await wsmOpenMore(page);
+    await page.waitForTimeout(150);
+    expect(await page.evaluate(() => (document.getElementById('more-reload') as HTMLElement).hidden), 'the Reload workspace row is shown on an old gateway');
+    expect(posts.length === 0, `an old gateway still posted ${JSON.stringify(posts)}`);
+
+    // Each gate follows its own flag and its own tag (and Edit also needs the
+    // file read it opens the text with).
+    const gates = await page.evaluate(String.raw`(() => {
+      var rc = caps.remoteControl;
+      rc.workspaceMemoryWrite = true;
+      rc.workspaceReload = true;
+      function at(tags) {
+        rc.daemon = { available: true, features: tags };
+        var out = document.createElement('div');
+        wsmDrawEdits(out, { workspaceCwd: '/w', files: [{ kind: 'memory_file', path: '/w/QWEN.md', scope: 'workspace', bytes: 1 }] });
+        return [wsmGate('workspaceReload', 'workspace_reload'), out.querySelectorAll('[data-wsm=edit]').length];
+      }
+      return {
+        memoryOnly: at(['workspace_file_read', 'workspace_memory']),
+        reloadOnly: at(['workspace_reload']),
+        noRead: at(['workspace_memory', 'workspace_reload']),
+      };
+    })()`) as { memoryOnly: number[]; reloadOnly: number[]; noRead: number[] };
+    expect(JSON.stringify(gates.memoryOnly) === '[false,1]', `memory tags only: ${JSON.stringify(gates.memoryOnly)}`);
+    expect(JSON.stringify(gates.reloadOnly) === '[true,0]', `reload tag only: ${JSON.stringify(gates.reloadOnly)}`);
+    expect(JSON.stringify(gates.noRead) === '[true,0]', `no file read: ${JSON.stringify(gates.noRead)}`);
+    return 'with every daemon tag but no gateway flag the list drew rows and nothing to write with, and More hid the row; with flags restored, memory tags gave Edit alone, the reload tag gave Reload alone, and no file read gave no Edit';
+  },
+});
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

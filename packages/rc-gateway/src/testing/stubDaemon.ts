@@ -133,6 +133,12 @@ export interface StubDaemon {
   lastStatQuery: Record<string, unknown> | undefined;
   /** #123: body the most recent POST /file/write carried. */
   lastFileWrite: Record<string, unknown> | undefined;
+  /** #123: every body POST /workspace/memory carried, in order. */
+  memoryWrites: Array<Record<string, unknown>>;
+  /** #123: how many POST /workspace/reload requests have arrived. */
+  reloadCount: number;
+  /** #123: body the most recent POST /workspace/reload carried. */
+  lastReloadBody: unknown;
   /** #123: body the most recent POST /file/edit carried. */
   lastFileEdit: Record<string, unknown> | undefined;
   /** #123: what the most recent POST /file/upload carried. */
@@ -723,6 +729,21 @@ export interface StubDaemonOptions {
    */
   fileWriteStatus?: number;
   fileWriteErrorBody?: unknown;
+  /**
+   * #123: force a status on POST /workspace/memory, answering
+   * `memoryWriteErrorBody` (default `{error: 'stub error'}`). Unset, the stub
+   * answers as the daemon does: it validates the body, writes the workspace
+   * file in its store (append adds to the end, replace swaps the text) and
+   * answers `{ok, filePath, bytesWritten, mode, changed}`.
+   */
+  memoryWriteStatus?: number;
+  memoryWriteErrorBody?: unknown;
+  /** #123: force a status on POST /workspace/reload, answering
+   * `reloadErrorBody`; unset it answers `reloadResult` or the default. */
+  reloadStatus?: number;
+  reloadErrorBody?: unknown;
+  /** Full body for POST /workspace/reload on success. */
+  reloadResult?: unknown;
   fileEditStatus?: number;
   fileEditErrorBody?: unknown;
   fileUploadStatus?: number;
@@ -933,6 +954,9 @@ export async function startStubDaemon(
     lastFileBytesQuery: undefined as Record<string, unknown> | undefined,
     lastStatQuery: undefined as Record<string, unknown> | undefined,
     lastFileWrite: undefined as Record<string, unknown> | undefined,
+    memoryWrites: [] as Array<Record<string, unknown>>,
+    reloadCount: 0,
+    lastReloadBody: undefined as unknown,
     lastFileEdit: undefined as Record<string, unknown> | undefined,
     lastFileUpload: undefined as
       | { path: unknown; contentType: string | undefined; byteLength: number }
@@ -2604,6 +2628,87 @@ export async function startStubDaemon(
     });
   });
 
+  // -- Workspace memory write and reload (#123) --------------------------
+  // POST /workspace/memory is shaped off packages/cli/src/serve/
+  // workspace-memory.ts: its envelope is `{error, code, ...}` (not the fs
+  // envelope), `mode` defaults to append, and content over 1 MiB is a 400
+  // content_too_large. There is no hash and no version on this route, so the
+  // stub keeps none: a replace is unconditional.
+  app.post('/workspace/memory', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    state.memoryWrites.push(body);
+    if (opts.memoryWriteStatus !== undefined) {
+      res
+        .status(opts.memoryWriteStatus)
+        .json(opts.memoryWriteErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    const scope = body['scope'];
+    if (scope !== 'workspace' && scope !== 'global') {
+      res.status(400).json({ error: '`scope` must be "workspace" or "global"', code: 'invalid_scope' });
+      return;
+    }
+    const modeRaw = body['mode'];
+    if (modeRaw !== undefined && modeRaw !== 'append' && modeRaw !== 'replace') {
+      res.status(400).json({ error: '`mode` must be "append", "replace", or omitted', code: 'invalid_mode' });
+      return;
+    }
+    const mode: 'append' | 'replace' = modeRaw === 'replace' ? 'replace' : 'append';
+    const content = body['content'];
+    if (typeof content !== 'string') {
+      res.status(400).json({ error: '`content` must be a string', code: 'invalid_content' });
+      return;
+    }
+    if (Buffer.byteLength(content, 'utf8') > 1024 * 1024) {
+      res.status(400).json({ error: '`content` exceeds the 1048576-byte limit', code: 'content_too_large' });
+      return;
+    }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    const filePath = scope === 'global' ? '/home/dev/.qwen/QWEN.md' : `${cwd}/QWEN.md`;
+    const key = 'QWEN.md';
+    let changed = true;
+    if (mode === 'append' && content.trim() === '') {
+      changed = false;
+    } else if (scope === 'workspace') {
+      const current = stubFileText(key) ?? '';
+      const next =
+        mode === 'replace'
+          ? content
+          : current + (current === '' || current.endsWith('\n') ? '' : '\n') + content;
+      stubFiles.written.set(key, next);
+      stubFiles.deleted.delete(key);
+    }
+    res.status(200).json({
+      ok: true,
+      filePath,
+      bytesWritten: changed ? Buffer.byteLength(content, 'utf8') : 0,
+      mode,
+      changed,
+    });
+  });
+
+  // POST /workspace/reload answers a DaemonReloadResponse
+  // (packages/sdk-typescript/src/daemon/types.ts:4680): the env keys it
+  // updated or removed, the keys that changed, whether the child reloaded and
+  // which sessions were refreshed or skipped.
+  app.post('/workspace/reload', (req, res) => {
+    state.reloadCount += 1;
+    state.lastReloadBody = req.body;
+    if (opts.reloadStatus !== undefined) {
+      res.status(opts.reloadStatus).json(opts.reloadErrorBody ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.reloadResult ?? {
+        env: { updatedKeys: ['QWEN_MODEL'], removedKeys: [] },
+        changedKeys: ['QWEN_MODEL'],
+        childReloaded: true,
+        sessionsRefreshed: ['s-1'],
+        sessionsSkipped: [],
+      },
+    );
+  });
+
   app.post('/file/write', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     state.lastFileWrite = body;
@@ -4256,6 +4361,15 @@ export async function startStubDaemon(
     },
     get lastFileWrite() {
       return state.lastFileWrite;
+    },
+    get memoryWrites() {
+      return state.memoryWrites;
+    },
+    get reloadCount() {
+      return state.reloadCount;
+    },
+    get lastReloadBody() {
+      return state.lastReloadBody;
     },
     get lastFileEdit() {
       return state.lastFileEdit;
