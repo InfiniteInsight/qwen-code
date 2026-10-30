@@ -288,7 +288,9 @@ export function gateJsonBody(json: RequestHandler): RequestHandler {
     // the scope check, under the #196 limit rather than this parser's 100 KB
     // (routes/workspaceFileWrites.ts, createWorkspaceFileBody).
     (req.method === 'POST' &&
-      /^\/rc\/workspace\/file\/(write|edit|upload)$/.test(req.path))
+      /^\/rc\/workspace\/file\/(write|edit|upload)$/.test(req.path)) ||
+    // #123: the workspace memory write reads its own body the same way.
+    (req.method === 'POST' && req.path === '/rc/workspace/memory')
       ? next()
       : json(req, res, next);
 }

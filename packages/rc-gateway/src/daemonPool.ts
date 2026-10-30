@@ -74,6 +74,9 @@ import {
   type DaemonWorkspaceSettingsStatus,
   type DaemonWorkspaceMemoryStatus,
   type DaemonWorkspaceAgentsStatus,
+  type DaemonWriteMemoryRequest,
+  type DaemonWriteMemoryResult,
+  type DaemonReloadResponse,
 } from '@qwen-code/sdk/daemon';
 import {
   requireWorkspaceCwd,
@@ -817,6 +820,20 @@ export interface SessionDaemon {
     clientId?: string,
     workspaceCwd?: string,
   ): Promise<void>;
+
+  // -- Workspace memory write and reload (#123) -------------------------
+  // The SDK's own names (`writeWorkspaceMemory`, `reload`) and shipped
+  // parameters, `workspaceCwd` appended and never forwarded. Both exist on a
+  // bare `DaemonClient`, so neither is optional.
+  writeWorkspaceMemory(
+    req: DaemonWriteMemoryRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWriteMemoryResult>;
+  reload(
+    opts?: { clientId?: string; timeoutMs?: number },
+    workspaceCwd?: string,
+  ): Promise<DaemonReloadResponse>;
 
   // -- Sessions at rest (add-capability-parity #111) --------------------
   // Batch actions over stored transcripts, workspace-scoped like the block
@@ -3152,6 +3169,30 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<void> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       deleteWorkspaceDirectoryOnPrimary(client, dirPath, clientId),
+    );
+  }
+
+  // -- Workspace memory write and reload (#123) -------------------------
+  // Each routes to the target workspace's daemon like the blocks above. The
+  // daemon decides which context file a write lands in and what a reload
+  // touches; the pool only carries the call.
+
+  writeWorkspaceMemory(
+    req: DaemonWriteMemoryRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWriteMemoryResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.writeWorkspaceMemory(req, clientId),
+    );
+  }
+
+  reload(
+    opts?: { clientId?: string; timeoutMs?: number },
+    workspaceCwd?: string,
+  ): Promise<DaemonReloadResponse> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.reload(opts),
     );
   }
 

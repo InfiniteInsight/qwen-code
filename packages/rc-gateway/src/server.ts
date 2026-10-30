@@ -133,6 +133,10 @@ import {
   createWorkspaceStatRoute,
 } from './routes/workspaceFileWrites.js';
 import {
+  createWorkspaceMemoryWriteRoute,
+  createWorkspaceReloadRoute,
+} from './routes/workspaceMemoryWrite.js';
+import {
   createWorkspaceDirectoryCreateRoute,
   createWorkspaceDirectoryDeleteRoute,
 } from './routes/workspaceDirectories.js';
@@ -2666,6 +2670,28 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceDirectoryDeleteRoute(deps.daemon, audit),
+  );
+  // Workspace memory write and reload (#123), at WRITE like the file writes
+  // above. The memory write reads its own body after the scope check, under
+  // the #196 limit (`createWorkspaceFileBody`); the global parser stands aside
+  // for it (gateJsonBody). Reload is a bodyless post and takes the global
+  // parser. Neither audit row carries content or a path.
+  app.post(
+    '/rc/workspace/memory',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    ...createWorkspaceFileBody('json', attachmentLimit),
+    createWorkspaceMemoryWriteRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/workspace/reload',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceReloadRoute(deps.daemon, audit),
   );
   // #110: POST /rc/workspace/session-groups?workspace=<cwd> makes a named
   // group in that folder's organization store, so a conversation can be
