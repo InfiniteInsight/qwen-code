@@ -28302,6 +28302,726 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// ---- #208. The Agents sheet shows the model and a finished row's tokens ----
+
+type P44Look = { key: string; text: string; model: string | null; modelColor: string | null; nameColor: string | null; modelAfterName: boolean };
+async function p44Looks(page: Page): Promise<P44Look[]> {
+  return (await page.evaluate(String.raw`(() => {
+    return Array.from(document.querySelectorAll('#agents-body .ag-row[data-state]')).map(function (r) {
+      var m = r.querySelector('.ag-model');
+      var n = r.querySelector('.ag-name');
+      return {
+        key: r.dataset.key || '',
+        text: r.textContent || '',
+        model: m ? m.textContent : null,
+        modelColor: m ? getComputedStyle(m).color : null,
+        nameColor: n ? getComputedStyle(n).color : null,
+        modelAfterName: !!(m && n && (n.compareDocumentPosition(m) & Node.DOCUMENT_POSITION_FOLLOWING)),
+      };
+    });
+  })()`)) as P44Look[];
+}
+const P44_STATS = { totalTokens: 4_321, outputTokens: 321, toolUses: 7, durationMs: 40_000 };
+const P44_ROSTER = (sid: string) =>
+  agentRoster(sid, [
+    agentTask({ id: 'agent-live', toolUseId: 'tc-live', subagentType: 'general-purpose', description: 'write the fix', model: 'qwen3-coder-plus', startTime: AG_T0 + 10_000 }),
+    agentTask({ id: 'agent-done', toolUseId: 'tc-done', subagentType: 'Explore', description: 'the first look', status: 'completed', model: 'qwen3-max', stats: P44_STATS, startTime: AG_T0 - 60_000, endTime: AG_T0 - 20_000, runtimeMs: 40_000 }),
+  ]);
+const P44_NO_INSPECT = async (page: Page, asked: string[]): Promise<void> => {
+  await page.route(/\/session\/[^/]+\/subagents\/[^/]+$/, async (route) => {
+    asked.push(decodeURIComponent(new URL(route.request().url()).pathname.split('/')[4]!));
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessionId: 'v', totalTokens: 999, inputTokens: 900, outputTokens: 99 }) });
+  });
+};
+
+PAGE_SCENARIOS.push({
+  name: 'P440 a finished agent\'s row shows its model (muted, after the type) and its tokens and tools from the daemon\'s stats',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P44_ROSTER },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    const done = (await p44Looks(page)).find((r) => r.key === 'tc-done')!;
+    expect(done.model === 'qwen3-max', `the finished row's model is ${JSON.stringify(done.model)}`);
+    expect(done.modelAfterName, 'the model is not after the type');
+    expect(done.modelColor !== null && done.modelColor !== done.nameColor, `the model is not muted (${done.modelColor} against ${done.nameColor})`);
+    expect(/Explore/.test(done.text) && /done/.test(done.text) && /4\.3k tok/.test(done.text) && /7 tools/.test(done.text), `the finished row reads ${JSON.stringify(done.text)}`);
+    return `finished row reads ${JSON.stringify(done.text)}; model ${done.model} in ${done.modelColor}, name in ${done.nameColor}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P441 a running agent\'s row shows its model after the type',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P44_ROSTER },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    const live = (await p44Looks(page)).find((r) => r.key === 'tc-live')!;
+    expect(live.model === 'qwen3-coder-plus' && live.modelAfterName, `the running row's model is ${JSON.stringify(live)}`);
+    expect(/general-purpose/.test(live.text) && /running/.test(live.text), `the running row reads ${JSON.stringify(live.text)}`);
+    return `running row reads ${JSON.stringify(live.text)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P442 a daemon that sends neither model nor stats draws the rows as before: no model, no token count, and the trace still reads the inspect route',
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({ id: 'agent-live', toolUseId: 'tc-live', subagentType: 'general-purpose', description: 'write the fix', startTime: AG_T0 + 10_000 }),
+        agentTask({ id: 'agent-done', toolUseId: 'tc-done', subagentType: 'Explore', description: 'the first look', status: 'completed', startTime: AG_T0 - 60_000, endTime: AG_T0 - 20_000, runtimeMs: 40_000 }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    await P44_NO_INSPECT(page, asked);
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    const looks = await p44Looks(page);
+    expect(looks.every((r) => r.model === null), `a model was drawn: ${JSON.stringify(looks.map((r) => r.model))}`);
+    const done = looks.find((r) => r.key === 'tc-done')!;
+    expect(!/tok/.test(done.text), `a finished row with no stats drew tokens (${JSON.stringify(done.text)})`);
+    await page.click('#agents-body .ag-open[data-key="tc-done"]');
+    await page.waitForFunction(() => /used 999 tok/.test(document.getElementById('agents-body')!.textContent ?? ''), null, { timeout: 10_000 });
+    expect(asked.join(',') === 'tc-done', `the inspect read asked ${JSON.stringify(asked)}`);
+    return 'no .ag-model on either row; the finished row has no token count; its trace read the inspect route and said "used 999 tok"';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P443 a finished agent\'s trace takes its usage line from the stats and does not read the inspect route; the header carries the model',
+  stub: { capabilitiesFeatures: AGENT_FEATURES, sessionAgentsResult: P44_ROSTER },
+  run: async ({ page, viewer }) => {
+    const asked: string[] = [];
+    await P44_NO_INSPECT(page, asked);
+    await watch(page, viewer.sessionId);
+    await waitChip(page, '1 agent');
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 2);
+    await page.click('#agents-body .ag-open[data-key="tc-done"]');
+    await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'tc-done', null, { timeout: 5_000 });
+    await page.waitForTimeout(800);
+    const head = await page.evaluate(() => ({
+      model: (document.querySelector('#agents-body .ag-sum .ag-model') || {}).textContent || null,
+      text: document.getElementById('agents-body')!.textContent ?? '',
+    }));
+    expect(head.model === 'qwen3-max', `the trace header's model is ${JSON.stringify(head.model)}`);
+    expect(/4\.3k tok/.test(head.text) && /7 tools/.test(head.text), `the trace reads ${JSON.stringify(head.text)}`);
+    expect(!/used 999|reading what it used/.test(head.text), `the trace showed the inspect read (${JSON.stringify(head.text)})`);
+    expect(asked.length === 0, `the inspect route was read for ${JSON.stringify(asked)}`);
+    return 'trace header carries qwen3-max; usage reads 4.3k tok, 7 tools from the stats; the inspect route was never read';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P444 a long model name shortens before the type does, the row stays 48px and the sheet does not scroll sideways at phone width',
+  stub: {
+    capabilitiesFeatures: AGENT_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({
+          id: 'agent-done',
+          toolUseId: 'tc-done',
+          subagentType: 'general-purpose',
+          description: 'the first look',
+          status: 'completed',
+          model: 'accounts/example/models/a-very-long-model-name-that-goes-on-and-on-v2-instruct-fp8',
+          stats: P44_STATS,
+          startTime: AG_T0 - 60_000,
+          endTime: AG_T0 - 20_000,
+          runtimeMs: 40_000,
+        }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.click('#h1-more');
+    await page.waitForSelector('#more-agents', { state: 'visible' });
+    await page.click('#more-agents');
+    await page.waitForSelector('#agents-sheet:not([hidden])', { timeout: 5_000 });
+    const rows = await waitSheetRows(page, 1);
+    const m = await page.evaluate(() => {
+      const row = document.querySelector('#agents-body .ag-row')!;
+      const name = row.querySelector('.ag-name') as HTMLElement;
+      const model = row.querySelector('.ag-model') as HTMLElement;
+      const st = row.querySelector('.ag-st') as HTMLElement;
+      const clock = row.querySelector('.ag-clock') as HTMLElement;
+      const body = document.getElementById('agents-body')!;
+      return {
+        nameCut: name.scrollWidth > name.clientWidth,
+        nameW: name.clientWidth,
+        modelCut: model.scrollWidth > model.clientWidth,
+        stRight: st.getBoundingClientRect().right,
+        clockRight: clock.getBoundingClientRect().right,
+        rowRight: row.getBoundingClientRect().right,
+        sideways: body.scrollWidth > body.clientWidth,
+      };
+    });
+    expect(m.modelCut && !m.nameCut, `the model did not give way first (${JSON.stringify(m)})`);
+    expect(!m.sideways, `the sheet scrolls sideways (${JSON.stringify(m)})`);
+    expect(m.clockRight <= m.rowRight + 0.5 && m.stRight <= m.rowRight + 0.5, `the state or clock left the row (${JSON.stringify(m)})`);
+    expect(rows[0]!.openH >= 48, `the row is ${rows[0]!.openH}px`);
+    return `model ellipsized, type whole (${m.nameW}px), state and clock inside the row, row ${rows[0]!.openH}px, no sideways scroll`;
+  },
+});
+
+// #110. Organize and Sources, two rows of More > This conversation. Organize
+// files the conversation on screen under a group of its folder or a colour
+// tag through PATCH /session/:id/organization, the groups read from the
+// session catalog for that folder alone; Sources is its reference list. The
+// harness drives a bare DaemonClient, so the stub's source mutations take any
+// caller here: the client id the daemon requires is the route tests' to show.
+{
+  const CV_SID = '11111111-2222-3333-4444-555555555555'; // the harness's session
+  const CV_WS = '/stub/workspace';
+  const CV_FEATURES = ['session_organization', 'session_sources'];
+  const CV_NOW = new Date().toISOString();
+  type CvRow = NonNullable<NonNullable<StubDaemonOptions['catalog']>[string]['sessions']>[number];
+  // A catalog of its own per scenario: the stub files the session into it.
+  const cvCatalog = (mark: Record<string, unknown> = {}): NonNullable<StubDaemonOptions['catalog']> => ({
+    [CV_WS]: {
+      sessions: [
+        { sessionId: CV_SID, workspaceCwd: CV_WS, updatedAt: CV_NOW, displayName: 'p46x on screen', titleSource: 'manual', ...mark } as CvRow,
+      ],
+      groups: [
+        { id: 'g-work', name: 'Work', color: 'blue', order: 0, createdAt: CV_NOW, updatedAt: CV_NOW },
+        { id: 'g-home', name: 'Home', color: 'green', order: 1, createdAt: CV_NOW, updatedAt: CV_NOW },
+      ],
+    },
+  });
+  // A wait that names what it waited for when it gives up.
+  const cvWaitFor = async (page: Page, expr: string): Promise<void> => {
+    try {
+      await page.waitForFunction(expr, null, { timeout: 10_000 });
+    } catch {
+      throw new Error(`waited 10s for ${expr.replace(/\s+/g, ' ').slice(0, 160)}`);
+    }
+  };
+  // The conversation on screen, in its folder, as opening it from the list
+  // (a resume) leaves it.
+  const cvWatch = async (page: Page): Promise<void> => {
+    await watch(page, CV_SID);
+    await cvWaitFor(page, `watchedSessionId === ${JSON.stringify(CV_SID)}`);
+    await page.evaluate(`watchedSessionCwd = ${JSON.stringify(CV_WS)}`);
+  };
+  const cvMoreRow = async (page: Page, id: string): Promise<void> => {
+    if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
+    await page.waitForSelector('#' + id, { state: 'visible', timeout: 10_000 });
+    await page.click('#' + id);
+  };
+  const cvOpenOrganize = async (page: Page): Promise<void> => {
+    await cvMoreRow(page, 'more-organize');
+    await page.waitForSelector('#org-sheet', { state: 'visible' });
+    await cvWaitFor(page, 'orgSheet.groups !== null && !orgSheet.busy');
+  };
+  const cvOpenSources = async (page: Page): Promise<void> => {
+    await cvMoreRow(page, 'more-sources');
+    await page.waitForSelector('#src-sheet', { state: 'visible' });
+    await cvWaitFor(page, 'srcSheet.rows !== null && !srcSheet.busy');
+  };
+  type OrgDrawn = {
+    now: string;
+    rows: Array<{ key: string; label: string; pressed: string; h: number }>;
+    swatches: Array<{ key: string; label: string; pressed: string; w: number; h: number }>;
+    note: string;
+    newShown: boolean;
+  };
+  const orgDrawn = (page: Page) =>
+    page.evaluate(`(() => ({
+      now: document.getElementById('org-now').textContent,
+      rows: Array.from(document.querySelectorAll('#org-groups .org-row')).map((b) => ({ key: b.dataset.org, label: b.querySelector('.gn').textContent, pressed: b.getAttribute('aria-pressed'), h: Math.round(b.getBoundingClientRect().height) })),
+      swatches: Array.from(document.querySelectorAll('#org-colors .org-sw')).map((b) => ({ key: b.dataset.org, label: b.getAttribute('aria-label'), pressed: b.getAttribute('aria-pressed'), w: Math.round(b.getBoundingClientRect().width), h: Math.round(b.getBoundingClientRect().height) })),
+      note: document.getElementById('org-note').textContent,
+      newShown: !document.getElementById('org-new').hidden,
+    }))()`) as Promise<OrgDrawn>;
+  // Every request to the routes this block is about, as sent.
+  const cvSent = (page: Page) => {
+    const sent: Array<{ path: string; method: string; body: unknown }> = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.endsWith('/organization') || u.pathname === '/rc/workspace/session-groups' || u.pathname.includes('/sources')) {
+        const data = r.postData();
+        sent.push({ path: u.pathname + u.search, method: r.method(), body: data ? JSON.parse(data) : undefined });
+      }
+    });
+    return sent;
+  };
+  // The list on the stub's folder, whose one row is the conversation on
+  // screen; the catalog itself is the gateway's own answer.
+  const cvList = async (page: Page): Promise<void> => {
+    await h190ListFixture(
+      page,
+      { [CV_WS]: [{ sessionId: CV_SID, title: 'p46x on screen', preview: 'the question', updatedAt: CV_NOW }] },
+      { [CV_WS]: { parent: null, entries: [] }, '/p190': { parent: null, entries: [] } },
+    );
+    const dump = async (what: string): Promise<never> => {
+      const state = await page.evaluate(`({ curDirPath, pastConvosCwd, watchedSessionId })`);
+      throw new Error(`${what}: ${JSON.stringify(state)}`);
+    };
+    await page
+      .waitForFunction('curDirPath !== null && pastConvosCwd !== null', null, { timeout: 10_000 })
+      .catch(() => dump('the boot browse never settled'));
+    await page.evaluate(h190At(CV_WS));
+    await page
+      .waitForFunction(`pastConvosCwd === ${JSON.stringify(CV_WS)}`, null, { timeout: 10_000 })
+      .catch(() => dump('the list never moved to the stub folder'));
+    await openList(page);
+    try {
+      await page.waitForFunction(
+        `document.querySelector('#past-list .srow[data-session="${CV_SID}"]') !== null && catalogState.rows.has(${JSON.stringify(CV_SID)})`,
+        null,
+        { timeout: 10_000 },
+      );
+    } catch {
+      const state = await page.evaluate(
+        `({ rows: Array.from(document.querySelectorAll('#past-list .srow')).map((w) => w.dataset.session), key: catalogState.key, held: Array.from(catalogState.rows.keys()), errors: Array.from(catalogState.errors.entries()), folders: listFolders(), on: sessionCatalogOn() })`,
+      );
+      throw new Error(`the list never drew the conversation with its catalog row: ${JSON.stringify(state)}`);
+    }
+    await closeList(page);
+  };
+  // The row's chip as drawn: group (or colour:x) | name | dot colour.
+  const cvChip = (page: Page) =>
+    page.evaluate(`(() => {
+      const w = document.querySelector('#past-list .srow[data-session="${CV_SID}"]');
+      if (!w) return 'no row';
+      const g = w.querySelector('.grp');
+      if (!g) return 'none';
+      const n = g.querySelector('.gn');
+      return g.dataset.group + '|' + (n ? n.textContent : '') + '|' + getComputedStyle(g.querySelector('.gd')).backgroundColor;
+    })()`) as Promise<string>;
+  const cvChipIs = async (page: Page, want: string): Promise<void> => {
+    try {
+      await page.waitForFunction(
+        `(() => {
+          const w = document.querySelector('#past-list .srow[data-session="${CV_SID}"]');
+          const g = w && w.querySelector('.grp');
+          return ${JSON.stringify(want)} === 'none' ? !!w && !g : !!g && g.dataset.group === ${JSON.stringify(want)};
+        })()`,
+        null,
+        { timeout: 10_000 },
+      );
+    } catch {
+      const state = await page.evaluate(
+        `({ key: catalogState.key, folders: listFolders(), row: catalogState.rows.get(${JSON.stringify(CV_SID)}) || null, drawn: Array.from(document.querySelectorAll('#past-list .srow')).map((w) => w.dataset.session) })`,
+      );
+      throw new Error(`the chip never read ${want} (it reads ${await cvChip(page)}): ${JSON.stringify(state)}`);
+    }
+  };
+  // The chip as a reader meets it: on the list, opened after the change. The
+  // open reads the catalog again (the change marked it stale), and a mark is
+  // drawn only from a read of the folders the list shows, which the watch's
+  // own workspace reads can have moved since the last one.
+  const cvListChip = async (page: Page, want: string): Promise<string> => {
+    await openList(page);
+    await cvWaitFor(page, `catalogState.key === listFolders().join('\\n') && catalogState.readAt > 0 && !catalogState.reading`);
+    await cvChipIs(page, want);
+    const chip = await cvChip(page);
+    await closeList(page);
+    return chip;
+  };
+  const cvNote = async (page: Page, id: string, want: string): Promise<void> => {
+    try {
+      await cvWaitFor(page, `document.getElementById(${JSON.stringify(id)}).textContent === ${JSON.stringify(want)}`);
+    } catch {
+      const got = await page.textContent('#' + id);
+      throw new Error(`#${id} reads ${JSON.stringify(got)}, not ${JSON.stringify(want)}`);
+    }
+  };
+  // Sources put in through the gateway, as another client would have.
+  const cvSeed = (page: Page, inputs: unknown[]) =>
+    page.evaluate(
+      async ([sid, list]) => {
+        for (const body of list as unknown[]) {
+          const r = await fetch('/session/' + sid + '/sources', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('qwen-rc-token') },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) throw new Error('seed refused: ' + r.status);
+          // A millisecond apart, so newest first is one order.
+          await new Promise((res) => setTimeout(res, 5));
+        }
+      },
+      [CV_SID, inputs] as const,
+    );
+  type SrcDrawn = { id: string; title: string; line: string; href: string | null; target: string | null; rel: string | null; rm: boolean; rmW: number; rmH: number; h: number };
+  const srcDrawn = (page: Page) =>
+    page.evaluate(`Array.from(document.querySelectorAll('#src-list .src-row')).map((li) => {
+      const a = li.querySelector('.src-l a');
+      const rm = li.querySelector('.src-rm');
+      const rb = rm ? rm.getBoundingClientRect() : null;
+      return {
+        id: li.dataset.id,
+        title: li.querySelector('.src-t').textContent,
+        line: li.querySelector('.src-l').textContent,
+        href: a ? a.getAttribute('href') : null,
+        target: a ? a.getAttribute('target') : null,
+        rel: a ? a.getAttribute('rel') : null,
+        rm: !!rm,
+        rmW: rb ? Math.round(rb.width) : 0,
+        rmH: rb ? Math.round(rb.height) : 0,
+        h: Math.round(li.getBoundingClientRect().height),
+      };
+    })`) as Promise<SrcDrawn[]>;
+  const BLUE = 'rgb(88, 166, 255)';
+  const RED = 'rgb(248, 81, 73)';
+  const PURPLE = 'rgb(188, 140, 255)';
+
+  PAGE_SCENARIOS.push({
+    name: 'P460 More > This conversation > Organize opens a sheet of None, this folder\'s groups and the six colour tags with where it is filed ticked, 48px rows and 44px swatches, and changes nothing by opening, at 390 and 1100',
+    stub: { capabilitiesFeatures: CV_FEATURES, catalog: cvCatalog({ groupId: 'g-home' }) },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      const lines: string[] = [];
+      for (const size of H190_SIZES) {
+        await page.setViewportSize(size);
+        await cvOpenOrganize(page);
+        await cvWaitFor(page, 'orgSheet.current !== null');
+        const d = await orgDrawn(page);
+        expect(d.rows.map((r) => r.label).join() === 'None,Work,Home', `${size.width}: the group rows are ${JSON.stringify(d.rows)}`);
+        expect(d.rows.map((r) => r.pressed).join() === 'false,false,true', `${size.width}: the ticked rows are ${JSON.stringify(d.rows.map((r) => r.pressed))}`);
+        expect(d.now === 'Filed under Home.', `${size.width}: the sheet says ${JSON.stringify(d.now)}`);
+        expect(d.rows.every((r) => r.h >= 48), `${size.width}: row heights ${d.rows.map((r) => r.h).join()}`);
+        expect(
+          d.swatches.map((s) => s.label).join() === 'red tag,orange tag,yellow tag,green tag,blue tag,purple tag' &&
+            d.swatches.every((s) => s.pressed === 'false' && s.w >= 44 && s.h >= 44),
+          `${size.width}: the swatches are ${JSON.stringify(d.swatches)}`,
+        );
+        expect(d.newShown, `${size.width}: no field to type a group name`);
+        await shot(page, `p460-organize-${size.width}`);
+        await page.click('#org-close');
+        await page.waitForSelector('#org-sheet', { state: 'hidden' });
+        lines.push(`${size.width}: None, Work, Home (ticked) and six 44px tags`);
+      }
+      expect(sent.length === 0, `opening the sheet sent ${JSON.stringify(sent)}`);
+      return lines.join('; ') + '; nothing sent';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P461 picking a group files the conversation under it with its colour cleared, the sheet says what the daemon now holds, and the list\'s chip and More\'s row follow',
+    stub: { capabilitiesFeatures: CV_FEATURES, catalog: cvCatalog() },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await cvList(page);
+      const before = await cvListChip(page, 'none');
+      expect(before === 'none', `the row has a chip before filing: ${before}`);
+      await cvOpenOrganize(page);
+      await page.click('#org-groups .org-row[data-org="group:g-work"]');
+      await cvNote(page, 'org-note', 'Filed under Work.');
+      const d = await orgDrawn(page);
+      expect(d.rows.find((r) => r.label === 'Work')?.pressed === 'true', `Work is not ticked: ${JSON.stringify(d.rows)}`);
+      const patches = sent.filter((s) => s.method === 'PATCH');
+      expect(
+        patches.length === 1 &&
+          patches[0]!.path === `/session/${CV_SID}/organization` &&
+          JSON.stringify(patches[0]!.body) === JSON.stringify({ groupId: 'g-work', color: null }),
+        `the page sent ${JSON.stringify(patches)}`,
+      );
+      await page.click('#org-close');
+      const chip = await cvListChip(page, 'g-work');
+      expect(chip === `g-work|Work|${BLUE}`, `the chip reads ${chip}`);
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-organize', { state: 'visible' });
+      const val = await page.textContent('#more-organize-val');
+      expect(val === 'Work', `More's Organize row reads ${JSON.stringify(val)}`);
+      await shot(page, 'p461-filed');
+      return `one PATCH {groupId: g-work, color: null}; "Filed under Work."; the list opened after reads the chip Work in blue; More reads Work`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P462 a colour tag files the conversation as that colour with its group cleared, the chip turns to the tag, and None takes both off',
+    stub: { capabilitiesFeatures: CV_FEATURES, catalog: cvCatalog({ groupId: 'g-work' }) },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await cvList(page);
+      const filed = await cvListChip(page, 'g-work');
+      expect(filed === `g-work|Work|${BLUE}`, `before the tag the chip reads ${filed}`);
+      await cvOpenOrganize(page);
+      await page.click('#org-colors .org-sw[data-org="color:purple"]');
+      await cvNote(page, 'org-note', 'Tagged purple.');
+      let d = await orgDrawn(page);
+      expect(
+        d.swatches.find((s) => s.key === 'color:purple')?.pressed === 'true' && d.rows.every((r) => r.pressed === 'false'),
+        `after the tag the sheet ticks ${JSON.stringify({ rows: d.rows, swatches: d.swatches })}`,
+      );
+      await page.click('#org-close');
+      const tagged = await cvListChip(page, 'color:purple');
+      expect(tagged === `color:purple||${PURPLE}`, `the chip reads ${tagged}`);
+      // Opened again, the sheet reads the tag back from the daemon.
+      await cvOpenOrganize(page);
+      await cvWaitFor(page, `orgSheet.current !== null && orgSheet.current.color === 'purple'`);
+      await page.click('#org-groups .org-row[data-org="none"]');
+      await cvNote(page, 'org-note', 'Not filed under anything.');
+      d = await orgDrawn(page);
+      expect(d.rows[0]?.pressed === 'true', `None is not ticked: ${JSON.stringify(d.rows)}`);
+      await page.click('#org-close');
+      await cvListChip(page, 'none');
+      const bodies = sent.filter((s) => s.method === 'PATCH').map((s) => JSON.stringify(s.body));
+      expect(
+        bodies.join(' ') === `${JSON.stringify({ color: 'purple', groupId: null })} ${JSON.stringify({ groupId: null, color: null })}`,
+        `the page sent ${bodies.join(' ')}`,
+      );
+      return 'purple sent {color: purple, groupId: null} and the chip became the purple tag; None sent both null and the chip went';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P463 a typed name new to the folder makes the group there in a colour no group has and files the conversation under it; a name the folder has, in another case, files under that group and makes none',
+    stub: { capabilitiesFeatures: CV_FEATURES, catalog: cvCatalog() },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await cvList(page);
+      await cvOpenOrganize(page);
+      await page.fill('#org-new-name', 'Release');
+      await page.click('#org-new-add');
+      await cvNote(page, 'org-note', 'Filed under Release.');
+      const made = sent.filter((s) => s.path.startsWith('/rc/workspace/session-groups'));
+      expect(
+        made.length === 1 &&
+          made[0]!.path === '/rc/workspace/session-groups?workspace=' + encodeURIComponent(CV_WS) &&
+          JSON.stringify(made[0]!.body) === JSON.stringify({ name: 'Release', color: 'red' }),
+        `the group was asked for as ${JSON.stringify(made)}`,
+      );
+      let patches = sent.filter((s) => s.method === 'PATCH');
+      const newId = (patches[0]?.body as { groupId?: string } | undefined)?.groupId ?? '';
+      expect(patches.length === 1 && newId.startsWith('stub-group-'), `the filing sent ${JSON.stringify(patches)}`);
+      let d = await orgDrawn(page);
+      expect(
+        d.rows.map((r) => r.label + ':' + r.pressed).join() === 'None:false,Work:false,Home:false,Release:true',
+        `the rows are ${JSON.stringify(d.rows)}`,
+      );
+      await page.click('#org-close');
+      const chip = await cvListChip(page, newId);
+      expect(chip === `${newId}|Release|${RED}`, `the chip reads ${chip}`);
+      // Opened again, the new group is one of the folder's, read back.
+      await cvOpenOrganize(page);
+      await cvWaitFor(page, `orgSheet.current !== null && orgSheet.current.groupId === ${JSON.stringify(newId)}`);
+      d = await orgDrawn(page);
+      expect(
+        d.rows.map((r) => r.label + ':' + r.pressed).join() === 'None:false,Work:false,Home:false,Release:true',
+        `read back, the rows are ${JSON.stringify(d.rows)}`,
+      );
+      await page.fill('#org-new-name', '  work ');
+      await page.press('#org-new-name', 'Enter');
+      await cvNote(page, 'org-note', 'Filed under Work.');
+      patches = sent.filter((s) => s.method === 'PATCH');
+      expect(
+        sent.filter((s) => s.path.startsWith('/rc/workspace/session-groups')).length === 1 &&
+          JSON.stringify(patches[1]?.body) === JSON.stringify({ groupId: 'g-work', color: null }),
+        `"  work " sent ${JSON.stringify(sent.slice(made.length + 1))}`,
+      );
+      d = await orgDrawn(page);
+      expect(d.rows.find((r) => r.label === 'Work')?.pressed === 'true', `Work is not ticked: ${JSON.stringify(d.rows)}`);
+      await shot(page, 'p463-new-group');
+      return `Release made in ${CV_WS} in red (blue and green taken) and filed under, chip Release; "  work " filed under Work with no second group`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P464 More > This conversation > Sources lists the conversation\'s sources in the daemon\'s order, each its title over its kind and where it is, a link openable in a new tab, 56px rows and 44px Remove, and More counts them',
+    stub: { capabilitiesFeatures: CV_FEATURES },
+    run: async ({ page }) => {
+      await cvWatch(page);
+      await cvSeed(page, [
+        { title: 'server.ts', locator: { type: 'workspace_file', workspacePath: 'src/server.ts' } },
+        { title: 'The spec', locator: { type: 'url', url: 'https://example.test/spec' } },
+        { title: 'photo.jpg', locator: { type: 'attachment', attachmentId: 'att-1' } },
+      ]);
+      const listed = (await page.evaluate(
+        `fetch('/session/${CV_SID}/sources', { headers: { Authorization: 'Bearer ' + localStorage.getItem('qwen-rc-token') } }).then((r) => r.json())`,
+      )) as { sources: Array<{ id: string; title: string }> };
+      const lines: string[] = [];
+      for (const size of H190_SIZES) {
+        await page.setViewportSize(size);
+        await cvOpenSources(page);
+        const rows = await srcDrawn(page);
+        expect(rows.map((r) => r.id).join() === listed.sources.map((s) => s.id).join(), `the rows are not in the daemon's order: ${JSON.stringify(rows.map((r) => r.title))}`);
+        const by = (t: string) => rows.find((r) => r.title === t)!;
+        expect(by('server.ts').line === 'filesrc/server.ts' && by('server.ts').href === null, `the file row reads ${JSON.stringify(by('server.ts'))}`);
+        const spec = by('The spec');
+        expect(
+          spec.line === 'linkhttps://example.test/spec' && spec.href === 'https://example.test/spec' && spec.target === '_blank' && spec.rel === 'noopener noreferrer',
+          `the link row reads ${JSON.stringify(spec)}`,
+        );
+        expect(by('photo.jpg').line === 'attached filesent with a message', `the attachment row reads ${JSON.stringify(by('photo.jpg'))}`);
+        expect(rows.every((r) => r.h >= 56 && r.rm && r.rmH >= 44 && r.rmW >= 44), `row and Remove sizes ${JSON.stringify(rows.map((r) => [r.h, r.rmW, r.rmH]))}`);
+        const add = await page.isVisible('#src-add');
+        expect(add, `${size.width}: no add row for a token that can write`);
+        await shot(page, `p464-sources-${size.width}`);
+        await page.click('#src-close');
+        await page.waitForSelector('#src-sheet', { state: 'hidden' });
+        lines.push(`${size.width}: 3 rows in the daemon's order`);
+      }
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-sources', { state: 'visible' });
+      const val = await page.textContent('#more-sources-val');
+      expect(val === '3', `More's Sources row reads ${JSON.stringify(val)}`);
+      return lines.join('; ') + '; file, link (new tab, noopener) and attached file; More reads 3';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P465 adding a source: a full path inside the folder goes relative with its file name as title, a link takes its host and path as title or the typed one, the same path again retitles, and the daemon\'s refusal of a path outside is shown in its words',
+    stub: { capabilitiesFeatures: CV_FEATURES },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await cvOpenSources(page);
+      const add = async (where: string, title: string, note: string) => {
+        await page.fill('#src-where', where);
+        await page.fill('#src-name', title);
+        await page.click('#src-add-btn');
+        await cvNote(page, 'src-note', note);
+        await cvWaitFor(page, '!srcSheet.busy');
+      };
+      await add(CV_WS + '/docs/plan.md', '', 'Added plan.md.');
+      await add('https://example.test/guide/', 'The guide', 'Added The guide.');
+      await add('https://example.test/api', '', 'Added example.test/api.');
+      await add('docs/plan.md', 'Plan', 'Retitled Plan.');
+      await add('/etc/passwd', '', 'Workspace path must be relative');
+      const tone = await page.getAttribute('#src-note', 'data-tone');
+      expect(tone === 'err', `the refusal is not drawn as one (${tone})`);
+      const posts = sent.filter((s) => s.method === 'POST').map((s) => s.body);
+      const want = [
+        { title: 'plan.md', locator: { type: 'workspace_file', workspacePath: 'docs/plan.md' } },
+        { title: 'The guide', locator: { type: 'url', url: 'https://example.test/guide/' } },
+        { title: 'example.test/api', locator: { type: 'url', url: 'https://example.test/api' } },
+        { title: 'Plan', locator: { type: 'workspace_file', workspacePath: 'docs/plan.md' } },
+        { title: 'passwd', locator: { type: 'workspace_file', workspacePath: '/etc/passwd' } },
+      ];
+      expect(JSON.stringify(posts) === JSON.stringify(want), `the page sent ${JSON.stringify(posts)}`);
+      const rows = await srcDrawn(page);
+      expect(
+        rows.map((r) => r.title).sort().join() === ['Plan', 'The guide', 'example.test/api'].sort().join(),
+        `the list reads ${JSON.stringify(rows.map((r) => r.title))}`,
+      );
+      const field = await page.inputValue('#src-where');
+      expect(field === '/etc/passwd', `the refused path was cleared from the field (${JSON.stringify(field)})`);
+      await shot(page, 'p465-added');
+      return 'plan.md (relative), The guide, example.test/api added; Plan retitled; /etc/passwd refused "Workspace path must be relative" and left in the field; 3 rows';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P466 Remove asks first, naming the source; Cancel sends nothing and keeps the row, OK removes it and says so',
+    stub: { capabilitiesFeatures: CV_FEATURES },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await cvSeed(page, [
+        { title: 'server.ts', locator: { type: 'workspace_file', workspacePath: 'src/server.ts' } },
+        { title: 'The spec', locator: { type: 'url', url: 'https://example.test/spec' } },
+      ]);
+      await cvOpenSources(page);
+      // The runner dismisses every real dialog, so the question is answered
+      // by a stand-in that keeps what it was asked.
+      await page.evaluate(`window.__asked = []; window.__answer = false; window.confirm = (m) => { window.__asked.push(m); return window.__answer; }`);
+      const target = (await srcDrawn(page)).find((r) => r.title === 'server.ts')!;
+      await page.click(`#src-list .src-row[data-id="${target.id}"] .src-rm`);
+      await page.waitForTimeout(300);
+      expect(sent.every((s) => s.method !== 'DELETE'), `Cancel sent ${JSON.stringify(sent.filter((s) => s.method === 'DELETE'))}`);
+      expect((await srcDrawn(page)).length === 2, 'a row went on Cancel');
+      await page.evaluate('window.__answer = true');
+      await page.click(`#src-list .src-row[data-id="${target.id}"] .src-rm`);
+      await cvNote(page, 'src-note', 'Removed server.ts.');
+      await cvWaitFor(page, 'srcSheet.rows && srcSheet.rows.length === 1 && !srcSheet.busy');
+      const left = await srcDrawn(page);
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      const dels = sent.filter((s) => s.method === 'DELETE');
+      const q = "Remove server.ts from this conversation's sources? The file or page itself is not touched.";
+      expect(asked.length === 2 && asked.every((m) => m === q), `the question read ${JSON.stringify(asked)}`);
+      expect(dels.length === 1 && dels[0]!.path === `/session/${CV_SID}/sources/${target.id}`, `the page sent ${JSON.stringify(dels)}`);
+      expect(left.map((r) => r.title).join() === 'The spec', `the list reads ${JSON.stringify(left.map((r) => r.title))}`);
+      return 'asked "Remove server.ts from ..." twice; Cancel sent nothing; OK sent one DELETE for its id and the row went';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P467 a reader sees the Sources list with no add row and no Remove, and no Organize row at all',
+    stub: { capabilitiesFeatures: CV_FEATURES, catalog: cvCatalog() },
+    before: async (page) => {
+      // A read-only token: the same answer, saying it cannot write.
+      await page.route(/\/rc\/capabilities$/, async (route) => {
+        const res = await route.fetch();
+        const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+        if (j.remoteControl) j.remoteControl['writeScope'] = false;
+        await route.fulfill({ response: res, json: j });
+      });
+    },
+    run: async ({ page }) => {
+      await cvWatch(page);
+      await cvSeed(page, [{ title: 'The spec', locator: { type: 'url', url: 'https://example.test/spec' } }]);
+      const sent = cvSent(page);
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-sources', { state: 'visible' });
+      const orgHidden = await page.evaluate(`document.getElementById('more-organize').hidden`);
+      expect(orgHidden === true, 'a reader is offered Organize');
+      await cvOpenSources(page);
+      const rows = await srcDrawn(page);
+      const addShown = await page.isVisible('#src-add');
+      expect(rows.length === 1 && rows[0]!.title === 'The spec' && !rows[0]!.rm, `the reader's rows are ${JSON.stringify(rows)}`);
+      expect(!addShown, 'a reader is offered the add row');
+      expect(sent.every((s) => s.method === 'GET'), `a reader's page sent ${JSON.stringify(sent)}`);
+      await shot(page, 'p467-reader');
+      return 'More shows Sources and no Organize; the list has its row, no Remove, no add row; only the list was read';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P468 on a gateway without the routes More shows neither row and nothing is asked of them, over a daemon that has both',
+    stub: { capabilitiesFeatures: CV_FEATURES, catalog: cvCatalog() },
+    before: async (page) => {
+      await page.route(/\/rc\/capabilities$/, async (route) => {
+        const res = await route.fetch();
+        const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+        if (j.remoteControl) {
+          delete j.remoteControl['sessionOrganization'];
+          delete j.remoteControl['sessionSources'];
+        }
+        await route.fulfill({ response: res, json: j });
+      });
+    },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-find', { state: 'visible' });
+      const hidden = await page.evaluate(`[document.getElementById('more-organize').hidden, document.getElementById('more-sources').hidden]`);
+      expect(JSON.stringify(hidden) === '[true,true]', `the rows are hidden: ${JSON.stringify(hidden)}`);
+      await page.waitForTimeout(400);
+      expect(sent.length === 0, `the page asked ${JSON.stringify(sent)}`);
+      return 'neither row drawn, no organization or sources request';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P469 over a daemon that advertises neither session_organization nor session_sources More shows neither row',
+    stub: { capabilitiesFeatures: [] },
+    run: async ({ page }) => {
+      const sent = cvSent(page);
+      await cvWatch(page);
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-find', { state: 'visible' });
+      const hidden = await page.evaluate(`[document.getElementById('more-organize').hidden, document.getElementById('more-sources').hidden]`);
+      expect(JSON.stringify(hidden) === '[true,true]', `the rows are hidden: ${JSON.stringify(hidden)}`);
+      expect(sent.length === 0, `the page asked ${JSON.stringify(sent)}`);
+      return 'neither row drawn, nothing asked';
+    },
+  });
+}
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

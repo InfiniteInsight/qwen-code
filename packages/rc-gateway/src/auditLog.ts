@@ -206,7 +206,16 @@ export type AuditAction =
   | 'workspace_file_uploaded'
   | 'workspace_file_deleted'
   | 'workspace_directory_created'
-  | 'workspace_directory_deleted';
+  | 'workspace_directory_deleted'
+  // #110: filing a conversation and its sources.
+  | 'session_organized'
+  | 'session_organize_failed'
+  | 'session_group_created'
+  | 'session_group_create_failed'
+  | 'session_source_added'
+  | 'session_source_add_failed'
+  | 'session_source_removed'
+  | 'session_source_remove_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -336,6 +345,14 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'workspace_file_deleted',
   'workspace_directory_created',
   'workspace_directory_deleted',
+  'session_organized',
+  'session_organize_failed',
+  'session_group_created',
+  'session_group_create_failed',
+  'session_source_added',
+  'session_source_add_failed',
+  'session_source_removed',
+  'session_source_remove_failed',
 ];
 
 export interface AuditEntry {

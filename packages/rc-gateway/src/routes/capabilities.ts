@@ -297,6 +297,16 @@ export function createCapabilityRoute(deps: {
       // mounted. Same three-way gate as above, with the daemon's
       // workspace_directory_create / workspace_directory_delete tags.
       workspaceDirectoryWrites: true,
+      // #110: PATCH /session/:id/organization and POST
+      // /rc/workspace/session-groups are mounted. The page draws Organize
+      // only when this is set, the token holds write, and the daemon
+      // advertises `session_organization`.
+      sessionOrganization: true,
+      // #110: GET, POST and DELETE /session/:id/sources are mounted. The
+      // page draws the Sources row when this is set and the daemon
+      // advertises `session_sources`, and its add and remove controls only
+      // for a token that holds write.
+      sessionSources: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

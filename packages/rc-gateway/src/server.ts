@@ -291,6 +291,15 @@ import {
   WorkingDeviceTracker,
   recordActivity,
 } from './routing/workingDevice.js';
+import {
+  createSessionGroupCreateRoute,
+  createSessionOrganizationRoute,
+} from './routes/sessionOrganization.js';
+import {
+  createSessionSourceAddRoute,
+  createSessionSourceRemoveRoute,
+  createSessionSourcesRoute,
+} from './routes/sessionSources.js';
 
 export interface GatewayDeps {
   daemon: SessionDaemon;
@@ -1226,6 +1235,44 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403
     createSessionRenameRoute(deps.daemon, audit),
+  );
+  // #110: PATCH /session/:id/organization files ONE session under a group, a
+  // colour tag or neither (and pins it). Same guard set as the rename above,
+  // for the same reasons: a mutation, a person's one tap rather than a loop,
+  // and a token locked to another session has no business filing this one.
+  app.patch(
+    '/session/:id/organization',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionOrganizationRoute(deps.daemon, audit),
+  );
+  // #110: a conversation's sources, its reference list (files in its folder,
+  // its attachments, web links; metadata only, never content). The list is
+  // session-read like the attachment list; adding and removing are writes.
+  // See routes/sessionSources.ts for the client id the daemon requires.
+  app.get(
+    '/session/:id/sources',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionSourcesRoute(deps.daemon),
+  );
+  app.post(
+    '/session/:id/sources',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionSourceAddRoute(deps.daemon, audit),
+  );
+  app.delete(
+    '/session/:id/sources/:sourceId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user -> 403
+    createSessionSourceRemoveRoute(deps.daemon, audit),
   );
   app.post(
     '/session/:id/permission/:requestId',
@@ -2619,6 +2666,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createWorkspaceDirectoryDeleteRoute(deps.daemon, audit),
+  );
+  // #110: POST /rc/workspace/session-groups?workspace=<cwd> makes a named
+  // group in that folder's organization store, so a conversation can be
+  // filed under a name nobody has used yet. WRITE, the floor of the
+  // PATCH /session/:id/organization that files under it; every share token
+  // is refused by requireScope. Audited without the name or the folder.
+  app.post(
+    '/rc/workspace/session-groups',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createSessionGroupCreateRoute(deps.daemon, audit),
   );
 
   if (deps.snooze) {

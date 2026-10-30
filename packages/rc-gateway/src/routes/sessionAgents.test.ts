@@ -43,6 +43,7 @@ const ROSTER = {
       runtimeMs: 60_000,
       outputFile: '/home/u/.qwen/projects/p/subagents/s/agent-agent-a.jsonl',
       subagentType: 'Explore',
+      model: 'qwen3-coder-plus',
       isBackgrounded: false,
       stats: { totalTokens: 12_345, toolUses: 8, durationMs: 60_000 },
       recentActivities: [
@@ -62,7 +63,23 @@ const ROSTER = {
       endTime: 1_767_225_090_000,
       runtimeMs: 90_000,
       subagentType: 'general-purpose',
+      // #208: a finished agent's model, final stats and last activities, as
+      // the daemon reads them from its sidecar.
+      model: 'qwen3-max',
       isBackgrounded: false,
+      stats: {
+        totalTokens: 4_321,
+        outputTokens: 321,
+        toolUses: 7,
+        durationMs: 90_000,
+      },
+      recentActivities: [
+        {
+          name: 'run_shell_command',
+          description: 'npm test',
+          at: 1_767_225_080_000,
+        },
+      ],
       toolUseId: 'tc-0',
     },
   ],
@@ -331,7 +348,10 @@ describe('GET /session/:id/saved-workflows/:name (#110)', () => {
     );
     expect(out.status).toBe(200);
     expect(out.body['workflow']).toEqual(WORKFLOW);
-    expect(stub?.lastSavedWorkflow).toEqual({ sessionId: SID, name: 'night ly' });
+    expect(stub?.lastSavedWorkflow).toEqual({
+      sessionId: SID,
+      name: 'night ly',
+    });
   });
 
   it('an unknown name is the daemon fail-closed envelope, relayed as an answer', async () => {
@@ -434,7 +454,10 @@ describe('the #110 reads as the gateway mounts them', () => {
     const auth = { headers: { Authorization: `Bearer ${share.token}` } };
     const agents = await fetch(`${url}/session/${SID}/agents`, auth);
     expect(agents.status).toBe(200);
-    const wf = await fetch(`${url}/session/${SID}/saved-workflows/nightly`, auth);
+    const wf = await fetch(
+      `${url}/session/${SID}/saved-workflows/nightly`,
+      auth,
+    );
     expect(wf.status).toBe(200);
     expect(((await wf.json()) as { workflow: unknown }).workflow).toBeNull();
     expect(stub?.lastSavedWorkflow).toBeUndefined();
