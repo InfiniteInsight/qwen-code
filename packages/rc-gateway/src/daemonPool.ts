@@ -99,6 +99,8 @@ import type {
   DaemonSessionArtifactMutationResult,
 } from '@qwen-code/sdk/daemon';
 import type {
+  GoalControlRequest,
+  GoalStateResponse,
   DaemonSessionGroup,
   DaemonSessionGroupInput,
   DaemonSessionOrganizationResult,
@@ -664,6 +666,19 @@ export interface SessionDaemon {
     sourceId: string,
     clientId?: string,
   ): Promise<SessionSourceRemoveResult>;
+  /** #135: the session's goal snapshot (read). */
+  sessionGoal(sessionId: string, clientId?: string): Promise<GoalStateResponse>;
+  /** #135: a goal control request (this gateway sends create and replace). */
+  sessionGoalControl(
+    sessionId: string,
+    request: GoalControlRequest,
+    clientId?: string,
+  ): Promise<GoalStateResponse>;
+  /** #135: drop the session's goal. */
+  sessionGoalClear(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<{ cleared: boolean; condition?: string }>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
   // Daemon-global methods: no session id, but workspace-scoped — each takes
@@ -2782,6 +2797,41 @@ export class DaemonPool implements SessionDaemon {
         sourceId,
         clientId ?? this.boundClientId(sessionId),
       ),
+    );
+  }
+
+  /**
+   * #135: the session's goal. The daemon's goal routes take no client id (a
+   * request without one is admitted), so none is added: a stale bound id
+   * would turn the call into a refusal.
+   */
+  async sessionGoal(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionGoal(sessionId, clientId),
+    );
+  }
+
+  /** #135: create or replace the session's goal. */
+  async sessionGoalControl(
+    sessionId: string,
+    request: GoalControlRequest,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionGoalControl(sessionId, request, clientId),
+    );
+  }
+
+  /** #135: drop the session's goal. */
+  async sessionGoalClear(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<{ cleared: boolean; condition?: string }> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionGoalClear(sessionId, clientId),
     );
   }
 
