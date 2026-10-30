@@ -77,6 +77,24 @@
           $('status').textContent = m;
         };
         var STORE_KEY = 'rc-share-token';
+        // #211: a failure names what was attempted, the status and the code
+        // the gateway answered with. This is the GUEST page, so it is the
+        // reader's shape of the owner page's describeFailure: the gateway's
+        // message is not printed (it can carry a host path or another client's
+        // id, and the code and status say the same thing a guest can act on).
+        // A dead network names the origin and the error.
+        function failLine(did, res, body) {
+          var code = body && typeof body.code === 'string' ? body.code : '';
+          return (
+            did + ' failed: ' + (code ? code + ' ' : '') + '(HTTP ' + res.status + ')'
+          );
+        }
+        function netLine(did, e) {
+          return (
+            'could not reach the gateway at ' + location.origin + ': ' +
+            ((e && e.name) || 'Error') + ' during ' + did
+          );
+        }
 
         // Resolve the share token: the path segment after /ui/share on first
         // visit (then stash + scrub), else sessionStorage on a reload. The URL
@@ -240,12 +258,13 @@
         authed('/rc/share/whoami')
           .then(function (res) {
             if (!res.ok) {
-              setStatus(
-                res.status === 401
-                  ? 'link expired or invalid'
-                  : 'redeem failed (' + res.status + ')',
-              );
-              return;
+              return res.json().catch(function () { return null; }).then(function (b) {
+                setStatus(
+                  res.status === 401
+                    ? 'link expired or invalid'
+                    : failLine('opening the share link', res, b),
+                );
+              });
             }
             return res.json().then(function (info) {
               setStatus('connected');
@@ -300,7 +319,7 @@
             });
           })
           .catch(function (e) {
-            setStatus('redeem error: ' + e);
+            setStatus(netLine('opening the share link', e));
           });
 
         // Read-only watch of the locked session's event stream (fetch-SSE;
@@ -310,8 +329,9 @@
           authed('/session/' + encodeURIComponent(sessionId) + '/events')
             .then(function (res) {
               if (!res.ok) {
-                setStatus('watch unavailable (' + res.status + ')');
-                return;
+                return res.json().catch(function () { return null; }).then(function (b) {
+                  setStatus(failLine('watching the conversation', res, b));
+                });
               }
               setStatus('streaming');
               var reader = res.body.getReader();
@@ -365,7 +385,7 @@
               return pump();
             })
             .catch(function (e) {
-              setStatus('watch error: ' + e);
+              setStatus(netLine('watching the conversation', e));
             });
         }
       })();

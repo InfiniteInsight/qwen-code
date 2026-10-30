@@ -3041,6 +3041,9 @@ type PageScenario =
         reloadStatus?: number;
         reloadErrorBody?: unknown;
         reloadResult?: unknown;
+        /** #211: force the stub's artifact add and remove to refuse. */
+        artifactMutationStatus?: number;
+        artifactMutationErrorBody?: unknown;
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -22099,7 +22102,8 @@ function solidPng(w: number, h: number): Buffer {
       expect(refused.stored === null, 'the browser kept the subscription the gateway refused');
       expect(!refused.state.startsWith('enabled'), `the page said ${JSON.stringify(refused.state)} for a subscription the gateway refused`);
       expect(
-        refused.state.includes('subscribe failed (500)') && refused.status.includes('subscribe failed (500)'),
+        // #211: the status, and what the gateway answered, not a bare status.
+        refused.state.includes('subscribing failed: HTTP 500') && refused.status.includes('subscribing failed: HTTP 500'),
         `the refusal was not said (state ${JSON.stringify(refused.state)}, status ${JSON.stringify(refused.status)})`,
       );
 
@@ -22381,7 +22385,8 @@ function solidPng(w: number, h: number): Buffer {
       await page.waitForTimeout(800);
       expect((await ids()).join() === 'p253-row', `the failed read emptied the list (${JSON.stringify(await ids())})`);
       const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
-      expect(/could not read/i.test(status), `the failure was not said (${JSON.stringify(status)})`);
+      // #211: now "reading the conversations in <dir> failed: <status and answer>".
+      expect(/reading the conversations in .* failed: .*HTTP 500/.test(status), `the failure was not said (${JSON.stringify(status)})`);
       return 'a failed read kept p253-row and said it could not read the folder';
     },
   });
@@ -22969,6 +22974,8 @@ async function runPageScenario(
     reloadStatus: s.stub?.reloadStatus,
     reloadErrorBody: s.stub?.reloadErrorBody,
     reloadResult: s.stub?.reloadResult,
+    artifactMutationStatus: s.stub?.artifactMutationStatus,
+    artifactMutationErrorBody: s.stub?.artifactMutationErrorBody,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -29544,6 +29551,248 @@ PAGE_SCENARIOS.push({
     expect(JSON.stringify(gates.reloadOnly) === '[true,0]', `reload tag only: ${JSON.stringify(gates.reloadOnly)}`);
     expect(JSON.stringify(gates.noRead) === '[true,0]', `no file read: ${JSON.stringify(gates.noRead)}`);
     return 'with every daemon tag but no gateway flag the list drew rows and nothing to write with, and More hid the row; with flags restored, memory tags gave Edit alone, the reload tag gave Reload alone, and no file read gave no Edit';
+  },
+});
+
+// -- #211: failure details, never a generic line (P510 to P519) --------------
+// The owner's rule: "I should see failure details, I don't want generic failure
+// reasons. 'failed to resume' doesn't tell me anything." Every scenario here
+// reads the words the page put on screen, not the code that chose them. The
+// gateway side (which caller is given the daemon's message) is vitest's:
+// src/routes/sessionArtifactMutations.test.ts and src/daemonHttpError.detail.test.ts.
+const f211Status = (page: Page): Promise<string> =>
+  page.evaluate(`document.getElementById('status').textContent || ''`) as Promise<string>;
+
+/** Resume a conversation whose resume route answers `answer`; the status line after. */
+async function f211Resume(
+  page: Page,
+  sid: string,
+  answer: { status: number; body: unknown } | 'abort',
+): Promise<string> {
+  await page.route(/\/session\/[^/]+\/resume$/, async (route) => {
+    if (answer === 'abort') await route.abort('connectionrefused');
+    else await route.fulfill({ status: answer.status, contentType: 'application/json', body: JSON.stringify(answer.body) });
+  });
+  await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope === true', null, { timeout: 15_000 });
+  await page.evaluate((id) => void resumeConversation(id, '/p211/proj', 'the p211 conversation'), sid);
+  await page.waitForFunction(`/resume of/.test(document.getElementById('status').textContent) && !/resuming/.test(document.getElementById('status').textContent)`, null, { timeout: 10_000 });
+  return f211Status(page);
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P510 a resume refused with a 412 shows the status, the code, the message and the reload step, not "resume failed"',
+  waitView: false,
+  run: async ({ page, viewer }) => {
+    const flat = await f211Resume(page, viewer.sessionId, {
+      status: 412,
+      body: { error: 'The history is older than the gateway keeps', code: 'replay_truncated', recovery: 'reload' },
+    });
+    for (const want of ['resume of the p211 conversation failed', 'HTTP 412', 'replay_truncated', 'The history is older than the gateway keeps', 'Next: reload the conversation']) {
+      expect(flat.includes(want), `the status line lacks ${JSON.stringify(want)}: ${JSON.stringify(flat)}`);
+    }
+    // The WAL horizon's own 412 body (D133): type, and the reason and recovery under data.
+    await page.unroute(/\/session\/[^/]+\/resume$/);
+    const walled = await f211Resume(page, viewer.sessionId, {
+      status: 412,
+      body: { type: 'replay_truncated', data: { reason: 'older_than_wal_horizon', earliestAvailableId: 500, recovery: 'reload', lastEventId: 742 } },
+    });
+    for (const want of ['HTTP 412', 'replay_truncated', 'older_than_wal_horizon', 'Next: reload the conversation']) {
+      expect(walled.includes(want), `the WAL 412 line lacks ${JSON.stringify(want)}: ${JSON.stringify(walled)}`);
+    }
+    return `flat: ${JSON.stringify(flat)}; WAL: ${JSON.stringify(walled)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P511 a resume the gateway answers 500 or 502 shows the status and the body error, and the daemon\'s own answer when the gateway passes it',
+  waitView: false,
+  run: async ({ page, viewer }) => {
+    const plain = await f211Resume(page, viewer.sessionId, { status: 500, body: { error: 'disk full while loading the transcript', code: 'internal_error' } });
+    for (const want of ['resume of the p211 conversation failed', 'internal_error', 'HTTP 500', 'disk full while loading the transcript']) {
+      expect(plain.includes(want), `the 500 line lacks ${JSON.stringify(want)}: ${JSON.stringify(plain)}`);
+    }
+    expect(!/^resume failed/.test(plain) && plain !== 'resume failed (500)', `the old generic line is back: ${JSON.stringify(plain)}`);
+    await page.unroute(/\/session\/[^/]+\/resume$/);
+    const relayed = await f211Resume(page, viewer.sessionId, {
+      status: 502,
+      body: { error: 'Daemon unavailable', code: 'daemon_unavailable', daemon: { status: 500, code: 'transcript_unreadable', message: 'could not load the transcript' } },
+    });
+    for (const want of ['HTTP 502', 'daemon_unavailable', 'Daemon unavailable', 'the daemon answered HTTP 500 transcript_unreadable: could not load the transcript']) {
+      expect(relayed.includes(want), `the 502 line lacks ${JSON.stringify(want)}: ${JSON.stringify(relayed)}`);
+    }
+    // A body that is not JSON at all still gets the status and the reason phrase.
+    await page.unroute(/\/session\/[^/]+\/resume$/);
+    await page.route(/\/session\/[^/]+\/resume$/, (route) => route.fulfill({ status: 503, contentType: 'text/plain', body: 'upstream gone' }));
+    await page.evaluate((id) => void resumeConversation(id, '/p211/proj', 'the p211 conversation'), viewer.sessionId);
+    await page.waitForFunction(`/HTTP 503/.test(document.getElementById('status').textContent)`, null, { timeout: 10_000 });
+    return `500: ${JSON.stringify(plain)}; 502: ${JSON.stringify(relayed)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P512 a resume that never reaches the gateway names the gateway origin, the error and what was being done',
+  waitView: false,
+  run: async ({ page, viewer }) => {
+    const line = await f211Resume(page, viewer.sessionId, 'abort');
+    const origin = new URL(viewer.url).origin;
+    for (const want of [`could not reach the gateway at ${origin}`, 'TypeError', 'during resume of the p211 conversation']) {
+      expect(line.includes(want), `the network line lacks ${JSON.stringify(want)}: ${JSON.stringify(line)}`);
+    }
+    return JSON.stringify(line);
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P513 an artifact remove the daemon refuses shows the owner the daemon\'s message and a share or read token the same line with ids, paths and internal strings taken out',
+  waitView: false,
+  stub: {
+    artifactMutationStatus: 403,
+    artifactMutationErrorBody: { error: 'Session artifact art-9 belongs to another client', code: 'session_artifact_forbidden', artifactId: 'art-9' },
+  },
+  run: async ({ page, viewer }) => {
+    await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope === true', null, { timeout: 15_000 });
+    const remove = () =>
+      page.evaluate(async (sid) => {
+        const res = await fetch(`/session/${sid}/artifacts/art-9`, { method: 'DELETE', headers: { Authorization: 'Bearer ' + token() } });
+        return describeFailure(res, await res.json().catch(() => null), 'removing the artifact');
+      }, viewer.sessionId);
+    // The real gateway relay over the stub daemon: an owner token gets the daemon's words.
+    const owner = await remove();
+    for (const want of ['removing the artifact failed', 'session_artifact_forbidden', 'HTTP 403', 'Session artifact art-9 belongs to another client']) {
+      expect(owner.includes(want), `the owner's line lacks ${JSON.stringify(want)}: ${JSON.stringify(owner)}`);
+    }
+    // The same answer read as a reader: the artifact id goes, the code and status stay.
+    await page.evaluate(`caps.remoteControl.writeScope = false`);
+    const reader = await remove();
+    for (const want of ['removing the artifact failed', 'session_artifact_forbidden', 'HTTP 403', 'belongs to another client']) {
+      expect(reader.includes(want), `the reader's line lacks ${JSON.stringify(want)}: ${JSON.stringify(reader)}`);
+    }
+    expect(!reader.includes('art-9'), `the reader's line names the artifact: ${JSON.stringify(reader)}`);
+    // What the reduction takes out, on a body no stub daemon sends: a host path, a client id, an errno.
+    const reduced = (await page.evaluate(`[
+      describeFailure({ status: 400, headers: null }, { error: "ENOENT: no such file or directory, stat '/home/u/secret/place'", code: 'VALIDATION_FAILED' }, 'adding the artifact'),
+      describeFailure({ status: 403, headers: null }, { error: 'Invalid client id client_abc123 for session 11111111-2222-3333-4444-555555555555 under /home/u/proj/x.md', code: 'invalid_client_id' }, 'adding the artifact'),
+    ]`)) as string[];
+    for (const line of reduced) {
+      for (const leak of ['/home/u', 'ENOENT', 'client_abc123', '11111111-2222', 'secret']) {
+        expect(!line.includes(leak), `a reader's line carries ${leak}: ${JSON.stringify(line)}`);
+      }
+      expect(line.includes('adding the artifact failed') && /HTTP 40[03]/.test(line), `a reader's line lost its shape: ${JSON.stringify(line)}`);
+    }
+    // And the owner sees those same bodies whole.
+    await page.evaluate(`caps.remoteControl.writeScope = true`);
+    const whole = (await page.evaluate(
+      `describeFailure({ status: 400, headers: null }, { error: "ENOENT: no such file or directory, stat '/home/u/secret/place'", code: 'VALIDATION_FAILED' }, 'adding the artifact')`,
+    )) as string;
+    expect(whole.includes("/home/u/secret/place") && whole.includes('ENOENT'), `the owner's line was shortened: ${JSON.stringify(whole)}`);
+    return `owner: ${JSON.stringify(owner)}; reader: ${JSON.stringify(reader)}; reduced: ${JSON.stringify(reduced)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P514 the single generic strings carry their cause: stored files, the stamp timezone, the folder list and a refused prompt',
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope === true', null, { timeout: 15_000 });
+    await watch(page, sid);
+    await waitForFrame(page, 1, 30_000);
+    // Stored files: a refusal with a message, then a dead network.
+    await page.route(/\/session\/[^/]+\/attachments$/, (route) =>
+      route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'This token cannot list attachments', code: 'scope_required' }) }),
+    );
+    await page.evaluate(() => void loadStored());
+    await page.waitForFunction(`/listing the stored files failed/.test(document.getElementById('stored-note').textContent)`, null, { timeout: 10_000 });
+    const refused = (await page.evaluate(`document.getElementById('stored-note').textContent`)) as string;
+    for (const want of ['scope_required', 'HTTP 403', 'This token cannot list attachments']) {
+      expect(refused.includes(want), `the stored-files note lacks ${JSON.stringify(want)}: ${JSON.stringify(refused)}`);
+    }
+    await page.unroute(/\/session\/[^/]+\/attachments$/);
+    await page.route(/\/session\/[^/]+\/attachments$/, (route) => route.abort('connectionrefused'));
+    await page.evaluate(() => void loadStored());
+    await page.waitForFunction(`/could not reach the gateway/.test(document.getElementById('stored-note').textContent)`, null, { timeout: 10_000 });
+    const dead = (await page.evaluate(`document.getElementById('stored-note').textContent`)) as string;
+    expect(dead.includes(`at ${new URL(viewer.url).origin}`) && dead.includes('TypeError') && dead.includes('listing the stored files'), `the dead-network note: ${JSON.stringify(dead)}`);
+    // The stamp timezone save.
+    await page.route(/\/rc\/ui-prefs$/, (route) =>
+      route.request().method() === 'PUT'
+        ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'preferences file is read-only', code: 'ui_prefs_unwritable' }) })
+        : route.continue(),
+    );
+    const zone = await page.evaluate(async () => {
+      const sel = stampZoneSelect;
+      sel.value = sel.options[sel.options.length - 1]!.value;
+      await sel.onchange!(new Event('change'));
+      return document.getElementById('status')!.textContent || '';
+    });
+    for (const want of ['saving the stamp timezone', 'ui_prefs_unwritable', 'HTTP 500', 'preferences file is read-only']) {
+      expect(zone.includes(want), `the timezone line lacks ${JSON.stringify(want)}: ${JSON.stringify(zone)}`);
+    }
+    // A refused prompt that is not one of the named refusals.
+    await page.route(/\/session\/[^/]+\/prompt$/, (route) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'the model server returned an error', code: 'prompt_failed' }) }),
+    );
+    await page.fill('#prompt', 'p514 hello');
+    await page.click('#send');
+    await page.waitForFunction(`/sending the prompt failed/.test(document.getElementById('status').textContent)`, null, { timeout: 10_000 });
+    const sent = await f211Status(page);
+    for (const want of ['prompt_failed', 'HTTP 500', 'the model server returned an error']) {
+      expect(sent.includes(want), `the send line lacks ${JSON.stringify(want)}: ${JSON.stringify(sent)}`);
+    }
+    expect(!/send failed \(500\)/.test(sent), `the old generic send line is back: ${JSON.stringify(sent)}`);
+    return `stored: ${JSON.stringify(refused)} / ${JSON.stringify(dead)}; zone: ${JSON.stringify(zone)}; send: ${JSON.stringify(sent)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P515 a rail read that fails says why for the folder, and an rcCall verb prints the code with the status and the message',
+  run: async ({ page }) => {
+    await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope === true', null, { timeout: 15_000 });
+    await page.route(/\/rc\/sessions\?cwd=/, (route) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'the folder scan failed: too many open files', code: 'scan_failed' }) }),
+    );
+    await page.evaluate(() => {
+      folderReadFailedFor = null;
+      curDirPath = '/p515/folder';
+      void refreshPastConversations('/p515/folder');
+    });
+    await page.waitForFunction(`/reading the conversations in \\/p515\\/folder failed/.test(document.getElementById('status').textContent)`, null, { timeout: 10_000 });
+    const rail = await f211Status(page);
+    for (const want of ['scan_failed', 'HTTP 500', 'the folder scan failed: too many open files']) {
+      expect(rail.includes(want), `the rail line lacks ${JSON.stringify(want)}: ${JSON.stringify(rail)}`);
+    }
+    // rcCall keeps `code` for callers that compare it and adds `detail` for the line.
+    await page.route(/\/session\/[^/]+\/stats$/, (route) =>
+      route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: 'Daemon unavailable', code: 'daemon_unavailable', daemon: { status: 500, message: 'stats store is locked' } }) }),
+    );
+    const r = (await page.evaluate(`rcCall('/session/abc/stats')`)) as { code: string; detail: string };
+    expect(r.code === 'daemon_unavailable', `rcCall changed its code to ${JSON.stringify(r.code)}`);
+    expect(r.detail.startsWith('daemon_unavailable (HTTP 502): Daemon unavailable') && r.detail.includes('stats store is locked'), `rcCall detail: ${JSON.stringify(r.detail)}`);
+    return `rail: ${JSON.stringify(rail)}; rcCall detail: ${JSON.stringify(r.detail)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P516 the guest share page names what failed, the status and the code, never the gateway message, and a dead network names the origin',
+  waitView: false,
+  run: async ({ page, viewer }) => {
+    const statusText = () => page.evaluate(`document.getElementById('status').textContent || ''`) as Promise<string>;
+    const open = async (answer: 'abort' | { status: number; body: unknown }) => {
+      await page.route(/\/rc\/share\/whoami$/, async (route) => {
+        if (answer === 'abort') await route.abort('connectionrefused');
+        else await route.fulfill({ status: answer.status, contentType: 'application/json', body: JSON.stringify(answer.body) });
+      });
+      await page.goto(`${viewer.url}/ui/share/p516token`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(`/failed|could not reach/.test(document.getElementById('status').textContent)`, null, { timeout: 10_000 });
+      const text = await statusText();
+      await page.unroute(/\/rc\/share\/whoami$/);
+      return text;
+    };
+    const refused = await open({ status: 500, body: { error: "ENOENT: stat '/home/u/secret/shares.json'", code: 'share_store_unreadable' } });
+    expect(refused === 'opening the share link failed: share_store_unreadable (HTTP 500)', `the guest's refusal line is ${JSON.stringify(refused)}`);
+    expect(!refused.includes('/home/u') && !refused.includes('ENOENT'), `the guest line carries the gateway message: ${JSON.stringify(refused)}`);
+    const dead = await open('abort');
+    expect(dead === `could not reach the gateway at ${new URL(viewer.url).origin}: TypeError during opening the share link`, `the guest's dead-network line is ${JSON.stringify(dead)}`);
+    return `refused: ${JSON.stringify(refused)}; dead: ${JSON.stringify(dead)}`;
   },
 });
 

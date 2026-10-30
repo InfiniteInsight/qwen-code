@@ -278,6 +278,9 @@ export interface BootViewerOptions {
   reloadStatus?: number;
   reloadErrorBody?: unknown;
   reloadResult?: unknown;
+  /** #211: force the stub's artifact add and remove to refuse. */
+  artifactMutationStatus?: number;
+  artifactMutationErrorBody?: unknown;
 }
 
 /** The label the harness's one host action carries. */
@@ -461,6 +464,8 @@ export async function bootViewer(
     reloadStatus: opts.reloadStatus,
     reloadErrorBody: opts.reloadErrorBody,
     reloadResult: opts.reloadResult,
+    artifactMutationStatus: opts.artifactMutationStatus,
+    artifactMutationErrorBody: opts.artifactMutationErrorBody,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
