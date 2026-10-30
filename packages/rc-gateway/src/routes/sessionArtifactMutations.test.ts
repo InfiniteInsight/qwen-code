@@ -735,4 +735,67 @@ describe('the #128 artifact routes as the gateway mounts them', () => {
     };
     expect(body.remoteControl.sessionArtifactWrites).toBe(true);
   });
+
+  // #127: the page's Artifacts sheet gates on these, so they are pinned here.
+  it('the read flag is reported to a reader and a writer alike, beside the writeScope that gates Open', async () => {
+    const { url, store } = await bootGateway();
+    for (const [scopes, writes] of [
+      [[SESSION_READ], false],
+      [[WRITE], true],
+    ] as const) {
+      const { token } = await store.issue([...scopes], 'phone');
+      const res = await fetch(`${url}/rc/capabilities`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = (await res.json()) as {
+        remoteControl: { sessionArtifacts?: unknown; writeScope?: unknown };
+      };
+      expect(body.remoteControl.sessionArtifacts).toBe(true);
+      expect(body.remoteControl.writeScope).toBe(writes);
+    }
+  });
+
+  it('a reader is refused the snapshot read, which sits at WRITE', async () => {
+    const { url, store } = await bootGateway();
+    const { token } = await store.issue([SESSION_READ], 'reader');
+    const res = await fetch(URL_(url, '/art-web-1/content'), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(403);
+    expect(stub?.lastArtifactContent).toBeUndefined();
+  });
+
+  it('the list shows what the phone added and drops what it removed; a tool row goes, another client\'s is refused', async () => {
+    const { url, store } = await bootGateway();
+    const { token } = await store.issue([WRITE], 'phone');
+    const link = { title: 'Runbook', url: 'https://example.com/runbook' };
+    const added = await send(URL_(url), 'POST', link, token);
+    expect(added.status).toBe(200);
+    const id = (added.body['changes'] as Array<{ artifactId: string }>)[0]!
+      .artifactId;
+    const ids = async () =>
+      (
+        (await send(URL_(url), 'GET', undefined, token)).body[
+          'artifacts'
+        ] as Array<{ id: string; clientId?: unknown }>
+      ).map((a) => [a.id, 'clientId' in a] as const);
+    expect(await ids()).toEqual([
+      ['art-web-1', false],
+      ['art-file-1', false],
+      [id, false],
+    ]);
+    // The model's saved webpage: any caller with session write removes it.
+    const tool = await send(URL_(url, '/art-web-1'), 'DELETE', undefined, token);
+    expect(tool.status).toBe(200);
+    expect(tool.body['changes']).toMatchObject([
+      { action: 'removed', artifactId: 'art-web-1', reason: 'explicit' },
+    ]);
+    // A client row the gateway did not add: the daemon's 403, relayed.
+    const other = await send(URL_(url, '/art-file-1'), 'DELETE', undefined, token);
+    expect(other.status).toBe(403);
+    expect(other.body['code']).toBe('session_artifact_forbidden');
+    const mine = await send(URL_(url, `/${id}`), 'DELETE', undefined, token);
+    expect(mine.status).toBe(200);
+    expect(await ids()).toEqual([['art-file-1', false]]);
+  });
 });

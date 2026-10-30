@@ -3287,6 +3287,185 @@
         display: flex;
         gap: 8px;
       }
+      /* #127. The Artifacts sheet, the Sources sheet's shape. A row is a
+         button, the title over its kind, size, age and who recorded it, that
+         shows the artifact's actions under it. Nothing an artifact holds is
+         ever drawn here. */
+      #art-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      #art-list .art-row {
+        border-top: 1px solid var(--g1-line);
+      }
+      #art-list .art-hd {
+        width: 100%;
+        min-height: 56px;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        padding: 6px 16px;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+      }
+      #art-list .art-hd[aria-expanded='true'] {
+        background: var(--g1-raise);
+      }
+      #art-list .art-t,
+      #art-list .art-l {
+        display: block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #art-list .art-t {
+        font-size: 15px;
+        color: var(--g1-ink-hi);
+      }
+      #art-list .art-l {
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+      }
+      #art-list .art-k {
+        font-weight: 600;
+        margin-right: 6px;
+      }
+      #art-list .art-d {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 4px 16px 12px;
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+        overflow-wrap: anywhere;
+      }
+      #art-list .art-d p {
+        margin: 0;
+      }
+      #art-list .art-d a {
+        color: inherit;
+      }
+      #art-list .art-acts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      #art-list .art-rm {
+        color: #ff7b72;
+      }
+      #art-note {
+        flex: none;
+        margin-bottom: 8px;
+      }
+      #art-add {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #art-add[hidden] {
+        display: none;
+      }
+      #art-add .art-in-row {
+        display: flex;
+        gap: 8px;
+      }
+      /* #135. The Goal sheet: the goal's words in a bordered block, its status
+         and turns under them, the reason it is in that status under that,
+         Clear below, and the field that sets a new one pinned in the thumb
+         zone like Sources' add row. */
+      #goal-now {
+        margin: 12px 16px 0;
+        padding: 12px;
+        border: 1px solid var(--g1-line);
+        border-radius: 10px;
+        background: var(--g1-raise);
+      }
+      #goal-objective {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 15px;
+        color: var(--g1-ink-hi);
+      }
+      #goal-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+      }
+      #goal-status {
+        font-weight: 600;
+      }
+      #goal-status[data-status='active'] {
+        color: var(--g1-link);
+      }
+      #goal-status[data-status='paused'],
+      #goal-status[data-status='usage_limited'] {
+        color: var(--g1-warn);
+      }
+      #goal-status[data-status='blocked'] {
+        color: #ff7b72;
+      }
+      #goal-status[data-status='complete'] {
+        color: #3fb950;
+      }
+      #goal-reason {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-top: 10px;
+        font-size: 13px;
+        color: var(--g1-ink);
+        overflow-wrap: anywhere;
+      }
+      #goal-reason[hidden] {
+        display: none;
+      }
+      #goal-reason .gr-k {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      #goal-now[hidden],
+      #goal-clear[hidden] {
+        display: none;
+      }
+      #goal-clear {
+        display: block;
+        margin: 12px 16px 0;
+        color: #ff7b72;
+      }
+      #goal-edit {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #goal-edit[hidden] {
+        display: none;
+      }
+      #goal-edit .goal-in-row {
+        display: flex;
+        gap: 8px;
+      }
+      #goal-edit .cv-note {
+        margin: 0;
+      }
       @media (min-width: 1100px) {
         .cv-sheet {
           left: var(--h1-left);
@@ -3466,6 +3645,14 @@
                  token that cannot write. -->
             <button type="button" class="row" id="more-organize" data-action="organize" hidden>
               <span class="lbl">Organize</span><span class="val" id="more-organize-val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <!-- #135. The session goal: what the agent keeps working toward.
+                 The value reads the goal's status and first words once the
+                 page knows them. Drawn on a gateway that serves the goal
+                 routes, to a reader too (who sees it and cannot change it). -->
+            <button type="button" class="row" id="more-goal" data-action="goal" hidden>
+              <span class="lbl">Goal</span><span class="val" id="more-goal-val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
             <button type="button" class="row" id="more-sources" data-action="sources" hidden>
@@ -4613,6 +4800,73 @@
           </div>
         </div>
       </div>
+      <!-- #127. Artifacts: what this conversation PRODUCED, in a sheet of
+           its own opened by the Artifacts pill beside Files, not rows in the
+           Files box (the user's option 2 on #127). A row is its title over
+           its kind, size, age and who recorded it; tapping it shows where it
+           is, Open for a saved webpage (a download, never drawn here) and
+           Remove (asks first, by name). The add row records a link or a
+           workspace path, for a token that can write. Filled by
+           renderArtSheet. -->
+      <div id="art-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="art-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="art-title" class="cv-title">Artifacts</strong>
+            <button id="art-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="art-body">
+            <p class="cv-lede">What this conversation produced. A saved webpage opens as a download, never inside this page.</p>
+            <ul id="art-list"></ul>
+            <p class="cv-note" id="art-list-note"></p>
+          </div>
+          <p class="cv-note" id="art-note" role="status"></p>
+          <div id="art-add" hidden>
+            <div class="art-in-row">
+              <input id="art-where" class="cv-in" type="text" maxlength="2048" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="A link, or a path in this folder" aria-label="A web link, or a path in this conversation's folder, to record as an artifact" />
+            </div>
+            <div class="art-in-row">
+              <input id="art-name" class="cv-in" type="text" maxlength="200" autocomplete="off" placeholder="Title (optional)" aria-label="Title, optional" />
+              <button id="art-add-btn" class="cv-btn" type="button">Add</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- #135. Goal: the session goal as the daemon holds it, in full: its
+           words, its status, why it is in that status, and for a token that
+           can write a field to set a new one in the thumb zone and Clear,
+           which asks first. Refreshed when it opens and when a turn ends,
+           since a turn is what moves a goal on. Filled by renderGoalSheet. -->
+      <div id="goal-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="goal-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="goal-title" class="cv-title">Goal</strong>
+            <button id="goal-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="goal-body">
+            <p class="cv-lede">What the agent keeps taking turns toward until it judges it met, or you pause or clear it. The same goal <code>/goal</code> sets in the terminal.</p>
+            <div id="goal-now" hidden>
+              <div id="goal-objective"></div>
+              <div id="goal-meta"><span id="goal-status"></span><span id="goal-turns"></span></div>
+              <div id="goal-reason" hidden><span class="gr-k">Last reason</span><span id="goal-reason-text"></span></div>
+            </div>
+            <p class="cv-note" id="goal-empty"></p>
+            <button id="goal-clear" class="cv-btn" type="button" hidden>Clear goal</button>
+          </div>
+          <div id="goal-edit" hidden>
+            <div class="goal-in-row">
+              <input id="goal-text" class="cv-in" type="text" maxlength="4000" autocomplete="off" placeholder="What should the agent work toward?" aria-label="The goal to set" />
+              <button id="goal-set" class="cv-btn" type="button">Set</button>
+            </div>
+            <p class="cv-note" id="goal-note" role="status"></p>
+          </div>
+        </div>
+      </div>
       <!-- #185 (h1). The List screen, drawn to List.dc.html: the bar (back
            to the chat, Conversations, search), the folder line, the rows of
            the folder's conversations with a ⋯ each, Archived (n) at the end,
@@ -5746,9 +6000,11 @@
             type="button"
             class="pill"
             aria-expanded="false"
-            aria-controls="artifacts"
+            aria-controls="art-sheet"
+            aria-haspopup="dialog"
             title="Artifacts in this session"
             aria-label="Artifacts in this session"
+            hidden
           >
             Artifacts
           </button>
@@ -5799,16 +6055,6 @@
             <!-- #125: the content read's answer. Deliberately inside the box
                  above rather than beside it: that box is bounded and scrolls. -->
             <span id="stored-preview" hidden></span>
-          </div>
-          <!-- #127. What the session PRODUCED, which is a different fact from
-               the box above it (what someone sent in). A row here only ever
-               offers a download: the body is HTML fetched off the open web,
-               served from an origin that holds the operator's token, and this
-               page sets no Content-Security-Policy. Its toggle is the
-               Artifacts pill under the +. -->
-          <div id="artifacts" class="cpanel" aria-live="polite" hidden>
-            <span id="artifacts-note"></span>
-            <span id="artifacts-list"></span>
           </div>
           <div id="rewind-pick" style="display: none">
             <label
@@ -6235,6 +6481,7 @@
         if (key === 'files') {
           $('more-files-open').disabled = !watchedSessionId;
           $('more-artifacts-open').disabled = !watchedSessionId;
+          syncArtifactsControl(); // #127: hidden on a gateway without the reads
         }
         if (key === 'share') $('more-export').disabled = !watchedSessionId;
       }
@@ -6747,9 +6994,11 @@
       $('more-files-open').addEventListener('click', () =>
         openComposerList('stored-toggle', 'stored'),
       );
-      $('more-artifacts-open').addEventListener('click', () =>
-        openComposerList('artifacts-toggle', 'artifacts'),
-      );
+      // #127: artifacts are a sheet now, not a box behind the +.
+      $('more-artifacts-open').addEventListener('click', () => {
+        setMoreOpen(false);
+        openArtSheet();
+      });
       $('more-export').addEventListener('click', () => void exportConversation());
 
       // "?" help buttons. #187 retired the panels' ones for a sentence at the
@@ -12613,6 +12862,7 @@
         // Doing it once here rather than at each branch is what keeps the
         // subagent path from being forgotten the way the first-frame path was.
         noteFrameActivity();
+        goalFromFrame(u);
         const su = u.sessionUpdate;
         const text = u.content && u.content.text;
         // Subagent frames are tagged with the parent Agent tool call's id —
@@ -12870,6 +13120,9 @@
             // The turn is what moved the fill, so re-read it now rather than
             // leaving the footer on the figure from before the turn ran.
             void fetchContextUsage(watchedSessionId);
+            // #135: a turn is what moves a goal on (it can finish, pause or
+            // block), so the row and an open sheet read it again.
+            goalRefreshSoon();
             if (asstThisTurn && transcriptModel.curAsst) placeForkButton();
             return;
           case 'turn_error': {
@@ -12970,6 +13223,10 @@
             if (said.length) scrollTranscript();
             return;
           }
+          // #127: an artifact was recorded, changed or removed. Nothing is
+          // drawn in the transcript; an open Artifacts sheet re-reads.
+          case 'artifact_changed':
+            return noteArtifactChanged(ev.data);
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // permission_* (rendered as cards)
           default:
@@ -14634,6 +14891,11 @@
         src.disabled = !sid;
         const n = sid ? srcSheet.count.get(sid) : undefined;
         h1Text($('more-sources-val'), typeof n === 'number' ? String(n) : '');
+        const gl = $('more-goal');
+        const onGoal = goalOn();
+        if (gl.hidden !== !onGoal) gl.hidden = !onGoal;
+        gl.disabled = !sid;
+        h1Text($('more-goal-val'), sid ? goalRowValue(goalHeld(sid)) : '');
       }
       new MutationObserver(() => {
         if (!$('more-screen').hidden) renderConvRows();
@@ -15173,6 +15435,332 @@
         e.preventDefault();
         e.stopPropagation();
         closeSrcSheet(true);
+      });
+
+      // -- #135: Goal (More > This conversation) ---------------------------
+      // The session goal, the one the CLI's /goal sets: what the agent keeps
+      // taking turns toward. The daemon keeps one per session, as a snapshot
+      // { v: 2, goal, activity } whose goal has an objective, a status
+      // (active, paused, blocked, usage_limited or complete), a turn count
+      // and an optional lastReason, the words for why it is in that status.
+      // The row's value is the status and the first words, once the page
+      // knows them: from a read (as More opens, as the sheet opens, as a turn
+      // ends) or from the snapshot the stream itself carries in a frame's
+      // _meta.goalState, which is newer than any read. The sheet shows the
+      // whole goal. Set sends the typed words and nothing else: the gateway
+      // makes it a create or, over an existing goal, a replace that carries
+      // the version it saw, so a goal that moved is refused and shown rather
+      // than overwritten. Replacing a live goal and clearing ask first. A
+      // reader sees the goal and none of Set or Clear. Drawn on a gateway
+      // that serves the routes; the daemon advertises no tag for goals, so a
+      // daemon without them says so in the sheet.
+      var goalSheet = {
+        open: false,
+        opener: null,
+        sid: null,
+        busy: false,
+        note: '',
+        tone: '',
+        readNote: '',
+        gen: 0,
+        known: new Map(), // session id -> { snap, at } as last read or streamed
+        reading: new Map(), // session id -> the read in flight
+        timer: null,
+        oldDaemon: false, // a read answered goal_unsupported: stop asking
+      };
+      function goalOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.sessionGoal === true);
+      }
+      function goalWritable() {
+        return !!(caps && caps.remoteControl && caps.remoteControl.writeScope === true);
+      }
+      var GOAL_STATUS_WORDS = {
+        active: 'active',
+        paused: 'paused',
+        blocked: 'blocked',
+        usage_limited: 'usage limited',
+        complete: 'done',
+      };
+      function goalStatusWord(status) {
+        return GOAL_STATUS_WORDS[status] || strOr(status, 'unknown');
+      }
+      // A snapshot the daemon or the stream sent, or null for anything else.
+      function goalSnap(x) {
+        if (!x || typeof x !== 'object' || x.v !== 2 || !('goal' in x)) return null;
+        const g = x.goal;
+        if (g !== null && (!g || typeof g !== 'object' || typeof g.objective !== 'string')) return null;
+        return x;
+      }
+      function goalHeld(sid) {
+        const k = sid ? goalSheet.known.get(sid) : null;
+        return k ? k.snap : null;
+      }
+      function goalFirstWords(text, max) {
+        const t = String(text).replace(/\s+/g, ' ').trim();
+        if (t.length <= max) return t;
+        // Whole words: back up to the last space unless that leaves almost nothing.
+        let cut = t.slice(0, max);
+        const sp = cut.lastIndexOf(' ');
+        if (sp > max / 2) cut = cut.slice(0, sp);
+        return cut.trimEnd() + '…';
+      }
+      // What the row says: nothing until known, nothing for no goal.
+      function goalRowValue(snap) {
+        const g = snap && snap.goal;
+        if (!g) return '';
+        return goalStatusWord(g.status) + ' · ' + goalFirstWords(g.objective, 40);
+      }
+      function goalNote(sid, snap) {
+        const ok = goalSnap(snap);
+        if (!sid || !ok) return false;
+        goalSheet.known.set(sid, { snap: ok, at: Date.now() });
+        if (goalSheet.open && goalSheet.sid === sid) renderGoalSheet();
+        renderConvRows();
+        return true;
+      }
+      // The sheet, drawn from what the page holds for its session.
+      function renderGoalSheet() {
+        if (!goalSheet.open) return;
+        const snap = goalHeld(goalSheet.sid);
+        const g = snap && snap.goal;
+        const writable = goalWritable();
+        $('goal-now').hidden = !g;
+        if (g) {
+          h1Text($('goal-objective'), g.objective);
+          const st = $('goal-status');
+          h1Text(
+            st,
+            goalStatusWord(g.status).replace(/^./, (c) => c.toUpperCase()) +
+              (g.status === 'active' && snap.activity === 'running'
+                ? ', working'
+                : g.status === 'active' && snap.activity === 'verifying'
+                  ? ', checking'
+                  : ''),
+          );
+          st.dataset.status = String(g.status);
+          const n = typeof g.turnCount === 'number' ? g.turnCount : 0;
+          h1Text($('goal-turns'), n > 0 ? n + (n === 1 ? ' turn' : ' turns') : '');
+          const why = typeof g.lastReason === 'string' ? g.lastReason.trim() : '';
+          $('goal-reason').hidden = !why;
+          h1Text($('goal-reason-text'), why);
+        }
+        h1Text(
+          $('goal-empty'),
+          goalSheet.readNote ||
+            (snap === null
+              ? goalSheet.oldDaemon
+                ? 'This daemon keeps no goals.'
+                : 'Reading the goal...'
+              : g
+                ? ''
+                : 'No goal is set for this conversation.'),
+        );
+        $('goal-clear').hidden = !(writable && g);
+        $('goal-clear').disabled = goalSheet.busy;
+        $('goal-edit').hidden = !writable;
+        $('goal-set').disabled = goalSheet.busy;
+        const note = $('goal-note');
+        h1Text(note, goalSheet.note);
+        if (goalSheet.tone) note.dataset.tone = goalSheet.tone;
+        else delete note.dataset.tone;
+      }
+      function goalReadNote(r) {
+        if (r.code === 'goal_unsupported') return 'This daemon keeps no goals.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        return 'The goal could not be read: ' + (r.error || r.code);
+      }
+      // One read at a time per session; what it finds is what the page holds.
+      function goalRead(sid) {
+        if (!sid || goalSheet.oldDaemon) return Promise.resolve(null);
+        const inflight = goalSheet.reading.get(sid);
+        if (inflight) return inflight;
+        const p = (async () => {
+          const r = await convCall('/session/' + encodeURIComponent(sid) + '/goal');
+          goalSheet.reading.delete(sid);
+          if (r.ok && goalNote(sid, r.body.snapshot)) {
+            if (goalSheet.open && goalSheet.sid === sid) goalSheet.readNote = '';
+            return goalHeld(sid);
+          }
+          if (!r.ok && r.code === 'goal_unsupported') goalSheet.oldDaemon = true;
+          if (goalSheet.open && goalSheet.sid === sid) {
+            goalSheet.readNote = r.ok ? 'The goal could not be read.' : goalReadNote(r);
+            renderGoalSheet();
+          }
+          return null;
+        })();
+        goalSheet.reading.set(sid, p);
+        return p;
+      }
+      // A turn is what moves a goal on, so one ending asks again; a burst of
+      // frames asks once.
+      function goalRefreshSoon() {
+        if (!goalOn() || !watchedSessionId || goalSheet.oldDaemon) return;
+        const sid = watchedSessionId;
+        if (goalSheet.timer) clearTimeout(goalSheet.timer);
+        goalSheet.timer = setTimeout(() => {
+          goalSheet.timer = null;
+          void goalRead(sid);
+        }, 250);
+      }
+      // A frame that carries the goal's snapshot (the daemon stamps one on the
+      // update it emits at each transition) is newer than any read.
+      function goalFromFrame(u) {
+        const gs = u && u._meta && u._meta.goalState;
+        if (gs && goalOn() && watchedSessionId) goalNote(watchedSessionId, gs);
+      }
+      // Opening More reads the goal once, so the row says what it holds.
+      new MutationObserver(() => {
+        if ($('more-screen').hidden || !goalOn() || !watchedSessionId) return;
+        const k = goalSheet.known.get(watchedSessionId);
+        if (!k || Date.now() - k.at > 15000) void goalRead(watchedSessionId);
+      }).observe($('more-screen'), { attributes: true, attributeFilter: ['hidden'] });
+      function openGoalSheet() {
+        if (!goalOn() || !watchedSessionId) return;
+        goalSheet.gen += 1;
+        if (!goalSheet.open) {
+          goalSheet.opener = document.activeElement;
+          goalSheet.open = true;
+          $('goal-sheet').hidden = false;
+        }
+        closeH1Menu(false);
+        goalSheet.sid = watchedSessionId;
+        goalSheet.busy = false;
+        goalSheet.note = '';
+        goalSheet.tone = '';
+        goalSheet.readNote = '';
+        $('goal-text').value = '';
+        renderGoalSheet();
+        void goalRead(goalSheet.sid);
+        $('goal-close').focus({ preventScroll: true });
+      }
+      function closeGoalSheet(refocus) {
+        if (!goalSheet.open) return;
+        goalSheet.open = false;
+        goalSheet.gen += 1;
+        $('goal-sheet').hidden = true;
+        const back = goalSheet.opener;
+        goalSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      function goalRefusalText(r) {
+        if (r.code === 'untrusted_workspace') {
+          return 'This conversation\'s folder is not trusted, so it cannot take a goal. Trust the folder, then try again.';
+        }
+        if (r.code === 'goal_unsupported') return 'This daemon keeps no goals.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        if (r.code === 'invalid_goal') return r.error || 'That is not a goal.';
+        if (r.status === 403) return 'Changing the goal needs a token that can write.';
+        return 'Not changed: ' + (r.error || r.code);
+      }
+      async function goalSet() {
+        if (goalSheet.busy) return;
+        const text = ($('goal-text').value || '').trim();
+        if (!text) {
+          goalSheet.note = 'Type what the agent should work toward.';
+          goalSheet.tone = 'err';
+          renderGoalSheet();
+          return;
+        }
+        const cur = goalHeld(goalSheet.sid);
+        const live = cur && cur.goal && cur.goal.status !== 'complete' ? cur.goal : null;
+        if (
+          live &&
+          !window.confirm(
+            'Replace the current goal "' + goalFirstWords(live.objective, 60) + '"? Its turns so far are not carried over.',
+          )
+        ) {
+          return;
+        }
+        const gen = goalSheet.gen;
+        const sid = goalSheet.sid;
+        goalSheet.busy = true;
+        goalSheet.note = 'Setting the goal...';
+        goalSheet.tone = '';
+        renderGoalSheet();
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/goal', {
+          method: 'POST',
+          body: JSON.stringify({ objective: text }),
+        });
+        if (gen !== goalSheet.gen || !goalSheet.open) return;
+        goalSheet.busy = false;
+        if (r.ok && goalSnap(r.body.snapshot)) {
+          goalSheet.note = 'Goal set.';
+          goalSheet.tone = '';
+          goalSheet.readNote = '';
+          $('goal-text').value = '';
+          goalNote(sid, r.body.snapshot);
+          return;
+        }
+        if (r.status === 409) {
+          // It moved while this was sent: show what it is now, keep the text.
+          goalSheet.note = 'The goal changed while you were typing. It is shown as it is now; Set again to replace it.';
+          goalSheet.tone = 'err';
+          void goalRead(sid);
+          renderGoalSheet();
+          return;
+        }
+        goalSheet.note = goalRefusalText(r);
+        goalSheet.tone = 'err';
+        renderGoalSheet();
+      }
+      // Asked first, by the goal's own words; the verdict is the daemon's
+      // `cleared`, so a goal already gone says so rather than claiming a clear.
+      async function goalClear() {
+        if (goalSheet.busy) return;
+        const cur = goalHeld(goalSheet.sid);
+        if (!cur || !cur.goal) return;
+        if (
+          !window.confirm(
+            'Clear the goal "' + goalFirstWords(cur.goal.objective, 60) + '"? The agent stops working toward it.',
+          )
+        ) {
+          return;
+        }
+        const gen = goalSheet.gen;
+        const sid = goalSheet.sid;
+        goalSheet.busy = true;
+        goalSheet.note = 'Clearing the goal...';
+        goalSheet.tone = '';
+        renderGoalSheet();
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/goal/clear', {
+          method: 'POST',
+          body: '{}',
+        });
+        if (gen !== goalSheet.gen || !goalSheet.open) return;
+        goalSheet.busy = false;
+        if (r.ok) {
+          goalSheet.note = r.body.cleared === true ? 'Goal cleared.' : 'There was no goal to clear.';
+          goalSheet.tone = '';
+          goalSheet.readNote = '';
+          if (!goalNote(sid, r.body.snapshot)) await goalRead(sid);
+          renderGoalSheet();
+          return;
+        }
+        goalSheet.note = goalRefusalText(r);
+        goalSheet.tone = 'err';
+        renderGoalSheet();
+      }
+      $('more-goal').addEventListener('click', () => {
+        setMoreOpen(false);
+        openGoalSheet();
+      });
+      $('goal-close').addEventListener('click', () => closeGoalSheet(true));
+      $('goal-set').addEventListener('click', () => void goalSet());
+      $('goal-clear').addEventListener('click', () => void goalClear());
+      $('goal-text').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        void goalSet();
+      });
+      $('goal-sheet').addEventListener('click', (e) => {
+        if (e.target === $('goal-sheet')) closeGoalSheet(true);
+      });
+      $('goal-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeGoalSheet(true);
       });
 
       const token = () => localStorage.getItem(TOKEN_KEY);
@@ -17917,7 +18505,7 @@
         // #173: the blob lives on the gateway's origin, so a type a tab will
         // run (html, svg, xml) would run an uploaded file with this page's
         // storage. Only a raster image keeps its type; everything else is
-        // served as bytes, as saveArtifact does.
+        // served as bytes, as the Artifacts Open (artOpen) does.
         const blobType = /^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(mime)
           ? mime.toLowerCase()
           : 'application/octet-stream';
@@ -18043,154 +18631,553 @@
       };
 
       // -- Session artifacts (#127) ----------------------------------------
-      // What the session produced, in its own box rather than rows added to
-      // the Files panel above it. See the markup note for the rule this keeps:
-      // a row offers a file and never draws one, because the only body this
-      // family serves is HTML that came off the open web.
-      let artifactFiles = [];
-      let artifactNote = '';
-      // One object URL at a time, revoked before the next save. These are
+      // What the session PRODUCED, in a sheet of its own opened by the
+      // Artifacts pill beside Files (the user's option 2 on #127), rather
+      // than rows in the Files box. Tapping a row shows where the artifact is
+      // and what can be done with it. A row never draws one: the only body
+      // this family serves is a saved webpage, HTML that came off the open
+      // web, and this origin holds the operator's token and sets no
+      // Content-Security-Policy. Open hands it to the browser as a download.
+      const artSheet = {
+        open: false,
+        opener: null,
+        sid: null,
+        rows: null, // null while the first read is out
+        listNote: '',
+        sel: null, // the row whose actions are showing
+        busy: false,
+        note: '',
+        tone: '',
+        gen: 0, // bumped on open and close: an answer for an older sheet is dropped
+        reads: 0, // only the newest list read paints
+        refresh: null, // the artifact_changed re-read, coalesced
+      };
+      // One object URL at a time, revoked before the next Open. These are
       // saved webpages, up to the daemon's own size, and a URL per press is a
       // leak the page cannot see.
       let artifactSaveUrl = '';
 
-      function artifactFileName(entry) {
-        // The title is the producer's text and is not trusted as a path. Every
-        // separator is folded out so a row cannot offer a name that escapes
-        // the download directory, and an empty title falls back to the id.
-        const raw = typeof entry.title === 'string' ? entry.title.trim() : '';
-        const base = raw.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80);
-        return base || String(entry.id || 'artifact');
+      // The gates. The pill needs the read pair, which the gateway reports
+      // as `sessionArtifacts`, so a page served to an older gateway shows no
+      // control. Open needs the content read's own scope, WRITE, which a
+      // reader lacks. Add and Remove need the mutation pair (#128) and WRITE.
+      // A share link holds no WRITE and its guest page has no sheet.
+      function artifactsOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.sessionArtifacts === true);
       }
-
-      function renderArtifacts() {
-        const list = $('artifacts-list');
-        if (!list) return;
-        list.textContent = '';
-        for (const entry of artifactFiles) {
-          const row = document.createElement('span');
-          row.style.display = 'block';
-          row.style.marginTop = '4px';
-          const label = document.createElement('span');
-          // The kind is drawn from the daemon's field and never guessed at.
-          // Its union is open (KnownDaemonSessionArtifactKind plus
-          // OpenStringUnion), so a kind this file has never heard of still
-          // gets a row with the daemon's own word on it rather than being
-          // dropped or relabeled as something known.
-          label.textContent =
-            (typeof entry.title === 'string' && entry.title
-              ? entry.title
-              : String(entry.id || '(untitled)')) +
-            ' (' +
-            String(entry.kind || 'unknown') +
-            ', ' +
-            formatBytes(Number(entry.sizeBytes) || 0) +
-            (entry.status && entry.status !== 'available'
-              ? ', ' + String(entry.status)
-              : '') +
-            ')';
-          row.appendChild(label);
-          // A missing or changed snapshot has nothing to save, and the content
-          // read would only answer with the daemon's refusal.
-          if (entry.status === 'available') {
-            const save = document.createElement('button');
-            save.type = 'button';
-            save.style.marginLeft = '6px';
-            save.textContent = 'Save';
-            save.onclick = () => void saveArtifact(entry);
-            row.appendChild(save);
-          }
-          list.appendChild(row);
-        }
-        $('artifacts-note').textContent = artifactNote;
+      function artifactsCanOpen() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.writeScope === true);
       }
-
-      async function loadArtifacts() {
-        // Snapshot the conversation: every write below happens after an await,
-        // and a switch cannot cancel this request. Without the guard two loads
-        // race and the later arrival wins, painting A's artifacts under B.
-        const id = watchedSessionId;
-        artifactFiles = [];
-        artifactNote = '';
-        if (!id) {
-          artifactNote = 'watch a session first';
-          renderArtifacts();
-          return;
-        }
-        const r = await rcCall(
-          '/session/' + encodeURIComponent(id) + '/artifacts',
+      function artifactsWritable() {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc.sessionArtifactWrites === true &&
+          rc.writeScope === true
         );
-        if (id !== watchedSessionId) return;
-        if (!r.ok) {
-          artifactNote = 'artifacts failed: ' + rcDetail(r);
-          renderArtifacts();
-          return;
+      }
+      function syncArtifactsControl() {
+        const on = artifactsOn();
+        for (const id of ['artifacts-toggle', 'more-artifacts-open']) {
+          const b = $(id);
+          if (b && b.hidden !== !on) b.hidden = !on;
         }
-        const rows =
-          r.body && Array.isArray(r.body.artifacts) ? r.body.artifacts : [];
-        artifactFiles = rows;
-        artifactNote = rows.length ? '' : 'nothing produced yet';
-        renderArtifacts();
+      }
+      // The pill is behind the +, so it is settled as the tools open.
+      new MutationObserver(() => {
+        if (!$('h1-tools').hidden) syncArtifactsControl();
+      }).observe($('h1-tools'), { attributes: true, attributeFilter: ['hidden'] });
+
+      // A saved webpage: the artifact tool's snapshot, the one thing the
+      // content read serves. The daemon's own test (getWebPreviewSnapshotId)
+      // starts from kind html in published storage, a storage only that tool
+      // may write, so nothing else is offered Open.
+      function artIsSnapshot(a) {
+        return a.kind === 'html' && a.storage === 'published';
+      }
+      const ART_KINDS = {
+        html: 'web page',
+        link: 'link',
+        file: 'file',
+        image: 'image',
+        video: 'video',
+        audio: 'audio',
+        pdf: 'PDF',
+        notebook: 'notebook',
+        document: 'document',
+        other: 'other',
+      };
+      // The kind union is open (KnownDaemonSessionArtifactKind plus
+      // OpenStringUnion), so a kind this page has never heard of keeps the
+      // daemon's own word rather than being dropped or relabeled.
+      function artKind(a) {
+        if (artIsSnapshot(a)) return 'saved webpage';
+        const k = strOr(a.kind, 'artifact');
+        return Object.prototype.hasOwnProperty.call(ART_KINDS, k) ? ART_KINDS[k] : k;
+      }
+      // Who recorded it, from the daemon's `source`. A client is any app
+      // attached to the daemon, this gateway among them: the list does not
+      // say which (the client id stays on the daemon).
+      function artWho(a) {
+        if (a.source === 'tool') return 'by the model';
+        if (a.source === 'hook') {
+          const ev = strOr(a.hookEventName, '');
+          return ev ? 'by a ' + ev + ' hook' : 'by a hook';
+        }
+        if (a.source === 'client') return 'added by an app';
+        return '';
+      }
+      function artTitle(a) {
+        const t = strOr(a.title, '');
+        if (t) return t;
+        const p = strOr(a.workspacePath, '');
+        if (p) return p.replace(/\/+$/, '').split('/').pop() || p;
+        return String(a.id || '(untitled)');
+      }
+      // Where it is, in words: a link openable in a new tab (another origin,
+      // no opener), a path in the folder, or the daemon's own copy.
+      function artWhere(a) {
+        if (artIsSnapshot(a)) return { text: 'A copy of the page as it was saved, kept by the daemon.' };
+        const p = strOr(a.workspacePath, '');
+        if (p) return { text: p };
+        const u = strOr(a.url, '');
+        if (u) {
+          try {
+            const parsed = new URL(u);
+            if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+              return { text: u, href: parsed.href };
+            }
+          } catch {
+            /* drawn as text */
+          }
+          return { text: u };
+        }
+        return { text: '' };
       }
 
-      async function saveArtifact(entry) {
-        const id = watchedSessionId;
-        if (!id) {
-          artifactNote = 'watch a session first';
-          renderArtifacts();
-          return;
+      function renderArtSheet() {
+        if (!artSheet.open) return;
+        const canOpen = artifactsCanOpen();
+        const writable = artifactsWritable();
+        const list = $('art-list');
+        // A re-render replaces the rows; the control that had focus gets it
+        // back, so a tap on a row does not drop a keyboard reader at the top.
+        const had = document.activeElement;
+        const keep =
+          had && list.contains(had) && had.dataset && had.dataset.id
+            ? { id: had.dataset.id, cls: had.classList[had.classList.length - 1] }
+            : null;
+        list.textContent = '';
+        for (const a of artSheet.rows || []) {
+          if (!a || typeof a.id !== 'string') continue;
+          const title = artTitle(a);
+          const shown = artSheet.sel === a.id;
+          const li = orgEl('li', 'art-row');
+          li.dataset.id = a.id;
+          const head = orgEl('button', 'art-hd');
+          head.type = 'button';
+          head.dataset.id = a.id;
+          head.setAttribute('aria-expanded', String(shown));
+          head.appendChild(orgEl('span', 'art-t', title));
+          const line = orgEl('span', 'art-l');
+          line.appendChild(orgEl('span', 'art-k', artKind(a)));
+          const bits = [];
+          if (typeof a.sizeBytes === 'number' && Number.isFinite(a.sizeBytes) && a.sizeBytes >= 0) {
+            bits.push(formatBytes(a.sizeBytes));
+          }
+          const when = typeof a.createdAt === 'string' ? relativeTime(a.createdAt) : '';
+          if (when) bits.push(when);
+          const who = artWho(a);
+          if (who) bits.push(who);
+          // A missing or changed one says so; available is the quiet case.
+          const st = strOr(a.status, '');
+          if (st && st !== 'available') bits.push(st);
+          if (bits.length) line.appendChild(document.createTextNode(bits.join(' · ')));
+          head.appendChild(line);
+          li.appendChild(head);
+          if (shown) {
+            const d = orgEl('div', 'art-d');
+            const w = artWhere(a);
+            if (w.href) {
+              const p = orgEl('p', 'art-w');
+              const link = orgEl('a', null, w.text);
+              link.href = w.href;
+              link.target = '_blank';
+              link.rel = 'noopener noreferrer';
+              p.appendChild(link);
+              d.appendChild(p);
+            } else if (w.text) {
+              d.appendChild(orgEl('p', 'art-w', w.text));
+            }
+            const desc = strOr(a.description, '');
+            if (desc) d.appendChild(orgEl('p', 'art-desc', desc));
+            const acts = orgEl('div', 'art-acts');
+            if (artIsSnapshot(a) && canOpen) {
+              const open = orgEl('button', 'cv-btn art-open', 'Open');
+              open.type = 'button';
+              open.dataset.id = a.id;
+              open.disabled = artSheet.busy;
+              open.setAttribute('aria-label', 'Open ' + title + ' as a download');
+              acts.appendChild(open);
+            }
+            // Every row, for a token that can write: whether this client may
+            // remove it is the daemon's call (a tool or hook artifact, yes;
+            // another client's, no), and the list does not carry the owner.
+            if (writable) {
+              const rm = orgEl('button', 'cv-btn art-rm', 'Remove');
+              rm.type = 'button';
+              rm.dataset.id = a.id;
+              rm.disabled = artSheet.busy;
+              rm.setAttribute('aria-label', 'Remove ' + title);
+              acts.appendChild(rm);
+            }
+            if (acts.childNodes.length) d.appendChild(acts);
+            if (artIsSnapshot(a) && !canOpen) {
+              d.appendChild(orgEl('p', 'art-why', 'Opening a saved webpage needs a token that can write.'));
+            }
+            li.appendChild(d);
+          }
+          list.appendChild(li);
         }
+        if (keep) {
+          const back = list.querySelector(
+            'button.' + keep.cls + '[data-id="' + CSS.escape(keep.id) + '"]',
+          );
+          if (back) back.focus({ preventScroll: true });
+        }
+        h1Text(
+          $('art-list-note'),
+          artSheet.rows === null
+            ? artSheet.listNote || 'Reading the artifacts...'
+            : artSheet.listNote || (artSheet.rows.length ? '' : 'Nothing produced yet.'),
+        );
+        $('art-add').hidden = !writable;
+        $('art-add-btn').disabled = artSheet.busy;
+        const note = $('art-note');
+        h1Text(note, artSheet.note);
+        if (artSheet.tone) note.dataset.tone = artSheet.tone;
+        else delete note.dataset.tone;
+      }
+      async function artRead() {
+        const gen = artSheet.gen;
+        const seq = (artSheet.reads += 1);
+        const sid = artSheet.sid;
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/artifacts');
+        if (gen !== artSheet.gen || seq !== artSheet.reads || !artSheet.open) return;
+        if (r.ok && Array.isArray(r.body.artifacts)) {
+          artSheet.rows = r.body.artifacts;
+          artSheet.listNote = '';
+          if (artSheet.sel && !artSheet.rows.some((a) => a && a.id === artSheet.sel)) {
+            artSheet.sel = null;
+          }
+        } else if (!r.ok) {
+          artSheet.listNote =
+            r.code === 'session_not_loaded'
+              ? r.error || 'Open this conversation before reading its artifacts.'
+              : r.code === 'session_not_found'
+                ? 'The daemon does not have this conversation open.'
+                : 'The artifacts could not be read: ' + (r.error || r.code);
+        }
+        renderArtSheet();
+      }
+      function openArtSheet() {
+        if (!artifactsOn() || !watchedSessionId) return;
+        artSheet.gen += 1;
+        if (!artSheet.open) {
+          artSheet.opener = document.activeElement;
+          artSheet.open = true;
+          $('art-sheet').hidden = false;
+          $('artifacts-toggle').setAttribute('aria-expanded', 'true');
+        }
+        artSheet.sid = watchedSessionId;
+        artSheet.rows = null;
+        artSheet.listNote = '';
+        artSheet.sel = null;
+        artSheet.busy = false;
+        artSheet.note = '';
+        artSheet.tone = '';
+        $('art-where').value = '';
+        $('art-name').value = '';
+        renderArtSheet();
+        void artRead();
+        $('art-close').focus({ preventScroll: true });
+      }
+      function closeArtSheet(refocus) {
+        if (!artSheet.open) return;
+        artSheet.open = false;
+        artSheet.gen += 1;
+        clearTimeout(artSheet.refresh);
+        artSheet.refresh = null;
+        $('art-sheet').hidden = true;
+        $('artifacts-toggle').setAttribute('aria-expanded', 'false');
+        const back = artSheet.opener;
+        artSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      // The sheet names the conversation it was opened in, so a switch shuts it.
+      function syncArtifactsForSession() {
+        if (artSheet.open && artSheet.sid !== watchedSessionId) closeArtSheet(false);
+      }
+      // The daemon announces each change on the conversation's stream
+      // (`artifact_changed`, DaemonArtifactChangedData). An open sheet
+      // re-reads its list for it, once per burst: a turn that saves several
+      // pages sends several, and a replay sends them all again.
+      function noteArtifactChanged(data) {
+        if (!artSheet.open) return;
+        const sid = data && typeof data.sessionId === 'string' ? data.sessionId : null;
+        if (sid && sid !== artSheet.sid) return;
+        clearTimeout(artSheet.refresh);
+        artSheet.refresh = setTimeout(() => {
+          artSheet.refresh = null;
+          if (artSheet.open) void artRead();
+        }, 250);
+      }
+
+      // The file the download is saved as. The daemon's Content-Disposition
+      // names it (saved-webpage.html); its extension is kept and the title,
+      // folded to a safe name, takes the stem, so two saved pages do not both
+      // arrive as saved-webpage.html. The title is the producer's text and is
+      // not trusted as a path: separators and control characters are folded.
+      function artFileName(a, disposition) {
+        const m = /filename="([^"]*)"/i.exec(disposition || '');
+        const given = m ? m[1].replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_') : '';
+        const dot = given.lastIndexOf('.');
+        const ext = dot > 0 ? given.slice(dot).replace(/[^.\w-]/g, '') : '';
+        const stem = artTitle(a)
+          .replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_')
+          .replace(/^[.\s]+/, '')
+          .slice(0, 80)
+          .trim();
+        if (!stem) return given || 'artifact' + ext;
+        return ext && stem.toLowerCase().endsWith(ext.toLowerCase()) ? stem : stem + ext;
+      }
+      function artOpenRefusal(status, e) {
+        // The daemon's own pair for a snapshot that is gone or has changed,
+        // relayed by the gateway: its words, as it sent them.
+        if (e && e.error === 'artifact_snapshot_unavailable') {
+          return typeof e.message === 'string' && e.message
+            ? e.message
+            : 'Saved webpage version is missing or has changed.';
+        }
+        if (e && e.code === 'artifact_snapshot_unsupported') return 'This daemon cannot read saved webpages.';
+        if (e && e.code === 'session_not_loaded') return e.error || 'Open this conversation before reading its artifacts.';
+        if (status === 403) return 'Opening a saved webpage needs a token that can write.';
+        return 'Not opened: ' + ((e && (e.error || e.code)) || status);
+      }
+      // Open. The text never enters this document and is never navigated to
+      // as HTML: a blob: URL takes this page's origin, so an HTML blob opened
+      // in a tab would run its scripts beside the token. The bytes go into a
+      // blob typed as a byte stream and are handed to the browser as a
+      // download (the `download` attribute, the disposition the daemon set),
+      // so even a stray navigation to the object URL downloads rather than
+      // renders. The saved file opens later from the downloads, outside
+      // this origin.
+      async function artOpen(id) {
+        const a = (artSheet.rows || []).find((x) => x && x.id === id);
+        if (!a || artSheet.busy) return;
+        const title = artTitle(a);
+        const gen = artSheet.gen;
+        const sid = artSheet.sid;
+        artSheet.busy = true;
+        artSheet.note = 'Opening ' + title + '...';
+        artSheet.tone = '';
+        renderArtSheet();
+        let res;
+        let bytes;
         try {
-          // Not rcCall: that helper JSON.parses every 2xx body, and this one is
-          // a saved webpage. The four headers the gateway restates are what
-          // keep this text from ever rendering where the token lives, and the
-          // blob below is typed as a byte stream for the same reason: even a
-          // stray navigation to the object URL downloads rather than renders.
-          const res = await fetch(
-            '/session/' +
-              encodeURIComponent(id) +
-              '/artifacts/' +
-              encodeURIComponent(String(entry.id)) +
-              '/content',
+          res = await fetch(
+            '/session/' + encodeURIComponent(sid) + '/artifacts/' + encodeURIComponent(id) + '/content',
             { headers: { Authorization: 'Bearer ' + token() } },
           );
-          if (!res.ok) {
-            const e = await res.json().catch(() => ({}));
-            artifactNote =
-              'save failed: ' + String((e && e.error) || res.status);
-            renderArtifacts();
-            return;
-          }
-          const text = await res.text();
-          if (id !== watchedSessionId) return;
-          if (artifactSaveUrl) URL.revokeObjectURL(artifactSaveUrl);
-          artifactSaveUrl = URL.createObjectURL(
-            new Blob([text], { type: 'application/octet-stream' }),
-          );
-          const a = document.createElement('a');
-          a.href = artifactSaveUrl;
-          a.download = artifactFileName(entry);
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          artifactNote = 'saved ' + artifactFileName(entry);
-        } catch (err) {
-          artifactNote = 'save failed: ' + err.message;
+          bytes = res.ok ? await res.arrayBuffer() : null;
+        } catch {
+          if (gen !== artSheet.gen || !artSheet.open) return;
+          artSheet.busy = false;
+          artSheet.note = 'The gateway did not answer.';
+          artSheet.tone = 'err';
+          renderArtSheet();
+          return;
         }
-        renderArtifacts();
+        if (gen !== artSheet.gen || !artSheet.open) return;
+        artSheet.busy = false;
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          if (gen !== artSheet.gen || !artSheet.open) return;
+          artSheet.note = artOpenRefusal(res.status, e);
+          artSheet.tone = 'err';
+          renderArtSheet();
+          return;
+        }
+        const name = artFileName(a, res.headers.get('Content-Disposition'));
+        if (artifactSaveUrl) URL.revokeObjectURL(artifactSaveUrl);
+        artifactSaveUrl = URL.createObjectURL(
+          new Blob([bytes], { type: 'application/octet-stream' }),
+        );
+        const link = document.createElement('a');
+        link.href = artifactSaveUrl;
+        link.download = name;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        artSheet.note = 'Downloaded ' + name + '. It opens from your downloads, outside this page.';
+        artSheet.tone = '';
+        renderArtSheet();
+      }
+      function artRefusalText(r) {
+        // The daemon refuses a change to a client artifact another client
+        // owns. What a tool or a hook recorded is not refused, so this is
+        // never the model's artifact.
+        if (r.code === 'session_artifact_forbidden') {
+          return 'Added by another app attached to this conversation; only that app can remove or change it.';
+        }
+        if (r.code === 'client_not_bound' || r.code === 'session_not_loaded') return r.error || r.code;
+        if (r.code === 'invalid_artifact' || r.code === 'VALIDATION_FAILED') {
+          return r.error || 'The daemon refused that artifact.';
+        }
+        if (r.code === 'artifact_mutations_unsupported') return 'This daemon cannot change artifacts.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        if (r.status === 403) return 'Changing artifacts needs a token that can write.';
+        return 'Not changed: ' + (r.error || r.code);
+      }
+      // A 200 can still be no change: the daemon keeps a live artifact whose
+      // removal it could not persist, and says so in `warnings`.
+      function artWarning(body) {
+        const w = body && Array.isArray(body.warnings) ? body.warnings : [];
+        return typeof w[0] === 'string' && w[0] ? w[0] : '';
+      }
+      // Asked first, by name. The verdict is the daemon's change list, so a
+      // row already gone says so rather than claiming a removal.
+      async function artRemove(id) {
+        const a = (artSheet.rows || []).find((x) => x && x.id === id);
+        if (!a || artSheet.busy) return;
+        const title = artTitle(a);
+        if (
+          !window.confirm(
+            'Remove ' + title + " from this conversation's artifacts? " +
+              (artIsSnapshot(a)
+                ? 'Its saved copy is deleted with it.'
+                : 'The file or page itself is not touched.'),
+          )
+        ) {
+          return;
+        }
+        const gen = artSheet.gen;
+        artSheet.busy = true;
+        artSheet.note = 'Removing ' + title + '...';
+        artSheet.tone = '';
+        renderArtSheet();
+        const r = await convCall(
+          '/session/' + encodeURIComponent(artSheet.sid) + '/artifacts/' + encodeURIComponent(id),
+          { method: 'DELETE' },
+        );
+        if (gen !== artSheet.gen || !artSheet.open) return;
+        artSheet.busy = false;
+        if (r.ok) {
+          const changes = Array.isArray(r.body.changes) ? r.body.changes : [];
+          const gone = changes.some((c) => c && c.action === 'removed' && c.artifactId === id);
+          const warn = artWarning(r.body);
+          artSheet.note = gone
+            ? 'Removed ' + title + '.'
+            : warn
+              ? title + ' was kept: ' + warn
+              : title + ' was not in the list any more.';
+          artSheet.tone = gone || !warn ? '' : 'err';
+          artSheet.sel = null;
+          await artRead();
+          return;
+        }
+        artSheet.note = artRefusalText(r);
+        artSheet.tone = 'err';
+        renderArtSheet();
+      }
+      // Add records a reference, as the daemon's POST takes one: a link
+      // (http or https) or a path in the conversation's folder, read the way
+      // the Sources add reads it (srcInput). It saves no copy of anything,
+      // so what it adds is never offered Open; a saved webpage is the
+      // artifact tool's alone to make.
+      async function artAdd() {
+        const where = ($('art-where').value || '').trim();
+        if (artSheet.busy) return;
+        if (!where) {
+          artSheet.note = 'Type a link, or a path in this folder.';
+          artSheet.tone = 'err';
+          renderArtSheet();
+          return;
+        }
+        const s = srcInput(where, ($('art-name').value || '').trim());
+        const body =
+          s.locator.type === 'url'
+            ? { title: s.title, url: s.locator.url }
+            : { title: s.title, workspacePath: s.locator.workspacePath };
+        const gen = artSheet.gen;
+        artSheet.busy = true;
+        artSheet.note = 'Adding ' + s.title + '...';
+        artSheet.tone = '';
+        renderArtSheet();
+        const r = await convCall('/session/' + encodeURIComponent(artSheet.sid) + '/artifacts', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        if (gen !== artSheet.gen || !artSheet.open) return;
+        artSheet.busy = false;
+        if (r.ok) {
+          const changes = Array.isArray(r.body.changes) ? r.body.changes : [];
+          const ch = changes.find((c) => c && c.artifact) || changes[0];
+          const t = ch && ch.artifact ? artTitle(ch.artifact) : s.title;
+          const warn = artWarning(r.body);
+          artSheet.note = !ch
+            ? warn
+              ? s.title + ' was not added: ' + warn
+              : s.title + ' was not added.'
+            : ch.action === 'updated'
+              ? 'Updated ' + t + '.'
+              : 'Added ' + t + '.';
+          artSheet.tone = ch ? '' : 'err';
+          if (ch) {
+            $('art-where').value = '';
+            $('art-name').value = '';
+          }
+          await artRead();
+          return;
+        }
+        artSheet.note = artRefusalText(r);
+        artSheet.tone = 'err';
+        renderArtSheet();
       }
 
-      $('artifacts-toggle').onclick = async () => {
-        const box = $('artifacts');
-        if (!box) return;
-        const opening = box.hidden;
-        box.hidden = !opening;
-        $('artifacts-toggle').setAttribute(
-          'aria-expanded',
-          opening ? 'true' : 'false',
-        );
-        if (opening) await loadArtifacts();
-      };
+      $('artifacts-toggle').addEventListener('click', () => openArtSheet());
+      $('art-close').addEventListener('click', () => closeArtSheet(true));
+      $('art-add-btn').addEventListener('click', () => void artAdd());
+      for (const id of ['art-where', 'art-name']) {
+        $(id).addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          void artAdd();
+        });
+      }
+      $('art-sheet').addEventListener('click', (e) => {
+        if (e.target === $('art-sheet')) return closeArtSheet(true);
+        const b = e.target.closest('button[data-id]');
+        if (!b || b.disabled) return;
+        const id = b.dataset.id;
+        if (b.classList.contains('art-hd')) {
+          artSheet.sel = artSheet.sel === id ? null : id;
+          renderArtSheet();
+        } else if (b.classList.contains('art-open')) {
+          void artOpen(id);
+        } else if (b.classList.contains('art-rm')) {
+          void artRemove(id);
+        }
+      });
+      $('art-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeArtSheet(true);
+      });
 
       // -- Session recap (#124) ------------------------------------------
       // The daemon's one-sentence 'where did I leave off', asked on press.
@@ -21473,6 +22460,8 @@
         syncBtwForSession();
         // #110: the agents roster names a conversation too.
         syncAgentsForSession();
+        // #127: so does the Artifacts sheet.
+        syncArtifactsForSession();
         // #134: an armed handover belongs to the conversation that was on
         // screen when it was armed, so a switch disarms it -- otherwise the next
         // press hands over whatever conversation the reader swiped to, which is
