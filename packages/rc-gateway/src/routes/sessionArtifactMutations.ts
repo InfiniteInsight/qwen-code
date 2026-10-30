@@ -4,14 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { RequestHandler, Response } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
 } from '@qwen-code/sdk/daemon';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
+import {
+  asDaemonHttpError,
+  canSeeDaemonDetail,
+  daemonErrorBody,
+  daemonFailureDetail,
+} from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
@@ -51,14 +56,23 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * field nobody asked about (`source`, `clientId`) is refused here rather than
  * dropped quietly on the daemon's side.
  *
- * WHAT IS ECHOED
+ * WHAT IS ECHOED (issue #211 changed this)
  *
- * The daemon's code, always. Its message, never: a refusal to inspect a
- * `workspacePath` carries the host's own error text, and a cross-client
- * refusal names an artifact id. A validation refusal (the daemon's
- * `{ error: { code, message, field } }`) keeps its `code` and its `field`
- * when the field is one of the input's own names, which is what the page needs
- * to point at the field, and the message is the gateway's.
+ * The daemon's code, always, and its `field` when the field is one of the
+ * input's own names, which is what the page needs to point at the field.
+ *
+ * The daemon's message depends on who asked. A caller holding write or owner
+ * (every caller that reaches this file in production, since both routes are
+ * mounted at write) gets the daemon's own message in `error`: a refusal to
+ * inspect a `workspacePath` says so in the daemon's words, and a cross-client
+ * refusal names the artifact, because "The daemon refused this request" tells
+ * the person holding the phone nothing they can act on. A transport failure
+ * (the daemon unreachable) names the error and its text the same way. Anyone
+ * else (a share guest, a token without write, a request with no resolved
+ * client) gets the gateway's fixed sentence and the code, which is the
+ * strictest reduction: nothing the daemon said, since its text can carry a host
+ * path or an artifact id the guest has no business with. `canSeeDaemonDetail`
+ * in daemonHttpError.ts decides, and fails closed.
  *
  * SCOPE
  *
@@ -197,7 +211,14 @@ function daemonCode(body: Record<string, unknown> | undefined): {
   return { code: undefined, field: undefined };
 }
 
-function sendArtifactError(res: Response, err: unknown): Outcome {
+function sendArtifactError(
+  req: Pick<Request, 'rcClient'>,
+  res: Response,
+  err: unknown,
+): Outcome {
+  // Write or owner: the daemon's own words go back. Everyone else: the fixed
+  // sentence below, which is also what this function said before #211.
+  const detail = canSeeDaemonDetail(req) ? daemonFailureDetail(err) : undefined;
   if (err instanceof UnknownSessionError) {
     // The pool's session-to-daemon map is in memory and drops the entry when
     // a session dies, so this proves the gateway has no one to ask, not that
@@ -234,25 +255,42 @@ function sendArtifactError(res: Response, err: unknown): Outcome {
   if (status !== undefined && status >= 400 && status < 500) {
     res.status(status).json({
       error:
-        code === 'VALIDATION_FAILED'
+        detail?.message ??
+        (code === 'VALIDATION_FAILED'
           ? field
             ? `The daemon refused the ${field} field`
             : 'The daemon refused this artifact'
-          : 'The daemon refused this request',
+          : 'The daemon refused this request'),
       code: code ?? (status === 404 ? 'session_not_found' : 'daemon_rejected'),
       ...(field ? { field } : {}),
     });
     return 'rejected';
   }
   if (status === 503 && code !== undefined) {
-    res
-      .status(503)
-      .json({ error: 'The daemon could not complete this change', code });
+    res.status(503).json({
+      error: detail?.message ?? 'The daemon could not complete this change',
+      code,
+    });
     return 'daemon_unavailable';
   }
-  res
-    .status(502)
-    .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+  // Anything else: a dead socket, a 5xx the daemon sent, a body that was not
+  // JSON. The owner is told which, and with what text.
+  const head = detail
+    ? [
+        detail.status !== undefined ? `HTTP ${detail.status}` : undefined,
+        detail.code,
+        detail.errorName,
+      ]
+        .filter((p) => p !== undefined)
+        .join(' ')
+    : '';
+  res.status(502).json({
+    error: detail
+      ? 'Daemon unavailable: ' +
+        [head, detail.message].filter((p) => p).join(': ')
+      : 'Daemon unavailable',
+    code: 'daemon_unavailable',
+  });
   return 'daemon_unavailable';
 }
 
@@ -291,7 +329,7 @@ export function createSessionArtifactAddRoute(
     try {
       result = await daemon.addSessionArtifact(sessionId, parsed.input);
     } catch (err) {
-      const reason = sendArtifactError(res, err);
+      const reason = sendArtifactError(req, res, err);
       void audit?.record({
         action: 'session_artifact_add_failed',
         actorTokenId,
@@ -340,7 +378,7 @@ export function createSessionArtifactRemoveRoute(
     try {
       result = await daemon.removeSessionArtifact(sessionId, artifactId);
     } catch (err) {
-      const reason = sendArtifactError(res, err);
+      const reason = sendArtifactError(req, res, err);
       void audit?.record({
         action: 'session_artifact_remove_failed',
         actorTokenId,

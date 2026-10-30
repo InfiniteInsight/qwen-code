@@ -236,7 +236,10 @@ describe('POST /session/:id/artifacts (#128)', () => {
     expect(stub?.artifactMutationCalls).toHaveLength(3);
   });
 
-  it("never echoes the daemon's message: a path the daemon could not inspect stays on the host", async () => {
+  it("a caller who is not write or owner never gets the daemon's message: a path the daemon could not inspect stays on the host", async () => {
+    // No resolved client at all, then a read-only token: both are readers, and
+    // the guard fails closed (#211 gives the daemon's words to write and owner
+    // only; the routes are mounted at write, so this is the guard, not a path).
     const base = await mountReal();
     const out = await send(URL_(base), 'POST', {
       title: 'x',
@@ -247,6 +250,92 @@ describe('POST /session/:id/artifacts (#128)', () => {
     expect(out.body['field']).toBe('workspacePath');
     expect(JSON.stringify(out.body)).not.toContain('secret');
     expect(JSON.stringify(out.body)).not.toContain('ENOENT');
+  });
+
+  it('a read-only token is a reader too: the fixed sentence, nothing the daemon said', async () => {
+    const base = await mountReal(
+      {},
+      { rcClient: { id: 'tok-r', scopes: ['session:read'] } },
+    );
+    const out = await send(URL_(base), 'POST', {
+      title: 'x',
+      workspacePath: '/home/u/secret/place',
+    });
+    expect(out.status).toBe(400);
+    expect(out.body['code']).toBe('VALIDATION_FAILED');
+    expect(JSON.stringify(out.body)).not.toContain('secret');
+    expect(JSON.stringify(out.body)).not.toContain('ENOENT');
+  });
+
+  it("an owner and a write token get the daemon's own message (#211), host path and all", async () => {
+    for (const scopes of [['owner'], ['write']]) {
+      const base = await mountReal({}, { rcClient: { id: 'tok-o', scopes } });
+      const out = await send(URL_(base), 'POST', {
+        title: 'x',
+        workspacePath: '/home/u/secret/place',
+      });
+      expect(out.status, scopes.join()).toBe(400);
+      expect(out.body['code']).toBe('VALIDATION_FAILED');
+      expect(out.body['field']).toBe('workspacePath');
+      // What the stub's daemon said, word for word, not the gateway's sentence.
+      expect(String(out.body['error'])).toContain('secret');
+      expect(String(out.body['error'])).not.toBe('The daemon refused the workspacePath field');
+      await new Promise<void>((r) => gateway!.close(() => r()));
+      await stub!.close();
+      gateway = undefined;
+      stub = undefined;
+    }
+  });
+
+  it("an owner is told which artifact belongs to another client, in the daemon's words; a reader is not", async () => {
+    const forbidden = {
+      error: 'Session artifact art-9 belongs to another client',
+      code: 'session_artifact_forbidden',
+      artifactId: 'art-9',
+    };
+    let base = await mountReal(
+      { artifactMutationStatus: 403, artifactMutationErrorBody: forbidden },
+      { rcClient: { id: 'tok-o', scopes: ['owner'] } },
+    );
+    let out = await send(URL_(base, '/art-9'), 'DELETE');
+    expect(out.status).toBe(403);
+    expect(out.body).toEqual({
+      error: 'Session artifact art-9 belongs to another client',
+      code: 'session_artifact_forbidden',
+    });
+    await new Promise<void>((r) => gateway!.close(() => r()));
+    await stub!.close();
+    base = await mountReal({ artifactMutationStatus: 403, artifactMutationErrorBody: forbidden });
+    out = await send(URL_(base, '/art-9'), 'DELETE');
+    expect(out.status).toBe(403);
+    expect(out.body).toEqual({
+      error: 'The daemon refused this request',
+      code: 'session_artifact_forbidden',
+    });
+  });
+
+  it('a transport failure names the error and its text to a write token, and only the sentence to anyone else', async () => {
+    const boom = new Error('ECONNRESET /home/u/x');
+    let base = await mountRoutes(throwing(boom), {
+      rcClient: { id: 'tok-w', scopes: ['write'] },
+    });
+    let out = await send(URL_(base), 'POST', FILE);
+    expect(out.status).toBe(502);
+    expect(out.body['code']).toBe('daemon_unavailable');
+    expect(out.body['error']).toBe('Daemon unavailable: Error: ECONNRESET /home/u/x');
+    await new Promise<void>((r) => gateway!.close(() => r()));
+    base = await mountRoutes(throwing(boom));
+    out = await send(URL_(base), 'POST', FILE);
+    expect(out.body['error']).toBe('Daemon unavailable');
+    await new Promise<void>((r) => gateway!.close(() => r()));
+    // A 500 the daemon sent: its status, code and message.
+    base = await mountRoutes(
+      throwing(new DaemonHttpError(500, { error: 'disk full', code: 'store_failed' }, 'u')),
+      { rcClient: { id: 'tok-w', scopes: ['write'] } },
+    );
+    out = await send(URL_(base, '/a'), 'DELETE');
+    expect(out.status).toBe(502);
+    expect(out.body['error']).toBe('Daemon unavailable: HTTP 500 store_failed: disk full');
   });
 
   it('passes the daemon status and code through for a refusal it makes', async () => {
