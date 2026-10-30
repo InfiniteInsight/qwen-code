@@ -204,7 +204,9 @@ export type AuditAction =
   | 'workspace_file_written'
   | 'workspace_file_edited'
   | 'workspace_file_uploaded'
-  | 'workspace_file_deleted';
+  | 'workspace_file_deleted'
+  | 'workspace_directory_created'
+  | 'workspace_directory_deleted';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -332,6 +334,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'workspace_file_edited',
   'workspace_file_uploaded',
   'workspace_file_deleted',
+  'workspace_directory_created',
+  'workspace_directory_deleted',
 ];
 
 export interface AuditEntry {

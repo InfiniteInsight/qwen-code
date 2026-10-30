@@ -109,7 +109,7 @@ export type WorkspaceFileWritesDaemon = Pick<
  * default workspace; a non-empty string is trimmed and used; anything else
  * is a 400 `invalid_workspace`.
  */
-function parseWorkspaceTarget(
+export function parseWorkspaceTarget(
   raw: unknown,
 ): { ok: true; cwd: string | undefined } | { ok: false } {
   if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
@@ -119,12 +119,12 @@ function parseWorkspaceTarget(
   return { ok: false };
 }
 
-function badRequest(res: Response, error: string, code: string): void {
+export function badRequest(res: Response, error: string, code: string): void {
   if (!res.headersSent) res.status(400).json({ error, code });
 }
 
 /** A required non-empty string, or a 400 naming the field. */
-function requireString(
+export function requireString(
   res: Response,
   raw: unknown,
   name: string,
@@ -285,7 +285,7 @@ function auditWorkspaceFile(
   });
 }
 
-function jsonBody(req: Request): Record<string, unknown> {
+export function jsonBody(req: Request): Record<string, unknown> {
   const body = req.body as unknown;
   return body && typeof body === 'object' && !Array.isArray(body)
     ? (body as Record<string, unknown>)

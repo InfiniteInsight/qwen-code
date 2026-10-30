@@ -293,6 +293,10 @@ export function createCapabilityRoute(deps: {
       // the route's own tag, so an old gateway, a reader and an old daemon
       // each see none.
       workspaceFileWrites: true,
+      // #123, directories: /rc/workspace/directory/{create,delete} are
+      // mounted. Same three-way gate as above, with the daemon's
+      // workspace_directory_create / workspace_directory_delete tags.
+      workspaceDirectoryWrites: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
