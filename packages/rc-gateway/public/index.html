@@ -1202,6 +1202,43 @@
         color: var(--g1-ink-hi);
         font-size: 14px;
       }
+      /* #212. The conversation's crashed or lost tab on the host: what
+         happened, a muted note, then Reopen, Dismiss and Remove, 44px each. */
+      #h1-host-tab[hidden] {
+        display: none;
+      }
+      #host-tab-state {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        text-align: right;
+        color: var(--g1-danger);
+      }
+      #h1-host-tab[data-state='ghost'] #host-tab-state {
+        color: var(--g1-warn);
+      }
+      #host-tab-note {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #host-tab-note[hidden] {
+        display: none;
+      }
+      #h1-host-tab .ht-acts {
+        display: flex;
+        gap: 8px;
+      }
+      #h1-host-tab .ht-acts button {
+        flex: 1 1 0;
+        min-height: 44px;
+        padding: 0 12px;
+        border-radius: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+      }
+      #h1-host-tab #host-tab-remove {
+        color: var(--g1-danger);
+      }
       #wt-reset {
         align-self: flex-start;
         min-height: 40px;
@@ -2175,6 +2212,23 @@
         height: 8px;
         border-radius: 50%;
         background: #3fb950;
+      }
+      /* #212. The conversation's tab on the host crashed or was lost: a word
+         in a pill after the title, red for crashed, amber for lost. It never
+         shrinks; the title gives way instead. */
+      #past-list .s .tabbadge {
+        flex: none;
+        padding: 0 6px;
+        border: 1px solid currentColor;
+        border-radius: 8px;
+        font-size: 11px;
+        line-height: 16px;
+        font-weight: 600;
+        white-space: nowrap;
+        color: var(--g1-danger);
+      }
+      #past-list .s .tabbadge[data-state='ghost'] {
+        color: var(--g1-warn);
       }
       #past-list .s .sub {
         font-size: 13px;
@@ -8810,6 +8864,282 @@
         hostActsSheet.hidden = list.length === 0;
       }
 
+      // #212. The host's tabs (GET /rc/host/tabs). A conversation whose
+      // terminal tab on the host ended without /quit (crashed) or vanished
+      // without a word (lost) gets a badge on its row in the list, and the
+      // status sheet a line with Reopen, Dismiss and Remove. Owner and write
+      // tokens only, on a gateway that reports `hostTabs`: a reader and an
+      // older gateway never read the route and see nothing. Read as the list
+      // and the sheet open, every 30 s while the page is visible, and when the
+      // owner event stream carries a tab's start or end.
+      const hostTabs = {
+        bySession: new Map(), // sessionId -> the crashed or lost record shown
+        launcher: null, // { state, seenMsAgo } from the last read
+        autoReopen: false,
+        seq: 0, // a read that a later one overtook is dropped
+        busy: new Map(), // tabId -> 'reopen' | 'dismiss' | 'remove'
+        sig: '', // what the list's badges were drawn from
+        pollId: null,
+      };
+      const HOST_TAB_POLL_MS = 30000;
+      function hostTabsOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.hostTabs === true && rc.writeScope === true);
+      }
+      // The record a badge and the sheet line are drawn from, or null.
+      function hostTabFor(sessionId) {
+        return (sessionId && hostTabs.bySession.get(sessionId)) || null;
+      }
+      function hostTabBadgeText(t) {
+        return t.state === 'ghost' ? 'tab lost' : 'tab crashed';
+      }
+      function hostTabSig() {
+        return JSON.stringify(
+          [...hostTabs.bySession.values()].map((t) => [
+            t.sessionId,
+            t.tabId,
+            t.state,
+          ]),
+        );
+      }
+      async function readHostTabs() {
+        if (!token() || !hostTabsOn()) {
+          if (hostTabs.bySession.size) {
+            hostTabs.bySession = new Map();
+            renderHostTabs();
+          }
+          return;
+        }
+        const seq = ++hostTabs.seq;
+        let res;
+        try {
+          res = await fetch('/rc/host/tabs', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+        } catch {
+          return; // a blip keeps what is drawn
+        }
+        if (seq !== hostTabs.seq) return;
+        if (res.status === 404 || res.status === 403 || res.status === 401) {
+          hostTabs.bySession = new Map();
+          renderHostTabs();
+          return;
+        }
+        if (!res.ok) return;
+        const body = await res.json().catch(() => null);
+        if (seq !== hostTabs.seq) return;
+        if (!body || !Array.isArray(body.tabs)) return;
+        const by = new Map();
+        for (const t of body.tabs) {
+          if (!t || typeof t.tabId !== 'string') continue;
+          if (typeof t.sessionId !== 'string') continue;
+          // Live, quit, closed and replaced are shown nowhere; a dismissed
+          // record keeps its place on the host and loses its badge here.
+          if (t.state !== 'crashed' && t.state !== 'ghost') continue;
+          if (t.dismissed === true) continue;
+          const prev = by.get(t.sessionId);
+          if (!prev || (t.startedAt || 0) > (prev.startedAt || 0)) {
+            by.set(t.sessionId, t);
+          }
+        }
+        hostTabs.bySession = by;
+        hostTabs.launcher =
+          body.launcher && typeof body.launcher.state === 'string'
+            ? body.launcher
+            : null;
+        hostTabs.autoReopen = body.autoReopen === true;
+        renderHostTabs();
+      }
+      function startHostTabsPoll() {
+        if (!hostTabsOn()) return;
+        void readHostTabs();
+        if (hostTabs.pollId) return;
+        hostTabs.pollId = setInterval(() => {
+          if (!document.hidden) void readHostTabs();
+        }, HOST_TAB_POLL_MS);
+      }
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && hostTabs.pollId) void readHostTabs();
+      });
+      // Redraw what shows a tab: the list's rows only when a badge changed
+      // (the list has its own redraws), and the sheet's line always.
+      function renderHostTabs() {
+        const sig = hostTabSig();
+        if (sig !== hostTabs.sig) {
+          hostTabs.sig = sig;
+          if (listShown()) renderList();
+        }
+        renderHostTabLine();
+      }
+
+      // The sheet's line: one node for the life of the page, re-appended by
+      // renderFooter like the host actions, so a verb in flight keeps its
+      // words across the sheet's redraws.
+      const hostTabSheet = document.createElement('div');
+      hostTabSheet.id = 'h1-host-tab';
+      hostTabSheet.className = 'sh-col';
+      hostTabSheet.hidden = true;
+      {
+        const head = document.createElement('div');
+        head.className = 'sh-row';
+        const lbl = document.createElement('span');
+        lbl.className = 'sh-lbl';
+        lbl.textContent = 'Host tab';
+        const state = document.createElement('span');
+        state.id = 'host-tab-state';
+        head.append(lbl, state);
+        const note = document.createElement('div');
+        note.id = 'host-tab-note';
+        const acts = document.createElement('div');
+        acts.className = 'ht-acts';
+        for (const [id, text] of [
+          ['host-tab-reopen', 'Reopen'],
+          ['host-tab-dismiss', 'Dismiss'],
+          ['host-tab-remove', 'Remove'],
+        ]) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.id = id;
+          b.textContent = text;
+          acts.append(b);
+        }
+        hostTabSheet.append(head, note, acts);
+      }
+      // What happened to the tab, in words, with the exit code when there is
+      // one: the wrapper's code classes (hostTabs.ts on the gateway).
+      function hostTabStateWords(t) {
+        if (t.state === 'ghost') return 'lost: no process on the host shows it';
+        const code = Number.isInteger(t.exitCode) ? t.exitCode : null;
+        if (code === null) return 'crashed: its process went without a word';
+        const why =
+          t.reason === 'killed'
+            ? 'ended by SIGTERM'
+            : t.reason === 'interrupted'
+              ? 'stopped with Ctrl-C while re-attaching'
+              : t.reason === 'daemon_gone'
+                ? 'ended when its daemon went'
+                : 'crashed';
+        return why + ' (exit ' + code + ')';
+      }
+      function hostTabWhen(ms) {
+        return Number.isFinite(ms) ? relativeTime(new Date(ms).toISOString()) : '';
+      }
+      function launcherWords(state, seenMsAgo) {
+        const ago = Math.round((seenMsAgo || 0) / 1000);
+        if (state === 'stale') {
+          return 'the launcher stopped checking in ' + ago + ' s ago';
+        }
+        if (state === 'never') return 'no launcher has ever checked in here';
+        return 'the launcher cannot be read';
+      }
+      function renderHostTabLine() {
+        const t = hostTabsOn() ? hostTabFor(watchedSessionId) : null;
+        hostTabSheet.hidden = !t;
+        if (!t) return;
+        hostTabSheet.dataset.state = t.state;
+        // When it ended, or, for a tab that went without a word, when the
+        // gateway first found it gone.
+        const ended = t.endedAt != null;
+        const when = hostTabWhen(ended ? t.endedAt : t.lostAt);
+        h1Text(
+          hostTabSheet.querySelector('#host-tab-state'),
+          hostTabStateWords(t) +
+            (when ? (ended ? ', ' : ', noticed ') + when : ''),
+        );
+        const notes = [];
+        if (t.autoReopenedAt != null) notes.push('reopened automatically once');
+        else if (t.reopenedAt != null) {
+          notes.push('reopen asked ' + hostTabWhen(t.reopenedAt));
+        }
+        const l = hostTabs.launcher;
+        if (l && l.state !== 'live') {
+          notes.push(launcherWords(l.state, l.seenMsAgo) + ', so Reopen cannot open a tab now');
+        }
+        const note = hostTabSheet.querySelector('#host-tab-note');
+        h1Text(note, notes.join('; '));
+        note.hidden = notes.length === 0;
+        const busy = hostTabs.busy.get(t.tabId) || '';
+        const btn = (id) => hostTabSheet.querySelector('#' + id);
+        h1Text(btn('host-tab-reopen'), busy === 'reopen' ? 'reopening…' : 'Reopen');
+        h1Text(btn('host-tab-dismiss'), busy === 'dismiss' ? 'dismissing…' : 'Dismiss');
+        h1Text(btn('host-tab-remove'), busy === 'remove' ? 'removing…' : 'Remove');
+        for (const id of ['host-tab-reopen', 'host-tab-dismiss', 'host-tab-remove']) {
+          btn(id).disabled = !!busy;
+        }
+      }
+      async function hostTabVerb(verb) {
+        const t = hostTabFor(watchedSessionId);
+        if (!t || hostTabs.busy.has(t.tabId)) return;
+        if (
+          verb === 'remove' &&
+          !window.confirm(
+            'Remove the record of this crashed tab? The conversation stays; ' +
+              'only the note that its tab on the host ended goes.',
+          )
+        ) {
+          return;
+        }
+        hostTabs.busy.set(t.tabId, verb);
+        renderHostTabLine();
+        const path =
+          '/rc/host/tabs/' +
+          encodeURIComponent(t.tabId) +
+          (verb === 'remove' ? '' : '/' + verb);
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch(path, {
+            method: verb === 'remove' ? 'DELETE' : 'POST',
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        hostTabs.busy.delete(t.tabId);
+        const did = verb === 'reopen' ? 'reopen of the host tab' : verb + ' of the host tab';
+        if (threw) {
+          renderHostTabLine();
+          setStatus(failureOf(threw, did));
+          return;
+        }
+        if (verb === 'reopen') {
+          if (res.status === 202) {
+            const live = body && body.launcherState === 'live';
+            setStatus(
+              live
+                ? 'tab reopening on the host…'
+                : 'tab queued on the host; ' +
+                    launcherWords(body && body.launcherState, body && body.launcherSeenMsAgo),
+            );
+          } else if (res.status === 200 && body && body.alreadyMirrored) {
+            setStatus('already open on the host');
+          } else if (body && body.code === 'launcher_unavailable') {
+            setStatus(
+              'no tab reopened: ' +
+                launcherWords(body.launcherState, body.launcherSeenMsAgo),
+            );
+          } else {
+            setStatus(did + ' failed: ' + failureDetailLine(res, body));
+          }
+        } else if (res.ok) {
+          // Gone from here at once; the next read agrees.
+          hostTabs.bySession.delete(t.sessionId);
+        } else {
+          setStatus(did + ' failed: ' + failureDetailLine(res, body));
+        }
+        renderHostTabs();
+        await readHostTabs();
+      }
+      hostTabSheet.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b || b.disabled) return;
+        if (b.id === 'host-tab-reopen') void hostTabVerb('reopen');
+        else if (b.id === 'host-tab-dismiss') void hostTabVerb('dismiss');
+        else if (b.id === 'host-tab-remove') void hostTabVerb('remove');
+      });
+
       // #184. The inspector sheet's rows, in #session-footer, the drawer
       // band's old box: the model (a button opening the picker when there is
       // more than one), the approval mode as a segmented control, the context
@@ -9054,6 +9384,9 @@
         }
         // #192: the host actions under the folder, the same node each time.
         f.append(hostActsSheet);
+        // #212: this conversation's crashed or lost tab on the host, if any.
+        renderHostTabLine();
+        f.append(hostTabSheet);
         if (keep) f.append(keep);
         f.style.display = '';
         if (hadFocus && hadFocus.isConnected && document.activeElement !== hadFocus) {
@@ -9160,6 +9493,7 @@
         closeH1Menu(false);
         if (paneLayout()) setMoreOpen(false);
         void readHostActions(); // #192: read as it opens, not on a timer
+        void readHostTabs(); // #212: and the tab line with it
       }
       $('h1-status').addEventListener('click', () =>
         setSheetOpen($('h1-sheet').hidden),
@@ -16444,6 +16778,7 @@
             showApp();
             startHealthPoll();
             startPastConvosPoll(); // issue #35: keep the past-conversations list fresh
+            startHostTabsPoll(); // #212: crashed and lost tabs on the host
             startPendingCardsPoll(); // issue #46: recover lost question cards while watching
             applyWorkspaceControlGating();
             renderRecentWorkspaces();
@@ -16562,6 +16897,7 @@
           showApp();
           startHealthPoll();
           startPastConvosPoll(); // issue #35: same as the auth-gate path
+          startHostTabsPoll(); // #212: same as the auth-gate path
           startPendingCardsPoll(); // issue #46: same as the auth-gate path
           // authGate() (above) only populates the directory picker for a
           // token that ALREADY existed at script load — a fresh pair (QR or
@@ -20537,6 +20873,7 @@
         renderList();
         void refreshArchivedCount(true);
         void refreshCatalog(true); // #132
+        void readHostTabs(); // #212: the rows' tab badges, read as it opens
         // #190: read now rather than on the 30 s tick, so a conversation
         // opened in another folder since shows its live dot as the list opens.
         if (curDirPath) void refreshPastConversations(curDirPath);
@@ -21281,6 +21618,18 @@
             dot.setAttribute('aria-label', 'open');
             dot.title = 'open on the host';
             head.appendChild(dot);
+          }
+          // #212: its terminal tab on the host crashed or was lost. Words,
+          // not a colour alone, and part of the row's name for a screen
+          // reader; the sheet's Host tab line has the verbs.
+          const tab = hostTabsOn() ? hostTabFor(s.sessionId) : null;
+          if (tab) {
+            const badge = document.createElement('span');
+            badge.className = 'tabbadge';
+            badge.dataset.state = tab.state;
+            badge.textContent = hostTabBadgeText(tab);
+            badge.title = hostTabStateWords(tab);
+            head.appendChild(badge);
           }
           row.appendChild(head);
           // #193: which folder it is in, the second line, in the folder
@@ -23632,6 +23981,14 @@
               }
               if (frame.type && frame.type !== 'audit') continue;
               const rec = frame.record || frame;
+              // #212: a tab started or ended on the host; the badges follow.
+              if (
+                typeof rec.action === 'string' &&
+                (rec.action.startsWith('host_tab_') ||
+                  rec.action === 'host_attached')
+              ) {
+                void readHostTabs();
+              }
               const parts = [rec.ts, rec.action];
               if (rec.actorTokenId) parts.push('by=' + rec.actorTokenId);
               if (rec.target) parts.push('target=' + rec.target);

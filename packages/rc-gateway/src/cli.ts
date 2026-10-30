@@ -137,6 +137,13 @@ import {
   defaultHostAttachedWorkspacesPath,
 } from './hostAttachedWorkspaces.js';
 import {
+  HostTabRegistry,
+  defaultHostTabsPath,
+  hostTabEndsDir,
+} from './hostTabs.js';
+import { LAUNCHER_STALE_MS } from './routes/terminals.js';
+import { HOST_TAB_SWEEP_MS } from './routes/hostTabs.js';
+import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
   loadRateTableFile,
@@ -404,6 +411,16 @@ export interface ServeOptions {
    */
   walDir?: string;
   /**
+   * `--reopen-crashed-tabs` (env `QWEN_RC_REOPEN_CRASHED_TABS=1`, #212):
+   * reopen a host tab that crashed (ended without /quit and without its tab
+   * being closed, or vanished without a word) by queueing a terminal request
+   * for its conversation, as the phone's Reopen does. Off by default. Once per
+   * tab record, never for a tab the user quit, closed or interrupted, never
+   * for a tab the automatic reopen itself opened, only for a crash in the last
+   * ten minutes, and only while the launcher's heartbeat is live.
+   */
+  reopenCrashedTabs?: boolean;
+  /**
    * `--no-wal` (env `QWEN_RC_NO_WAL=1`): run WAL-dark, the shape before #174:
    * one daemon subscription per watcher, raw ids, no durable replay. Wins
    * over `--wal-dir`.
@@ -549,6 +566,13 @@ export function formatSessionWalLine(dir: string | undefined): string {
   return dir === undefined
     ? 'session WAL: off (--no-wal): one daemon subscription per watcher, no durable replay'
     : `session WAL: ${join(dir, 'wal')} (--wal-dir ${dir}; one shared subscription per session, durable replay; --no-wal to turn off)`;
+}
+
+/** The boot line saying whether crashed host tabs are reopened on their own (#212). */
+export function formatHostTabsLine(autoReopen: boolean): string {
+  return autoReopen
+    ? 'host tabs: tracked; a crashed tab is reopened automatically once, while the launcher is live (--reopen-crashed-tabs)'
+    : 'host tabs: tracked; a crashed tab is reopened from the phone (--reopen-crashed-tabs to reopen automatically)';
 }
 
 /** Boot the daemon + gateway and print the owner pairing code. */
@@ -1017,6 +1041,14 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const hostAttachToken = await loadOrCreateLocalToken(
     hostAttachTokenPath(join(homedir(), '.qwen', 'rc')),
   );
+  // #212: one record per `qwen-rc attach` tab, so a tab that ends without
+  // /quit shows on the phone as crashed. An open record whose wrapper is gone
+  // stays a ghost for one launcher stale window (the time a closing tab's end
+  // report takes to land), then counts as crashed.
+  const hostTabs = await HostTabRegistry.open(defaultHostTabsPath(homedir()), {
+    ghostGraceMs: LAUNCHER_STALE_MS,
+    endsDir: hostTabEndsDir(join(homedir(), '.qwen', 'rc')),
+  });
   // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
   // function is handed to both `agents.costFor` and `review.costFor` so the
   // two control planes never disagree on a session's cost.
@@ -1129,6 +1161,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     promptQueue,
     agentLifecycle,
     reviewLifecycle,
+    hostTabSweep,
   } = createGatewayApp({
     daemon: daemonPool,
     store,
@@ -1259,6 +1292,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     hostAttachedWorkspaces: HostAttachedWorkspaces.open(
       defaultHostAttachedWorkspacesPath(homedir()),
     ),
+    hostTabs: {
+      registry: hostTabs,
+      autoReopen: opts.reopenCrashedTabs === true,
+    },
   });
   // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
   // app's audit recorder (constructed inside createGatewayApp, so the pool
@@ -1368,6 +1405,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     HEARTBEAT_INTERVAL_SEC * 1000,
   );
   bridgeReaper.unref();
+
+  // #212: the automatic reopen of crashed host tabs, when it is on. A pass at
+  // boot catches the tabs a reboot or a gateway outage took; unref'd, like
+  // the reaper above.
+  // eslint-disable-next-line no-console
+  console.log(formatHostTabsLine(opts.reopenCrashedTabs === true));
+  if (opts.reopenCrashedTabs && hostTabSweep) {
+    void hostTabSweep();
+    setInterval(() => void hostTabSweep(), HOST_TAB_SWEEP_MS).unref();
+  }
 
   // Session WAL retention (#174): a session's own log is bounded only when it
   // is appended to, so the directory is swept at boot and hourly. A session
@@ -2315,6 +2362,9 @@ export function parseServeFlags(argv: string[]): ServeOptions {
     // an empty environment value counts as unset.
     walDir: walDirFlag ?? (walDirEnv ? walDirEnv : undefined),
     noWal: argv.includes('--no-wal') || process.env.QWEN_RC_NO_WAL === '1',
+    reopenCrashedTabs:
+      argv.includes('--reopen-crashed-tabs') ||
+      process.env.QWEN_RC_REOPEN_CRASHED_TABS === '1',
     walRetentionDays: parsePositiveIntFlag(
       walRetentionFlag !== undefined
         ? '--wal-retention-days'
@@ -2352,6 +2402,7 @@ if (process.argv[2] === 'serve') {
   //        --max-attachment-bytes <n> --qwen-bin <path>
   //        --wal-dir <dir> (WAL in <dir>/wal/, default ~/.qwen/rc) --no-wal
   //        --wal-retention-days <n> --wal-max-mb <n>
+  //        --reopen-crashed-tabs (env QWEN_RC_REOPEN_CRASHED_TABS=1, #212)
   //        --acme-domain <d[,d]> --acme-email <e>
   //        --acme-dns-provider <route53|cloudflare> --acme-staging --acme-directory <url>
   let serveOpts: ServeOptions;
