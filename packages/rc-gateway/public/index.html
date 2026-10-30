@@ -14817,7 +14817,15 @@
             },
           });
         } catch (e) {
-          return { ok: false, status: 0, code: 'network', error: 'the gateway did not answer' };
+          // #211: `error` stays the short word callers compare against; `detail`
+          // names the origin and the error for the line a sheet prints.
+          return {
+            ok: false,
+            status: 0,
+            code: 'network',
+            error: 'the gateway did not answer',
+            detail: networkFailureLine(e),
+          };
         }
         let body = null;
         try {
@@ -14836,6 +14844,8 @@
           status: res.status,
           code: body && typeof body.code === 'string' ? body.code : String(res.status),
           error: body && typeof body.error === 'string' ? body.error : '',
+          // #211: status, code, message, the daemon's answer and the next step.
+          detail: failureDetailLine(res, body),
         };
       }
       function orgMark(c) {
@@ -15568,7 +15578,7 @@
       function goalReadNote(r) {
         if (r.code === 'goal_unsupported') return 'This daemon keeps no goals.';
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
-        return 'The goal could not be read: ' + (r.error || r.code);
+        return 'The goal could not be read: ' + rcDetail(r);
       }
       // One read at a time per session; what it finds is what the page holds.
       function goalRead(sid) {
@@ -15651,7 +15661,7 @@
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.code === 'invalid_goal') return r.error || 'That is not a goal.';
         if (r.status === 403) return 'Changing the goal needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       async function goalSet() {
         if (goalSheet.busy) return;
@@ -18878,7 +18888,7 @@
               ? r.error || 'Open this conversation before reading its artifacts.'
               : r.code === 'session_not_found'
                 ? 'The daemon does not have this conversation open.'
-                : 'The artifacts could not be read: ' + (r.error || r.code);
+                : 'The artifacts could not be read: ' + rcDetail(r);
         }
         renderArtSheet();
       }
@@ -18964,7 +18974,8 @@
         if (e && e.code === 'artifact_snapshot_unsupported') return 'This daemon cannot read saved webpages.';
         if (e && e.code === 'session_not_loaded') return e.error || 'Open this conversation before reading its artifacts.';
         if (status === 403) return 'Opening a saved webpage needs a token that can write.';
-        return 'Not opened: ' + ((e && (e.error || e.code)) || status);
+        // #211: status, code and message, not whichever of them came first.
+        return 'Not opened: ' + failureDetailLine({ status }, e);
       }
       // Open. The text never enters this document and is never navigated to
       // as HTML: a blob: URL takes this page's origin, so an HTML blob opened
@@ -18992,10 +19003,13 @@
             { headers: { Authorization: 'Bearer ' + token() } },
           );
           bytes = res.ok ? await res.arrayBuffer() : null;
-        } catch {
+        } catch (e) {
           if (gen !== artSheet.gen || !artSheet.open) return;
           artSheet.busy = false;
-          artSheet.note = 'The gateway did not answer.';
+          artSheet.note = describeFailure(null, null, {
+            did: 'opening ' + title,
+            err: e,
+          });
           artSheet.tone = 'err';
           renderArtSheet();
           return;
@@ -19040,7 +19054,7 @@
         if (r.code === 'artifact_mutations_unsupported') return 'This daemon cannot change artifacts.';
         if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
         if (r.status === 403) return 'Changing artifacts needs a token that can write.';
-        return 'Not changed: ' + (r.error || r.code);
+        return 'Not changed: ' + rcDetail(r);
       }
       // A 200 can still be no change: the daemon keeps a live artifact whose
       // removal it could not persist, and says so in `warnings`.
@@ -22304,7 +22318,10 @@
         } catch (e) {
           // Still cannot interrupt a working conversation, but it is said: this
           // is the gateway being unreachable, not the feature declining.
-          setStatus('no terminal on the host: the gateway did not answer');
+          setStatus(
+            'no terminal on the host: the gateway did not answer, ' +
+              networkFailureLine(e),
+          );
         }
       }
 

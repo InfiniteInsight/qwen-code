@@ -30779,6 +30779,47 @@ PAGE_SCENARIOS.push({
   });
 }
 
+PAGE_SCENARIOS.push({
+  name: 'P517 the goal and artifacts sheets print status, code and message for a read or change the daemon refuses, and name the origin when the gateway does not answer',
+  waitView: false,
+  run: async ({ page, viewer }) => {
+    await page.waitForFunction('caps && caps.remoteControl && caps.remoteControl.writeScope === true', null, { timeout: 15_000 });
+    await page.route(/\/session\/[^/]+\/goal$/, (route) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'goal store is locked', code: 'goal_store_failed' }) }),
+    );
+    await page.route(/\/session\/[^/]+\/artifacts$/, (route) =>
+      route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: 'Daemon unavailable', code: 'daemon_unavailable', daemon: { status: 500, message: 'artifact index is corrupt' } }) }),
+    );
+    const lines = (await page.evaluate(async () => {
+      const goal = await convCall('/session/s1/goal');
+      const arts = await convCall('/session/s1/artifacts');
+      return {
+        goalRead: goalReadNote(goal),
+        goalChange: goalRefusalText(goal),
+        artRead: 'The artifacts could not be read: ' + rcDetail(arts),
+        artChange: artRefusalText(arts),
+        artOpen: artOpenRefusal(500, { error: 'snapshot store is offline', code: 'store_offline' }),
+      };
+    })) as Record<string, string>;
+    const need: Array<[string, string[]]> = [
+      ['goalRead', ['goal_store_failed', 'HTTP 500', 'goal store is locked']],
+      ['goalChange', ['goal_store_failed', 'HTTP 500', 'goal store is locked']],
+      ['artRead', ['daemon_unavailable', 'HTTP 502', 'the daemon answered HTTP 500: artifact index is corrupt']],
+      ['artChange', ['daemon_unavailable', 'HTTP 502', 'artifact index is corrupt']],
+      ['artOpen', ['store_offline', 'HTTP 500', 'snapshot store is offline']],
+    ];
+    for (const [key, wants] of need) {
+      for (const want of wants) expect(lines[key]!.includes(want), `${key} lacks ${JSON.stringify(want)}: ${JSON.stringify(lines[key])}`);
+    }
+    await page.unroute(/\/session\/[^/]+\/goal$/);
+    await page.route(/\/session\/[^/]+\/goal$/, (route) => route.abort('connectionrefused'));
+    const dead = (await page.evaluate(async () => goalReadNote(await convCall('/session/s1/goal')))) as string;
+    const origin = new URL(viewer.url).origin;
+    expect(dead.includes(`could not reach the gateway at ${origin}`) && dead.includes('TypeError'), `the dead-network goal line is ${JSON.stringify(dead)}`);
+    return `${JSON.stringify(lines)}; dead: ${JSON.stringify(dead)}`;
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];
