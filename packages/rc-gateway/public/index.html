@@ -2888,6 +2888,16 @@
         text-overflow: ellipsis;
         font-weight: 600;
       }
+      /* #208. The model the agent runs with, muted, after its type. It gives
+         way to the name first (a far higher shrink factor, so the name keeps its width), then ellipsizes. */
+      #agents-sheet .ag-model {
+        flex: 0 100000 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+      }
       #agents-sheet .ag-st,
       #agents-sheet .ag-clock {
         flex: none;
@@ -12748,8 +12758,9 @@
         return v.state || '';
       }
       // What the row says under its name: what it used, if the daemon said,
-      // and whose child it is. Absent is not zero: a finished agent's sidecar
-      // carries no stats, and that row says nothing rather than 0 tok.
+      // and whose child it is. Absent is not zero: a daemon that predates #208,
+      // or a sidecar that never recorded stats, leaves the row saying nothing
+      // rather than 0 tok.
       function agentFacts(v) {
         const bits = [];
         const st = v.row && v.row.stats;
@@ -12777,6 +12788,9 @@
         dot.dataset.state = v.state;
         l1.appendChild(dot);
         l1.appendChild(agentEl('span', 'ag-name', v.name));
+        // #208. Absent on a daemon that predates the field: no empty span.
+        const model = v.row && strOr(v.row.model, '');
+        if (model) l1.appendChild(agentEl('span', 'ag-model', model));
         l1.appendChild(agentEl('span', 'ag-st', agentStateWord(v)));
         l1.appendChild(agentClock(v));
         return l1;
