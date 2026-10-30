@@ -4256,7 +4256,12 @@ export async function startStubDaemon(
     const id = existing ? String(existing['id']) : `art-stub-${(s128.seq += 1)}`;
     const artifact: Record<string, unknown> = {
       id,
-      kind: body['kind'] ?? 'file',
+      // The bridge's inferKind when none is sent: a url is a link, a
+      // workspace path a file (the daemon also reads its extension), anything
+      // else other.
+      kind:
+        body['kind'] ??
+        (body['url'] ? 'link' : body['workspacePath'] ? 'file' : 'other'),
       storage:
         body['storage'] ??
         (body['workspacePath']
