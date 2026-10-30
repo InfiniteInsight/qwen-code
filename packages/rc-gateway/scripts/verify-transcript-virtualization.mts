@@ -10509,7 +10509,9 @@ PAGE_SCENARIOS.push({
     // OpenStringUnion), so a kind this page has never heard of has to arrive
     // with the daemon's own word on it. Dropping the row or relabeling it as
     // 'other' would hide a produced file from the only screen that lists them.
-    // The third entry is `missing`, which has nothing to save.
+    // The third entry is `missing`. #127 moved the rows into the Artifacts
+    // sheet, where Open is offered on a saved webpage (kind html in published
+    // storage, the one body the content read serves) and on nothing else.
     stub: {
       artifactListResult: {
         v: 1,
@@ -10520,6 +10522,7 @@ PAGE_SCENARIOS.push({
           {
             id: 'a1',
             kind: 'html',
+            storage: 'published',
             status: 'available',
             title: 'paging notes',
             sizeBytes: 2048,
@@ -10544,15 +10547,15 @@ PAGE_SCENARIOS.push({
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await press(page, 'artifacts', 'artifacts-toggle');
-      await drawn(page, 'artifacts-list');
+      await page.waitForFunction(
+        () => document.querySelectorAll('#art-list .art-row').length === 3,
+        null,
+        { timeout: 20_000 },
+      );
       const rows = await page.evaluate(() =>
-        Array.from(document.getElementById('artifacts-list')?.children || []).map(
+        Array.from(document.querySelectorAll('#art-list .art-hd')).map(
           (c) => (c.textContent || '').trim(),
         ),
-      );
-      const buttons = await page.evaluate(
-        () =>
-          document.querySelectorAll('#artifacts-list button').length,
       );
       expect(
         rows.length === 3,
@@ -10570,13 +10573,18 @@ PAGE_SCENARIOS.push({
         rows.some((r) => r.includes('gone.txt') && r.includes('missing')),
         `a missing artifact did not say so (${JSON.stringify(rows)})`,
       );
-      // Two available rows get a Save; the missing one must not, since the
-      // content read could only answer with the daemon's refusal.
+      // Each row's actions, one row open at a time: Open on the saved
+      // webpage alone, since the content read serves nothing else.
+      const opens: string[] = [];
+      for (const id of ['a1', 'a2', 'a3']) {
+        await page.click(`#art-list .art-hd[data-id="${id}"]`);
+        if (await page.isVisible(`#art-list .art-open[data-id="${id}"]`)) opens.push(id);
+      }
       expect(
-        buttons === 2,
-        `Save buttons did not track availability (${buttons} for ${JSON.stringify(rows)})`,
+        opens.join() === 'a1',
+        `Open was offered on ${JSON.stringify(opens)}, not on the saved webpage alone`,
       );
-      return `3 rows drawn, unknown kind kept, ${buttons} Save buttons`;
+      return `3 rows drawn, unknown kind kept, Open on ${opens.join()} only`;
     },
   });
 
@@ -10588,7 +10596,8 @@ PAGE_SCENARIOS.push({
     // thing that must never happen is the text landing in the DOM. A row that
     // rendered it would pass every other scenario in this file. It carries its
     // own one-row envelope so the asserted file name is this scenario's title
-    // rather than whatever the stub happens to default to.
+    // rather than whatever the stub happens to default to; the extension is
+    // the one the daemon's Content-Disposition names.
     stub: {
       artifactListResult: {
         v: 1,
@@ -10599,6 +10608,7 @@ PAGE_SCENARIOS.push({
           {
             id: 'a1',
             kind: 'html',
+            storage: 'published',
             status: 'available',
             title: 'paging notes',
             sizeBytes: 2048,
@@ -10609,27 +10619,26 @@ PAGE_SCENARIOS.push({
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await press(page, 'artifacts', 'artifacts-toggle');
-      await drawn(page, 'artifacts-list');
+      await page.waitForSelector('#art-list .art-hd[data-id="a1"]');
+      await page.click('#art-list .art-hd[data-id="a1"]');
       const dl = page
         .waitForEvent('download', { timeout: 15_000 })
         .catch(() => null);
-      await page.evaluate(() => {
-        const b = document.querySelector(
-          '#artifacts-list button',
-        ) as HTMLButtonElement | null;
-        b?.click();
-      });
-      const note = await drawn(page, 'artifacts-note');
-      const download = await dl;
-      const body = await page.evaluate(
-        () => document.getElementById('artifacts')?.innerHTML ?? '',
+      await page.click('#art-list .art-open[data-id="a1"]');
+      await page.waitForFunction(() =>
+        (document.getElementById('art-note')?.textContent || '').startsWith('Downloaded '),
       );
+      const note = await page.evaluate(
+        () => (document.getElementById('art-note')?.textContent || '').trim(),
+      );
+      const download = await dl;
+      const body = await page.evaluate(() => document.body.innerHTML);
       expect(
-        note.startsWith('saved '),
+        note.startsWith('Downloaded '),
         `a save did not report the file (${JSON.stringify(note)})`,
       );
       expect(
-        download,
+        download !== null,
         'the save offered no download',
       );
       expect(
@@ -10642,8 +10651,8 @@ PAGE_SCENARIOS.push({
       );
       const name = download ? download.suggestedFilename() : '';
       expect(
-        name === 'paging notes',
-        `download name was not the title (${JSON.stringify(name)})`,
+        name === 'paging notes.html',
+        `download name was not the title with the daemon's extension (${JSON.stringify(name)})`,
       );
       return `saved as ${JSON.stringify(name)}, body never entered the DOM`;
     },
@@ -10653,18 +10662,21 @@ PAGE_SCENARIOS.push({
     name: 'P87 a refused artifact list names its reason instead of an empty box',
     waitView: false,
     // The gateway answers this route with several different failures and the
-    // box has nowhere to show the difference except this note. An empty box
-    // and a refusal are different facts to an operator.
+    // sheet has nowhere to show the difference except this note. An empty
+    // list and a refusal are different facts to an operator. A daemon 404 is
+    // the gateway's session_not_found.
     stub: { artifactListStatus: 404 },
     run: async ({ page, viewer }) => {
       await watch(page, viewer.sessionId);
       await press(page, 'artifacts', 'artifacts-toggle');
-      await drawn(page, 'artifacts-note');
+      await page.waitForFunction(() =>
+        /daemon/.test(document.getElementById('art-list-note')?.textContent || ''),
+      );
       const note = await page.evaluate(
-        () => (document.getElementById('artifacts-note')?.textContent ?? '').trim(),
+        () => (document.getElementById('art-list-note')?.textContent ?? '').trim(),
       );
       expect(
-        note.includes('artifacts failed'),
+        note === 'The daemon does not have this conversation open.',
         `a refused list did not say so (${JSON.stringify(note)})`,
       );
       return `a refused list reports ${JSON.stringify(note)}`;
@@ -14581,15 +14593,17 @@ PAGE_SCENARIOS.push({
         const chooser = page.waitForEvent('filechooser', { timeout: 5_000 });
         await page.click('#attach');
         await chooser;
-        for (const [btn, box] of [
-          ['stored-toggle', 'stored'],
-          ['artifacts-toggle', 'artifacts'],
+        // #127: Artifacts opens a sheet over the screen, which its own
+        // close shuts, rather than a box its pill toggles.
+        for (const [btn, box, shut] of [
+          ['stored-toggle', 'stored', 'stored-toggle'],
+          ['artifacts-toggle', 'art-sheet', 'art-close'],
         ] as const) {
           await page.click('#' + btn);
           await page.waitForSelector('#' + box, { state: 'visible' });
           const expanded = await page.getAttribute('#' + btn, 'aria-expanded');
           expect(expanded === 'true', `#${btn} opened its list but reads aria-expanded ${expanded}`);
-          await page.click('#' + btn);
+          await page.click('#' + shut);
           await page.waitForSelector('#' + box, { state: 'hidden' });
         }
         await page.click('#h1-plus');
@@ -29554,6 +29568,576 @@ PAGE_SCENARIOS.push({
     return 'with every daemon tag but no gateway flag the list drew rows and nothing to write with, and More hid the row; with flags restored, memory tags gave Edit alone, the reload tag gave Reload alone, and no file read gave no Edit';
   },
 });
+
+// #127. The Artifacts sheet: what the conversation PRODUCED, opened by the
+// Artifacts pill beside Files (the user's option 2), never drawn inline. The
+// rows are the daemon's public artifact as acp-bridge sessionArtifacts.ts
+// (toPublicArtifact) builds it: a saved webpage the artifact tool made
+// (published storage, a preview- managed id, a file: url the page must not
+// show), a hook's workspace file, an app's link, and a tool's image that has
+// gone missing. The harness drives a bare DaemonClient, so the gateway sends
+// no client id and the stub takes any caller; the stub refuses a `client`
+// row it did not add, as the daemon refuses another client's artifact.
+{
+  const A127_NOW = Date.now();
+  // Half an hour off the hour, so a queued run still reads the same age.
+  const a127Ago = (hours: number) => new Date(A127_NOW - (hours + 0.5) * 3_600_000).toISOString();
+  const A127_SNAP_URL =
+    'file:///home/u/.qwen/runtime/artifacts/snapshots/3f1c2b9e-1d2a-4c3b-8e4f-5a6b7c8d9e0f/index.html';
+  const A127_ROWS = [
+    {
+      id: 'art-snap-1',
+      kind: 'html',
+      storage: 'published',
+      source: 'tool',
+      status: 'available',
+      title: 'Paging runbook',
+      url: A127_SNAP_URL,
+      managedId: 'preview-3f1c2b9e-1d2a-4c3b-8e4f-5a6b7c8d9e0f',
+      mimeType: 'text/html',
+      sizeBytes: 2048,
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        'qwen.snapshot.references': 1,
+        publishedUrl: 'http://127.0.0.1:4173/preview',
+        'qwen.published.sha256': 'a'.repeat(64),
+      },
+      retention: 'restorable',
+      clientRetained: false,
+      createdAt: a127Ago(3),
+      updatedAt: a127Ago(3),
+      toolCallId: 'call-1',
+      toolName: 'artifact',
+    },
+    {
+      id: 'art-hook-1',
+      kind: 'file',
+      storage: 'workspace',
+      source: 'hook',
+      status: 'available',
+      title: 'build.log',
+      workspacePath: 'logs/build.log',
+      sizeBytes: 3072,
+      retention: 'ephemeral',
+      clientRetained: false,
+      createdAt: a127Ago(26),
+      updatedAt: a127Ago(26),
+      hookEventName: 'PostToolUse',
+    },
+    {
+      id: 'art-client-1',
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: 'Design doc',
+      url: 'https://example.test/design',
+      retention: 'ephemeral',
+      clientRetained: false,
+      createdAt: a127Ago(50),
+      updatedAt: a127Ago(50),
+    },
+    {
+      id: 'art-gone-1',
+      kind: 'image',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'missing',
+      title: 'chart.png',
+      workspacePath: 'out/chart.png',
+      sizeBytes: 512,
+      retention: 'ephemeral',
+      clientRetained: false,
+      createdAt: a127Ago(5),
+      updatedAt: a127Ago(5),
+      toolCallId: 'call-2',
+      toolName: 'write_file',
+    },
+  ];
+  const A127_LIST = {
+    v: 1,
+    sessionId: '11111111-2222-3333-4444-555555555555',
+    generatedAt: new Date(A127_NOW).toISOString(),
+    limits: { maxArtifacts: 64 },
+    artifacts: A127_ROWS,
+  };
+  const a127WaitFor = async (page: Page, expr: string): Promise<void> => {
+    try {
+      await page.waitForFunction(expr, null, { timeout: 10_000 });
+    } catch {
+      throw new Error(`waited 10s for ${expr.replace(/\s+/g, ' ').slice(0, 160)}`);
+    }
+  };
+  const a127Watch = async (page: Page, sessionId: string): Promise<void> => {
+    await watch(page, sessionId);
+    await a127WaitFor(page, `watchedSessionId === ${JSON.stringify(sessionId)}`);
+  };
+  // The pill, as a reader reaches it: the + then Artifacts.
+  const a127Open = async (page: Page): Promise<void> => {
+    await clickTool(page, 'artifacts-toggle');
+    await page.waitForSelector('#art-sheet', { state: 'visible' });
+    await a127WaitFor(page, 'artSheet.rows !== null && !artSheet.busy');
+  };
+  // Every request to the artifact routes, as sent.
+  const a127Sent = (page: Page) => {
+    const sent: Array<{ path: string; method: string; body: unknown }> = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (!u.pathname.includes('/artifacts')) return;
+      const data = r.postData();
+      sent.push({ path: u.pathname, method: r.method(), body: data ? JSON.parse(data) : undefined });
+    });
+    return sent;
+  };
+  type A127Row = {
+    id: string;
+    title: string;
+    kind: string;
+    rest: string;
+    h: number;
+    expanded: string | null;
+    where: string | null;
+    href: string | null;
+    target: string | null;
+    rel: string | null;
+    open: boolean;
+    openH: number;
+    rm: boolean;
+    rmH: number;
+    why: string;
+  };
+  const a127Rows = (page: Page) =>
+    page.evaluate(`Array.from(document.querySelectorAll('#art-list .art-row')).map((li) => {
+      const hd = li.querySelector('.art-hd');
+      const k = li.querySelector('.art-k');
+      const l = li.querySelector('.art-l');
+      const d = li.querySelector('.art-d');
+      const w = d && d.querySelector('.art-w');
+      const a = w && w.querySelector('a');
+      const open = li.querySelector('.art-open');
+      const rm = li.querySelector('.art-rm');
+      const why = d && d.querySelector('.art-why');
+      return {
+        id: li.dataset.id,
+        title: li.querySelector('.art-t').textContent,
+        kind: k ? k.textContent : '',
+        rest: l ? l.textContent.slice(k ? k.textContent.length : 0) : '',
+        h: Math.round(hd.getBoundingClientRect().height),
+        expanded: hd.getAttribute('aria-expanded'),
+        where: w ? w.textContent : null,
+        href: a ? a.getAttribute('href') : null,
+        target: a ? a.target : null,
+        rel: a ? a.rel : null,
+        open: !!open,
+        openH: open ? Math.round(open.getBoundingClientRect().height) : 0,
+        rm: !!rm,
+        rmH: rm ? Math.round(rm.getBoundingClientRect().height) : 0,
+        why: why ? why.textContent : '',
+      };
+    })`) as Promise<A127Row[]>;
+  const a127Tap = async (page: Page, id: string): Promise<A127Row> => {
+    await page.click(`#art-list .art-hd[data-id="${id}"]`);
+    await a127WaitFor(page, `document.querySelector('#art-list .art-hd[data-id="${id}"]').getAttribute('aria-expanded') === 'true'`);
+    return (await a127Rows(page)).find((r) => r.id === id)!;
+  };
+  const a127Note = async (page: Page, want: string): Promise<void> => {
+    try {
+      await page.waitForFunction(
+        (w) => (document.getElementById('art-note')?.textContent || '').includes(w),
+        want,
+        { timeout: 10_000 },
+      );
+    } catch {
+      const got = await page.textContent('#art-note');
+      throw new Error(`the note never read ${JSON.stringify(want)} (it reads ${JSON.stringify(got)})`);
+    }
+  };
+  // The confirm, answered by a stand-in that keeps what it was asked: the
+  // runner dismisses every real dialog.
+  const a127Confirm = (page: Page, answer: boolean) =>
+    page.evaluate(`window.__asked = window.__asked || []; window.__answer = ${answer}; window.confirm = (m) => { window.__asked.push(m); return window.__answer; }`);
+  // A gateway answer with fields changed, as a reader's token or an older
+  // gateway would see it.
+  const a127Caps = (edit: (rc: Record<string, unknown>) => void) => async (page: Page) => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+      if (j.remoteControl) edit(j.remoteControl);
+      await route.fulfill({ response: res, json: j });
+    });
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P490 with the gateway\'s sessionArtifacts flag the Artifacts pill sits beside Files at its height, opens the Artifacts sheet over the screen with the list read fresh, and More > Files and artifacts opens the same sheet',
+    waitView: false,
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await openTools(page);
+      const pills = (await page.evaluate(String.raw`(() => {
+        const r = (id) => { const b = document.getElementById(id).getBoundingClientRect(); return { left: b.left, right: b.right, top: Math.round(b.top), h: Math.round(b.height), shown: b.width > 0 }; };
+        return { files: r('stored-toggle'), art: r('artifacts-toggle'), haspopup: document.getElementById('artifacts-toggle').getAttribute('aria-haspopup') };
+      })()`)) as { files: { left: number; right: number; top: number; h: number; shown: boolean }; art: { left: number; right: number; top: number; h: number; shown: boolean }; haspopup: string };
+      expect(pills.art.shown, 'no Artifacts pill with the flag set');
+      expect(
+        pills.art.top === pills.files.top && pills.art.h === pills.files.h && pills.art.h >= 44,
+        `Artifacts is not Files' size and row (${JSON.stringify(pills)})`,
+      );
+      const gap = pills.art.left - pills.files.right;
+      expect(gap >= 0 && gap <= 12, `Artifacts is not beside Files (gap ${gap}px)`);
+      expect(pills.haspopup === 'dialog', `the pill does not say it opens a dialog (${pills.haspopup})`);
+      await a127Open(page);
+      const sheet = (await page.evaluate(String.raw`(() => {
+        const s = document.getElementById('art-sheet').getBoundingClientRect();
+        return { w: Math.round(s.width), h: Math.round(s.height), vw: innerWidth, vh: innerHeight, rows: document.querySelectorAll('#art-list .art-row').length, expanded: document.getElementById('artifacts-toggle').getAttribute('aria-expanded'), focus: document.activeElement && document.activeElement.id };
+      })()`)) as { w: number; h: number; vw: number; vh: number; rows: number; expanded: string; focus: string };
+      expect(sheet.w === sheet.vw && sheet.h === sheet.vh, `the sheet does not cover the screen (${JSON.stringify(sheet)})`);
+      expect(sheet.rows === 2, `the sheet drew ${sheet.rows} rows of the stub's two`);
+      expect(sheet.expanded === 'true' && sheet.focus === 'art-close', `pill ${sheet.expanded}, focus on ${sheet.focus}`);
+      await shot(page, 'p490-artifacts-sheet-390');
+      await page.click('#art-close');
+      await page.waitForSelector('#art-sheet', { state: 'hidden' });
+      const back = await page.evaluate('document.activeElement && document.activeElement.id');
+      expect(back === 'artifacts-toggle', `closing put focus on ${back}, not the pill`);
+      await openPanel(page, 'files');
+      await page.waitForSelector('#more-artifacts-open', { state: 'visible' });
+      await page.click('#more-artifacts-open');
+      await page.waitForSelector('#art-sheet', { state: 'visible' });
+      await a127WaitFor(page, 'artSheet.rows !== null && !artSheet.busy');
+      const more = await page.isVisible('#more-screen');
+      expect(!more, 'More stayed open under the sheet');
+      const reads = sent.filter((s) => s.method === 'GET' && s.path.endsWith('/artifacts')).length;
+      expect(reads === 2, `${reads} list reads for two opens: the sheet does not read fresh each time it opens`);
+      return `pill ${pills.art.h}px beside Files (gap ${gap}px), sheet ${sheet.w}x${sheet.h} with 2 rows, focus to close and back to the pill; More opened it too; 2 opens, 2 reads`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P491 a gateway that does not report sessionArtifacts shows no Artifacts pill and no More button, and the page never reads the artifacts',
+    waitView: false,
+    before: a127Caps((rc) => {
+      delete rc['sessionArtifacts'];
+      delete rc['sessionArtifactWrites'];
+    }),
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await openTools(page);
+      const tools = (await page.evaluate(String.raw`(() => {
+        const t = document.getElementById('h1-tools');
+        return { pill: document.getElementById('artifacts-toggle').getClientRects().length > 0, kids: Array.from(t.children).filter((k) => k.getClientRects().length > 0).map((k) => k.id) };
+      })()`)) as { pill: boolean; kids: string[] };
+      expect(!tools.pill, 'an older gateway shows the Artifacts pill');
+      expect(tools.kids.join() === 'attach,dictate,stored-toggle', `the + holds ${tools.kids.join()}`);
+      await page.click('#h1-plus');
+      await openPanel(page, 'files');
+      const moreBtn = await page.isVisible('#more-artifacts-open');
+      expect(!moreBtn, 'More > Files and artifacts offers Artifacts on an older gateway');
+      await openPanel(page, 'chat');
+      // Even asked directly, the sheet does not open and nothing is read.
+      await page.evaluate('openArtSheet()');
+      await page.waitForTimeout(400);
+      const open = await page.isVisible('#art-sheet');
+      expect(!open, 'the sheet opened without the flag');
+      expect(sent.length === 0, `the page asked ${JSON.stringify(sent)}`);
+      return 'no pill (the + holds Attach, Dictate, Files), no More button, no sheet, no artifact request';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P492 each artifact is a 56px row, its title over its kind, size, age and who recorded it, in the daemon\'s order; a tap shows where it is, a link opens in a new tab, and the saved webpage\'s host file URL is never shown',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    run: async ({ page, viewer }) => {
+      const lines: string[] = [];
+      for (const size of [PHONE, { width: 1100, height: 810 }]) {
+        await page.setViewportSize(size);
+        if (!(await page.evaluate('watchedSessionId'))) await a127Watch(page, viewer.sessionId);
+        await a127Open(page);
+        const rows = await a127Rows(page);
+        expect(
+          rows.map((r) => r.id).join() === A127_ROWS.map((r) => r.id).join(),
+          `the rows are not in the daemon's order: ${JSON.stringify(rows.map((r) => r.id))}`,
+        );
+        const by = (id: string) => rows.find((r) => r.id === id)!;
+        const want: Record<string, [string, string, string]> = {
+          'art-snap-1': ['Paging runbook', 'saved webpage', '2.0 KB · 3 h ago · by the model'],
+          'art-hook-1': ['build.log', 'file', '3.0 KB · 1 d ago · by a PostToolUse hook'],
+          'art-client-1': ['Design doc', 'link', '2 d ago · added by an app'],
+          'art-gone-1': ['chart.png', 'image', '512 B · 5 h ago · by the model · missing'],
+        };
+        for (const [id, [title, kind, rest]] of Object.entries(want)) {
+          const r = by(id);
+          expect(
+            r.title === title && r.kind === kind && r.rest === rest,
+            `${id} reads ${JSON.stringify([r.title, r.kind, r.rest])}, not ${JSON.stringify([title, kind, rest])}`,
+          );
+        }
+        expect(rows.every((r) => r.h >= 56 && r.expanded === 'false'), `row heights ${JSON.stringify(rows.map((r) => [r.h, r.expanded]))}`);
+        const link = await a127Tap(page, 'art-client-1');
+        expect(
+          link.where === 'https://example.test/design' && link.href === 'https://example.test/design' && link.target === '_blank' && link.rel === 'noopener noreferrer' && !link.open,
+          `the link row shows ${JSON.stringify(link)}`,
+        );
+        expect(link.rm && link.rmH >= 44, `Remove is ${link.rmH}px on the link row`);
+        const hook = await a127Tap(page, 'art-hook-1');
+        expect(hook.where === 'logs/build.log' && hook.href === null && !hook.open, `the hook row shows ${JSON.stringify(hook)}`);
+        const linkNow = (await a127Rows(page)).find((r) => r.id === 'art-client-1')!;
+        expect(linkNow.expanded === 'false' && linkNow.where === null, 'two rows were open at once');
+        const snap = await a127Tap(page, 'art-snap-1');
+        expect(
+          snap.open && snap.openH >= 44 && snap.where === 'A copy of the page as it was saved, kept by the daemon.' && snap.href === null,
+          `the saved webpage row shows ${JSON.stringify(snap)}`,
+        );
+        const text = (await page.textContent('#art-sheet')) || '';
+        expect(!text.includes('file:') && !text.includes('preview-'), 'the sheet shows the snapshot\'s host location');
+        const sideways = await page.evaluate(`document.querySelector('#art-sheet .cv-body').scrollWidth > document.querySelector('#art-sheet .cv-body').clientWidth`);
+        expect(!sideways, `the sheet scrolls sideways at ${size.width}`);
+        await shot(page, `p492-artifacts-rows-${size.width}`);
+        await page.click('#art-close');
+        await page.waitForSelector('#art-sheet', { state: 'hidden' });
+        lines.push(`${size.width}: 4 rows in order, ${rows.map((r) => r.h).join('/')}px`);
+      }
+      return lines.join('; ') + '; link opens in a new tab with noopener, path as text, Open on the saved webpage alone, no host file URL shown';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P493 Open on a saved webpage fetches it through the gateway, which keeps the daemon\'s four headers, and hands the bytes to the browser as a download named for its title; the HTML never enters the page and no tab opens',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    run: async ({ page, viewer }) => {
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      await a127Tap(page, 'art-snap-1');
+      // What the page made its object URL from, kept by a wrapper.
+      await page.evaluate(`window.__blobs = []; const o = URL.createObjectURL; URL.createObjectURL = (b) => { window.__blobs.push(b.type); return o.call(URL, b); }`);
+      const answered = page.waitForResponse((r) => r.url().endsWith('/artifacts/art-snap-1/content'));
+      const dl = page.waitForEvent('download', { timeout: 15_000 });
+      const pagesBefore = page.context().pages().length;
+      const at = page.url();
+      await page.click('#art-list .art-open[data-id="art-snap-1"]');
+      const res = await answered;
+      const download = await dl;
+      await a127Note(page, 'Downloaded Paging runbook.html.');
+      const h = res.headers();
+      const four = {
+        'content-type': h['content-type'],
+        'content-disposition': h['content-disposition'],
+        'x-content-type-options': h['x-content-type-options'],
+        'cache-control': h['cache-control'],
+      };
+      expect(res.status() === 200, `the content read answered ${res.status()}`);
+      expect(
+        JSON.stringify(four) ===
+          JSON.stringify({
+            'content-type': 'text/html; charset=utf-8',
+            'content-disposition': 'attachment; filename="saved-webpage.html"',
+            'x-content-type-options': 'nosniff',
+            'cache-control': 'private, no-store',
+          }),
+        `the relay's headers are ${JSON.stringify(four)}`,
+      );
+      const name = download.suggestedFilename();
+      expect(name === 'Paging runbook.html', `the download is named ${JSON.stringify(name)}`);
+      const path = await download.path();
+      const saved = path ? readFileSync(path, 'utf8') : '';
+      expect(saved === '<!doctype html><p>saved snapshot</p>', `the download holds ${JSON.stringify(saved)}`);
+      const blobs = (await page.evaluate('window.__blobs')) as string[];
+      expect(blobs.join() === 'application/octet-stream', `the object URL was typed ${JSON.stringify(blobs)}`);
+      const dom = await page.evaluate('document.documentElement.outerHTML');
+      expect(!(dom as string).includes('saved snapshot'), 'the snapshot body was written into the page');
+      expect(!/<iframe|<object|<embed/i.test(dom as string), 'an artifact was given a frame to render in');
+      expect(page.url() === at && page.context().pages().length === pagesBefore, 'Open navigated or opened a tab');
+      return `200 with ${JSON.stringify(four)}; downloaded "${name}" holding the body, from an application/octet-stream blob; the DOM never held it and no tab opened`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P494 a saved webpage whose snapshot is gone shows the daemon\'s own message and offers no download',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST, artifactContentStatus: 404 },
+    run: async ({ page, viewer }) => {
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      await a127Tap(page, 'art-snap-1');
+      let downloads = 0;
+      page.on('download', () => (downloads += 1));
+      const answered = page.waitForResponse((r) => r.url().endsWith('/artifacts/art-snap-1/content'));
+      await page.click('#art-list .art-open[data-id="art-snap-1"]');
+      const res = await answered;
+      const body = (await res.json()) as Record<string, unknown>;
+      await a127Note(page, 'Saved webpage version is missing or has changed.');
+      const note = (await page.textContent('#art-note')) || '';
+      const tone = await page.getAttribute('#art-note', 'data-tone');
+      expect(res.status() === 404 && body['error'] === 'artifact_snapshot_unavailable', `the relay answered ${res.status()} ${JSON.stringify(body)}`);
+      expect(note === 'Saved webpage version is missing or has changed.' && tone === 'err', `the note reads ${JSON.stringify(note)} (${tone})`);
+      expect(downloads === 0, 'a refused read still downloaded something');
+      return `404 ${JSON.stringify(body)} shown as ${JSON.stringify(note)}, drawn as a refusal, no download`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P495 Remove asks first, naming the artifact (and for a saved webpage that its copy goes too); Cancel sends nothing, OK sends one DELETE for its id and the row goes',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      await a127Confirm(page, false);
+      await a127Tap(page, 'art-snap-1');
+      await page.click('#art-list .art-rm[data-id="art-snap-1"]');
+      await a127Tap(page, 'art-hook-1');
+      await page.click('#art-list .art-rm[data-id="art-hook-1"]');
+      await page.waitForTimeout(300);
+      expect(sent.every((s) => s.method !== 'DELETE'), `Cancel sent ${JSON.stringify(sent.filter((s) => s.method === 'DELETE'))}`);
+      expect((await a127Rows(page)).length === 4, 'a row went on Cancel');
+      await a127Confirm(page, true);
+      await page.click('#art-list .art-rm[data-id="art-hook-1"]');
+      await a127Note(page, 'Removed build.log.');
+      await a127WaitFor(page, 'artSheet.rows && artSheet.rows.length === 3 && !artSheet.busy');
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      const dels = sent.filter((s) => s.method === 'DELETE');
+      const qSnap = "Remove Paging runbook from this conversation's artifacts? Its saved copy is deleted with it.";
+      const qHook = "Remove build.log from this conversation's artifacts? The file or page itself is not touched.";
+      expect(JSON.stringify(asked) === JSON.stringify([qSnap, qHook, qHook]), `the questions read ${JSON.stringify(asked)}`);
+      expect(
+        dels.length === 1 && dels[0]!.path === `/session/${viewer.sessionId}/artifacts/art-hook-1`,
+        `the page sent ${JSON.stringify(dels)}`,
+      );
+      const left = (await a127Rows(page)).map((r) => r.id);
+      expect(left.join() === 'art-snap-1,art-client-1,art-gone-1', `the list reads ${JSON.stringify(left)}`);
+      const rereads = sent.filter((s) => s.method === 'GET' && s.path.endsWith('/artifacts')).length;
+      expect(rereads === 2, `the list was read ${rereads} times, not once on open and once after the removal`);
+      return 'asked by name (the saved webpage\'s question names its copy); two Cancels sent nothing; OK sent one DELETE for art-hook-1, said "Removed build.log." and re-read 3 rows';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P496 removing another app\'s artifact is the daemon\'s 403 session_artifact_forbidden, shown as added by another app that alone can remove it, and the row stays',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      await a127Confirm(page, true);
+      await a127Tap(page, 'art-client-1');
+      const answered = page.waitForResponse((r) => r.request().method() === 'DELETE');
+      await page.click('#art-list .art-rm[data-id="art-client-1"]');
+      const res = await answered;
+      const body = (await res.json()) as Record<string, unknown>;
+      const want = 'Added by another app attached to this conversation; only that app can remove or change it.';
+      await a127Note(page, want);
+      const tone = await page.getAttribute('#art-note', 'data-tone');
+      const rows = (await a127Rows(page)).map((r) => r.id);
+      expect(res.status() === 403 && body['code'] === 'session_artifact_forbidden', `the relay answered ${res.status()} ${JSON.stringify(body)}`);
+      expect(tone === 'err', `the refusal is not drawn as one (${tone})`);
+      expect(rows.includes('art-client-1') && rows.length === 4, `the rows are ${JSON.stringify(rows)}`);
+      expect(sent.filter((s) => s.method === 'DELETE').length === 1, 'the page retried the refused removal');
+      return `403 ${String(body['code'])} reads "${want}"; the row stays`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P497 a reader sees the artifacts with no Open (saying why), no Remove and no add row, and never asks for content or a change',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    before: a127Caps((rc) => {
+      rc['writeScope'] = false;
+    }),
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      const snap = await a127Tap(page, 'art-snap-1');
+      const link = await a127Tap(page, 'art-client-1');
+      const add = await page.isVisible('#art-add');
+      const anyRm = await page.evaluate(`document.querySelectorAll('#art-sheet .art-rm, #art-sheet .art-open').length`);
+      expect((await a127Rows(page)).length === 4, 'a reader does not see the list');
+      expect(!snap.open && !snap.rm && snap.why === 'Opening a saved webpage needs a token that can write.', `the saved webpage shows a reader ${JSON.stringify(snap)}`);
+      expect(!link.rm && link.href === 'https://example.test/design', `the link shows a reader ${JSON.stringify(link)}`);
+      expect(!add && anyRm === 0, `a reader is offered ${add ? 'the add row' : ''} ${String(anyRm)} actions`);
+      const others = sent.filter((s) => s.method !== 'GET' || s.path.endsWith('/content'));
+      expect(others.length === 0, `a reader's page sent ${JSON.stringify(others)}`);
+      await shot(page, 'p497-artifacts-reader');
+      return '4 rows; the saved webpage says why it cannot open; no Remove, no add row; only the list was read';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P498 Add records a link as the daemon takes one (a title and a url, no copy), the list shows it as added by an app with no Open, and the phone can remove what it added',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      const addH = (await page.evaluate(`Math.round(document.getElementById('art-add-btn').getBoundingClientRect().height)`)) as number;
+      expect(addH >= 44, `Add is ${addH}px`);
+      await page.fill('#art-where', 'https://example.test/runbook');
+      await page.fill('#art-name', 'Runbook');
+      await page.click('#art-add-btn');
+      await a127Note(page, 'Added Runbook.');
+      await a127WaitFor(page, 'artSheet.rows && artSheet.rows.length === 5 && !artSheet.busy');
+      const posts = sent.filter((s) => s.method === 'POST').map((s) => s.body);
+      expect(
+        JSON.stringify(posts) === JSON.stringify([{ title: 'Runbook', url: 'https://example.test/runbook' }]),
+        `the page sent ${JSON.stringify(posts)}`,
+      );
+      const rows = await a127Rows(page);
+      const added = rows[rows.length - 1]!;
+      expect(added.title === 'Runbook' && added.kind === 'link' && added.rest.endsWith('added by an app'), `the new row reads ${JSON.stringify(added)}`);
+      const fields = await page.evaluate(`[document.getElementById('art-where').value, document.getElementById('art-name').value]`);
+      expect(JSON.stringify(fields) === '["",""]', `the fields kept ${JSON.stringify(fields)}`);
+      const tapped = await a127Tap(page, added.id);
+      expect(!tapped.open && tapped.href === 'https://example.test/runbook', `the added row shows ${JSON.stringify(tapped)}`);
+      await page.fill('#art-where', '');
+      await page.click('#art-add-btn');
+      await a127Note(page, 'Type a link, or a path in this folder.');
+      await a127Confirm(page, true);
+      await page.click(`#art-list .art-rm[data-id="${added.id}"]`);
+      await a127Note(page, 'Removed Runbook.');
+      await a127WaitFor(page, 'artSheet.rows && artSheet.rows.length === 4 && !artSheet.busy');
+      return `POST {title, url} added "Runbook" (link, added by an app, no Open); an empty add says what to type; Remove took it back out`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P499 an artifact_changed frame for this conversation re-reads an open sheet once per burst and the new row appears; one for another conversation, or with the sheet shut, reads nothing',
+    waitView: false,
+    stub: { artifactListResult: A127_LIST },
+    run: async ({ page, viewer }) => {
+      const sent = a127Sent(page);
+      await a127Watch(page, viewer.sessionId);
+      await a127Open(page);
+      const reads = () => sent.filter((s) => s.method === 'GET' && s.path.endsWith('/artifacts')).length;
+      expect(reads() === 1, `${reads()} reads on open`);
+      // Another device records an artifact; the daemon announces it.
+      await page.evaluate(
+        `fetch('/session/${viewer.sessionId}/artifacts', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() }, body: JSON.stringify({ title: 'From the laptop', url: 'https://example.test/laptop' }) })`,
+      );
+      const frame = (sid: string) =>
+        `renderFrame({ type: 'artifact_changed', data: { sessionId: ${JSON.stringify(sid)}, change: { action: 'created', artifactId: 'x' } } })`;
+      await page.evaluate(`${frame(viewer.sessionId)}; ${frame(viewer.sessionId)}; ${frame(viewer.sessionId)}`);
+      await a127WaitFor(page, `Array.from(document.querySelectorAll('#art-list .art-t')).some((t) => t.textContent === 'From the laptop')`);
+      await page.waitForTimeout(500);
+      expect(reads() === 2, `three frames in a burst read the list ${reads() - 1} times, not once`);
+      await page.evaluate(frame('99999999-2222-3333-4444-555555555555'));
+      await page.waitForTimeout(600);
+      expect(reads() === 2, 'a frame for another conversation re-read this one');
+      await page.click('#art-close');
+      await page.waitForSelector('#art-sheet', { state: 'hidden' });
+      await page.evaluate(frame(viewer.sessionId));
+      await page.waitForTimeout(600);
+      expect(reads() === 2, 'a frame with the sheet shut read the list');
+      const tx = (await page.textContent('#transcript')) || '';
+      expect(!tx.includes('artifact_changed'), 'the frame was drawn in the transcript');
+      return 'a burst of three frames read the list once and drew "From the laptop"; another conversation\'s frame and one with the sheet shut read nothing; nothing drawn in the transcript';
+    },
+  });
+}
 
 // #135. Goal, a row of More > This conversation after Organize. The session
 // goal the CLI's /goal sets: the row says its status and first words, the

@@ -282,6 +282,13 @@ export interface StubDaemon {
     body?: unknown;
     artifactId?: string;
   }>;
+  /**
+   * The last artifact list and snapshot read the stub answered. The getters
+   * were returned without being declared here, so a test that read them did
+   * not typecheck.
+   */
+  lastArtifactListSessionId: string | undefined;
+  lastArtifactContent: { sessionId: string; artifactId: string } | undefined;
   /** #110: every PATCH /session/:id/organization body, in order. */
   organizationCalls: Array<{ sessionId: string; body: unknown }>;
   /** #110: every POST /workspace/:id/session-groups, in order. */
@@ -2133,49 +2140,58 @@ export async function startStubDaemon(
       res.status(status).json({ error: 'stub error' });
       return;
     }
+    // #127: what a client added (POST below) is listed after the rows the
+    // stub was given, and what was removed is not, as the daemon's own list
+    // would answer. With neither, the body is exactly the one configured.
     if (opts.artifactListResult !== undefined) {
-      res.status(200).json(opts.artifactListResult);
+      res
+        .status(200)
+        .json(s127Listed(String(req.params.id), opts.artifactListResult));
       return;
     }
-    res.status(200).json({
-      v: 1,
-      sessionId: String(req.params.id),
-      generatedAt: '2026-10-26T09:00:00.000Z',
-      limits: { maxArtifacts: 64 },
-      artifacts: [
-        {
-          id: 'art-web-1',
-          kind: 'html',
-          storage: 'snapshot',
-          source: 'tool',
-          status: 'available',
-          title: 'Saved webpage: paging notes',
-          url: 'https://example.com/paging',
-          mimeType: 'text/html',
-          sizeBytes: 2048,
-          retention: 'session',
-          clientRetained: false,
-          createdAt: '2026-10-26T08:00:00.000Z',
-          updatedAt: '2026-10-26T08:00:00.000Z',
-        },
-        {
-          id: 'art-file-1',
-          kind: 'file',
-          storage: 'workspace',
-          source: 'client',
-          status: 'available',
-          title: 'decisions.md',
-          workspacePath: 'decisions.md',
-          mimeType: 'text/markdown',
-          sizeBytes: 512,
-          retention: 'session',
-          clientRetained: true,
-          createdAt: '2026-10-26T08:30:00.000Z',
-          updatedAt: '2026-10-26T08:30:00.000Z',
-        },
-      ],
-    });
+    res.status(200).json(
+      s127Listed(String(req.params.id), {
+        v: 1,
+        sessionId: String(req.params.id),
+        generatedAt: '2026-10-26T09:00:00.000Z',
+        limits: { maxArtifacts: 64 },
+        artifacts: s127DefaultArtifacts,
+      }),
+    );
   });
+  // The two rows the list answers when no scenario supplies its own.
+  const s127DefaultArtifacts: Array<Record<string, unknown>> = [
+    {
+      id: 'art-web-1',
+      kind: 'html',
+      storage: 'snapshot',
+      source: 'tool',
+      status: 'available',
+      title: 'Saved webpage: paging notes',
+      url: 'https://example.com/paging',
+      mimeType: 'text/html',
+      sizeBytes: 2048,
+      retention: 'session',
+      clientRetained: false,
+      createdAt: '2026-10-26T08:00:00.000Z',
+      updatedAt: '2026-10-26T08:00:00.000Z',
+    },
+    {
+      id: 'art-file-1',
+      kind: 'file',
+      storage: 'workspace',
+      source: 'client',
+      status: 'available',
+      title: 'decisions.md',
+      workspacePath: 'decisions.md',
+      mimeType: 'text/markdown',
+      sizeBytes: 512,
+      retention: 'session',
+      clientRetained: true,
+      createdAt: '2026-10-26T08:30:00.000Z',
+      updatedAt: '2026-10-26T08:30:00.000Z',
+    },
+  ];
 
   // The snapshot read answers with the body AND the headers the daemon chose
   // (session.ts:7331-7336), not just the bytes. The SDK discards those headers
@@ -4275,6 +4291,58 @@ export async function startStubDaemon(
     calls: [] as StubDaemon['artifactMutationCalls'],
     seq: 0,
   };
+  // #127: the configured list's rows a DELETE took out, per session.
+  const s127RemovedIds = new Map<string, Set<string>>();
+  function s127Removed(sessionId: string): Set<string> {
+    let set = s127RemovedIds.get(sessionId);
+    if (!set) {
+      set = new Set();
+      s127RemovedIds.set(sessionId, set);
+    }
+    return set;
+  }
+  /** The rows the list was configured with, before any change. */
+  function s127BaseRows(): Array<Record<string, unknown>> {
+    const given = opts.artifactListResult as
+      | { artifacts?: unknown }
+      | undefined;
+    if (given === undefined) return s127DefaultArtifacts;
+    return Array.isArray(given.artifacts)
+      ? (given.artifacts as Array<Record<string, unknown>>)
+      : [];
+  }
+  /**
+   * The list body with this session's changes applied: removed rows left out
+   * and added ones appended, without the two fields the stub keeps for itself
+   * (`locator`, and `clientId`, which the daemon's public artifact never
+   * carries).
+   */
+  function s127Listed(sessionId: string, body: unknown): unknown {
+    if (
+      typeof body !== 'object' ||
+      body === null ||
+      !Array.isArray((body as { artifacts?: unknown }).artifacts)
+    ) {
+      return body;
+    }
+    const gone = s127RemovedIds.get(sessionId);
+    const added = [...(s128.artifacts.get(sessionId)?.values() ?? [])].map(
+      (a) => {
+        const { locator: _l, clientId: _c, ...shown } = a;
+        return shown;
+      },
+    );
+    if (!gone?.size && added.length === 0) return body;
+    const rows = (body as { artifacts: Array<Record<string, unknown>> })
+      .artifacts;
+    return {
+      ...(body as Record<string, unknown>),
+      artifacts: [
+        ...rows.filter((a) => !gone?.has(String(a['id']))),
+        ...added,
+      ],
+    };
+  }
   const s128Refused = (
     req: express.Request,
     res: express.Response,
@@ -4372,7 +4440,12 @@ export async function startStubDaemon(
     const id = existing ? String(existing['id']) : `art-stub-${(s128.seq += 1)}`;
     const artifact: Record<string, unknown> = {
       id,
-      kind: body['kind'] ?? 'file',
+      // The bridge's inferKind when none is sent: a url is a link, a
+      // workspace path a file (the daemon also reads its extension), anything
+      // else other.
+      kind:
+        body['kind'] ??
+        (body['url'] ? 'link' : body['workspacePath'] ? 'file' : 'other'),
       storage:
         body['storage'] ??
         (body['workspacePath']
@@ -4426,6 +4499,36 @@ export async function startStubDaemon(
     const held = s128.artifacts.get(sessionId);
     const existing = held?.get(artifactId);
     if (!held || !existing) {
+      // #127: a row of the configured list. The daemon lets any caller that
+      // passed session mutation auth remove what a tool or a hook recorded,
+      // and refuses a client's artifact to every other client
+      // (acp-bridge sessionArtifacts.ts, denyCrossClientMutation). The
+      // configured rows were not added through this stub, so a `client` row
+      // is another client's.
+      const listed = s127BaseRows().find(
+        (a) =>
+          a['id'] === artifactId && !s127Removed(sessionId).has(artifactId),
+      );
+      if (listed && listed['source'] === 'client') {
+        res.status(403).json({
+          error: `artifact ${artifactId} is owned by a different client`,
+          code: 'session_artifact_forbidden',
+          sessionId,
+          artifactId,
+        });
+        return;
+      }
+      if (listed) {
+        s127Removed(sessionId).add(artifactId);
+        res.status(200).json({
+          v: 1,
+          sessionId,
+          changes: [
+            { action: 'removed', artifactId, artifact: listed, reason: 'explicit' },
+          ],
+        });
+        return;
+      }
       res.status(200).json({ v: 1, sessionId, changes: [] });
       return;
     }
