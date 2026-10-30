@@ -271,6 +271,13 @@ export interface BootViewerOptions {
   directoryCreateErrorBody?: unknown;
   directoryDeleteStatus?: number;
   directoryDeleteErrorBody?: unknown;
+  /** #123 (memory): force the stub's memory write and reload to refuse, or
+   * answer a reload with a body of the scenario's own. */
+  memoryWriteStatus?: number;
+  memoryWriteErrorBody?: unknown;
+  reloadStatus?: number;
+  reloadErrorBody?: unknown;
+  reloadResult?: unknown;
 }
 
 /** The label the harness's one host action carries. */
@@ -449,6 +456,11 @@ export async function bootViewer(
     directoryCreateErrorBody: opts.directoryCreateErrorBody,
     directoryDeleteStatus: opts.directoryDeleteStatus,
     directoryDeleteErrorBody: opts.directoryDeleteErrorBody,
+    memoryWriteStatus: opts.memoryWriteStatus,
+    memoryWriteErrorBody: opts.memoryWriteErrorBody,
+    reloadStatus: opts.reloadStatus,
+    reloadErrorBody: opts.reloadErrorBody,
+    reloadResult: opts.reloadResult,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
