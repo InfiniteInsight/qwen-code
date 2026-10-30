@@ -212,3 +212,26 @@ describe('POST /session/:id/tasks/:taskId/workflow-action (#110)', () => {
     expect(await r.json()).toEqual({ sessionId: SID, changed: false });
   });
 });
+
+describe('GET /session/:id/saved-workflows/:name (#110)', () => {
+  it('is write scope: a reader, an approve-only token and a share link get 403; write and owner read it', async () => {
+    const { url, tokens } = await setup({
+      savedWorkflowResult: { name: 'release', source: 'project', script: 's' },
+    });
+    const read = (t: string) =>
+      fetch(`${url}/session/${SID}/saved-workflows/release`, {
+        headers: { Authorization: `Bearer ${t}` },
+      });
+    for (const t of [tokens.read, tokens.approve, tokens.share]) {
+      expect((await read(t)).status).toBe(403);
+    }
+    expect(stub!.lastSavedWorkflow).toBeUndefined();
+    for (const t of [tokens.write, tokens.owner]) {
+      const r = await read(t);
+      expect(r.status).toBe(200);
+      expect(
+        ((await r.json()) as { workflow: { name: string } }).workflow.name,
+      ).toBe('release');
+    }
+  });
+});

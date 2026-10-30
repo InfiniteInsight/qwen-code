@@ -1171,9 +1171,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionAgentTraceRoute(deps.daemon),
   );
+  // Write scope (#110, the user's decision of 2026-10-30): the definition is a
+  // script from the project or home directory with its absolute path, which
+  // belongs with the workflow-run disclosure limited to owner and write tokens.
   app.get(
     '/session/:id/saved-workflows/:name',
-    requireScope(SESSION_READ, audit),
+    requireScope(WRITE, audit),
     enforceSessionLock(audit),
     createSessionSavedWorkflowRoute(deps.daemon),
   );
