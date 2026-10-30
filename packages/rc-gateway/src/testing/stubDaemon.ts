@@ -241,6 +241,22 @@ export interface StubDaemon {
   lastSavedWorkflow: { sessionId: string; name: string } | undefined;
   /** #132: every POST /sessions/catalog body, in order. */
   catalogRequests: unknown[];
+  /**
+   * #110: every GET, POST and DELETE on /session/:id/sources, in order, with
+   * the `X-Qwen-Client-Id` it carried (the daemon refuses a mutation without
+   * a session-bound one).
+   */
+  sourceCalls: Array<{
+    method: string;
+    sessionId: string;
+    clientId: string | undefined;
+    body?: unknown;
+    sourceId?: string;
+  }>;
+  /** #110: every PATCH /session/:id/organization body, in order. */
+  organizationCalls: Array<{ sessionId: string; body: unknown }>;
+  /** #110: every POST /workspace/:id/session-groups, in order. */
+  groupCreates: Array<{ workspace: string; body: unknown }>;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -808,6 +824,27 @@ export interface StubDaemonOptions {
       error?: { code: string; message: string; status: number };
     }
   >;
+  /**
+   * #110: stamp a client id on every create, load and resume answer, as a
+   * newer daemon does for the HTTP client that attached, and hold the
+   * sources mutations to it: none is a 403 `client_id_required` and one the
+   * stub never stamped for that session a 400 `invalid_client_id`, as the
+   * daemon's route and bridge answer. Left unset nothing is stamped and the
+   * mutations take any caller, which is what the page harness needs: it
+   * drives a bare DaemonClient that never attached through the pool.
+   */
+  stampClientIds?: boolean;
+  /** #110: the sources each session starts with, keyed by session id. */
+  sources?: Record<string, unknown[]>;
+  /** #110: status for all three sources routes (default 200). */
+  sourcesStatus?: number;
+  sourcesErrorBody?: unknown;
+  /** #110: status for PATCH /session/:id/organization (default 200). */
+  organizationStatus?: number;
+  organizationErrorBody?: unknown;
+  /** #110: status for POST /workspace/:id/session-groups (default 201). */
+  groupCreateStatus?: number;
+  groupCreateErrorBody?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -3317,6 +3354,40 @@ export async function startStubDaemon(
     }
   });
 
+  // #110: what the organization, session-group and sources routes below keep.
+  // Declared here, above the create, load and resume answers, because those
+  // stamp the client ids the sources mutations are held to.
+  const s110 = {
+    clientIds: new Map<string, Set<string>>(),
+    stamped: 0,
+    sources: new Map<
+      string,
+      { revision: number; sources: Array<Record<string, unknown>> }
+    >(),
+    organization: new Map<
+      string,
+      {
+        groupId: string | null;
+        color: string | null;
+        pinnedAt?: string;
+        updatedAt: string;
+      }
+    >(),
+    groups: new Map<string, Array<Record<string, unknown>>>(),
+    sourceCalls: [] as StubDaemon['sourceCalls'],
+    organizationCalls: [] as StubDaemon['organizationCalls'],
+    groupCreates: [] as StubDaemon['groupCreates'],
+  };
+  const s110Stamp = (sessionId: string): { clientId?: string } => {
+    if (!opts.stampClientIds) return {};
+    s110.stamped += 1;
+    const clientId = `client_stub-${s110.stamped}`;
+    const held = s110.clientIds.get(sessionId) ?? new Set<string>();
+    held.add(clientId);
+    s110.clientIds.set(sessionId, held);
+    return { clientId };
+  };
+
   app.post('/session', (req, res) => {
     const status = opts.createSessionStatus ?? 200;
     state.lastCreateSessionBody = req.body;
@@ -3327,10 +3398,12 @@ export async function startStubDaemon(
     state.createdSessionCount += 1;
     const mintSessionId =
       opts.createSessionId ?? ((n: number) => `stub-agent-${n}`);
+    const minted = mintSessionId(state.createdSessionCount);
     res.status(200).json({
-      sessionId: mintSessionId(state.createdSessionCount),
+      sessionId: minted,
       workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
       attached: false,
+      ...s110Stamp(minted),
     });
   });
 
@@ -3350,6 +3423,7 @@ export async function startStubDaemon(
           : (opts.workspaceCwd ?? '/stub/workspace'),
       attached: true,
       state: {},
+      ...s110Stamp(req.params.id),
     });
   });
 
@@ -3371,7 +3445,340 @@ export async function startStubDaemon(
           : (opts.workspaceCwd ?? '/stub/workspace'),
       attached: true,
       state: {},
+      ...s110Stamp(req.params.id),
     });
+  });
+
+  // -- #110: session organization, session groups, sources -----------------
+  // Shapes and refusals copied from the daemon: the organization PATCH and
+  // the group create from cli/src/serve/routes/session.ts (handler at
+  // :8955, group create at :9116, error statuses at :496), the sources trio
+  // from :7216 and the bridge (acp-bridge session-control-plane.ts:13266),
+  // whose validation and upsert are core/src/services/session-sources.ts.
+  const s110Home = opts.workspaceCwd ?? '/stub/workspace';
+  // A session lives in the catalog workspace whose rows name it, else in the
+  // stub's own. The organization store is per workspace on the daemon, so a
+  // group id is checked against that workspace's groups only.
+  const s110WorkspaceOf = (sessionId: string): string => {
+    for (const [ws, entry] of Object.entries(opts.catalog ?? {})) {
+      if (entry.sessions?.some((s) => s.sessionId === sessionId)) return ws;
+    }
+    return s110Home;
+  };
+  // A registered catalog workspace's groups ARE its catalog groups, so a
+  // group made here is listed by the next catalog read, as on the daemon.
+  const s110Groups = (ws: string): Array<Record<string, unknown>> => {
+    const entry = opts.catalog?.[ws];
+    if (entry) {
+      entry.groups ??= [];
+      return entry.groups as Array<Record<string, unknown>>;
+    }
+    let held = s110.groups.get(ws);
+    if (!held) {
+      held = [];
+      s110.groups.set(ws, held);
+    }
+    return held;
+  };
+  const S110_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'];
+
+  app.patch('/session/:id/organization', (req, res) => {
+    const sessionId = req.params.id;
+    const body = (
+      req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+        ? req.body
+        : {}
+    ) as Record<string, unknown>;
+    s110.organizationCalls.push({ sessionId, body: req.body });
+    const status = opts.organizationStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.organizationErrorBody ?? { error: 'stub' });
+      return;
+    }
+    const refuse = (field: string, error: string) =>
+      res
+        .status(400)
+        .json({ error, code: 'invalid_session_organization', field });
+    const isPinned = body['isPinned'];
+    if (isPinned !== undefined && typeof isPinned !== 'boolean') {
+      return refuse('isPinned', '`isPinned` must be a boolean');
+    }
+    const groupId = body['groupId'];
+    if (
+      groupId !== undefined &&
+      groupId !== null &&
+      typeof groupId !== 'string'
+    ) {
+      return refuse('groupId', '`groupId` must be a string or null');
+    }
+    const color = body['color'];
+    if (
+      color !== undefined &&
+      color !== null &&
+      (typeof color !== 'string' || !S110_COLORS.includes(color))
+    ) {
+      return refuse('color', '`color` must be a supported color or null');
+    }
+    const ws = s110WorkspaceOf(sessionId);
+    if (
+      typeof groupId === 'string' &&
+      !s110Groups(ws).some((g) => g['id'] === groupId)
+    ) {
+      res.status(404).json({
+        error: `Group not found: ${groupId}`,
+        code: 'group_not_found',
+        field: 'groupId',
+      });
+      return;
+    }
+    const row = opts.catalog?.[ws]?.sessions?.find(
+      (s) => s.sessionId === sessionId,
+    ) as Record<string, unknown> | undefined;
+    const now = new Date().toISOString();
+    const current = s110.organization.get(sessionId) ?? {
+      groupId: typeof row?.['groupId'] === 'string' ? row['groupId'] : null,
+      color: typeof row?.['color'] === 'string' ? row['color'] : null,
+      ...(row?.['isPinned'] === true ? { pinnedAt: now } : {}),
+      updatedAt: now,
+    };
+    if (color !== undefined) current.color = color as string | null;
+    if (groupId !== undefined) current.groupId = groupId as string | null;
+    if (isPinned === true) current.pinnedAt = current.pinnedAt ?? now;
+    if (isPinned === false) delete current.pinnedAt;
+    current.updatedAt = now;
+    s110.organization.set(sessionId, current);
+    // The catalog's organized rows read the same store.
+    if (row) {
+      row['groupId'] = current.groupId;
+      row['color'] = current.color;
+      row['isPinned'] = current.pinnedAt !== undefined;
+    }
+    res.status(200).json({
+      sessionId,
+      groupId: current.groupId,
+      isPinned: current.pinnedAt !== undefined,
+      ...(current.pinnedAt ? { pinnedAt: current.pinnedAt } : {}),
+      color: current.color,
+      updatedAt: current.updatedAt,
+    });
+  });
+
+  app.post('/workspace/:id/session-groups', (req, res) => {
+    const ws = req.params.id;
+    s110.groupCreates.push({ workspace: ws, body: req.body });
+    const status = opts.groupCreateStatus ?? 201;
+    if (status !== 201) {
+      res.status(status).json(opts.groupCreateErrorBody ?? { error: 'stub' });
+      return;
+    }
+    if (ws !== s110Home && !opts.catalog?.[ws]) {
+      res.status(400).json({
+        error: `Workspace mismatch: ${ws}`,
+        code: 'workspace_mismatch',
+      });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawName = body['name'];
+    const name = typeof rawName === 'string' ? rawName.trim() : '';
+    if (
+      typeof rawName !== 'string' ||
+      name.length === 0 ||
+      name.length > 64 ||
+      /[\p{Cc}\p{Cf}]/u.test(name)
+    ) {
+      res.status(400).json({
+        error:
+          '`name` must be 1-64 characters and contain no control characters',
+        code: 'invalid_group_name',
+        field: 'name',
+      });
+      return;
+    }
+    const color = typeof body['color'] === 'string' ? body['color'].trim() : '';
+    if (!S110_COLORS.includes(color) && !/^#[0-9a-fA-F]{6}$/.test(color)) {
+      res.status(400).json({
+        error: '`color` must be a supported preset or a #RRGGBB hex value',
+        code: 'invalid_group_color',
+        field: 'color',
+      });
+      return;
+    }
+    const groups = s110Groups(ws);
+    const key = name.toLowerCase();
+    if (groups.some((g) => String(g['name']).trim().toLowerCase() === key)) {
+      res.status(409).json({
+        error: `Group name already exists: ${name}`,
+        code: 'group_name_conflict',
+        field: 'name',
+      });
+      return;
+    }
+    const now = new Date().toISOString();
+    const group = {
+      id: `stub-group-${s110.groupCreates.length}`,
+      name,
+      color,
+      order: groups.reduce((m, g) => Math.max(m, Number(g['order']) || 0), -1) + 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    groups.push(group);
+    res.status(201).json({ group });
+  });
+
+  const s110SourcesOf = (sessionId: string) => {
+    let held = s110.sources.get(sessionId);
+    if (!held) {
+      held = {
+        revision: 0,
+        sources: [
+          ...((opts.sources?.[sessionId] ?? []) as Array<
+            Record<string, unknown>
+          >),
+        ],
+      };
+      s110.sources.set(sessionId, held);
+    }
+    return held;
+  };
+  // The daemon's route refuses a mutation with no client id (403), and the
+  // bridge one the session never registered (400). Only with stampClientIds.
+  const s110ClientRefused = (
+    req: express.Request,
+    res: express.Response,
+  ): boolean => {
+    if (!opts.stampClientIds) return false;
+    const clientId = req.get('X-Qwen-Client-Id');
+    if (clientId === undefined) {
+      res.status(403).json({
+        error: 'Source mutations require a session-bound client id',
+        code: 'client_id_required',
+      });
+      return true;
+    }
+    if (!s110.clientIds.get(req.params.id!)?.has(clientId)) {
+      res.status(400).json({
+        error: `Invalid client id "${clientId}" for session ${req.params.id}`,
+        code: 'invalid_client_id',
+        sessionId: req.params.id,
+        clientId,
+      });
+      return true;
+    }
+    return false;
+  };
+
+  app.get('/session/:id/sources', (req, res) => {
+    s110.sourceCalls.push({
+      method: 'GET',
+      sessionId: req.params.id,
+      clientId: req.get('X-Qwen-Client-Id'),
+    });
+    const status = opts.sourcesStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.sourcesErrorBody ?? { error: 'stub' });
+      return;
+    }
+    const held = s110SourcesOf(req.params.id);
+    res.status(200).json({ revision: held.revision, sources: held.sources });
+  });
+
+  app.post('/session/:id/sources', (req, res) => {
+    const sessionId = req.params.id;
+    s110.sourceCalls.push({
+      method: 'POST',
+      sessionId,
+      clientId: req.get('X-Qwen-Client-Id'),
+      body: req.body,
+    });
+    const status = opts.sourcesStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.sourcesErrorBody ?? { error: 'stub' });
+      return;
+    }
+    if (s110ClientRefused(req, res)) return;
+    const checked = stubValidateSource(req.body);
+    if (typeof checked === 'string') {
+      res.status(400).json({ error: checked, code: 'invalid_source' });
+      return;
+    }
+    const held = s110SourcesOf(sessionId);
+    const workspaceCwd =
+      checked.locator['type'] === 'workspace_file' ? s110Home : undefined;
+    const id = createHash('sha256')
+      .update(JSON.stringify([sessionId, checked.locator, workspaceCwd ?? null]))
+      .digest('hex');
+    const previous = held.sources.find((s) => s['id'] === id);
+    const description =
+      checked.description ?? (previous?.['description'] as string | undefined);
+    if (
+      previous &&
+      previous['title'] === checked.title &&
+      previous['description'] === description
+    ) {
+      res
+        .status(200)
+        .json({ revision: held.revision, source: previous, change: 'unchanged' });
+      return;
+    }
+    if (!previous && held.sources.length >= 200) {
+      res.status(409).json({
+        error: 'A session can contain at most 200 sources',
+        code: 'source_limit_reached',
+      });
+      return;
+    }
+    const now = new Date().toISOString();
+    const source: Record<string, unknown> = {
+      title: checked.title,
+      locator: checked.locator,
+      ...(description !== undefined ? { description } : {}),
+      id,
+      kind: checked.locator['type'] === 'url' ? 'link' : 'file',
+      ...(workspaceCwd ? { workspaceCwd } : {}),
+      createdAt: (previous?.['createdAt'] as string | undefined) ?? now,
+      updatedAt: now,
+    };
+    // The daemon's order: newest first, then by id (session-sources.ts).
+    held.sources = [
+      ...held.sources.filter((s) => s['id'] !== id),
+      source,
+    ].sort(
+      (a, b) =>
+        String(b['createdAt']).localeCompare(String(a['createdAt'])) ||
+        String(a['id']).localeCompare(String(b['id'])),
+    );
+    held.revision += 1;
+    res.status(200).json({
+      revision: held.revision,
+      source,
+      change: previous ? 'updated' : 'created',
+    });
+  });
+
+  app.delete('/session/:id/sources/:sourceId', (req, res) => {
+    const sessionId = req.params.id;
+    s110.sourceCalls.push({
+      method: 'DELETE',
+      sessionId,
+      clientId: req.get('X-Qwen-Client-Id'),
+      sourceId: req.params.sourceId,
+    });
+    const status = opts.sourcesStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.sourcesErrorBody ?? { error: 'stub' });
+      return;
+    }
+    if (s110ClientRefused(req, res)) return;
+    const held = s110SourcesOf(sessionId);
+    const kept = held.sources.filter((s) => s['id'] !== req.params.sourceId);
+    const removed = kept.length !== held.sources.length;
+    if (removed) {
+      held.sources = kept;
+      held.revision += 1;
+    }
+    res.status(200).json({ revision: held.revision, removed });
   });
 
   const server: Server = await new Promise((resolve) => {
@@ -3561,6 +3968,15 @@ export async function startStubDaemon(
     get catalogRequests() {
       return state.catalogRequests;
     },
+    get sourceCalls() {
+      return s110.sourceCalls;
+    },
+    get organizationCalls() {
+      return s110.organizationCalls;
+    },
+    get groupCreates() {
+      return s110.groupCreates;
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         // Idempotent: crash() may already have closed the server, and a
@@ -3579,4 +3995,114 @@ export async function startStubDaemon(
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
+}
+
+/**
+ * #110: the daemon's source validation (`validateSessionSourceInput`,
+ * core/src/services/session-sources.ts:95), restated because rc-gateway has
+ * no core dependency. Returns the normalized input, or the daemon's own
+ * message for an `invalid_source`, word for word.
+ */
+function stubValidateSource(value: unknown):
+  | {
+      title: string;
+      description?: string;
+      locator: Record<string, string>;
+    }
+  | string {
+  const isObject = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === 'object' && !Array.isArray(v);
+  const only = (v: Record<string, unknown>, fields: string[]) =>
+    Object.keys(v).every((k) => fields.includes(k));
+  const text = (
+    v: unknown,
+    field: string,
+    limit: number,
+    empty = false,
+    trim = true,
+  ): string => {
+    if (typeof v !== 'string' || /[\p{Cc}\p{Cf}]/u.test(v)) {
+      throw new Error(`Invalid ${field}`);
+    }
+    const n = trim ? v.trim() : v;
+    if ((!empty && !n) || n.length > limit) {
+      throw new Error(`Invalid ${field} length (maximum ${limit})`);
+    }
+    return n;
+  };
+  try {
+    if (!isObject(value)) return 'Source must be an object';
+    if (!only(value, ['title', 'description', 'locator'])) {
+      return 'Unknown source field';
+    }
+    const title = text(value['title'], 'title', 200);
+    const description =
+      value['description'] === undefined
+        ? undefined
+        : text(value['description'], 'description', 1000, true);
+    const raw = value['locator'];
+    if (!isObject(raw)) return 'Source must be an object';
+    if (!only(raw, ['type', 'workspacePath', 'attachmentId', 'url'])) {
+      return 'Unknown source field';
+    }
+    let locator: Record<string, string>;
+    if (raw['type'] === 'workspace_file') {
+      if (!only(raw, ['type', 'workspacePath'])) return 'Unknown source field';
+      const p = text(
+        raw['workspacePath'],
+        'workspacePath',
+        500,
+        false,
+        false,
+      ).replaceAll('\\', '/');
+      if (p.startsWith('/') || /^[a-z]:/iu.test(p)) {
+        return 'Workspace path must be relative';
+      }
+      const segments: string[] = [];
+      for (const segment of p.split('/')) {
+        if (!segment || segment === '.') continue;
+        if (segment === '..') {
+          if (!segments.length) return 'Workspace path escapes its root';
+          segments.pop();
+        } else {
+          segments.push(segment);
+        }
+      }
+      if (!segments.length) return 'Workspace path must identify a file';
+      locator = { type: 'workspace_file', workspacePath: segments.join('/') };
+    } else if (raw['type'] === 'attachment') {
+      if (!only(raw, ['type', 'attachmentId'])) return 'Unknown source field';
+      locator = {
+        type: 'attachment',
+        attachmentId: text(raw['attachmentId'], 'attachmentId', 200, false, false),
+      };
+    } else if (raw['type'] === 'url') {
+      if (!only(raw, ['type', 'url'])) return 'Unknown source field';
+      const url = text(raw['url'], 'url', 2048);
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return 'Invalid source URL';
+      }
+      if (
+        !['http:', 'https:'].includes(parsed.protocol) ||
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password
+      ) {
+        return 'Source URL must be HTTP(S) without credentials';
+      }
+      locator = { type: 'url', url: parsed.href };
+    } else {
+      return 'Unknown source locator type';
+    }
+    return {
+      title,
+      locator,
+      ...(description !== undefined ? { description } : {}),
+    };
+  } catch (err) {
+    return err instanceof Error ? err.message : 'Invalid source';
+  }
 }
