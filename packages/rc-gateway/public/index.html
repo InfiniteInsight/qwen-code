@@ -2720,6 +2720,20 @@
       #more-screen .row[hidden] {
         display: none;
       }
+      /* #123. What the daemon answered to Reload workspace, under its row. */
+      #more-reload-result {
+        padding: 6px 16px 8px;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--g1-ink-mid);
+        overflow-wrap: anywhere;
+      }
+      #more-reload-result:empty {
+        display: none;
+      }
+      #more-reload-result[data-tone='error'] {
+        color: var(--g1-danger);
+      }
       #agents-chip .dot {
         width: 8px;
         height: 8px;
@@ -3489,6 +3503,15 @@
               <span class="lbl">Memory and skills</span><span class="val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
+            <!-- #123. Reload workspace: asks first, calls the daemon's settings
+                 reload for the workspace the group head names, and writes what
+                 the daemon answered on the line under the row. An action, not
+                 a screen, so no chevron. Hidden on a gateway or daemon without
+                 the route and for a token that cannot write. -->
+            <button type="button" class="row" id="more-reload" data-action="reload-workspace" hidden>
+              <span class="lbl">Reload workspace</span><span class="val" id="more-reload-val"></span>
+            </button>
+            <div id="more-reload-result" role="status" aria-live="polite"></div>
           </div>
           <div class="mgrp" role="group" aria-labelledby="more-g-host">
             <div class="grp" id="more-g-host">Host<span id="more-host"></span></div>
@@ -11207,6 +11230,11 @@
           text.setAttribute('autocomplete', 'off');
           text.setAttribute('aria-label', 'File contents');
           text.addEventListener('input', wsfRenderDirty);
+          // A standing note under the field (the memory editor's, #123): what a
+          // save here does not check. Empty, so hidden, for a file.
+          const note = document.createElement('div');
+          note.className = 'wsf-status';
+          note.id = 'wsf-editor-note';
           const status = document.createElement('div');
           status.className = 'wsf-status';
           status.id = 'wsf-editor-status';
@@ -11226,7 +11254,7 @@
           save.textContent = 'Save';
           save.addEventListener('click', () => void wsfSave());
           foot.append(cancel, save);
-          box.append(head, text, status, foot);
+          box.append(head, text, note, status, foot);
           box.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && $('wsf-ask')?.hidden !== false) {
               e.preventDefault();
@@ -11264,11 +11292,21 @@
         else delete s.dataset.tone;
       }
 
-      function wsfOpenEditor(path, text, hash) {
+      // `memory` (#123) marks the open text as the workspace's context file:
+      // `{cwd, note}`, the workspace it was read from and the standing note.
+      // Such a save goes through POST /rc/workspace/memory, not file/write.
+      function wsfOpenEditor(path, text, hash, memory) {
         const ed = wsfEditorEls();
-        ed.path.textContent = path;
+        ed.path.textContent = memory ? path + ' (workspace memory)' : path;
         ed.text.value = text;
-        wsfEditing = { path, original: ed.text.value, hash, saving: false };
+        wsfEditing = {
+          path,
+          original: ed.text.value,
+          hash,
+          saving: false,
+          memory: memory || null,
+        };
+        $('wsf-editor-note').textContent = memory ? memory.note : '';
         wsfEditorStatus('');
         wsfRenderDirty();
         ed.save.disabled = false;
@@ -11326,6 +11364,10 @@
         ed.cancel.disabled = true;
         wsfEditorStatus('saving...');
         try {
+          if (cur.memory) {
+            await wsmSaveMemory(cur, ed, text, size, limit);
+            return;
+          }
           const { res, data } = await wsfPost('/rc/workspace/file/write', {
             path: cur.path,
             content: text,
@@ -11380,6 +11422,281 @@
           ed.cancel.disabled = false;
         }
       }
+
+      // -- Workspace memory write and Reload workspace (#123) ----------------
+      // Edit on the workspace's context file (QWEN.md) in the Memory and
+      // skills panel, and a Reload workspace row in More's Workspace group.
+      // Each is drawn only when this gateway mounts its route (a flag an older
+      // gateway omits), this token holds write (remoteControl.writeScope), and
+      // the daemon advertises the route's own tag.
+      function wsmGate(flag, tag) {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc[flag] === true &&
+          rc.writeScope === true &&
+          daemonHasFeature(tag)
+        );
+      }
+
+      // The daemon's memory write carries no hash and no version, so a save
+      // cannot be checked against a change made on the host the way a file
+      // save is. The editor says so under the field instead of implying it.
+      const WSM_NOTE =
+        'Saving replaces the whole file. This daemon does not check whether it changed on the host since you opened it, so a change made there meanwhile is overwritten.';
+
+      // The context file's name relative to the workspace folder it was read
+      // from. The daemon lists them at the folder's root, so this is the last
+      // segment unless the path says otherwise.
+      function wsmRelPath(path, root) {
+        const base = typeof root === 'string' ? root.replace(/\/+$/, '') : '';
+        if (base && path.startsWith(base + '/')) return path.slice(base.length + 1);
+        return path.split('/').filter(Boolean).pop() || path;
+      }
+
+      // Under the context-file list: one Edit button for each file in the
+      // workspace scope. The global file gets none: this gateway never reads
+      // it (src/routes/workspaceContext.ts) and refuses to write it, so there
+      // is nothing it could open.
+      function wsmDrawEdits(out, st) {
+        // The text is read through the file read, so a daemon without that
+        // route has nothing for Edit to open.
+        if (
+          !wsmGate('workspaceMemoryWrite', 'workspace_memory') ||
+          !daemonHasFeature('workspace_file_read')
+        )
+          return;
+        const files = (Array.isArray(st.files) ? st.files : []).filter(
+          (f) => f && f.scope === 'workspace' && typeof f.path === 'string',
+        );
+        if (!files.length) return;
+        // The workspace this list was read for, kept with each button: the
+        // target can change before a button is tapped.
+        const cwd = wsTargetCwd || '';
+        const wrap = document.createElement('div');
+        wrap.dataset.wsm = 'edits';
+        wrap.style.cssText =
+          'display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;align-items:center';
+        const status = document.createElement('div');
+        status.dataset.wsm = 'status';
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.style.cssText = 'font-size:12px;flex:1 1 100%';
+        for (const f of files) {
+          const rel = wsmRelPath(f.path, st.workspaceCwd);
+          const b = wsfFileButton('Edit ' + rel, () =>
+            wsmStartEdit(rel, cwd, status),
+          );
+          b.dataset.wsm = 'edit';
+          wrap.appendChild(b);
+        }
+        wrap.appendChild(status);
+        out.appendChild(wrap);
+      }
+
+      // Edit: read the file whole through the sandboxed file read and open
+      // the editor on it. Refused here, with the reason, for a file the
+      // memory write would not round-trip: the daemon replaces a context file
+      // with exactly the text it is sent, as UTF-8 with plain newlines, so a
+      // file with a byte order mark, Windows line endings or another encoding
+      // would be changed by a save that touched nothing else.
+      async function wsmStartEdit(rel, cwd, status) {
+        status.textContent = 'opening ' + rel + ' to edit...';
+        try {
+          const res = await fetch(
+            '/rc/workspace/file?path=' +
+              encodeURIComponent(rel) +
+              '&maxBytes=' +
+              WSF_EDIT_MAX_BYTES +
+              (cwd ? '&workspace=' + encodeURIComponent(cwd) : ''),
+            { headers: wsfAuth() },
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            status.textContent =
+              data.code === 'binary_file'
+                ? 'not editable here: a binary file'
+                : 'cannot edit: ' + wsFilesErrorText(res.status, data);
+            return;
+          }
+          const size = typeof data.sizeBytes === 'number' ? data.sizeBytes : 0;
+          if (data.truncated || data.hasMore || size > WSF_EDIT_MAX_BYTES) {
+            status.textContent =
+              'too large to edit here: ' +
+              formatBytes(size) +
+              ', the editor takes files up to ' +
+              formatBytes(WSF_EDIT_MAX_BYTES);
+            return;
+          }
+          if (
+            data.bom === true ||
+            data.lineEnding === 'crlf' ||
+            (typeof data.encoding === 'string' &&
+              !/^utf-?8$/i.test(data.encoding))
+          ) {
+            status.textContent =
+              'not editable here: ' +
+              rel +
+              ' uses ' +
+              (data.bom === true
+                ? 'a byte order mark'
+                : data.lineEnding === 'crlf'
+                  ? 'Windows line endings'
+                  : data.encoding) +
+              ', which a memory save would not keep';
+            return;
+          }
+          status.textContent = '';
+          wsfOpenEditor(
+            rel,
+            typeof data.content === 'string' ? data.content : '',
+            typeof data.hash === 'string' ? data.hash : undefined,
+            { cwd, note: WSM_NOTE },
+          );
+        } catch (err) {
+          status.textContent = 'cannot edit: ' + err.message;
+        }
+      }
+
+      // Save for an open memory edit: the whole text through
+      // POST /rc/workspace/memory in replace mode. Called from wsfSave, inside
+      // its try, so the buttons come back on whatever happens here.
+      async function wsmSaveMemory(cur, ed, text, size, limit) {
+        const body = { scope: 'workspace', content: text, mode: 'replace' };
+        if (cur.memory.cwd) body.workspace = cur.memory.cwd;
+        const res = await fetch('/rc/workspace/memory', {
+          method: 'POST',
+          headers: wsfAuth({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          wsfHideEditor();
+          setStatus(
+            data.changed === false
+              ? 'no change made to ' + cur.path
+              : 'saved ' +
+                  cur.path +
+                  (typeof data.bytesWritten === 'number'
+                    ? ' (' + formatBytes(data.bytesWritten) + ')'
+                    : ''),
+          );
+          const kind = document.querySelector('input[name="ctx-kind"]:checked');
+          if (kind && kind.value === 'memory') $('ctx-load').click();
+          return;
+        }
+        // Not saved, and the text stays in the field. The daemon's own words
+        // come first: they are what a person can act on.
+        wsfEditorStatus(
+          'Not saved: ' +
+            (data.code === 'file_too_large'
+              ? wsfTooLargeText(
+                  cur.path,
+                  size,
+                  typeof data.maxBytes === 'number' ? data.maxBytes : limit,
+                )
+              : wsFilesErrorText(res.status, data)) +
+            '. Your text is still here.',
+          'error',
+        );
+      }
+
+      // Reload workspace. The row is More's, so it follows the same pattern as
+      // Organize and Sources: hidden unless offered, drawn as More opens.
+      let wsmReloadBusy = false;
+      function wsmRenderReloadRow() {
+        const row = $('more-reload');
+        const on = wsmGate('workspaceReload', 'workspace_reload');
+        if (row.hidden !== !on) row.hidden = !on;
+        if (!on && !wsmReloadBusy) $('more-reload-result').textContent = '';
+      }
+      new MutationObserver(() => {
+        if ($('more-screen').hidden) return;
+        // A new visit starts without the last visit's answer.
+        if (!wsmReloadBusy) {
+          const r = $('more-reload-result');
+          r.textContent = '';
+          delete r.dataset.tone;
+        }
+        wsmRenderReloadRow();
+      }).observe($('more-screen'), {
+        attributes: true,
+        attributeFilter: ['hidden'],
+      });
+
+      // The daemon's DaemonReloadResponse in words: the settings keys that
+      // changed, whether the agent process took them, which conversations
+      // were refreshed or skipped, and the daemon's own error when it had one.
+      function wsmReloadText(d) {
+        const changed = Array.isArray(d.changedKeys) ? d.changedKeys : [];
+        const parts = [
+          changed.length
+            ? 'Reloaded: ' +
+              changed.length +
+              (changed.length === 1 ? ' setting' : ' settings') +
+              ' changed (' +
+              changed.join(', ') +
+              ')'
+            : 'Reloaded: nothing changed',
+        ];
+        if (d.childReloaded === true) {
+          const n = Array.isArray(d.sessionsRefreshed)
+            ? d.sessionsRefreshed.length
+            : 0;
+          const k = Array.isArray(d.sessionsSkipped)
+            ? d.sessionsSkipped.length
+            : 0;
+          parts.push(
+            'agent reloaded, ' +
+              n +
+              (n === 1 ? ' conversation' : ' conversations') +
+              ' refreshed' +
+              (k ? ', ' + k + ' skipped' : ''),
+          );
+        } else {
+          parts.push('agent not reloaded');
+        }
+        if (typeof d.childError === 'string' && d.childError)
+          parts.push('the agent said: ' + d.childError);
+        if (d.runtimeEnvironmentApplied === false)
+          parts.push('the environment was not applied to the daemon');
+        return parts.join('. ') + '.';
+      }
+
+      async function wsmReload() {
+        if (wsmReloadBusy) return;
+        const ok = await wsfAsk({
+          title: 'Reload workspace?',
+          path: wsfFullPath('.'),
+          sub: "Re-reads this workspace's settings and environment and applies them to its agent and open conversations.",
+          go: 'Reload',
+        });
+        if (!ok) return;
+        wsmReloadBusy = true;
+        const row = $('more-reload');
+        const out = $('more-reload-result');
+        row.disabled = true;
+        $('more-reload-val').textContent = 'reloading...';
+        out.textContent = '';
+        delete out.dataset.tone;
+        try {
+          const { res, data } = await wsfPost('/rc/workspace/reload', {});
+          if (res.ok) {
+            out.textContent = wsmReloadText(data);
+          } else {
+            out.textContent = 'Not reloaded: ' + wsFilesErrorText(res.status, data);
+            out.dataset.tone = 'error';
+          }
+        } catch (err) {
+          out.textContent = 'Not reloaded: ' + err.message;
+          out.dataset.tone = 'error';
+        } finally {
+          wsmReloadBusy = false;
+          row.disabled = false;
+          $('more-reload-val').textContent = '';
+        }
+      }
+      $('more-reload').addEventListener('click', () => void wsmReload());
 
       // Upload: the phone's own picker, then one POST per file, in turn, each
       // with its own progress line. A file over the #196 limit is refused here
@@ -24889,7 +25206,7 @@
         );
         const kind = kindEl && kindEl.value === 'agents' ? 'agents' : 'memory';
         out.textContent = 'loading\u2026';
-        const r = await rcCall('/rc/workspace/' + kind);
+        const r = await rcCall(wsTargetQuery('/rc/workspace/' + kind));
         if (!r.ok) {
           // Two routes, two verdicts, each passed through as the route named it
           // (src/routes/workspaceContext.ts), because a daemon can serve one and
@@ -24971,6 +25288,7 @@
           );
         }
         renderRows(out, rows);
+        if (kind === 'memory') wsmDrawEdits(out, st);
       };
 
       $('fork-btn').onclick = async () => {
