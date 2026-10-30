@@ -21,6 +21,7 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { rebuildStaleDependents } from './rebuild-stale-dependents.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -71,6 +72,14 @@ execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
   stdio: 'inherit',
   cwd: root,
 });
+
+// A `tsc --build` package whose only change is a dependency's rebuilt dist
+// emits nothing and keeps an older dist than that dependency, which the check
+// below would reject; force those packages to rebuild first (#209). Not part
+// of a --cli-only build, which rebuilds a subset on purpose.
+if (!cliOnly) {
+  rebuildStaleDependents(root);
+}
 
 // A package that was skipped above (or whose dependents were) leaves a bundle
 // importing names its dependency no longer exports; fail the build loudly
