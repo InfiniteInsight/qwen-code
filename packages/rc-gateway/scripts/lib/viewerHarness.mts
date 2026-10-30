@@ -283,6 +283,8 @@ export interface BootViewerOptions {
   artifactMutationErrorBody?: unknown;
   /** #135: the stub's session goal routes: the goal each session holds, what moves it, a refusal. */
   goal?: StubDaemonOptions['goal'];
+  /** #135: the stub's session hooks read: the hooks each session holds, a refusal. */
+  hooks?: StubDaemonOptions['hooks'];
 }
 
 /** The label the harness's one host action carries. */
@@ -469,6 +471,7 @@ export async function bootViewer(
     artifactMutationStatus: opts.artifactMutationStatus,
     artifactMutationErrorBody: opts.artifactMutationErrorBody,
     goal: opts.goal,
+    hooks: opts.hooks,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));

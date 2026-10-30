@@ -63,6 +63,7 @@ import {
   type WorktreeResetSessionRequest,
   type DaemonSessionStatsStatus,
   type DaemonSessionResourcesStatus,
+  type DaemonSessionHooksStatus,
   type DaemonPermissionRuleType,
   type DaemonPermissionScope,
   type DaemonSettingUpdateResult,
@@ -679,6 +680,12 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
+  /**
+   * #135: the hooks registered in this session (read). Under the SDK's own name
+   * (DaemonClient.sessionHooks). The daemon's entries carry `env` and `headers`
+   * unmasked; routes/sessionHooks.ts projects them away before they leave.
+   */
+  sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
   // Daemon-global methods: no session id, but workspace-scoped — each takes
@@ -2832,6 +2839,13 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<{ cleared: boolean; condition?: string }> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionGoalClear(sessionId, clientId),
+    );
+  }
+
+  /** #135: the hooks registered in this session (read). */
+  async sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionHooks(sessionId),
     );
   }
 

@@ -313,6 +313,7 @@ import {
   createSessionGoalReadRoute,
   createSessionGoalSetRoute,
 } from './routes/sessionGoal.js';
+import { createSessionHooksReadRoute } from './routes/sessionHooks.js';
 
 export interface GatewayDeps {
   daemon: SessionDaemon;
@@ -1313,6 +1314,15 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user -> 403
     createSessionGoalClearRoute(deps.daemon, audit),
+  );
+  // #135: the hooks registered in this session, as a projection. Session-read:
+  // a read, and what it carries is the event, matcher, source and the command's
+  // first words, not the config (see routes/sessionHooks.ts for what is left out).
+  app.get(
+    '/session/:id/hooks',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionHooksReadRoute(deps.daemon),
   );
   app.post(
     '/session/:id/permission/:requestId',

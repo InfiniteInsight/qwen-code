@@ -333,6 +333,11 @@ export function createCapabilityRoute(deps: {
       // hold write (`writeScope`). The daemon advertises no tag for goals, so
       // a daemon without the routes answers `goal_unsupported` on the read.
       sessionGoal: true,
+      // #135: GET /session/:id/hooks is mounted at session-read. The page
+      // draws the Hooks row when this is set. The route answers a projection
+      // (no env, headers, prompt text or full command), never the daemon's
+      // entries; see routes/sessionHooks.ts.
+      sessionHooks: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
