@@ -3005,6 +3005,271 @@
           align-self: center;
         }
       }
+      /* #110. The Organize and Sources sheets (More > This conversation):
+         the Agents sheet's shape, at the foot of the screen over a scrim, a
+         56px head, a scrolled body of 48px rows, and for Sources the add
+         row pinned under the list in the thumb zone. */
+      .cv-sheet {
+        position: fixed;
+        inset: 0;
+        z-index: 80;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        background: rgba(1, 4, 9, 0.6);
+      }
+      .cv-sheet[hidden] {
+        display: none;
+      }
+      .cv-sheet .cv-card {
+        display: flex;
+        flex-direction: column;
+        box-sizing: border-box;
+        max-height: 85%;
+        min-height: 40%;
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        background: var(--g1-band);
+        border-top: 1px solid var(--g1-edge);
+        border-radius: 16px 16px 0 0;
+        color: var(--g1-ink);
+      }
+      .cv-sheet .cv-head {
+        flex: none;
+        height: 56px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--g1-line);
+        color: var(--g1-ink-hi);
+      }
+      .cv-sheet .cv-head > button,
+      .cv-sheet .cv-head > .cv-sp {
+        width: 44px;
+        height: 44px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: inherit;
+      }
+      .cv-sheet .cv-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        text-align: center;
+        font-size: 16px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .cv-sheet .cv-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 4px 0 16px;
+      }
+      .cv-sheet .cv-lede {
+        margin: 12px 16px 4px;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+      }
+      .cv-sheet .cv-grp {
+        padding: 14px 16px 6px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      .cv-sheet .cv-note {
+        margin: 8px 16px 0;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      .cv-sheet .cv-note:empty {
+        display: none;
+      }
+      .cv-sheet .cv-note[data-tone='err'] {
+        color: #ff7b72;
+      }
+      .cv-sheet .cv-btn {
+        flex: none;
+        min-width: 64px;
+        min-height: 44px;
+        padding: 0 16px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .cv-sheet .cv-btn:disabled {
+        opacity: 0.5;
+      }
+      .cv-sheet .cv-in {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 44px;
+        box-sizing: border-box;
+        padding: 0 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        color: inherit;
+        /* 16px, so a phone does not zoom the page when the field is focused. */
+        font-size: 16px;
+      }
+      .cv-sheet .gd {
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--g1-ink-mid);
+      }
+      #org-groups .org-row {
+        width: 100%;
+        min-height: 48px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 16px;
+        border: 0;
+        border-top: 1px solid var(--g1-line);
+        background: transparent;
+        color: inherit;
+        font-size: 15px;
+        text-align: left;
+      }
+      #org-groups .org-row .gn {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #org-groups .org-row .tick {
+        flex: none;
+        visibility: hidden;
+        color: var(--g1-ink-hi);
+      }
+      #org-groups .org-row[aria-pressed='true'] .tick {
+        visibility: visible;
+      }
+      #org-new {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #org-new[hidden] {
+        display: none;
+      }
+      #org-colors {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 4px 16px 0;
+      }
+      #org-colors .org-sw {
+        width: 44px;
+        height: 44px;
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 2px solid transparent;
+        border-radius: 50%;
+        background: transparent;
+      }
+      #org-colors .org-sw .gd {
+        width: 24px;
+        height: 24px;
+      }
+      #org-colors .org-sw[aria-pressed='true'] {
+        border-color: var(--g1-ink-hi);
+      }
+      #src-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      #src-list .src-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 56px;
+        box-sizing: border-box;
+        padding: 6px 12px 6px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #src-list .src-txt {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      #src-list .src-t,
+      #src-list .src-l {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #src-list .src-t {
+        font-size: 15px;
+        color: var(--g1-ink-hi);
+      }
+      #src-list .src-l {
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+      }
+      #src-list .src-k {
+        font-weight: 600;
+        margin-right: 6px;
+      }
+      #src-list .src-l a {
+        color: inherit;
+      }
+      #src-list .src-rm {
+        color: #ff7b72;
+      }
+      #src-add {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #src-add[hidden] {
+        display: none;
+      }
+      #src-add .src-in-row {
+        display: flex;
+        gap: 8px;
+      }
+      @media (min-width: 1100px) {
+        .cv-sheet {
+          left: var(--h1-left);
+          right: var(--h1-right);
+        }
+        .cv-sheet .cv-card {
+          width: 100%;
+          max-width: 80ch;
+          align-self: center;
+        }
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -3164,6 +3429,19 @@
                  reads. -->
             <button type="button" class="row" id="more-agents" data-action="agents" hidden>
               <span class="lbl">Agents</span><span class="val" id="more-agents-val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <!-- #110. Organize files this conversation under a group or a
+                 colour tag; Sources is its reference list. Each opens its
+                 sheet over the chat (More shuts, as Agents does). Hidden on
+                 a gateway or daemon without them, and Organize also for a
+                 token that cannot write. -->
+            <button type="button" class="row" id="more-organize" data-action="organize" hidden>
+              <span class="lbl">Organize</span><span class="val" id="more-organize-val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <button type="button" class="row" id="more-sources" data-action="sources" hidden>
+              <span class="lbl">Sources</span><span class="val" id="more-sources-val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
             <button type="button" class="row" id="more-find" data-action="find" disabled>
@@ -4235,6 +4513,66 @@
           <div id="agents-foot" hidden>
             <span id="agent-stop-note"></span>
             <button id="agent-stop" type="button">Stop</button>
+          </div>
+        </div>
+      </div>
+      <!-- #110. Organize: where this conversation is filed. One choice of
+           None, a group of its folder, or a colour tag, each a 48px row or a
+           44px swatch that applies as it is tapped; a typed name files it
+           under that group, made first when the folder has none by that
+           name. Filled by renderOrgSheet. -->
+      <div id="org-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="org-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="org-title" class="cv-title">Organize</strong>
+            <button id="org-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="org-body">
+            <p class="cv-lede" id="org-now"></p>
+            <div class="cv-grp" id="org-g-groups">Group</div>
+            <div id="org-groups" role="group" aria-labelledby="org-g-groups"></div>
+            <p class="cv-note" id="org-groups-note"></p>
+            <div id="org-new">
+              <span class="gd" id="org-new-dot" aria-hidden="true"></span>
+              <input id="org-new-name" class="cv-in" type="text" maxlength="64" autocomplete="off" placeholder="Group name" aria-label="File under a group by name, made if new" />
+              <button id="org-new-add" class="cv-btn" type="button" aria-label="File under this group, made if new">Add</button>
+            </div>
+            <div class="cv-grp" id="org-g-colors">Colour tag</div>
+            <div id="org-colors" role="group" aria-labelledby="org-g-colors"></div>
+            <p class="cv-note" id="org-note" role="status"></p>
+          </div>
+        </div>
+      </div>
+      <!-- #110. Sources: the conversation's reference list, newest first,
+           each row its title over its kind and where it is; Remove asks
+           first, by name. The add row is in the thumb zone, for a token
+           that can write. Filled by renderSrcSheet. -->
+      <div id="src-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="src-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="src-title" class="cv-title">Sources</strong>
+            <button id="src-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="src-body">
+            <p class="cv-lede">The files and links this conversation keeps as references: where each one is, never what it holds.</p>
+            <ul id="src-list"></ul>
+            <p class="cv-note" id="src-list-note"></p>
+          </div>
+          <div id="src-add" hidden>
+            <div class="src-in-row">
+              <input id="src-where" class="cv-in" type="text" maxlength="2048" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="A path in this folder, or a link" aria-label="A path in this conversation's folder, or a web link" />
+            </div>
+            <div class="src-in-row">
+              <input id="src-name" class="cv-in" type="text" maxlength="200" autocomplete="off" placeholder="Title (optional)" aria-label="Title, optional" />
+              <button id="src-add-btn" class="cv-btn" type="button">Add</button>
+            </div>
+            <p class="cv-note" id="src-note" role="status"></p>
           </div>
         </div>
       </div>
@@ -13312,6 +13650,708 @@
         e.preventDefault();
         e.stopPropagation();
         closeAgentsSheet(true);
+      });
+
+      // -- #110: Organize and Sources (More > This conversation) ----------
+      // Organize files the conversation on screen under a named group of its
+      // folder, a colour tag, or neither: the daemon's organization store,
+      // the one the list's chip reads through the session catalog (#132).
+      // The daemon keeps group and colour apart, but its own UI treats them
+      // as one choice and the chip draws the colour over the group, so a pick
+      // here sends both, the other cleared. Pinning, the store's third field,
+      // is not offered: the list does not draw it. The groups offered are the
+      // ones the catalog lists for this conversation's own folder, read as
+      // the sheet opens (a group of another folder is one the daemon will not
+      // file it under). A typed name files it under the group of that name,
+      // compared as the daemon compares them (trimmed, any case), and makes
+      // the group first when there is none. Drawn only for a token that holds
+      // write, on a gateway that mounts the route, over a daemon that
+      // advertises session_organization.
+      //
+      // Sources is the conversation's reference list: files in its folder,
+      // files it was sent, web links. Each is a pointer the daemon keeps,
+      // never the contents, so there is no size to show. A reader sees the
+      // list; a token with write also adds a path or a link and removes a row,
+      // asked first by name. The daemon's add takes no file content, so there
+      // is no picker: a file from the phone becomes a source by being sent.
+      var ORG_PRESETS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'];
+      var orgSheet = {
+        open: false,
+        opener: null,
+        sid: null,
+        cwd: null,
+        groups: null, // this folder's groups, null while they are read
+        colors: ORG_PRESETS,
+        groupsNote: '',
+        current: null, // { groupId, color } once known, else null
+        busy: false,
+        note: '',
+        tone: '',
+        gen: 0,
+      };
+      var srcSheet = {
+        open: false,
+        opener: null,
+        sid: null,
+        rows: null,
+        listNote: '',
+        busy: false,
+        note: '',
+        tone: '',
+        gen: 0,
+        count: new Map(), // session id -> how many sources the last read held
+      };
+      function organizeOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc.sessionOrganization === true &&
+          rc.writeScope === true &&
+          daemonHasFeature('session_organization')
+        );
+      }
+      function sourcesOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc.sessionSources === true &&
+          daemonHasFeature('session_sources')
+        );
+      }
+      function sourcesWritable() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.writeScope === true
+        );
+      }
+      // rcCall, keeping the refusal's own words: the daemon's source
+      // validator says what is wrong (a path that is not relative, a link
+      // with a password), and a code alone cannot.
+      async function convCall(path, init) {
+        let res;
+        try {
+          res = await fetch(path, {
+            ...init,
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+          });
+        } catch (e) {
+          return { ok: false, status: 0, code: 'network', error: 'the gateway did not answer' };
+        }
+        let body = null;
+        try {
+          const text = await res.text();
+          body = text ? JSON.parse(text) : {};
+        } catch {
+          body = null;
+        }
+        if (res.ok) {
+          return body
+            ? { ok: true, status: res.status, body }
+            : { ok: false, status: res.status, code: 'bad response body', error: '' };
+        }
+        return {
+          ok: false,
+          status: res.status,
+          code: body && typeof body.code === 'string' ? body.code : String(res.status),
+          error: body && typeof body.error === 'string' ? body.error : '',
+        };
+      }
+      function orgMark(c) {
+        if (!c) return null;
+        return {
+          groupId: typeof c.groupId === 'string' && c.groupId ? c.groupId : null,
+          color: typeof c.color === 'string' && c.color ? c.color : null,
+        };
+      }
+      function orgGroupName(id) {
+        const g =
+          (orgSheet.groups || []).find((x) => x.id === id) ||
+          catalogState.groups.get(id);
+        return g ? strOr(g.name, '') : '';
+      }
+      // What the conversation is filed under, in words, as the chip reads it:
+      // a colour tag over a group.
+      function orgFiledText(cur) {
+        if (!cur) return '';
+        if (cur.color) return 'Tagged ' + cur.color + '.';
+        if (cur.groupId) {
+          const n = orgGroupName(cur.groupId);
+          return n ? 'Filed under ' + n + '.' : 'Filed under a group of another folder.';
+        }
+        return 'Not filed under anything.';
+      }
+      function orgCwd() {
+        if (watchedSessionCwd) return watchedSessionCwd;
+        const c = catalogState.rows.get(watchedSessionId);
+        return c && typeof c.workspace === 'string' && c.workspace ? c.workspace : null;
+      }
+      // The two rows' visibility and values, drawn whenever More opens.
+      function renderConvRows() {
+        const sid = watchedSessionId;
+        const org = $('more-organize');
+        const onOrg = organizeOn();
+        if (org.hidden !== !onOrg) org.hidden = !onOrg;
+        org.disabled = !sid;
+        const mark = sid ? orgMark(catalogState.rows.get(sid)) : null;
+        h1Text(
+          $('more-organize-val'),
+          !mark
+            ? ''
+            : mark.color
+              ? mark.color + ' tag'
+              : mark.groupId
+                ? orgGroupName(mark.groupId)
+                : '',
+        );
+        const src = $('more-sources');
+        const onSrc = sourcesOn();
+        if (src.hidden !== !onSrc) src.hidden = !onSrc;
+        src.disabled = !sid;
+        const n = sid ? srcSheet.count.get(sid) : undefined;
+        h1Text($('more-sources-val'), typeof n === 'number' ? String(n) : '');
+      }
+      new MutationObserver(() => {
+        if (!$('more-screen').hidden) renderConvRows();
+      }).observe($('more-screen'), { attributes: true, attributeFilter: ['hidden'] });
+
+      function orgEl(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+      }
+      function orgDot(color) {
+        const d = orgEl('span', 'gd');
+        d.setAttribute('aria-hidden', 'true');
+        const sw = groupSwatch(color);
+        if (sw) d.style.background = sw;
+        return d;
+      }
+      // The colour a new group is given: the first preset no group of this
+      // folder has, so a new one stands apart from the rest.
+      function orgNewColor() {
+        const used = new Set((orgSheet.groups || []).map((g) => g.color));
+        return orgSheet.colors.find((c) => !used.has(c)) ||
+          orgSheet.colors[(orgSheet.groups || []).length % orgSheet.colors.length];
+      }
+      function renderOrgSheet() {
+        if (!orgSheet.open) return;
+        const cur = orgSheet.current;
+        h1Text($('org-now'), cur ? orgFiledText(cur) : 'Reading where this conversation is filed...');
+        const box = $('org-groups');
+        box.textContent = '';
+        const row = (key, label, color, pressed) => {
+          const b = orgEl('button', 'org-row');
+          b.type = 'button';
+          b.dataset.org = key;
+          b.disabled = orgSheet.busy;
+          b.setAttribute('aria-pressed', String(!!pressed));
+          b.appendChild(color === undefined ? orgEl('span', 'gd') : orgDot(color));
+          b.appendChild(orgEl('span', 'gn', label));
+          const tick = orgEl('span', 'tick', '✓');
+          tick.setAttribute('aria-hidden', 'true');
+          b.appendChild(tick);
+          box.appendChild(b);
+        };
+        row('none', 'None', undefined, cur && !cur.groupId && !cur.color);
+        for (const g of orgSheet.groups || []) {
+          row('group:' + g.id, strOr(g.name, g.id), g.color, cur && !cur.color && cur.groupId === g.id);
+        }
+        h1Text($('org-groups-note'), orgSheet.groups === null ? 'Reading this folder\'s groups...' : orgSheet.groupsNote);
+        $('org-new').hidden = !orgSheet.cwd;
+        const dot = $('org-new-dot');
+        const sw = groupSwatch(orgNewColor());
+        dot.style.background = sw || '';
+        $('org-new-add').disabled = orgSheet.busy || orgSheet.groups === null;
+        const colors = $('org-colors');
+        colors.textContent = '';
+        for (const c of orgSheet.colors) {
+          const b = orgEl('button', 'org-sw');
+          b.type = 'button';
+          b.dataset.org = 'color:' + c;
+          b.disabled = orgSheet.busy;
+          b.setAttribute('aria-label', c + ' tag');
+          b.setAttribute('aria-pressed', String(!!(cur && cur.color === c)));
+          b.appendChild(orgDot(c));
+          colors.appendChild(b);
+        }
+        const note = $('org-note');
+        h1Text(note, orgSheet.note);
+        if (orgSheet.tone) note.dataset.tone = orgSheet.tone;
+        else delete note.dataset.tone;
+      }
+      function openOrgSheet() {
+        if (!organizeOn() || !watchedSessionId) return;
+        orgSheet.gen += 1;
+        if (!orgSheet.open) {
+          orgSheet.opener = document.activeElement;
+          orgSheet.open = true;
+          $('org-sheet').hidden = false;
+        }
+        closeH1Menu(false);
+        orgSheet.sid = watchedSessionId;
+        orgSheet.cwd = orgCwd();
+        orgSheet.current = orgMark(catalogState.rows.get(orgSheet.sid));
+        orgSheet.groups = null;
+        orgSheet.colors = ORG_PRESETS;
+        orgSheet.groupsNote = '';
+        orgSheet.busy = false;
+        orgSheet.note = '';
+        orgSheet.tone = '';
+        $('org-new-name').value = '';
+        renderOrgSheet();
+        void orgReadGroups();
+        $('org-close').focus({ preventScroll: true });
+      }
+      function closeOrgSheet(refocus) {
+        if (!orgSheet.open) return;
+        orgSheet.open = false;
+        orgSheet.gen += 1;
+        $('org-sheet').hidden = true;
+        const back = orgSheet.opener;
+        orgSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      // This folder's groups, and where the conversation is filed, from one
+      // catalog read of this folder alone: the list's own catalog state
+      // merges the groups of every folder it shows.
+      async function orgReadGroups() {
+        const gen = orgSheet.gen;
+        const sid = orgSheet.sid;
+        const cwd = orgSheet.cwd;
+        const done = (note) => {
+          if (orgSheet.groups === null) orgSheet.groups = [];
+          orgSheet.groupsNote = note;
+          renderOrgSheet();
+        };
+        if (!cwd) {
+          return done('This conversation\'s folder is not known here, so its groups cannot be listed. A colour tag still works.');
+        }
+        if (!sessionCatalogOn()) {
+          return done('This gateway cannot list groups. A colour tag still works.');
+        }
+        const r = await convCall('/rc/sessions/catalog', {
+          method: 'POST',
+          body: JSON.stringify({
+            workspaces: [cwd],
+            options: { view: 'organized', size: 100 },
+            includeGroups: true,
+          }),
+        });
+        if (gen !== orgSheet.gen || !orgSheet.open) return;
+        if (!r.ok) {
+          return done(
+            r.status === 403
+              ? 'Listing groups needs an owner token. A colour tag still works.'
+              : 'The groups could not be read (' + r.code + ').',
+          );
+        }
+        const b = r.body;
+        const list = b.groups && Array.isArray(b.groups.groups) ? b.groups.groups : [];
+        orgSheet.groups = list
+          .filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string')
+          .sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+        const offered =
+          b.groups && Array.isArray(b.groups.colorOptions)
+            ? b.groups.colorOptions.filter((c) => typeof c === 'string' && GROUP_SWATCHES[c])
+            : [];
+        if (offered.length) orgSheet.colors = offered;
+        const member = (Array.isArray(b.workspaces) ? b.workspaces : []).find(
+          (w) => w && w.workspace === cwd,
+        );
+        const mine = (Array.isArray(b.sessions) ? b.sessions : []).find(
+          (s) => s && s.sessionId === sid,
+        );
+        if (mine) orgSheet.current = orgMark(mine);
+        else if (!orgSheet.current) orgSheet.current = null;
+        done(
+          member && member.error
+            ? strOr(member.error.message, 'The groups could not be read.')
+            : orgSheet.groups.length
+              ? ''
+              : 'No groups in this folder yet. Type a name below to make one.',
+        );
+      }
+      function orgRefusalText(r) {
+        if (r.code === 'group_not_found') return 'That group is not in this conversation\'s folder.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        if (r.code === 'organization_unsupported') return 'This daemon cannot file conversations.';
+        if (r.status === 403) return 'Filing needs a token that can write.';
+        return 'Not changed: ' + (r.error || r.code);
+      }
+      // One PATCH, and what the daemon says it now holds: the list's catalog
+      // row takes the daemon's answer, not the request, and the next list
+      // open reads the catalog again.
+      async function orgApply(update) {
+        const sid = orgSheet.sid;
+        if (!sid || orgSheet.busy) return;
+        const gen = orgSheet.gen;
+        orgSheet.busy = true;
+        orgSheet.note = 'Filing...';
+        orgSheet.tone = '';
+        renderOrgSheet();
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/organization', {
+          method: 'PATCH',
+          body: JSON.stringify(update),
+        });
+        if (r.ok) {
+          const mark = orgMark(r.body);
+          const row = catalogState.rows.get(sid);
+          if (row) {
+            catalogState.rows.set(sid, { ...row, groupId: mark.groupId, color: mark.color });
+          }
+          for (const g of orgSheet.groups || []) {
+            if (!catalogState.groups.has(g.id)) catalogState.groups.set(g.id, g);
+          }
+          catalogState.readAt = 0;
+          redrawWithCatalog();
+          if (listShown()) void refreshCatalog(false);
+        }
+        if (gen !== orgSheet.gen || !orgSheet.open) return;
+        orgSheet.busy = false;
+        if (r.ok) {
+          orgSheet.current = orgMark(r.body);
+          orgSheet.note = orgFiledText(orgSheet.current);
+          orgSheet.tone = '';
+        } else {
+          orgSheet.note = orgRefusalText(r);
+          orgSheet.tone = 'err';
+        }
+        renderOrgSheet();
+        renderConvRows();
+      }
+      // A typed name: the group of that name if this folder has one, else a
+      // new group made first and then filed under.
+      async function orgFileByName() {
+        const name = ($('org-new-name').value || '').trim();
+        if (!name || orgSheet.busy || orgSheet.groups === null) {
+          if (!name) {
+            orgSheet.note = 'Type a group name first.';
+            orgSheet.tone = 'err';
+            renderOrgSheet();
+          }
+          return;
+        }
+        const key = name.toLowerCase();
+        const same = () =>
+          (orgSheet.groups || []).find((g) => strOr(g.name, '').trim().toLowerCase() === key);
+        let g = same();
+        if (!g) {
+          const gen = orgSheet.gen;
+          orgSheet.busy = true;
+          orgSheet.note = 'Making the group ' + name + '...';
+          orgSheet.tone = '';
+          renderOrgSheet();
+          const r = await convCall(
+            '/rc/workspace/session-groups?workspace=' + encodeURIComponent(orgSheet.cwd),
+            { method: 'POST', body: JSON.stringify({ name, color: orgNewColor() }) },
+          );
+          if (gen !== orgSheet.gen || !orgSheet.open) return;
+          orgSheet.busy = false;
+          if (r.ok && r.body && r.body.group && typeof r.body.group.id === 'string') {
+            g = r.body.group;
+            orgSheet.groups = [...(orgSheet.groups || []), g];
+          } else if (r.code === 'group_name_conflict') {
+            // Made elsewhere since this sheet read the groups.
+            await orgReadGroups();
+            if (gen !== orgSheet.gen || !orgSheet.open) return;
+            g = same();
+          }
+          if (!g) {
+            orgSheet.note =
+              r.code === 'invalid_group_name'
+                ? 'A group name is 1 to 64 characters.'
+                : 'The group was not made: ' + (r.error || r.code);
+            orgSheet.tone = 'err';
+            renderOrgSheet();
+            return;
+          }
+        }
+        $('org-new-name').value = '';
+        await orgApply({ groupId: g.id, color: null });
+      }
+      $('more-organize').addEventListener('click', () => {
+        setMoreOpen(false);
+        openOrgSheet();
+      });
+      $('org-close').addEventListener('click', () => closeOrgSheet(true));
+      $('org-new-add').addEventListener('click', () => void orgFileByName());
+      $('org-new-name').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        void orgFileByName();
+      });
+      $('org-sheet').addEventListener('click', (e) => {
+        if (e.target === $('org-sheet')) return closeOrgSheet(true);
+        const t = e.target.closest('button[data-org]');
+        if (!t || t.disabled) return;
+        const k = t.dataset.org;
+        if (k === 'none') void orgApply({ groupId: null, color: null });
+        else if (k.startsWith('group:')) void orgApply({ groupId: k.slice(6), color: null });
+        else if (k.startsWith('color:')) void orgApply({ color: k.slice(6), groupId: null });
+      });
+      $('org-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeOrgSheet(true);
+      });
+
+      // Where a source is, in words: its kind, then its path or link.
+      function srcWhere(s) {
+        const l = (s && s.locator) || {};
+        if (l.type === 'workspace_file') return { kind: 'file', text: strOr(l.workspacePath, '') };
+        if (l.type === 'url') return { kind: 'link', text: strOr(l.url, ''), url: l.url };
+        if (l.type === 'attachment') return { kind: 'attached file', text: 'sent with a message' };
+        return { kind: strOr(s && s.kind, 'source'), text: '' };
+      }
+      function renderSrcSheet() {
+        if (!srcSheet.open) return;
+        const writable = sourcesWritable();
+        const list = $('src-list');
+        list.textContent = '';
+        for (const s of srcSheet.rows || []) {
+          if (!s || typeof s.id !== 'string') continue;
+          const li = orgEl('li', 'src-row');
+          li.dataset.id = s.id;
+          const txt = orgEl('div', 'src-txt');
+          const title = strOr(s.title, '(untitled)');
+          txt.appendChild(orgEl('span', 'src-t', title));
+          const w = srcWhere(s);
+          const line = orgEl('span', 'src-l');
+          line.appendChild(orgEl('span', 'src-k', w.kind));
+          let safe = null;
+          if (w.url) {
+            try {
+              const u = new URL(w.url);
+              if (u.protocol === 'https:' || u.protocol === 'http:') safe = u.href;
+            } catch {
+              safe = null;
+            }
+          }
+          if (safe) {
+            const a = orgEl('a', null, w.text);
+            a.href = safe;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            line.appendChild(a);
+          } else {
+            line.appendChild(document.createTextNode(w.text));
+          }
+          line.title = w.text;
+          txt.appendChild(line);
+          li.appendChild(txt);
+          if (writable) {
+            const rm = orgEl('button', 'cv-btn src-rm', 'Remove');
+            rm.type = 'button';
+            rm.dataset.id = s.id;
+            rm.dataset.title = title;
+            rm.disabled = srcSheet.busy;
+            rm.setAttribute('aria-label', 'Remove ' + title);
+            li.appendChild(rm);
+          }
+          list.appendChild(li);
+        }
+        h1Text(
+          $('src-list-note'),
+          srcSheet.rows === null
+            ? srcSheet.listNote || 'Reading the sources...'
+            : srcSheet.listNote || (srcSheet.rows.length ? '' : 'No sources yet.'),
+        );
+        $('src-add').hidden = !writable;
+        $('src-add-btn').disabled = srcSheet.busy;
+        const note = $('src-note');
+        h1Text(note, srcSheet.note);
+        if (srcSheet.tone) note.dataset.tone = srcSheet.tone;
+        else delete note.dataset.tone;
+      }
+      async function srcRead() {
+        const gen = srcSheet.gen;
+        const sid = srcSheet.sid;
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/sources');
+        if (gen !== srcSheet.gen || !srcSheet.open) return;
+        if (r.ok && Array.isArray(r.body.sources)) {
+          srcSheet.rows = r.body.sources;
+          srcSheet.listNote = '';
+          srcSheet.count.set(sid, r.body.sources.length);
+        } else if (!r.ok) {
+          srcSheet.listNote =
+            r.code === 'sources_unsupported'
+              ? 'This daemon keeps no sources.'
+              : r.code === 'session_not_found'
+                ? 'The daemon does not have this conversation open.'
+                : 'The sources could not be read: ' + (r.error || r.code);
+        }
+        renderSrcSheet();
+        renderConvRows();
+      }
+      function openSrcSheet() {
+        if (!sourcesOn() || !watchedSessionId) return;
+        srcSheet.gen += 1;
+        if (!srcSheet.open) {
+          srcSheet.opener = document.activeElement;
+          srcSheet.open = true;
+          $('src-sheet').hidden = false;
+        }
+        closeH1Menu(false);
+        srcSheet.sid = watchedSessionId;
+        srcSheet.rows = null;
+        srcSheet.listNote = '';
+        srcSheet.busy = false;
+        srcSheet.note = '';
+        srcSheet.tone = '';
+        $('src-where').value = '';
+        $('src-name').value = '';
+        renderSrcSheet();
+        void srcRead();
+        $('src-close').focus({ preventScroll: true });
+      }
+      function closeSrcSheet(refocus) {
+        if (!srcSheet.open) return;
+        srcSheet.open = false;
+        srcSheet.gen += 1;
+        $('src-sheet').hidden = true;
+        const back = srcSheet.opener;
+        srcSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      // What was typed, as the daemon's add takes it: a link when it starts
+      // with http:// or https://, else a path in the conversation's folder.
+      // A full path inside that folder is made relative to it, the form the
+      // daemon keeps; any other full path goes as typed, for the daemon to
+      // refuse in its own words. The title, when none is typed, is the
+      // file's name or the link's host and path.
+      function srcInput(where, typedTitle) {
+        if (/^https?:\/\//i.test(where)) {
+          let t = typedTitle;
+          if (!t) {
+            try {
+              const u = new URL(where);
+              t = (u.host + u.pathname).replace(/\/+$/, '');
+            } catch {
+              t = where;
+            }
+          }
+          return { title: t.slice(0, 200), locator: { type: 'url', url: where } };
+        }
+        let p = where;
+        const cwd = watchedSessionCwd || orgCwd();
+        if (cwd && p.startsWith(cwd.replace(/\/+$/, '') + '/')) {
+          p = p.slice(cwd.replace(/\/+$/, '').length + 1);
+        }
+        const leaf = p.replace(/\/+$/, '').split('/').pop() || p;
+        return {
+          title: (typedTitle || leaf).slice(0, 200),
+          locator: { type: 'workspace_file', workspacePath: p },
+        };
+      }
+      function srcRefusalText(r) {
+        if (r.code === 'invalid_source') return r.error || 'The daemon refused that source.';
+        if (r.code === 'client_not_bound') return r.error;
+        if (r.code === 'source_limit_reached') return 'This conversation already has 200 sources.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        if (r.status === 403) return 'Changing sources needs a token that can write.';
+        return 'Not changed: ' + (r.error || r.code);
+      }
+      async function srcAdd() {
+        const where = ($('src-where').value || '').trim();
+        if (srcSheet.busy) return;
+        if (!where) {
+          srcSheet.note = 'Type a path in this folder, or a link.';
+          srcSheet.tone = 'err';
+          renderSrcSheet();
+          return;
+        }
+        const input = srcInput(where, ($('src-name').value || '').trim());
+        const gen = srcSheet.gen;
+        srcSheet.busy = true;
+        srcSheet.note = 'Adding ' + input.title + '...';
+        srcSheet.tone = '';
+        renderSrcSheet();
+        const r = await convCall('/session/' + encodeURIComponent(srcSheet.sid) + '/sources', {
+          method: 'POST',
+          body: JSON.stringify(input),
+        });
+        if (gen !== srcSheet.gen || !srcSheet.open) return;
+        srcSheet.busy = false;
+        if (r.ok && r.body && r.body.source) {
+          const t = strOr(r.body.source.title, input.title);
+          srcSheet.note =
+            r.body.change === 'unchanged'
+              ? t + ' is already a source.'
+              : r.body.change === 'updated'
+                ? 'Retitled ' + t + '.'
+                : 'Added ' + t + '.';
+          srcSheet.tone = '';
+          $('src-where').value = '';
+          $('src-name').value = '';
+          await srcRead();
+          return;
+        }
+        srcSheet.note = srcRefusalText(r);
+        srcSheet.tone = 'err';
+        renderSrcSheet();
+      }
+      // Asked first, by name; the verdict is the daemon's `removed`, so a
+      // row already gone says so rather than claiming a removal.
+      async function srcRemove(id, title) {
+        if (srcSheet.busy || !id) return;
+        if (
+          !window.confirm(
+            'Remove ' + title + ' from this conversation\'s sources? The file or page itself is not touched.',
+          )
+        ) {
+          return;
+        }
+        const gen = srcSheet.gen;
+        srcSheet.busy = true;
+        srcSheet.note = 'Removing ' + title + '...';
+        srcSheet.tone = '';
+        renderSrcSheet();
+        const r = await convCall(
+          '/session/' + encodeURIComponent(srcSheet.sid) + '/sources/' + encodeURIComponent(id),
+          { method: 'DELETE' },
+        );
+        if (gen !== srcSheet.gen || !srcSheet.open) return;
+        srcSheet.busy = false;
+        if (r.ok) {
+          srcSheet.note =
+            r.body.removed === true ? 'Removed ' + title + '.' : title + ' was not in the list any more.';
+          srcSheet.tone = '';
+          await srcRead();
+          return;
+        }
+        srcSheet.note = srcRefusalText(r);
+        srcSheet.tone = 'err';
+        renderSrcSheet();
+      }
+      $('more-sources').addEventListener('click', () => {
+        setMoreOpen(false);
+        openSrcSheet();
+      });
+      $('src-close').addEventListener('click', () => closeSrcSheet(true));
+      $('src-add-btn').addEventListener('click', () => void srcAdd());
+      for (const id of ['src-where', 'src-name']) {
+        $(id).addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          void srcAdd();
+        });
+      }
+      $('src-sheet').addEventListener('click', (e) => {
+        if (e.target === $('src-sheet')) return closeSrcSheet(true);
+        const t = e.target.closest('button.src-rm');
+        if (t && !t.disabled) void srcRemove(t.dataset.id, t.dataset.title);
+      });
+      $('src-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeSrcSheet(true);
       });
 
       const token = () => localStorage.getItem(TOKEN_KEY);
