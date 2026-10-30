@@ -91,6 +91,16 @@ import type {
   DaemonSessionCatalogResult,
 } from '@qwen-code/sdk';
 import { catalogCallFailure } from './sessions/catalogFanout.js';
+import type {
+  DaemonSessionGroup,
+  DaemonSessionGroupInput,
+  DaemonSessionOrganizationResult,
+  DaemonSessionOrganizationUpdate,
+  SessionSourceInput,
+  SessionSourceRemoveResult,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+} from '@qwen-code/sdk';
 
 /** What {@link deleteWorkspaceFileOnPrimary} needs from a client. */
 export type PrimaryWorkspaceDeleteClient = Pick<
@@ -556,6 +566,41 @@ export interface SessionDaemon {
     name: string,
     clientId?: string,
   ): Promise<DaemonSessionSavedWorkflowStatus>;
+  /**
+   * #110: files ONE session under a named group, a colour tag, or neither,
+   * and pins it or not. Workspace sidecar state on the daemon, not live
+   * session metadata. Returns the daemon's effective organization.
+   */
+  updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult>;
+  /** #110: a new named group in a workspace's organization store. */
+  createSessionGroup(
+    workspaceCwd: string,
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup>;
+  /** #110: the session's reference list (files and links), metadata only. */
+  listSessionSources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<SessionSourcesResult>;
+  /**
+   * #110: add or retitle one source. The daemon refuses this without a
+   * session-bound client id; see `DaemonPool.boundClientId`.
+   */
+  upsertSessionSource(
+    sessionId: string,
+    source: SessionSourceInput,
+    clientId?: string,
+  ): Promise<SessionSourceUpsertResult>;
+  /** #110: drop one source by id. Same client id rule as the upsert. */
+  removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    clientId?: string,
+  ): Promise<SessionSourceRemoveResult>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
   // Daemon-global methods: no session id, but workspace-scoped — each takes
@@ -1031,6 +1076,15 @@ export class DaemonPool implements SessionDaemon {
    * stop.
    */
   private readonly superseded = new Map<string, Entry>();
+  /**
+   * #110: the client id each session's daemon stamped on THIS gateway's own
+   * attachment (the `clientId` a create or a load answers with), with the
+   * record of the daemon that stamped it. See `boundClientId`.
+   */
+  private readonly boundClients = new Map<
+    string,
+    { clientId: string; entry: Entry }
+  >();
 
   /** Wire the audit recorder in (add-mid-turn-recovery: `daemon_died`
    * rows). Called by cli.ts after the gateway app is constructed. */
@@ -1747,6 +1801,7 @@ export class DaemonPool implements SessionDaemon {
   }
 
   private removeSession(id: string): void {
+    this.boundClients.delete(id); // #110
     const key = this.ownerOf.get(id);
     if (key === undefined) return;
     this.ownerOf.delete(id);
@@ -1796,6 +1851,7 @@ export class DaemonPool implements SessionDaemon {
         client.createOrAttachSession(req, clientId),
       );
       this.trackSession(key, session.sessionId);
+      this.bindClient(session.sessionId, entry, session.clientId); // #110
       // The session is live again (add-mid-turn-recovery): clear any stale
       // recovery outcome so the events route attaches normally.
       this.recoveryProvider?.sessionLive?.(session.sessionId);
@@ -1843,6 +1899,7 @@ export class DaemonPool implements SessionDaemon {
         client.loadSession(sessionId, { workspaceCwd: key }),
       );
       this.trackSession(key, sessionId);
+      this.bindClient(sessionId, entry, restored.clientId); // #110
       // The session is live again (add-mid-turn-recovery): clear any stale
       // recovery outcome so the events route attaches normally.
       this.recoveryProvider?.sessionLive?.(sessionId);
@@ -2473,6 +2530,133 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionSavedWorkflowStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionSavedWorkflow(sessionId, name, clientId),
+    );
+  }
+
+  /**
+   * #110: record the client id a daemon stamped on this gateway's attachment
+   * to `sessionId`. A newer daemon answers every create and load with one
+   * (`DaemonSession.clientId`) and keeps it registered on the session until
+   * that client detaches, which this gateway never does for a session it
+   * holds. An answer without one (an older daemon) keeps a binding stamped
+   * by the same daemon, which is still registered, and drops any other.
+   */
+  private bindClient(
+    sessionId: string,
+    entry: Entry,
+    clientId: string | undefined,
+  ): void {
+    if (typeof clientId === 'string' && clientId.length > 0) {
+      this.boundClients.set(sessionId, { clientId, entry });
+      return;
+    }
+    if (this.boundClients.get(sessionId)?.entry !== entry) {
+      this.boundClients.delete(sessionId);
+    }
+  }
+
+  /**
+   * #110: the session-bound client id the daemon's source mutations require
+   * (`POST /session/:id/sources` and the DELETE answer 403
+   * `client_id_required` without one, and the bridge 400 `invalid_client_id`
+   * for one the session never registered). It is the id stamped on this
+   * gateway's own attachment, and only while the daemon that stamped it
+   * still owns the session: after a death or a reap the session's next owner
+   * is another process that never registered it, so the id is dropped
+   * rather than sent to be refused. Undefined when there is none, and the
+   * daemon's refusal then says so.
+   */
+  private boundClientId(sessionId: string): string | undefined {
+    const bound = this.boundClients.get(sessionId);
+    if (!bound) return undefined;
+    const key = this.ownerOf.get(sessionId);
+    const owner =
+      key === undefined
+        ? undefined
+        : key === this.defaultWorkspaceCwd
+          ? this.defaultEntry
+          : this.byWorkspace.get(key);
+    if (owner !== bound.entry || bound.entry.dead) {
+      this.boundClients.delete(sessionId);
+      return undefined;
+    }
+    return bound.clientId;
+  }
+
+  /**
+   * #110: one session's organization. Session-keyed like the rename, so it
+   * reaches a session this pool holds; the daemon's route itself also files
+   * an archived or unloaded transcript, but a session no daemon here owns is
+   * an `UnknownSessionError` before any call. The daemon ignores a client id
+   * on this route, so none is added.
+   */
+  async updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.updateSessionOrganization(sessionId, update, clientId),
+    );
+  }
+
+  /**
+   * #110: a new named group in `workspaceCwd`'s organization store, on that
+   * workspace's daemon (spawned on demand, like the other workspace-scoped
+   * calls). The daemon addresses the store by its own cwd, which is the
+   * pool's key for the workspace, so the key is what is sent.
+   */
+  async createSessionGroup(
+    workspaceCwd: string,
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup> {
+    const key = this.keyFor(workspaceCwd);
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.createSessionGroup(key, input),
+    );
+  }
+
+  /**
+   * #110: the session's sources, relayed verbatim. The daemon takes an
+   * unbound read (`resolveTrustedClientId` passes when no id is sent), so
+   * none is added here: a stale one would turn a read into a refusal.
+   */
+  async listSessionSources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<SessionSourcesResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.listSessionSources(sessionId, clientId),
+    );
+  }
+
+  /** #110: add or retitle one source, as this gateway's own attached client. */
+  async upsertSessionSource(
+    sessionId: string,
+    source: SessionSourceInput,
+    clientId?: string,
+  ): Promise<SessionSourceUpsertResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.upsertSessionSource(
+        sessionId,
+        source,
+        clientId ?? this.boundClientId(sessionId),
+      ),
+    );
+  }
+
+  /** #110: drop one source, as this gateway's own attached client. */
+  async removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    clientId?: string,
+  ): Promise<SessionSourceRemoveResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.removeSessionSource(
+        sessionId,
+        sourceId,
+        clientId ?? this.boundClientId(sessionId),
+      ),
     );
   }
 

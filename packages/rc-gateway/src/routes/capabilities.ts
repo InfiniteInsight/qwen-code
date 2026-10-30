@@ -293,6 +293,16 @@ export function createCapabilityRoute(deps: {
       // the route's own tag, so an old gateway, a reader and an old daemon
       // each see none.
       workspaceFileWrites: true,
+      // #110: PATCH /session/:id/organization and POST
+      // /rc/workspace/session-groups are mounted. The page draws Organize
+      // only when this is set, the token holds write, and the daemon
+      // advertises `session_organization`.
+      sessionOrganization: true,
+      // #110: GET, POST and DELETE /session/:id/sources are mounted. The
+      // page draws the Sources row when this is set and the daemon
+      // advertises `session_sources`, and its add and remove controls only
+      // for a token that holds write.
+      sessionSources: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
