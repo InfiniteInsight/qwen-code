@@ -293,6 +293,13 @@ export interface StubDaemon {
   organizationCalls: Array<{ sessionId: string; body: unknown }>;
   /** #110: every POST /workspace/:id/session-groups, in order. */
   groupCreates: Array<{ workspace: string; body: unknown }>;
+  /** #135: every request to the three goal routes, in order. */
+  goalCalls: Array<{
+    method: string;
+    path: string;
+    sessionId: string;
+    body?: unknown;
+  }>;
   close: () => Promise<void>;
   /**
    * Simulate a hard daemon crash: immediately destroy all open connections
@@ -915,6 +922,40 @@ export interface StubDaemonOptions {
   artifactMutationStatus?: number;
   /** #128: body sent with a non-200 `artifactMutationStatus`. */
   artifactMutationErrorBody?: unknown;
+  /**
+   * #135: the session goal routes (GET and POST /session/:id/goal, POST
+   * .../goal/clear), with the daemon's snapshot shape (goal-protocol.ts) and
+   * its create, replace and clear rules.
+   */
+  goal?: StubGoalOptions;
+}
+
+/** #135: what a goal in the stub is seeded with; the rest is filled in. */
+export interface StubGoalSeed {
+  objective: string;
+  status?: 'active' | 'paused' | 'blocked' | 'usage_limited' | 'complete';
+  lastReason?: string;
+  turnCount?: number;
+  tokensUsed?: number;
+  [key: string]: unknown;
+}
+
+export interface StubGoalOptions {
+  /** The goal each session starts with (a session not listed has none). */
+  seed?: Record<string, StubGoalSeed | null>;
+  /**
+   * Called on every read and write, as the agent would move the goal between
+   * them: a goal (or null for none) replaces the held one, undefined leaves it.
+   * A function, so a scenario can change it between two reads.
+   */
+  change?: (sessionId: string) => StubGoalSeed | null | undefined;
+  /** Status for all three routes (default 200); `errorBody` rides with it. */
+  status?: number;
+  errorBody?: unknown;
+  /** Refuse a create or replace as the daemon does in an untrusted folder. */
+  untrusted?: boolean;
+  /** Activity the snapshot reports (default idle). */
+  activity?: 'idle' | 'running' | 'verifying';
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -4101,6 +4142,142 @@ export async function startStubDaemon(
     res.status(200).json({ revision: held.revision, removed });
   });
 
+  // -- #135: the session goal ------------------------------------------------
+  // The daemon's routes (cli/src/serve/routes/session.ts:7530, :7559, :7570)
+  // over its reducer (core/src/goals/goal-reducer.ts): a create is refused
+  // while a goal exists (409 goal_conflict), a replace must carry the current
+  // id and revision, a clear answers { cleared, condition, snapshot } and
+  // clearing nothing is an answer, not an error. Goal routes take no client
+  // id. A daemon error is { error, code, current? } (error-response.ts:1119).
+  const s135 = {
+    goals: new Map<string, Record<string, unknown> | null>(),
+    calls: [] as StubDaemon['goalCalls'],
+    seq: 0,
+  };
+  const s135Fill = (
+    seed: StubGoalSeed,
+    revision = 1,
+  ): Record<string, unknown> => ({
+    goalId: `goal-stub-${(s135.seq += 1)}`,
+    revision,
+    status: 'active',
+    evidenceCursor: { recordId: null },
+    turnCount: 0,
+    activeTimeMs: 0,
+    tokensUsed: 0,
+    createdAt: 1_761_800_000_000,
+    updatedAt: 1_761_800_000_000,
+    ...seed,
+  });
+  const s135Goal = (sessionId: string): Record<string, unknown> | null => {
+    const moved = opts.goal?.change?.(sessionId);
+    if (moved !== undefined) {
+      s135.goals.set(sessionId, moved === null ? null : s135Fill(moved));
+    }
+    if (!s135.goals.has(sessionId)) {
+      const seed = opts.goal?.seed?.[sessionId];
+      s135.goals.set(sessionId, seed ? s135Fill(seed) : null);
+    }
+    return s135.goals.get(sessionId) ?? null;
+  };
+  const s135Snapshot = (
+    goal: Record<string, unknown> | null,
+    cleared?: Record<string, unknown>,
+  ) => ({
+    v: 2,
+    goal,
+    activity: opts.goal?.activity ?? 'idle',
+    ...(cleared
+      ? {
+          clearedGoal: {
+            goalId: cleared['goalId'],
+            revision: cleared['revision'],
+            updatedAt: 1_761_800_001_000,
+          },
+        }
+      : {}),
+  });
+  const s135Refused = (
+    req: express.Request,
+    res: express.Response,
+  ): boolean => {
+    s135.calls.push({
+      method: req.method,
+      path: req.path,
+      sessionId: req.params.id!,
+      ...(req.method === 'POST' && req.path.endsWith('/goal')
+        ? { body: req.body }
+        : {}),
+    });
+    const status = opts.goal?.status ?? 200;
+    if (status === 200) return false;
+    res.status(status).json(opts.goal?.errorBody ?? { error: 'stub' });
+    return true;
+  };
+  app.get('/session/:id/goal', (req, res) => {
+    if (s135Refused(req, res)) return;
+    res
+      .status(200)
+      .json({ snapshot: s135Snapshot(s135Goal(req.params.id!)) });
+  });
+  app.post('/session/:id/goal', (req, res) => {
+    if (s135Refused(req, res)) return;
+    const sessionId = req.params.id!;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const action = body['action'];
+    const objective =
+      typeof body['objective'] === 'string' ? body['objective'].trim() : '';
+    const keys = Object.keys(body).sort().join();
+    const shapeOk =
+      (action === 'create' && keys === 'action,objective') ||
+      (action === 'replace' &&
+        keys === 'action,expectedGoalId,expectedRevision,objective' &&
+        typeof body['expectedGoalId'] === 'string' &&
+        typeof body['expectedRevision'] === 'number');
+    if (!shapeOk || objective === '') {
+      res.status(400).json({
+        error: 'Invalid Goal control request',
+        code: 'invalid_goal_control_request',
+      });
+      return;
+    }
+    if (opts.goal?.untrusted) {
+      res
+        .status(403)
+        .json({ error: 'Workspace is not trusted.', code: 'untrusted_workspace' });
+      return;
+    }
+    const current = s135Goal(sessionId);
+    if (
+      action === 'create'
+        ? current !== null
+        : current === null ||
+          current['goalId'] !== body['expectedGoalId'] ||
+          current['revision'] !== body['expectedRevision']
+    ) {
+      res.status(409).json({
+        error: 'Goal version does not match the current session Goal',
+        code: 'goal_conflict',
+        current: s135Snapshot(current),
+      });
+      return;
+    }
+    const next = s135Fill({ objective });
+    s135.goals.set(sessionId, next);
+    res.status(200).json({ snapshot: s135Snapshot(next) });
+  });
+  app.post('/session/:id/goal/clear', (req, res) => {
+    if (s135Refused(req, res)) return;
+    const sessionId = req.params.id!;
+    const current = s135Goal(sessionId);
+    s135.goals.set(sessionId, null);
+    res.status(200).json({
+      cleared: current !== null,
+      condition: current ? current['objective'] : undefined,
+      snapshot: s135Snapshot(null, current ?? undefined),
+    });
+  });
+
   // -- #128: the artifact mutation pair --------------------------------------
   // The daemon's POST and DELETE (cli/src/serve/routes/session.ts:7347 and
   // :7396). Both refuse a request without a client id (403 client_id_required,
@@ -4586,6 +4763,9 @@ export async function startStubDaemon(
     },
     get groupCreates() {
       return s110.groupCreates;
+    },
+    get goalCalls() {
+      return s135.calls;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

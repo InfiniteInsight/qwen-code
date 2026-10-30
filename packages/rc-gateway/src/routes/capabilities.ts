@@ -327,6 +327,12 @@ export function createCapabilityRoute(deps: {
       // served to an older gateway shows no control it cannot back; Open
       // also needs `writeScope`, the content read's own scope.
       sessionArtifacts: true,
+      // #135: GET, POST and POST .../clear on /session/:id/goal are mounted.
+      // The page draws the Goal row when this is set (a reader included, who
+      // sees the goal and no Set or Clear); Set and Clear need the token to
+      // hold write (`writeScope`). The daemon advertises no tag for goals, so
+      // a daemon without the routes answers `goal_unsupported` on the read.
+      sessionGoal: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

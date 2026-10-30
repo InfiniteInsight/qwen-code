@@ -3041,6 +3041,8 @@ type PageScenario =
         reloadStatus?: number;
         reloadErrorBody?: unknown;
         reloadResult?: unknown;
+        /** #135: the stub's session goal routes. */
+        goal?: StubDaemonOptions['goal'];
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -19068,7 +19070,12 @@ PAGE_SCENARIOS.push({
   // panel row it precedes (P164). Kept apart from MORE_GROUPS because the
   // panel scenarios open every row there by its key.
   const MORE_ACTION_ROWS: Record<string, { before: string; action: string; label: string }[]> = {
-    'This conversation': [{ before: 'search', action: 'find', label: 'Find in conversation' }],
+    // #135's Goal is drawn wherever the gateway serves the goal routes, so it
+    // is among the rows the default stub shows, and sits before Find.
+    'This conversation': [
+      { before: 'search', action: 'goal', label: 'Goal' },
+      { before: 'search', action: 'find', label: 'Find in conversation' },
+    ],
   };
 
   // #187. The controls the three old panes held, card by card, measured on the
@@ -22983,6 +22990,7 @@ async function runPageScenario(
     reloadStatus: s.stub?.reloadStatus,
     reloadErrorBody: s.stub?.reloadErrorBody,
     reloadResult: s.stub?.reloadResult,
+    goal: s.stub?.goal,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -30127,6 +30135,398 @@ PAGE_SCENARIOS.push({
       const tx = (await page.textContent('#transcript')) || '';
       expect(!tx.includes('artifact_changed'), 'the frame was drawn in the transcript');
       return 'a burst of three frames read the list once and drew "From the laptop"; another conversation\'s frame and one with the sheet shut read nothing; nothing drawn in the transcript';
+    },
+  });
+}
+
+// #135. Goal, a row of More > This conversation after Organize. The session
+// goal the CLI's /goal sets: the row says its status and first words, the
+// sheet the whole goal with its status and the reason it is in it, and a
+// token that can write also Sets and Clears. The stub keeps the daemon's
+// reducer rules (a create over a goal is a 409, a replace carries the id and
+// revision it saw), so Set is shown against them rather than against a mock.
+{
+  const GL_SID = '11111111-2222-3333-4444-555555555555'; // the harness's session
+  const GL_LONG =
+    'Migrate the billing service to the new queue and keep every consumer green, then remove the old topic once nothing reads it for a full day';
+  const GL_SEED = { objective: GL_LONG, status: 'active' as const, lastReason: 'two consumers still read the old topic', turnCount: 3 };
+  const glWaitFor = async (page: Page, expr: string): Promise<void> => {
+    try {
+      await page.waitForFunction(expr, null, { timeout: 10_000 });
+    } catch {
+      throw new Error(`waited 10s for ${expr.replace(/\s+/g, ' ').slice(0, 160)}`);
+    }
+  };
+  const glWatch = async (page: Page): Promise<void> => {
+    await watch(page, GL_SID);
+    await glWaitFor(page, `watchedSessionId === ${JSON.stringify(GL_SID)}`);
+  };
+  // Every request to the goal routes, as the page sent it.
+  const glSent = (page: Page) => {
+    const sent: Array<{ path: string; method: string; body: unknown }> = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.includes('/goal')) {
+        const data = r.postData();
+        sent.push({ path: u.pathname, method: r.method(), body: data ? JSON.parse(data) : undefined });
+      }
+    });
+    return sent;
+  };
+  const glOpenMore = async (page: Page): Promise<void> => {
+    if (!(await page.isVisible('#more-screen'))) await page.click('#h1-more');
+    await page.waitForSelector('#more-goal', { state: 'visible', timeout: 10_000 });
+  };
+  const glOpenSheet = async (page: Page): Promise<void> => {
+    await glOpenMore(page);
+    await page.click('#more-goal');
+    await page.waitForSelector('#goal-sheet', { state: 'visible' });
+    await glWaitFor(page, `goalSheet.known.has(goalSheet.sid) && !goalSheet.reading.size`);
+  };
+  const glRow = (page: Page) =>
+    page.evaluate(`(() => {
+      const b = document.getElementById('more-goal');
+      const r = b.getBoundingClientRect();
+      const v = document.getElementById('more-goal-val');
+      return { hidden: b.hidden, disabled: b.disabled, h: Math.round(r.height), value: v.textContent, valSize: getComputedStyle(v).fontSize, label: b.querySelector('.lbl').textContent };
+    })()`) as Promise<{ hidden: boolean; disabled: boolean; h: number; value: string; valSize: string; label: string }>;
+  type GlDrawn = {
+    shown: boolean;
+    objective: string;
+    status: string;
+    statusKey: string;
+    turns: string;
+    reason: string;
+    reasonShown: boolean;
+    empty: string;
+    clearShown: boolean;
+    clearH: number;
+    editShown: boolean;
+    setH: number;
+    setW: number;
+    inputH: number;
+    inputFont: string;
+    note: string;
+    sideways: boolean;
+  };
+  const glDrawn = (page: Page) =>
+    page.evaluate(`(() => {
+      const vis = (id) => { const e = document.getElementById(id); return !e.hidden && e.getClientRects().length > 0; };
+      const set = document.getElementById('goal-set').getBoundingClientRect();
+      const inp = document.getElementById('goal-text');
+      const body = document.getElementById('goal-body');
+      return {
+        shown: vis('goal-now'),
+        objective: document.getElementById('goal-objective').textContent,
+        status: document.getElementById('goal-status').textContent,
+        statusKey: document.getElementById('goal-status').dataset.status || '',
+        turns: document.getElementById('goal-turns').textContent,
+        reason: document.getElementById('goal-reason-text').textContent,
+        reasonShown: vis('goal-reason'),
+        empty: document.getElementById('goal-empty').textContent,
+        clearShown: vis('goal-clear'),
+        clearH: Math.round(document.getElementById('goal-clear').getBoundingClientRect().height),
+        editShown: vis('goal-edit'),
+        setH: Math.round(set.height),
+        setW: Math.round(set.width),
+        inputH: Math.round(inp.getBoundingClientRect().height),
+        inputFont: getComputedStyle(inp).fontSize,
+        note: document.getElementById('goal-note').textContent,
+        sideways: body.scrollWidth > body.clientWidth,
+      };
+    })()`) as Promise<GlDrawn>;
+  const glNote = async (page: Page, want: string): Promise<void> => {
+    try {
+      await glWaitFor(page, `document.getElementById('goal-note').textContent === ${JSON.stringify(want)}`);
+    } catch {
+      throw new Error(`#goal-note reads ${JSON.stringify(await page.textContent('#goal-note'))}, not ${JSON.stringify(want)}`);
+    }
+  };
+  // A stand-in for the real dialog, which the runner dismisses: it keeps what it was asked.
+  const glDialogs = (page: Page, answer: boolean) =>
+    page.evaluate(`window.__asked = []; window.__answer = ${answer}; window.confirm = (m) => { window.__asked.push(m); return window.__answer; }`);
+  const glReader = async (page: Page): Promise<void> => {
+    await page.route(/\/rc\/capabilities$/, async (route) => {
+      const res = await route.fetch();
+      const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+      if (j.remoteControl) j.remoteControl['writeScope'] = false;
+      await route.fulfill({ response: res, json: j });
+    });
+  };
+
+  PAGE_SCENARIOS.push({
+    name: 'P500 on a gateway that does not flag sessionGoal More has no Goal row and nothing is asked of the goal routes, over a daemon that holds a goal',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED } } },
+    before: async (page) => {
+      await page.route(/\/rc\/capabilities$/, async (route) => {
+        const res = await route.fetch();
+        const j = (await res.json()) as { remoteControl?: Record<string, unknown> };
+        if (j.remoteControl) delete j.remoteControl['sessionGoal'];
+        await route.fulfill({ response: res, json: j });
+      });
+    },
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-find', { state: 'visible' });
+      const row = await glRow(page);
+      expect(row.hidden === true, 'the Goal row is drawn without the capability');
+      // A turn ending on such a page must not ask either.
+      await page.evaluate(`renderFrame({ type: 'turn_complete', data: {} })`);
+      await page.waitForTimeout(600);
+      expect(sent.length === 0, `the page asked ${JSON.stringify(sent)}`);
+      return 'no Goal row, no goal request on More opening or on a turn ending';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P501 with a goal set More > This conversation has a Goal row after Organize, 48px, whose value is the status then the first words, at 390 and 1100',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED } } },
+    run: async ({ page }) => {
+      await glWatch(page);
+      const lines: string[] = [];
+      for (const size of H190_SIZES) {
+        await page.setViewportSize(size);
+        await glOpenMore(page);
+        await glWaitFor(page, `document.getElementById('more-goal-val').textContent !== ''`);
+        const row = await glRow(page);
+        const order = (await page.evaluate(`Array.from(document.querySelectorAll('#more-screen .mgrp')).flatMap((g) => Array.from(g.querySelectorAll('.row')).map((r) => r.id || r.dataset.panel))`)) as string[];
+        const at = order.indexOf('more-goal');
+        expect(
+          at > order.indexOf('more-organize') && at < order.indexOf('more-sources') && order.indexOf('more-organize') >= 0,
+          `the row sits at ${at} of ${JSON.stringify(order)}`,
+        );
+        expect(!row.hidden && !row.disabled && row.label === 'Goal', `the row is ${JSON.stringify(row)}`);
+        expect(row.h === 48 && row.valSize === '13px', `the row is ${row.h}px with a ${row.valSize} value`);
+        expect(row.value === 'active · Migrate the billing service to the new…', `the value reads ${JSON.stringify(row.value)}`);
+        await shot(page, `p501-goal-row-${size.width}`);
+        await page.click('#more-back');
+        lines.push(`${size.width}: 48px, "${row.value}"`);
+      }
+      return lines.join('; ');
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P502 the Goal sheet shows the whole goal, its status, its turns and the reason it is in that status, with a 44px Set and a field in the thumb zone and Clear, at 390 and 1100',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED }, activity: 'running' } },
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      const lines: string[] = [];
+      for (const size of H190_SIZES) {
+        await page.setViewportSize(size);
+        await glOpenSheet(page);
+        const d = await glDrawn(page);
+        expect(d.shown && d.objective === GL_LONG, `the sheet holds ${JSON.stringify(d.objective)}, not the whole goal`);
+        expect(d.status === 'Active, working' && d.statusKey === 'active', `the status reads ${JSON.stringify(d.status)} (${d.statusKey})`);
+        expect(d.turns === '3 turns', `the turns read ${JSON.stringify(d.turns)}`);
+        expect(d.reasonShown && d.reason === 'two consumers still read the old topic', `the reason reads ${JSON.stringify(d.reason)}`);
+        expect(d.empty === '', `the empty note reads ${JSON.stringify(d.empty)}`);
+        expect(d.editShown && d.setH >= 44 && d.setW >= 44 && d.inputH >= 44 && d.inputFont === '16px', `Set is ${d.setW}x${d.setH}, the field ${d.inputH}px at ${d.inputFont}`);
+        expect(d.clearShown && d.clearH >= 44, `Clear is ${d.clearH}px`);
+        expect(!d.sideways, 'the sheet scrolls sideways');
+        // The field is in the lower part of the screen, the thumb zone.
+        const bottom = (await page.evaluate(`window.innerHeight - document.getElementById('goal-set').getBoundingClientRect().bottom`)) as number;
+        expect(bottom < 60, `Set is ${bottom}px above the bottom`);
+        await shot(page, `p502-goal-sheet-${size.width}`);
+        await page.click('#goal-close');
+        await page.waitForSelector('#goal-sheet', { state: 'hidden' });
+        lines.push(`${size.width}: whole text, "${d.status}", ${d.turns}, the reason, Set ${d.setW}x${d.setH}`);
+      }
+      expect(sent.every((s) => s.method === 'GET'), `opening the sheet sent ${JSON.stringify(sent.filter((s) => s.method !== 'GET'))}`);
+      return lines.join('; ') + '; only reads were sent';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P503 Set with no goal sends the typed words and nothing else, asks nothing, and the sheet and the row show the new goal',
+    stub: { goal: {} },
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      await glOpenSheet(page);
+      await glDialogs(page, true);
+      const empty = await glDrawn(page);
+      expect(!empty.shown && empty.empty === 'No goal is set for this conversation.' && !empty.clearShown, `an empty sheet draws ${JSON.stringify(empty)}`);
+      await page.fill('#goal-text', '  Get the tests green  ');
+      await page.click('#goal-set');
+      await glNote(page, 'Goal set.');
+      const d = await glDrawn(page);
+      expect(d.shown && d.objective === 'Get the tests green' && d.status === 'Active' && d.clearShown, `the sheet draws ${JSON.stringify(d)}`);
+      expect((await page.inputValue('#goal-text')) === '', 'the field kept the words after a set');
+      const posts = sent.filter((s) => s.method === 'POST');
+      expect(posts.length === 1 && posts[0]!.path === `/session/${GL_SID}/goal` && JSON.stringify(posts[0]!.body) === '{"objective":"Get the tests green"}', `the page sent ${JSON.stringify(posts)}`);
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      expect(asked.length === 0, `a set over nothing asked ${JSON.stringify(asked)}`);
+      await page.click('#goal-close');
+      await glOpenMore(page);
+      const row = await glRow(page);
+      expect(row.value === 'active · Get the tests green', `the row reads ${JSON.stringify(row.value)}`);
+      return 'one POST {objective} with the words trimmed, no question, the sheet drew the goal as Active with Clear, and the row read "active · Get the tests green"';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P504 Set over a live goal asks first, naming it: Cancel sends nothing and keeps the words typed, OK replaces it',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED } } },
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      await glOpenSheet(page);
+      await glDialogs(page, false);
+      await page.fill('#goal-text', 'Something else entirely');
+      await page.click('#goal-set');
+      await page.waitForTimeout(300);
+      expect(sent.every((s) => s.method !== 'POST'), `Cancel sent ${JSON.stringify(sent.filter((s) => s.method === 'POST'))}`);
+      expect((await page.inputValue('#goal-text')) === 'Something else entirely', 'Cancel lost the typed words');
+      expect((await glDrawn(page)).objective === GL_LONG, 'the goal changed on Cancel');
+      await page.evaluate('window.__answer = true');
+      await page.click('#goal-set');
+      await glNote(page, 'Goal set.');
+      const d = await glDrawn(page);
+      expect(d.objective === 'Something else entirely' && d.turns === '', `the sheet draws ${JSON.stringify(d)}`);
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      expect(asked.length === 2 && asked.every((m) => m === 'Replace the current goal "Migrate the billing service to the new queue and keep every…"? Its turns so far are not carried over.'), `the question read ${JSON.stringify(asked)}`);
+      // The daemon's reducer is what proves it was a replace: a create over a goal is refused there.
+      const posts = sent.filter((s) => s.method === 'POST');
+      expect(posts.length === 1 && JSON.stringify(posts[0]!.body) === '{"objective":"Something else entirely"}', `the page sent ${JSON.stringify(posts)}`);
+      return 'asked twice naming the goal; Cancel sent nothing and kept the words; OK sent one POST {objective} and the daemon replaced the goal (the page never sends a version)';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P505 Clear asks first, naming the goal: Cancel sends nothing, OK clears it, and the sheet and the row go empty',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED } } },
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      await glOpenSheet(page);
+      await glDialogs(page, false);
+      await page.click('#goal-clear');
+      await page.waitForTimeout(300);
+      expect(sent.every((s) => s.method !== 'POST'), `Cancel sent ${JSON.stringify(sent.filter((s) => s.method === 'POST'))}`);
+      expect((await glDrawn(page)).shown, 'the goal went on Cancel');
+      await page.evaluate('window.__answer = true');
+      await page.click('#goal-clear');
+      await glNote(page, 'Goal cleared.');
+      const d = await glDrawn(page);
+      expect(!d.shown && !d.clearShown && d.empty === 'No goal is set for this conversation.', `the sheet draws ${JSON.stringify(d)}`);
+      const asked = (await page.evaluate('window.__asked')) as string[];
+      expect(asked.length === 2 && asked.every((m) => m === 'Clear the goal "Migrate the billing service to the new queue and keep every…"? The agent stops working toward it.'), `the question read ${JSON.stringify(asked)}`);
+      const posts = sent.filter((s) => s.method === 'POST');
+      expect(posts.length === 1 && posts[0]!.path === `/session/${GL_SID}/goal/clear`, `the page sent ${JSON.stringify(posts)}`);
+      await page.click('#goal-close');
+      await glOpenMore(page);
+      expect((await glRow(page)).value === '', 'the row still names a goal');
+      return 'asked twice naming the goal; Cancel sent nothing; OK sent one POST to /goal/clear, the sheet said "No goal is set" and the row went blank';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P506 a reader sees the goal, its status and reason, and no field, no Set and no Clear; only reads are sent',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED } } },
+    before: glReader,
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      await glOpenSheet(page);
+      const d = await glDrawn(page);
+      expect(d.shown && d.objective === GL_LONG && d.reasonShown, `the reader's sheet draws ${JSON.stringify(d)}`);
+      expect(!d.editShown && !d.clearShown, `a reader is offered controls: ${JSON.stringify({ edit: d.editShown, clear: d.clearShown })}`);
+      await page.click('#goal-close');
+      await glOpenMore(page);
+      expect((await glRow(page)).value.startsWith('active · '), 'the reader\'s row does not name the goal');
+      expect(sent.every((s) => s.method === 'GET'), `a reader's page sent ${JSON.stringify(sent)}`);
+      await shot(page, 'p506-goal-reader');
+      return 'the goal, its status and reason drawn; no field, Set or Clear; the row reads the goal; only GETs sent';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P507 a turn ending refreshes the Goal: an open sheet and the row follow the goal to done with the daemon\'s reason, without reopening',
+    stub: (() => {
+      const moved = { done: false };
+      (globalThis as Record<string, unknown>)['__glMoved'] = moved;
+      return {
+        goal: {
+          seed: { [GL_SID]: GL_SEED },
+          change: () => (moved.done ? { objective: GL_LONG, status: 'complete' as const, lastReason: 'the old topic has had no reader for a day', turnCount: 9 } : undefined),
+        },
+      };
+    })(),
+    run: async ({ page }) => {
+      const moved = (globalThis as Record<string, unknown>)['__glMoved'] as { done: boolean };
+      const sent = glSent(page);
+      await glWatch(page);
+      await glOpenSheet(page);
+      expect((await glDrawn(page)).status === 'Active', 'the sheet did not start as Active');
+      const reads = sent.filter((s) => s.method === 'GET').length;
+      // The agent finishes the goal during the turn; nothing tells the page but the turn's end.
+      moved.done = true;
+      await page.waitForTimeout(400);
+      expect((await glDrawn(page)).status === 'Active', 'the sheet moved before the turn ended');
+      await page.evaluate(`renderFrame({ type: 'turn_complete', data: {} })`);
+      await glWaitFor(page, `document.getElementById('goal-status').textContent === 'Done'`);
+      const d = await glDrawn(page);
+      expect(d.statusKey === 'complete' && d.turns === '9 turns' && d.reason === 'the old topic has had no reader for a day', `the sheet draws ${JSON.stringify(d)}`);
+      expect(sent.filter((s) => s.method === 'GET').length === reads + 1, `the turn's end read ${sent.filter((s) => s.method === 'GET').length - reads} times`);
+      await page.click('#goal-close');
+      await glOpenMore(page);
+      expect((await glRow(page)).value.startsWith('done · '), 'the row did not follow');
+      return 'Active, then turn_complete: one read, the sheet said Done with 9 turns and the new reason, the row read "done · ..."';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P508 a frame that carries the goal snapshot (_meta.goalState) updates the row and an open sheet at once, with no read',
+    stub: { goal: { seed: { [GL_SID]: GL_SEED } } },
+    run: async ({ page }) => {
+      const sent = glSent(page);
+      await glWatch(page);
+      await glOpenSheet(page);
+      const reads = sent.length;
+      await page.evaluate(`renderFrame({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' }, _meta: { goalState: { v: 2, activity: 'idle', goal: { goalId: 'g-1', revision: 4, objective: 'Pause and think', status: 'blocked', evidenceCursor: { recordId: null }, turnCount: 1, activeTimeMs: 10, createdAt: 1, updatedAt: 2, lastReason: 'waiting on a decision' } } } } } })`);
+      await glWaitFor(page, `document.getElementById('goal-status').textContent === 'Blocked'`);
+      const d = await glDrawn(page);
+      expect(d.objective === 'Pause and think' && d.statusKey === 'blocked' && d.reason === 'waiting on a decision', `the sheet draws ${JSON.stringify(d)}`);
+      // A frame that is not a snapshot changes nothing.
+      await page.evaluate(`renderFrame({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '' }, _meta: { goalState: { v: 1 } } } } })`);
+      expect((await glDrawn(page)).objective === 'Pause and think', 'a malformed snapshot replaced the goal');
+      await page.click('#goal-close');
+      await glOpenMore(page);
+      expect((await glRow(page)).value === 'blocked · Pause and think', 'the row did not follow the frame');
+      expect(sent.length === reads, `the frame caused ${JSON.stringify(sent.slice(reads))}`);
+      return 'the frame turned the sheet to Blocked with its reason and the row to "blocked · Pause and think"; a v1 snapshot was ignored; nothing was read';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P509 refusals are told in words with the typed goal kept: an untrusted folder, and a daemon that does not serve goals',
+    stub: { goal: { untrusted: true } },
+    run: async ({ page }) => {
+      await glWatch(page);
+      await glOpenSheet(page);
+      await page.fill('#goal-text', 'Try anyway');
+      await page.click('#goal-set');
+      await glNote(page, "This conversation's folder is not trusted, so it cannot take a goal. Trust the folder, then try again.");
+      expect((await page.inputValue('#goal-text')) === 'Try anyway', 'the refused words were dropped');
+      expect((await page.getAttribute('#goal-note', 'data-tone')) === 'err', 'the refusal is not drawn as an error');
+      expect(!(await glDrawn(page)).shown, 'a refused set drew a goal');
+      // A daemon that predates the routes, as the gateway reports it (the route test covers the daemon's own plain 404).
+      await page.route(new RegExp(`/session/${GL_SID}/goal$`), async (route) => {
+        await route.fulfill({ status: 502, json: { error: 'Daemon does not serve session goals', code: 'goal_unsupported' } });
+      });
+      await page.click('#goal-close');
+      await page.evaluate(`goalSheet.known.clear()`);
+      await glOpenMore(page);
+      await page.click('#more-goal');
+      await page.waitForSelector('#goal-sheet', { state: 'visible' });
+      await glWaitFor(page, `document.getElementById('goal-empty').textContent === 'This daemon keeps no goals.'`);
+      const row = await glRow(page);
+      expect(row.value === '', `the row names a goal: ${JSON.stringify(row.value)}`);
+      return 'the untrusted refusal was shown in words with the field kept; a goal_unsupported read said "This daemon keeps no goals." and the row stayed blank';
     },
   });
 }

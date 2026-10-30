@@ -3379,6 +3379,93 @@
         display: flex;
         gap: 8px;
       }
+      /* #135. The Goal sheet: the goal's words in a bordered block, its status
+         and turns under them, the reason it is in that status under that,
+         Clear below, and the field that sets a new one pinned in the thumb
+         zone like Sources' add row. */
+      #goal-now {
+        margin: 12px 16px 0;
+        padding: 12px;
+        border: 1px solid var(--g1-line);
+        border-radius: 10px;
+        background: var(--g1-raise);
+      }
+      #goal-objective {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 15px;
+        color: var(--g1-ink-hi);
+      }
+      #goal-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+      }
+      #goal-status {
+        font-weight: 600;
+      }
+      #goal-status[data-status='active'] {
+        color: var(--g1-link);
+      }
+      #goal-status[data-status='paused'],
+      #goal-status[data-status='usage_limited'] {
+        color: var(--g1-warn);
+      }
+      #goal-status[data-status='blocked'] {
+        color: #ff7b72;
+      }
+      #goal-status[data-status='complete'] {
+        color: #3fb950;
+      }
+      #goal-reason {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-top: 10px;
+        font-size: 13px;
+        color: var(--g1-ink);
+        overflow-wrap: anywhere;
+      }
+      #goal-reason[hidden] {
+        display: none;
+      }
+      #goal-reason .gr-k {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      #goal-now[hidden],
+      #goal-clear[hidden] {
+        display: none;
+      }
+      #goal-clear {
+        display: block;
+        margin: 12px 16px 0;
+        color: #ff7b72;
+      }
+      #goal-edit {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #goal-edit[hidden] {
+        display: none;
+      }
+      #goal-edit .goal-in-row {
+        display: flex;
+        gap: 8px;
+      }
+      #goal-edit .cv-note {
+        margin: 0;
+      }
       @media (min-width: 1100px) {
         .cv-sheet {
           left: var(--h1-left);
@@ -3558,6 +3645,14 @@
                  token that cannot write. -->
             <button type="button" class="row" id="more-organize" data-action="organize" hidden>
               <span class="lbl">Organize</span><span class="val" id="more-organize-val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+            <!-- #135. The session goal: what the agent keeps working toward.
+                 The value reads the goal's status and first words once the
+                 page knows them. Drawn on a gateway that serves the goal
+                 routes, to a reader too (who sees it and cannot change it). -->
+            <button type="button" class="row" id="more-goal" data-action="goal" hidden>
+              <span class="lbl">Goal</span><span class="val" id="more-goal-val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
             <button type="button" class="row" id="more-sources" data-action="sources" hidden>
@@ -4736,6 +4831,39 @@
               <input id="art-name" class="cv-in" type="text" maxlength="200" autocomplete="off" placeholder="Title (optional)" aria-label="Title, optional" />
               <button id="art-add-btn" class="cv-btn" type="button">Add</button>
             </div>
+          </div>
+        </div>
+      </div>
+      <!-- #135. Goal: the session goal as the daemon holds it, in full: its
+           words, its status, why it is in that status, and for a token that
+           can write a field to set a new one in the thumb zone and Clear,
+           which asks first. Refreshed when it opens and when a turn ends,
+           since a turn is what moves a goal on. Filled by renderGoalSheet. -->
+      <div id="goal-sheet" class="cv-sheet" role="dialog" aria-modal="true" aria-labelledby="goal-title" hidden>
+        <div class="cv-card">
+          <div class="cv-head">
+            <span class="cv-sp" aria-hidden="true"></span>
+            <strong id="goal-title" class="cv-title">Goal</strong>
+            <button id="goal-close" type="button" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <div class="cv-body" id="goal-body">
+            <p class="cv-lede">What the agent keeps taking turns toward until it judges it met, or you pause or clear it. The same goal <code>/goal</code> sets in the terminal.</p>
+            <div id="goal-now" hidden>
+              <div id="goal-objective"></div>
+              <div id="goal-meta"><span id="goal-status"></span><span id="goal-turns"></span></div>
+              <div id="goal-reason" hidden><span class="gr-k">Last reason</span><span id="goal-reason-text"></span></div>
+            </div>
+            <p class="cv-note" id="goal-empty"></p>
+            <button id="goal-clear" class="cv-btn" type="button" hidden>Clear goal</button>
+          </div>
+          <div id="goal-edit" hidden>
+            <div class="goal-in-row">
+              <input id="goal-text" class="cv-in" type="text" maxlength="4000" autocomplete="off" placeholder="What should the agent work toward?" aria-label="The goal to set" />
+              <button id="goal-set" class="cv-btn" type="button">Set</button>
+            </div>
+            <p class="cv-note" id="goal-note" role="status"></p>
           </div>
         </div>
       </div>
@@ -12551,6 +12679,7 @@
         // Doing it once here rather than at each branch is what keeps the
         // subagent path from being forgotten the way the first-frame path was.
         noteFrameActivity();
+        goalFromFrame(u);
         const su = u.sessionUpdate;
         const text = u.content && u.content.text;
         // Subagent frames are tagged with the parent Agent tool call's id —
@@ -12808,6 +12937,9 @@
             // The turn is what moved the fill, so re-read it now rather than
             // leaving the footer on the figure from before the turn ran.
             void fetchContextUsage(watchedSessionId);
+            // #135: a turn is what moves a goal on (it can finish, pause or
+            // block), so the row and an open sheet read it again.
+            goalRefreshSoon();
             if (asstThisTurn && transcriptModel.curAsst) placeForkButton();
             return;
           case 'turn_error': {
@@ -14576,6 +14708,11 @@
         src.disabled = !sid;
         const n = sid ? srcSheet.count.get(sid) : undefined;
         h1Text($('more-sources-val'), typeof n === 'number' ? String(n) : '');
+        const gl = $('more-goal');
+        const onGoal = goalOn();
+        if (gl.hidden !== !onGoal) gl.hidden = !onGoal;
+        gl.disabled = !sid;
+        h1Text($('more-goal-val'), sid ? goalRowValue(goalHeld(sid)) : '');
       }
       new MutationObserver(() => {
         if (!$('more-screen').hidden) renderConvRows();
@@ -15115,6 +15252,332 @@
         e.preventDefault();
         e.stopPropagation();
         closeSrcSheet(true);
+      });
+
+      // -- #135: Goal (More > This conversation) ---------------------------
+      // The session goal, the one the CLI's /goal sets: what the agent keeps
+      // taking turns toward. The daemon keeps one per session, as a snapshot
+      // { v: 2, goal, activity } whose goal has an objective, a status
+      // (active, paused, blocked, usage_limited or complete), a turn count
+      // and an optional lastReason, the words for why it is in that status.
+      // The row's value is the status and the first words, once the page
+      // knows them: from a read (as More opens, as the sheet opens, as a turn
+      // ends) or from the snapshot the stream itself carries in a frame's
+      // _meta.goalState, which is newer than any read. The sheet shows the
+      // whole goal. Set sends the typed words and nothing else: the gateway
+      // makes it a create or, over an existing goal, a replace that carries
+      // the version it saw, so a goal that moved is refused and shown rather
+      // than overwritten. Replacing a live goal and clearing ask first. A
+      // reader sees the goal and none of Set or Clear. Drawn on a gateway
+      // that serves the routes; the daemon advertises no tag for goals, so a
+      // daemon without them says so in the sheet.
+      var goalSheet = {
+        open: false,
+        opener: null,
+        sid: null,
+        busy: false,
+        note: '',
+        tone: '',
+        readNote: '',
+        gen: 0,
+        known: new Map(), // session id -> { snap, at } as last read or streamed
+        reading: new Map(), // session id -> the read in flight
+        timer: null,
+        oldDaemon: false, // a read answered goal_unsupported: stop asking
+      };
+      function goalOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.sessionGoal === true);
+      }
+      function goalWritable() {
+        return !!(caps && caps.remoteControl && caps.remoteControl.writeScope === true);
+      }
+      var GOAL_STATUS_WORDS = {
+        active: 'active',
+        paused: 'paused',
+        blocked: 'blocked',
+        usage_limited: 'usage limited',
+        complete: 'done',
+      };
+      function goalStatusWord(status) {
+        return GOAL_STATUS_WORDS[status] || strOr(status, 'unknown');
+      }
+      // A snapshot the daemon or the stream sent, or null for anything else.
+      function goalSnap(x) {
+        if (!x || typeof x !== 'object' || x.v !== 2 || !('goal' in x)) return null;
+        const g = x.goal;
+        if (g !== null && (!g || typeof g !== 'object' || typeof g.objective !== 'string')) return null;
+        return x;
+      }
+      function goalHeld(sid) {
+        const k = sid ? goalSheet.known.get(sid) : null;
+        return k ? k.snap : null;
+      }
+      function goalFirstWords(text, max) {
+        const t = String(text).replace(/\s+/g, ' ').trim();
+        if (t.length <= max) return t;
+        // Whole words: back up to the last space unless that leaves almost nothing.
+        let cut = t.slice(0, max);
+        const sp = cut.lastIndexOf(' ');
+        if (sp > max / 2) cut = cut.slice(0, sp);
+        return cut.trimEnd() + '…';
+      }
+      // What the row says: nothing until known, nothing for no goal.
+      function goalRowValue(snap) {
+        const g = snap && snap.goal;
+        if (!g) return '';
+        return goalStatusWord(g.status) + ' · ' + goalFirstWords(g.objective, 40);
+      }
+      function goalNote(sid, snap) {
+        const ok = goalSnap(snap);
+        if (!sid || !ok) return false;
+        goalSheet.known.set(sid, { snap: ok, at: Date.now() });
+        if (goalSheet.open && goalSheet.sid === sid) renderGoalSheet();
+        renderConvRows();
+        return true;
+      }
+      // The sheet, drawn from what the page holds for its session.
+      function renderGoalSheet() {
+        if (!goalSheet.open) return;
+        const snap = goalHeld(goalSheet.sid);
+        const g = snap && snap.goal;
+        const writable = goalWritable();
+        $('goal-now').hidden = !g;
+        if (g) {
+          h1Text($('goal-objective'), g.objective);
+          const st = $('goal-status');
+          h1Text(
+            st,
+            goalStatusWord(g.status).replace(/^./, (c) => c.toUpperCase()) +
+              (g.status === 'active' && snap.activity === 'running'
+                ? ', working'
+                : g.status === 'active' && snap.activity === 'verifying'
+                  ? ', checking'
+                  : ''),
+          );
+          st.dataset.status = String(g.status);
+          const n = typeof g.turnCount === 'number' ? g.turnCount : 0;
+          h1Text($('goal-turns'), n > 0 ? n + (n === 1 ? ' turn' : ' turns') : '');
+          const why = typeof g.lastReason === 'string' ? g.lastReason.trim() : '';
+          $('goal-reason').hidden = !why;
+          h1Text($('goal-reason-text'), why);
+        }
+        h1Text(
+          $('goal-empty'),
+          goalSheet.readNote ||
+            (snap === null
+              ? goalSheet.oldDaemon
+                ? 'This daemon keeps no goals.'
+                : 'Reading the goal...'
+              : g
+                ? ''
+                : 'No goal is set for this conversation.'),
+        );
+        $('goal-clear').hidden = !(writable && g);
+        $('goal-clear').disabled = goalSheet.busy;
+        $('goal-edit').hidden = !writable;
+        $('goal-set').disabled = goalSheet.busy;
+        const note = $('goal-note');
+        h1Text(note, goalSheet.note);
+        if (goalSheet.tone) note.dataset.tone = goalSheet.tone;
+        else delete note.dataset.tone;
+      }
+      function goalReadNote(r) {
+        if (r.code === 'goal_unsupported') return 'This daemon keeps no goals.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        return 'The goal could not be read: ' + (r.error || r.code);
+      }
+      // One read at a time per session; what it finds is what the page holds.
+      function goalRead(sid) {
+        if (!sid || goalSheet.oldDaemon) return Promise.resolve(null);
+        const inflight = goalSheet.reading.get(sid);
+        if (inflight) return inflight;
+        const p = (async () => {
+          const r = await convCall('/session/' + encodeURIComponent(sid) + '/goal');
+          goalSheet.reading.delete(sid);
+          if (r.ok && goalNote(sid, r.body.snapshot)) {
+            if (goalSheet.open && goalSheet.sid === sid) goalSheet.readNote = '';
+            return goalHeld(sid);
+          }
+          if (!r.ok && r.code === 'goal_unsupported') goalSheet.oldDaemon = true;
+          if (goalSheet.open && goalSheet.sid === sid) {
+            goalSheet.readNote = r.ok ? 'The goal could not be read.' : goalReadNote(r);
+            renderGoalSheet();
+          }
+          return null;
+        })();
+        goalSheet.reading.set(sid, p);
+        return p;
+      }
+      // A turn is what moves a goal on, so one ending asks again; a burst of
+      // frames asks once.
+      function goalRefreshSoon() {
+        if (!goalOn() || !watchedSessionId || goalSheet.oldDaemon) return;
+        const sid = watchedSessionId;
+        if (goalSheet.timer) clearTimeout(goalSheet.timer);
+        goalSheet.timer = setTimeout(() => {
+          goalSheet.timer = null;
+          void goalRead(sid);
+        }, 250);
+      }
+      // A frame that carries the goal's snapshot (the daemon stamps one on the
+      // update it emits at each transition) is newer than any read.
+      function goalFromFrame(u) {
+        const gs = u && u._meta && u._meta.goalState;
+        if (gs && goalOn() && watchedSessionId) goalNote(watchedSessionId, gs);
+      }
+      // Opening More reads the goal once, so the row says what it holds.
+      new MutationObserver(() => {
+        if ($('more-screen').hidden || !goalOn() || !watchedSessionId) return;
+        const k = goalSheet.known.get(watchedSessionId);
+        if (!k || Date.now() - k.at > 15000) void goalRead(watchedSessionId);
+      }).observe($('more-screen'), { attributes: true, attributeFilter: ['hidden'] });
+      function openGoalSheet() {
+        if (!goalOn() || !watchedSessionId) return;
+        goalSheet.gen += 1;
+        if (!goalSheet.open) {
+          goalSheet.opener = document.activeElement;
+          goalSheet.open = true;
+          $('goal-sheet').hidden = false;
+        }
+        closeH1Menu(false);
+        goalSheet.sid = watchedSessionId;
+        goalSheet.busy = false;
+        goalSheet.note = '';
+        goalSheet.tone = '';
+        goalSheet.readNote = '';
+        $('goal-text').value = '';
+        renderGoalSheet();
+        void goalRead(goalSheet.sid);
+        $('goal-close').focus({ preventScroll: true });
+      }
+      function closeGoalSheet(refocus) {
+        if (!goalSheet.open) return;
+        goalSheet.open = false;
+        goalSheet.gen += 1;
+        $('goal-sheet').hidden = true;
+        const back = goalSheet.opener;
+        goalSheet.opener = null;
+        if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
+      }
+      function goalRefusalText(r) {
+        if (r.code === 'untrusted_workspace') {
+          return 'This conversation\'s folder is not trusted, so it cannot take a goal. Trust the folder, then try again.';
+        }
+        if (r.code === 'goal_unsupported') return 'This daemon keeps no goals.';
+        if (r.code === 'session_not_found') return 'The daemon does not have this conversation open.';
+        if (r.code === 'invalid_goal') return r.error || 'That is not a goal.';
+        if (r.status === 403) return 'Changing the goal needs a token that can write.';
+        return 'Not changed: ' + (r.error || r.code);
+      }
+      async function goalSet() {
+        if (goalSheet.busy) return;
+        const text = ($('goal-text').value || '').trim();
+        if (!text) {
+          goalSheet.note = 'Type what the agent should work toward.';
+          goalSheet.tone = 'err';
+          renderGoalSheet();
+          return;
+        }
+        const cur = goalHeld(goalSheet.sid);
+        const live = cur && cur.goal && cur.goal.status !== 'complete' ? cur.goal : null;
+        if (
+          live &&
+          !window.confirm(
+            'Replace the current goal "' + goalFirstWords(live.objective, 60) + '"? Its turns so far are not carried over.',
+          )
+        ) {
+          return;
+        }
+        const gen = goalSheet.gen;
+        const sid = goalSheet.sid;
+        goalSheet.busy = true;
+        goalSheet.note = 'Setting the goal...';
+        goalSheet.tone = '';
+        renderGoalSheet();
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/goal', {
+          method: 'POST',
+          body: JSON.stringify({ objective: text }),
+        });
+        if (gen !== goalSheet.gen || !goalSheet.open) return;
+        goalSheet.busy = false;
+        if (r.ok && goalSnap(r.body.snapshot)) {
+          goalSheet.note = 'Goal set.';
+          goalSheet.tone = '';
+          goalSheet.readNote = '';
+          $('goal-text').value = '';
+          goalNote(sid, r.body.snapshot);
+          return;
+        }
+        if (r.status === 409) {
+          // It moved while this was sent: show what it is now, keep the text.
+          goalSheet.note = 'The goal changed while you were typing. It is shown as it is now; Set again to replace it.';
+          goalSheet.tone = 'err';
+          void goalRead(sid);
+          renderGoalSheet();
+          return;
+        }
+        goalSheet.note = goalRefusalText(r);
+        goalSheet.tone = 'err';
+        renderGoalSheet();
+      }
+      // Asked first, by the goal's own words; the verdict is the daemon's
+      // `cleared`, so a goal already gone says so rather than claiming a clear.
+      async function goalClear() {
+        if (goalSheet.busy) return;
+        const cur = goalHeld(goalSheet.sid);
+        if (!cur || !cur.goal) return;
+        if (
+          !window.confirm(
+            'Clear the goal "' + goalFirstWords(cur.goal.objective, 60) + '"? The agent stops working toward it.',
+          )
+        ) {
+          return;
+        }
+        const gen = goalSheet.gen;
+        const sid = goalSheet.sid;
+        goalSheet.busy = true;
+        goalSheet.note = 'Clearing the goal...';
+        goalSheet.tone = '';
+        renderGoalSheet();
+        const r = await convCall('/session/' + encodeURIComponent(sid) + '/goal/clear', {
+          method: 'POST',
+          body: '{}',
+        });
+        if (gen !== goalSheet.gen || !goalSheet.open) return;
+        goalSheet.busy = false;
+        if (r.ok) {
+          goalSheet.note = r.body.cleared === true ? 'Goal cleared.' : 'There was no goal to clear.';
+          goalSheet.tone = '';
+          goalSheet.readNote = '';
+          if (!goalNote(sid, r.body.snapshot)) await goalRead(sid);
+          renderGoalSheet();
+          return;
+        }
+        goalSheet.note = goalRefusalText(r);
+        goalSheet.tone = 'err';
+        renderGoalSheet();
+      }
+      $('more-goal').addEventListener('click', () => {
+        setMoreOpen(false);
+        openGoalSheet();
+      });
+      $('goal-close').addEventListener('click', () => closeGoalSheet(true));
+      $('goal-set').addEventListener('click', () => void goalSet());
+      $('goal-clear').addEventListener('click', () => void goalClear());
+      $('goal-text').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        void goalSet();
+      });
+      $('goal-sheet').addEventListener('click', (e) => {
+        if (e.target === $('goal-sheet')) closeGoalSheet(true);
+      });
+      $('goal-sheet').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeGoalSheet(true);
       });
 
       const token = () => localStorage.getItem(TOKEN_KEY);
