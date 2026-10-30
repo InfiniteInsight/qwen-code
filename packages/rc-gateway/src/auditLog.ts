@@ -217,7 +217,12 @@ export type AuditAction =
   | 'session_source_added'
   | 'session_source_add_failed'
   | 'session_source_removed'
-  | 'session_source_remove_failed';
+  | 'session_source_remove_failed'
+  // #128: recording and dropping a conversation's artifacts.
+  | 'session_artifact_added'
+  | 'session_artifact_add_failed'
+  | 'session_artifact_removed'
+  | 'session_artifact_remove_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -357,6 +362,10 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_source_add_failed',
   'session_source_removed',
   'session_source_remove_failed',
+  'session_artifact_added',
+  'session_artifact_add_failed',
+  'session_artifact_removed',
+  'session_artifact_remove_failed',
 ];
 
 export interface AuditEntry {

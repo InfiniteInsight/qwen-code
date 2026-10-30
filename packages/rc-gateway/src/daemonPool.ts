@@ -95,6 +95,10 @@ import type {
 } from '@qwen-code/sdk';
 import { catalogCallFailure } from './sessions/catalogFanout.js';
 import type {
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+} from '@qwen-code/sdk/daemon';
+import type {
   DaemonSessionGroup,
   DaemonSessionGroupInput,
   DaemonSessionOrganizationResult,
@@ -292,11 +296,11 @@ export interface SessionDaemon {
   // signatures differ and both mirror `DaemonClient` exactly: the list takes a
   // bare `clientId` (its :7108) while the content read takes a trailing `opts`
   // object (its :4816), so they are NOT the attachment block's uniform shape.
-  // The `add`/`remove` pair is deliberately NOT modelled: the daemon's POST and
-  // DELETE routes both call `requireSessionArtifactClientId`
-  // (packages/cli/src/serve/routes/session.ts:466) and answer 403
-  // `client_id_required` without a session-bound client id, which no gateway
-  // route forwards today.
+  // The `add`/`remove` pair (#128) is modelled below the content read: the
+  // daemon's POST and DELETE routes both call `requireSessionArtifactClientId`
+  // (packages/cli/src/serve/routes/session.ts:468) and answer 403
+  // `client_id_required` without a session-bound client id, which the pool
+  // now supplies (`DaemonPool.boundClientId`, the #110 mechanism).
   listSessionArtifacts(sessionId: string, clientId?: string): Promise<unknown>;
   /**
    * One artifact's saved snapshot, as the SDK hands it over: a decoded string.
@@ -315,6 +319,23 @@ export interface SessionDaemon {
     artifactId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<unknown>;
+  /**
+   * #128: record one artifact on the session (the daemon's `POST
+   * /session/:id/artifacts`). Mirrors `DaemonClient.addSessionArtifact`. The
+   * daemon refuses it without a session-bound client id; the pool supplies
+   * the one stamped on its own attachment (`DaemonPool.boundClientId`).
+   */
+  addSessionArtifact(
+    sessionId: string,
+    artifact: DaemonSessionArtifactInput,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult>;
+  /** #128: drop one artifact from the session. Same client id rule as the add. */
+  removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult>;
 
   // The visible queue (add-capability-parity #110, second slice). Signatures
   // mirror `DaemonClient`'s exactly, including its trailing `opts` object, so
@@ -2711,6 +2732,39 @@ export class DaemonPool implements SessionDaemon {
       client.upsertSessionSource(
         sessionId,
         source,
+        clientId ?? this.boundClientId(sessionId),
+      ),
+    );
+  }
+
+  /**
+   * #128: record one artifact, as this gateway's own attached client (the
+   * same id the source writes send; see `boundClientId`).
+   */
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: DaemonSessionArtifactInput,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.addSessionArtifact(
+        sessionId,
+        artifact,
+        clientId ?? this.boundClientId(sessionId),
+      ),
+    );
+  }
+
+  /** #128: drop one artifact, as this gateway's own attached client. */
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.removeSessionArtifact(
+        sessionId,
+        artifactId,
         clientId ?? this.boundClientId(sessionId),
       ),
     );

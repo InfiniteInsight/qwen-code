@@ -315,6 +315,11 @@ export function createCapabilityRoute(deps: {
       // Reload workspace row only when this is set, the token holds write,
       // and the daemon advertises `workspace_reload`.
       workspaceReload: true,
+      // #128: POST /session/:id/artifacts and DELETE
+      // /session/:id/artifacts/:artifactId are mounted (relays; the pool
+      // sends the daemon-issued client id the daemon requires). Nothing on
+      // the page reads this yet: the display decision is #127's.
+      sessionArtifactWrites: true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {
