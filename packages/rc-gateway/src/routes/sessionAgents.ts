@@ -22,7 +22,8 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  *  - `GET /session/:id/saved-workflows/:name`: one saved workflow definition,
  *    or `workflow: null`.
  *
- * All three are read scope and unaudited, like the `/tasks` and `/stats`
+ * The first two are read scope and the saved workflow read is WRITE scope
+ * (server.ts, #110: it returns a script and its path). All three are unaudited, like the `/tasks` and `/stats`
  * reads beside them: a roster is a poll, and auditing a poll would bury the
  * writes the audit log exists to reconstruct.
  *

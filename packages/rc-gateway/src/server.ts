@@ -191,6 +191,7 @@ import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
+import { createSessionWorkflowActionRoute } from './routes/sessionWorkflowAction.js';
 import { createSessionRenameRoute } from './routes/sessionRename.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
@@ -1247,9 +1248,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionAgentTraceRoute(deps.daemon),
   );
+  // Write scope (#110, the user's decision of 2026-10-30): the definition is a
+  // script from the project or home directory with its absolute path, which
+  // belongs with the workflow-run disclosure limited to owner and write tokens.
   app.get(
     '/session/:id/saved-workflows/:name',
-    requireScope(SESSION_READ, audit),
+    requireScope(WRITE, audit),
     enforceSessionLock(audit),
     createSessionSavedWorkflowRoute(deps.daemon),
   );
@@ -1311,6 +1315,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionTaskCancelRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/tasks/:taskId/workflow-action: write-scope; pause,
+  // resume, retry, rerun or delete the history of ONE workflow run (#110). Stop
+  // is the cancel route above with kind "workflow". The two start verbs
+  // (run-saved, run-script) are refused in the handler. Same guard set as the
+  // cancel: the owner guard is the daemon's own, applied on top.
+  app.post(
+    '/session/:id/tasks/:taskId/workflow-action',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    createSessionWorkflowActionRoute(deps.daemon, audit),
   );
   // PATCH /session/:id/metadata: write-scope, gives ONE loaded session a human
   // title. Same guard set as the run cancel above it: naming a session is a

@@ -285,6 +285,20 @@ export interface BootViewerOptions {
   artifactMutationErrorBody?: unknown;
   /** #135: the stub's session goal routes: the goal each session holds, what moves it, a refusal. */
   goal?: StubDaemonOptions['goal'];
+  /**
+   * #110 (workflow runs): the stub's task list and workflow rows, and who the
+   * page's token is. `readerToken` issues a real read-only token instead of the
+   * owner one, so the gateway's own scope rule is what the page meets.
+   */
+  runs?: {
+    tasks?: StubDaemonOptions['tasksResult'];
+    workflowTasks?: StubDaemonOptions['workflowTasksResult'];
+    trusted?: boolean;
+    cancelVerdict?: StubDaemonOptions['taskCancelVerdict'];
+    actionChanged?: boolean;
+    savedWorkflow?: unknown;
+    readerToken?: boolean;
+  };
   /** #135: the stub's session hooks read: the hooks each session holds, a refusal. */
   hooks?: StubDaemonOptions['hooks'];
   /**
@@ -338,6 +352,8 @@ export interface Viewer {
   sessionId: string;
   /** Set when booted with `pool`: what the pool holds and has spawned. */
   pool?: { workspaces(): string[]; spawned: string[] };
+  /** #110: the boot stub, for what a scenario needs to read back from it. */
+  stub: StubDaemon;
   /** #212: set when booted with `hostTabs`. */
   hostTabs?: {
     registry: HostTabRegistry;
@@ -493,11 +509,20 @@ export async function bootViewer(
     artifactMutationStatus: opts.artifactMutationStatus,
     artifactMutationErrorBody: opts.artifactMutationErrorBody,
     goal: opts.goal,
+    tasksResult: opts.runs?.tasks,
+    workflowTasksResult: opts.runs?.workflowTasks,
+    workspaceTrusted: opts.runs?.trusted,
+    taskCancelVerdict: opts.runs?.cancelVerdict,
+    workflowActionChanged: opts.runs?.actionChanged,
+    savedWorkflowResult: opts.runs?.savedWorkflow,
     hooks: opts.hooks,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
-  const { token } = await store.issue(['owner'], 'viewer-harness');
+  const { token } = await store.issue(
+    opts.runs?.readerToken ? ['session:read'] : ['owner'],
+    'viewer-harness',
+  );
   const spawned: string[] = [];
   const spawnedStubs: StubDaemon[] = [];
   const poolOpt = opts.pool;
@@ -597,6 +622,7 @@ export async function bootViewer(
     page,
     url,
     sessionId: SESSION_ID,
+    stub,
     ...(daemonPool
       ? { pool: { workspaces: () => daemonPool.workspaces(), spawned } }
       : {}),

@@ -458,8 +458,8 @@ describe('the #110 reads as the gateway mounts them', () => {
       `${url}/session/${SID}/saved-workflows/nightly`,
       auth,
     );
-    expect(wf.status).toBe(200);
-    expect(((await wf.json()) as { workflow: unknown }).workflow).toBeNull();
+    // Write scope now (#110): the share is refused before the route runs.
+    expect(wf.status).toBe(403);
     expect(stub?.lastSavedWorkflow).toBeUndefined();
   });
 

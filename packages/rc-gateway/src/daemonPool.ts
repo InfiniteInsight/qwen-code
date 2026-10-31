@@ -34,6 +34,8 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonSubagentSessionResolution,
   DaemonSessionTasksStatus,
+  DaemonSessionWorkflowTasksStatus,
+  DaemonSessionWorkflowTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   SessionMetadataResult,
   DaemonWorkspaceEnvStatus,
@@ -231,6 +233,18 @@ export interface DaemonExitInfo {
   code: number | null;
   signal: NodeJS.Signals | null;
 }
+
+/**
+ * #110: the workflow-run controls the gateway relays. The daemon's own
+ * vocabulary also has `run-saved` and `run-script`, which START a run (the
+ * second from caller-supplied source); the gateway does not relay those.
+ */
+export type WorkflowControlAction =
+  | 'pause'
+  | 'resume'
+  | 'retry'
+  | 'rerun'
+  | 'delete-history';
 
 /**
  * The session-routing surface of `DaemonClient` that the gateway's routes
@@ -632,6 +646,31 @@ export interface SessionDaemon {
     name: string,
     clientId?: string,
   ): Promise<DaemonSessionSavedWorkflowStatus>;
+  /**
+   * #110: the task list WITH workflow runs, under the SDK's own name. The
+   * daemon expands workflow rows only for a trusted workspace and only when the
+   * query opts in; this is the call that opts in. Callers decide who may have
+   * it: the tasks route sends it for owner and write tokens only.
+   */
+  sessionWorkflowTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionWorkflowTasksStatus>;
+  /**
+   * #110: control one workflow run. The daemon answers a bare `{changed}`;
+   * `changed: false` carries no reason (an untrusted folder, workflows off, or
+   * a run that already moved on all look alike).
+   */
+  sessionWorkflowTaskAction(
+    sessionId: string,
+    taskId: string,
+    action: WorkflowControlAction,
+    clientId?: string,
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }>;
   /**
    * #110: files ONE session under a named group, a colour tag, or neither,
    * and pins it or not. Workspace sidecar state on the daemon, not live
@@ -2644,6 +2683,37 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionSavedWorkflowStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionSavedWorkflow(sessionId, name, clientId),
+    );
+  }
+
+  /**
+   * #110: the task list with workflow rows. Sent only by the callers that hold
+   * write or owner (see the tasks route); the daemon still withholds the rows
+   * from an untrusted workspace. No gateway-side cache: a run's phase and
+   * counts move between reads.
+   */
+  async sessionWorkflowTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionWorkflowTasksStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionWorkflowTasks(sessionId, clientId),
+    );
+  }
+
+  /** #110: pause, resume, retry, rerun or delete the history of one run. */
+  async sessionWorkflowTaskAction(
+    sessionId: string,
+    taskId: string,
+    action: WorkflowControlAction,
+    clientId?: string,
+  ): Promise<{
+    changed: boolean;
+    status?: DaemonSessionWorkflowTaskStatus['status'];
+    taskId?: string;
+  }> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionWorkflowTaskAction(sessionId, taskId, action, clientId),
     );
   }
 

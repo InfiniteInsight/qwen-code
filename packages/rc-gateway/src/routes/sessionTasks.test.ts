@@ -63,6 +63,21 @@ const STATUS = {
   ],
 };
 
+/** The same list plus the workflow row the daemon adds when asked. */
+const WITH_WORKFLOW = {
+  ...STATUS,
+  tasks: [
+    ...STATUS.tasks,
+    {
+      kind: 'workflow',
+      id: 'wf-1',
+      label: 'release',
+      workflowName: 'release',
+      status: 'running',
+    },
+  ],
+};
+
 function fakeDaemon(behaviour: { status?: unknown; thrown?: unknown } = {}) {
   const calls: string[] = [];
   const daemon = {
@@ -71,6 +86,11 @@ function fakeDaemon(behaviour: { status?: unknown; thrown?: unknown } = {}) {
       if (behaviour.thrown !== undefined) throw behaviour.thrown;
       return behaviour.status ?? STATUS;
     },
+    sessionWorkflowTasks: async (sessionId: string) => {
+      calls.push('workflow:' + sessionId);
+      if (behaviour.thrown !== undefined) throw behaviour.thrown;
+      return WITH_WORKFLOW;
+    },
   } as unknown as SessionDaemon;
   return { daemon, calls };
 }
@@ -78,9 +98,10 @@ function fakeDaemon(behaviour: { status?: unknown; thrown?: unknown } = {}) {
 async function call(
   daemon: SessionDaemon,
   sessionId = SESS,
+  rcClient?: Record<string, unknown>,
 ): Promise<Captured> {
   const { res, captured } = fakeRes();
-  const req = { params: { id: sessionId } } as unknown as Request;
+  const req = { params: { id: sessionId }, rcClient } as unknown as Request;
   await createSessionTasksRoute(daemon)(req, res, () => {});
   return captured;
 }
@@ -153,5 +174,53 @@ describe('GET /session/:id/tasks (#110)', () => {
     });
     const out = await call(daemon);
     expect(JSON.stringify(out.body)).not.toContain('should-not-surface');
+  });
+
+  describe('workflow rows (#110): owner and write tokens only', () => {
+    const asks = (scopes: string[], extra: Record<string, unknown> = {}) => ({
+      id: 'tok',
+      scopes,
+      ...extra,
+    });
+
+    it.each([['owner'], ['write'], ['write', 'session:read']])(
+      'a %s token is given the opted-in list',
+      async (...scopes) => {
+        const { daemon, calls } = fakeDaemon();
+        const out = await call(daemon, SESS, asks(scopes));
+        expect(out.body).toEqual(WITH_WORKFLOW);
+        expect(calls).toEqual(['workflow:' + SESS]);
+      },
+    );
+
+    it.each([
+      [['session:read']],
+      [['approve']],
+      [['approve', 'session:read']],
+      [[]],
+    ])('a token holding %j gets today\'s list and the daemon is not opted in', async (scopes) => {
+      const { daemon, calls } = fakeDaemon();
+      const out = await call(daemon, SESS, asks(scopes));
+      expect(out.body).toEqual(STATUS);
+      expect(calls).toEqual([SESS]);
+    });
+
+    it('a share link never gets workflow rows, even one that carried write', async () => {
+      const { daemon, calls } = fakeDaemon();
+      const out = await call(
+        daemon,
+        SESS,
+        asks(['share', 'session:read', 'write'], { sessionLockId: SESS }),
+      );
+      expect(out.body).toEqual(STATUS);
+      expect(calls).toEqual([SESS]);
+    });
+
+    it('a caller with no scopes array fails closed to the plain list', async () => {
+      const { daemon, calls } = fakeDaemon();
+      const out = await call(daemon, SESS, { id: 'tok' });
+      expect(out.body).toEqual(STATUS);
+      expect(calls).toEqual([SESS]);
+    });
   });
 });
