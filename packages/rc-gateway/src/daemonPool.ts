@@ -988,7 +988,7 @@ export interface DaemonPoolOptions {
   /** Spawn a NEW daemon bound to `cwd`; returns once it is reachable. Also
    * used to replace the boot daemon after it dies, with the default cwd. */
   spawn: (cwd: string) => Promise<PooledDaemonSpawn>;
-  maxDaemons?: number; // default 3
+  maxDaemons?: number; // default 6
   idleReapMs?: number; // default 15*60_000
   now?: () => number; // injectable clock (default Date.now)
   /**
@@ -1048,7 +1048,7 @@ interface Entry {
   confirming?: Promise<boolean>;
 }
 
-const DEFAULT_MAX_DAEMONS = 3;
+const DEFAULT_MAX_DAEMONS = 6;
 const DEFAULT_IDLE_REAP_MS = 15 * 60_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_DEATH_PROBE_DELAY_MS = 250;
