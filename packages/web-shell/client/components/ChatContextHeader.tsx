@@ -27,7 +27,7 @@ interface ChatContextHeaderProps {
    * header can defer to a visible composer workspace selector.
    */
   workspaceName?: string;
-  /** Full workspace path, shown as the leading icon's hover tooltip. */
+  /** Full workspace path, shown as the leading icon's tooltip and the folder line's. */
   workspacePath?: string;
   /**
    * Hides the leading workspace icon when the new-task composer's workspace
@@ -113,7 +113,20 @@ export function ChatContextHeader({
           </Tooltip>
         </TooltipProvider>
       )}
-      <div className={styles.content}>{content}</div>
+      <div className={styles.titleBlock}>
+        <div className={styles.content}>{content}</div>
+        {/* The tooltip needs hover, which touch does not have, so the folder the
+            session lives in gets its own always-visible line. */}
+        {workspaceName && !hideWorkspaceIcon ? (
+          <div
+            className={styles.workspaceLine}
+            title={workspacePath}
+            data-testid="chat-header-workspace-line"
+          >
+            {workspaceName}
+          </div>
+        ) : null}
+      </div>
       {location && (
         <div className="mr-2 flex min-w-0 max-w-[40%] shrink items-center">
           {location}

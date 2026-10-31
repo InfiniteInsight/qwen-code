@@ -8,13 +8,36 @@
   padding: 8px 20px 8px 12px;
 }
 
-.content {
+/* Title and folder share one column so the folder reads as belonging to the
+   session, not as a third header slot. */
+.titleBlock {
+  display: flex;
   min-width: 0;
   flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+}
+
+.content {
+  min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
   color: var(--foreground);
   font-size: 14px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sized to fit under the 14px title inside the header's existing 52px, so the
+   row does not grow. */
+.workspaceLine {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
