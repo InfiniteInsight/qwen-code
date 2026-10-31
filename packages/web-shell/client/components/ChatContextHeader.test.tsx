@@ -236,6 +236,39 @@ describe('ChatContextHeader', () => {
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(text);
   });
 
+  it('shows the folder as a persistent line under the title, without hover', () => {
+    const view = mount({
+      content: 'Session title',
+      workspaceName: 'OpsNexus',
+      workspacePath: '/home/evan/projects/OpsNexus',
+    });
+    const line = view.querySelector(
+      '[data-testid="chat-header-workspace-line"]',
+    );
+
+    expect(line?.textContent).toBe('OpsNexus');
+    expect(line?.getAttribute('title')).toBe('/home/evan/projects/OpsNexus');
+    // The folder shares the title's column instead of taking a third header slot.
+    expect(line?.previousElementSibling?.textContent).toBe('Session title');
+  });
+
+  it.each([
+    ['no workspace', { workspacePath: '/home/evan/projects/OpsNexus' }],
+    [
+      'a visible composer workspace selector',
+      {
+        workspaceName: 'OpsNexus',
+        workspacePath: '/home/evan/projects/OpsNexus',
+        hideWorkspaceIcon: true,
+      },
+    ],
+  ])('omits the folder line when the shell has %s', (_case, props) => {
+    const view = mount(props);
+    expect(
+      view.querySelector('[data-testid="chat-header-workspace-line"]'),
+    ).toBeNull();
+  });
+
   it('opens workspace files from a button while retaining the tooltip', () => {
     vi.useFakeTimers();
     const onOpenFiles = vi.fn();
