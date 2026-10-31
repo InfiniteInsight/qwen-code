@@ -31073,7 +31073,7 @@ PAGE_SCENARIOS.push({
     expect(!/stopped/.test((await wrRows(page))[0]!), 'a refused stop read as stopped');
     verdict = { cancelled: false };
     await page.click('#runs-body .wf-run button[data-act="stop"]');
-    await page.waitForFunction(() => !/not trusted/.test(document.querySelector('#runs-body .wf-run .wf-note')?.textContent ?? ''), null, { timeout: 8000 });
+    await page.waitForFunction(() => { const t = document.querySelector('#runs-body .wf-run .wf-note')?.textContent ?? ''; return /did not stop/.test(t) && !/not trusted/.test(t); }, null, { timeout: 8000 });
     const bare = await wrNote(page);
     expect(/did not stop/.test(bare) && !/reason/.test(bare), `no reason reads ${JSON.stringify(bare)}`);
     verdict = { cancelled: false, reason: 'busy' };
