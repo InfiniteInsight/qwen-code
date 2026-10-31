@@ -383,6 +383,15 @@ export interface ServeOptions {
    */
   maxAttachmentBytes?: number;
   /**
+   * `--max-daemons <n>` (env `QWEN_RC_MAX_DAEMONS`): how many workspace daemons
+   * the pool may hold at once. Each one is a separate `qwen serve` process bound
+   * to one cwd, so this is the number of folders that can host conversations at
+   * the same time; a create for a folder past the cap is refused 503
+   * `workspace_pool_full` unless an idle daemon can be reclaimed. Default 6
+   * (#214). A positive integer.
+   */
+  maxDaemons?: number;
+  /**
    * `--qwen-bin <path>` (env `QWEN_RC_QWEN_BIN`): the one executable every
    * daemon is spawned as (the boot daemon and the pool's). A path is checked at
    * parse time and absolute here; a bare name is resolved on PATH at boot.
@@ -955,7 +964,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       );
       return out;
     },
-    maxDaemons: 3,
+    maxDaemons: opts.maxDaemons,
     idleReapMs: 15 * 60_000,
   });
   // add-mid-turn-recovery: the boot daemon's death flows through the SAME
@@ -2304,6 +2313,7 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const daemonPort = flag('daemon-port');
   const acmeDomain = flag('acme-domain');
   const maxAttachmentFlag = flag('max-attachment-bytes');
+  const maxDaemonsFlag = flag('max-daemons');
   const walDirFlag = flag('wal-dir');
   if (walDirFlag !== undefined && walDirFlag.trim() === '') {
     throw new Error('--wal-dir: expected a directory path, got ""');
@@ -2339,6 +2349,10 @@ export function parseServeFlags(argv: string[]): ServeOptions {
         ? '--max-attachment-bytes'
         : 'QWEN_RC_MAX_ATTACHMENT_BYTES',
       maxAttachmentFlag ?? process.env.QWEN_RC_MAX_ATTACHMENT_BYTES,
+    ),
+    maxDaemons: parsePositiveIntFlag(
+      maxDaemonsFlag !== undefined ? '--max-daemons' : 'QWEN_RC_MAX_DAEMONS',
+      maxDaemonsFlag ?? process.env.QWEN_RC_MAX_DAEMONS,
     ),
     qwenBin:
       qwenBinRaw === undefined || (!qwenBinFromFlag && qwenBinRaw === '')
@@ -2400,6 +2414,7 @@ if (process.argv[2] === 'serve') {
   //        --mdns-instance-name <s> --attach-daemon <url> --daemon-token <tok>
   //        --llama-swap-url <url> --host-actions <path>
   //        --max-attachment-bytes <n> --qwen-bin <path>
+  //        --max-daemons <n> (workspace daemon pool cap, default 6, #214)
   //        --wal-dir <dir> (WAL in <dir>/wal/, default ~/.qwen/rc) --no-wal
   //        --wal-retention-days <n> --wal-max-mb <n>
   //        --reopen-crashed-tabs (env QWEN_RC_REOPEN_CRASHED_TABS=1, #212)

@@ -66,6 +66,36 @@ describe('parseServeFlags', () => {
     expect(opts.noMdns).toBe(true);
   });
 
+  it('reads --max-daemons in both forms and from QWEN_RC_MAX_DAEMONS, flag over env (#214)', () => {
+    // Unset means "use the pool's default", so it must stay undefined rather
+    // than become a number here.
+    expect(parseServeFlags([]).maxDaemons).toBeUndefined();
+    expect(parseServeFlags(['--max-daemons', '6'])).toMatchObject({
+      maxDaemons: 6,
+    });
+    expect(parseServeFlags(['--max-daemons=12'])).toMatchObject({
+      maxDaemons: 12,
+    });
+    const saved = process.env.QWEN_RC_MAX_DAEMONS;
+    process.env.QWEN_RC_MAX_DAEMONS = '9';
+    try {
+      expect(parseServeFlags([]).maxDaemons).toBe(9);
+      expect(parseServeFlags(['--max-daemons', '4']).maxDaemons).toBe(4);
+    } finally {
+      if (saved === undefined) delete process.env.QWEN_RC_MAX_DAEMONS;
+      else process.env.QWEN_RC_MAX_DAEMONS = saved;
+    }
+  });
+
+  it('refuses a --max-daemons that is not a positive whole number, before any daemon is spawned (#214)', () => {
+    expect(() => parseServeFlags(['--max-daemons', '0'])).toThrow(
+      /--max-daemons: expected a positive whole number, got "0"/,
+    );
+    expect(() => parseServeFlags(['--max-daemons=abc'])).toThrow(
+      /--max-daemons/,
+    );
+  });
+
   it('reads --host-actions in both forms, and leaves it unset so the default path stands', () => {
     expect(parseServeFlags(['--host-actions', '/x/a.json'])).toMatchObject({
       hostActionsPath: '/x/a.json',
