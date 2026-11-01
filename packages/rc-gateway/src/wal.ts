@@ -117,6 +117,14 @@ export class SessionWal {
    * bound by dropping leading frames / pruning segments.
    */
   private frames: FrameMeta[] = [];
+  /**
+   * Last frame id in file order per segment, keyed by numeric suffix (0 = the
+   * active segment). A rotated segment is never written again, so its id is
+   * stable once read; the active one is updated on each append. Lets
+   * pruneEmptySegments() decide without re-reading whole segments.
+   * A `null` value is a read that found no decodable frame (empty or corrupt).
+   */
+  private segLastId = new Map<number, number | null>();
   /** Set when dropped from the registry; forces a resync before the next write. */
   private evicted = false;
   private _earliest: number | null = null;
@@ -194,6 +202,9 @@ export class SessionWal {
     const encoded = encodeFrame(frame);
     const fd = this.ensureOpen();
     writeSync(fd, encoded, 0, encoded.length);
+    // The active segment's last frame is now this one. Recorded here so
+    // enforceBounds() never has to re-read the segment to decide pruning.
+    this.segLastId.set(0, frame.id);
 
     const appendedAtMs = this.now();
     this.activeBytes += encoded.length;
@@ -351,6 +362,7 @@ export class SessionWal {
    */
   private recover(): void {
     this.frames = [];
+    this.segLastId.clear();
     this._earliest = null;
     this._latest = null;
 
@@ -358,7 +370,9 @@ export class SessionWal {
       // Use the file mtime as a best-effort append time for recovered frames so
       // the horizon bound still applies across restarts.
       const mtimeMs = statSync(seg).mtimeMs;
+      let last: number | null = null;
       for (const { frame, frameBytes } of decodeSegmentWithSizes(seg)) {
+        last = frame.id;
         this.frames.push({ id: frame.id, appendedAtMs: mtimeMs, frameBytes });
         if (this._earliest === null) {
           this._earliest = frame.id;
@@ -370,6 +384,7 @@ export class SessionWal {
           this._latest = frame.id;
         }
       }
+      this.segLastId.set(this.suffixOfPath(seg), last);
     }
 
     if (existsSync(this.activePath)) {
@@ -391,6 +406,12 @@ export class SessionWal {
     if (existsSync(this.activePath)) {
       renameSync(this.activePath, this.segPath(1));
     }
+    // Every segment moved up one suffix, so the cached last-ids shift with the
+    // files instead of being re-read. The reopened active segment holds no
+    // frame yet, so its (absent) entry is not restored here.
+    const shifted = new Map<number, number | null>();
+    for (const [n, last] of this.segLastId) shifted.set(n + 1, last);
+    this.segLastId = shifted;
     this.activeBytes = 0;
     // Eagerly reopen so the active segment exists as an empty file even before
     // the next append.
@@ -447,13 +468,21 @@ export class SessionWal {
     const earliest = this._earliest;
     for (const n of this.rotatedSuffixesDescending()) {
       const path = this.segPath(n);
-      let newestInSeg: number | null = null;
-      for (const frame of decodeSegment(path)) {
-        newestInSeg = frame.id;
+      // A rotated segment is immutable, so its last id is read once and kept.
+      // Re-reading it here cost a full segment scan on every append once the
+      // session passed the retention bound (see enforceBounds).
+      let newestInSeg = this.segLastId.get(n);
+      if (newestInSeg === undefined) {
+        newestInSeg = null;
+        for (const frame of decodeSegment(path)) {
+          newestInSeg = frame.id;
+        }
+        this.segLastId.set(n, newestInSeg);
       }
       // Segment fully below the retained window (or empty) => delete it.
       if (newestInSeg === null || earliest === null || newestInSeg < earliest) {
         rmSync(path, { force: true });
+        this.segLastId.delete(n);
       }
     }
   }
@@ -462,6 +491,13 @@ export class SessionWal {
 
   private segPath(n: number): string {
     return n === 0 ? this.activePath : `${this.activePath}.${n}`;
+  }
+
+  /** The numeric suffix of one of this instance's segment paths (0 = active). */
+  private suffixOfPath(path: string): number {
+    if (path === this.activePath) return 0;
+    const tail = path.slice(this.activePath.length + 1);
+    return /^\d+$/.test(tail) ? Number(tail) : 0;
   }
 
   /** Existing rotated suffixes (>=1), sorted DESCENDING (oldest first). */
