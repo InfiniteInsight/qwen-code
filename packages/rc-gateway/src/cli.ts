@@ -275,6 +275,7 @@ import {
   type DaemonRow,
 } from './daemons/daemonsCli.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
+import { startLoopGuard, DEFAULT_LOOP_LAG_MS } from './loopGuard.js';
 import {
   RecoveryOrchestrator,
   createReportOutcome,
@@ -1440,6 +1441,21 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         })
       : () => {};
 
+  // #217: the gateway can wedge with the process alive and the unit green, so
+  // `Restart=on-failure` never sees a failure. Watch the loop's own delay and
+  // end the process when it is sustained, which is the only thing systemd can
+  // act on. `QWEN_RC_LOOP_GUARD_MS=0` turns it off.
+  const loopGuardMs =
+    process.env.QWEN_RC_LOOP_GUARD_MS === undefined
+      ? DEFAULT_LOOP_LAG_MS
+      : Number(process.env.QWEN_RC_LOOP_GUARD_MS);
+  const stopLoopGuard = startLoopGuard({
+    thresholdMs: loopGuardMs,
+    audit,
+    // eslint-disable-next-line no-console
+    log: (line) => console.log(line),
+  });
+
   // Load the policy fail-closed, layered over the same workspace cwd resolved
   // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
   // <cwd>/.qwen/policy.yaml (the workspace layer can only narrow: its allow
@@ -2039,6 +2055,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     clearInterval(bridgeReaper);
     stopWalRetention();
+    stopLoopGuard();
     for (const b of startedBridges) b.stop();
     // mDNS Goodbye (design D4): withdraw the advertisement so a stale record does
     // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
