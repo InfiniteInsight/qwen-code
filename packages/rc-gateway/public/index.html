@@ -710,7 +710,32 @@
       #h1-title > svg {
         flex: none;
       }
+      /* Title over folder, so the bar says which folder this tab is in
+         without opening the list. Two lines at 19 + 14 fit the 44px the
+         buttons already take, so the bar did not grow. */
+      #h1-title-col {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        align-items: center;
+        gap: 1px;
+      }
       #h1-title-text {
+        max-width: 100%;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* #216: the folder reads as it does on a row and on the folder screen,
+         and gives way from its start, since the last folder names it. */
+      #h1-folder {
+        max-width: 100%;
+        direction: rtl;
+        color: var(--g1-ink-lo);
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+        font-weight: 400;
+        line-height: 1.25;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -3742,7 +3767,10 @@
           aria-controls="list-screen"
           title="Conversations"
         >
-          <span id="h1-title-text">No conversation</span>
+          <span id="h1-title-col">
+            <span id="h1-title-text">No conversation</span>
+            <span id="h1-folder" hidden></span>
+          </span>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
         </button>
         <button
@@ -20768,13 +20796,21 @@
       function renderBarTitle() {
         const id = watchedSessionId;
         let title = 'No conversation';
+        let cwd = '';
         if (id) {
           const row = pastConvos.find((s) => s && s.sessionId === id);
           title = row
             ? convoTitle(row)
             : watchedSessionTitle || 'session ' + String(id).slice(0, 8);
+          cwd = (row && row.cwd) || watchedSessionCwd || '';
         }
         h1Text($('h1-title-text'), title);
+        // #216: the folder this conversation is in, said without a tap. With
+        // several tabs open in different folders the title alone cannot tell
+        // them apart, and the list that does name it is behind this button.
+        const folder = $('h1-folder');
+        folder.hidden = !cwd;
+        h1Text(folder, cwd ? isolatedFolder(cwd) : '');
       }
 
       // What #status, the verb result and the export note say surfaces over
