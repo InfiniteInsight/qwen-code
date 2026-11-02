@@ -19900,6 +19900,114 @@ describe('Session', () => {
         });
       });
 
+      const callStream = (id: string, path: string) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id, name: 'read_file', args: { path } }],
+            },
+          },
+        ]);
+
+      it('keeps an ACP prompt alive when an accepted call separates its parameter errors', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // The shape reported in the field: the model emits `path` where the
+        // schema wants `file_path`, gets it right once, then errs twice more.
+        // Under a counter that never resets that is 3 lifetime rejections and
+        // the turn dies mid-work even though the middle call proved progress.
+        const accepted = {
+          params: { path: '/tmp/b.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        };
+        const rejection = () => {
+          throw new Error("params must have required property 'file_path'");
+        };
+        const build = vi
+          .fn()
+          .mockImplementationOnce(rejection)
+          .mockImplementationOnce(() => accepted)
+          .mockImplementationOnce(rejection)
+          .mockImplementationOnce(rejection);
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          displayName: 'Read File',
+          description: 'Read file',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(callStream('read_1', '/tmp/a.txt'))
+          .mockResolvedValueOnce(callStream('read_2', '/tmp/b.txt'))
+          .mockResolvedValueOnce(callStream('read_3', '/tmp/c.txt'))
+          .mockResolvedValueOnce(callStream('read_4', '/tmp/d.txt'))
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read these four files' }],
+        });
+
+        // All four calls reached the model's turn: the turn was never cut
+        // short, and the model got the rejection back as a recoverable
+        // functionResponse rather than a terminated prompt.
+        expect(accepted.execute).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(5);
+      });
+
+      it('still stops an ACP turn on three unrecovered parameter rejections', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // The reset must not soften the guard it sits beside: three rejections
+        // with no accepted call between them are the stuck loop the stop
+        // message claims to detect, distinct files included.
+        const rejection = () => {
+          throw new Error("params must have required property 'file_path'");
+        };
+        const build = vi
+          .fn()
+          .mockImplementationOnce(rejection)
+          .mockImplementationOnce(rejection)
+          .mockImplementationOnce(rejection);
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          displayName: 'Read File',
+          description: 'Read file',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(callStream('read_1', '/tmp/a.txt'))
+          .mockResolvedValueOnce(callStream('read_2', '/tmp/b.txt'))
+          .mockResolvedValueOnce(callStream('read_3', '/tmp/c.txt'))
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read these three files' }],
+          }),
+        ).rejects.toMatchObject({
+          data: {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: core.LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+          },
+        });
+        expect(build).toHaveBeenCalledTimes(3);
+      });
+
       it.each([
         {
           label: 'distinct targets',
