@@ -1200,6 +1200,16 @@ function recordDaemonInvalidToolParams(
   );
 }
 
+// A parameter rejection is recoverable by construction: the model gets the
+// exact missing property back, so an accepted call for the same tool means the
+// run of rejections this counter exists to catch has already broken.
+function clearDaemonInvalidToolParams(
+  loopState: DaemonToolLoopState | undefined,
+  toolName: string,
+): void {
+  loopState?.invalidToolParamErrors.delete(toolName);
+}
+
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
 // means the client silently drops unknown methods; without a deadline the
@@ -17148,6 +17158,7 @@ export class Session implements SessionContext {
           terminalStatus = status;
           finishToolLifecycle(status);
           const succeeded = status === 'success';
+          if (succeeded) clearDaemonInvalidToolParams(toolLoopState, toolName);
           const responseError =
             status === 'error' && toolResult.error
               ? new Error(toolResult.error.message)
