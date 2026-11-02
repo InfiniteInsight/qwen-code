@@ -88,10 +88,16 @@ type Gateway = {
 /**
  * Boot a gateway given `promptTimeoutMs` the way cli.ts passes it, in front of a
  * stub that holds every prompt unanswered for `promptDelayMs`.
+ *
+ * `promptAccepts` switches the stub to the 202 envelope the live daemon
+ * actually answers (`packages/cli/src/serve/routes/session.ts:8200`), which is
+ * the only path where the SDK reaches `_awaitTurnComplete` and therefore the
+ * only path on which an aborted wait turns into a daemon cancel.
  */
 async function bootGateway(
   promptTimeoutMs: number | undefined,
   promptDelayMs: number,
+  promptAccepts = false,
 ): Promise<Gateway> {
   const dir = mkdtempSync(join(tmpdir(), 'rc-timeout-'));
   const auditDir = join(dir, 'audit');
@@ -99,6 +105,7 @@ async function bootGateway(
     frames: [],
     holdOpenMs: 60_000,
     promptDelayMs,
+    promptAccepts,
   };
   const stub = await startStubDaemon(stubOpts);
   const store = await TokenStore.open(join(dir, 'tokens.json'));
@@ -277,15 +284,18 @@ type Turn = {
   frame: Record<string, unknown> | undefined;
   firings: Array<Record<string, unknown>>;
   actions: string[];
+  cancels: number;
+  cancelledSession: string | undefined;
 };
 
 async function driveTurn(
   argv: string[],
   env: Record<string, string | undefined>,
   stubHoldMs: number,
+  promptAccepts = false,
 ): Promise<Turn> {
   const { sec, ms } = ceilingFromCli(argv, env);
-  const gw = await bootGateway(ms, stubHoldMs);
+  const gw = await bootGateway(ms, stubHoldMs, promptAccepts);
   const sessionId = SESSION_ID;
   // Attach before the turn: the broadcast has no replay, so a subscriber that
   // shows up afterwards proves nothing about what the firing sent.
@@ -294,6 +304,12 @@ async function driveTurn(
     const { status, body } = await postPrompt(gw, sessionId, 'hold the turn');
     const frame = await watcher.waitFor(isTimeoutFrame, 1_000);
     await sleep(150);
+    if (promptAccepts) {
+      // The SDK fires the cancel without awaiting it (DaemonClient.ts:6553),
+      // so let the request land before the counter below is read.
+      const until = Date.now() + 1_000;
+      while (gw.stub.cancelCount === 0 && Date.now() < until) await sleep(20);
+    }
     const rows = auditRows(gw);
     return {
       sec,
@@ -303,6 +319,8 @@ async function driveTurn(
       frame,
       firings: rows.filter((r) => r['action'] === 'prompt_timed_out'),
       actions: rows.map((r) => String(r['action'])),
+      cancels: gw.stub.cancelCount,
+      cancelledSession: gw.stub.lastCancelledSessionId,
     };
   } finally {
     watcher.close();
@@ -345,7 +363,13 @@ async function p1(): Promise<string> {
     detailOf(row)['timeoutMs'] === 1_000,
     `row timeoutMs ${String(detailOf(row)['timeoutMs'])}, want 1000`,
   );
-  return `504 + stream_error + one prompt_timed_out row, all at 1000ms`;
+  // The contrast that gives P6 its meaning: on the legacy 200 path the SDK
+  // sits inside one HTTP request, so an aborted wait sends the daemon nothing.
+  expect(
+    t.cancels === 0,
+    `${t.cancels} daemon cancels on the 200 path, want 0`,
+  );
+  return `504 + stream_error + one row at 1000ms, and no daemon cancel`;
 }
 
 /** P2: the environment fallback reaches the route, not just the parser. */
@@ -439,12 +463,48 @@ async function p5(): Promise<string> {
   return '7200s default, three routes share it, no 600_000 left';
 }
 
+/**
+ * P6: the 202 path the live daemon actually answers. The daemon accepts the
+ * prompt and the SDK waits on a temporary SSE, so the one thing an aborted
+ * wait can do is ask the daemon to cancel the turn. Without this scenario the
+ * delta's "which cancels the underlying agent turn on the daemon" is a reading
+ * of DaemonClient rather than a measured fact.
+ */
+async function p6(): Promise<string> {
+  const t = await driveTurn(
+    ['--prompt-timeout-sec', '1'],
+    { QWEN_RC_PROMPT_TIMEOUT_SEC: undefined },
+    3_000,
+    true,
+  );
+  expect(t.status === 504, `status was ${t.status}, want 504`);
+  expect(
+    t.body['timeoutMs'] === 1_000,
+    `body timeoutMs ${String(t.body['timeoutMs'])}, want 1000`,
+  );
+  expect(t.firings.length === 1, `${t.firings.length} audit rows, want 1`);
+  expect(
+    detailOf(t.firings[0] ?? {})['timeoutMs'] === 1_000,
+    'the firing row did not carry the ceiling that fired',
+  );
+  expect(
+    t.cancels === 1,
+    `${t.cancels} daemon cancels on the 202 path, want exactly 1`,
+  );
+  expect(
+    t.cancelledSession === SESSION_ID,
+    `the cancel targeted ${String(t.cancelledSession)}, want ${SESSION_ID}`,
+  );
+  return '202 path: 504 at 1000ms + one firing row + one daemon cancel for S';
+}
+
 const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: 'P1', run: p1 },
   { name: 'P2', run: p2 },
   { name: 'P3', run: p3 },
   { name: 'P4', run: p4 },
   { name: 'P5', run: p5 },
+  { name: 'P6', run: p6 },
 ];
 
 const only = process.env['ONLY']
