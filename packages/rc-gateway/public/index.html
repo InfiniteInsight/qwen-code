@@ -1014,6 +1014,12 @@
       #h1-status[data-state='wait'] .dot {
         background: var(--g1-warn);
       }
+      /* #223: a run with no turn open. Distinct from `run` so a reader can tell
+         the process is still going after the answer finished, and not a second
+         shade of the turn's own blue. */
+      #h1-status[data-state='bg'] .dot {
+        background: #a371f7;
+      }
       #h1-status[data-state='off'] .dot {
         background: #f85149;
       }
@@ -9533,6 +9539,101 @@
       function turnRunning() {
         return !!watchedSessionId && (turnOpen || abandonPendingSend !== null);
       }
+      // #222. The turn is not the whole of the session's work: a shell or a
+      // monitor launched with is_background outlives the turn that started it,
+      // and turnRunning() goes false the moment that turn closes, so the page
+      // reads idle over a process still running. The daemon's roster is the
+      // only thing that says otherwise, so it is read here rather than inferred
+      // from the tool call that launched the work.
+      // Held per watched session, never per row. A failed read keeps the rows
+      // it already has and marks the failure: the read said nothing about the
+      // tasks, so the last observed status is the honest one and clearing them
+      // would print idle over a run still going.
+      let roster = { sessionId: null, tasks: [], listed: false, failed: false, why: '' };
+      let rosterReading = false;
+      // The id whose rows are on screen. The watched session owns the panel
+      // while it is watched; a typed id takes it over until the next switch, so
+      // reading some other session does not stop the live one being polled.
+      let runsSubject = null;
+      let turnWasRunning = false;
+      function rosterRunning() {
+        return roster.tasks.filter((t) => t.status === 'running');
+      }
+      // Bounded by what the last read actually showed. A roster that was never
+      // read has nothing to re-read, and an empty one or a fully settled one
+      // starts no timer; only a row still `running` keeps it going.
+      function rosterNeedsPoll() {
+        return (
+          !!roster.sessionId &&
+          roster.listed &&
+          !rosterReading &&
+          rosterRunning().length > 0
+        );
+      }
+      // Whether the shared interval has any reason to exist at all. This is not
+      // the same question as rosterNeedsPoll(): a read that is still out has no
+      // verdict yet, so it must keep the interval alive rather than look settled.
+      // Reading needsPoll here would clear the clock underneath its own request,
+      // and a fetch that never answers would then stop the poll for good.
+      function rosterPollWanted() {
+        return (
+          !!roster.sessionId &&
+          roster.listed &&
+          (rosterReading || rosterRunning().length > 0)
+        );
+      }
+      function rosterWord() {
+        // The count, and the oldest run's label: that is the one the reader is
+        // actually waiting on.
+        const run = rosterRunning();
+        const oldest = run.reduce((a, b) =>
+          (a.startTime || 0) <= (b.startTime || 0) ? a : b,
+        );
+        const label = oldest.label || oldest.id || 'run';
+        const secs = Math.round((oldest.runtimeMs || 0) / 1000);
+        return run.length + ' background, ' + label + (secs > 0 ? ' ' + h1Clock(secs) : '');
+      }
+      async function readRoster(id) {
+        if (!id || !token()) return;
+        rosterReading = true;
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/tasks');
+        rosterReading = false;
+        if (roster.sessionId !== id) return; // a switch landed while it was out
+        if (r.ok) {
+          roster.failed = false;
+          roster.why = '';
+          roster.listed = true;
+          roster.tasks = Array.isArray(r.body && r.body.tasks) ? r.body.tasks : [];
+        } else {
+          roster.failed = true;
+          roster.why = rcDetail(r);
+        }
+        renderStatusLine();
+        renderRunsBody();
+      }
+      function syncRosterForSession() {
+        const sid = watchedSessionId || null;
+        if (roster.sessionId === sid) return;
+        roster = { sessionId: sid, tasks: [], listed: false, failed: false, why: '' };
+        rosterReading = false;
+        turnWasRunning = false;
+        runsSubject = sid;
+        renderRunsBody();
+        if (sid && token()) void readRoster(sid);
+      }
+      // Called from the status line, which redraws whenever a turn starts or
+      // ends. A turn closing is the moment a background run can outlive it, so
+      // that transition asks once; the poll itself is carried by the tick.
+      function rosterOnStatus(running) {
+        syncRosterForSession();
+        if (running === turnWasRunning) return;
+        turnWasRunning = running;
+        if (!running && roster.sessionId && token()) void readRoster(roster.sessionId);
+      }
+      function statusTick() {
+        if (rosterNeedsPoll()) void readRoster(roster.sessionId);
+        renderStatusLine();
+      }
       function shortModel(name) {
         // A provider path or a route hash is the model's id, not its name; the
         // last segment is what a reader recognises on a 390px line.
@@ -9564,6 +9665,12 @@
           state = 'run';
           const secs = Math.floor((Date.now() - runStartedAt) / 1000);
           word = 'running ' + h1Clock(secs);
+        } else if (rosterRunning().length > 0) {
+          // #223. Below `run` on purpose: an open turn already holds the
+          // reader, and its clock is the more urgent fact. The count stays
+          // readable in the task list either way.
+          state = 'bg';
+          word = rosterWord();
         }
         if (btn.dataset.state !== state) btn.dataset.state = state;
         h1Text($('h1-state'), word);
@@ -9577,12 +9684,19 @@
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
         agentsOnStatus(running); // #110: the chip, and a read as a turn starts or ends
+        rosterOnStatus(running); // #222: the roster read as a turn starts or ends
         syncPromptPlaceholder();
         syncTurnPoll();
         h1Text($('turn-elapsed'), h1Clock(turnLiveSecs()));
-        if (running && !runClock) {
-          runClock = setInterval(renderStatusLine, 1000);
-        } else if (!running && runClock) {
+        // One interval, not two. The roster needs the same one-second beat the
+        // run clock already uses, but it needs it after the turn has closed,
+        // which is the only case the clock on its own would never cover: a
+        // background run is by definition work with no turn open. So the
+        // clock's lifetime is widened to the roster rather than duplicated.
+        const tickWanted = running || rosterPollWanted();
+        if (tickWanted && !runClock) {
+          runClock = setInterval(statusTick, 1000);
+        } else if (!tickWanted && runClock) {
           clearInterval(runClock);
           runClock = null;
         }
@@ -23484,6 +23598,11 @@
         syncBtwForSession();
         // #110: the agents roster names a conversation too.
         syncAgentsForSession();
+        // #222: so does the background roster. Called here rather than only
+        // from the status line, because a switch draws no status line: hooking
+        // it there alone leaves a conversation with no turn ever run in it
+        // unread, which is the one case this read exists for.
+        syncRosterForSession();
         // #127: so does the Artifacts sheet.
         syncArtifactsForSession();
         // #134: an armed handover belongs to the conversation that was on
@@ -26991,28 +27110,25 @@
         closeWfSheet(true);
       });
 
-      $('runs-list').onclick = async () => {
-        if (!token()) return setStatus('pair first');
-        const out = $('runs-body');
-        const id = verbSessionId('runs-id');
-        if (!id) {
-          out.textContent = 'watch a session, or enter an id';
-          return;
-        }
-        out.textContent = 'loading…';
-        const r = await rcCall('/session/' + encodeURIComponent(id) + '/tasks');
-        if (!r.ok) {
-          out.textContent = 'list failed: ' + rcDetail(r);
-          return;
-        }
-        const tasks = (r.body.tasks || []).filter(
-          (t) => t.kind !== 'workflow' || workflowRunsOn(),
-        );
-        if (tasks.length === 0) {
-          out.textContent = '(no runs)';
-          return;
-        }
+      // #224. The rows came from a click alone, so a run that outlived its turn
+      // stayed invisible until someone thought to ask. The panel is drawn from
+      // the roster read now, with the click kept as a manual re-read. Both
+      // halves share this renderer so the two cannot drift apart. `why` is a
+      // failed read's reason, printed over the rows it could not refresh rather
+      // than replacing them.
+      // #224. A stop verdict the reader already got, keyed by session:task. The
+      // roster redraws every second now that the poll is live, and a verdict
+      // held only in the clicked row's text was wiped by the next tick: the
+      // reader watched their own result disappear. Kept here so the redraw
+      // prints it again, and cleared when that task settles out of the roster.
+      const stopVerdicts = new Map();
+      function drawRunsRows(out, id, tasks, why) {
         out.textContent = '';
+        if (why) {
+          const note = document.createElement('div');
+          note.textContent = 'list failed: ' + why + '  (showing the last read)';
+          out.appendChild(note);
+        }
         for (const t of tasks) {
           if (t.kind === 'workflow') {
             // #110. Owner and write tokens alone are sent these (the gateway
@@ -27032,6 +27148,7 @@
           // this read discloses less than the sibling context read already
           // does for the same scope.
           const bits = [t.status, t.kind, t.label || t.id];
+          const held = stopVerdicts.get(id + ':' + t.id);
           if (t.kind === 'agent') {
             if (t.subagentType) bits.push(t.subagentType);
             if (t.stats && t.stats.totalTokens) bits.push(t.stats.totalTokens + ' tok');
@@ -27044,7 +27161,10 @@
             bits.push(t.eventCount + ' events');
           }
           if (t.runtimeMs) bits.push(Math.round(t.runtimeMs / 1000) + 's');
-          label.textContent = bits.join('  ');
+          label.textContent =
+            held !== undefined && t.status === 'running'
+              ? held
+              : bits.join('  ');
           row.appendChild(label);
           // Only a running row gets the control. The other three statuses are
           // settled, and a button that can only ever 404 is not a control, it
@@ -27073,24 +27193,87 @@
               // built to avoid, re-introduced by the page that calls it.
               const stopped =
                 c.ok && !!c.body && c.body.cancelled === true;
+              // Each verdict is recorded as well as drawn, because the poll
+              // redraws this row a second later from the roster and would
+              // otherwise print a bare running row over the answer the reader
+              // just got.
+              const say = (text) => {
+                stopVerdicts.set(id + ':' + t.id, text);
+                label.textContent = text;
+              };
               if (stopped) {
-                label.textContent = 'stopped  ' + (t.label || t.id);
+                say('stopped  ' + (t.label || t.id));
               } else if (!c.ok) {
-                label.textContent =
-                  bits.join('  ') + '  [stop failed: ' + rcDetail(c) + ']';
+                say(bits.join('  ') + '  [stop failed: ' + rcDetail(c) + ']');
               } else {
                 // #110: no branch for reason 'disabled' here. The daemon sends
                 // it only for a workflow cancel, and workflow rows are drawn
                 // by drawWorkflowRun, which words it. This line is the honest
                 // answer for every refusal of the three kinds drawn here.
-                label.textContent =
-                  bits.join('  ') + '  [the daemon did not stop it]';
+                say(bits.join('  ') + '  [the daemon did not stop it]');
               }
             };
             row.appendChild(btn);
           }
           out.appendChild(row);
         }
+      }
+      // #224. Draws whatever the roster read holds for the watched session. The
+      // panel opens at `(not listed)`, and that is what it keeps until a read
+      // actually lands: an empty list printed before asking the session would
+      // claim there are no runs on the strength of nothing.
+      function renderRunsBody() {
+        const out = $('runs-body');
+        if (!out) return;
+        const sid = roster.sessionId;
+        if (!sid || runsSubject !== sid) return; // a typed id holds the panel
+        if (!roster.listed) {
+          if (roster.failed) {
+            out.textContent = 'list failed: ' + roster.why;
+          } else {
+            out.textContent = token() ? 'loading…' : '(not listed)';
+          }
+          return;
+        }
+        const tasks = roster.tasks.filter(
+          (t) => t.kind !== 'workflow' || workflowRunsOn(),
+        );
+        if (tasks.length === 0 && !roster.failed) {
+          out.textContent = '(no runs)';
+          return;
+        }
+        drawRunsRows(out, sid, tasks, roster.failed ? roster.why : '');
+      }
+      $('runs-list').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('runs-body');
+        const id = verbSessionId('runs-id');
+        if (!id) {
+          out.textContent = 'watch a session, or enter an id';
+          return;
+        }
+        out.textContent = 'loading…';
+        runsSubject = id;
+        if (id === roster.sessionId) {
+          // The watched session goes through the roster so the re-read keeps
+          // running after the click returns; a one-off fetch here would show a
+          // snapshot that then silently stale-ates.
+          await readRoster(id);
+          return;
+        }
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/tasks');
+        if (!r.ok) {
+          out.textContent = 'list failed: ' + rcDetail(r);
+          return;
+        }
+        const tasks = (r.body.tasks || []).filter(
+          (t) => t.kind !== 'workflow' || workflowRunsOn(),
+        );
+        if (tasks.length === 0) {
+          out.textContent = '(no runs)';
+          return;
+        }
+        drawRunsRows(out, id, tasks, '');
       };
 
       // #110. Names one session. The reply is judged on the name the daemon
