@@ -9,6 +9,7 @@ import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { WRITE, hasScope } from '../scopes.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 
 /**
  * GET /session/:id/supported-commands — relay the daemon's per-session slash
@@ -97,7 +98,7 @@ export function createSupportedCommandsRoute(
 export function createSessionCommandInvokeRoute(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
-  promptTimeoutMs = 600_000,
+  promptTimeoutMs = DEFAULT_PROMPT_TIMEOUT_MS,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;

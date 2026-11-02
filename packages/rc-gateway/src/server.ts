@@ -526,7 +526,10 @@ export interface GatewayDeps {
    * 503 `queue_timeout` (default 120_000).
    * `promptTimeoutMs`: max ms the daemon turn may run before it is cancelled
    * and a synthetic `stream_error { code: "prompt_timeout" }` is broadcast to
-   * SSE subscribers (default 600_000).
+   * SSE subscribers (default: the shared `DEFAULT_PROMPT_TIMEOUT_MS` ceiling in
+   * routes/promptTimeout.ts, set from `--prompt-timeout-sec`). Unset here means
+   * that default, not a smaller one: all three prompt-posting routes read this
+   * same value (#237).
    */
   queueWaitMs?: number;
   promptTimeoutMs?: number;

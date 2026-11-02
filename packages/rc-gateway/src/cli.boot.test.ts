@@ -87,6 +87,29 @@ describe('parseServeFlags', () => {
     }
   });
 
+  it('reads --prompt-timeout-sec in both forms and from QWEN_RC_PROMPT_TIMEOUT_SEC, flag over env (#237)', () => {
+    // Unset stays unset: the routes then read the shared ceiling, which is the
+    // whole point of collapsing three literals into one (#237).
+    expect(parseServeFlags([]).promptTimeoutSec).toBeUndefined();
+    expect(parseServeFlags(['--prompt-timeout-sec', '90'])).toMatchObject({
+      promptTimeoutSec: 90,
+    });
+    expect(parseServeFlags(['--prompt-timeout-sec=180'])).toMatchObject({
+      promptTimeoutSec: 180,
+    });
+    const saved = process.env.QWEN_RC_PROMPT_TIMEOUT_SEC;
+    process.env.QWEN_RC_PROMPT_TIMEOUT_SEC = '300';
+    try {
+      expect(parseServeFlags([]).promptTimeoutSec).toBe(300);
+      expect(
+        parseServeFlags(['--prompt-timeout-sec', '4']).promptTimeoutSec,
+      ).toBe(4);
+    } finally {
+      if (saved === undefined) delete process.env.QWEN_RC_PROMPT_TIMEOUT_SEC;
+      else process.env.QWEN_RC_PROMPT_TIMEOUT_SEC = saved;
+    }
+  });
+
   it('refuses a --max-daemons that is not a positive whole number, before any daemon is spawned (#214)', () => {
     expect(() => parseServeFlags(['--max-daemons', '0'])).toThrow(
       /--max-daemons: expected a positive whole number, got "0"/,
