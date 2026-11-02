@@ -17,6 +17,7 @@ import {
 } from '../scopes.js';
 import type { CommandLoader, CommandScope } from '../commands/loader.js';
 import { substitute } from '../commands/parse.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 
 /**
  * True when an `If-None-Match` request header matches `revision` (a hex digest).
@@ -109,7 +110,7 @@ export function createInvokeCommandRoute(
   daemon: SessionDaemon,
   loader: CommandLoader,
   audit?: AuditRecorder,
-  promptTimeoutMs = 600_000,
+  promptTimeoutMs = DEFAULT_PROMPT_TIMEOUT_MS,
 ): RequestHandler {
   return async (req, res) => {
     const cmds = await loader.load();

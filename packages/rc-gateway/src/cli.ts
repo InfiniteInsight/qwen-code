@@ -144,6 +144,10 @@ import {
 import { LAUNCHER_STALE_MS } from './routes/terminals.js';
 import { HOST_TAB_SWEEP_MS } from './routes/hostTabs.js';
 import {
+  DEFAULT_PROMPT_TIMEOUT_SEC,
+  promptTimeoutMsFromSec,
+} from './routes/promptTimeout.js';
+import {
   DEFAULT_RATE_TABLE,
   RateTableHolder,
   loadRateTableFile,
@@ -392,6 +396,23 @@ export interface ServeOptions {
    * (#214). A positive integer.
    */
   maxDaemons?: number;
+  /**
+   * `--prompt-timeout-sec <n>` (env `QWEN_RC_PROMPT_TIMEOUT_SEC`): how long one
+   * turn may run before the gateway cancels it and answers 504
+   * `prompt_timeout` (#237). It is an absolute ceiling, not a quiet-period
+   * bound: a turn that goes silent for a while is not a turn that stopped
+   * working (one tool call, a build or a test run, can hold the event bus quiet
+   * for tens of minutes), and the gateway has no way to measure turn silence,
+   * because the daemon's frames reach it only through a watched-session relay
+   * that exists only while a client is watching. See routes/promptTimeout.ts.
+   * Default 7200 (2 hours); a positive whole number of seconds. Raise it for
+   * workloads with longer tool calls; every firing is audited as
+   * `prompt_timed_out`, so the count is readable off the audit log.
+   */
+  promptTimeoutSec?: number;
+  /** Which of the two above supplied it, so boot can say where the bound came
+   * from instead of making an operator guess. Unset means the default. */
+  promptTimeoutSecFrom?: '--prompt-timeout-sec' | 'QWEN_RC_PROMPT_TIMEOUT_SEC';
   /**
    * `--qwen-bin <path>` (env `QWEN_RC_QWEN_BIN`): the one executable every
    * daemon is spawned as (the boot daemon and the pool's). A path is checked at
@@ -699,6 +720,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   if (sessionWalDir !== undefined) prepareSessionWalDir(sessionWalDir);
   // eslint-disable-next-line no-console
   console.log(formatSessionWalLine(sessionWalDir));
+  // The per-turn ceiling in force and where it came from (#237). Worth a boot
+  // line because the symptom it explains is a turn that died mid-work with a
+  // 504, and the first thing anyone reaches for is whether the gateway, not the
+  // model, was the one that stopped it. The audit row the firing writes carries
+  // the same number; this says what the setting was at boot.
+  // eslint-disable-next-line no-console
+  console.log(
+    `qwen-rc serve: per-turn ceiling ${
+      opts.promptTimeoutSec ?? DEFAULT_PROMPT_TIMEOUT_SEC
+    }s (${opts.promptTimeoutSecFrom ?? 'default'})`,
+  );
   // Which `qwen` every daemon runs, settled and logged before anything is
   // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
   // and the daemons used to run whatever `qwen` PATH held, so say which one
@@ -1193,6 +1225,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       : {}),
     daemonQwenBin: daemonBin.path,
     daemonQwenBinHealthy: daemonProbe.healthy,
+    // #237: the CLI speaks seconds, the routes speak ms, and unset means "use
+    // the shared ceiling in routes/promptTimeout.ts", NOT a smaller default,
+    // which is what three independent 600_000 literals used to mean.
+    ...(opts.promptTimeoutSec !== undefined
+      ? { promptTimeoutMs: promptTimeoutMsFromSec(opts.promptTimeoutSec) }
+      : {}),
     ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
     apnsStore,
     ...(apnsDelivery ? { apns: apnsDelivery } : {}),
@@ -2331,6 +2369,7 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const acmeDomain = flag('acme-domain');
   const maxAttachmentFlag = flag('max-attachment-bytes');
   const maxDaemonsFlag = flag('max-daemons');
+  const promptTimeoutFlag = flag('prompt-timeout-sec');
   const walDirFlag = flag('wal-dir');
   if (walDirFlag !== undefined && walDirFlag.trim() === '') {
     throw new Error('--wal-dir: expected a directory path, got ""');
@@ -2371,6 +2410,18 @@ export function parseServeFlags(argv: string[]): ServeOptions {
       maxDaemonsFlag !== undefined ? '--max-daemons' : 'QWEN_RC_MAX_DAEMONS',
       maxDaemonsFlag ?? process.env.QWEN_RC_MAX_DAEMONS,
     ),
+    promptTimeoutSec: parsePositiveIntFlag(
+      promptTimeoutFlag !== undefined
+        ? '--prompt-timeout-sec'
+        : 'QWEN_RC_PROMPT_TIMEOUT_SEC',
+      promptTimeoutFlag ?? process.env.QWEN_RC_PROMPT_TIMEOUT_SEC,
+    ),
+    promptTimeoutSecFrom:
+      promptTimeoutFlag !== undefined
+        ? '--prompt-timeout-sec'
+        : process.env.QWEN_RC_PROMPT_TIMEOUT_SEC
+          ? 'QWEN_RC_PROMPT_TIMEOUT_SEC'
+          : undefined,
     qwenBin:
       qwenBinRaw === undefined || (!qwenBinFromFlag && qwenBinRaw === '')
         ? undefined
@@ -2432,6 +2483,7 @@ if (process.argv[2] === 'serve') {
   //        --llama-swap-url <url> --host-actions <path>
   //        --max-attachment-bytes <n> --qwen-bin <path>
   //        --max-daemons <n> (workspace daemon pool cap, default 6, #214)
+  //        --prompt-timeout-sec <n> (per-turn ceiling, default 7200, #237)
   //        --wal-dir <dir> (WAL in <dir>/wal/, default ~/.qwen/rc) --no-wal
   //        --wal-retention-days <n> --wal-max-mb <n>
   //        --reopen-crashed-tabs (env QWEN_RC_REOPEN_CRASHED_TABS=1, #212)

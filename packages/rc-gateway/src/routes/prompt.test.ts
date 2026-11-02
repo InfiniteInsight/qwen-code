@@ -222,6 +222,8 @@ describe('prompt route', () => {
 
   // ── Prompt-execution timeout (Task 2.4) ──────────────────────────────────
 
+  // The bound under test is an absolute ceiling; see routes/promptTimeout.ts
+  // for why it is not a quiet-period bound (#237).
   it('returns 504 prompt_timeout and emits stream_error when daemon is too slow', async () => {
     // Daemon takes 300ms; prompt-execution budget is only 50ms.
     stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 300 });
@@ -248,6 +250,38 @@ describe('prompt route', () => {
     expect(emitted).toHaveLength(1);
     expect(emitted[0]!.type).toBe('stream_error');
     expect((emitted[0]!.data as { code: string }).code).toBe('prompt_timeout');
+  });
+
+  it('audits the firing with the budget that fired (#237)', async () => {
+    stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 300 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mount(daemon, audit, {
+      promptTimeoutMs: 50,
+      queue: new PromptQueue(),
+    });
+    const res = await postPrompt(url, { prompt: 'slow-turn' });
+    expect(res.status).toBe(504);
+    expect(await res.json()).toMatchObject({
+      code: 'prompt_timeout',
+      timeoutMs: 50,
+    });
+    const fired = audit.calls.filter((e) => e.action === 'prompt_timed_out');
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({
+      target: 'sess-1',
+      detail: { timeoutMs: 50 },
+    });
+  });
+
+  it('records no firing for a turn that finishes inside the ceiling (#237)', async () => {
+    stub = await startStubDaemon({ promptStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mount(daemon, audit, { queue: new PromptQueue() });
+    const res = await postPrompt(url, { prompt: 'finished fine' });
+    expect(res.status).toBe(200);
+    expect(audit.calls.map((e) => e.action)).toEqual(['prompt_sent']);
   });
 
   it('queue slot is released after a prompt timeout (next prompt can proceed)', async () => {

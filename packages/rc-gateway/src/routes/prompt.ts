@@ -11,6 +11,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import { daemonUnavailableBody } from '../daemonHttpError.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 
 /**
  * POST /session/:id/prompt — proxy the SDK's daemon.prompt(). Accepts either
@@ -46,7 +47,8 @@ const sharedQueue = new PromptQueue();
 export interface PromptRouteOptions {
   /** ms to wait for the per-session slot before returning 503 (default: 120_000). */
   queueWaitMs?: number;
-  /** ms budget for the daemon turn before it is cancelled (default: 600_000). */
+  /** ms budget for the daemon turn before it is cancelled (default: the shared
+   * `DEFAULT_PROMPT_TIMEOUT_MS` ceiling, see routes/promptTimeout.ts). */
   promptTimeoutMs?: number;
   /**
    * Broadcaster for gateway-injected SSE events (e.g. `stream_error` on prompt
@@ -79,7 +81,7 @@ export function createPromptRoute(
   opts: PromptRouteOptions = {},
 ): RequestHandler {
   const queueWaitMs = opts.queueWaitMs ?? 120_000;
-  const promptTimeoutMs = opts.promptTimeoutMs ?? 600_000;
+  const promptTimeoutMs = opts.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
   const broadcaster = opts.promptEventBroadcaster;
   const queue = opts.queue ?? sharedQueue;
 
@@ -174,18 +176,32 @@ export function createPromptRoute(
       }
 
       if (timedOut) {
+        // #237: record the firing durably. The broadcast below reaches only
+        // live SSE subscribers and is dropped on the floor with them, so until
+        // now a gateway that cancelled turns every day left no trace that any
+        // turn had ever been cancelled - the count that decides whether this
+        // bound is set right could not be taken off the running system.
+        void audit?.record({
+          action: 'prompt_timed_out',
+          actorTokenId: req.rcClient?.id,
+          subActor: req.rcClient?.subActor,
+          target: sessionId,
+          detail: { timeoutMs: promptTimeoutMs, blocks: blocks.length },
+        });
         // Broadcast a synthetic stream_error to all SSE subscribers so they
         // know the turn was cancelled by the gateway.
         broadcaster?.emit(sessionId, {
           type: 'stream_error',
-          data: { code: 'prompt_timeout' },
+          data: { code: 'prompt_timeout', timeoutMs: promptTimeoutMs },
         });
         // #40: the turn ended in failure (gateway timeout).
         opts.onTurnEnd?.(sessionId, { ok: false, reason: 'timeout' });
         if (!res.closed) {
-          res
-            .status(504)
-            .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
+          res.status(504).json({
+            error: 'prompt_timeout',
+            code: 'prompt_timeout',
+            timeoutMs: promptTimeoutMs,
+          });
         }
         return;
       }

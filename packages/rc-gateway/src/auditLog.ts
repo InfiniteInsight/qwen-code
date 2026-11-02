@@ -91,6 +91,7 @@ export type AuditAction =
   | 'session_detached'
   | 'permission_voted'
   | 'prompt_sent'
+  | 'prompt_timed_out'
   | 'push_subscribed'
   | 'push_unsubscribed'
   | 'push_sent'
@@ -249,6 +250,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_detached',
   'permission_voted',
   'prompt_sent',
+  'prompt_timed_out',
   'push_subscribed',
   'push_unsubscribed',
   'push_sent',
