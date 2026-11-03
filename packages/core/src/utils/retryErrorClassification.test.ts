@@ -242,6 +242,30 @@ describe('classifyRetryError', () => {
     expectVerdict(err, NETWORK_400);
   });
 
+  it('classifies a bodyless SDK HTTP 400 ("400 status code (no body)") as retryable transport error (#250)', () => {
+    const untraceable = APIError.generate(
+      400,
+      undefined,
+      undefined,
+      new Headers(),
+    );
+    expect(untraceable.message).toBe('400 status code (no body)');
+    expectVerdict(untraceable, NETWORK_400);
+    expect(isRetryableUpstreamError(untraceable)).toBe(true);
+
+    const proxyTraced = APIError.generate(
+      400,
+      undefined,
+      undefined,
+      new Headers({ 'x-request-id': 'req-proxy-empty-400' }),
+    );
+    expectVerdict(proxyTraced, {
+      ...NETWORK_400,
+      requestId: 'req-proxy-empty-400',
+    });
+    expect(isRetryableUpstreamError(proxyTraced)).toBe(true);
+  });
+
   it('keeps a 4xx with provider fields fail-fast even if the message mentions EOF', () => {
     // A genuine client error carries provider fields; the network-failure
     // exception must not relabel it as retryable.
