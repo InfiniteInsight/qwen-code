@@ -79,7 +79,11 @@ const PERM_PENDING = (requestId: string, command: string) => ({
   kind: 'permission',
   createdAt: '2026-11-02T09:00:00.000Z',
   action: { type: 'execute', title: command, input: { command } },
-  options: EXEC_OPTIONS.map((o) => ({ optionId: o.optionId, label: o.name, kind: o.kind })),
+  options: EXEC_OPTIONS.map((o) => ({
+    optionId: o.optionId,
+    label: o.name,
+    kind: o.kind,
+  })),
 });
 
 type Opened = { viewer: Viewer; page: Page; rosterReads: string[] };
@@ -118,7 +122,11 @@ async function status(page: Page): Promise<Status> {
   }))) as Status;
 }
 
-async function waitState(page: Page, want: string, timeout = 20_000): Promise<Status> {
+async function waitState(
+  page: Page,
+  want: string,
+  timeout = 20_000,
+): Promise<Status> {
   await page.waitForFunction(
     (w) => (document.getElementById('h1-status').dataset.state ?? '') === w,
     want,
@@ -128,7 +136,11 @@ async function waitState(page: Page, want: string, timeout = 20_000): Promise<St
 }
 
 /** Waits for the status line to leave a state, and returns what it became. */
-async function waitStateNot(page: Page, gone: string, timeout = 20_000): Promise<Status> {
+async function waitStateNot(
+  page: Page,
+  gone: string,
+  timeout = 20_000,
+): Promise<Status> {
   await page.waitForFunction(
     (g) => (document.getElementById('h1-status').dataset.state ?? '') !== g,
     gone,
@@ -146,6 +158,51 @@ async function runsText(page: Page): Promise<string> {
 /** Reads the stub's own count of roster reads. */
 function readCount(viewer: Viewer): number {
   return viewer.stub.tasksQueries.length;
+}
+
+/**
+ * Hands the page one `task_changed` frame (#230). The stub can only replay the
+ * frames it was given when a stream connects, and a scenario needs the
+ * transition to land AFTER the roster read, which is when a real run settles.
+ * So it goes through the page's own dispatcher, with the payload the promoted
+ * frame carries: sessionId, taskId, kind, status, runtimeMs, nothing else.
+ */
+async function frameChanged(
+  page: Page,
+  sessionId: string,
+  taskId: string,
+  status: string,
+  runtimeMs = 5_000,
+): Promise<void> {
+  await page.evaluate(
+    ([sid, id, st, ms]) => {
+      renderFrame({
+        type: 'task_changed',
+        data: {
+          sessionId: sid,
+          taskId: id,
+          kind: 'shell',
+          status: st,
+          runtimeMs: ms,
+        },
+      });
+    },
+    [sessionId, taskId, status, runtimeMs] as [string, string, string, number],
+  );
+}
+
+async function settleByFrame(
+  page: Page,
+  sessionId: string,
+  taskId: string,
+  status: string,
+): Promise<void> {
+  await frameChanged(page, sessionId, taskId, status, 91_000);
+}
+
+/** The status word minus its trailing clock, which #230 lets run locally. */
+function wordHead(word: string): string {
+  return word.replace(/ (\d+m\d+s|\d+s)$/, '');
 }
 
 // The Runs panel ships hidden behind the More screen, and a click needs a
@@ -218,7 +275,11 @@ CASES.push({
     const { viewer, page } = await open({
       frames: [
         ...ready(),
-        { id: 2, type: 'permission_request', data: PERM_FRAME('p2-p', 'gh cache delete --all') },
+        {
+          id: 2,
+          type: 'permission_request',
+          data: PERM_FRAME('p2-p', 'gh cache delete --all'),
+        },
       ],
       runs: { tasks: [shellRow()] },
     });
@@ -246,7 +307,10 @@ CASES.push({
       });
       await watch(page, viewer.sessionId);
       await page.waitForFunction(
-        () => !!document.querySelector('#cards .pcard:not([hidden]):not(.retiring)'),
+        () =>
+          !!document.querySelector(
+            '#cards .pcard:not([hidden]):not(.retiring)',
+          ),
         null,
         { timeout: 20_000 },
       );
@@ -269,47 +333,40 @@ CASES.push({
 });
 
 CASES.push({
-  name: 'P3 a run that settles stops the re-read: the line leaves bg and the daemon is asked nothing further',
+  name: 'P3 a settle that arrives as a frame moves the line and the row, and the daemon is asked nothing further',
   run: async () => {
-    let reads = 0;
     const { viewer, page } = await open({
       frames: ready(),
-      runs: {
-        tasks: () => {
-          reads += 1;
-          return reads === 1
-            ? [shellRow()]
-            : [
-                shellRow({
-                  status: 'completed',
-                  endTime: 1_800_000_041_000,
-                  exitCode: 0,
-                }),
-              ];
-        },
-      },
+      runs: { tasks: [shellRow()] },
     });
     try {
       await watch(page, viewer.sessionId);
       await waitState(page, 'bg');
+      const before = readCount(viewer);
+      // #230 retired the re-read, so this is how a settle now reaches the page:
+      // the daemon pushes it. Delivered through the page's own dispatcher,
+      // because the stub can only replay frames when a stream connects.
+      await settleByFrame(page, viewer.sessionId, 'bg_one', 'completed');
       const settled = await waitStateNot(page, 'bg');
       expect(
         settled.state === 'idle',
-        `a settled roster left the line at ${JSON.stringify(settled)}`,
+        `a settled frame left the line at ${JSON.stringify(settled)}`,
       );
       const rows = await runsText(page);
       expect(
-        rows.includes('completed') && rows.includes('exit 0'),
+        rows.includes('completed'),
         `the settled row reads ${JSON.stringify(rows)}`,
       );
-      const after = readCount(viewer);
-      expect(after >= 2, `the settle was never re-read (${after} read(s))`);
+      expect(
+        readCount(viewer) === before,
+        `a frame the roster could patch in place still cost ${readCount(viewer) - before} read(s)`,
+      );
       await sleep(3_500);
       expect(
-        readCount(viewer) === after,
-        `the poll kept running after every row settled (${after} then ${readCount(viewer)} reads)`,
+        readCount(viewer) === before,
+        `the poll kept running after every row settled (${before} then ${readCount(viewer)} reads)`,
       );
-      return `bg gave ${JSON.stringify(settled.word)}, ${after} reads and no more over 3.5s`;
+      return `bg gave ${JSON.stringify(settled.word)} off the frame alone, ${before} read and no more over 3.5s`;
     } finally {
       await viewer.close();
     }
@@ -319,12 +376,18 @@ CASES.push({
 CASES.push({
   name: 'P4 an empty roster asks once and starts no timer',
   run: async () => {
-    const { viewer, page } = await open({ frames: ready(), runs: { tasks: [] } });
+    const { viewer, page } = await open({
+      frames: ready(),
+      runs: { tasks: [] },
+    });
     try {
       await watch(page, viewer.sessionId);
       await waitState(page, 'idle');
       const rows = await runsText(page);
-      expect(rows === '(no runs)', `an empty roster drew ${JSON.stringify(rows)}`);
+      expect(
+        rows === '(no runs)',
+        `an empty roster drew ${JSON.stringify(rows)}`,
+      );
       const after = readCount(viewer);
       expect(after === 1, `an empty roster was read ${after} times`);
       await sleep(3_500);
@@ -356,14 +419,21 @@ CASES.push({
           body: JSON.stringify({ error: { code: 'daemon_unreachable' } }),
         }),
       );
-      await sleep(3_500);
+      // #230 retired the re-read, so nothing would hit that 502 on its own
+      // anymore. A frame naming a row the roster has never seen is what asks
+      // now, and it is the read this scenario is about: one, and it fails.
+      await frameChanged(page, viewer.sessionId, 'never_listed', 'running');
+      await sleep(1_500);
       const after = await status(page);
       expect(
         after.state === 'bg',
         `a failed read moved the line to ${JSON.stringify(after)}`,
       );
+      // The clock is allowed to move (it runs locally now, which is the whole
+      // point of the frame); the label and the count are the part a failed read
+      // must leave alone, because the run it names is still going.
       expect(
-        after.word === before.word,
+        wordHead(after.word) === wordHead(before.word),
         `a failed read changed the word from ${JSON.stringify(before.word)} to ${JSON.stringify(after.word)}`,
       );
       const rows = await runsText(page);
@@ -383,7 +453,10 @@ CASES.push({
 // route answers 502 and the page would only ever show its transport failure.
 // What is under test is the page's reading of the verdict body, which the
 // gateway's pass-through is covered elsewhere.
-async function serveCancel(page: Page, verdict: Record<string, unknown>): Promise<void> {
+async function serveCancel(
+  page: Page,
+  verdict: Record<string, unknown>,
+): Promise<void> {
   await page.route(/\/tasks\/[^/]+\/cancel$/, (route) =>
     route.fulfill({
       status: 200,
@@ -403,11 +476,19 @@ CASES.push({
     try {
       await watch(page, viewer.sessionId);
       await waitState(page, 'bg');
-      await serveCancel(page, { sessionId: viewer.sessionId, taskId: 'bg_one', cancelled: false, reason: 'busy' });
+      await serveCancel(page, {
+        sessionId: viewer.sessionId,
+        taskId: 'bg_one',
+        cancelled: false,
+        reason: 'busy',
+      });
       await openRuns(page);
       await page.click('#runs-body button');
       await page.waitForFunction(
-        () => /did not stop/.test(document.getElementById('runs-body').textContent ?? ''),
+        () =>
+          /did not stop/.test(
+            document.getElementById('runs-body').textContent ?? '',
+          ),
         null,
         { timeout: 15_000 },
       );
@@ -441,11 +522,18 @@ CASES.push({
     try {
       await watch(page, viewer.sessionId);
       await waitState(page, 'bg');
-      await serveCancel(page, { sessionId: viewer.sessionId, taskId: 'bg_one', cancelled: true });
+      await serveCancel(page, {
+        sessionId: viewer.sessionId,
+        taskId: 'bg_one',
+        cancelled: true,
+      });
       await openRuns(page);
       await page.click('#runs-body button');
       await page.waitForFunction(
-        () => /stopped/.test(document.getElementById('runs-body').textContent ?? ''),
+        () =>
+          /stopped/.test(
+            document.getElementById('runs-body').textContent ?? '',
+          ),
         null,
         { timeout: 15_000 },
       );
@@ -456,6 +544,84 @@ CASES.push({
         `the next redraw erased the confirmation: ${JSON.stringify(rows)}`,
       );
       return JSON.stringify(rows);
+    } finally {
+      await viewer.close();
+    }
+  },
+});
+
+CASES.push({
+  name: 'P8 a burst of ids the roster never listed costs one re-read, not one each, and the row arrives with the label no frame carries',
+  run: async () => {
+    let reads = 0;
+    const { viewer, page } = await open({
+      frames: ready(),
+      runs: {
+        tasks: () => {
+          reads += 1;
+          if (reads === 1) return [shellRow()];
+          // Everything the frames are about to name, and nothing a frame could
+          // have drawn by itself: the label and the command are the read's work.
+          return [
+            shellRow(),
+            shellRow({
+              id: 'bg_two',
+              label: 'pnpm lint',
+              command: 'pnpm lint',
+            }),
+            shellRow({
+              id: 'bg_three',
+              label: 'pnpm test',
+              command: 'pnpm test',
+            }),
+            shellRow({
+              id: 'bg_four',
+              label: 'pnpm build',
+              command: 'pnpm build',
+            }),
+          ];
+        },
+      },
+    });
+    try {
+      await watch(page, viewer.sessionId);
+      await waitState(page, 'bg');
+      const before = readCount(viewer);
+      // One workflow fanning out installs several children at once, so three
+      // transitions land back to back. In one evaluate, because the coalescing
+      // is about frames arriving while the read they triggered is still out.
+      await page.evaluate((sid) => {
+        for (const id of ['bg_two', 'bg_three', 'bg_four']) {
+          renderFrame({
+            type: 'task_changed',
+            data: {
+              sessionId: sid,
+              taskId: id,
+              kind: 'shell',
+              status: 'running',
+              runtimeMs: 1_000,
+            },
+          });
+        }
+      }, viewer.sessionId);
+      for (let i = 0; i < 60 && readCount(viewer) === before; i += 1)
+        await sleep(100);
+      const after = readCount(viewer);
+      expect(
+        after - before === 1,
+        `three unseen ids bought ${after - before} read(s), not the one they all share`,
+      );
+      const rows = await runsText(page);
+      expect(
+        rows.includes('pnpm lint') && rows.includes('pnpm build'),
+        `the re-read drew ${JSON.stringify(rows)}`,
+      );
+      await sleep(3_500);
+      expect(
+        readCount(viewer) === after,
+        `the paid-off debt kept re-arming (${after} then ${readCount(viewer)} reads)`,
+      );
+      return `${after - before} read for three unseen ids; rows now ${JSON.stringify(rows.split('\n')[0])}`;
     } finally {
       await viewer.close();
     }
@@ -475,10 +641,21 @@ async function main(): Promise<void> {
     if (!selected(c.name)) continue;
     const started = Date.now();
     try {
-      results.push({ name: c.name, ok: true, detail: (await c.run()) + ` (${((Date.now() - started) / 1000).toFixed(1)}s)` });
+      results.push({
+        name: c.name,
+        ok: true,
+        detail:
+          (await c.run()) + ` (${((Date.now() - started) / 1000).toFixed(1)}s)`,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      results.push({ name: c.name, ok: false, detail: msg.split('\n')[0]! + ` (${((Date.now() - started) / 1000).toFixed(1)}s)` });
+      results.push({
+        name: c.name,
+        ok: false,
+        detail:
+          msg.split('\n')[0]! +
+          ` (${((Date.now() - started) / 1000).toFixed(1)}s)`,
+      });
     }
     const r = results[results.length - 1]!;
     console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name} - ${r.detail}`);
