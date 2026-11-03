@@ -262,6 +262,14 @@ export interface SessionDaemon {
     req: PromptRequest,
     signal?: AbortSignal,
     clientId?: string,
+    /**
+     * Called once per event frame the prompt's own wait observes, carrying the
+     * frame type only. Informational: it cannot cancel or extend the turn and a
+     * throw inside it is swallowed. The gateway uses it to record how quiet a
+     * turn was (routes/turnProgress.ts); the argument is deliberately a bare
+     * frame type so no prompt content can reach a measurement.
+     */
+    onTurnFrame?: (frameType: string) => void,
   ): Promise<PromptResult>;
   capabilities(): Promise<DaemonCapabilities>;
   closeSession(sessionId: string, clientId?: string): Promise<void>;
@@ -2152,9 +2160,10 @@ export class DaemonPool implements SessionDaemon {
     req: PromptRequest,
     signal?: AbortSignal,
     clientId?: string,
+    onTurnFrame?: (frameType: string) => void,
   ): Promise<PromptResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
-      client.prompt(sessionId, req, signal, clientId),
+      client.prompt(sessionId, req, signal, clientId, onTurnFrame),
     );
   }
 

@@ -168,6 +168,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  TurnFrameObserver,
   SetModelResult,
   SetSessionLanguageResult,
   SetUserLanguageResult,
@@ -6418,12 +6419,22 @@ export class DaemonClient {
    * `DaemonSessionClient`) should prefer {@link promptNonBlocking}
    * and correlate via their existing event stream to avoid the extra
    * connection.
+   *
+   * `onTurnFrame` reports progress to the holder of the turn: it fires once per
+   * frame this method's own wait observes on the temporary subscription, so a
+   * caller learns the turn is alive without adding a second subscriber to a
+   * session bus with a finite per-session budget. It is informational only. It
+   * cannot cancel or extend the turn, it is never handed the frame payload, and
+   * a throw inside it is swallowed so a broken observer cannot change the
+   * turn's outcome. A daemon that answers 200 opens no subscription, so such a
+   * turn reports no frames at all.
    */
   async prompt(
     sessionId: string,
     req: PromptRequest,
     signal?: AbortSignal,
     clientId?: string,
+    onTurnFrame?: TurnFrameObserver,
   ): Promise<PromptResult> {
     signal?.throwIfAborted();
     const releasePromptSlot = this.reservePromptSlot(sessionId);
@@ -6453,6 +6464,7 @@ export class DaemonClient {
             signal,
             clientId,
             accept.eventEpoch,
+            onTurnFrame,
           );
         } finally {
           releasePromptSlot();
@@ -6523,6 +6535,7 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
     eventEpoch?: string,
+    onTurnFrame?: TurnFrameObserver,
   ): Promise<PromptResult> {
     const sseAbort = new AbortController();
     const composedSignal = signal
@@ -6539,6 +6552,16 @@ export class DaemonClient {
         signal: composedSignal,
       });
       for await (const event of events) {
+        if (onTurnFrame) {
+          try {
+            onTurnFrame(event.type);
+          } catch {
+            // The observer is a measurement, not part of the turn. Letting a
+            // throw escape here would end a healthy turn early through the
+            // error path below, which is the failure this callback must never
+            // be able to cause.
+          }
+        }
         const result = matchTurnEvent(event, promptId);
         if (result !== undefined) return result;
       }

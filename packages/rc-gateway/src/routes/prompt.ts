@@ -12,6 +12,7 @@ import { daemonUnavailableBody } from '../daemonHttpError.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
 import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
+import { createTurnProgressMeter } from './turnProgress.js';
 
 /**
  * POST /session/:id/prompt — proxy the SDK's daemon.prompt(). Accepts either
@@ -137,6 +138,14 @@ export function createPromptRoute(
         timeoutAbort.abort();
       }, promptTimeoutMs);
 
+      // add-turn-progress-signal 1.2: record how quiet this turn was. The
+      // observer fires once per frame the prompt's own wait already pulls off
+      // its subscription, so this adds no second subscriber and no wire event,
+      // and the callback carries only a frame count and a duration, never
+      // content. It measures and decides nothing: the absolute ceiling below
+      // stays the only bound until Phase 2 has a recorded distribution to size a
+      // quiet-period window from.
+      const progress = createTurnProgressMeter();
       let result;
       let timedOut = false;
       try {
@@ -144,6 +153,8 @@ export function createPromptRoute(
           sessionId,
           { prompt: blocks },
           timeoutAbort.signal,
+          undefined,
+          () => progress.observe(),
         );
       } catch (err) {
         if (timeoutAbort.signal.aborted) {
@@ -214,7 +225,14 @@ export function createPromptRoute(
         actorTokenId: req.rcClient?.id,
         subActor: req.rcClient?.subActor,
         target: sessionId,
-        detail: { stopReason: result!.stopReason, blocks: blocks.length },
+        // `summary()` is empty for a turn the daemon answered without a
+        // subscription, so those turns carry neither number rather than a gap of
+        // zero: no measurement and a zero-length silence are opposite claims.
+        detail: {
+          stopReason: result!.stopReason,
+          blocks: blocks.length,
+          ...progress.summary(),
+        },
       });
 
       // #40: the turn completed — notify backgrounded clients (the push is

@@ -5356,6 +5356,19 @@ export interface DaemonSessionAttachmentData {
  */
 export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 
+/**
+ * Reports one event frame observed while awaiting a turn, called once per
+ * frame from the same wait that {@link DaemonClient.prompt} already runs.
+ *
+ * It carries the frame's discriminator only, never its payload: a holder of a
+ * turn needs to learn that the turn is producing frames, and passing the body
+ * would let a measurement record prompt content or tool arguments by accident.
+ * The callback is informational. It cannot cancel, extend or end the turn, and
+ * a throw inside it is swallowed so a broken observer cannot change the turn's
+ * outcome.
+ */
+export type TurnFrameObserver = (frameType: string) => void;
+
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
