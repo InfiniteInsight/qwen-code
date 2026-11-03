@@ -1770,6 +1770,40 @@
         max-height: 140px;
         overflow-y: auto;
       }
+      /* #240. The slash command picker's rows. It is a .cpanel, so the height
+         bound and the scroll belong to the rule above and are not restated
+         here: that bound is what keeps a long list from pushing the composer
+         under the fold, which is the failure recorded for the plan strip.
+         34px is the touch target, because a row a thumb cannot hit is a row
+         that cannot be tapped. */
+      #cmd-pick .cmdopt {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        min-height: 34px;
+        cursor: pointer;
+      }
+      #cmd-pick .cmd-name {
+        flex: none;
+        color: #e5e9f0;
+      }
+      #cmd-pick .cmd-desc {
+        color: #9aa5b1;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      #cmd-pick .cmd-tag {
+        flex: none;
+        color: #6b7686;
+      }
+      #cmd-pick .cmdopt[aria-selected='true'] {
+        background: #2f3b4c;
+      }
+      #cmd-pick .cmd-note {
+        color: #9aa5b1;
+        font-style: italic;
+      }
       #rewind-pick {
         display: flex;
         flex-wrap: wrap;
@@ -6384,6 +6418,19 @@
             <span id="rewind-pick-result"></span>
           </div>
           <span class="interim" id="dictate-interim" aria-live="polite"></span>
+          <!-- #240. The slash command picker. A .cpanel like #stored above, so
+               it is bounded and scrolls by the same rule rather than by a copy
+               of it, and it sits before .crow so it opens over the field rather
+               than pushing the row down. Filled from the same two reads the
+               Commands panel makes; rows are built with textContent only, since
+               a command name and description are file- and model-supplied text. -->
+          <div
+            id="cmd-pick"
+            class="cpanel"
+            role="listbox"
+            aria-label="Slash commands"
+            hidden
+          ></div>
           <!-- #184. One row: the + that opens the tools, the field, and Send.
                While a turn runs Stop takes Send's place (#cancel-turn, the
                handler the ⊘ verb had), and Queue (#70) sits beside it, since
@@ -6406,6 +6453,9 @@
                 rows="1"
                 aria-label="Message"
                 placeholder="Message"
+                aria-autocomplete="list"
+                aria-controls="cmd-pick"
+                aria-expanded="false"
               ></textarea>
             </div>
             <button
@@ -18612,7 +18662,320 @@
         if (e.clientY < r.top || e.clientY > r.bottom) return;
         acceptIdleGhost();
       });
+      // #240. The slash command picker. A leading `/` in the composer opens the
+      // commands that exist and typing after it narrows the list, because on a
+      // phone the only other route to a slash command is to recall its whole
+      // name and spell it on a touchscreen keyboard. And a misspelling is not an
+      // error on this page: the send path posts the text verbatim, so `/stauts`
+      // asks the model about status instead of failing. That silence is the
+      // reason this exists.
+      //
+      // It opens ONLY while the caret sits inside that first token, so a message
+      // that happens to begin with a path (`/etc/hosts says`) keeps its field to
+      // itself. Rows come from loadCommandSources(), the same two reads the
+      // Commands panel makes, so the two cannot disagree about what is offered.
+      //
+      // Completing INSERTS the command and leaves the box open for arguments,
+      // which is what the terminal does. Not sending is the deliberate half: a
+      // command that takes an argument cannot be guessed at, so a completion that
+      // fired immediately would be wrong for every one of those to pay for the
+      // ones that take none. The insert leaves text in the box, so the #70 drain
+      // sees a draft and waits, which is that drain's existing rule rather than a
+      // new exception made for the picker.
+      const cmdPick = {
+        open: false,
+        sel: 0,
+        shown: [],
+        token: '',
+        dismissed: null, // the text Escape shut, so that keyup cannot undo it; null
+        // means nothing is shut. It is null and not '' because a bare slash
+        // filters on the empty string, and '' would read as that slash dismissed.
+        sources: null, // the last loadCommandSources() answer,
+        forSession: '', // read for this conversation,
+        at: 0, // at this moment.
+      };
+
+      function cmdPickClose() {
+        cmdPick.open = false;
+        cmdPick.shown = [];
+        cmdPick.token = '';
+        cmdPick.sel = 0;
+        const box = $('cmd-pick');
+        box.hidden = true;
+        box.textContent = '';
+        $('prompt').setAttribute('aria-expanded', 'false');
+        $('prompt').removeAttribute('aria-activedescendant');
+      }
+
+      /**
+       * The `/token` the caret sits inside, lowercased for matching, or null
+       * when this is not text the picker may act on: no leading slash, or the
+       * caret has passed the token, a space or a newline ending it.
+       */
+      function cmdPickToken() {
+        const el = $('prompt');
+        const caret =
+          typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+        const before = el.value.slice(0, caret);
+        if (before.charAt(0) !== '/') return null;
+        if (/\s/.test(before)) return null;
+        return before.slice(1).toLowerCase();
+      }
+
+      /**
+       * The two sources, read once per watched conversation and kept: a keystroke
+       * must not cost two requests. A stale list is worse than a slow one, so the
+       * answer is keyed by session and dropped after a minute, which is also how
+       * long a session restart that changed the command list has to wait out.
+       *
+       * One flight is shared, not one per caller: every keystroke reaches this
+       * twice (the input handler and the keyup one), so without the handoff the
+       * first character would buy two copies of both reads before either landed.
+       */
+      function cmdPickSources() {
+        const key = watchedSessionId || '';
+        if (
+          cmdPick.sources &&
+          cmdPick.forSession === key &&
+          Date.now() - cmdPick.at < 60000
+        ) {
+          return Promise.resolve(cmdPick.sources);
+        }
+        if (cmdPick.flight && cmdPick.flightFor === key) return cmdPick.flight;
+        const gen = switchGen;
+        const flight = (async () => {
+          const got = await loadCommandSources(watchedSessionId);
+          // A reply about a conversation nobody watches any more must not fill
+          // the picker for the one that arrived (the page's own switchGen rule).
+          if (gen !== switchGen) return null;
+          cmdPick.sources = got;
+          cmdPick.forSession = key;
+          cmdPick.at = Date.now();
+          return got;
+        })();
+        cmdPick.flight = flight;
+        cmdPick.flightFor = key;
+        void flight.finally(() => {
+          if (cmdPick.flight === flight) {
+            cmdPick.flight = null;
+            cmdPick.flightFor = '';
+          }
+        });
+        return flight;
+      }
+
+      /**
+       * Prefix matches first, then the substring ones. Prefix is the useful
+       * default because that is how a command name is recalled; the substring
+       * fallback is kept for the half-remembered middle, for the same reason the
+       * terminal does both. Session rows win a tie, because they act on the
+       * conversation on screen.
+       */
+      function cmdPickFilter(rows, needle) {
+        const pre = [];
+        const sub = [];
+        for (const r of rows) {
+          const name = String(r.name || '').toLowerCase();
+          if (!needle || name.startsWith(needle)) pre.push(r);
+          else if (name.includes(needle)) sub.push(r);
+        }
+        const rank = (a, b) =>
+          String(a.name).localeCompare(String(b.name)) ||
+          (a.kind === b.kind ? 0 : a.kind === 'session' ? -1 : 1);
+        return pre.sort(rank).concat(sub.sort(rank));
+      }
+
+      function cmdPickRender(needle) {
+        const box = $('cmd-pick');
+        box.textContent = '';
+        const shown = cmdPickFilter(
+          cmdPick.sources ? cmdPick.sources.rows : [],
+          needle,
+        );
+        cmdPick.shown = shown;
+        cmdPick.token = needle;
+        // A source that failed is named above the rows, because the rows it would
+        // have added are missing and a short list must never read as a complete
+        // one. The Commands panel prints the same notes from the same array.
+        const notes = cmdPick.sources ? cmdPick.sources.notes : [];
+        if (notes.length) {
+          const n = document.createElement('div');
+          n.className = 'cmd-note';
+          n.textContent = notes.join('; ');
+          box.appendChild(n);
+        }
+        if (shown.length === 0) {
+          const n = document.createElement('div');
+          n.className = 'cmd-note';
+          n.textContent = 'no command matches /' + needle;
+          box.appendChild(n);
+        }
+        shown.forEach((r, i) => {
+          const row = document.createElement('div');
+          row.className = 'cmdopt';
+          row.id = 'cmd-opt-' + i;
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', i === cmdPick.sel ? 'true' : 'false');
+          const name = document.createElement('span');
+          name.className = 'cmd-name';
+          name.textContent = '/' + r.name;
+          const desc = document.createElement('span');
+          desc.className = 'cmd-desc';
+          desc.textContent = r.description;
+          const tag = document.createElement('span');
+          tag.className = 'cmd-tag';
+          // Which of the two sources the row came from, which is the one fact
+          // the reader cannot get any other way. The panel adds the file row's
+          // scope because there it gates the Invoke button; here completing
+          // inserts text, so the gate is not the reader's concern.
+          tag.textContent = r.kind === 'session' ? 'session' : 'file';
+          row.appendChild(name);
+          row.appendChild(desc);
+          row.appendChild(tag);
+          // pointerdown rather than click, and its default stopped: a plain div
+          // takes focus on mousedown, which blurs the field and closes the list
+          // a beat before the tap would have landed.
+          row.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            cmdPickComplete(i);
+          });
+          box.appendChild(row);
+        });
+      }
+
+      /** Moves the highlight, and keeps the row it is on inside the bounded box
+       * the way a keyboard user needs it: the panel scrolls, the page does not. */
+      function cmdPickPaint() {
+        for (let i = 0; i < cmdPick.shown.length; i++) {
+          const row = $('cmd-opt-' + i);
+          if (row)
+            row.setAttribute('aria-selected', i === cmdPick.sel ? 'true' : 'false');
+        }
+        const cur = $('cmd-opt-' + cmdPick.sel);
+        if (cur) {
+          if (cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
+          $('prompt').setAttribute('aria-activedescendant', cur.id);
+        } else {
+          $('prompt').removeAttribute('aria-activedescendant');
+        }
+      }
+
+      /** Re-decides the whole thing from what the box holds now. */
+      async function cmdPickSync() {
+        // Named for what it is: a local called `token` would shadow the page's
+        // token() pairing accessor, which this has to call to know whether there
+        // is anything to read a command list with.
+        const needle = cmdPickToken();
+        if (needle === null || !token()) {
+          cmdPick.dismissed = null;
+          return cmdPickClose();
+        }
+        // Escape shut this exact text, and the keyup for that same keypress is
+        // what usually lands here. Typing past it, or back to nothing, lifts it.
+        if (needle === cmdPick.dismissed) return cmdPickClose();
+        cmdPick.dismissed = null;
+        const src = await cmdPickSources();
+        if (!src) return;
+        // The box can have moved while the two reads were in flight, so this
+        // re-reads it: a fast typist can pass the space, and the list must not
+        // reopen over text that stopped asking for it.
+        const now = cmdPickToken();
+        if (now === null || now === cmdPick.dismissed) return cmdPickClose();
+        if (now !== cmdPick.token) cmdPick.sel = 0;
+        cmdPickRender(now);
+        cmdPick.open = true;
+        $('cmd-pick').hidden = false;
+        $('prompt').setAttribute('aria-expanded', 'true');
+        cmdPickPaint();
+      }
+
+      function cmdPickMove(delta) {
+        const n = cmdPick.shown.length;
+        if (n === 0) return;
+        cmdPick.sel = (cmdPick.sel + delta + n) % n;
+        cmdPickPaint();
+      }
+
+      /**
+       * Insert, do not send. Only the leading token is replaced, so an argument
+       * already typed past the caret survives the completion, and the caret lands
+       * after one space so the next keystroke is the first argument character.
+       */
+      function cmdPickComplete(i) {
+        const r = cmdPick.shown[i];
+        if (!r) return;
+        const el = $('prompt');
+        const value = el.value;
+        // The whole leading token is what gets replaced, wherever inside it the
+        // caret happens to sit. The token runs to the first whitespace, and
+        // everything from there on is an argument that has to survive: cutting
+        // at the caret instead would leave the tail of the old name in place, so
+        // completing /rev|iew --path x onto /review read
+        // "/review iew --path x".
+        const tokenEnd = (/^\S*/.exec(value) || [''])[0].length;
+        const insert = '/' + r.name;
+        const rest = value.slice(tokenEnd);
+        // Exactly one space between the name and what follows, so completing a
+        // second time does not stack spaces. Only spaces and tabs are folded
+        // here; a newline the reader typed on purpose is left alone.
+        el.value = insert + ' ' + rest.replace(/^[ \t]+/, '');
+        const at = insert.length + 1;
+        el.setSelectionRange(at, at);
+        // #182: a programmatic write fires no input event, so the draft is saved
+        // here or a phone that evicts the tab loses the completion.
+        saveDraft();
+        cmdPickClose();
+        el.focus({ preventScroll: true });
+      }
+
+      /**
+       * True when the picker took the key. Every other key still goes to the box,
+       * which is what makes typing while the list is open remain typing. Tab only
+       * reaches this with the list up, so the idle ghost keeps that key the rest
+       * of the time. Enter is taken rather than sent: while browsing, that key
+       * means this row, and the field is a textarea where the key would otherwise
+       * drop a newline into the middle of the command name.
+       */
+      function cmdPickKey(e) {
+        if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return false;
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          // Remember what was dismissed. The keyup for this same key reaches the
+          // sync handler a beat later, and the text under the caret has not
+          // changed, so without this the list it just shut would open again
+          // before the reader's thumb left the key.
+          cmdPick.dismissed = cmdPickToken();
+          cmdPickClose();
+          return true;
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          cmdPickMove(1);
+          return true;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          cmdPickMove(-1);
+          return true;
+        }
+        if (e.key === 'Tab' || e.key === 'Enter') {
+          e.preventDefault();
+          if (cmdPick.shown.length > 0 && cmdPick.sel >= 0)
+            cmdPickComplete(cmdPick.sel);
+          else cmdPickClose();
+          return true;
+        }
+        return false;
+      }
+
+      // input for the text, click and keyup for the caret moving without one
+      // (an arrow key, or a thumb putting the cursor back inside the token).
+      $('prompt').addEventListener('input', cmdPickSync);
+      $('prompt').addEventListener('keyup', cmdPickSync);
+      $('prompt').addEventListener('click', cmdPickSync);
+      $('prompt').addEventListener('blur', cmdPickClose);
       $('prompt').addEventListener('keydown', (e) => {
+        if (cmdPick.open && cmdPickKey(e)) return;
         if (e.key !== 'Tab') return;
         const g = $('idle-ghost');
         if (!g || g.hidden) return;
@@ -26211,16 +26574,22 @@
           btn.disabled = false;
         }
       }
-      $('list-commands').onclick = async () => {
-        if (!token()) return setStatus('pair first');
-        const out = $('commands-list');
-        const count = $('commands-count');
-        out.textContent = 'loading…';
-        if (count) count.textContent = '';
-        const watched = watchedSessionId;
-        // Each source is read on its own and reports its own failure, so a
-        // daemon that is down cannot hide the gateway's file commands (or vice
-        // versa). A short list must never look like a complete one.
+      // The two command sources, in one place, because two consumers read them:
+      // the Commands panel below and the composer's slash picker (#240). Two
+      // copies of these two fetches is exactly how a picker and a panel start
+      // telling different stories about what is available, and the panel's own
+      // promise (what the watched session actually supports) is the picker's.
+      //
+      // Each source is read on its own and reports its own failure, so a daemon
+      // that is down cannot hide the gateway's file commands (or vice versa). A
+      // short list must never look like a complete one, so a failure comes back
+      // in `notes` for the caller to print rather than being swallowed.
+      //
+      // `route` is the gateway path segment an invoke uses, 'command' for a file
+      // row and 'supported-commands' for a session row; both target the WATCHED
+      // session. A session row carries no scope because the daemon's payload has
+      // none, and its Invoke gate is the whole list's, not the row's.
+      async function loadCommandSources(watched) {
         let fileCmds = [];
         let sessionCmds = [];
         let sessionInvocable = false;
@@ -26272,43 +26641,56 @@
           }
         }
         // Session rows first: they act on the session the reader is looking at.
-        // A session row shows no [scope] because the daemon's payload carries
-        // none, and its Invoke gate is the whole list's, not the row's.
         const rows = [];
         for (const c of sessionCmds) {
           rows.push({
             kind: 'session',
-            label:
-              '/' +
-              c.name +
-              '  —  ' +
-              (c.description || '') +
-              '  (' +
-              ((c._meta && c._meta.sourceLabel) || 'unknown') +
-              ')',
-            invocable: sessionInvocable,
             name: c.name,
+            description: c.description || '',
+            tag: (c._meta && c._meta.sourceLabel) || 'unknown',
+            invocable: sessionInvocable,
             route: 'supported-commands',
           });
         }
         for (const c of fileCmds) {
           rows.push({
             kind: 'file',
-            label:
-              '/' +
-              c.name +
-              '  —  ' +
-              (c.description || '') +
-              '  [' +
-              c.scope +
-              ']  (' +
-              c.source +
-              ')',
-            invocable: c.invocableByYou === true,
             name: c.name,
+            description: c.description || '',
+            tag: c.scope,
+            source: c.source,
+            invocable: c.invocableByYou === true,
             route: 'command',
           });
         }
+        return {
+          rows,
+          notes,
+          sessionCount: sessionCmds.length,
+          fileCount: fileCmds.length,
+        };
+      }
+
+      // The panel's row text. The picker (#240) shows the same parts on one line
+      // of its own, so both consumers print the same name and description rather
+      // than two formattings that could drift.
+      function commandRowLabel(r) {
+        const head = '/' + r.name + '  \u2014  ' + (r.description || '');
+        return r.kind === 'session'
+          ? head + '  (' + r.tag + ')'
+          : head + '  [' + r.tag + ']  (' + r.source + ')';
+      }
+
+      $('list-commands').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('commands-list');
+        const count = $('commands-count');
+        out.textContent = 'loading…';
+        if (count) count.textContent = '';
+        const watched = watchedSessionId;
+        const got = await loadCommandSources(watched);
+        const rows = got.rows;
+        const notes = got.notes;
         out.textContent = '';
         for (const r of rows) {
           const row = document.createElement('div');
@@ -26318,7 +26700,7 @@
           kind.className = 'cmd-kind';
           kind.textContent = r.kind;
           info.appendChild(kind);
-          info.appendChild(document.createTextNode(r.label));
+          info.appendChild(document.createTextNode(commandRowLabel(r)));
           if (!r.invocable) info.style.color = '#999';
           const note = document.createElement('span');
           const btn = document.createElement('button');
