@@ -189,6 +189,8 @@ export function classifyRetryError(
       // replay/continuation gates.
       if (
         providerCode === undefined &&
+        providerFields.providerType === undefined &&
+        details.providerType === undefined &&
         providerMessage === undefined &&
         hasNetworkFailureCause(error)
       ) {
@@ -334,6 +336,7 @@ function isTransportCode(code: string): boolean {
 // not admitted here: a 4xx carrying a socket code stays fail-fast, as the
 // transport block above pins.
 const NETWORK_FAILURE_MESSAGE_RE = /network error for request /i;
+const NO_BODY_STATUS_MESSAGE_RE = /^(?:\d{3}\s+)?status code \(no body\)$/i;
 
 export function hasNetworkFailureCause(error: unknown): boolean {
   let current: unknown = error;
@@ -342,7 +345,8 @@ export function hasNetworkFailureCause(error: unknown): boolean {
     const message = (current as { message?: unknown }).message;
     if (
       typeof message === 'string' &&
-      NETWORK_FAILURE_MESSAGE_RE.test(message)
+      (NETWORK_FAILURE_MESSAGE_RE.test(message) ||
+        NO_BODY_STATUS_MESSAGE_RE.test(message))
     ) {
       return true;
     }
@@ -449,8 +453,13 @@ function getProviderFields(error: unknown): ProviderFields {
     source.requestId,
     source.requestID,
   );
+  const isSynthesizedNoBodyMessage =
+    error instanceof Error &&
+    typeof source.message === 'string' &&
+    NO_BODY_STATUS_MESSAGE_RE.test(source.message);
   const providerMessage =
     typeof source.message === 'string' &&
+    !isSynthesizedNoBodyMessage &&
     (!(error instanceof Error) ||
       providerCode !== undefined ||
       requestId !== undefined)
