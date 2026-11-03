@@ -1219,3 +1219,179 @@ describe('turn_error ends the turn', () => {
     expect(state.streamingState).toBe(StreamingState.Idle);
   });
 });
+
+// --- #247: sub-turn commits during multi-step tool turns ---
+
+describe('multi-step tool turns commit sub-turns as they complete (#247)', () => {
+  it('commits pre-tool assistant prose on tool_call and commits completed tool_group on the next sub-turn', () => {
+    let s = initialDaemonProjectionState(SELF);
+    const committed: HistoryItemWithoutId[] = [];
+    const apply = (frame: DaemonFrame) => {
+      const r = projectDaemonEvent(s, frame);
+      s = r.state;
+      committed.push(...r.committed);
+      return r;
+    };
+
+    // Sub-turn 1: reasoning + commentary before tool call
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: '**Step 1** inspect repo' },
+      }),
+    );
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Checking files first.' },
+      }),
+    );
+    expect(committed).toEqual([]);
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      { type: 'gemini', text: 'Checking files first.' },
+    ]);
+
+    // Tool call 1 starts (preparing -> in_progress) -> flushes pre-tool prose immediately
+    const onCall1 = apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call_1',
+        status: 'pending',
+        title: 'Shell',
+        _meta: { toolName: 'run_shell_command', phase: 'preparing' },
+      }),
+    );
+    expect(onCall1.committed).toEqual([
+      { type: 'gemini', text: 'Checking files first.' },
+    ]);
+    expect(thoughtOf(s)).toBeNull();
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      {
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call_1',
+            description: 'Shell',
+            status: ToolCallStatus.Pending,
+          }),
+        ],
+      },
+    ]);
+
+    // Trailing whitespace chunks emitted as the model stream finishes preparing the tool call
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: '.\n' },
+      }),
+    );
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '\n\n' },
+      }),
+    );
+    // Whitespace-only pendingText must not create a blank gemini item in pendingHistoryItems
+    expect(pendingHistoryItemsOf(s)).toHaveLength(1);
+    expect(pendingHistoryItemsOf(s)[0]?.type).toBe('tool_group');
+
+    // Tool call 1 transitions to in_progress with full title, then toolLifecycle frames (no status field), then completed
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        status: 'in_progress',
+        title: 'Shell: git status',
+        _meta: { toolName: 'run_shell_command' },
+      }),
+    );
+    expect(pendingToolCallsOf(s)[0]).toMatchObject({
+      description: 'Shell: git status',
+      status: ToolCallStatus.Executing,
+    });
+
+    // Lifecycle started frame without `status` field must not reset Executing back to Pending
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        _meta: {
+          toolLifecycle: {
+            phase: 'started',
+            executionStatus: 'running',
+          },
+        },
+      }),
+    );
+    expect(pendingToolCallsOf(s)[0]?.status).toBe(ToolCallStatus.Executing);
+
+    // Lifecycle ended frame with outcome: 'success' marks the tool Success even before/without status: 'completed'
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        _meta: {
+          toolLifecycle: {
+            phase: 'ended',
+            outcome: 'success',
+            executionStatus: 'success',
+          },
+        },
+      }),
+    );
+    expect(pendingToolCallsOf(s)[0]?.status).toBe(ToolCallStatus.Success);
+
+    // Sub-turn 2 begins with new reasoning -> commits completed tool_group from sub-turn 1 and starts fresh thought
+    const onSubTurn2Thought = apply(
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: '**Step 2** summarize result' },
+      }),
+    );
+    expect(onSubTurn2Thought.committed).toEqual([
+      {
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call_1',
+            description: 'Shell: git status',
+            status: ToolCallStatus.Success,
+          }),
+        ],
+      },
+    ]);
+    expect(thoughtOf(s)).toEqual({
+      subject: 'Step 2',
+      description: 'summarize result',
+    });
+    expect(pendingToolCallsOf(s)).toEqual([]);
+
+    // Sub-turn 2 streams assistant prose -> only sub-turn 2's prose is in pendingHistoryItems (no completed tools above it)
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'The working tree is clean.' },
+      }),
+    );
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      { type: 'gemini', text: 'The working tree is clean.' },
+    ]);
+
+    // Turn completes -> commits final sub-turn prose
+    apply({ type: 'turn_complete', data: {} });
+    expect(committed).toEqual([
+      { type: 'gemini', text: 'Checking files first.' },
+      {
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call_1',
+            description: 'Shell: git status',
+            status: ToolCallStatus.Success,
+          }),
+        ],
+      },
+      { type: 'gemini', text: 'The working tree is clean.' },
+    ]);
+  });
+});
