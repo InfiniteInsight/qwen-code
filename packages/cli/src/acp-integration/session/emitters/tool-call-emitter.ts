@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolLifecycleEvent ,
+import {
   compactToolResultDisplayForRecording,
   formatVisionBridgeNoticeDisplay,
   isVisionBridgeNoticeDisplay,
@@ -13,6 +13,7 @@ import type { ToolLifecycleEvent ,
   Kind,
   createToolLifecycle,
   createDebugLogger,
+  type ToolLifecycleEvent,
   type ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 
