@@ -1581,6 +1581,81 @@ describe('ChatRecordingService', () => {
       );
     });
 
+    it('keeps the discriminators an error carries in its own data', () => {
+      // The shape a real JSON-RPC error presents: a numeric code no reader of
+      // this record can use, and the tokens that name what happened nested in
+      // `data`. The numeric code is dropped exactly as before.
+      const loop = Object.assign(
+        new Error('Loop detected: the same tool call repeated 5 times.'),
+        {
+          code: -32603,
+          data: {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'global_tool_call_duplicate',
+          },
+        },
+      );
+      expect(normalizeTurnResultError(loop)).toEqual(
+        expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'global_tool_call_duplicate',
+        }),
+      );
+
+      // A session writer error has no `data`, so its own RPC code still wins
+      // and no discriminator is invented for it.
+      const writer = normalizeTurnResultError(new SessionWriterLostError());
+      expect(writer).toEqual(expect.objectContaining({ code: '-32021' }));
+      expect(writer).not.toHaveProperty('errorKind');
+
+      // An over-bound discriminator is dropped rather than clipped, since a
+      // truncated token would read like a real one. The code decision is made
+      // off `data` the same way the live frame makes it, so a discriminator
+      // too long to keep does not change which code is recorded.
+      const oversized = normalizeTurnResultError(
+        Object.assign(new Error('oversized'), {
+          code: 'TOP_LEVEL',
+          data: {
+            code: 'LOOP_DETECTED',
+            errorKind: 'k'.repeat(TURN_RESULT_ERROR_CODE_MAX_CHARS + 1),
+            loopType: 't'.repeat(TURN_RESULT_ERROR_CODE_MAX_CHARS + 1),
+          },
+        }),
+      );
+      expect(oversized).toEqual({
+        message: 'oversized',
+        code: 'LOOP_DETECTED',
+      });
+    });
+
+    it('bounds the discriminator tokens in the turn_result contract', () => {
+      expect(
+        isValid({
+          state: 'error',
+          error: {
+            message: 'boom',
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'global_tool_call_duplicate',
+          },
+        }),
+      ).toBe(true);
+      expect(
+        isValid({
+          state: 'error',
+          error: {
+            message: 'boom',
+            errorKind: 'k'.repeat(TURN_RESULT_ERROR_CODE_MAX_CHARS + 1),
+          },
+        }),
+      ).toBe(false);
+      expect(
+        isValid({ state: 'error', error: { message: 'boom', loopType: 7 } }),
+      ).toBe(false);
+    });
+
     it('validates the bounded turn_result transcript contract', () => {
       expect(
         isValid({

@@ -12413,6 +12413,64 @@ describe('Session', () => {
         );
       });
 
+      it('names the stop reason of an error turn so a failure cannot read as a clean end', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('model exploded'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'boom' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('model exploded');
+
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0],
+        ).toMatchObject({ state: 'error', stopReason: 'error' });
+      });
+
+      it('keeps a loop-detected turn error in the durable turn result', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            yield* [];
+            throw new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
+              code: 'LOOP_DETECTED',
+              errorKind: 'loop_detected',
+              loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            });
+          })(),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'loop me' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toMatchObject({
+          data: { code: 'LOOP_DETECTED', errorKind: 'loop_detected' },
+        });
+
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0],
+        ).toMatchObject({
+          state: 'error',
+          stopReason: 'error',
+          error: {
+            message: LOOP_DETECTED_TURN_ERROR_MESSAGE,
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          },
+        });
+      });
+
       it('records an error turn for an abort-shaped stream failure without a user cancel', async () => {
         mockChat.sendMessageStream = vi
           .fn()

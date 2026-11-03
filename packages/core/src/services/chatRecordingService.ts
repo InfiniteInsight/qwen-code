@@ -906,6 +906,13 @@ export type TurnResultCode = typeof TURN_RESULT_CODE_TEXT_TRUNCATED;
 export interface TurnResultErrorPayload {
   message: string;
   code?: string;
+  /**
+   * The discriminator and loop detail a thrower attached to its own error
+   * (`RequestError.data`). Written only when the throw named them, so an
+   * unattributed failure keeps the shape it already has on disk.
+   */
+  errorKind?: string;
+  loopType?: string;
   messageTruncated?: boolean;
   codeTruncated?: boolean;
 }
@@ -922,6 +929,34 @@ function readTurnResultErrorField(
   }
   try {
     return Reflect.get(error, field);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read a JSON-RPC `data` member off a thrown error. The live `turn_error`
+ * frame reads its discriminators here; the durable record has to read the
+ * same members or the two disagree about why one turn stopped. The getters are
+ * guarded because a hostile `data` must not throw while settling a turn.
+ */
+function readTurnResultErrorDataField(
+  error: unknown,
+  field: 'code' | 'errorKind' | 'loopType',
+): string | undefined {
+  let data: unknown;
+  try {
+    data =
+      typeof error === 'object' && error !== null
+        ? Reflect.get(error, 'data')
+        : undefined;
+  } catch {
+    return undefined;
+  }
+  if (typeof data !== 'object' || data === null) return undefined;
+  try {
+    const value = Reflect.get(data, field);
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
   } catch {
     return undefined;
   }
@@ -957,7 +992,16 @@ export function normalizeTurnResultError(
     TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
   );
 
+  // Same precedence the live `turn_error` frame uses: a throw that names its
+  // own kind in `data` also names the reason there, and that wins over the
+  // JSON-RPC transport code (-32603 says nothing an operator can act on).
+  // Keyed on `data`, so an error carrying a top-level `errorKind` and no
+  // `data` (the session writer family) keeps reporting its RPC code.
+  const errorKind = readTurnResultErrorDataField(error, 'errorKind');
   const rawCode =
+    (errorKind === undefined
+      ? undefined
+      : readTurnResultErrorDataField(error, 'code')) ??
     readTurnResultErrorField(error, 'code') ??
     readTurnResultErrorField(error, 'rpcCode');
   const code =
@@ -971,11 +1015,23 @@ export function normalizeTurnResultError(
       ? undefined
       : truncateTurnResultErrorField(code, TURN_RESULT_ERROR_CODE_MAX_CHARS);
 
+  // A discriminator past the code bound is dropped rather than cut short: a
+  // clipped token reads like a real one to whoever diagnoses the turn.
+  const loopType = readTurnResultErrorDataField(error, 'loopType');
+
   return {
     message: boundedMessage.value,
     ...(boundedMessage.truncated ? { messageTruncated: true } : {}),
     ...(boundedCode ? { code: boundedCode.value } : {}),
     ...(boundedCode?.truncated ? { codeTruncated: true } : {}),
+    ...(errorKind !== undefined &&
+    errorKind.length <= TURN_RESULT_ERROR_CODE_MAX_CHARS
+      ? { errorKind }
+      : {}),
+    ...(loopType !== undefined &&
+    loopType.length <= TURN_RESULT_ERROR_CODE_MAX_CHARS
+      ? { loopType }
+      : {}),
   };
 }
 
@@ -1063,14 +1119,22 @@ export function isTurnResultRecordPayload(
     return false;
   }
   const fields = error as Record<string, unknown>;
+  const optionalToken = (field: string) => {
+    const value = fields[field];
+    return (
+      value === undefined ||
+      (typeof value === 'string' &&
+        value.length > 0 &&
+        value.length <= TURN_RESULT_ERROR_CODE_MAX_CHARS)
+    );
+  };
   return (
     typeof fields['message'] === 'string' &&
     fields['message'].length > 0 &&
     fields['message'].length <= TURN_RESULT_ERROR_MESSAGE_MAX_CHARS &&
-    (fields['code'] === undefined ||
-      (typeof fields['code'] === 'string' &&
-        fields['code'].length > 0 &&
-        fields['code'].length <= TURN_RESULT_ERROR_CODE_MAX_CHARS)) &&
+    optionalToken('code') &&
+    optionalToken('errorKind') &&
+    optionalToken('loopType') &&
     (fields['messageTruncated'] === undefined ||
       typeof fields['messageTruncated'] === 'boolean') &&
     (fields['codeTruncated'] === undefined ||

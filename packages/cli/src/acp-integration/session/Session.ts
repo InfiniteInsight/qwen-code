@@ -9113,8 +9113,18 @@ export class Session implements SessionContext {
       };
     }
     const finalAnswer = truncateTurnText(recording.finalAnswer.finalText);
+    // A throw has no `PromptResponse` to read a reason off, so the error state
+    // names its own instead of recording nothing: the transcript then
+    // distinguishes a turn that stopped early from one that ran to the end
+    // with no journal comparison. `'error'` is not a new value, the hosted
+    // writers already settle this way; the ACP path was the outlier among them.
     const stopReason =
-      response?.stopReason ?? (state === 'cancelled' ? 'cancelled' : undefined);
+      response?.stopReason ??
+      (state === 'cancelled'
+        ? 'cancelled'
+        : state === 'error'
+          ? 'error'
+          : undefined);
     const payload: TurnResultRecordPayload = {
       promptId: recording.promptId,
       state,
