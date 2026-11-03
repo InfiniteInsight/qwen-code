@@ -35409,7 +35409,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           };
           resumed = [...(typed.resumeFromToolResults ?? [])];
           // What the real model does after core's orphan repair told it the
-          // call "was not recorded ... retry if needed": it retries.
+          // result "was not recorded ... may or may not have run": it retries.
           if (!resumed.some((p) => p.functionResponse?.id === 'call-k')) {
             retried += 1;
             const retry = { ...second, callId: 'call-retry' };

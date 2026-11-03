@@ -10517,6 +10517,26 @@ describe('LlmChat', async () => {
       expect(fr?.response?.['error']).toMatch(/interrupted/i);
     });
 
+    it('says the effect is unknown instead of asserting a failure (#216)', () => {
+      // The scheduler's dedup drops the REAL result of a repaired call, so the
+      // tool may well have run and only its result was lost. Text that asserted
+      // failure sent the model to re-issue a call whose side effects already
+      // happened, so the placeholder must not order that.
+      const { history } = repair([
+        userText('open /tmp/a.txt'),
+        content(
+          'model',
+          readCall('call_unknown_effect', { path: '/tmp/a.txt' }),
+        ),
+      ]);
+      const fr = history[2]!.parts![0]!.functionResponse;
+      expect(fr?.id).toBe('call_unknown_effect');
+      const error = String((fr?.response as { error?: string })?.error);
+      expect(error).toMatch(/may or may not have run/);
+      expect(error).not.toMatch(/treat as failure/i);
+      expect(error).not.toMatch(/retry if needed/i);
+    });
+
     it('preserves selected call ids instead of synthesizing a response', () => {
       const { result, history } = repair(
         [

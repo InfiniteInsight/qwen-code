@@ -1908,10 +1908,18 @@ class LeadingProtocolTagLeakDetector {
  * the user hit Ctrl+Y before the in-flight tool finished and the scheduler's
  * `onAllToolCallsComplete` was a single-shot that already fired into an
  * `isResponding` early-return).
+ *
+ * Says the effect is unknown rather than naming a cause or ordering a retry.
+ * The scheduler's dedup (`useLlmStream.handleCompletedTools`) drops the real
+ * result of a repaired call, so in that case the tool DID run and only its
+ * result was lost: text claiming failure would send the model to re-issue a
+ * call whose side effects already happened. Keep the word "interrupted":
+ * three history guards assert on it.
  */
 export const ORPHAN_TOOL_USE_REPAIR_REASON =
-  'Tool execution result was not recorded — likely interrupted by network ' +
-  'failure, abort, or process exit. Treat as failure and retry if needed.';
+  'Tool execution result was not recorded: the turn was interrupted before ' +
+  'the result landed, so the tool may or may not have run. Check for side ' +
+  'effects before repeating this call.';
 
 /*
  * ============================================================================
