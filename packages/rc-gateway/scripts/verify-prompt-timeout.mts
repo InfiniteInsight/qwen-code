@@ -98,11 +98,12 @@ async function bootGateway(
   promptTimeoutMs: number | undefined,
   promptDelayMs: number,
   promptAccepts = false,
+  stubFrames: StubDaemonOptions['frames'] = [],
 ): Promise<Gateway> {
   const dir = mkdtempSync(join(tmpdir(), 'rc-timeout-'));
   const auditDir = join(dir, 'audit');
   const stubOpts: StubDaemonOptions = {
-    frames: [],
+    frames: stubFrames,
     holdOpenMs: 60_000,
     promptDelayMs,
     promptAccepts,
@@ -498,6 +499,87 @@ async function p6(): Promise<string> {
   return '202 path: 504 at 1000ms + one firing row + one daemon cancel for S';
 }
 
+/**
+ * One turn driven with nobody subscribed to /session/:id/events, returning the
+ * `detail` of the audit row it left behind. No watcher on purpose: the numbers
+ * come off the prompt's own temporary subscription, so an unwatched session is
+ * both the case the design claims and the case a live wedge is actually found in.
+ */
+async function unwatchedTurnDetail(
+  stubFrames: StubDaemonOptions['frames'],
+  promptAccepts: boolean,
+): Promise<Record<string, unknown>> {
+  const gw = await bootGateway(undefined, 0, promptAccepts, stubFrames);
+  try {
+    const { status } = await postPrompt(gw, SESSION_ID, 'stream then finish');
+    expect(status === 200, `prompt status was ${status}, want 200`);
+    // The route fires the audit write without awaiting it, so poll for the row
+    // instead of assuming the flush beat the response.
+    const until = Date.now() + 2_000;
+    for (;;) {
+      const row = auditRows(gw).find((r) => r['action'] === 'prompt_sent');
+      if (row) return detailOf(row);
+      if (Date.now() > until) throw new Error('no prompt_sent row appeared');
+      await sleep(25);
+    }
+  } finally {
+    await gw.close();
+  }
+}
+
+/**
+ * P7: the turn-progress record (InfiniteInsight/Qwen-Code-Remote#243). Every
+ * completed turn files its frame count and its longest inter-frame gap in the
+ * `detail` of the row it already writes, and nothing is enforced from either.
+ *
+ * Asserted through the shipped chain rather than only in
+ * src/routes/turnProgress.test.ts, which drives the route with a hand-built
+ * daemon: here the numbers survive a real DaemonClient, a real SSE parse, and
+ * the real hash-chained audit file.
+ */
+async function p7(): Promise<string> {
+  const streamed = await unwatchedTurnDetail(
+    [
+      { id: 1, type: 'session_update', data: { k: 'one' } },
+      { id: 2, type: 'session_update', data: { k: 'two' } },
+      {
+        id: 3,
+        type: 'turn_complete',
+        data: { promptId: 'stub-prompt-1', stopReason: 'end_turn' },
+      },
+    ],
+    true,
+  );
+  expect(
+    streamed['stopReason'] === 'end_turn',
+    `stopReason was ${String(streamed['stopReason'])}`,
+  );
+  expect(
+    streamed['frames'] === 3,
+    `detail frames was ${String(streamed['frames'])}, want 3`,
+  );
+  expect(
+    typeof streamed['maxGapMs'] === 'number',
+    `detail maxGapMs was ${String(streamed['maxGapMs'])}, want a number`,
+  );
+
+  // The contrast that makes the two numbers mean something. The legacy 200 path
+  // opens no subscription, so there is no frame to count and no silence to
+  // measure. The absence has to reach the file: a zero here would read as "this
+  // turn was never quiet" about a turn nobody ever saw a frame from, and the
+  // window chosen later would be sized from that lie.
+  const legacy = await unwatchedTurnDetail([], false);
+  expect(
+    !('frames' in legacy),
+    `200 path recorded frames=${String(legacy['frames'])}, want absent`,
+  );
+  expect(
+    !('maxGapMs' in legacy),
+    `200 path recorded maxGapMs=${String(legacy['maxGapMs'])}, want absent`,
+  );
+  return 'unwatched 202 turn files frames + maxGapMs; the 200 turn files neither';
+}
+
 const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: 'P1', run: p1 },
   { name: 'P2', run: p2 },
@@ -505,6 +587,7 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: 'P4', run: p4 },
   { name: 'P5', run: p5 },
   { name: 'P6', run: p6 },
+  { name: 'P7', run: p7 },
 ];
 
 const only = process.env['ONLY']
