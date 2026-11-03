@@ -29,7 +29,11 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getSharedWal, SessionWal } from '../wal.js';
-import { loadEpochState, saveEpochState } from '../walEpoch.js';
+import {
+  loadEpochState,
+  resolveEpochState,
+  saveEpochState,
+} from '../walEpoch.js';
 import { WatchPresence } from '../webpush/watchPresence.js';
 
 // Valid session-id shapes (isValidSessionId: 32-36 hex/dash chars) — these
@@ -933,6 +937,54 @@ describe('walEpoch sidecar (add-mid-turn-recovery §4)', () => {
     );
     expect(loadEpochState(walDir, SID)).toEqual(CONSERVATIVE);
   });
+
+  it('a log ending on a resync gap has no resumable cursor (#254)', () => {
+    // The rule the quiet-session fix rests on: the newest record wins by
+    // position, so a gap marker outranks the relayed frame under it, and the
+    // numbering that frame carries is one the daemon already refused.
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-epoch-'));
+    const wal = getSharedWal(walDir, SID);
+    wal.append({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {},
+      _rc: { raw: 7, epoch: 'e1' },
+    });
+    wal.append({
+      id: 2,
+      v: 1,
+      type: 'state_resync_required',
+      data: { reason: 'epoch_reset' },
+      _rc: { gap: true },
+    });
+    saveEpochState(walDir, SID, {
+      epochOffset: -6,
+      lastOutId: 7,
+      daemonEpoch: 'e1',
+    });
+    expect(resolveEpochState(walDir, SID)).toEqual({
+      epochOffset: -6,
+      lastOutId: 7,
+      daemonEpoch: 'e1',
+      cursorVoid: true,
+    });
+
+    // A relayed frame above the marker outranks it again: the epoch is
+    // re-anchored and the log is resumable, so the flag is not sticky.
+    wal.append({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {},
+      _rc: { raw: 1, epoch: 'e2' },
+    });
+    expect(resolveEpochState(walDir, SID)).toEqual({
+      epochOffset: 2,
+      lastOutId: 1,
+      daemonEpoch: 'e2',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1611,6 +1663,98 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
     expect(gatewayCursorForDaemonCursor(walDir, sid, 40, 'epoch-3')).toBe(6);
     // No token on either side (an old daemon): the raw ids decide.
     expect(gatewayCursorForDaemonCursor(walDir, sid, 9)).toBe(13);
+  });
+
+  it('an epoch change on a session that goes quiet is announced once, not on every page open (#254)', async () => {
+    // The signature measured in the field: the bus is replaced while the
+    // conversation produces nothing, so the log ends on the gap marker and no
+    // relayed frame ever lands above it. Only the id-bearing path adopts the
+    // epoch the daemon announces, and an idle session never sends one, so
+    // every page open re-sent the cursor the daemon had already refused and
+    // re-bought the same forced transcript reload.
+    const sid = 'b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-quiet-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    await relayThenLeave(bus, url, ['one', 'two', 'three']);
+    const gaps = (c: SseClient) =>
+      c.frames.filter((f) => f.ev.type === 'state_resync_required').length;
+
+    bus.restart('epoch-2');
+
+    // The first open after the restart: the announcement the page needs, once.
+    const first = await watch(url, { 'Last-Event-ID': '3' });
+    await first.waitFor((fs) =>
+      fs.some((f) => f.ev.type === 'state_resync_required'),
+    );
+    expect(gaps(first)).toBe(1);
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4]);
+    first.close();
+    await until(() => bus.liveSubscribers === 0);
+
+    // Still nothing published. A second open must not re-announce: there is no
+    // resumable cursor to offer, so the subscription asks for live frames only
+    // and the log gains no second marker.
+    const second = await watch(url, { 'Last-Event-ID': '4' });
+    await second.waitFor(joined);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(gaps(second)).toBe(0);
+    expect(bus.subscriptions[2]).toEqual({
+      lastEventId: undefined,
+      epoch: undefined,
+    });
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4]);
+
+    // The void lasts exactly as long as the silence. The moment the session
+    // speaks, the new epoch anchors above the marker and the log ends on a
+    // stamped frame again.
+    bus.publish('four');
+    await second.waitFor(() => texts(second).includes('four'));
+    expect(second.ids()).toEqual([5]);
+    second.close();
+    await until(() => bus.liveSubscribers === 0);
+
+    const third = await watch(url, { 'Last-Event-ID': '5' });
+    await third.waitFor(joined);
+    expect(bus.subscriptions[3]).toEqual({
+      lastEventId: 1,
+      epoch: 'epoch-2',
+    });
+  });
+
+  it('a gap the daemon reported in a numbering the log has since left behind is still announced', async () => {
+    // The other half of #254: going live-only must not swallow a refusal the
+    // daemon has not made yet. The log ends on a stamped frame from epoch 2,
+    // so the cursor is offered, and a second restart refuses it.
+    const sid = 'b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-quiet-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    await relayThenLeave(bus, url, ['one', 'two', 'three']);
+
+    bus.restart('epoch-2');
+    const quiet = await watch(url, { 'Last-Event-ID': '3' });
+    await quiet.waitFor(joined);
+    bus.publish('four');
+    await quiet.waitFor(() => texts(quiet).includes('four'));
+    // 4 is the announcement it asked for, 5 the new epoch anchored above it.
+    expect(quiet.ids()).toEqual([4, 5]);
+    quiet.close();
+    await until(() => bus.liveSubscribers === 0);
+
+    bus.restart('epoch-3');
+    const back = await watch(url, { 'Last-Event-ID': '5' });
+    await back.waitFor((fs) =>
+      fs.some((f) => f.ev.type === 'state_resync_required'),
+    );
+    expect(
+      back.frames.filter((f) => f.ev.type === 'state_resync_required'),
+    ).toHaveLength(1);
+    expect(bus.subscriptions[2]).toEqual({
+      lastEventId: 1,
+      epoch: 'epoch-2',
+    });
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });
 

@@ -38,6 +38,15 @@ export interface EpochState {
    * than the relay guessing from id arithmetic.
    */
   daemonEpoch?: string;
+  /**
+   * The log's last word about the daemon's numbering is a resync gap the daemon
+   * could not back with data, with nothing relayed after it. Every cursor the
+   * log can offer was minted against the numbering that gap was reported in, so
+   * there is nothing resumable to send and the next subscription is live-only.
+   * Derived from the WAL on load and never persisted: the gap marker is the
+   * record, and the first relayed frame lands above it.
+   */
+  cursorVoid?: boolean;
 }
 
 /**
@@ -67,6 +76,19 @@ export function readRelayStamp(frame: WalFrame): RelayStamp | undefined {
   return typeof rc.epoch === 'string'
     ? { raw: rc.raw, epoch: rc.epoch }
     : { raw: rc.raw };
+}
+
+/**
+ * True when a WAL frame is the gateway's own note that the daemon could not
+ * serve a cursor (the relay's resync gap marker). Shares the `_rc` slot with
+ * {@link RelayStamp} but carries no `raw`, so {@link readRelayStamp} still
+ * refuses it and the WAL keeps telling relayed frames from its own
+ * annotations. It is what lets {@link resolveEpochState} see that the log ends
+ * on an unfilled hole rather than on a resumable frame.
+ */
+export function readEpochGap(frame: WalFrame): boolean {
+  const rc = frame['_rc'] as { gap?: unknown } | undefined;
+  return rc !== undefined && rc !== null && rc.gap === true;
 }
 
 function sidecarPath(walDir: string, sessionId: string): string {
@@ -122,6 +144,14 @@ export function loadEpochState(walDir: string, sessionId: string): EpochState {
  * the id it already has. The newest stamped frame cannot be behind, so it
  * wins; the sidecar answers only for a log holding no stamped frame (written
  * before stamping, or every relayed frame aged out and only markers remain).
+ *
+ * Position, not kind, decides which record wins. A resync gap marker is not a
+ * stamp, but when it is the newest thing the log holds it outranks the older
+ * frame beneath it: the daemon reported that it could not serve that frame's
+ * numbering and has produced nothing since, so the older frame's raw id is a
+ * cursor the daemon has already refused once. Re-sending it earns the same
+ * refusal again on every subscribe (#254), so the state comes back saying
+ * there is nothing resumable instead.
  */
 export function resolveEpochState(
   walDir: string,
@@ -129,9 +159,16 @@ export function resolveEpochState(
 ): EpochState {
   const sidecar = loadEpochState(walDir, sessionId);
   const last = getSharedWal(walDir, sessionId).findLast(
-    (f) => readRelayStamp(f) !== undefined,
+    (f) => readRelayStamp(f) !== undefined || readEpochGap(f),
   );
   if (last === undefined) return sidecar;
+  if (readEpochGap(last)) {
+    // Which epoch is live is unknown, and every offset derivable here belongs
+    // to the numbering the gap was reported against. Hand back the sidecar's
+    // numbers (conservative when it is dark, which re-anchors the next epoch
+    // above the log head and so stays gapless) plus the void flag.
+    return { ...sidecar, cursorVoid: true };
+  }
   const stamp = readRelayStamp(last)!;
   return {
     epochOffset: last.id - stamp.raw,
