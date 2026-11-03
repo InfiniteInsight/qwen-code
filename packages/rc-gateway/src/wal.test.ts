@@ -178,12 +178,13 @@ describe('SessionWal', () => {
   });
 
   it('the default segment cap holds about one retention window, no more', () => {
-    // The active segment is never truncated (#226), so the cap on a segment is
-    // the cap on dead bytes a session can hold. Frame sizes were measured over
-    // 186,034 live frames: median ~310 B, mean ~422 B. One 10,000-frame window
-    // is therefore ~3.1 MB, so the cap must fit at least that, and must not sit
-    // so high that a session parks several windows of unreachable frames in a
-    // segment that can never be reclaimed.
+    // The cap bounds how big a segment gets before it rotates and becomes
+    // deletable, and compaction rewrites the active one only once half of it is
+    // dead, so the cap also sets the ceiling on unreachable bytes. Frame sizes
+    // were measured over 186,034 live frames: median ~310 B, mean ~422 B. One
+    // 10,000-frame window is therefore ~3.1 MB, so the cap must fit at least
+    // that, and must not sit so high that a session parks several windows of
+    // unreachable frames in a segment that is slow to become deletable.
     const oneWindowAtMedian = WAL_DEFAULTS.walMaxEvents * 310;
     const twoWindowsAtMean = WAL_DEFAULTS.walMaxEvents * 422 * 2;
     expect(WAL_DEFAULTS.walSegmentMaxBytes).toBeGreaterThanOrEqual(
@@ -215,6 +216,149 @@ describe('SessionWal', () => {
       expect(result.events.map((e) => e.id)).toEqual([1, 2]);
     }
     wal2.close();
+  });
+
+  describe('active-segment compaction (#226)', () => {
+    const activePath = () => join(dir, 'wal', 'sess-1.log');
+
+    /** Bytes the active segment physically holds after one uncompacted-style run. */
+    function runRetaining(six: number, compactAfterBytes: number): number {
+      const runDir = makeTmpDir();
+      const wal = new SessionWal({
+        dir: runDir,
+        sessionId: 'sess-1',
+        // Generous: nothing rotates during the run, so every frame the bound
+        // drops stays in the active file unless compaction takes it out.
+        segmentMaxBytes: 1024 * 1024,
+        maxEvents: six,
+        compactAfterBytes,
+      });
+      for (let id = 1; id <= 200; id++) wal.append(makeFrame(id));
+      wal.close();
+      return readFileSync(join(runDir, 'wal', 'sess-1.log')).length;
+    }
+
+    it('reclaims bytes a session would otherwise sit on with no rotation in sight', () => {
+      const compacted = runRetaining(6, 256);
+      // Same run, same bound, same segment cap, compaction disabled: the only
+      // difference is the rewrite, so this compares the fix against the bug.
+      const parked = runRetaining(6, Number.MAX_SAFE_INTEGER);
+      expect(parked).toBeGreaterThan(8 * 1024);
+      // Six frames is ~400 B, so a compacted segment that keeps only what the
+      // window can reach is far under a tenth of what the dead head cost.
+      expect(compacted).toBeLessThan(parked / 10);
+    });
+
+    it('rewrites in place, keeping the retained window and nothing above it', () => {
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        segmentMaxBytes: 1024 * 1024,
+        maxEvents: 6,
+        compactAfterBytes: 256,
+      });
+      for (let id = 1; id <= 60; id++) wal.append(makeFrame(id));
+
+      expect(
+        readdirSync(join(dir, 'wal')).filter((n) => n !== 'sess-1.log'),
+        'no segment should have rotated at this volume',
+      ).toEqual([]);
+      expect(
+        readdirSync(join(dir, 'wal')).filter((n) => n.endsWith('.compact')),
+        'the rewrite must not leave its temp file behind',
+      ).toEqual([]);
+
+      const onDisk = [...decodeSegment(activePath())].map((f) => f.id);
+      expect(onDisk.slice(-6)).toEqual([55, 56, 57, 58, 59, 60]);
+      // The allowed residue is the dead head that has not yet crossed the
+      // trigger: 256 B of ~66 B frames. Without the rewrite this list would
+      // still start at 1.
+      expect(onDisk.length).toBeLessThanOrEqual(6 + 4);
+      expect(onDisk[0]!).toBeGreaterThan(40);
+      wal.close();
+    });
+
+    it('keeps replay and the truncation signal intact across a reopen', () => {
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        segmentMaxBytes: 1024 * 1024,
+        maxEvents: 6,
+        compactAfterBytes: 256,
+      });
+      for (let id = 1; id <= 60; id++) wal.append(makeFrame(id));
+
+      expect(wal.count()).toBe(6);
+      expect(wal.earliestId()).toBe(55);
+      expect(wal.latestId()).toBe(60);
+      const replay = wal.replayFrom(54);
+      expect(replay.truncated).toBe(false);
+      if (!replay.truncated) {
+        expect(replay.events.map((f) => f.id)).toEqual([
+          55, 56, 57, 58, 59, 60,
+        ]);
+      }
+      expect(wal.replayFrom(53)).toMatchObject({
+        truncated: true,
+        reason: 'older_than_wal_horizon',
+        earliestAvailableId: 55,
+      });
+      wal.close();
+
+      // The rewritten file must recover to the same end of the window the live
+      // instance reported, or a gateway restart would resume from a gap.
+      const reopened = new SessionWal({ dir, sessionId: 'sess-1' });
+      expect(reopened.latestId()).toBe(60);
+      const afterRestart = reopened.replayFrom(54);
+      expect(afterRestart.truncated).toBe(false);
+      if (!afterRestart.truncated) {
+        expect(afterRestart.events.map((f) => f.id)).toEqual([
+          55, 56, 57, 58, 59, 60,
+        ]);
+      }
+      reopened.close();
+    });
+
+    it('leaves a segment that does not decode end to end alone', () => {
+      // Seed through the WAL so the directory exists, then replace the segment
+      // with a crafted one: a corrupt frame in the MIDDLE. The scanner stops at
+      // it, so frames 3 and 4 are reachable by position but invisible to a
+      // decode. A rewrite that kept only what it could parse would delete them.
+      const seed = new SessionWal({ dir, sessionId: 'sess-1' });
+      seed.append(makeFrame(1));
+      seed.close();
+
+      const json = Buffer.from('this is not json', 'utf8');
+      const corrupt = Buffer.allocUnsafe(4 + json.length);
+      corrupt.writeUInt32BE(json.length, 0);
+      json.copy(corrupt, 4);
+      const bytes = Buffer.concat([
+        encodeFrame(makeFrame(1)),
+        encodeFrame(makeFrame(2)),
+        corrupt,
+        encodeFrame(makeFrame(3)),
+        encodeFrame(makeFrame(4)),
+      ]);
+      writeFileSync(activePath(), bytes);
+
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        maxEvents: 1,
+        compactAfterBytes: 1,
+      });
+      wal.append(makeFrame(5));
+
+      // The append still lands, but nothing that was already on disk is taken
+      // out: the untouched frames plus the new one, byte for byte.
+      expect(readFileSync(activePath())).toEqual(
+        Buffer.concat([bytes, encodeFrame(makeFrame(5))]),
+      );
+      expect(
+        readdirSync(join(dir, 'wal')).filter((n) => n.endsWith('.compact')),
+      ).toEqual([]);
+      wal.close();
+    });
   });
 });
 
