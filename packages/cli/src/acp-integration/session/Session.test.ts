@@ -21641,6 +21641,217 @@ describe('Session', () => {
         }
       });
 
+      it('resets invalidToolParamErrors when parameters pass build() even if execute() fails or throws', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'edit'
+            ? {
+                name: 'edit',
+                kind: core.Kind.Edit,
+                displayName: 'Edit',
+                description: 'Edit',
+                build: vi
+                  .fn()
+                  .mockImplementation((args: Record<string, unknown>) => {
+                    if (typeof args['file_path'] !== 'string') {
+                      throw new Error(
+                        "params must have required property 'file_path'",
+                      );
+                    }
+                    return {
+                      params: args,
+                      getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                      getDescription: vi.fn().mockReturnValue('edit'),
+                      toolLocations: vi.fn().mockReturnValue([]),
+                      execute: vi.fn().mockImplementation(async () => {
+                        if (args['mode'] === 'throw') {
+                          throw new Error('disk write failed');
+                        }
+                        return {
+                          llmContent:
+                            'Failed to edit, could not find the string to replace.',
+                          returnDisplay:
+                            'Failed to edit, could not find the string to replace.',
+                          error: {
+                            message:
+                              'Failed to edit, could not find the string to replace.',
+                            type: core.ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
+                          },
+                        };
+                      }),
+                    };
+                  }),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+          repeatedToolFailureMode: 'off' as const,
+          repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+        };
+
+        const runCalls = (calls: FunctionCall[], promptId: string) =>
+          (
+            session as unknown as {
+              runToolCalls: (
+                abortSignal: AbortSignal,
+                promptId: string,
+                calls: FunctionCall[],
+                loopState: typeof toolLoopState,
+              ) => Promise<{
+                parts: Part[];
+                stopAfterPermissionCancel: boolean;
+                loopDetected?: boolean;
+              }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            promptId,
+            calls,
+            toolLoopState,
+          );
+
+        // Two invalid-param calls bring the counter to 2 (threshold is 3).
+        await runCalls(
+          [
+            { id: 'edit_bad_1', name: 'edit', args: {} },
+            { id: 'edit_bad_2', name: 'edit', args: {} },
+          ],
+          'prompt-reset-on-build-1',
+        );
+        expect(toolLoopState.invalidToolParamErrors.get('edit')).toBe(2);
+
+        // A call with valid params that passes build() but returns a runtime
+        // toolResult.error must reset the invalid-params streak.
+        const runtimeFailResult = await runCalls(
+          [
+            {
+              id: 'edit_runtime_fail',
+              name: 'edit',
+              args: { file_path: 'a.ts', old_string: 'x', new_string: 'y' },
+            },
+          ],
+          'prompt-reset-on-build-2',
+        );
+        expect(runtimeFailResult.loopDetected ?? false).toBe(false);
+        expect(toolLoopState.invalidToolParamErrors.has('edit')).toBe(false);
+
+        // Two more invalid-param calls followed by a built call whose execute()
+        // throws must also reset the counter rather than tripping at 3.
+        await runCalls(
+          [
+            { id: 'edit_bad_3', name: 'edit', args: {} },
+            { id: 'edit_bad_4', name: 'edit', args: {} },
+          ],
+          'prompt-reset-on-build-3',
+        );
+        expect(toolLoopState.invalidToolParamErrors.get('edit')).toBe(2);
+
+        const thrownExecResult = await runCalls(
+          [
+            {
+              id: 'edit_throw_exec',
+              name: 'edit',
+              args: { file_path: 'a.ts', mode: 'throw' },
+            },
+          ],
+          'prompt-reset-on-build-4',
+        );
+        expect(thrownExecResult.loopDetected ?? false).toBe(false);
+        expect(toolLoopState.invalidToolParamErrors.has('edit')).toBe(false);
+      });
+
+      it('resets invalidToolParamErrors for tool_call when the bridge envelope is valid even if the target tool fails', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const editTool = {
+          name: 'edit',
+          kind: core.Kind.Edit,
+          displayName: 'Edit',
+          description: 'Edit',
+          build: vi.fn().mockImplementation(() => {
+            throw new Error("params must have required property 'file_path'");
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        };
+        const bridgeTool = {
+          name: core.ToolNames.TOOL_CALL,
+          kind: core.Kind.Other,
+          displayName: 'ToolCall',
+          description: 'ToolCall',
+          build: vi.fn((envelope: Record<string, unknown>) => ({
+            params: envelope,
+          })),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        };
+        mockToolRegistry.getAllToolNames.mockReturnValue([
+          core.ToolNames.TOOL_CALL,
+          'edit',
+        ]);
+        mockToolRegistry.getTool.mockImplementation((name: string) => {
+          if (name === 'edit') return editTool;
+          if (name === core.ToolNames.TOOL_CALL) return bridgeTool;
+          return undefined;
+        });
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) => {
+          if (name === 'edit') return editTool;
+          if (name === core.ToolNames.TOOL_CALL) return bridgeTool;
+          return undefined;
+        });
+
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>([
+            [core.ToolNames.TOOL_CALL, 2],
+          ]),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+          repeatedToolFailureMode: 'off' as const,
+          repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-reset-tool-call-bridge',
+          [
+            {
+              id: 'tc_valid_envelope',
+              name: core.ToolNames.TOOL_CALL,
+              args: { name: 'edit', arguments: {} },
+            },
+          ],
+          toolLoopState,
+        );
+
+        expect(result.loopDetected ?? false).toBe(false);
+        expect(
+          toolLoopState.invalidToolParamErrors.has(core.ToolNames.TOOL_CALL),
+        ).toBe(false);
+        expect(toolLoopState.invalidToolParamErrors.get('edit')).toBe(1);
+      });
+
       it('clears duplicate provider id tracking between ACP prompts', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
