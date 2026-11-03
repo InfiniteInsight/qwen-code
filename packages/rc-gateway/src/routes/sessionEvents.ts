@@ -515,6 +515,12 @@ class SessionEventsHub {
    * of the WAL, so it is never forwarded.
    */
   private upstreamCursor(firstCursor: number | undefined): number | undefined {
+    // Nothing resumable to ask for: the log's last word is a resync gap the
+    // daemon could not back with data (#254). Re-sending the cursor it was
+    // reported in buys the same refusal again on every page open, so subscribe
+    // live-only. The WAL holds everything up to the hole, and the first frame
+    // of the epoch now live re-anchors above it.
+    if (this.state.cursorVoid) return undefined;
     // Relayed before: resume from the last raw id this gateway relayed, so the
     // daemon replays exactly what the WAL is missing.
     if (this.state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId) {
@@ -673,6 +679,12 @@ class SessionEventsHub {
           ? { detail: data['detail'] }
           : {}),
       },
+      // The gateway's own note, not the daemon's: it marks the log as ending
+      // on a hole the daemon could not fill, which is how the next subscribe
+      // learns that the cursor it would send has already been refused (#254).
+      // Carries no `raw`, so it stays a marker rather than a relay stamp, and
+      // serializeFrame strips it before any watcher sees it.
+      _rc: { gap: true },
     };
     wal.append(frame);
     this.broadcast(serializeFrame(frame), frame.id, true);
