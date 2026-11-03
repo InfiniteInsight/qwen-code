@@ -184,10 +184,25 @@ const REPLAY_COMPLETE = Symbol('replay_complete');
  * subscriber). The daemon's own sentinel belongs to the hub's subscription, so
  * each watcher gets one of its own: after its WAL replay, or, when it joined
  * while the hub was still catching up on what the gateway missed, after that.
+ *
+ * Exported for the backpressure guards, which need to drive a socket that
+ * answers `write()` with false; the route tests cannot make a real one do that
+ * on a schedule.
  */
-class HubWatcher {
+export class HubWatcher {
   private res: Response | undefined;
-  private pending: Array<string | typeof REPLAY_COMPLETE> = [];
+  /**
+   * The one ordered write queue for this stream: WAL replay frames first, then
+   * live fan-out, then the `replay_complete` sentinel and the closing
+   * `client_left`. Everything reaches the socket through `pump()` and nothing
+   * else, because a stream that yields to backpressure cannot have two writers:
+   * a paused replay plus a direct live write puts a high-id frame ahead of the
+   * low-id frames still queued, and the client's Last-Event-ID cursor then
+   * advances past frames it never received.
+   */
+  private queue: Array<string | typeof REPLAY_COMPLETE> = [];
+  /** Guards re-entry while `pump()` is already on the stack. */
+  private pumping = false;
   private replayCompleteQueued = false;
   private replayedCount = 0;
   private lastReplayedId: number | undefined;
@@ -229,8 +244,7 @@ class HubWatcher {
     if (id !== undefined && this.wantsReplay && !this.replayCompleteQueued) {
       this.noteReplayed(id, 1);
     }
-    if (this.res === undefined) this.pending.push(chunk);
-    else this.write(chunk);
+    this.enqueue(chunk);
   }
 
   /** The hub's upstream has finished replaying what the gateway missed. */
@@ -242,21 +256,21 @@ class HubWatcher {
   /** Headers are out: write the WAL replay, then everything buffered. */
   open(res: Response, replay: readonly WalFrame[]): void {
     this.res = res;
-    for (const ev of replay) this.write(serializeFrame(ev));
     if (replay.length > 0) {
       // Replay ids are all below anything buffered, which the hub appended
       // after the join, so the buffered ones are already the later maxima.
+      const chunks: Array<string | typeof REPLAY_COMPLETE> = replay.map((ev) =>
+        serializeFrame(ev),
+      );
       this.replayedCount += replay.length;
       this.lastReplayedId = Math.max(
         this.lastReplayedId ?? 0,
         replay[replay.length - 1]!.id,
       );
+      this.queue = chunks.concat(this.queue);
     }
-    for (const item of this.pending) {
-      if (item === REPLAY_COMPLETE) this.writeReplayComplete();
-      else this.write(item);
-    }
-    this.pending = [];
+    res.on('drain', () => this.pump());
+    this.pump();
     if (!this.awaitingCatchUp) this.queueReplayComplete();
     if (this.ended !== undefined) this.finish();
   }
@@ -276,44 +290,101 @@ class HubWatcher {
   private queueReplayComplete(): void {
     if (!this.wantsReplay || this.replayCompleteQueued) return;
     this.replayCompleteQueued = true;
-    if (this.res === undefined) this.pending.push(REPLAY_COMPLETE);
-    else this.writeReplayComplete();
+    this.enqueue(REPLAY_COMPLETE);
+  }
+
+  /**
+   * Queue one chunk, then hand whatever the socket will take.
+   *
+   * Buffering is the whole point: a chunk that cannot be written now is still
+   * in order, ahead of everything queued after it. Writing it past a stalled
+   * socket instead would be the two-writer bug this class exists to avoid.
+   */
+  private enqueue(chunk: string | typeof REPLAY_COMPLETE): void {
+    this.queue.push(chunk);
+    if (this.res !== undefined) this.pump();
+  }
+
+  /**
+   * Write what the socket accepts and keep the rest.
+   *
+   * `res.write` returning false is the socket saying its buffer is full, which
+   * is the only push-back a stream gets. Honouring it is what stops a WAL
+   * replay from pushing a whole retention window at one phone in a tunnel
+   * (#251): the frames stay in `queue` and the `drain` listener resumes.
+   */
+  private pump(): void {
+    const res = this.res;
+    if (res === undefined || this.pumping) return;
+    this.pumping = true;
+    try {
+      while (this.queue.length > 0) {
+        if (res.writableEnded || res.destroyed) {
+          this.queue = [];
+          return;
+        }
+        const item = this.queue.shift()!;
+        let flushed: boolean;
+        try {
+          flushed = res.write(
+            item === REPLAY_COMPLETE ? this.replayCompleteChunk() : item,
+          );
+        } catch {
+          // Socket already gone; the route's close/abort path owns teardown.
+          this.queue = [];
+          return;
+        }
+        if (!flushed) {
+          // Stop, and do NOT put the chunk back. `false` means the socket's
+          // buffer is full, not that the chunk was dropped: it is already
+          // handed over and will go out. Re-queuing it would write every frame
+          // after the first stall a second time, which is a duplicate assistant
+          // turn on the page rather than a dropped one.
+          return;
+        }
+      }
+    } finally {
+      this.pumping = false;
+    }
   }
 
   /** Same shape as the daemon's sentinel, in the gateway's numbering. */
-  private writeReplayComplete(): void {
+  private replayCompleteChunk(): string {
     const last = this.lastReplayedId;
-    this.write(
-      serializeFrame({
-        v: 1,
-        type: 'replay_complete',
-        data: {
-          ...(last !== undefined
-            ? { lastReplayedEventId: last, lastEventId: last }
-            : {}),
-          replayedCount: this.replayedCount,
-        },
-      }),
-    );
+    return serializeFrame({
+      v: 1,
+      type: 'replay_complete',
+      data: {
+        ...(last !== undefined
+          ? { lastReplayedEventId: last, lastEventId: last }
+          : {}),
+        replayedCount: this.replayedCount,
+      },
+    });
   }
 
   private finish(): void {
     if (this.finished || this.res === undefined) return;
     this.finished = true;
-    if (this.ended === 'graceful') {
-      writePresenceLeft(this.res, this.actorTokenId, 'disconnect');
-    }
-    if (!this.res.writableEnded) this.res.end();
-  }
-
-  private write(chunk: string): void {
     const res = this.res;
-    if (res === undefined || res.writableEnded || res.destroyed) return;
-    try {
-      res.write(chunk);
-    } catch {
-      // Socket already gone; the route's close/abort path owns teardown.
+    // Close is the one place that writes past push-back. A client that stopped
+    // draining still gets the frames already promised to it: `res.end()` over a
+    // non-empty queue truncates the transcript mid-answer with nothing on screen
+    // saying so, which is #150's failure reproduced on purpose. The burst is
+    // bounded by what was already queued, so it cannot grow anything either.
+    while (this.queue.length > 0 && !res.writableEnded && !res.destroyed) {
+      const item = this.queue.shift()!;
+      try {
+        res.write(item === REPLAY_COMPLETE ? this.replayCompleteChunk() : item);
+      } catch {
+        // Socket already gone; what follows would not have arrived either.
+        break;
+      }
     }
+    if (this.ended === 'graceful') {
+      writePresenceLeft(res, this.actorTokenId, 'disconnect');
+    }
+    if (!res.writableEnded) res.end();
   }
 }
 

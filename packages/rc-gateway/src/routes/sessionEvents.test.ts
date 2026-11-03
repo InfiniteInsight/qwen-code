@@ -6,6 +6,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
+import type { Response } from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
@@ -14,6 +15,7 @@ import { UnknownSessionError, type RecoveryState } from '../daemonPool.js';
 import {
   createSessionEventsRoute,
   gatewayCursorForDaemonCursor,
+  HubWatcher,
   withGatewayResumeCursor,
   isSessionRelayLive,
 } from './sessionEvents.js';
@@ -1654,5 +1656,170 @@ describe('watch presence join/leave (#40)', () => {
       await new Promise((r) => setTimeout(r, 20));
     }
     expect(wp.isWatched(WP_SID)).toBe(false); // leave ran in the route finally
+  });
+});
+
+/**
+ * A socket whose acceptance budget the test controls.
+ *
+ * `write` always accepts the chunk and only then advises, which is Node's
+ * contract: a `false` return means "the buffer is over the high-water mark,
+ * stop feeding", never "this chunk was dropped". Tests drive the resume by
+ * calling `release()`, which is the `drain` event.
+ */
+function fakeSocket(budget: number) {
+  const written: string[] = [];
+  const drainHandlers: Array<() => void> = [];
+  let left = budget;
+  let ended = false;
+  return {
+    written,
+    destroyed: false,
+    get writableEnded() {
+      return ended;
+    },
+    write(chunk: string): boolean {
+      written.push(chunk);
+      left -= 1;
+      return left >= 0;
+    },
+    end() {
+      ended = true;
+    },
+    on(_event: string, handler: () => void) {
+      drainHandlers.push(handler);
+    },
+    destroy() {
+      this.destroyed = true;
+    },
+    /** Empty the buffer: hand back `more` frames of room and emit `drain`. */
+    release(more = 2) {
+      left += more;
+      for (const handler of [...drainHandlers]) handler();
+    },
+    get ended() {
+      return ended;
+    },
+  };
+}
+
+/** The gateway ids this socket has actually been handed, in order. */
+function deliveredIds(socket: { written: string[] }): number[] {
+  const ids: number[] = [];
+  for (const chunk of socket.written) {
+    const match = /^id: (\d+)$/m.exec(chunk);
+    if (match) ids.push(Number(match[1]));
+  }
+  return ids;
+}
+
+function walFrames(from: number, to: number) {
+  const frames = [];
+  for (let id = from; id <= to; id++) {
+    frames.push({ id, v: 1, type: 'message', data: { id } });
+  }
+  return frames;
+}
+
+function sseFrame(id: number, type: string): string {
+  return `id: ${id}\ndata: ${JSON.stringify({ id, type, data: {} })}\n\n`;
+}
+
+describe('session-events watcher backpressure (#251)', () => {
+  it('writes the whole window synchronously when the socket never pushes back', () => {
+    // The common case, and the reason this is safe to change at all: a client
+    // that keeps up sees no new turn boundary. Everything the old synchronous
+    // pass wrote is written before `open()` returns, with no drain waited on,
+    // so the only stream whose timing moves is one that was already stalling.
+    const watcher = new HubWatcher(true, undefined);
+    const socket = fakeSocket(100);
+    watcher.open(socket as unknown as Response, walFrames(1, 12));
+
+    expect(deliveredIds(socket)).toEqual(
+      Array.from({ length: 12 }, (_unused, i) => i + 1),
+    );
+    expect(socket.written.some((c) => c.includes('replay_complete'))).toBe(
+      true,
+    );
+  });
+
+  it('does not push a whole replay window at a socket that asked it to stop', () => {
+    const watcher = new HubWatcher(true, undefined);
+    const socket = fakeSocket(3);
+    watcher.open(socket as unknown as Response, walFrames(1, 12));
+
+    const handed = deliveredIds(socket);
+    // The old path wrote all twelve in one synchronous pass regardless of what
+    // the socket said. A wide window has to wait for `drain` instead.
+    expect(handed.length).toBeLessThan(12);
+    expect(handed.length).toBeGreaterThan(0);
+    expect(socket.ended).toBe(false);
+  });
+
+  it('delivers the whole window once the socket drains, in order and once each', () => {
+    const watcher = new HubWatcher(true, undefined);
+    const socket = fakeSocket(3);
+    watcher.open(socket as unknown as Response, walFrames(1, 12));
+
+    for (let i = 0; i < 30; i++) socket.release(3);
+    // Nothing ends a watcher on its own, so end it the way the route does once
+    // the session closes; the assertion is about what the stall deferred.
+    watcher.end('graceful');
+
+    expect(deliveredIds(socket)).toEqual(
+      Array.from({ length: 12 }, (_unused, i) => i + 1),
+    );
+    // The sentinel closes the replay and must not arrive until the window has.
+    expect(socket.written.at(-2)).toContain('replay_complete');
+    expect(socket.written.at(-1)).toContain('client_left');
+    expect(socket.ended).toBe(true);
+  });
+
+  it('keeps a live frame behind the replay frames still queued behind it', () => {
+    const watcher = new HubWatcher(true, undefined);
+    const socket = fakeSocket(3);
+    watcher.open(socket as unknown as Response, walFrames(1, 10));
+
+    // Two live frames fan out while the replay is stalled. Writing them
+    // straight to the socket, which is what a second writer does, would land
+    // them ahead of ids the client has not received, and its cursor would then
+    // pass those ids for good.
+    watcher.deliver(sseFrame(11, 'turn_started'), 11);
+    watcher.deliver(sseFrame(12, 'turn_completed'), 12);
+
+    for (let i = 0; i < 30 && !socket.ended; i++) socket.release(3);
+
+    const ids = deliveredIds(socket);
+    expect(ids).toEqual(Array.from({ length: 12 }, (_unused, i) => i + 1));
+    // Strictly ascending: the guard against the cursor-jump, stated directly.
+    expect(ids.every((id, i) => i === 0 || id > ids[i - 1]!)).toBe(true);
+  });
+
+  it('finishes the window it promised before closing, even mid-stall', () => {
+    const watcher = new HubWatcher(true, undefined);
+    const socket = fakeSocket(3);
+    watcher.open(socket as unknown as Response, walFrames(1, 10));
+    // Stalled, and now the session ends. Truncating here is what would put a
+    // partial transcript on screen with nothing saying so.
+    watcher.end('graceful');
+
+    expect(deliveredIds(socket)).toEqual(
+      Array.from({ length: 10 }, (_unused, i) => i + 1),
+    );
+    expect(socket.written.at(-1)).toContain('client_left');
+    expect(socket.ended).toBe(true);
+  });
+
+  it('writes nothing further to a socket that has ended', () => {
+    const watcher = new HubWatcher(true, undefined);
+    const socket = fakeSocket(2);
+    watcher.open(socket as unknown as Response, walFrames(1, 6));
+    const before = socket.written.length;
+    socket.end();
+
+    watcher.deliver(sseFrame(7, 'turn_started'), 7);
+    socket.release(10);
+
+    expect(socket.written.length).toBe(before);
   });
 });
