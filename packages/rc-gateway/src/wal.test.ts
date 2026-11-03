@@ -23,6 +23,7 @@ import {
   releaseSharedWal,
   sharedWalCount,
   pruneWalDir,
+  WAL_DEFAULTS,
 } from './wal.js';
 import type { WalFrame } from './wal.js';
 
@@ -174,6 +175,23 @@ describe('SessionWal', () => {
       expect(result.events.map((e) => e.id)).toEqual([1, 2]);
     }
     wal2.close();
+  });
+
+  it('the default segment cap holds about one retention window, no more', () => {
+    // The active segment is never truncated (#226), so the cap on a segment is
+    // the cap on dead bytes a session can hold. Frame sizes were measured over
+    // 186,034 live frames: median ~310 B, mean ~422 B. One 10,000-frame window
+    // is therefore ~3.1 MB, so the cap must fit at least that, and must not sit
+    // so high that a session parks several windows of unreachable frames in a
+    // segment that can never be reclaimed.
+    const oneWindowAtMedian = WAL_DEFAULTS.walMaxEvents * 310;
+    const twoWindowsAtMean = WAL_DEFAULTS.walMaxEvents * 422 * 2;
+    expect(WAL_DEFAULTS.walSegmentMaxBytes).toBeGreaterThanOrEqual(
+      oneWindowAtMedian,
+    );
+    expect(WAL_DEFAULTS.walSegmentMaxBytes).toBeLessThanOrEqual(
+      twoWindowsAtMean,
+    );
   });
 
   it('segment rotation: creates .log.1 once active segment exceeds segmentMaxBytes', () => {

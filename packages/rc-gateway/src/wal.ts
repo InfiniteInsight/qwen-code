@@ -62,11 +62,22 @@ export type ReplayResult =
       reason: 'older_than_wal_horizon' | 'no_wal';
     };
 
-/** WAL retention defaults (matches donor's DEFAULTS). */
+/**
+ * WAL retention defaults.
+ *
+ * `walSegmentMaxBytes` is sized to the retention window, not to a round number.
+ * Measured over 186,034 live frames the median frame is ~310 B and the mean
+ * 422 B, so the 10,000-frame window costs 3.2-4.0 MB. `pruneEmptySegments()`
+ * reclaims only rotated segments and never the active one (#226), so the cap on
+ * the active segment is also the cap on how much dead data a session can sit on
+ * while it is still inside its window. At 16 MB the cap was 4-5x the whole
+ * window, so rotation, the only thing that makes bytes reclaimable, rarely
+ * happened. 4 MB fits one window in one segment.
+ */
 export const WAL_DEFAULTS = {
   walMaxEvents: 10_000,
   walHorizonSec: 86_400,
-  walSegmentMaxBytes: 16 * 1024 * 1024,
+  walSegmentMaxBytes: 4 * 1024 * 1024,
 } as const;
 
 export interface SessionWalOptions {
