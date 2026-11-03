@@ -74,6 +74,9 @@ import {
   type WorkflowApproval,
   type WorkflowSnapshot,
   type WorkflowTask,
+  type AgentTask,
+  type MonitorTask,
+  type ShellTask,
   type BranchPoint,
   type CodeModeToolResult,
   type AdmissibleNotification,
@@ -315,6 +318,7 @@ import {
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   USER_CANCEL_ABORT_REASON,
   INTERRUPTED_PROMPT_ABORT_REASON,
+  TASK_EVENT_NOTIFICATION_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import {
@@ -451,6 +455,7 @@ import type {
   ToolCallStartParams,
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
+import { runtimeMs } from './tasksSnapshot.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
@@ -2395,7 +2400,7 @@ export class Session implements SessionContext {
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
-  #statusChangeCallback: (() => void) | undefined;
+  #statusChangeCallback: ((entry?: AgentTask) => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
   /**
@@ -2426,8 +2431,8 @@ export class Session implements SessionContext {
    */
   private workflowDeletionSeq = 0;
   private readonly workflowDeletionSeqByRunId = new Map<string, number>();
-  #shellStatusChangeCallback: (() => void) | undefined;
-  #monitorStatusChangeCallback: (() => void) | undefined;
+  #shellStatusChangeCallback: ((entry?: ShellTask) => void) | undefined;
+  #monitorStatusChangeCallback: ((entry?: MonitorTask) => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -4611,6 +4616,40 @@ export class Session implements SessionContext {
 
   #activeWorkChanged(): void {
     this.onActiveWorkChanged?.();
+  }
+
+  /**
+   * Reports one task transition to the bridge, which republishes it as a
+   * session-scoped `task_changed` frame. Runs beside `#activeWorkChanged()`
+   * rather than through it: the active-work channel is a coalesced full
+   * snapshot on a cadence, so folding a per-task edge into it would let the
+   * next report smooth the transition away, and it carries neither the shell
+   * `cwd` nor any per-task runtime.
+   *
+   * Every callback invocation is forwarded without filtering. The registries
+   * fire on register (a deliberate nothing-to-`running` transition) and on each
+   * later transition, which is exactly the set the contract publishes; and
+   * `status` is forwarded verbatim because the roster reports a workflow's
+   * `pausing` the same way, so remapping it here would put the two sources in
+   * disagreement for one task.
+   */
+  #publishTaskChanged(
+    entry: AgentTask | ShellTask | MonitorTask | WorkflowTask | undefined,
+  ): void {
+    if (!entry) return;
+    void this.client
+      .extNotification(TASK_EVENT_NOTIFICATION_METHOD, {
+        v: 1,
+        sessionId: this.sessionId,
+        taskId: entry.id,
+        kind: entry.kind,
+        status: entry.status,
+        runtimeMs: runtimeMs(entry, Date.now()),
+      })
+      .catch(() => {
+        // Best-effort. A dropped notification costs the viewer one transition
+        // until the next one, and the roster poll reconciles the whole row.
+      });
   }
 
   #hasActiveTurn(): boolean {
@@ -11382,8 +11421,9 @@ export class Session implements SessionContext {
     // retract that. Under ACP nothing else claims the slot today, but a Session
     // must not clear a callback it did not install — the TUI uses the same
     // registry, and "clear on dispose" would silently unhook it.
-    this.#statusChangeCallback = () => {
+    this.#statusChangeCallback = (entry) => {
       this.#activeWorkChanged();
+      this.#publishTaskChanged(entry);
     };
     backgroundRegistry.setStatusChangeCallback(this.#statusChangeCallback);
     backgroundRegistry.setNotificationCallback(
@@ -11418,7 +11458,10 @@ export class Session implements SessionContext {
     );
 
     const monitorRegistry = this.config.getMonitorRegistry();
-    this.#monitorStatusChangeCallback = () => this.#activeWorkChanged();
+    this.#monitorStatusChangeCallback = (entry) => {
+      this.#activeWorkChanged();
+      this.#publishTaskChanged(entry);
+    };
     monitorRegistry.setStatusChangeCallback?.(
       this.#monitorStatusChangeCallback,
     );
@@ -11452,8 +11495,9 @@ export class Session implements SessionContext {
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
-    this.#shellStatusChangeCallback = () => {
+    this.#shellStatusChangeCallback = (entry) => {
       this.#activeWorkChanged();
+      this.#publishTaskChanged(entry);
     };
     shellRegistry.setStatusChangeCallback(this.#shellStatusChangeCallback);
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
@@ -11477,6 +11521,7 @@ export class Session implements SessionContext {
     this.#workflowStatusChangeCallback = (entry) => {
       this.#activeWorkChanged();
       if (entry) this.#rememberWorkflowHistory(entry);
+      this.#publishTaskChanged(entry);
     };
     workflowRegistry.setStatusChangeCallback(
       this.#workflowStatusChangeCallback,

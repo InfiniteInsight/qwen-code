@@ -1646,6 +1646,11 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_cwd_changed',
   'artifact_changed',
   'source_changed',
+  // A background task can settle long after the turn ended, so this is the
+  // otherwise-idle case the set exists for: absent from it, one late shell
+  // exit would count as newer turn content, defeat the bounded refresh-append
+  // and drop the loop terminal from the refreshed transcript.
+  'task_changed',
   'settings_changed',
   'extensions_changed',
   'mcp_server_changed',

@@ -30,7 +30,12 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
 // so a rename can't silently break the protocol.
-import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
+import {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  TASK_CHANGED_EVENT,
+  TASK_CHANGED_KIND_VALUES,
+  TASK_CHANGED_STATUS_VALUES,
+} from './daemonEventTypes.js';
 import {
   parseBackgroundNotificationTurn,
   ACTIVE_WORK_HEARTBEAT_VERSION,
@@ -38,6 +43,7 @@ import {
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  TASK_EVENT_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -2571,6 +2577,51 @@ export class BridgeClient implements Client {
       entry.events.publish({
         type: 'source_changed',
         data: { sessionId, revision },
+      });
+      return;
+    }
+    if (method === TASK_EVENT_NOTIFICATION_METHOD) {
+      const sessionId = params['sessionId'];
+      const taskId = params['taskId'];
+      const kind = params['kind'];
+      const status = params['status'];
+      const elapsedMs = params['runtimeMs'];
+      if (
+        typeof sessionId !== 'string' ||
+        typeof taskId !== 'string' ||
+        taskId.length === 0 ||
+        typeof kind !== 'string' ||
+        typeof status !== 'string' ||
+        !TASK_CHANGED_KIND_VALUES.includes(kind) ||
+        !TASK_CHANGED_STATUS_VALUES.includes(status) ||
+        !Number.isFinite(elapsedMs) ||
+        (elapsedMs as number) < 0
+      ) {
+        writeStderrLine(
+          `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=task_changed action=dropped reason=malformed`,
+        );
+        return;
+      }
+      if (
+        !this.ownsSession(sessionId) &&
+        !this.inFlightRestoreIds.has(sessionId)
+      ) {
+        writeStderrLine(
+          `[demux] session=${sessionId} type=task_changed action=dropped reason=session_not_owned`,
+        );
+        return;
+      }
+      // `data` carries `sessionId` even though the frame is session-scoped:
+      // the payload shape in the wire-protocol registry is
+      // `{ sessionId, taskId, kind, status, runtimeMs }`, and
+      // `publishExtNotification` forwards `data` unchanged rather than
+      // injecting the id.
+      this.publishExtNotification(sessionId, TASK_CHANGED_EVENT, {
+        sessionId,
+        taskId,
+        kind,
+        status,
+        runtimeMs: elapsedMs,
       });
       return;
     }

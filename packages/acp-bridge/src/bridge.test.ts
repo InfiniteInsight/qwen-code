@@ -156,7 +156,9 @@ import {
   ACTIVE_WORK_CLOSE_RETRY_CEILING_MS,
   activeWorkCloseRetryDelayMs,
   sessionCloseDrainBudgetMs,
+  TASK_EVENT_NOTIFICATION_METHOD,
 } from './bridgeTypes.js';
+import { TASK_CHANGED_EVENT } from './daemonEventTypes.js';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -8443,6 +8445,117 @@ describe('createAcpSessionBridge', () => {
     } finally {
       shellSpy.mockRestore();
     }
+  });
+
+  it('keeps the turn error on refresh when a background task settles after it', async () => {
+    // A background shell/agent/monitor/workflow row can settle long after
+    // the turn that started it, so its `task_changed` frame reaches the bus
+    // on an otherwise-idle session. It carries no turn content, so it must
+    // not defeat the bounded refresh-append of the loop terminal.
+    const handle = makeChannel({
+      promptImpl: () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {};
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-task-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const seenTypes: string[] = [];
+    void (async () => {
+      for await (const event of iter) seenTypes.push(event.type);
+    })();
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'loop' }],
+        },
+        undefined,
+        { promptId: 'prompt-loop' },
+      ),
+    ).rejects.toThrow('Loop protection stopped this turn');
+
+    await handle.agentConnection.extNotification(
+      TASK_EVENT_NOTIFICATION_METHOD,
+      {
+        v: 1,
+        sessionId: session.sessionId,
+        taskId: 'background-shell-1',
+        kind: 'shell',
+        status: 'completed',
+        runtimeMs: 1200,
+      },
+    );
+    // Without this the test would pass vacuously on a dropped frame: the
+    // append would survive because nothing challenged it.
+    await vi.waitFor(() => {
+      expect(seenTypes).toContain(TASK_CHANGED_EVENT);
+    });
+    expect(seenTypes).toContain('turn_error');
+    expect(seenTypes.indexOf('turn_error')).toBeLessThan(
+      seenTypes.lastIndexOf(TASK_CHANGED_EVENT),
+    );
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay).toHaveLength(2);
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+      type: 'turn_error',
+      promptId: 'prompt-loop',
+      data: expect.objectContaining({
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    });
+
+    abort.abort();
+    await bridge.shutdown();
   });
 
   it('keeps the turn error on refresh when journal truncation marks the idle tail', async () => {
