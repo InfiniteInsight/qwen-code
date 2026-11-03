@@ -712,8 +712,50 @@ index cdb5fc4..cd10dc2 100644
      return render;
  };
  const create = (stream, { showCursor = false, incremental = false } = {}) => {
-diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
-index 0f4523f..a3ef634 100644
++diff --git a/node_modules/ink/build/measure-text.js b/node_modules/ink/build/measure-text.js
++index 0f79192..2ab10f2 100644
++--- a/node_modules/ink/build/measure-text.js
+++++ b/node_modules/ink/build/measure-text.js
++@@ -1,20 +1,33 @@
++ import widestLine from 'widest-line';
+++const MAX_CACHE_ENTRIES = 2000;
+++const MAX_TEXT_LENGTH_TO_CACHE = 4096;
++ const cache = new Map();
++ const measureText = (text) => {
++     if (text.length === 0) {
++         return {
++             width: 0,
++             height: 0,
++         };
++     }
++-    const cachedDimensions = cache.get(text);
++-    if (cachedDimensions) {
++-        return cachedDimensions;
+++    const shouldCache = text.length <= MAX_TEXT_LENGTH_TO_CACHE;
+++    if (shouldCache) {
+++        const cachedDimensions = cache.get(text);
+++        if (cachedDimensions) {
+++            return cachedDimensions;
+++        }
++     }
++     const width = widestLine(text);
++     const height = text.split('\n').length;
++     const dimensions = { width, height };
++-    cache.set(text, dimensions);
+++    if (shouldCache) {
+++        if (cache.size >= MAX_CACHE_ENTRIES) {
+++            const oldestKey = cache.keys().next().value;
+++            if (oldestKey !== undefined) {
+++                cache.delete(oldestKey);
+++            }
+++        }
+++        cache.set(text, dimensions);
+++    }
++     return dimensions;
++ };
++ export default measureText;
+ diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
+ index 0f4523f..a3ef634 100644
 --- a/node_modules/ink/build/output.d.ts
 +++ b/node_modules/ink/build/output.d.ts
 @@ -1,4 +1,6 @@
@@ -1236,15 +1278,39 @@ diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-t
 index 51f696c..1f66ca0 100644
 --- a/node_modules/ink/build/wrap-text.js
 +++ b/node_modules/ink/build/wrap-text.js
-@@ -1,5 +1,6 @@
+@@ -1,10 +1,16 @@
  import wrapAnsi from 'wrap-ansi';
  import cliTruncate from 'cli-truncate';
 +import stripAnsi from 'strip-ansi';
- const cache = {};
+-const cache = {};
++const MAX_CACHE_ENTRIES = 2000;
++const MAX_TEXT_LENGTH_TO_CACHE = 4096;
++const cache = new Map();
  const wrapText = (text, maxWidth, wrapType) => {
-     const cacheKey = text + String(maxWidth) + String(wrapType);
-@@ -34,5 +35,51 @@ const wrapText = (text, maxWidth, wrapType) => {
-     cache[cacheKey] = wrappedText;
+-    const cacheKey = text + String(maxWidth) + String(wrapType);
+-    const cachedText = cache[cacheKey];
+-    if (cachedText) {
+-        return cachedText;
++    const shouldCache = text.length <= MAX_TEXT_LENGTH_TO_CACHE;
++    const cacheKey = shouldCache ? text + String(maxWidth) + String(wrapType) : '';
++    if (shouldCache) {
++        const cachedText = cache.get(cacheKey);
++        if (cachedText !== undefined) {
++            return cachedText;
++        }
+     }
+     let wrappedText = text;
+@@ -34,5 +40,59 @@ const wrapText = (text, maxWidth, wrapType) => {
+-    cache[cacheKey] = wrappedText;
++    if (shouldCache) {
++        if (cache.size >= MAX_CACHE_ENTRIES) {
++            const oldestKey = cache.keys().next().value;
++            if (oldestKey !== undefined) {
++                cache.delete(oldestKey);
++            }
++        }
++        cache.set(cacheKey, wrappedText);
++    }
      return wrappedText;
  };
 +export const wrapTextWithMetadata = (text, maxWidth, wrapType, shouldWrap = true) => {

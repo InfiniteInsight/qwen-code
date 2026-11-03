@@ -11,6 +11,8 @@ import {
   type HistoryItemWithoutId,
 } from '../../types.js';
 import {
+  MAX_PENDING_THOUGHT_CHARS,
+  MAX_TOOL_RESULT_DISPLAY_CHARS,
   initialDaemonProjectionState,
   projectDaemonEvent,
   pendingHistoryItemsOf,
@@ -1459,5 +1461,101 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
       }),
     );
     expect(pendingToolCallsOf(s)[1]?.status).toBe(ToolCallStatus.Canceled);
+  });
+
+  it('caps pendingThought at MAX_PENDING_THOUGHT_CHARS and ignores subagent/progress frames (#252)', () => {
+    let s = initialDaemonProjectionState(SELF);
+
+    // 1. Top-level agent tool starts executing
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'agent_1',
+        title: 'Task: explore codebase',
+        status: 'in_progress',
+        kind: 'other',
+        _meta: { toolName: 'agent' },
+      }),
+    ).state;
+
+    // 2. Subagent child frames (carrying parentToolCallId !== toolCallId) and
+    //    subagentProgress/shellProgress liveness frames must be ignored and
+    //    preserve state reference identity when no watermark id is present.
+    const stateBeforeSubagent = s;
+    for (const childUpdate of [
+      {
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: '**Subagent thought** internal' },
+        _meta: { parentToolCallId: 'agent_1' },
+      },
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Subagent internal text' },
+        _meta: { parentToolCallId: 'agent_1' },
+      },
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'sub_tool_1',
+        title: 'ReadFile',
+        status: 'in_progress',
+        _meta: { toolName: 'read_file', parentToolCallId: 'agent_1' },
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent_1',
+        status: 'in_progress',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'progress tick' } },
+        ],
+        _meta: { subagentProgress: true, provenance: 'subagent' },
+      },
+    ]) {
+      const r = projectDaemonEvent(s, sessionUpdate(childUpdate));
+      expect(r.committed).toEqual([]);
+      expect(r.state).toBe(stateBeforeSubagent);
+    }
+
+    // 3. Top-level pendingThought is capped at MAX_PENDING_THOUGHT_CHARS
+    let thoughtState = initialDaemonProjectionState(SELF);
+    thoughtState = projectDaemonEvent(
+      thoughtState,
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: {
+          type: 'text',
+          text: `**Subject** ${'a'.repeat(MAX_PENDING_THOUGHT_CHARS + 500)}`,
+        },
+      }),
+    ).state;
+    expect(thoughtState.pendingThought).toHaveLength(MAX_PENDING_THOUGHT_CHARS);
+    expect(thoughtOf(thoughtState)?.subject).toBe('Subject');
+
+    // Further thought chunks in the same sub-turn do not allocate a new state
+    const afterCap = projectDaemonEvent(
+      thoughtState,
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'more thought text' },
+      }),
+    );
+    expect(afterCap.state).toBe(thoughtState);
+
+    // 4. Huge tool output text is capped at MAX_TOOL_RESULT_DISPLAY_CHARS
+    const hugeTool = projectDaemonEvent(
+      initialDaemonProjectionState(SELF),
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_huge',
+        status: 'completed',
+        rawOutput: 'z'.repeat(MAX_TOOL_RESULT_DISPLAY_CHARS + 5_000),
+        _meta: { toolName: 'read_file' },
+      }),
+    ).state;
+    const display = String(
+      pendingToolCallsOf(hugeTool)[0]?.resultDisplay ?? '',
+    );
+    expect(display.length).toBeLessThan(MAX_TOOL_RESULT_DISPLAY_CHARS + 200);
+    expect(display).toContain('truncated from');
   });
 });

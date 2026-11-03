@@ -207,6 +207,21 @@ function withLoadState(
   return { ...base, modelId, approvalMode };
 }
 
+function hasRenderableStateChange(
+  prev: DaemonProjectionState,
+  next: DaemonProjectionState,
+): boolean {
+  return (
+    prev.streamingState !== next.streamingState ||
+    prev.pendingText !== next.pendingText ||
+    prev.pendingThought !== next.pendingThought ||
+    prev.tools !== next.tools ||
+    prev.pendingPermission !== next.pendingPermission ||
+    prev.modelId !== next.modelId ||
+    prev.approvalMode !== next.approvalMode
+  );
+}
+
 export function useDaemonStream(
   driver: DaemonSessionDriver,
   addItem: AddHistoryItem,
@@ -255,7 +270,9 @@ export function useDaemonStream(
     stateRef.current = state;
     for (const item of committed) addItemRef.current(item, now());
     streamingResponseLengthRef.current = state.pendingText.length;
-    setSnapshot(state);
+    setSnapshot((prev) =>
+      hasRenderableStateChange(prev, state) ? state : prev,
+    );
   }, []);
 
   // Finalize the in-flight turn (commit pending text, return to Idle).
