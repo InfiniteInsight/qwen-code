@@ -5,6 +5,7 @@
  */
 
 import esbuild from 'esbuild';
+import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,46 @@ const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Which commit this bundle came from (issue #210).
+ *
+ * The install is a hand copy of `win-unpacked` over the installed folder, so
+ * nothing at the install names its commit: an app built on 10-12 sat under a fix
+ * landed 10-27 and the phone's repeat open requests died in the bug that fix
+ * removed, with nothing on the host saying the running code predated it.
+ *
+ * `define` rather than a generated module, so the identity cannot be edited
+ * separately from the build that produced it. Outside a checkout (or with git
+ * refusing) it stamps `unknown`, and `buildInfo.ts` prints that rather than
+ * staying silent, because "which build is this" must never be unanswerable.
+ */
+function readBuildStamp() {
+  let commit = 'unknown';
+  try {
+    commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: __dirname,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    // Not a checkout, or git unavailable: the stamp degrades to 'unknown'.
+  }
+  if (!commit) commit = 'unknown';
+  // The build's own clock, not the commit date: what matters is how old the
+  // installed bundle is, and a dirty tree still needs a truthful time.
+  return { commit, builtAt: new Date().toISOString() };
+}
+
+const stamp = readBuildStamp();
+
+// Two STRING defines, not one object: a define value is substituted as written,
+// so an object would land bare in `typeof` and conditional positions. Strings are
+// the ordinary case and read unambiguously wherever they are substituted.
+const BUILD_DEFINE = {
+  __LAUNCHER_BUILD_COMMIT__: JSON.stringify(stamp.commit),
+  __LAUNCHER_BUILD_AT__: JSON.stringify(stamp.builtAt),
+};
 
 /**
  * @type {import('esbuild').Plugin}
@@ -70,6 +111,7 @@ const nodeBuildOptions = {
   sourcesContent: false,
   external: ['electron'],
   logLevel: 'silent',
+  define: { ...BUILD_DEFINE },
 };
 
 // `main.ts` is ESM source using `import.meta.url`, but it is emitted as CJS and
@@ -79,8 +121,12 @@ const nodeBuildOptions = {
 // sandbox, where `require('url')` is unavailable; injecting this banner there
 // throws before `contextBridge.exposeInMainWorld`, leaving `window.launcher`
 // undefined. The preload never uses `import.meta.url`, so it gets no banner.
+//
+// This context spreads AFTER `nodeBuildOptions`, so its `define` REPLACES the
+// shared one rather than merging: the stamp has to be restated here or the main
+// bundle, the only one that reads it, would ship unstamped.
 const mainImportMetaShim = {
-  define: { 'import.meta.url': 'importMetaUrl' },
+  define: { ...BUILD_DEFINE, 'import.meta.url': 'importMetaUrl' },
   banner: {
     js: "const importMetaUrl = require('url').pathToFileURL(__filename).href;",
   },

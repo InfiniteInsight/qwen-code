@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerIpc } from './ipc.js';
 import { readAppConfig, writeAppConfig } from './appConfig.js';
+import { trayTooltip } from './buildInfo.js';
 import { realRunWsl } from './wsl.js';
 import { drainTerminalRequests, realExecWt } from './terminalLauncher.js';
 import { createTray, type TrayHandle } from './tray.js';
@@ -170,7 +171,7 @@ function quit(): void {
 function installTray(): void {
   tray = createTray({
     iconPath: ICON_PATH,
-    tooltip: 'Qwen Remote Launcher',
+    tooltip: trayTooltip('Qwen Remote Launcher'),
     host: { show: showWindow, quit },
     note: () => terminalNote,
     // Only a packaged build can register itself; `electron .` would register
