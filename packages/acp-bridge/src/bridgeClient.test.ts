@@ -29,6 +29,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  TASK_CHANGED_EVENT,
+  TASK_CHANGED_KIND_VALUES,
+  TASK_CHANGED_STATUS_VALUES,
+} from './daemonEventTypes.js';
+import { TASK_EVENT_NOTIFICATION_METHOD } from './bridgeTypes.js';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -5587,5 +5593,96 @@ describe('background execution ownership', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('BridgeClient - task_changed promotion', () => {
+  const sessionId = 'session-tasks';
+
+  const makeTaskClient = () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+    return { client, publish };
+  };
+
+  const frame = (
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    v: 1,
+    sessionId,
+    taskId: 'shell-1',
+    kind: 'shell',
+    status: 'completed',
+    runtimeMs: 4200,
+    ...overrides,
+  });
+
+  it('publishes the transition with the registry payload and nothing else', async () => {
+    const { client, publish } = makeTaskClient();
+    await client.extNotification(TASK_EVENT_NOTIFICATION_METHOD, frame());
+    expect(publish).toHaveBeenCalledTimes(1);
+    const [event] = publish.mock.calls[0] as [Record<string, unknown>];
+    expect(event['type']).toBe(TASK_CHANGED_EVENT);
+    // The routing `v` must not leak into `data`; the envelope carries the
+    // schema version, and the registry fixes `data` at five fields.
+    expect(event['data']).toEqual({
+      sessionId,
+      taskId: 'shell-1',
+      kind: 'shell',
+      status: 'completed',
+      runtimeMs: 4200,
+    });
+  });
+
+  it('carries the workflow-only pausing state the roster also reports', async () => {
+    // `ServeSessionWorkflowTaskStatus.status` admits 'pausing', so dropping or
+    // remapping it here would put the frame and the roster in disagreement for
+    // one task - the exact drift that lets a poll and a frame disagree.
+    const { client, publish } = makeTaskClient();
+    await client.extNotification(
+      TASK_EVENT_NOTIFICATION_METHOD,
+      frame({ kind: 'workflow', status: 'pausing', taskId: 'wf_1' }),
+    );
+    const [event] = publish.mock.calls[0] as [Record<string, unknown>];
+    const data = event['data'] as Record<string, unknown>;
+    expect(data['status']).toBe('pausing');
+  });
+
+  it.each([
+    ['an unknown status', frame({ status: 'succeeded' })],
+    ['an unknown kind', frame({ kind: 'cron' })],
+    ['a negative runtime', frame({ runtimeMs: -1 })],
+    ['a missing taskId', frame({ taskId: undefined })],
+    ['a non-numeric runtime', frame({ runtimeMs: '4200' })],
+  ])('drops %s without publishing', async (_label, params) => {
+    const { client, publish } = makeTaskClient();
+    await client.extNotification(TASK_EVENT_NOTIFICATION_METHOD, params);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('admits every kind and status the shared vocabularies declare', async () => {
+    // Guards the two ends of the wire against drifting vocabularies: anything
+    // the shared lists allow must survive promotion, because a frame dropped
+    // here is invisible to the viewer.
+    for (const kind of TASK_CHANGED_KIND_VALUES) {
+      for (const status of TASK_CHANGED_STATUS_VALUES) {
+        const { client, publish } = makeTaskClient();
+        await client.extNotification(
+          TASK_EVENT_NOTIFICATION_METHOD,
+          frame({ kind, status }),
+        );
+        expect(publish).toHaveBeenCalledTimes(1);
+      }
+    }
   });
 });

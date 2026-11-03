@@ -29,12 +29,16 @@ import {
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  TASK_CHANGED_EVENT,
+  TASK_CHANGED_KIND_VALUES,
+  TASK_CHANGED_STATUS_VALUES,
 } from '@qwen-code/acp-bridge/daemonEventTypes';
 export {
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  TASK_CHANGED_EVENT,
 };
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
@@ -54,6 +58,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  TASK_CHANGED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -317,6 +322,42 @@ export interface DaemonSourceChangedData {
 export type DaemonSourceChangedEvent = DaemonEventEnvelope<
   'source_changed',
   DaemonSourceChangedData
+>;
+
+/**
+ * `task_changed` payload: one background-task transition, mirroring a row of
+ * `GET /session/:id/tasks`.
+ *
+ * `status` carries the roster's vocabulary, which is the five shared lifecycle
+ * states plus `'pausing'` for `kind: 'workflow'` (the dispatch scheduler's
+ * mid-pause state, legal on `ServeSessionWorkflowTaskStatus.status`). The
+ * runtime check uses `TASK_CHANGED_STATUS_VALUES` from acp-bridge rather than
+ * this spelling, so the two cannot drift apart in behaviour even if a consumer
+ * narrows the type locally.
+ */
+export type DaemonTaskChangedKind = 'agent' | 'shell' | 'monitor' | 'workflow';
+
+export type DaemonTaskChangedStatus =
+  | 'running'
+  | 'paused'
+  | 'pausing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonTaskChangedData {
+  sessionId: string;
+  taskId: string;
+  kind: DaemonTaskChangedKind;
+  status: DaemonTaskChangedStatus;
+  /** Elapsed task time, computed by the same formula the roster uses. */
+  runtimeMs: number;
+  [key: string]: unknown;
+}
+
+export type DaemonTaskChangedEvent = DaemonEventEnvelope<
+  typeof TASK_CHANGED_EVENT,
+  DaemonTaskChangedData
 >;
 
 export interface DaemonArtifactChangedData {
@@ -1293,6 +1334,7 @@ export type DaemonTurnEvent = DaemonTurnCompleteEvent | DaemonTurnErrorEvent;
 export type KnownDaemonEvent =
   | DaemonSessionEvent
   | DaemonSourceChangedEvent
+  | DaemonTaskChangedEvent
   | DaemonControlEvent
   | DaemonStreamLifecycleEvent
   | DaemonMcpGuardrailEvent
@@ -1705,6 +1747,23 @@ export function asKnownDaemonEvent(
         Number(event.data['revision']) >= 0
         ? (event as DaemonSourceChangedEvent)
         : undefined;
+    case TASK_CHANGED_EVENT: {
+      const data = event.data;
+      if (!isRecord(data)) return undefined;
+      const kind = data['kind'];
+      const status = data['status'];
+      const runtimeMs = data['runtimeMs'];
+      return typeof data['sessionId'] === 'string' &&
+        typeof data['taskId'] === 'string' &&
+        typeof kind === 'string' &&
+        TASK_CHANGED_KIND_VALUES.includes(kind) &&
+        typeof status === 'string' &&
+        TASK_CHANGED_STATUS_VALUES.includes(status) &&
+        typeof runtimeMs === 'number' &&
+        Number.isFinite(runtimeMs)
+        ? (event as DaemonTaskChangedEvent)
+        : undefined;
+    }
     case 'artifact_changed':
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
@@ -2250,6 +2309,7 @@ export function reduceDaemonSessionEvent(
     case 'extensions_changed':
     case 'artifact_changed':
     case 'source_changed':
+    case TASK_CHANGED_EVENT:
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:

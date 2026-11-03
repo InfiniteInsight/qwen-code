@@ -46,7 +46,12 @@ const agentSidecarCache = new Map<
   }
 >();
 
-function runtimeMs(
+/**
+ * Elapsed task time. Exported because the `task_changed` frame computes the
+ * same field: with the roster poll and the frame both live, a second formula
+ * would have them report different runtimes for one task.
+ */
+export function runtimeMs(
   entry: { startTime: number; endTime?: number },
   now: number,
 ): number {

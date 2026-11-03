@@ -600,6 +600,14 @@ export const ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS = 60_000;
 export const ACTIVE_WORK_STALE_INTERVALS = 3;
 export const ACTIVE_WORK_NOTIFICATION_METHOD =
   'qwen/notify/channel/active-work';
+/**
+ * Child-to-daemon method for one background-task transition. Carries
+ * `{ v, sessionId, taskId, kind, status, runtimeMs }` and is promoted to the
+ * session-scoped `task_changed` SSE frame by `BridgeClient.extNotification`.
+ * Unknown methods are dropped silently there, so the emitter and this literal
+ * ship together or the transitions vanish without an error.
+ */
+export const TASK_EVENT_NOTIFICATION_METHOD = 'qwen/notify/session/task-event';
 export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
 /** Bound on the conditional-close round trip. Its own constant rather than the
  *  handshake timeout: this runs on the automatic-cleanup path, where waiting

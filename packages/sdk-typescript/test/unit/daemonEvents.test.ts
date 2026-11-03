@@ -15,6 +15,7 @@ import {
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  TASK_CHANGED_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
@@ -3801,5 +3802,94 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.recordingDegraded).toBe(false);
     });
+  });
+});
+
+describe('task_changed (background task lifecycle frame)', () => {
+  // The bridge publishes exactly these five fields; a frame the validator
+  // rejects is indistinguishable, at the subscriber, from a task that never
+  // changed at all, so the accepted shape has to be pinned here.
+  const frame = (data: Record<string, unknown>) =>
+    ({
+      v: 1,
+      type: TASK_CHANGED_EVENT,
+      data: {
+        sessionId: 'session-1',
+        taskId: 'task-1',
+        kind: 'shell',
+        status: 'running',
+        runtimeMs: 1234,
+        ...data,
+      },
+    }) as DaemonEvent;
+
+  it('is a registered known event type', () => {
+    expect(TASK_CHANGED_EVENT).toBe('task_changed');
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(TASK_CHANGED_EVENT);
+    expect(isDaemonEventType(TASK_CHANGED_EVENT)).toBe(true);
+  });
+
+  it('admits the frame the bridge publishes', () => {
+    expect(asKnownDaemonEvent(frame({}))).toEqual(frame({}));
+  });
+
+  it.each([
+    ['agent', 'completed'],
+    ['shell', 'failed'],
+    ['monitor', 'cancelled'],
+    ['workflow', 'running'],
+  ])('admits kind=%s status=%s', (kind, status) => {
+    expect(asKnownDaemonEvent(frame({ kind, status }))).toBeDefined();
+  });
+
+  it('admits the intermediate pausing status a workflow run reaches', () => {
+    // `WorkflowStatus` includes 'pausing' and the roster serializes it raw, so
+    // a validator that only allowed the five lifecycle states would drop the
+    // frame while the viewer still rendered that row as live.
+    expect(
+      asKnownDaemonEvent(frame({ kind: 'workflow', status: 'pausing' })),
+    ).toBeDefined();
+  });
+
+  it.each([
+    ['an unknown kind', { kind: 'cron' }],
+    ['an unknown status', { status: 'pending' }],
+    ['a missing taskId', { taskId: undefined }],
+    ['a non-string taskId', { taskId: 7 }],
+    ['a missing runtimeMs', { runtimeMs: undefined }],
+    ['a non-numeric runtimeMs', { runtimeMs: '1234' }],
+    ['a NaN runtimeMs', { runtimeMs: Number.NaN }],
+    ['an infinite runtimeMs', { runtimeMs: Number.POSITIVE_INFINITY }],
+  ])('drops a frame carrying %s', (_label, data) => {
+    expect(asKnownDaemonEvent(frame(data))).toBeUndefined();
+  });
+
+  it('drops a frame with no data', () => {
+    expect(
+      asKnownDaemonEvent({ v: 1, type: TASK_CHANGED_EVENT } as DaemonEvent),
+    ).toBeUndefined();
+  });
+
+  it('is bookkeeping for the session reducer', () => {
+    const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+      v: 1,
+      type: 'session_update',
+      data: { sessionId: 'session-1', update: {} },
+    });
+    const next = reduceDaemonSessionEvent(state, {
+      id: 10,
+      v: 1,
+      type: TASK_CHANGED_EVENT,
+      data: {
+        sessionId: 'session-1',
+        taskId: 'task-1',
+        kind: 'workflow',
+        status: 'pausing',
+        runtimeMs: 4200,
+      },
+    });
+
+    expect(next).toEqual({ ...state, lastEventId: 10 });
+    expect(next.unrecognizedKnownEventCount ?? 0).toBe(0);
   });
 });
