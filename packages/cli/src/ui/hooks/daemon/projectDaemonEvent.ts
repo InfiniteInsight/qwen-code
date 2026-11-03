@@ -224,11 +224,26 @@ function resolveToolStatus(
   meta: Record<string, unknown>,
   prevStatus: ToolCallStatus | undefined,
 ): ToolCallStatus {
-  if (typeof update['status'] === 'string') {
-    return mapToolStatus(update['status']);
-  }
   const lifecycle = asRecord(meta['toolLifecycle']);
   const outcome = lifecycle['outcome'] ?? lifecycle['executionStatus'];
+  const isMetaCancelled =
+    meta['toolStatus'] === 'cancelled' ||
+    meta['toolStatus'] === 'canceled' ||
+    meta['preparationDiscarded'] === true ||
+    outcome === 'cancelled' ||
+    outcome === 'canceled';
+  if (typeof update['status'] === 'string') {
+    if (
+      update['status'] === 'failed' &&
+      (isMetaCancelled || prevStatus === ToolCallStatus.Canceled)
+    ) {
+      return ToolCallStatus.Canceled;
+    }
+    return mapToolStatus(update['status']);
+  }
+  if (isMetaCancelled) {
+    return ToolCallStatus.Canceled;
+  }
   switch (outcome) {
     case 'success':
       return ToolCallStatus.Success;
@@ -607,7 +622,11 @@ function projectFrame(
       }
       const outcome = asRecord(data['outcome'])['outcome'] ?? data['outcome'];
       const cancelled = outcome === 'cancelled';
-      const callId = state.pendingPermission?.toolCallId;
+      const callId =
+        state.pendingPermission?.toolCallId ??
+        (typeof data['toolCallId'] === 'string'
+          ? data['toolCallId']
+          : undefined);
       return {
         state: {
           ...state,

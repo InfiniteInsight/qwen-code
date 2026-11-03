@@ -1394,4 +1394,70 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
       { type: 'gemini', text: 'The working tree is clean.' },
     ]);
   });
+
+  it('preserves ToolCallStatus.Canceled when terminal tool_call_update carries wire status failed (#249)', () => {
+    let s = initialDaemonProjectionState(SELF);
+
+    const apply = (frame: DaemonFrame) => {
+      const r = projectDaemonEvent(s, frame);
+      s = r.state;
+      return r;
+    };
+
+    // Case 1: permission_request -> permission_resolved { outcome: 'cancelled' } followed by terminal status: 'failed'
+    apply({
+      type: 'permission_request',
+      data: {
+        requestId: 'req_1',
+        toolCall: {
+          toolCallId: 'call_perm_cancel',
+          title: 'Write file',
+          status: 'pending',
+          _meta: { toolName: 'write_file' },
+        },
+        options: [],
+      },
+    });
+    apply({
+      type: 'permission_resolved',
+      data: {
+        requestId: 'req_1',
+        outcome: { outcome: 'cancelled' },
+      },
+    });
+    expect(pendingToolCallsOf(s)[0]?.status).toBe(ToolCallStatus.Canceled);
+
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_perm_cancel',
+        status: 'failed',
+        _meta: { toolName: 'write_file' },
+      }),
+    );
+    expect(pendingToolCallsOf(s)[0]?.status).toBe(ToolCallStatus.Canceled);
+
+    // Case 2: _meta.toolStatus === 'cancelled' on a replay/live terminal update
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call_meta_cancel',
+        title: 'Shell: sleep 10',
+        status: 'in_progress',
+        _meta: { toolName: 'run_shell_command' },
+      }),
+    );
+    apply(
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_meta_cancel',
+        status: 'failed',
+        _meta: {
+          toolName: 'run_shell_command',
+          toolStatus: 'cancelled',
+        },
+      }),
+    );
+    expect(pendingToolCallsOf(s)[1]?.status).toBe(ToolCallStatus.Canceled);
+  });
 });

@@ -3465,3 +3465,56 @@ it('marks goal runtime text as injected within the existing turn', () => {
     ),
   ).toMatchObject([{ _meta: { source: 'goal_runtime' } }]);
 });
+
+it('stamps _meta.toolStatus = cancelled on cancelled tool_result records while keeping wire status failed', () => {
+  const machine = createTranscriptReplayMachine();
+  updates(
+    machine,
+    record('assistant-1', 'assistant', {
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'run_shell_command',
+              args: { command: 'ls' },
+              id: 'call-cancel-1',
+            },
+          },
+        ],
+      },
+    }),
+  );
+  const out = updates(
+    machine,
+    record('result-cancel-1', 'tool_result', {
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-cancel-1',
+              name: 'run_shell_command',
+              response: { error: 'User cancelled tool execution.' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-cancel-1',
+        status: 'cancelled',
+      },
+    }),
+  );
+  expect(out).toMatchObject([
+    {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-cancel-1',
+      status: 'failed',
+      _meta: {
+        toolName: 'run_shell_command',
+        toolStatus: 'cancelled',
+      },
+    },
+  ]);
+});

@@ -117,6 +117,8 @@ export interface ToolCallResultParams {
   callId: string;
   /** Whether the tool execution succeeded */
   success: boolean;
+  /** Whether the tool call was cancelled rather than failing with an error */
+  cancelled?: boolean;
   /** The response parts from tool execution (maps to content in update event) */
   message: Part[];
   /** Display result from tool execution (maps to rawOutput in update event) */

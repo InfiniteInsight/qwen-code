@@ -425,9 +425,15 @@ describe('TranscriptModel', () => {
     const { m } = setup();
     m.upsertTool({ toolCallId: 'p', title: 'Agent', status: 'in_progress' });
     m.appendSubagentText('p', 'abc');
-    m.upsertSubagentTool({ toolCallId: 'k1', title: 'one', status: 'pending' }, 'p');
+    m.upsertSubagentTool(
+      { toolCallId: 'k1', title: 'one', status: 'pending' },
+      'p',
+    );
     m.appendSubagentText('p', 'de');
-    m.upsertSubagentTool({ toolCallId: 'k2', title: 'two', status: 'pending' }, 'p');
+    m.upsertSubagentTool(
+      { toolCallId: 'k2', title: 'two', status: 'pending' },
+      'p',
+    );
     m.upsertSubagentTool({ toolCallId: 'k1', status: 'completed' }, 'p');
     expect(m.items[0].sub?.tools.map((t) => [t.id, t.textAt])).toEqual([
       ['k1', 3],
@@ -439,7 +445,10 @@ describe('TranscriptModel', () => {
     const { m } = setup();
     m.upsertTool({ toolCallId: 'p', title: 'Agent', status: 'in_progress' });
     m.appendSubagentText('p', 'de');
-    m.upsertSubagentTool({ toolCallId: 'k2', title: 'two', status: 'pending' }, 'p');
+    m.upsertSubagentTool(
+      { toolCallId: 'k2', title: 'two', status: 'pending' },
+      'p',
+    );
     const ev = (n: number, data: Record<string, unknown>) => ({
       v: 1,
       type: 'session_update',
@@ -453,9 +462,24 @@ describe('TranscriptModel', () => {
       },
     });
     const older = api.replayStoredPage([
-      ev(1, { sessionUpdate: 'tool_call', toolCallId: 'p', title: 'Agent', status: 'in_progress' }),
-      ev(2, { sessionUpdate: 'agent_message_chunk', content: { text: 'abc' }, _meta: { parentToolCallId: 'p' } }),
-      ev(3, { sessionUpdate: 'tool_call', toolCallId: 'k1', title: 'one', status: 'completed', _meta: { parentToolCallId: 'p' } }),
+      ev(1, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'p',
+        title: 'Agent',
+        status: 'in_progress',
+      }),
+      ev(2, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { text: 'abc' },
+        _meta: { parentToolCallId: 'p' },
+      }),
+      ev(3, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'k1',
+        title: 'one',
+        status: 'completed',
+        _meta: { parentToolCallId: 'p' },
+      }),
     ]);
     m.prependItems(older);
     const sub = m.items.find((i) => i.toolCallId === 'p')?.sub;
@@ -1305,6 +1329,83 @@ describe('TranscriptModel', () => {
       });
       m.addUser('hi');
       expect(reportError).toHaveBeenCalledWith(boom);
+    });
+  });
+
+  describe('cancelled tool call resolution (#249)', () => {
+    it('resolves _meta.toolStatus = cancelled, preparationDiscarded, and toolLifecycle.outcome = cancelled as cancelled despite wire status failed', () => {
+      const { m } = setup();
+
+      // 1. Live lifecycle cancelled frame followed by wire status: 'failed'
+      m.upsertTool({
+        sessionUpdate: 'tool_call',
+        toolCallId: 't_life',
+        title: 'Run shell',
+        status: 'in_progress',
+      });
+      m.upsertTool({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 't_life',
+        _meta: {
+          toolLifecycle: {
+            phase: 'ended',
+            outcome: 'cancelled',
+            executionStatus: 'cancelled',
+          },
+        },
+      });
+      expect(m.items[0].status).toBe('cancelled');
+      m.upsertTool({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 't_life',
+        status: 'failed',
+      });
+      expect(m.items[0].status).toBe('cancelled');
+
+      // 2. Replay/live terminal update carrying _meta.toolStatus = 'cancelled'
+      m.upsertTool({
+        sessionUpdate: 'tool_call',
+        toolCallId: 't_meta',
+        title: 'Write file',
+        status: 'pending',
+      });
+      m.upsertTool({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 't_meta',
+        status: 'failed',
+        _meta: { toolName: 'write_file', toolStatus: 'cancelled' },
+      });
+      expect(m.items[1].status).toBe('cancelled');
+
+      // 3. Discarded preparation frame carrying _meta.preparationDiscarded = true
+      m.upsertTool({
+        sessionUpdate: 'tool_call',
+        toolCallId: 't_prep',
+        title: 'Read file',
+        status: 'pending',
+      });
+      m.upsertTool({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 't_prep',
+        status: 'failed',
+        _meta: { phase: 'preparing', preparationDiscarded: true },
+      });
+      expect(m.items[2].status).toBe('cancelled');
+    });
+
+    it('resolves subagent tool cancellation and lifecycle outcomes via toolStatusOf', () => {
+      const { m } = setup();
+      m.upsertTool({ toolCallId: 'p', title: 'Agent', status: 'in_progress' });
+      m.upsertSubagentTool(
+        {
+          toolCallId: 'sub_1',
+          title: 'Grep',
+          status: 'failed',
+          _meta: { toolStatus: 'cancelled' },
+        },
+        'p',
+      );
+      expect(m.items[0].sub?.tools[0]?.status).toBe('cancelled');
     });
   });
 });
