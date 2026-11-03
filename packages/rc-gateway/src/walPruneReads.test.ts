@@ -108,4 +108,31 @@ describe('SessionWal append reads', () => {
       earliestAvailableId: 19,
     });
   });
+
+  /**
+   * Compaction (#226) reads the active segment, so it must stay off this path.
+   * What keeps it off is the trigger being scoped to bytes physically inside
+   * the active segment. Here every append rotates, so the frames the bound drops
+   * sit in rotated files that pruneEmptySegments() deletes whole; a tally that
+   * charged those too would cross its trigger on every append and rewrite the
+   * segment each time. Checked by mutation: dropping the scoping makes this test
+   * record 28 segment reads, which is the per-append segment scan that starved
+   * the event loop at 55.6ms.
+   */
+  it('reads nothing with compaction armed, because the dropped bytes are not in the active segment', () => {
+    const wal = new SessionWal({
+      dir,
+      sessionId: SESSION_ID,
+      maxEvents: 4,
+      segmentMaxBytes: 1,
+      compactAfterBytes: 1,
+    });
+    for (let id = 1; id <= 12; id++) wal.append(frame(id));
+
+    segmentReads.length = 0;
+    for (let id = 13; id <= 40; id++) wal.append(frame(id));
+
+    expect(segmentReads).toEqual([]);
+    expect(wal.earliestId()).toBe(37);
+  });
 });

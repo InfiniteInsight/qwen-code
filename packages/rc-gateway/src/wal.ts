@@ -24,6 +24,7 @@
 import {
   closeSync,
   existsSync,
+  fsyncSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -38,6 +39,14 @@ import { join } from 'node:path';
 
 /** Width of the big-endian length prefix that precedes each JSON frame. */
 const LENGTH_PREFIX_BYTES = 4;
+
+/**
+ * Floor for the compaction trigger: never rewrite the active segment to reclaim
+ * less than this. Below it the read + rewrite + fsync costs more than the
+ * space it returns, and a session writing small frames would pay a rewrite on
+ * nearly every retention drop.
+ */
+const COMPACT_MIN_DEAD_BYTES = 256 * 1024;
 
 /**
  * The frame shape stored in the WAL. Mirrors the daemon's DaemonEvent shape
@@ -67,12 +76,17 @@ export type ReplayResult =
  *
  * `walSegmentMaxBytes` is sized to the retention window, not to a round number.
  * Measured over 186,034 live frames the median frame is ~310 B and the mean
- * 422 B, so the 10,000-frame window costs 3.2-4.0 MB. `pruneEmptySegments()`
- * reclaims only rotated segments and never the active one (#226), so the cap on
- * the active segment is also the cap on how much dead data a session can sit on
- * while it is still inside its window. At 16 MB the cap was 4-5x the whole
- * window, so rotation, the only thing that makes bytes reclaimable, rarely
- * happened. 4 MB fits one window in one segment.
+ * 422 B, so the 10,000-frame window costs 3.2-4.0 MB. At 16 MB the cap was 4-5x
+ * the whole window, so rotation, the thing that makes a segment deletable at
+ * all, rarely happened. 4 MB fits one window in one segment.
+ *
+ * The cap is not by itself a bound on dead bytes. Retention drops frames from
+ * the head of the window, while disk is reclaimed only by whole-segment
+ * `rmSync` of rotated files and by compactActiveSegment()'s rewrite of the
+ * active one, so the unreachable prefix of the active file sits there until it
+ * reaches the compaction trigger: half the segment cap, floored at
+ * COMPACT_MIN_DEAD_BYTES. With these defaults a session can hold under 2 MB of
+ * dead bytes, against ~12 MB at the old 16 MB cap.
  */
 export const WAL_DEFAULTS = {
   walMaxEvents: 10_000,
@@ -90,6 +104,13 @@ export interface SessionWalOptions {
   maxEvents?: number;
   /** Retain events newer than now - horizonSec (older bound wins). */
   horizonSec?: number;
+  /**
+   * Rewrite the active segment once this many bytes of it have fallen out of
+   * the retention window. Defaults to half of segmentMaxBytes, floored at
+   * COMPACT_MIN_DEAD_BYTES. Raise it to trade disk for fewer rewrites; there is
+   * no way to turn compaction off, since that is what bounds dead bytes on disk.
+   */
+  compactAfterBytes?: number;
   /** Injectable clock (epoch ms) for horizon tests. Defaults to Date.now. */
   now?: () => number;
 }
@@ -136,6 +157,24 @@ export class SessionWal {
    * A `null` value is a read that found no decodable frame (empty or corrupt).
    */
   private segLastId = new Map<number, number | null>();
+  /**
+   * How many of the frames in `frames` are physically in the ACTIVE segment.
+   * Appends add to the end of both the list and the file, so the active file
+   * always holds the newest `activeFrameCount` entries of the sequence; that is
+   * what lets compaction tell which dropped frames were its business without
+   * reading the segment. Reset by rotate() (the reopened file holds nothing) and
+   * recomputed by recover().
+   */
+  private activeFrameCount = 0;
+  /**
+   * Bytes at the head of the active segment that no retained frame occupies,
+   * which is disk that `rmSync` can never reach because it is not a whole
+   * rotated segment. Accumulated by enforceBounds() from frame sizes it already
+   * has, so it costs no read; reset by the rewrite that reclaims it and by
+   * rotate(), which moves the dead head into a segment that rmSync can take.
+   */
+  private deadBytes = 0;
+  private readonly compactAfterBytes: number;
   /** Set when dropped from the registry; forces a resync before the next write. */
   private evicted = false;
   private _earliest: number | null = null;
@@ -150,6 +189,11 @@ export class SessionWal {
     this.maxEvents = opts.maxEvents ?? WAL_DEFAULTS.walMaxEvents;
     this.horizonSec = opts.horizonSec ?? WAL_DEFAULTS.walHorizonSec;
     this.now = opts.now ?? Date.now;
+    // Half a segment of dead bytes is the break-even point: below it the
+    // rewrite reclaims less than the segment it would have rotated into.
+    this.compactAfterBytes =
+      opts.compactAfterBytes ??
+      Math.max(COMPACT_MIN_DEAD_BYTES, Math.floor(this.segmentMaxBytes / 2));
 
     // Owner-only: the log holds conversation text. The CLI creates the root
     // this subdirectory the same way at boot (cli.ts prepareSessionWalDir).
@@ -219,6 +263,7 @@ export class SessionWal {
 
     const appendedAtMs = this.now();
     this.activeBytes += encoded.length;
+    this.activeFrameCount += 1;
     this.frames.push({
       id: frame.id,
       appendedAtMs,
@@ -376,14 +421,21 @@ export class SessionWal {
     this.segLastId.clear();
     this._earliest = null;
     this._latest = null;
+    // A fresh scan sees only retained-on-disk bytes, so there is no dead head
+    // to charge until appends start dropping frames again.
+    this.activeFrameCount = 0;
+    this.deadBytes = 0;
 
     for (const seg of this.segmentsOldestToNewest()) {
       // Use the file mtime as a best-effort append time for recovered frames so
       // the horizon bound still applies across restarts.
       const mtimeMs = statSync(seg).mtimeMs;
+      const suffix = this.suffixOfPath(seg);
       let last: number | null = null;
+      let decoded = 0;
       for (const { frame, frameBytes } of decodeSegmentWithSizes(seg)) {
         last = frame.id;
+        decoded += 1;
         this.frames.push({ id: frame.id, appendedAtMs: mtimeMs, frameBytes });
         if (this._earliest === null) {
           this._earliest = frame.id;
@@ -395,7 +447,10 @@ export class SessionWal {
           this._latest = frame.id;
         }
       }
-      this.segLastId.set(this.suffixOfPath(seg), last);
+      this.segLastId.set(suffix, last);
+      if (suffix === 0) {
+        this.activeFrameCount = decoded;
+      }
     }
 
     if (existsSync(this.activePath)) {
@@ -424,6 +479,11 @@ export class SessionWal {
     for (const [n, last] of this.segLastId) shifted.set(n + 1, last);
     this.segLastId = shifted;
     this.activeBytes = 0;
+    // The renamed-away file took the active segment's frames (and any dead head
+    // it was holding) with it, where pruneEmptySegments() can delete it whole.
+    // The reopened segment holds no frame yet.
+    this.activeFrameCount = 0;
+    this.deadBytes = 0;
     // Eagerly reopen so the active segment exists as an empty file even before
     // the next append.
     this.ensureOpen();
@@ -461,6 +521,19 @@ export class SessionWal {
       return;
     }
 
+    // Charge the dropped bytes that were physically in the active segment. The
+    // drop takes from the head of the sequence and the active file holds its
+    // newest `activeFrameCount` entries, so the overlap is the tail of the drop
+    // range; frames dropped from further back live in rotated segments, where
+    // pruneEmptySegments() below already deletes the whole file.
+    const firstActiveIdx = this.frames.length - this.activeFrameCount;
+    if (dropCount > firstActiveIdx) {
+      for (let i = Math.max(0, firstActiveIdx); i < dropCount; i++) {
+        this.deadBytes += this.frames[i]!.frameBytes;
+      }
+      this.activeFrameCount -= dropCount - Math.max(0, firstActiveIdx);
+    }
+
     this.frames = this.frames.slice(dropCount);
     this._earliest = this.frames.length > 0 ? this.frames[0]!.id : null;
     if (this.frames.length === 0) {
@@ -468,6 +541,101 @@ export class SessionWal {
     }
 
     this.pruneEmptySegments();
+    if (this.deadBytes >= this.compactAfterBytes) {
+      this.compactActiveSegment();
+    }
+  }
+
+  /**
+   * Rewrite the active segment so the retained frames start at byte 0.
+   *
+   * Retention was enforced in memory plus whole-segment `rmSync`, and never on
+   * the active file, so a session whose window had slid forward kept its dead
+   * prefix on disk until it rotated (#226). The session that filled the old
+   * 16 MB cap held ~4 MB of reachable frames sitting on ~12 MB of unreachable
+   * ones, and nothing could reclaim them while the session stayed open.
+   *
+   * Two rules keep this off the hot path and off the data-loss path:
+   *
+   * - It runs only when enforceBounds()'s dead-byte tally crosses
+   *   compactAfterBytes, never from a scan, so appending past the retention
+   *   bound still reads no segment (see walPruneReads.test.ts). One read pays
+   *   for one segment's worth of reclamation.
+   * - It refuses to rewrite unless the file decodes end to end. A frame the
+   *   scanner cannot parse stops the scan, which hides every valid frame behind
+   *   it; keeping only what decoded would delete reachable events.
+   *
+   * The write goes to a temp file that is fsynced before the rename, so a crash
+   * mid-rewrite leaves the previous segment intact rather than a half-written
+   * one. The fd is closed before the rename because a still-open fd would keep
+   * appending to the unlinked inode.
+   */
+  private compactActiveSegment(): void {
+    // Spend the tally either way: a skipped or failed rewrite must not make the
+    // next append read the segment too, so a retry waits for another
+    // compactAfterBytes of dead data.
+    this.deadBytes = 0;
+    if (this.evicted) {
+      return;
+    }
+
+    let buf: Buffer;
+    try {
+      buf = readFileSync(this.activePath);
+    } catch {
+      return;
+    }
+
+    // subarray() views share `buf`, so collecting them costs nothing until the
+    // retained tail is concatenated.
+    const decoded: Buffer[] = [];
+    let offset = 0;
+    for (const { frameBytes } of decodeBuffer(buf)) {
+      decoded.push(buf.subarray(offset, offset + frameBytes));
+      offset += frameBytes;
+    }
+    if (offset !== buf.length) {
+      return;
+    }
+
+    // Retained frames are a contiguous suffix of the append sequence, so the
+    // ones in this file are simply its newest `keep` frames, by position. Ids
+    // cannot be used for this: fork and rewind markers land below the current
+    // end, so file order is not id order.
+    const keep = Math.min(this.frames.length, decoded.length);
+    if (keep >= decoded.length) {
+      return;
+    }
+
+    const out = Buffer.concat(decoded.slice(decoded.length - keep));
+    const tmpPath = `${this.activePath}.compact`;
+    try {
+      const tmpFd = openSync(tmpPath, 'w', 0o600);
+      try {
+        // writeSync can return short; a partial rewrite would truncate the live
+        // window, so it is driven to completion here.
+        let written = 0;
+        while (written < out.length) {
+          written += writeSync(tmpFd, out, written, out.length - written);
+        }
+        fsyncSync(tmpFd);
+      } finally {
+        closeSync(tmpFd);
+      }
+      this.close();
+      renameSync(tmpPath, this.activePath);
+      this.activeBytes = out.length;
+      this.activeFrameCount = keep;
+      if (keep === 0) {
+        this.segLastId.set(0, null);
+      }
+    } catch {
+      // The append that triggered this must not fail because its reclaim did:
+      // the old segment is untouched, so the only cost is deferred reclamation.
+      rmSync(tmpPath, { force: true });
+    } finally {
+      this.ensureOpen();
+    }
   }
 
   /**
