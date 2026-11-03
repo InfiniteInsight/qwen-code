@@ -416,6 +416,83 @@ describe('SessionWal', () => {
       wal.close();
     });
   });
+
+  describe('the recovered index (#239)', () => {
+    const activePath = () => join(dir, 'wal', 'sess-1.log');
+    const DAY_MS = 86_400_000;
+
+    it('bounds the index at open, not on the first append', () => {
+      const seed = new SessionWal({ dir, sessionId: 'sess-1' });
+      for (let id = 1; id <= 40; id++) seed.append(makeFrame(id));
+      seed.close();
+      const before = readFileSync(activePath());
+
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        maxEvents: 4,
+        compactAfterBytes: 256,
+      });
+
+      // The reopened handle used to report every frame the directory held,
+      // 40 here against a bound of 4, and held them until its first append,
+      // which a read-only watcher never makes.
+      expect(wal.count()).toBe(4);
+      expect(wal.earliestId()).toBe(37);
+      expect(wal.latestId()).toBe(40);
+      // Bounding at open is bookkeeping. Nothing was written, so opening a WAL
+      // still cannot take bytes out of one.
+      expect(readFileSync(activePath())).toEqual(before);
+      expect(readdirSync(join(dir, 'wal'))).toEqual(['sess-1.log']);
+
+      // The dead head the bound charged at open is what the next append reclaims.
+      wal.append(makeFrame(41));
+      expect([...decodeSegment(activePath())].map((f) => f.id)).toEqual([
+        38, 39, 40, 41,
+      ]);
+      wal.close();
+    });
+
+    it('keeps the newest frame when every recovered frame is past the horizon', () => {
+      // recover() stamps each frame with its segment's mtime rather than the
+      // frame's own timestamp, so a session idle for longer than the horizon
+      // comes back with EVERY recovered frame below the cutoff. The bound would
+      // then drop the entire index.
+      const seed = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        segmentMaxBytes: 400,
+        maxEvents: 1000,
+      });
+      for (let id = 1; id <= 10; id++) seed.append(makeFrame(id));
+      seed.close();
+
+      const filesBefore = readdirSync(join(dir, 'wal'));
+      expect(
+        filesBefore.length,
+        'the seed must have rotated, so there is a segment to lose',
+      ).toBeGreaterThan(1);
+      const activeBefore = readFileSync(activePath());
+
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        segmentMaxBytes: 400,
+        maxEvents: 1000,
+        now: () => Date.now() + 2 * DAY_MS,
+      });
+
+      expect(wal.count()).toBe(1);
+      expect(wal.latestId()).toBe(10);
+      expect(wal.earliestId()).toBe(10);
+      // This is the arithmetic the four id-assigning callers run. Emptied, it
+      // hands out id 1 below ids the log already holds.
+      expect((wal.latestId() ?? 0) + 1).toBe(11);
+      expect(readdirSync(join(dir, 'wal'))).toEqual(filesBefore);
+      expect(readFileSync(activePath())).toEqual(activeBefore);
+      wal.close();
+    });
+  });
 });
 
 describe('encodeFrame / decodeSegment', () => {

@@ -294,6 +294,7 @@ export class SessionWal {
       // whole 6.9 MB moved to .log.1. Apply the bound and reclaim first, and
       // rotate only if what is genuinely retained still will not fit.
       this.applyBound();
+      this.pruneEmptySegments();
       if (this.deadBytes > 0) {
         this.reclaimDeadHead();
       }
@@ -472,6 +473,21 @@ export class SessionWal {
     if (existsSync(this.activePath)) {
       this.activeBytes = statSync(this.activePath).size;
     }
+
+    // #239. Bound the recovered index here instead of leaving it to the first
+    // append. Without this a handle that only reads holds every frame the
+    // directory has ever kept: the incident's live session had 12,363 frames in
+    // an index bounded at 10,000, ~3.66 MiB of frame bodies pinned for a watcher
+    // whose replay gate refuses anything below the window anyway, and a `count()`
+    // far over the bound. Dead bytes are charged here so the next append reclaims
+    // them through the trigger rather than through a bigger rotate.
+    //
+    // `applyBound()` is deliberately disk-inert for this call site (see its
+    // note): opening a WAL must not delete segments, and an index whose frames
+    // are ALL older than the horizon must still retain its newest frame, since
+    // emptying it here would report a healthy session as having lost its
+    // sequence and would take `replayFrom()`'s `no_wal` branch.
+    this.applyBound();
   }
 
   /**
@@ -512,6 +528,7 @@ export class SessionWal {
    */
   private enforceBounds(): void {
     this.applyBound();
+    this.pruneEmptySegments();
     if (this.deadBytes >= this.compactAfterBytes) {
       this.reclaimDeadHead();
     }
@@ -519,12 +536,19 @@ export class SessionWal {
 
   /**
    * Apply both retention bounds, the OLDER one winning: drop leading frames
-   * below the cut, then delete any rotated segment whose every frame is gone.
+   * below the cut and charge the ones that sat in the active file.
    *
    * Idempotent by construction. Once a drop has been applied the same inputs
    * compute a zero drop and charge nothing, so append() can apply the bound
    * early on its way to a rotation and still call enforceBounds() at the end of
    * the same write without charging the bytes twice.
+   *
+   * In-memory only. Emptying an index deletes the segment that held it, so the
+   * segment sweep lives in the two write-path callers (append()'s over-cap
+   * branch and enforceBounds()) rather than here. Those are the places that
+   * deliberately move bytes and take the disk with them. recover() calls this
+   * to bound what a reopened handle holds and must not delete a file it was
+   * only asked to open.
    */
   private applyBound(): void {
     if (this.frames.length === 0) {
@@ -548,7 +572,22 @@ export class SessionWal {
     }
 
     // Older bound wins => keep from the LATER (larger) of the two cut indices.
-    const dropCount = Math.max(keepFromCount, keepFromHorizon);
+    // Capped at all but the newest frame: an emptied index makes latestId()
+    // null, and the four callers that compute `(latestId() ?? 0) + 1` would
+    // anchor at id 1 below ids the log already holds. append() cannot reach the
+    // cap (its fresh frame is inside the horizon, and keepFromCount leaves one
+    // behind unless maxEvents is 0); recover() can, because recover() stamps
+    // every frame with the segment's mtime and a session idle past the horizon
+    // therefore has EVERY recovered frame below the cutoff. Measured on a
+    // backdated copy of a live session's bytes: dropCount came out 15,221 of
+    // 15,221, i.e. the whole index. Uncapped, that nulls _earliest, which makes
+    // pruneEmptySegments() delete every rotated segment on `earliest === null`
+    // and reclaimDeadHead() compute keep = 0, an empty rewrite. On the request
+    // path, with no frame written.
+    const dropCount = Math.min(
+      Math.max(keepFromCount, keepFromHorizon),
+      this.frames.length - 1,
+    );
     if (dropCount <= 0) {
       return;
     }
@@ -557,7 +596,8 @@ export class SessionWal {
     // drop takes from the head of the sequence and the active file holds its
     // newest `activeFrameCount` entries, so the overlap is the tail of the drop
     // range; frames dropped from further back live in rotated segments, where
-    // pruneEmptySegments() below already deletes the whole file.
+    // the write-path callers' pruneEmptySegments() deletes the whole file once
+    // this index no longer reaches into it.
     const firstActiveIdx = this.frames.length - this.activeFrameCount;
     if (dropCount > firstActiveIdx) {
       for (let i = Math.max(0, firstActiveIdx); i < dropCount; i++) {
@@ -571,8 +611,6 @@ export class SessionWal {
     if (this.frames.length === 0) {
       this._latest = null;
     }
-
-    this.pruneEmptySegments();
   }
 
   /**
