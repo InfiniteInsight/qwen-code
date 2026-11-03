@@ -264,7 +264,9 @@ export class SubAgentTracker {
           toolName: event.name,
           callId: event.callId,
           success: event.success,
-          cancelled: event.lifecycle?.outcome === 'cancelled',
+          cancelled:
+            event.lifecycle?.phase === 'ended' &&
+            event.lifecycle.outcome === 'cancelled',
           message: event.responseParts ?? [],
           resultDisplay: event.resultDisplay,
           boundaryArtifact: event.boundaryArtifact,
