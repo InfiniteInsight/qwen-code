@@ -76,17 +76,19 @@ export type ReplayResult =
  *
  * `walSegmentMaxBytes` is sized to the retention window, not to a round number.
  * Measured over 186,034 live frames the median frame is ~310 B and the mean
- * 422 B, so the 10,000-frame window costs 3.2-4.0 MB. At 16 MB the cap was 4-5x
- * the whole window, so rotation, the thing that makes a segment deletable at
- * all, rarely happened. 4 MB fits one window in one segment.
+ * 422 B, so the 10,000-frame window costs 3.1 MB at the median and 4.22 MB at
+ * the mean. At 16 MB the cap was 4-5x the whole window, so rotation, the thing
+ * that makes a segment deletable at all, rarely happened. 4 MB holds a median
+ * window in one segment; a mean-sized window spans two, which is fine now that
+ * rotation no longer carries dead bytes with it.
  *
- * The cap is not by itself a bound on dead bytes. Retention drops frames from
- * the head of the window, while disk is reclaimed only by whole-segment
- * `rmSync` of rotated files and by compactActiveSegment()'s rewrite of the
- * active one, so the unreachable prefix of the active file sits there until it
- * reaches the compaction trigger: half the segment cap, floored at
- * COMPACT_MIN_DEAD_BYTES. With these defaults a session can hold under 2 MB of
- * dead bytes, against ~12 MB at the old 16 MB cap.
+ * Two paths reclaim disk, and neither is a scan. Whole-segment `rmSync` takes a
+ * rotated file once every frame in it has fallen out of the window, and
+ * reclaimDeadHead() rewrites the active file to drop its unreachable head,
+ * either when half of it has died (half the cap, floored at
+ * COMPACT_MIN_DEAD_BYTES) or just before a rotation would have relocated that
+ * head into a rotated file. So the bytes a session can sit on beyond its window
+ * are bounded by roughly half a segment, against ~12 MB at the old 16 MB cap.
  */
 export const WAL_DEFAULTS = {
   walMaxEvents: 10_000,
@@ -283,7 +285,21 @@ export class SessionWal {
     }
 
     if (this.activeBytes > this.segmentMaxBytes) {
-      this.rotate();
+      // A rotation renames the whole file, dead head and all, into a rotated
+      // segment that nothing can shorten until it falls out of the window
+      // entire, so rotating a segment whose bound had already slipped forward
+      // relocates the dead bytes instead of freeing them. Measured on a live
+      // session's own copy: a 6.9 MB segment holding 5,222 frames past its
+      // 10,000 bound rotated on its next append and the log GREW, because the
+      // whole 6.9 MB moved to .log.1. Apply the bound and reclaim first, and
+      // rotate only if what is genuinely retained still will not fit.
+      this.applyBound();
+      if (this.deadBytes > 0) {
+        this.reclaimDeadHead();
+      }
+      if (this.activeBytes > this.segmentMaxBytes) {
+        this.rotate();
+      }
     }
     this.enforceBounds();
   }
@@ -495,6 +511,22 @@ export class SessionWal {
    * whose every frame has been dropped.
    */
   private enforceBounds(): void {
+    this.applyBound();
+    if (this.deadBytes >= this.compactAfterBytes) {
+      this.reclaimDeadHead();
+    }
+  }
+
+  /**
+   * Apply both retention bounds, the OLDER one winning: drop leading frames
+   * below the cut, then delete any rotated segment whose every frame is gone.
+   *
+   * Idempotent by construction. Once a drop has been applied the same inputs
+   * compute a zero drop and charge nothing, so append() can apply the bound
+   * early on its way to a rotation and still call enforceBounds() at the end of
+   * the same write without charging the bytes twice.
+   */
+  private applyBound(): void {
     if (this.frames.length === 0) {
       return;
     }
@@ -541,9 +573,6 @@ export class SessionWal {
     }
 
     this.pruneEmptySegments();
-    if (this.deadBytes >= this.compactAfterBytes) {
-      this.compactActiveSegment();
-    }
   }
 
   /**
@@ -557,20 +586,26 @@ export class SessionWal {
    *
    * Two rules keep this off the hot path and off the data-loss path:
    *
-   * - It runs only when enforceBounds()'s dead-byte tally crosses
-   *   compactAfterBytes, never from a scan, so appending past the retention
-   *   bound still reads no segment (see walPruneReads.test.ts). One read pays
-   *   for one segment's worth of reclamation.
+   * - Both callers act on bookkeeping, never on a scan. enforceBounds() calls
+   *   it once the dead-byte tally crosses compactAfterBytes; append() calls it
+   *   when the segment is over its cap and about to rotate. Appending past the
+   *   retention bound therefore still reads no segment (see
+   *   walPruneReads.test.ts), so one read pays for a whole segment's worth of
+   *   reclamation rather than costing time on every event.
    * - It refuses to rewrite unless the file decodes end to end. A frame the
    *   scanner cannot parse stops the scan, which hides every valid frame behind
    *   it; keeping only what decoded would delete reachable events.
+   *
+   * `keep` is the lesser of the retained count and the frames actually in this
+   * file, which on a disagreement between bookkeeping and disk errs toward
+   * keeping bytes. That is the direction worth erring in.
    *
    * The write goes to a temp file that is fsynced before the rename, so a crash
    * mid-rewrite leaves the previous segment intact rather than a half-written
    * one. The fd is closed before the rename because a still-open fd would keep
    * appending to the unlinked inode.
    */
-  private compactActiveSegment(): void {
+  private reclaimDeadHead(): void {
     // Spend the tally either way: a skipped or failed rewrite must not make the
     // next append read the segment too, so a retry waits for another
     // compactAfterBytes of dead data.

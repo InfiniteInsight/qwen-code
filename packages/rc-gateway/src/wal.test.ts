@@ -278,6 +278,62 @@ describe('SessionWal', () => {
       wal.close();
     });
 
+    it('reclaims before rotating, so a segment that fits its window never rotates', () => {
+      // compactAfterBytes is unreachable on purpose, leaving only the reclaim
+      // that runs when the segment is over its cap. Without it the seventh
+      // append rotated, so .log.1 existed from then on and every rotated file
+      // carried its dead head with it.
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        segmentMaxBytes: 400,
+        maxEvents: 5,
+        compactAfterBytes: Number.MAX_SAFE_INTEGER,
+      });
+      for (let id = 1; id <= 200; id++) wal.append(makeFrame(id));
+
+      expect(readdirSync(join(dir, 'wal'))).toEqual(['sess-1.log']);
+      const onDisk = [...decodeSegment(activePath())].map((f) => f.id);
+      expect(onDisk.slice(-5)).toEqual([196, 197, 198, 199, 200]);
+      // Only the dead head that has not yet been reclaimed may sit above the
+      // window, and the file must still respect its cap.
+      expect(onDisk.length).toBeLessThanOrEqual(8);
+      expect(readFileSync(activePath()).length).toBeLessThanOrEqual(400);
+      wal.close();
+    });
+
+    it('does not carry a dead head into the rotated segment it creates', () => {
+      // Seed one segment with room under its own cap, then reopen it under a
+      // cap and a bound it no longer fits. That is the legacy shape on disk
+      // today: segments grown while the cap was 16 MB.
+      const seed = new SessionWal({ dir, sessionId: 'sess-1' });
+      for (let id = 1; id <= 40; id++) seed.append(makeFrame(id));
+      seed.close();
+      const before = readFileSync(activePath()).length;
+
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        segmentMaxBytes: 1024,
+        maxEvents: 4,
+        compactAfterBytes: Number.MAX_SAFE_INTEGER,
+      });
+      wal.append(makeFrame(41));
+
+      // 36 of the 41 frames are outside the window, so the reclaim runs first
+      // and what survives fits under the cap: nothing rotates, and the file
+      // ends smaller than it began. Rotating first moved all of them into
+      // .log.1, which is what the cap does to the oversized sessions sitting
+      // on disk right now.
+      expect(readdirSync(join(dir, 'wal'))).toEqual(['sess-1.log']);
+      const onDisk = [...decodeSegment(activePath())].map((f) => f.id);
+      expect(onDisk.slice(-4)).toEqual([38, 39, 40, 41]);
+      expect(readFileSync(activePath()).length).toBeLessThan(before);
+      expect(wal.count()).toBe(4);
+      expect(wal.earliestId()).toBe(38);
+      wal.close();
+    });
+
     it('keeps replay and the truncation signal intact across a reopen', () => {
       const wal = new SessionWal({
         dir,
