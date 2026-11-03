@@ -172,6 +172,7 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly toolName: string;
   readonly callId: string;
   readonly success: boolean;
+  readonly cancelled?: boolean;
   readonly message?: readonly unknown[];
   readonly resultDisplay?: unknown;
   readonly errorMessage?: string;
@@ -1005,6 +1006,7 @@ export function createTranscriptToolCallResultUpdate(
         toolName: options.toolName,
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+        ...(options.cancelled ? { toolStatus: 'cancelled' } : {}),
         ...(options.artifacts && options.artifacts.length > 0
           ? { artifacts: options.artifacts }
           : {}),
@@ -1659,6 +1661,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           result?.['status'] === undefined
             ? !result?.['error']
             : result['status'] === 'success' && !result['error'],
+        cancelled:
+          result?.['status'] === 'cancelled' ||
+          result?.['status'] === 'canceled',
         errorMessage: extractErrorMessage(result?.['error']),
         message: record.message?.parts,
         resultDisplay,

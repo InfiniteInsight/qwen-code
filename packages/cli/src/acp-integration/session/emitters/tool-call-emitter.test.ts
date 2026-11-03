@@ -1496,5 +1496,44 @@ describe('ToolCallEmitter', () => {
       expect(call._meta.provenance).toBe('mcp');
       expect(call._meta.serverId).toBe('fs');
     });
+
+    it('stamps _meta.toolStatus = cancelled on cancelled emitResult and emitError updates', async () => {
+      await emitter.emitResult({
+        toolName: 'run_shell_command',
+        callId: 'call-cancelled-res',
+        success: false,
+        cancelled: true,
+        message: [],
+        error: new Error('User cancelled tool execution.'),
+      });
+      await emitter.emitError(
+        'call-cancelled-err',
+        'run_shell_command',
+        new Error('User cancelled tool execution.'),
+        undefined,
+        { startedAt: 100, durationMs: 25, cancelled: true },
+      );
+
+      expect(sendUpdateSpy.mock.calls[0][0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-cancelled-res',
+        status: 'failed',
+        _meta: {
+          toolName: 'run_shell_command',
+          toolStatus: 'cancelled',
+        },
+      });
+      expect(sendUpdateSpy.mock.calls[1][0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-cancelled-err',
+        status: 'failed',
+        _meta: {
+          toolName: 'run_shell_command',
+          toolStatus: 'cancelled',
+          startedAt: 100,
+          durationMs: 25,
+        },
+      });
+    });
   });
 });

@@ -37,6 +37,43 @@
     cancelled: true,
   };
 
+  // Resolve a tool frame's status across explicit `u.status` and `_meta`
+  // cancellation/lifecycle markers. ACP's wire schema only permits
+  // pending|in_progress|completed|failed on `status`, so cancelled tools carry
+  // `status: 'failed'` with `_meta.toolStatus === 'cancelled'`,
+  // `_meta.preparationDiscarded === true`, or `_meta.toolLifecycle.outcome === 'cancelled'`.
+  function toolStatusOf(u, prevStatus) {
+    if (!u || typeof u !== 'object') return '';
+    var meta = u._meta && typeof u._meta === 'object' ? u._meta : null;
+    var lifecycle =
+      meta && meta.toolLifecycle && typeof meta.toolLifecycle === 'object'
+        ? meta.toolLifecycle
+        : null;
+    var outcome = lifecycle
+      ? strOr(lifecycle.outcome, '') || strOr(lifecycle.executionStatus, '')
+      : '';
+    if (
+      (meta &&
+        (meta.toolStatus === 'cancelled' ||
+          meta.toolStatus === 'canceled' ||
+          meta.preparationDiscarded === true)) ||
+      outcome === 'cancelled' ||
+      outcome === 'canceled'
+    ) {
+      return 'cancelled';
+    }
+    var raw = strOr(u.status, '');
+    if (raw === 'failed' && prevStatus === 'cancelled') return 'cancelled';
+    if (raw === 'canceled') return 'cancelled';
+    if (raw) return raw;
+    if (outcome === 'success') return 'completed';
+    if (outcome === 'error' || outcome === 'failed') return 'failed';
+    if (outcome === 'running' || (lifecycle && lifecycle.phase === 'started')) {
+      return prevStatus || 'in_progress';
+    }
+    return '';
+  }
+
   // PlanEntryStatus is pending | in_progress | completed (plus failed on the
   // replay path). Only a completed entry leaves the to-do list.
   var PLAN_DONE_STATUSES = { completed: true };
@@ -616,7 +653,6 @@
       var h = holderOf(parentId);
       if (!h) return;
       var id = strOr(u.toolCallId, '');
-      var status = strOr(u.status, '');
       var idx = subToolIndex.get(h.sub);
       if (!idx) {
         // A sub built on a page model and merged in: index what it holds.
@@ -627,6 +663,7 @@
         subToolIndex.set(h.sub, idx);
       }
       var entry = id ? idx.get(id) : null;
+      var status = toolStatusOf(u, entry ? entry.status : '');
       if (!entry) {
         // #110: textAt is how much of the child's text had arrived when this
         // call started, so a trace can put the call between the words said
@@ -656,10 +693,10 @@
     function upsertTool(u) {
       resetTurn();
       var id = strOr(u.toolCallId, '');
-      var status = strOr(u.status, '');
+      var tool = id ? toolIndex.get(id) : null;
+      var status = toolStatusOf(u, tool ? tool.status : '');
       var input = u.rawInput;
       var result = toolResult(u);
-      var tool = id ? toolIndex.get(id) : null;
       if (tool) {
         tool.label = toolLabel(u, id, tool.label);
         // #171: every Agent tool gets a status-less update
@@ -1450,6 +1487,7 @@
     },
     // The record id a frame carries, or undefined (#129).
     recordIdOf: recordIdOf,
+    toolStatusOf: toolStatusOf,
     turnErrorText: turnErrorText,
     userPartOf: userPartOf,
     userBlockOf: userBlockOf,

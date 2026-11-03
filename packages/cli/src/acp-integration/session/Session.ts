@@ -14660,6 +14660,7 @@ export class Session implements SessionContext {
               message: errorParts,
               error,
               success: false,
+              cancelled: opts.status === 'cancelled',
               artifacts: opts.settledMetadata.artifacts,
               persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
             });
@@ -14669,7 +14670,11 @@ export class Session implements SessionContext {
               toolName,
               error,
               undefined,
-              { startedAt: startTime, durationMs: Date.now() - startTime },
+              {
+                startedAt: startTime,
+                durationMs: Date.now() - startTime,
+                cancelled: opts.status === 'cancelled',
+              },
             );
           }
         } catch (emitError) {
@@ -17278,6 +17283,7 @@ export class Session implements SessionContext {
                 resultDisplay: toolResult.returnDisplay,
                 error: responseError,
                 success: succeeded,
+                cancelled: status === 'cancelled',
                 artifacts: settledArtifacts,
                 persistedOutputFiles: settledPersistedOutputFiles,
               });

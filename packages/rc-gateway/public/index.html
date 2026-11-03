@@ -13817,7 +13817,10 @@
           // #71: a running tool row is the better indicator while it lasts, and
           // the moment it settles is one of the gaps this indicator exists for,
           // so the frame carries its id and status to the quiet beat.
-          noteToolFrame(u.toolCallId, u.status);
+          const toolStatus = TranscriptModel.toolStatusOf(u);
+          if (su === 'tool_call' || toolStatus) {
+            noteToolFrame(u.toolCallId, toolStatus);
+          }
           return renderTool(u);
         }
         if (su === 'plan') return renderPlan(u.entries);

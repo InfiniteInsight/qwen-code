@@ -267,6 +267,7 @@ export class ToolCallEmitter extends BaseEmitter {
       toolName: params.toolName,
       callId: params.callId,
       success: params.success,
+      cancelled: params.cancelled,
       message: params.message,
       resultDisplay: stripBoundaryArtifactsFromRawOutput(params.resultDisplay),
       errorMessage: params.error?.message,
@@ -310,7 +311,7 @@ export class ToolCallEmitter extends BaseEmitter {
     toolName: string,
     error: Error,
     subagentMeta?: SubagentMeta,
-    timing?: { startedAt: number; durationMs: number },
+    timing?: { startedAt: number; durationMs: number; cancelled?: boolean },
   ): Promise<void> {
     this.preparedCallIds.delete(callId);
     this.preparedLifecycles.delete(callId);
@@ -318,14 +319,16 @@ export class ToolCallEmitter extends BaseEmitter {
       toolName,
       subagentMeta,
     );
+    const { cancelled, ...timingFields } = timing ?? {};
     await this.sendUpdate(
       createTranscriptToolCallResultUpdate({
         toolName,
         callId,
         success: false,
+        cancelled,
         errorMessage: error.message,
         extra: {
-          ...timing,
+          ...timingFields,
           ...subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
