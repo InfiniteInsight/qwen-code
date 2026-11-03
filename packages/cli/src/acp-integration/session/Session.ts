@@ -14543,6 +14543,7 @@ export class Session implements SessionContext {
       | { planId: string; sourceCallId: string }
       | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
+    let toolBuildSucceeded = false;
 
     const cleanupSubAgentTracking = () => {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
@@ -14722,6 +14723,14 @@ export class Session implements SessionContext {
           errorType: opts.status === 'error' ? opts.errorType : undefined,
         },
       });
+      if (
+        toolBuildSucceeded &&
+        opts.status === 'error' &&
+        !opts.recordInvalidToolParams &&
+        !opts.stopAfterPermissionCancel
+      ) {
+        clearDaemonInvalidToolParams(toolLoopState, toolName);
+      }
       const loopDetected =
         opts.recordInvalidToolParams === true &&
         !activeToolAbortSignal.aborted &&
@@ -14844,6 +14853,12 @@ export class Session implements SessionContext {
       const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
       if (bridgeCancellation) return bridgeCancellation;
       if ('error' in resolution) {
+        if (
+          resolution.targetName &&
+          resolution.targetName !== ToolNames.TOOL_CALL
+        ) {
+          clearDaemonInvalidToolParams(toolLoopState, ToolNames.TOOL_CALL);
+        }
         return earlyErrorResponse(resolution.error, toolName, {
           status: 'error',
           errorType: resolution.errorType,
@@ -14853,6 +14868,7 @@ export class Session implements SessionContext {
           invalidToolParamsName: resolution.targetName,
         });
       }
+      clearDaemonInvalidToolParams(toolLoopState, ToolNames.TOOL_CALL);
       toolName = resolution.tool.name;
       args = resolution.arguments;
       tool = resolution.tool;
@@ -15105,7 +15121,6 @@ export class Session implements SessionContext {
         // Get approval mode for hook context (defined outside try for catch block access)
         let approvalMode = this.config.getApprovalMode();
 
-        let toolBuildSucceeded = false;
         try {
           const buildInvocation = (input: Record<string, unknown>) => {
             const built = appExecution
@@ -17213,7 +17228,9 @@ export class Session implements SessionContext {
           terminalStatus = status;
           finishToolLifecycle(status);
           const succeeded = status === 'success';
-          if (succeeded) clearDaemonInvalidToolParams(toolLoopState, toolName);
+          if (status !== 'cancelled') {
+            clearDaemonInvalidToolParams(toolLoopState, toolName);
+          }
           const responseError =
             status === 'error' && toolResult.error
               ? new Error(toolResult.error.message)
