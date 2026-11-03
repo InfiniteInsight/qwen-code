@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mkdtempSync,
   readdirSync,
@@ -35,6 +35,46 @@ const {
   sweepWalDir,
   formatHostTabsLine,
 } = await import('./cli.js');
+
+/**
+ * Every variable `parseServeFlags` falls back to. A developer shell or a
+ * systemd drop-in can set any of them, and a test that expects the unset
+ * default then reads the host instead of the parser: on a gateway host that
+ * exports QWEN_RC_QWEN_BIN, `parseServeFlags([]).qwenBin` came back as a real
+ * path and a `toBeUndefined()` with nothing wrong with it went red. Hold the
+ * whole surface down for the suite instead of leaving each test to clear the
+ * ones it happens to think about.
+ */
+const PARSE_SERVE_FLAGS_ENV = [
+  'QWEN_RC_WAL_DIR',
+  'QWEN_RC_QWEN_BIN',
+  'QWEN_RC_LOOPBACK_BIND',
+  'QWEN_RC_DAEMON_URL',
+  'QWEN_RC_DAEMON_TOKEN',
+  'QWEN_RC_LLAMA_SWAP_URL',
+  'QWEN_RC_MAX_ATTACHMENT_BYTES',
+  'QWEN_RC_MAX_DAEMONS',
+  'QWEN_RC_PROMPT_TIMEOUT_SEC',
+  'QWEN_RC_NO_WAL',
+  'QWEN_RC_REOPEN_CRASHED_TABS',
+  'QWEN_RC_WAL_RETENTION_DAYS',
+  'QWEN_RC_WAL_MAX_MB',
+];
+
+let hostEnv: Record<string, string | undefined> = {};
+beforeEach(() => {
+  hostEnv = {};
+  for (const name of PARSE_SERVE_FLAGS_ENV) {
+    hostEnv[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+afterEach(() => {
+  for (const [name, value] of Object.entries(hostEnv)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 /** A handle that only records that it was stopped, plus a call counter. */
 function fakeHandle(onStop?: () => Promise<void> | void): {
