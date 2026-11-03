@@ -4,7 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolLifecycleEvent } from '@qwen-code/qwen-code-core';
+import type { ToolLifecycleEvent ,
+  compactToolResultDisplayForRecording,
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  toolResultBoundaryArtifact,
+  ToolNames,
+  Kind,
+  createToolLifecycle,
+  createDebugLogger,
+  type ToolResultDisplay,
+} from '@qwen-code/qwen-code-core';
 
 import { BaseEmitter } from './base-emitter.js';
 import { PlanEmitter } from './PlanEmitter.js';
@@ -21,15 +31,6 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from '@agentclientprotocol/sdk';
-import {
-  formatVisionBridgeNoticeDisplay,
-  isVisionBridgeNoticeDisplay,
-  toolResultBoundaryArtifact,
-  ToolNames,
-  Kind,
-  createToolLifecycle,
-  createDebugLogger,
-} from '@qwen-code/qwen-code-core';
 import {
   createTranscriptToolLifecycleUpdate,
   createTranscriptToolCallResultUpdate,
@@ -263,16 +264,21 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.subagentMeta,
     );
+    const compactedResultDisplay = compactToolResultDisplayForRecording(
+      stripBoundaryArtifactsFromRawOutput(params.resultDisplay) as
+        | ToolResultDisplay
+        | undefined,
+    );
     const update = createTranscriptToolCallResultUpdate({
       toolName: params.toolName,
       callId: params.callId,
       success: params.success,
       cancelled: params.cancelled,
       message: params.message,
-      resultDisplay: stripBoundaryArtifactsFromRawOutput(params.resultDisplay),
+      resultDisplay: compactedResultDisplay,
       errorMessage: params.error?.message,
       artifacts: params.artifacts,
-      contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
+      contentPrefix: buildToolResultContentPrefix(compactedResultDisplay),
       timestamp: params.timestamp,
       extra: {
         ...(params.startedAt !== undefined

@@ -624,6 +624,7 @@ export class DaemonSessionClient {
   consumeReplaySnapshot(): DaemonReplaySnapshot {
     const snapshot = this.replaySnapshot;
     this.replaySnapshot = { compactedReplay: [], liveJournal: [] };
+    delete this.state.updates;
     return snapshot;
   }
 

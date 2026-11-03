@@ -276,6 +276,45 @@ function areAllToolsTerminal(tools: IndividualToolCallDisplay[]): boolean {
   return tools.length > 0 && tools.every((t) => isTerminalToolStatus(t.status));
 }
 
+export const MAX_PENDING_THOUGHT_CHARS = 4_096;
+export const MAX_TOOL_RESULT_DISPLAY_CHARS = 32_000;
+
+function appendPendingThought(current: string, chunk: string): string {
+  if (!chunk || current.length >= MAX_PENDING_THOUGHT_CHARS) {
+    return current;
+  }
+  const remaining = MAX_PENDING_THOUGHT_CHARS - current.length;
+  return (
+    current + (chunk.length <= remaining ? chunk : chunk.slice(0, remaining))
+  );
+}
+
+function capToolResultText(text: string): string {
+  if (text.length <= MAX_TOOL_RESULT_DISPLAY_CHARS) return text;
+  return `${text.slice(0, MAX_TOOL_RESULT_DISPLAY_CHARS)}\n[... truncated from ${text.length} characters for CLI history display ...]`;
+}
+
+function isIgnoredSubagentOrProgressUpdate(
+  update: Record<string, unknown>,
+): boolean {
+  const meta = asRecord(update['_meta']);
+  if (
+    (update['sessionUpdate'] === 'tool_call' ||
+      update['sessionUpdate'] === 'tool_call_update') &&
+    update['status'] === 'in_progress' &&
+    typeof update['kind'] !== 'string' &&
+    (meta['shellProgress'] !== undefined || meta['subagentProgress'] === true)
+  ) {
+    return true;
+  }
+  const parent = meta['parentToolCallId'];
+  return (
+    typeof parent === 'string' &&
+    parent.length > 0 &&
+    parent !== update['toolCallId']
+  );
+}
+
 /** Join the text of ACP content blocks (`[{content:{text}}]`) into a string. */
 function resultTextOf(update: Record<string, unknown>): string | undefined {
   const content = update['content'];
@@ -289,10 +328,10 @@ function resultTextOf(update: Record<string, unknown>): string | undefined {
       })
       .filter(Boolean)
       .join('\n');
-    if (text) return text;
+    if (text) return capToolResultText(text);
   }
   return typeof update['rawOutput'] === 'string'
-    ? (update['rawOutput'] as string)
+    ? capToolResultText(update['rawOutput'] as string)
     : undefined;
 }
 
@@ -331,6 +370,17 @@ function upsertTool(
     resultDisplay: result ?? prev?.resultDisplay,
     renderOutputAsMarkdown: true,
   };
+  if (
+    prev &&
+    prev.name === next.name &&
+    prev.description === next.description &&
+    prev.status === next.status &&
+    prev.confirmationDetails === next.confirmationDetails &&
+    prev.resultDisplay === next.resultDisplay &&
+    prev.renderOutputAsMarkdown === next.renderOutputAsMarkdown
+  ) {
+    return tools;
+  }
   return prev
     ? tools.map((t) => (t.callId === callId ? next : t))
     : [...tools, next];
@@ -380,15 +430,26 @@ function flushBeforeToolActivity(state: DaemonProjectionState): {
   committed: HistoryItemWithoutId[];
   state: DaemonProjectionState;
 } {
+  if (state.pendingText.trim().length === 0) {
+    if (state.pendingText === '' && state.pendingThought === '') {
+      return { committed: [], state };
+    }
+    return {
+      committed: [],
+      state: {
+        ...state,
+        pendingText: '',
+        pendingThought: '',
+      },
+    };
+  }
   const committed: HistoryItemWithoutId[] = [];
   let tools = state.tools;
-  if (state.pendingText.trim().length > 0) {
-    if (areAllToolsTerminal(tools)) {
-      committed.push({ type: 'tool_group', tools });
-      tools = [];
-    }
-    committed.push({ type: 'gemini', text: state.pendingText });
+  if (areAllToolsTerminal(tools)) {
+    committed.push({ type: 'tool_group', tools });
+    tools = [];
   }
+  committed.push({ type: 'gemini', text: state.pendingText });
   return {
     committed,
     state: {
@@ -406,6 +467,9 @@ function projectSessionUpdate(
   originatorClientId: string | undefined,
 ): ProjectionResult {
   const update = asRecord(data['update']);
+  if (isIgnoredSubagentOrProgressUpdate(update)) {
+    return { state, committed: [] };
+  }
   const kind = update['sessionUpdate'];
   const text = textOf(update);
 
@@ -442,16 +506,26 @@ function projectSessionUpdate(
           state: {
             ...flushed.state,
             streamingState: StreamingState.Responding,
-            pendingThought: text,
+            pendingThought: appendPendingThought('', text),
           },
           committed: flushed.committed,
         };
+      }
+      const nextPendingThought = appendPendingThought(
+        state.pendingThought,
+        text,
+      );
+      if (
+        nextPendingThought === state.pendingThought &&
+        state.streamingState === StreamingState.Responding
+      ) {
+        return { state, committed: [] };
       }
       return {
         state: {
           ...state,
           streamingState: StreamingState.Responding,
-          pendingThought: state.pendingThought + text,
+          pendingThought: nextPendingThought,
         },
         committed: [],
       };
@@ -467,25 +541,38 @@ function projectSessionUpdate(
         tools = [];
         pendingThought = '';
       }
+      // A chunk with nothing to show is not evidence that a turn is
+      // running. The daemon sends such chunks for usage and for model
+      // request lifecycle markers, and keeps sending them AFTER
+      // `turn_complete` for background requests (the memory extractor),
+      // with no promptId or originator. Letting one set Responding
+      // reopened a finished turn: the tab kept its thinking row and
+      // `esc to cancel` after the reply had rendered (#195).
+      const nextStreamingState = hasChunkContent(update)
+        ? StreamingState.Responding
+        : state.streamingState;
+      const nextPendingText = state.pendingText + text;
+      const nextLastUsage = usage ?? state.lastUsage;
+      if (
+        committed.length === 0 &&
+        tools === state.tools &&
+        pendingThought === state.pendingThought &&
+        nextPendingText === state.pendingText &&
+        nextStreamingState === state.streamingState &&
+        nextLastUsage === state.lastUsage
+      ) {
+        return { state, committed: [] };
+      }
       return {
         state: {
           ...state,
-          // A chunk with nothing to show is not evidence that a turn is
-          // running. The daemon sends such chunks for usage and for model
-          // request lifecycle markers, and keeps sending them AFTER
-          // `turn_complete` for background requests (the memory extractor),
-          // with no promptId or originator. Letting one set Responding
-          // reopened a finished turn: the tab kept its thinking row and
-          // `esc to cancel` after the reply had rendered (#195).
-          streamingState: hasChunkContent(update)
-            ? StreamingState.Responding
-            : state.streamingState,
+          streamingState: nextStreamingState,
           tools,
           pendingThought,
           // Concatenate verbatim — a terminal chunk may carry empty text plus
           // `_meta.usage`; appending '' is a no-op.
-          pendingText: state.pendingText + text,
-          lastUsage: usage ?? state.lastUsage,
+          pendingText: nextPendingText,
+          lastUsage: nextLastUsage,
         },
         committed,
       };
@@ -494,11 +581,20 @@ function projectSessionUpdate(
     case 'tool_call':
     case 'tool_call_update': {
       const flushed = flushBeforeToolActivity(state);
+      const tools = upsertTool(flushed.state.tools, update);
+      if (
+        flushed.state === state &&
+        flushed.committed.length === 0 &&
+        tools === state.tools &&
+        state.streamingState === StreamingState.Responding
+      ) {
+        return { state, committed: [] };
+      }
       return {
         state: {
           ...flushed.state,
           streamingState: StreamingState.Responding,
-          tools: upsertTool(flushed.state.tools, update),
+          tools,
         },
         committed: flushed.committed,
       };

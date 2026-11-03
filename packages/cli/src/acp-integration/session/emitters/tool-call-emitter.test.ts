@@ -749,6 +749,32 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('should compact large live FileDiff bodies before emitting tool_call_update (#252)', async () => {
+      const fileDiff = '--- a/huge.ts\n+++ b/huge.ts\n@@ -1 +1 @@\n-old\n+new';
+      const largeBody = 'x'.repeat(20_000);
+
+      await emitter.emitResult({
+        toolName: 'edit',
+        callId: 'call-edit-huge',
+        success: true,
+        message: [],
+        resultDisplay: {
+          fileName: '/test/huge.ts',
+          originalContent: largeBody,
+          newContent: `${largeBody}\n// edited`,
+          fileDiff,
+        },
+      });
+
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+        fileName: '/test/huge.ts',
+        fileDiff,
+      });
+      expect(sendUpdateSpy.mock.calls[0][0].content).not.toContainEqual(
+        expect.objectContaining({ type: 'diff' }),
+      );
+    });
+
     it('should transform message parts to content', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',
