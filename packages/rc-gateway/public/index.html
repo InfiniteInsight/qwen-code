@@ -9556,31 +9556,90 @@
       // reading some other session does not stop the live one being polled.
       let runsSubject = null;
       let turnWasRunning = false;
+      // #230. A run's transitions arrive on `task_changed`, so the roster is no
+      // longer re-read to notice one. What that frame can do is move a row the
+      // read already drew; what it cannot do is draw a row the read never
+      // listed, because the wire carries no label, command, exit code or token
+      // count. So the frames are held here and replayed over every read (a frame
+      // that lands while a read is out must not be lost under its older answer),
+      // and an id no read has ever listed buys exactly one re-read, asked once
+      // per id so a burst of installs is one read rather than one each.
+      const taskFrames = new Map(); // taskId -> { at, status, ms }
+      const taskFrameAsked = new Set(); // ids whose row a frame already bought
+      // Ids a frame named while a read was already out. The answer to that read
+      // may predate them, so they are the only ones that can owe a second read:
+      // an id learned and paid for long ago must not re-arm one on every read
+      // that follows, which would be the poll back under another name.
+      const rosterDebt = new Set();
+      let rosterReadAt = 0; // this page's clock when these rows were read
+      let rosterIssueAt = 0; // ... and when the read that produced them went out
+      let rosterStale = false; // the stream closed: rows may have moved unseen
+      // Statuses whose clock is still accruing. `paused` and `pausing` belong
+      // here because the daemon grows runtimeMs for anything with no endTime
+      // (acp-bridge/src/tasksSnapshot.ts:49), so a paused run keeps counting.
+      const RUN_LIVE = ['running', 'paused', 'pausing'];
       function rosterRunning() {
         return roster.tasks.filter((t) => t.status === 'running');
       }
-      // Bounded by what the last read actually showed. A roster that was never
-      // read has nothing to re-read, and an empty one or a fully settled one
-      // starts no timer; only a row still `running` keeps it going.
-      function rosterNeedsPoll() {
-        return (
-          !!roster.sessionId &&
-          roster.listed &&
-          !rosterReading &&
-          rosterRunning().length > 0
-        );
+      function rosterLive() {
+        return roster.tasks.filter((t) => RUN_LIVE.includes(t.status));
       }
-      // Whether the shared interval has any reason to exist at all. This is not
-      // the same question as rosterNeedsPoll(): a read that is still out has no
-      // verdict yet, so it must keep the interval alive rather than look settled.
-      // Reading needsPoll here would clear the clock underneath its own request,
-      // and a fetch that never answers would then stop the poll for good.
+      // How long a row has run, on this page's clock. The base is the daemon's
+      // own subtraction, so no skew reaches it, and only a live row grows: with
+      // the poll retired nothing else ever reports a bigger number. Same shape
+      // as the agents sheet's running clock above (index.html:14554).
+      function rosterElapsed(t) {
+        const ms = t && typeof t.runtimeMs === 'number' ? t.runtimeMs : 0;
+        if (!rosterReadAt || !t || !RUN_LIVE.includes(t.status)) return ms;
+        return ms + Math.max(0, Date.now() - rosterReadAt);
+      }
+      // Whether the shared interval has any reason to exist. It fetches nothing
+      // now, but a live row's seconds still need the beat, and a read still out
+      // has no verdict yet: clearing the clock underneath its own request would
+      // stop the beat for good if that fetch never answered.
       function rosterPollWanted() {
         return (
           !!roster.sessionId &&
           roster.listed &&
-          (rosterReading || rosterRunning().length > 0)
+          (rosterReading || rosterLive().length > 0)
         );
+      }
+      // The newest verdict for one row, when a frame has one and it is newer than
+      // the read that drew the row. Patching in place is what replaced the poll.
+      function patchRosterRow(id) {
+        const f = taskFrames.get(id);
+        const row = roster.tasks.find((t) => t && t.id === id);
+        if (!f || !row) return false;
+        if (f.at < rosterIssueAt) return false; // the read was asked after the frame
+        row.status = f.status;
+        // Elapsed only grows, so the larger figure wins: a frame replayed over a
+        // newer read must never rewind the seconds on screen.
+        const held = typeof row.runtimeMs === 'number' ? row.runtimeMs : -1;
+        if (f.ms !== null && f.ms >= held) row.runtimeMs = f.ms;
+        return true;
+      }
+      function replayTaskFrames() {
+        // A frame older than the request that just answered cannot be news: that
+        // read was asked after it was sent, so its answer already carries it.
+        for (const [id, f] of taskFrames) {
+          if (f.at < rosterIssueAt) taskFrames.delete(id);
+        }
+        for (const id of taskFrames.keys()) patchRosterRow(id);
+      }
+      function resetTaskFrames() {
+        taskFrames.clear();
+        taskFrameAsked.clear();
+        rosterDebt.clear();
+        rosterStale = false;
+      }
+      // A stream that closed while this session was watched is a hole in the
+      // transitions: anything that moved in the gap sent its frame into nothing.
+      // Marked rather than fetched, because the read belongs at the point the
+      // frames are live again, not in the middle of the teardown that found it.
+      // Only a roster that has been listed can be stale; a first attempt that
+      // never answered is still waiting on its one cold-start read.
+      function rosterGap() {
+        if (roster.listed && roster.sessionId) rosterStale = true;
       }
       function rosterWord() {
         // The count, and the oldest run's label: that is the one the reader is
@@ -9590,12 +9649,13 @@
           (a.startTime || 0) <= (b.startTime || 0) ? a : b,
         );
         const label = oldest.label || oldest.id || 'run';
-        const secs = Math.round((oldest.runtimeMs || 0) / 1000);
+        const secs = Math.round(rosterElapsed(oldest) / 1000);
         return run.length + ' background, ' + label + (secs > 0 ? ' ' + h1Clock(secs) : '');
       }
       async function readRoster(id) {
         if (!id || !token()) return;
         rosterReading = true;
+        rosterIssueAt = Date.now();
         const r = await rcCall('/session/' + encodeURIComponent(id) + '/tasks');
         rosterReading = false;
         if (roster.sessionId !== id) return; // a switch landed while it was out
@@ -9604,12 +9664,61 @@
           roster.why = '';
           roster.listed = true;
           roster.tasks = Array.isArray(r.body && r.body.tasks) ? r.body.tasks : [];
+          rosterReadAt = Date.now();
+          replayTaskFrames();
         } else {
           roster.failed = true;
           roster.why = rcDetail(r);
         }
         renderStatusLine();
         renderRunsBody();
+        // Ids a frame named while this read was out may postdate its answer, so
+        // they are owed one more read, and only if the answer still does not
+        // carry them. Clearing the set first is what keeps a row the daemon is
+        // never going to list from buying a read on every read after it.
+        if (rosterDebt.size) {
+          const missing = [...rosterDebt].some(
+            (asked) => !roster.tasks.some((t) => t && t.id === asked),
+          );
+          rosterDebt.clear();
+          if (missing) void readRoster(id);
+        }
+      }
+      // #230. One run's transition as the daemon pushed it, in place of the
+      // re-read. The wire carries taskId, kind, status and runtimeMs and nothing
+      // else, so a frame can move a row the read drew but cannot draw one it
+      // never listed: the label, command and exit code exist only in the read.
+      function noteTaskChanged(d) {
+        const f = d && typeof d === 'object' ? d : null;
+        if (!f || typeof f.taskId !== 'string' || !f.taskId) return;
+        if (typeof f.status !== 'string' || !f.status) return;
+        if (!roster.sessionId || f.sessionId !== roster.sessionId) return;
+        const ms =
+          typeof f.runtimeMs === 'number' && Number.isFinite(f.runtimeMs)
+            ? f.runtimeMs
+            : null;
+        taskFrames.set(f.taskId, { at: Date.now(), status: f.status, ms });
+        // Before the first read there is nothing to move, and the read already
+        // in flight answers later than this frame, so it carries the newer word.
+        if (!roster.listed) return;
+        if (patchRosterRow(f.taskId)) {
+          renderStatusLine();
+          renderRunsBody();
+          return;
+        }
+        if (taskFrameAsked.has(f.taskId)) return; // its one read is already spent
+        taskFrameAsked.add(f.taskId);
+        if (rosterReading) rosterDebt.add(f.taskId);
+        else void readRoster(roster.sessionId);
+      }
+      // A row's seconds, on the clock that owns it. The watched session's rows
+      // grow between verdicts; a one-off read of a typed id is a snapshot and
+      // stays exactly what the daemon said.
+      function rowElapsed(id, t) {
+        if (id !== roster.sessionId) {
+          return t && typeof t.runtimeMs === 'number' ? t.runtimeMs : 0;
+        }
+        return rosterElapsed(t);
       }
       function syncRosterForSession() {
         const sid = watchedSessionId || null;
@@ -9617,21 +9726,26 @@
         roster = { sessionId: sid, tasks: [], listed: false, failed: false, why: '' };
         rosterReading = false;
         turnWasRunning = false;
+        resetTaskFrames();
         runsSubject = sid;
         renderRunsBody();
         if (sid && token()) void readRoster(sid);
       }
       // Called from the status line, which redraws whenever a turn starts or
       // ends. A turn closing is the moment a background run can outlive it, so
-      // that transition asks once; the poll itself is carried by the tick.
+      // that transition asks once; what it does not ask about arrives on
+      // `task_changed`, which is why the tick below no longer reads at all.
       function rosterOnStatus(running) {
         syncRosterForSession();
         if (running === turnWasRunning) return;
         turnWasRunning = running;
         if (!running && roster.sessionId && token()) void readRoster(roster.sessionId);
       }
+      // The beat drives clocks, not fetches. #230 retired the re-read: a run
+      // installing or settling says so on the stream, so the only work left
+      // here is to redraw the elapsed figures that grow between verdicts.
       function statusTick() {
-        if (rosterNeedsPoll()) void readRoster(roster.sessionId);
+        if (rosterLive().length) renderRunsBody();
         renderStatusLine();
       }
       function shortModel(name) {
@@ -13909,6 +14023,15 @@
             // the arm above becomes eligible. It carries no id, so it is never
             // written to the WAL and can never come back as a replayed boundary.
             insideReplay = false;
+            // #230: a closed stream is a hole in the transitions, and with the
+            // re-read retired nothing papers over it. From here the frames are
+            // live again, so one read closes whatever the gap swallowed. It is
+            // never set on a first watch, so the cold-start read stays the only
+            // one that session ever asks for on its own.
+            if (rosterStale) {
+              rosterStale = false;
+              if (roster.sessionId && token()) void readRoster(roster.sessionId);
+            }
             return;
           // #190: the conversation's running usage, for the sheet and More.
           case 'usage_tick':
@@ -13936,6 +14059,11 @@
           // drawn in the transcript; an open Artifacts sheet re-reads.
           case 'artifact_changed':
             return noteArtifactChanged(ev.data);
+          // #230: a background run installed or settled. This is the roster's
+          // transition feed, and it is what the once-a-second re-read used to
+          // discover by asking again.
+          case 'task_changed':
+            return noteTaskChanged(ev.data);
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // permission_* (rendered as cards)
           default:
@@ -23817,6 +23945,9 @@
                     noReplayFallbackSessionId = null;
                   }
                   pendingResyncCwd = watchedSessionCwd;
+                  // #230: the bus epoch changed, so whatever the roster is
+                  // showing missed everything between here and the reload.
+                  if (roster.sessionId === id) rosterGap();
                   myController.abort();
                 }
                 continue;
@@ -23843,6 +23974,9 @@
           // issue #85: name which of the two it was. A silent socket is not the
           // session finishing, and the retry after it is the recovery.
           setStatus(stalled ? 'stream stalled' : 'stream ended');
+          // #230: either way the frames stopped arriving, so a run that moved
+          // during the gap moved unseen. The replay boundary reads once.
+          if (roster.sessionId === id) rosterGap();
           // issue #35: the session just finished — refresh so it lands in
           // the list with its final mtime/title instead of waiting for the
           // next interval tick.
@@ -23860,7 +23994,12 @@
           setStatus(aborted ? 'stopped' : failureOf(e, 'the event stream'));
           // Self-heal: a network-level death (not an Unwatch abort)
           // retries from where we last saw.
-          if (!aborted) scheduleWatchRetry(0);
+          if (!aborted) {
+            // #230: the same hole as a clean end, and an abort is not one: an
+            // Unwatch or a switch tears the roster down anyway.
+            if (roster.sessionId === id) rosterGap();
+            scheduleWatchRetry(0);
+          }
         } finally {
           // issue #85: first thing, above the superseded-watch return below —
           // a watch that got replaced still owns a pending stall timer, and
@@ -27160,7 +27299,10 @@
             bits.push(t.command);
             bits.push(t.eventCount + ' events');
           }
-          if (t.runtimeMs) bits.push(Math.round(t.runtimeMs / 1000) + 's');
+          // A live row's seconds grow locally now that no re-read carries a
+          // bigger number; a settled one prints what the daemon measured.
+          const secs = rowElapsed(id, t);
+          if (secs) bits.push(Math.round(secs / 1000) + 's');
           label.textContent =
             held !== undefined && t.status === 'running'
               ? held
