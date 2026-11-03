@@ -470,12 +470,15 @@ export function useDaemonStream(
   );
 
   const pendingHistoryItems = useMemo(() => {
-    const items = pendingHistoryItemsOf(snapshot);
+    const items = pendingHistoryItemsOf({
+      tools: snapshot.tools,
+      pendingText: snapshot.pendingText,
+    });
     // Bind the approval prompt: attach a `confirmationDetails` (with an
     // outcome→optionId-mapping `onConfirm`) to the gated tool so
     // `ToolConfirmationMessage` renders an answerable Yes/Always/No. The reducer
     // can't build this — `onConfirm` closes over the impure `respondToPermission`.
-    const gate = activePermissionOf(snapshot);
+    const gate = snapshot.pendingPermission;
     if (!gate?.toolCallId) return items;
     const details = buildDaemonConfirmation(gate, respondToPermission);
     return items.map((item) =>
@@ -490,15 +493,23 @@ export function useDaemonStream(
           }
         : item,
     );
-  }, [snapshot, respondToPermission]);
-  const thought = useMemo(() => thoughtOf(snapshot), [snapshot]);
+  }, [
+    snapshot.tools,
+    snapshot.pendingText,
+    snapshot.pendingPermission,
+    respondToPermission,
+  ]);
+  const thought = useMemo(
+    () => thoughtOf({ pendingThought: snapshot.pendingThought }),
+    [snapshot.pendingThought],
+  );
   const pendingToolCalls = useMemo(
-    () => pendingToolCallsOf(snapshot),
-    [snapshot],
+    () => pendingToolCallsOf({ tools: snapshot.tools }),
+    [snapshot.tools],
   );
   const activePermission = useMemo(
-    () => activePermissionOf(snapshot),
-    [snapshot],
+    () => activePermissionOf({ pendingPermission: snapshot.pendingPermission }),
+    [snapshot.pendingPermission],
   );
 
   return {

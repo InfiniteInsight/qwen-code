@@ -214,6 +214,53 @@ function mapToolStatus(s: unknown): ToolCallStatus {
   }
 }
 
+/**
+ * Resolve a tool's status across explicit `status` strings and `_meta.toolLifecycle`
+ * updates (which omit `update.status` and would otherwise reset an in-progress
+ * or completed tool back to `Pending`).
+ */
+function resolveToolStatus(
+  update: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  prevStatus: ToolCallStatus | undefined,
+): ToolCallStatus {
+  if (typeof update['status'] === 'string') {
+    return mapToolStatus(update['status']);
+  }
+  const lifecycle = asRecord(meta['toolLifecycle']);
+  const outcome = lifecycle['outcome'] ?? lifecycle['executionStatus'];
+  switch (outcome) {
+    case 'success':
+      return ToolCallStatus.Success;
+    case 'error':
+    case 'failed':
+      return ToolCallStatus.Error;
+    case 'canceled':
+    case 'cancelled':
+      return ToolCallStatus.Canceled;
+    case 'running':
+      return prevStatus ?? ToolCallStatus.Executing;
+    default:
+      break;
+  }
+  if (lifecycle['phase'] === 'started') {
+    return prevStatus ?? ToolCallStatus.Executing;
+  }
+  return prevStatus ?? ToolCallStatus.Pending;
+}
+
+function isTerminalToolStatus(status: ToolCallStatus): boolean {
+  return (
+    status === ToolCallStatus.Success ||
+    status === ToolCallStatus.Error ||
+    status === ToolCallStatus.Canceled
+  );
+}
+
+function areAllToolsTerminal(tools: IndividualToolCallDisplay[]): boolean {
+  return tools.length > 0 && tools.every((t) => isTerminalToolStatus(t.status));
+}
+
 /** Join the text of ACP content blocks (`[{content:{text}}]`) into a string. */
 function resultTextOf(update: Record<string, unknown>): string | undefined {
   const content = update['content'];
@@ -243,7 +290,7 @@ function upsertTool(
   if (!callId) return tools;
   const meta = asRecord(update['_meta']);
   const title =
-    typeof update['title'] === 'string'
+    typeof update['title'] === 'string' && update['title'].length > 0
       ? (update['title'] as string)
       : undefined;
   const name =
@@ -261,8 +308,8 @@ function upsertTool(
   const next: IndividualToolCallDisplay = {
     callId,
     name,
-    description: prev?.description ?? description,
-    status: mapToolStatus(update['status']),
+    description: title ?? prev?.description ?? description,
+    status: resolveToolStatus(update, meta, prev?.status),
     // The reducer never builds the imperative onConfirm closure; the hook fills
     // confirmationDetails when a permission_request targets this call.
     confirmationDetails: prev?.confirmationDetails,
@@ -308,6 +355,36 @@ function flushPendingTurn(state: DaemonProjectionState): {
   };
 }
 
+/**
+ * Commit any pre-tool assistant text (and any already-terminal tool group that
+ * preceded it) when a tool call or approval gate starts, so each sub-turn's
+ * prose commits above its tool group instead of accumulating in `pending[1]`
+ * below a growing `tool_group` (`InfiniteInsight/Qwen-Code-Remote#247`).
+ */
+function flushBeforeToolActivity(state: DaemonProjectionState): {
+  committed: HistoryItemWithoutId[];
+  state: DaemonProjectionState;
+} {
+  const committed: HistoryItemWithoutId[] = [];
+  let tools = state.tools;
+  if (state.pendingText.trim().length > 0) {
+    if (areAllToolsTerminal(tools)) {
+      committed.push({ type: 'tool_group', tools });
+      tools = [];
+    }
+    committed.push({ type: 'gemini', text: state.pendingText });
+  }
+  return {
+    committed,
+    state: {
+      ...state,
+      tools,
+      pendingText: '',
+      pendingThought: '',
+    },
+  };
+}
+
 function projectSessionUpdate(
   state: DaemonProjectionState,
   data: Record<string, unknown>,
@@ -337,7 +414,24 @@ function projectSessionUpdate(
       };
     }
 
-    case 'agent_thought_chunk':
+    case 'agent_thought_chunk': {
+      // A new reasoning sub-turn after a completed tool batch (or after prior
+      // assistant text) commits the finished sub-turn and starts fresh
+      // reasoning instead of concatenating thoughts across the entire turn.
+      if (
+        areAllToolsTerminal(state.tools) ||
+        state.pendingText.trim().length > 0
+      ) {
+        const flushed = flushPendingTurn(state);
+        return {
+          state: {
+            ...flushed.state,
+            streamingState: StreamingState.Responding,
+            pendingThought: text,
+          },
+          committed: flushed.committed,
+        };
+      }
       return {
         state: {
           ...state,
@@ -346,9 +440,18 @@ function projectSessionUpdate(
         },
         committed: [],
       };
+    }
 
     case 'agent_message_chunk': {
       const usage = readUsage(update);
+      const committed: HistoryItemWithoutId[] = [];
+      let tools = state.tools;
+      let pendingThought = state.pendingThought;
+      if (text.trim().length > 0 && areAllToolsTerminal(tools)) {
+        committed.push({ type: 'tool_group', tools });
+        tools = [];
+        pendingThought = '';
+      }
       return {
         state: {
           ...state,
@@ -362,25 +465,29 @@ function projectSessionUpdate(
           streamingState: hasChunkContent(update)
             ? StreamingState.Responding
             : state.streamingState,
+          tools,
+          pendingThought,
           // Concatenate verbatim — a terminal chunk may carry empty text plus
           // `_meta.usage`; appending '' is a no-op.
           pendingText: state.pendingText + text,
           lastUsage: usage ?? state.lastUsage,
         },
-        committed: [],
+        committed,
       };
     }
 
     case 'tool_call':
-    case 'tool_call_update':
+    case 'tool_call_update': {
+      const flushed = flushBeforeToolActivity(state);
       return {
         state: {
-          ...state,
+          ...flushed.state,
           streamingState: StreamingState.Responding,
-          tools: upsertTool(state.tools, update),
+          tools: upsertTool(flushed.state.tools, update),
         },
-        committed: [],
+        committed: flushed.committed,
       };
+    }
 
     // `available_commands_update` (and any other update kind) does not affect
     // the streamed turn in this slice.
@@ -467,7 +574,8 @@ function projectFrame(
       // `tool_call` frame (verified against a live daemon) — so without this the
       // gated tool would never render. A run_shell_command DOES send a prior
       // `tool_call`; there `upsertTool` just refreshes the existing entry.
-      let tools = state.tools;
+      const flushed = flushBeforeToolActivity(state);
+      let tools = flushed.state.tools;
       if (toolCallId) {
         tools = setToolStatus(
           upsertTool(tools, toolCall),
@@ -477,12 +585,12 @@ function projectFrame(
       }
       return {
         state: {
-          ...state,
+          ...flushed.state,
           streamingState: StreamingState.WaitingForConfirmation,
           tools,
           pendingPermission: { requestId, toolCallId, title, options },
         },
-        committed: [],
+        committed: flushed.committed,
       };
     }
 
@@ -692,14 +800,14 @@ export function projectReplaySnapshot(
 
 /** Live tool-call display for the current turn (the UI's `pendingToolCalls`). */
 export function pendingToolCallsOf(
-  state: DaemonProjectionState,
+  state: Pick<DaemonProjectionState, 'tools'>,
 ): IndividualToolCallDisplay[] {
   return state.tools;
 }
 
 /** The outstanding approval gate, if any (the hook turns this into a prompt). */
 export function activePermissionOf(
-  state: DaemonProjectionState,
+  state: Pick<DaemonProjectionState, 'pendingPermission'>,
 ): PendingPermission | undefined {
   return state.pendingPermission;
 }
@@ -709,7 +817,7 @@ export function activePermissionOf(
  * pending-section the same way `useGeminiStream.pendingHistoryItems` is.
  */
 export function pendingHistoryItemsOf(
-  state: DaemonProjectionState,
+  state: Pick<DaemonProjectionState, 'tools' | 'pendingText'>,
 ): HistoryItemWithoutId[] {
   // Mirror the `turn_complete` commit order (`[tool_group, gemini]`) so the live
   // view matches the committed history exactly: tools render above the streaming
@@ -718,7 +826,7 @@ export function pendingHistoryItemsOf(
   if (state.tools.length > 0) {
     items.push({ type: 'tool_group', tools: state.tools });
   }
-  if (state.pendingText) {
+  if (state.pendingText.trim().length > 0) {
     items.push({ type: 'gemini', text: state.pendingText });
   }
   return items;
@@ -729,7 +837,9 @@ export function pendingHistoryItemsOf(
  * indicator. Convention (matching the in-process path): the subject is the
  * first `**bold**` span; the remainder is the description.
  */
-export function thoughtOf(state: DaemonProjectionState): ThoughtSummary | null {
+export function thoughtOf(
+  state: Pick<DaemonProjectionState, 'pendingThought'>,
+): ThoughtSummary | null {
   const raw = state.pendingThought.trim();
   if (!raw) return null;
   const m = raw.match(/\*\*(.+?)\*\*/s);

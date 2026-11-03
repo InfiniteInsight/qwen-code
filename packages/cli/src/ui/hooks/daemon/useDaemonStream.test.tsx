@@ -1055,4 +1055,88 @@ describe('useDaemonStream', () => {
     unmount();
     await waitFor(() => expect(driver.stats().aborted).toBe(true));
   });
+
+  it('commits completed sub-turns mid-turn and keeps pendingHistoryItems referentially stable across thought tokens (#247)', async () => {
+    const driver = makeFakeDriver({ clientId: 'me' });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+    await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'First step.' },
+          },
+          'phone',
+        ),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.pendingHistoryItems).toEqual([
+        { type: 'gemini', text: 'First step.' },
+      ]),
+    );
+    const pendingBeforeThought = result.current.pendingHistoryItems;
+
+    // Streaming thought tokens must not rebuild pendingHistoryItems.
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: '**Thinking** token 1' },
+          },
+          'phone',
+        ),
+      );
+    });
+    // Wait for the thought to commit pre-thought text and update thought summary:
+    await waitFor(() =>
+      expect(result.current.thought?.subject).toBe('Thinking'),
+    );
+    expect(added).toEqual([{ type: 'gemini', text: 'First step.' }]);
+
+    // Now with an active tool in pendingHistoryItems, further thought tokens keep pendingHistoryItems referentially identical:
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call_1',
+            status: 'in_progress',
+            title: 'Shell: ls',
+            _meta: { toolName: 'run_shell_command' },
+          },
+          'phone',
+        ),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.pendingHistoryItems).toHaveLength(1),
+    );
+    const pendingDuringTool = result.current.pendingHistoryItems;
+    expect(pendingDuringTool).not.toBe(pendingBeforeThought);
+
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: '**Still thinking** token 2' },
+          },
+          'phone',
+        ),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.thought?.subject).toBe('Still thinking'),
+    );
+    expect(result.current.pendingHistoryItems).toBe(pendingDuringTool);
+  });
 });
