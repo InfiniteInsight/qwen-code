@@ -118,6 +118,12 @@ export interface SubscribeOptions {
    */
   maxQueued?: number;
   /**
+   * Marks the subscriber as a non-interactive background listener (such as the
+   * gateway push pump) that does not hold an idle session open against
+   * automatic teardown.
+   */
+  background?: boolean;
+  /**
    * Receives low-frequency, per-subscriber queue diagnostics. Return `true`
    * after emitting the human-facing diagnostic; `false` (or a throw) keeps the
    * EventBus legacy stderr fallback.
@@ -343,6 +349,7 @@ function logSlowClientWarning(data: Record<string, unknown>): void {
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
+  background: boolean;
   /** Cap remembered per subscriber so the warning ratio + reset can be
    * checked without rummaging through the queue's private state. */
   maxQueued: number;
@@ -504,6 +511,15 @@ export class EventBus {
   /** Snapshot of the live subscriber count. */
   get subscriberCount(): number {
     return this.subs.size;
+  }
+
+  /** Snapshot of live non-background subscribers that hold an idle session open. */
+  get interactiveSubscriberCount(): number {
+    let count = 0;
+    for (const sub of this.subs) {
+      if (!sub.background) count += 1;
+    }
+    return count;
   }
 
   seedReplayEvents(
@@ -818,6 +834,7 @@ export class EventBus {
     const sub: InternalSub = {
       queue,
       evicted: false,
+      background: opts.background === true,
       maxQueued,
       warnThreshold: WARN_THRESHOLD_RATIO * maxQueued,
       warnResetThreshold: WARN_RESET_RATIO * maxQueued,

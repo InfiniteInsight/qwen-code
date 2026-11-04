@@ -9436,11 +9436,27 @@ export class Session implements SessionContext {
       !(options.getModelOverride?.() ?? options.modelOverride)
     ) {
       try {
-        const compressed = await llmClient.tryCompressChat(
-          promptId,
-          false,
-          abortSignal,
+        const hasPendingToolResult = message.some(
+          (part) => !!part.functionResponse,
         );
+        const currentChat = this.#getCurrentChat();
+        const historyTail = (
+          currentChat.getHistoryShallow?.(true) ?? currentChat.getHistory?.() ?? []
+        ).at(-1);
+        const hasTrailingFunctionCall =
+          historyTail?.role === 'model' &&
+          historyTail.parts?.some((part) => !!part.functionCall) === true;
+        const compressed =
+          hasPendingToolResult || hasTrailingFunctionCall
+            ? await llmClient.tryCompressChat(promptId, false, abortSignal, {
+                trigger: 'auto',
+                pendingUserMessage: { role: 'user', parts: message },
+              })
+            : await llmClient.tryCompressChat(
+                promptId,
+                false,
+                abortSignal,
+              );
         compressionInfo = compressed;
         compressionFailed = isCompressionFailureStatus(
           compressed.compressionStatus,

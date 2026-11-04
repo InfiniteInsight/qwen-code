@@ -2790,4 +2790,71 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
     };
     expect(ctx.calledOn).toBe('/proj/a');
   });
+
+  it('background subscribeEvents and listWorkspaceSessions do not refresh idle timer or steal cross-workspace sessions to defaultWorkspaceCwd', async () => {
+    let t = 1000;
+    const stopped: string[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: {
+        ...fakeClient('default'),
+        async listWorkspaceSessions(cwd?: string) {
+          return [
+            {
+              sessionId: 'sess-proj-a',
+              workspaceCwd: cwd ?? '/proj/a',
+              attached: false,
+            },
+          ] as never;
+        },
+      } as unknown as DaemonClient,
+      defaultWorkspaceCwd: '/home/evan',
+      idleReapMs: 5000,
+      now: () => t,
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, 'sess-proj-a'),
+          async listWorkspaceSessions() {
+            return [
+              {
+                sessionId: 'sess-proj-a',
+                workspaceCwd: cwd,
+                attached: true,
+              },
+            ] as never;
+          },
+          async sessionStatus(id: string) {
+            throw sessionGone(id);
+          },
+          subscribeEvents() {
+            return { close() {} };
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+
+    const created = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    expect(created.sessionId).toBe('sess-proj-a');
+
+    // Advance clock; background subscribeEvents and listWorkspaceSessions must not reset lastUsedAt.
+    t = 4000;
+    pool.subscribeEvents('sess-proj-a', () => {}, { background: true });
+    await pool.listWorkspaceSessions('/proj/a');
+
+    // Past idleReapMs from t=1000 (not t=4000), reapIdle should reap /proj/a.
+    t = 6500;
+    await pool.reapIdle();
+    expect(stopped).toEqual(['/proj/a']);
+
+    // Polling listWorkspaceSessions('/proj/a') after /proj/a was reaped falls back to defaultDaemon,
+    // which must NOT bind 'sess-proj-a' to '/home/evan'.
+    await pool.listWorkspaceSessions('/proj/a');
+    expect(pool.size()).toBe(0);
+    await expect(pool.sessionContext('sess-proj-a')).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
 });

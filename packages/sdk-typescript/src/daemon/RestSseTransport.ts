@@ -124,6 +124,9 @@ export class RestSseTransport implements DaemonTransport {
       if (opts.maxQueued !== undefined) {
         query.set('maxQueued', String(opts.maxQueued));
       }
+      if (opts.background) {
+        query.set('background', '1');
+      }
       if (opts.sseConnectReason !== undefined) {
         query.set('connectReason', opts.sseConnectReason);
       }

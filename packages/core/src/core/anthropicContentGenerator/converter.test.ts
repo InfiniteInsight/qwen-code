@@ -417,6 +417,19 @@ describe('AnthropicContentConverter', () => {
       expect(tr.content[1]?.text).toContain('archive.zip');
     });
 
+    it('preserves text parts inside functionResponse.parts without Unsupported media placeholder', () => {
+      const messages = readWithMedia('Main output', {
+        text: 'Extra text part inside functionResponse.parts',
+      });
+
+      const tr = messages[1]?.content?.[0] as TextResult;
+      expect(tr.type).toBe('tool_result');
+      expect(tr.content).toEqual([
+        txt('Main output'),
+        txt('Extra text part inside functionResponse.parts'),
+      ]);
+    });
+
     it('associates each image with its preceding functionResponse', () => {
       const { messages } = convert([
         content(

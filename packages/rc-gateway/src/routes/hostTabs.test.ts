@@ -839,6 +839,37 @@ describe('the automatic reopen (--reopen-crashed-tabs)', () => {
     expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeDefined();
   });
 
+  it('retries auto-reopen on the next sweep when endpointFor transiently returns 502/503', async () => {
+    let attempts = 0;
+    const g = await boot({
+      autoReopen: true,
+      endpointFor: async (_s, cwd) => {
+        attempts++;
+        if (attempts === 1) {
+          return {
+            ok: false,
+            status: 503,
+            code: 'workspace_pool_full',
+            message: 'pool full',
+          };
+        }
+        return ENDPOINT(cwd);
+      },
+    });
+    g.probe.fd0.set(75, '/dev/pts/1');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 75 });
+    await end(g, t.tabId, 137);
+    await g.poll();
+    await g.sweep!(); // first sweep hits 503
+    expect(await g.requests.readAll()).toEqual([]);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeUndefined();
+
+    await g.poll();
+    await g.sweep!(); // second sweep succeeds because tried deleted tabId on 503
+    expect(await queued(g, 1)).toHaveLength(1);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeDefined();
+  });
+
   it('leaves a dismissed crash and an old crash alone, and does nothing when it is off', async () => {
     const g = await boot({ autoReopen: true });
     const old = await g.registry.start({

@@ -857,6 +857,12 @@ export interface SubscribeOptions {
   maxQueued?: number;
   /** Client identity forwarded on REST/SSE subscriptions. */
   clientId?: string;
+  /**
+   * Marks the subscription as a non-interactive background listener (e.g. push
+   * notification pump) that should not hold an idle session or workspace daemon
+   * open. Forwarded as `?background=1` on `GET /session/:id/events`.
+   */
+  background?: boolean;
   /** Diagnostic-only reason for opening this REST/SSE connection. */
   sseConnectReason?: DaemonSseConnectReason;
   /** Diagnostic-only predecessor of this REST/SSE connection. */
@@ -6682,6 +6688,7 @@ export class DaemonClient {
       onEpoch: opts.onEpoch,
       maxQueued: opts.maxQueued,
       clientId: opts.clientId,
+      background: opts.background,
       sseConnectReason: opts.sseConnectReason,
       previousSseStreamId: opts.previousSseStreamId,
       onSseStreamAccepted: opts.onSseStreamAccepted,

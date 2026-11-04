@@ -932,4 +932,29 @@ describe('isFallbackEligible', () => {
     expect(classification.statusCode).toBeUndefined();
     expect(isFallbackEligible(classification)).toBe(false);
   });
+
+  it('classifies TensorRT-LLM HTTP 400 "LLM is shutting down" and mid-stream EngineDeadError as retryable', () => {
+    const trtllm400 = Object.assign(new Error('400 LLM is shutting down'), {
+      status: 400,
+      type: 'BadRequestError',
+      code: 400,
+    });
+    expect(classifyRetryError(trtllm400)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: 'network-error',
+      statusCode: 400,
+    });
+    expect(isRetryableUpstreamError(trtllm400)).toBe(true);
+
+    const engineDeadStreamError = new Error(
+      'EngineDeadError: Engine has died: RuntimeError: MPI worker rank 1 (pid 306) exited unexpectedly',
+    );
+    expect(classifyRetryError(engineDeadStreamError)).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+    });
+    expect(isRetryableUpstreamError(engineDeadStreamError)).toBe(true);
+  });
 });

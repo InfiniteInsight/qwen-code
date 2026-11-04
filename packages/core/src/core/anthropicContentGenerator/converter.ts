@@ -741,6 +741,12 @@ export class AnthropicContentConverter {
     const partBlocks: AnthropicContentBlockParam[] = [];
 
     for (const part of response.parts || []) {
+      if ('text' in part && typeof part.text === 'string') {
+        if (part.text.length > 0) {
+          partBlocks.push({ type: 'text', text: part.text });
+        }
+        continue;
+      }
       const block = this.createMediaBlockFromPart(part);
       if (block) {
         partBlocks.push(block);

@@ -534,7 +534,10 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       for (const t of await registry.list()) {
         if (tried.has(t.tabId) || !autoReopenEligible(t, now)) continue;
         tried.add(t.tabId);
-        await reopenTab(t.tabId, { auto: true });
+        const out = await reopenTab(t.tabId, { auto: true });
+        if (out.status === 502 || out.status === 503) {
+          tried.delete(t.tabId);
+        }
       }
     } catch {
       // The next pass tries again; a sweep never takes the gateway down.

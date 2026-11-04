@@ -318,6 +318,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     if (TRANSIENT_TYPES.has(event.type)) return;
 
+    if (event.type === 'session_rewound') {
+      this.rewindReplayWindow(event);
+      return;
+    }
+
     // Track the latest recordId seen on any session_update so a later
     // `snapshot()` can surface it on a `history_truncated` marker as a
     // pagination anchor. Runs for every non-transient event — recordIds
@@ -881,6 +886,175 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.slots = [];
     this.toolSlotIndex.clear();
     this.clearTextSlotIndex();
+  }
+
+  private rewindReplayWindow(event: BridgeEvent): void {
+    if (this.slots.length > 0) {
+      const pending: BridgeEvent[] = [];
+      for (const slot of this.slots) {
+        switch (slot.kind) {
+          case 'text':
+          case 'thought':
+            pending.push(
+              makeMergedSessionUpdateEvent(
+                slot.kind === 'text'
+                  ? 'agent_message_chunk'
+                  : 'agent_thought_chunk',
+                slot.chunks.join(''),
+                slot.lastEventId,
+                slot.lastMeta,
+                slot.lastEnvelopeMeta,
+                slot.lastTurn,
+                slot.lastSessionId,
+              ),
+            );
+            break;
+          case 'tool':
+          case 'misc':
+          case 'latestWins':
+            pending.push(slot.event);
+            break;
+          default:
+            break;
+        }
+      }
+      if (pending.length > 0) {
+        this.addReplaySegment(pending, 1);
+      }
+    }
+    this.resetJournal();
+    this.slots = [];
+    this.toolSlotIndex.clear();
+    this.clearTextSlotIndex();
+
+    const data =
+      event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+        ? (event.data as Record<string, unknown>)
+        : undefined;
+    const promptId =
+      typeof data?.['promptId'] === 'string' && data['promptId'].length > 0
+        ? data['promptId']
+        : undefined;
+    const targetTurnIndex =
+      typeof data?.['targetTurnIndex'] === 'number' &&
+      Number.isInteger(data['targetTurnIndex']) &&
+      data['targetTurnIndex'] >= 0
+        ? data['targetTurnIndex']
+        : undefined;
+
+    let cutSegIdx: number | undefined;
+    let cutEventIdx = 0;
+
+    if (promptId !== undefined) {
+      outerPrompt: for (
+        let i = this.replaySegmentStart;
+        i < this.replaySegments.length;
+        i++
+      ) {
+        const seg = this.replaySegments[i]!;
+        for (let j = 0; j < seg.events.length; j++) {
+          const ev = seg.events[j]!;
+          const evData =
+            ev.data && typeof ev.data === 'object' && !Array.isArray(ev.data)
+              ? (ev.data as Record<string, unknown>)
+              : undefined;
+          if (ev.promptId === promptId || evData?.['promptId'] === promptId) {
+            cutSegIdx = i;
+            cutEventIdx = j;
+            break outerPrompt;
+          }
+        }
+      }
+    }
+
+    if (
+      cutSegIdx === undefined &&
+      targetTurnIndex !== undefined &&
+      this.truncatedEvents === 0
+    ) {
+      let userTurnIndex = 0;
+      let inUserChunkRun = false;
+      outerTurn: for (
+        let i = this.replaySegmentStart;
+        i < this.replaySegments.length;
+        i++
+      ) {
+        const seg = this.replaySegments[i]!;
+        let segHasUserChunk = false;
+        for (let j = 0; j < seg.events.length; j++) {
+          const ev = seg.events[j]!;
+          const evData =
+            ev.data && typeof ev.data === 'object' && !Array.isArray(ev.data)
+              ? (ev.data as SessionUpdateData)
+              : undefined;
+          const update = evData?.update;
+          const isUserChunk =
+            ev.type === 'session_update' &&
+            update?.sessionUpdate === 'user_message_chunk' &&
+            (!update._meta ||
+              typeof update._meta !== 'object' ||
+              (update._meta as Record<string, unknown>)['source'] !==
+                'background_notification');
+          if (isUserChunk) {
+            segHasUserChunk = true;
+            if (!inUserChunkRun) {
+              if (userTurnIndex === targetTurnIndex) {
+                cutSegIdx = i;
+                cutEventIdx = j;
+                break outerTurn;
+              }
+              userTurnIndex += 1;
+              inUserChunkRun = true;
+            }
+          } else {
+            inUserChunkRun = false;
+          }
+        }
+        if (!segHasUserChunk && seg.turnCount > 0) {
+          inUserChunkRun = false;
+          if (userTurnIndex === targetTurnIndex) {
+            cutSegIdx = i;
+            cutEventIdx = 0;
+            break;
+          }
+          userTurnIndex += 1;
+        }
+      }
+    }
+
+    if (cutSegIdx === undefined) return;
+
+    if (cutEventIdx > 0) {
+      const keptEvents = this.replaySegments[cutSegIdx]!.events.slice(
+        0,
+        cutEventIdx,
+      );
+      const bytes = keptEvents.reduce(
+        (sum, ev) => sum + (serializedBridgeEventByteLength(ev) ?? 0),
+        0,
+      );
+      this.replaySegments[cutSegIdx] = {
+        events: keptEvents,
+        bytes,
+        turnCount: 0,
+      };
+      this.replaySegments.length = cutSegIdx + 1;
+    } else {
+      this.replaySegments.length = cutSegIdx;
+    }
+
+    let totalBytes = 0;
+    for (
+      let i = this.replaySegmentStart;
+      i < this.replaySegments.length;
+      i++
+    ) {
+      totalBytes += this.replaySegments[i]!.bytes;
+    }
+    this.replayBytes = totalBytes;
+    const retained = this.flattenReplaySegments();
+    this.activeRecordId = lastRecordIdIn(retained);
+    this.summaryRecordId = lastSummaryRecordIdIn(retained);
   }
 
   private recordLastEventId(event: BridgeEvent): void {

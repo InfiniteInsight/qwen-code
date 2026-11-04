@@ -764,6 +764,14 @@ interface TryCompressOptions {
    */
   deferChatCompressionRecord?: boolean;
   /**
+   * Whether `recordChatCompression` should append `pendingUserMessage` to the
+   * recorded `compressedHistory` snapshot. Defaults to `true` for in-send
+   * callers (where the user message was already recorded to the transcript
+   * before `tryCompress`) and `false` for pre-send `tryCompressChat` callers
+   * (where the user message will be recorded after compression).
+   */
+  includePendingUserMessageInCompressionRecord?: boolean;
+  /**
    * Forwarded to the compression side-query system prompt. Sourced from
    * `/compress <text>` invocation arg; appended after the base prompt as
    * an `Additional Instructions:` block so the summary model can focus
@@ -2872,9 +2880,11 @@ export class LlmChat {
         // question and do not share the live array mutated later in the turn.
         this.chatRecordingService?.recordChatCompression({
           info,
-          compressedHistory: options?.pendingUserMessage
-            ? [...newHistory, options.pendingUserMessage]
-            : newHistory,
+          compressedHistory:
+            options?.pendingUserMessage &&
+            options.includePendingUserMessageInCompressionRecord !== false
+              ? [...newHistory, options.pendingUserMessage]
+              : newHistory,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -4440,6 +4450,40 @@ export class LlmChat {
                 if (!streamYieldedFunctionCall) {
                   pendingTransportPrefix = transportContinuationParts;
                 }
+                // Temporarily pop any uncommitted partial assistant turn
+                // (`model[functionCall]` pushed by `processStreamResponse` on
+                // mid-stream failure) BEFORE running `tryCompress` so
+                // `composePostCompactHistory` does not fold a failed attempt's
+                // orphaned `functionCall` into the post-compact `model` ack.
+                // If reactive compression does not succeed, restore the
+                // partial turn so unretryable error handling sees it intact.
+                const savedPendingIdx = self.pendingPartialAssistantTurnIndex;
+                const savedPendingRecord =
+                  self.pendingPartialAssistantRecord;
+                const savedPendingTurn =
+                  savedPendingIdx !== null &&
+                  self.history.length > savedPendingIdx &&
+                  self.history[savedPendingIdx]?.role === 'model'
+                    ? self.history[savedPendingIdx]
+                    : undefined;
+                if (savedPendingTurn !== undefined) {
+                  self.popPendingPartialAssistantTurn();
+                }
+                const restoreSavedPendingTurn = () => {
+                  if (
+                    savedPendingTurn !== undefined &&
+                    savedPendingIdx !== null &&
+                    self.pendingPartialAssistantTurnIndex === null
+                  ) {
+                    const insertIdx = Math.min(
+                      savedPendingIdx,
+                      self.history.length,
+                    );
+                    self.history.splice(insertIdx, 0, savedPendingTurn);
+                    self.pendingPartialAssistantTurnIndex = insertIdx;
+                    self.pendingPartialAssistantRecord = savedPendingRecord;
+                  }
+                };
                 try {
                   const reactiveInfo = await self.tryCompress(
                     prompt_id,
@@ -4562,6 +4606,7 @@ export class LlmChat {
                   ) {
                     payloadRecoveryNoop = true;
                   }
+                  restoreSavedPendingTurn();
                   debugLogger.warn(
                     requestPayloadOverflow.isTooLarge
                       ? `Reactive compression did not recover request ` +
@@ -4597,6 +4642,7 @@ export class LlmChat {
                     }
                   }
                 } catch (compressionError) {
+                  restoreSavedPendingTurn();
                   if (
                     params.config?.abortSignal?.aborted ||
                     isAbortError(compressionError)

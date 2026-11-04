@@ -3743,4 +3743,26 @@ describe('turn attribution preservation (DAEMON-007)', () => {
     expect('originatorClientId' in folded!).toBe(false);
     expect('sessionId' in (folded!.data as object)).toBe(false);
   });
+
+  it('truncates replaySegments at target promptId on session_rewound', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(withIdentity(makeUserMessage(1, 'turn 0'), { promptId: 'p0' }));
+    engine.ingest(withIdentity(makeTextChunk(2, 'reply 0'), { promptId: 'p0' }));
+    engine.ingest(withIdentity(makeTurnComplete(3), { promptId: 'p0' }));
+
+    engine.ingest(withIdentity(makeUserMessage(4, 'turn 1'), { promptId: 'p1' }));
+    engine.ingest(withIdentity(makeTextChunk(5, 'reply 1'), { promptId: 'p1' }));
+    engine.ingest(withIdentity(makeTurnComplete(6), { promptId: 'p1' }));
+
+    engine.ingest({
+      id: 7,
+      v: 1,
+      type: 'session_rewound',
+      data: { promptId: 'p1', targetTurnIndex: 1, removedTurnCount: 1 },
+    });
+
+    const snap = engine.snapshot();
+    const texts = extractTexts(snap.compactedTurns);
+    expect(texts).toEqual(['turn 0', 'reply 0']);
+  });
 });

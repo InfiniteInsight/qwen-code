@@ -1950,10 +1950,14 @@ export class DaemonPool implements SessionDaemon {
   }
 
   /** Resolve the owning daemon for a session id. Bumps a pooled entry's
-   * `lastUsed` (a live-referenced session never looks idle). Throws
+   * `lastUsed` (a live-referenced session never looks idle) unless `touch` is
+   * false (e.g. background event pump subscriptions). Throws
    * `UnknownSessionError` for an unrecorded id, or one whose owning
    * daemon has since been reaped or has died. */
-  private ownerEntry(id: string): { key: string; entry: Entry } {
+  private ownerEntry(
+    id: string,
+    touch = true,
+  ): { key: string; entry: Entry } {
     const key = this.ownerOf.get(id);
     if (key === undefined) throw new UnknownSessionError(id);
     if (key === this.defaultWorkspaceCwd) {
@@ -1964,7 +1968,7 @@ export class DaemonPool implements SessionDaemon {
     }
     const e = this.byWorkspace.get(key);
     if (!e) throw new UnknownSessionError(id); // daemon was reaped
-    this.touch(e);
+    if (touch) this.touch(e);
     return { key, entry: e };
   }
 
@@ -2012,16 +2016,19 @@ export class DaemonPool implements SessionDaemon {
     }
   }
 
-  /** Record that the daemon for `key` owns session `id`. Touches the entry,
-   * so a `reconcileEntry` round that asked about `id` before this
-   * registration landed cannot drop it on a stale answer. */
-  private trackSession(key: string, id: string): void {
+  /** Record that the daemon for `key` owns session `id`. Touches the entry
+   * unless `touch` is false (already-tracked sessions during background
+   * workspace polling), so a `reconcileEntry` round that asked about `id`
+   * before a fresh registration landed cannot drop it on a stale answer. */
+  private trackSession(key: string, id: string, touch = true): void {
     this.ownerOf.set(id, key);
     this.lastKnownWorkspaceOf.set(id, key);
     const entry = this.byWorkspace.get(key);
     if (entry) {
       entry.sessions.add(id);
-      this.touch(entry);
+      if (touch) {
+        this.touch(entry);
+      }
     }
   }
 
@@ -2153,12 +2160,13 @@ export class DaemonPool implements SessionDaemon {
     sessionId: string,
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
-    const { key, entry } = this.ownerEntry(sessionId);
+    const isBackground = opts.background === true;
+    const { key, entry } = this.ownerEntry(sessionId, !isBackground);
     const client = entry.client;
     let evicted = false;
     try {
       for await (const event of client.subscribeEvents(sessionId, opts)) {
-        if (key !== this.defaultWorkspaceCwd && !entry.dead) {
+        if (!isBackground && key !== this.defaultWorkspaceCwd && !entry.dead) {
           this.touch(entry);
         }
         if (event.type === 'session_died' || event.type === 'session_closed') {
@@ -2179,7 +2187,7 @@ export class DaemonPool implements SessionDaemon {
       }
       throw err;
     } finally {
-      if (key !== this.defaultWorkspaceCwd && !entry.dead) {
+      if (!isBackground && key !== this.defaultWorkspaceCwd && !entry.dead) {
         this.touch(entry);
       }
     }
@@ -3001,7 +3009,8 @@ export class DaemonPool implements SessionDaemon {
       const list = await pooled.client.listWorkspaceSessions(key);
       for (const s of list) {
         if (typeof s?.sessionId === 'string' && s.sessionId.length > 0) {
-          this.trackSession(key, s.sessionId);
+          const alreadyTracked = pooled.sessions.has(s.sessionId);
+          this.trackSession(key, s.sessionId, !alreadyTracked);
         }
       }
       return list;
@@ -3013,7 +3022,14 @@ export class DaemonPool implements SessionDaemon {
       if (
         typeof s?.sessionId === 'string' &&
         s.sessionId.length > 0 &&
-        !this.ownerOf.has(s.sessionId)
+        !this.ownerOf.has(s.sessionId) &&
+        (key === this.defaultWorkspaceCwd ||
+          (typeof s.workspaceCwd === 'string' &&
+            s.workspaceCwd.length > 0 &&
+            this.keyFor(s.workspaceCwd) === this.defaultWorkspaceCwd)) &&
+        (!this.lastKnownWorkspaceOf.has(s.sessionId) ||
+          this.lastKnownWorkspaceOf.get(s.sessionId) ===
+            this.defaultWorkspaceCwd)
       ) {
         this.trackSession(this.defaultWorkspaceCwd, s.sessionId);
       }

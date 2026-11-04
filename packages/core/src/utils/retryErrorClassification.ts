@@ -188,11 +188,12 @@ export function classifyRetryError(
       // these 4xx-wrapped failures into the transportCode-keyed stream
       // replay/continuation gates.
       if (
-        providerCode === undefined &&
-        providerFields.providerType === undefined &&
-        details.providerType === undefined &&
-        providerMessage === undefined &&
-        hasNetworkFailureCause(error)
+        (providerCode === undefined &&
+          providerFields.providerType === undefined &&
+          details.providerType === undefined &&
+          providerMessage === undefined &&
+          hasNetworkFailureCause(error)) ||
+        hasTransientEngineShutdownCause(error)
       ) {
         return {
           kind: 'transport',
@@ -277,7 +278,7 @@ export function classifyRetryError(
   // codes), so they stay unclassified and are not retried. An unrecognised
   // upstream code stays retryable on purpose: the next gateway bug should not
   // have to be taught to this file before it stops killing turns.
-  if (requestId !== undefined) {
+  if (requestId !== undefined || hasTransientEngineShutdownCause(error)) {
     return {
       kind: statuslessKind,
       diagnosis: 'retryable',
@@ -337,6 +338,24 @@ function isTransportCode(code: string): boolean {
 // transport block above pins.
 const NETWORK_FAILURE_MESSAGE_RE = /network error for request /i;
 const NO_BODY_STATUS_MESSAGE_RE = /^(?:\d{3}\s+)?status code \(no body\)$/i;
+const TRANSIENT_ENGINE_SHUTDOWN_RE =
+  /\b(?:LLM is shutting down|Engine has died|EngineDeadError|MPI worker rank \d+ .* exited unexpectedly|Draft KV cache .* resize failed|Failed to resume draft KV cache)\b/i;
+
+export function hasTransientEngineShutdownCause(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_TRANSPORT_CAUSE_DEPTH; depth++) {
+    if (typeof current !== 'object' || current === null) return false;
+    const message = (current as { message?: unknown }).message;
+    if (
+      typeof message === 'string' &&
+      TRANSIENT_ENGINE_SHUTDOWN_RE.test(message)
+    ) {
+      return true;
+    }
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
+}
 
 export function hasNetworkFailureCause(error: unknown): boolean {
   let current: unknown = error;

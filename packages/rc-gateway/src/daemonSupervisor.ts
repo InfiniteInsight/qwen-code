@@ -236,12 +236,32 @@ function defaultSpawner(
       const reason =
         `"${qwenBin} serve" exited with ${how}` +
         (tail ? `: ${tail.slice(-500)}` : '');
-      // The shim exited; the daemon grandchild may linger. Resolve only once the
-      // whole group is gone so `stop()`'s escalation isn't fooled into skipping
-      // the SIGKILL.
+      // The shim exited; the daemon grandchild (or an orphaned MCP/tool
+      // descendant after an unexpected daemon crash) may linger. Reap any
+      // surviving group members after a short grace window and bound the wait
+      // so `whenExited` can never hang forever on an orphaned descendant.
+      const exitedAt = Date.now();
+      let sentSigterm = false;
+      let sentSigkill = false;
       const waitGroup = () => {
-        if (groupGone()) finish(reason, code, signal);
-        else setTimeout(waitGroup, 50).unref?.();
+        if (groupGone()) {
+          finish(reason, code, signal);
+          return;
+        }
+        const elapsed = Date.now() - exitedAt;
+        if (!sentSigterm && elapsed >= 200) {
+          sentSigterm = true;
+          killGroup('SIGTERM');
+        }
+        if (elapsed >= 2000) {
+          if (!sentSigkill) {
+            sentSigkill = true;
+            killGroup('SIGKILL');
+          }
+          finish(reason, code, signal);
+          return;
+        }
+        setTimeout(waitGroup, 50).unref?.();
       };
       waitGroup();
     });

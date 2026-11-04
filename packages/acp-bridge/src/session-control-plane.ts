@@ -3084,7 +3084,7 @@ export function createSessionControlPlane(
    */
   function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
     if (!entryCanStartConditionalClose(entry, true)) return false;
-    if (entry.events.subscriberCount > 0) return false;
+    if (entry.events.interactiveSubscriberCount > 0) return false;
     const owner = channelInfoForEntry(entry);
     // A probe the child could not answer is retried on the next snapshot, but
     // not on every snapshot forever: a Session the child can never settle
@@ -12094,7 +12094,12 @@ export function createSessionControlPlane(
       // for the remaining window once the last subscriber drops. Only cancel
       // after subscribe succeeds so a failed subscribe preserves the pending
       // close.
-      cancelPromptSettledTimer(entry);
+      // Only cancel for interactive subscribers so background listeners (e.g.
+      // the gateway push pump) do not hold the session open past the grace
+      // window.
+      if (!subOpts?.background) {
+        cancelPromptSettledTimer(entry);
+      }
       if (!subOpts?.snapshot) return raw;
 
       // A5: wrap the iterator to inject a synthetic `session_snapshot`
@@ -15947,6 +15952,8 @@ export function createSessionControlPlane(
 
         entry.terminalTurnStatuses.clear();
         entry.enrichedTerminalPromptIds.clear();
+        entry.turnError = undefined;
+        entry.turnErrorEvent = undefined;
         entry.rewindGeneration += 1;
 
         const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;

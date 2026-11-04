@@ -392,6 +392,8 @@ export function registerSseEventsRoutes(
       if (!runtime) return;
       workspaceTrusted = runtime.trusted;
       const snapshot = req.query['snapshot'] === '1';
+      const background =
+        req.query['background'] === '1' || req.query['background'] === 'true';
       const openSubscription = async (): Promise<
         { iter: AsyncIterator<BridgeEvent>; busEpoch?: string } | undefined
       > => {
@@ -400,6 +402,7 @@ export function registerSseEventsRoutes(
               signal: abort.signal,
               lastEventId,
               ...(maxQueued !== undefined ? { maxQueued } : {}),
+              ...(background ? { background: true } : {}),
               onSubscriberDiagnostic,
             })
           : runtime.bridge.subscribeEvents(sessionId, {
@@ -408,6 +411,7 @@ export function registerSseEventsRoutes(
               ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
               ...(maxQueued !== undefined ? { maxQueued } : {}),
               ...(snapshot ? { snapshot: true } : {}),
+              ...(background ? { background: true } : {}),
               onSubscriberDiagnostic,
             });
         if (!iterable) return undefined;

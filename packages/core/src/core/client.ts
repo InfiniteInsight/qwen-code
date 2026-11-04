@@ -5997,16 +5997,34 @@ export class LlmClient {
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
-    customInstructions?: string,
+    customInstructions?:
+      | string
+      | {
+          customInstructions?: string;
+          trigger?: 'auto' | 'manual';
+          pendingUserMessage?: Content;
+          includePendingUserMessageInCompressionRecord?: boolean;
+        },
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const previousChat = this.getChat();
+    const compressOptions =
+      typeof customInstructions === 'string'
+        ? { customInstructions }
+        : customInstructions
+          ? {
+              ...customInstructions,
+              includePendingUserMessageInCompressionRecord:
+                customInstructions.includePendingUserMessageInCompressionRecord ??
+                false,
+            }
+          : undefined;
     const info = await previousChat.tryCompress(
       prompt_id,
       force,
       signal,
-      customInstructions ? { customInstructions } : undefined,
+      compressOptions,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const compressedHistory =

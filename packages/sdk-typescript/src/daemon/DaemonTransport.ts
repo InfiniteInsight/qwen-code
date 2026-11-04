@@ -55,6 +55,8 @@ export interface DaemonTransportSubscribeOptions {
   maxQueued?: number;
   /** Client identity used by REST/SSE. Ignored by ACP transports. */
   clientId?: string;
+  /** Non-interactive background subscription (`?background=1` for REST/SSE). */
+  background?: boolean;
   /** Diagnostic-only REST/SSE connection reason. */
   sseConnectReason?: DaemonSseConnectReason;
   /** Diagnostic-only predecessor for the next REST/SSE stream. */

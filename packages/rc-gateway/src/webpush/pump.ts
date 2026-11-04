@@ -312,6 +312,7 @@ export class SessionEventPump {
         for await (const ev of this.daemon.subscribeEvents(s.sessionId, {
           signal: loop.ctrl.signal,
           lastEventId: loop.lastEventId,
+          background: true,
         })) {
           // Advance the resume cursor first, before any handling branch, so a
           // reconnect never re-delivers an event we already auto-voted on.
