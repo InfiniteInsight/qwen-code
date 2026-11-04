@@ -392,6 +392,41 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('surfaces outputHistoryItems added via context.ui.addItem when command action returns void', async () => {
+    const mockVoidUiCommand = {
+      name: 'status',
+      description: 'Show status via context.ui.addItem',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: vi.fn().mockImplementation((context) => {
+        context.ui.addItem({
+          type: 'error',
+          text: 'Connection failed: offline',
+        });
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockVoidUiCommand]);
+
+    const result = await handleSlashCommand(
+      '/status',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: 'Connection failed: offline',
+      outputHistoryItems: [
+        expect.objectContaining({
+          type: 'error',
+          text: 'Connection failed: offline',
+        }),
+      ],
+    });
+  });
+
   it('blocks a canonical built-in through its alias before action execution', async () => {
     const action = vi.fn();
     mockGetCommands.mockReturnValue([

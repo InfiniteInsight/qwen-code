@@ -1482,7 +1482,8 @@ export class DaemonSessionClient {
         if (
           event.type === 'state_resync_required' &&
           (event.data as { reason?: unknown } | null | undefined)?.reason ===
-            'epoch_reset'
+            'epoch_reset' &&
+          event.id === undefined
         ) {
           this.lastSeenEventId = undefined;
         } else if (event.id !== undefined) {

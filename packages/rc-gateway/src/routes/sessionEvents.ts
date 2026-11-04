@@ -728,12 +728,15 @@ class SessionEventsHub {
     const data = (ev.data ?? {}) as Record<string, unknown>;
     if (data['reason'] === 'epoch_reset') this.epochResetSeen = true;
     const wal = getSharedWal(walDir, sessionId);
+    const prevId = wal.latestId() ?? 0;
     const frame: WalFrame = {
-      id: (wal.latestId() ?? 0) + 1,
+      id: prevId + 1,
       v: ev.v ?? 1,
       type: 'state_resync_required',
       data: {
         reason: typeof data['reason'] === 'string' ? data['reason'] : 'unknown',
+        lastDeliveredId: prevId,
+        earliestAvailableId: prevId + 1,
         ...(typeof data['detail'] === 'string'
           ? { detail: data['detail'] }
           : {}),
@@ -1190,6 +1193,29 @@ export function withGatewayResumeCursor(
         !isValidSessionId(sessionId)
       ) {
         return restored;
+      }
+      const state = resolveEpochState(walDir, sessionId);
+      if (
+        state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId &&
+        !state.cursorVoid &&
+        typeof restored.eventEpoch === 'string' &&
+        restored.eventEpoch.length > 0 &&
+        state.daemonEpoch !== undefined &&
+        restored.eventEpoch !== state.daemonEpoch
+      ) {
+        const wal = getSharedWal(walDir, sessionId);
+        const prevId = wal.latestId() ?? 0;
+        wal.append({
+          id: prevId + 1,
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            lastDeliveredId: prevId,
+            earliestAvailableId: prevId + 1,
+          },
+          _rc: { gap: true },
+        });
       }
       return {
         ...restored,

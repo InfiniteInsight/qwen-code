@@ -3892,4 +3892,25 @@ describe('task_changed (background task lifecycle frame)', () => {
     expect(next).toEqual({ ...state, lastEventId: 10 });
     expect(next.unrecognizedKnownEventCount ?? 0).toBe(0);
   });
+
+  it('admits gateway WAL session_rewound markers carrying toTurn and truncatedEventId', () => {
+    const gatewayMarker: DaemonEvent = {
+      id: 42,
+      v: 1,
+      type: 'session_rewound',
+      data: {
+        toTurn: 1,
+        targetTurnIndex: 1,
+        truncatedEventId: 41,
+        files: { changed: 2, failed: 0 },
+      },
+    };
+    expect(asKnownDaemonEvent(gatewayMarker)).toBeDefined();
+    const state = reduceDaemonSessionEvent(
+      createDaemonSessionViewState(),
+      gatewayMarker,
+    );
+    expect(state.unrecognizedKnownEventCount).toBe(0);
+    expect(state.lastEventId).toBe(42);
+  });
 });

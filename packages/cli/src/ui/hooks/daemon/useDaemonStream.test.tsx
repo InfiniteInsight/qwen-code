@@ -15,6 +15,8 @@ import {
   type DaemonSessionDriver,
   type DaemonPermissionResponse,
 } from './useDaemonStream.js';
+import { useDaemonStreamAdapter } from './useDaemonStreamAdapter.js';
+import { DaemonStreamContext } from './DaemonStreamContext.js';
 import type { DaemonFrame } from './projectDaemonEvent.js';
 import {
   HOOK_TEXT,
@@ -1138,5 +1140,83 @@ describe('useDaemonStream', () => {
       expect(result.current.thought?.subject).toBe('Still thinking'),
     );
     expect(result.current.pendingHistoryItems).toBe(pendingDuringTool);
+  });
+
+  it('submitQuery immediately transitions streamingState to Responding and resets to Idle if driver.prompt fails before SSE', async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+
+    let sent!: Promise<void>;
+    act(() => {
+      sent = result.current.submitQuery('hello');
+    });
+    // Immediately Responding while waiting for the first SSE chunk
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    expect(added).toEqual([{ type: 'user', text: 'hello' }]);
+
+    await act(async () => {
+      driver.failPrompt(new Error('network error'));
+      await expect(sent).rejects.toThrow('network error');
+    });
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+  });
+
+  it('useDaemonStreamAdapter routes bare ? and local commands to handleSlashCommand and forwards /clear (/reset, /new) to driver.prompt', async () => {
+    const driver = makeFakeDriver({ clientId: 'me' });
+    const handleSlashCommand = vi.fn().mockResolvedValue(false);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          vi.fn(),
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+        ),
+      { wrapper },
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('?');
+    });
+    expect(handleSlashCommand).toHaveBeenCalledWith(
+      '?',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(driver.stats().prompts).toEqual([]);
+
+    await act(async () => {
+      await result.current.submitQuery('/reset');
+    });
+    expect(handleSlashCommand).toHaveBeenCalledWith(
+      '/reset',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(driver.stats().prompts).toEqual([
+      { prompt: [{ type: 'text', text: '/clear' }] },
+    ]);
   });
 });

@@ -1516,7 +1516,11 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
       (f) => f.ev.type === 'state_resync_required',
     )!;
     expect(live.id).toBe(4);
-    expect(live.ev.data).toMatchObject({ reason: 'seeded_replay_not_in_ring' });
+    expect(live.ev.data).toMatchObject({
+      reason: 'seeded_replay_not_in_ring',
+      lastDeliveredId: 3,
+      earliestAvailableId: 4,
+    });
 
     const reload = await watch(url, { 'Last-Event-ID': '0' });
     await reload.waitFor((fs) =>
@@ -1616,6 +1620,25 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
     expect(await plain.resumeSession(sid, { workspaceCwd: '/w' })).toEqual(
       bare,
     );
+
+    // When resumeSession restores into a new daemon epoch (e3) while the WAL
+    // ends on e2 without a gap marker yet, withGatewayResumeCursor appends the
+    // epoch_reset gap marker at id 6 so the resuming client starts at id 6 and
+    // is not immediately told to resync on its first /events attach.
+    const nextEpochRestored = {
+      ...restored,
+      lastEventId: 2,
+      eventEpoch: 'e3',
+    };
+    const nextWrapped = withGatewayResumeCursor(
+      { resumeSession: async () => nextEpochRestored } as never,
+      walDir,
+    );
+    const nextOut = await nextWrapped.resumeSession(sid, {
+      workspaceCwd: '/w',
+    });
+    expect(nextOut).toEqual({ ...nextEpochRestored, lastEventId: 6 });
+    expect(walIds(walDir, sid)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it('answers 500 wal_unavailable, rather than hanging, when the log cannot be opened', async () => {

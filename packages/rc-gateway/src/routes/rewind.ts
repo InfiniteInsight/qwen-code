@@ -471,6 +471,10 @@ export function createRewindRoute(
       const rewoundByTokenId = req.rcClient?.id;
       const markerData = {
         toTurn: targetTurnIndex,
+        targetTurnIndex,
+        ...(dispatchedPromptId !== undefined
+          ? { promptId: dispatchedPromptId }
+          : {}),
         truncatedEventId,
         rewoundByTokenId,
         rewoundAt,

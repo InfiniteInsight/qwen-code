@@ -949,6 +949,54 @@ describe('composePostCompactHistory', () => {
     expect(last.parts?.some((p) => !!p.functionCall)).toBe(true);
   });
 
+  it('preserves thought/thoughtSignature parts on a trailing model+functionCall and does not mutate caller history', async () => {
+    const trailingModelTurn: Content = {
+      role: 'model',
+      parts: [
+        {
+          thought: true,
+          text: 'reasoning before tool call',
+          thoughtSignature: 'sig-123',
+        },
+        { text: 'I will read the file now.' },
+        {
+          functionCall: {
+            name: 'read_file',
+            args: { file_path: '/some/file.ts' },
+          },
+          thoughtSignature: 'sig-fc-456',
+        },
+      ],
+    };
+    const originalPartsSnapshot = structuredClone(trailingModelTurn.parts);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'use the tool' }] },
+      trailingModelTurn,
+    ];
+
+    const result = await composePostCompactHistory(history, 'SUM');
+    // Caller's input Content must not be mutated in place
+    expect(trailingModelTurn.parts).toEqual(originalPartsSnapshot);
+
+    // In the 2-entry fold (no post-ack user attachments), the model entry must
+    // keep the thought part (with thoughtSignature) ahead of the ack text and functionCall
+    expect(result).toHaveLength(2);
+    const modelParts = result[1].parts ?? [];
+    expect(modelParts[0]).toEqual({
+      thought: true,
+      text: 'reasoning before tool call',
+      thoughtSignature: 'sig-123',
+    });
+    expect(
+      modelParts.some(
+        (p) =>
+          !!p.functionCall &&
+          (p as { thoughtSignature?: string }).thoughtSignature ===
+            'sig-fc-456',
+      ),
+    ).toBe(true);
+  });
+
   it('attachments + trailing functionCall produce a 4-entry, role-alternating output', async () => {
     // The most complex branch: postAckParts.length > 0 AND a trailing
     // model+functionCall, producing [user(summary), model(ack),

@@ -870,6 +870,29 @@ describe('the automatic reopen (--reopen-crashed-tabs)', () => {
     expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeDefined();
   });
 
+  it('retries auto-reopen on the next sweep when isMirrored transiently returns true while the dying wrapper is still exiting', async () => {
+    let stillExiting = true;
+    const g = await boot({
+      autoReopen: true,
+      isMirrored: async (id) => stillExiting && id === S1,
+    });
+    g.probe.fd0.set(76, '/dev/pts/1');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 76 });
+    await g.poll();
+    // Synchronous sweep triggered inside end() sees isMirrored=true -> alreadyMirrored
+    await end(g, t.tabId, 137);
+    await g.sweep!();
+    expect(await g.requests.readAll()).toEqual([]);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeUndefined();
+
+    // Wrapper finishes exiting; next sweep retries and reopens the tab
+    stillExiting = false;
+    await g.poll();
+    await g.sweep!();
+    expect(await queued(g, 1)).toHaveLength(1);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeDefined();
+  });
+
   it('leaves a dismissed crash and an old crash alone, and does nothing when it is off', async () => {
     const g = await boot({ autoReopen: true });
     const old = await g.registry.start({

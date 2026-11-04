@@ -647,7 +647,7 @@ function trailingFunctionCallContent(history: Content[]): Content | undefined {
   const last = history[history.length - 1];
   if (!last || last.role !== 'model') return undefined;
   if (!last.parts?.some((p) => !!p.functionCall)) return undefined;
-  return last;
+  return structuredClone(last);
 }
 
 /**
@@ -867,13 +867,19 @@ export async function composePostCompactHistory(
     if (trailingFc) out.push(trailingFc);
   } else if (trailingFc) {
     // Fold the trailing functionCall into the ack's own Content so we don't
-    // produce model→model adjacency. Intentionally keep ONLY the
-    // functionCall parts: the trailing turn's text was already captured in
-    // the summary, and merging it into the ack would muddy both. (The
-    // with-attachments branch above keeps trailingFc as its own model turn,
-    // so text survives there — the asymmetry is deliberate, not a bug.)
+    // produce model→model adjacency. Keep thought/thoughtSignature parts
+    // (placed before ackParts) and functionCall parts so thinking models
+    // (Anthropic extended thinking, DeepSeek Reasoner, Kimi, Z.ai, Gemini)
+    // do not reject the assistant tool-call turn with HTTP 400 when
+    // pendingUserMessage's functionResponse is appended next.
+    const thoughtParts = (trailingFc.parts ?? []).filter(
+      (p) => p.thought === true && !p.functionCall,
+    );
     const fcParts = (trailingFc.parts ?? []).filter((p) => !!p.functionCall);
-    out.push({ role: 'model', parts: [...ackParts, ...fcParts] });
+    out.push({
+      role: 'model',
+      parts: [...thoughtParts, ...ackParts, ...fcParts],
+    });
   } else {
     out.push({ role: 'model', parts: ackParts });
   }

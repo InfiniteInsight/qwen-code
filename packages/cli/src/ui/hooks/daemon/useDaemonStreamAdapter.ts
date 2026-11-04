@@ -35,6 +35,7 @@ import {
  * against the daemon's live session.
  */
 const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
+  '?',
   'model',
   'approval-mode',
   'quit',
@@ -44,6 +45,7 @@ const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
   'vim',
   'copy',
   'about',
+  'status',
   'settings',
   'terminal-setup',
   'editor',
@@ -54,6 +56,8 @@ const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
   'bug',
   'ide',
   'clear',
+  'reset',
+  'new',
   'rewind',
   'restore',
   'resume',
@@ -71,6 +75,17 @@ const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
   'setup-github',
   'commit',
   'language',
+  'auth',
+  'connect',
+  'login',
+  'cd',
+  'history',
+  'reload-plugins',
+  'recap',
+  'tools',
+  'rollback',
+  'continue',
+  'tag',
 ]);
 
 /** Flatten a `submitQuery` argument (string | Part | Part[]) to plain text. */
@@ -117,12 +132,11 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     submitQuery: async (query, _submitType, promptId) => {
       const text = toText(query);
       const trimmed = text.trim();
-      if (handleSlashCommand && isSlashCommand(trimmed)) {
-        const firstToken = trimmed
-          .replace(/^[/?]/, '')
-          .trim()
-          .split(/\s+/u)[0]
-          ?.toLowerCase();
+      if (handleSlashCommand && (isSlashCommand(trimmed) || trimmed === '?')) {
+        const body = trimmed.replace(/^[/?]/, '').trim();
+        const firstToken = (
+          body ? body.split(/\s+/u)[0] : trimmed[0]
+        )?.toLowerCase();
         if (firstToken && LOCAL_DAEMON_TUI_SLASH_COMMANDS.has(firstToken)) {
           const slashResult = await handleSlashCommand(
             trimmed,
@@ -131,6 +145,17 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
             undefined,
             promptId,
           );
+          if (
+            !slashResult &&
+            (firstToken === 'clear' ||
+              firstToken === 'reset' ||
+              firstToken === 'new')
+          ) {
+            await driver.prompt({
+              prompt: [{ type: 'text', text: '/clear' }],
+            });
+            return;
+          }
           if (!slashResult || slashResult.type !== 'submit_prompt') {
             return;
           }

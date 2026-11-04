@@ -143,6 +143,7 @@ type ToolSpanRecord = {
   statusCalls: Array<{ code: number; message?: string }>;
   spanAttributes: Record<string, string | number | boolean>;
   ended: boolean;
+  mutatedAfterEnd?: boolean;
   /**
    * Metadata passed to endToolSpan / endToolExecutionSpan — captured so
    * tests can assert success/error/cancelled values are forwarded correctly.
@@ -284,18 +285,27 @@ function createMockToolSpan(
   const spanId = Math.random().toString(16).slice(2, 18).padEnd(16, '0');
   return Object.assign(record, {
     setStatus(status: { code: number; message?: string }) {
+      if (record.ended) {
+        record.mutatedAfterEnd = true;
+      }
       if (shouldThrowToolSpanSetStatus.value) {
         throw new Error('setStatus failed');
       }
       record.statusCalls.push(status);
     },
     setAttribute(key: string, value: string | number | boolean) {
+      if (record.ended) {
+        record.mutatedAfterEnd = true;
+      }
       if (shouldThrowToolSpanSetAttribute.value) {
         throw new Error('setAttribute failed');
       }
       record.spanAttributes[key] = value;
     },
     setAttributes(attrs: Record<string, string | number | boolean>) {
+      if (record.ended) {
+        record.mutatedAfterEnd = true;
+      }
       Object.assign(record.spanAttributes, attrs);
     },
     end() {
@@ -15169,5 +15179,36 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ).resolves.not.toThrow();
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+  });
+
+  it('writes setToolSpanFailure attributes before ending the tool span on pre-execution denial', async () => {
+    toolSpanRecords.length = 0;
+    const tool = new MockTool({
+      name: 'denied_tool',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        ...INTERACTIVE_CLI,
+        isInteractive: () => false,
+        getInputFormat: () => InputFormat.TEXT,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      }),
+    );
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('call-denied-span', 'denied_tool', {}, 'prompt-denied'),
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const span = toolSpanRecords.find((r) => r.name === 'tool.denied_tool');
+    expect(span).toBeDefined();
+    expect(span?.ended).toBe(true);
+    expect(span?.mutatedAfterEnd).toBeUndefined();
+    expect(span?.spanAttributes['tool.failure_kind']).toBe(
+      'non_interactive_denied',
+    );
   });
 });

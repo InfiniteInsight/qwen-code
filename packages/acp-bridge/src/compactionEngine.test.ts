@@ -3746,12 +3746,20 @@ describe('turn attribution preservation (DAEMON-007)', () => {
 
   it('truncates replaySegments at target promptId on session_rewound', () => {
     const engine = new TurnBoundaryCompactionEngine();
-    engine.ingest(withIdentity(makeUserMessage(1, 'turn 0'), { promptId: 'p0' }));
-    engine.ingest(withIdentity(makeTextChunk(2, 'reply 0'), { promptId: 'p0' }));
+    engine.ingest(
+      withIdentity(makeUserMessage(1, 'turn 0'), { promptId: 'p0' }),
+    );
+    engine.ingest(
+      withIdentity(makeTextChunk(2, 'reply 0'), { promptId: 'p0' }),
+    );
     engine.ingest(withIdentity(makeTurnComplete(3), { promptId: 'p0' }));
 
-    engine.ingest(withIdentity(makeUserMessage(4, 'turn 1'), { promptId: 'p1' }));
-    engine.ingest(withIdentity(makeTextChunk(5, 'reply 1'), { promptId: 'p1' }));
+    engine.ingest(
+      withIdentity(makeUserMessage(4, 'turn 1'), { promptId: 'p1' }),
+    );
+    engine.ingest(
+      withIdentity(makeTextChunk(5, 'reply 1'), { promptId: 'p1' }),
+    );
     engine.ingest(withIdentity(makeTurnComplete(6), { promptId: 'p1' }));
 
     engine.ingest({
@@ -3764,5 +3772,44 @@ describe('turn attribution preservation (DAEMON-007)', () => {
     const snap = engine.snapshot();
     const texts = extractTexts(snap.compactedTurns);
     expect(texts).toEqual(['turn 0', 'reply 0']);
+  });
+
+  it('does not evict retained turns before truncating when session_rewound arrives with active turn slots', () => {
+    // Regression: flushing active turn slots via flushCurrentTurn() ran
+    // enforceReplayWindow() BEFORE truncating at the rewind boundary, which
+    // evicted older turns that should have survived after the rewind cut.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 450 });
+    engine.ingest(
+      withIdentity(makeUserMessage(1, 'turn 0 keep'), { promptId: 'p0' }),
+    );
+    engine.ingest(
+      withIdentity(makeTextChunk(2, 'reply 0 keep'), { promptId: 'p0' }),
+    );
+    engine.ingest(withIdentity(makeTurnComplete(3), { promptId: 'p0' }));
+
+    // Turn 1 is in flight with a large text slot that would push total bytes
+    // well past maxReplayBytes (450B) if enforceReplayWindow() ran before cut.
+    engine.ingest(
+      withIdentity(makeUserMessage(4, 'turn 1 rewind target'), {
+        promptId: 'p1',
+      }),
+    );
+    engine.ingest(
+      withIdentity(makeTextChunk(5, 'x'.repeat(1000)), { promptId: 'p1' }),
+    );
+
+    engine.ingest({
+      id: 6,
+      v: 1,
+      type: 'session_rewound',
+      data: { promptId: 'p1', targetTurnIndex: 1, removedTurnCount: 1 },
+    });
+
+    const snap = engine.snapshot();
+    expect(snap.compactedTurns[0]?.type).not.toBe('history_truncated');
+    expect(extractTexts(snap.compactedTurns)).toEqual([
+      'turn 0 keep',
+      'reply 0 keep',
+    ]);
   });
 });

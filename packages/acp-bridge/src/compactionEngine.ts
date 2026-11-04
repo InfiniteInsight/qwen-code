@@ -889,6 +889,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   }
 
   private rewindReplayWindow(event: BridgeEvent): void {
+    let pushedPendingSegment = false;
     if (this.slots.length > 0) {
       const pending: BridgeEvent[] = [];
       for (const slot of this.slots) {
@@ -919,13 +920,15 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         }
       }
       if (pending.length > 0) {
-        this.addReplaySegment(pending, 1);
+        const bytes = pending.reduce(
+          (sum, ev) => sum + (serializedBridgeEventByteLength(ev) ?? 0),
+          0,
+        );
+        this.replaySegments.push({ events: pending, bytes, turnCount: 1 });
+        this.replayBytes += bytes;
+        pushedPendingSegment = true;
       }
     }
-    this.resetJournal();
-    this.slots = [];
-    this.toolSlotIndex.clear();
-    this.clearTextSlotIndex();
 
     const data =
       event.data && typeof event.data === 'object' && !Array.isArray(event.data)
@@ -1022,7 +1025,24 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       }
     }
 
-    if (cutSegIdx === undefined) return;
+    if (cutSegIdx === undefined) {
+      if (pushedPendingSegment) {
+        const popped = this.replaySegments.pop();
+        if (popped) {
+          this.replayBytes = Math.max(0, this.replayBytes - popped.bytes);
+        }
+      }
+      this.resetJournal();
+      this.slots = [];
+      this.toolSlotIndex.clear();
+      this.clearTextSlotIndex();
+      return;
+    }
+
+    this.resetJournal();
+    this.slots = [];
+    this.toolSlotIndex.clear();
+    this.clearTextSlotIndex();
 
     if (cutEventIdx > 0) {
       const keptEvents = this.replaySegments[cutSegIdx]!.events.slice(
@@ -1044,11 +1064,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     }
 
     let totalBytes = 0;
-    for (
-      let i = this.replaySegmentStart;
-      i < this.replaySegments.length;
-      i++
-    ) {
+    for (let i = this.replaySegmentStart; i < this.replaySegments.length; i++) {
       totalBytes += this.replaySegments[i]!.bytes;
     }
     this.replayBytes = totalBytes;

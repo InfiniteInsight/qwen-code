@@ -24360,6 +24360,10 @@ describe('Session', () => {
           'test-session-id########1',
           false,
           expect.any(AbortSignal),
+          expect.objectContaining({
+            pendingUserMessage: expect.objectContaining({ role: 'user' }),
+            trigger: 'auto',
+          }),
         );
 
         const sendMessageStream = mockChat.sendMessageStream as ReturnType<
@@ -28457,6 +28461,10 @@ describe('Session', () => {
           'test-session-id########1',
           false,
           expect.any(AbortSignal),
+          expect.objectContaining({
+            pendingUserMessage: expect.objectContaining({ role: 'user' }),
+            trigger: 'auto',
+          }),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockChat.addHistory).toHaveBeenCalledWith({
@@ -60368,6 +60376,90 @@ describe('Session', () => {
 
       await session.cancelPendingPrompt();
       expect(capturedSignal!.aborted).toBe(true);
+    });
+
+    it('does not record user turn, capture cache-safe params, or emit follow-up suggestions when UserPromptSubmit blocks the prompt', async () => {
+      const existingRecorder = mockConfig.getChatRecordingService();
+      const recordUserMessage = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        ...existingRecorder,
+        recordUserMessage,
+        recordThought: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordSlashCommand: vi.fn(),
+        flush: vi.fn(),
+      });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((event: string) => event === 'UserPromptSubmit');
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockResolvedValue({
+          type: core.MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'hook-1',
+          success: true,
+          output: {
+            decision: 'block',
+            reason: 'Rejected by UserPromptSubmit policy',
+          },
+        }),
+      });
+      generateMock.mockResolvedValue({ suggestion: 'should not emit' });
+
+      const res = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'blocked prompt' }],
+      });
+
+      expect(res).toEqual({ stopReason: 'end_turn' });
+      expect(recordUserMessage).not.toHaveBeenCalled();
+      expect(generateMock).not.toHaveBeenCalled();
+    });
+
+    it('passes UserPromptSubmit additionalContext to recordUserMessage hookContext', async () => {
+      const existingRecorder = mockConfig.getChatRecordingService();
+      const recordUserMessage = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        ...existingRecorder,
+        recordUserMessage,
+        recordThought: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordSlashCommand: vi.fn(),
+        flush: vi.fn(),
+      });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((event: string) => event === 'UserPromptSubmit');
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockResolvedValue({
+          type: core.MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'hook-2',
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              hookEventName: 'UserPromptSubmit',
+              additionalContext: 'extra hook context',
+            },
+          },
+        }),
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'allowed prompt' }],
+      });
+
+      expect(recordUserMessage).toHaveBeenCalledWith(
+        'allowed prompt',
+        undefined,
+        expect.objectContaining({
+          displayText: 'allowed prompt',
+          hookContext: 'extra hook context',
+        }),
+        expect.any(String),
+        undefined,
+      );
     });
   });
 });

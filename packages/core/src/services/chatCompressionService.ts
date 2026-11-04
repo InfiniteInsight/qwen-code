@@ -1256,9 +1256,19 @@ export class ChatCompressionService {
         // → 400. (Manual orphans were already stripped above.) Folding into
         // the ack avoids a model→model adjacency.
         const trailingFc = historyForCompose[historyForCompose.length - 1];
+        const thoughtParts =
+          trailingFc?.role === 'model'
+            ? structuredClone(
+                (trailingFc.parts ?? []).filter(
+                  (p) => p.thought === true && !p.functionCall,
+                ),
+              )
+            : [];
         const fcParts =
           trailingFc?.role === 'model'
-            ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
+            ? structuredClone(
+                (trailingFc.parts ?? []).filter((p) => !!p.functionCall),
+              )
             : [];
         // Re-apply the SAME plan-mode + subagent reminders the normal path
         // injects. These builders are pure (no disk I/O / history walking),
@@ -1277,6 +1287,7 @@ export class ChatCompressionService {
           {
             role: 'model',
             parts: [
+              ...thoughtParts,
               { text: 'Got it. Thanks for the additional context!' },
               ...fcParts,
             ],

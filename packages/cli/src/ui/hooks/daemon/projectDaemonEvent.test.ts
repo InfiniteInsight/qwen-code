@@ -814,6 +814,18 @@ describe('projectReplaySnapshot', () => {
     ]);
   });
 
+  it('transitions to Responding when hasActivePrompt is true even if only user_message_chunk has arrived', () => {
+    const { committed, state } = projectReplaySnapshot(
+      {
+        compactedReplay,
+        liveJournal: [liveJournal[0]!],
+      },
+      { ownClientId: SELF, lastEventId: 52, hasActivePrompt: true },
+    );
+    expect(committed.at(-1)).toEqual({ type: 'user', text: 'third question' });
+    expect(state.streamingState).toBe(StreamingState.Responding);
+  });
+
   it('renders a replayed user line even when it carries our own clientId', () => {
     // Replay is history, not an echo of input this client just rendered.
     const { committed, state } = projectReplaySnapshot(

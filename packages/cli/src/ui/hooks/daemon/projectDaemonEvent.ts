@@ -919,6 +919,8 @@ export function projectReplaySnapshot(
     const flushed = projectFrame(state, { type: 'turn_complete', data: {} });
     state = flushed.state;
     committed.push(...flushed.committed);
+  } else if (state.streamingState === StreamingState.Idle) {
+    state = { ...state, streamingState: StreamingState.Responding };
   }
 
   return {

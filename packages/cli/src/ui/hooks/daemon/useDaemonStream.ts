@@ -429,9 +429,27 @@ export function useDaemonStream(
 
   const submitQuery = useCallback(
     async (query: string) => {
+      if (
+        stateRef.current.pendingText.length > 0 ||
+        stateRef.current.tools.length > 0
+      ) {
+        finalizeTurn();
+      }
       // Echo locally for responsiveness; the reducer drops the daemon's
       // self-echo (matched by originatorClientId === our clientId).
       addItemRef.current({ type: 'user', text: query }, now());
+      if (stateRef.current.streamingState === StreamingState.Idle) {
+        const respondingState = {
+          ...stateRef.current,
+          streamingState: StreamingState.Responding,
+        };
+        stateRef.current = respondingState;
+        setSnapshot((prev) =>
+          hasRenderableStateChange(prev, respondingState)
+            ? respondingState
+            : prev,
+        );
+      }
       dbg(`submitQuery len=${query.length}`);
       let result: unknown;
       try {
@@ -460,6 +478,7 @@ export function useDaemonStream(
         ) {
           return;
         }
+        finalizeTurn();
         throw err;
       }
       dbg('prompt() resolved');

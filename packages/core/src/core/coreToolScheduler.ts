@@ -3838,6 +3838,11 @@ export class CoreToolScheduler {
 
             const message =
               getPlanRequiredTeammatePreApprovalMessage(canonicalName);
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+            );
             this.setStatusInternal(
               reqInfo.callId,
               'error',
@@ -3848,17 +3853,17 @@ export class CoreToolScheduler {
                 'not_started',
               ),
             );
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
-              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
-            );
             this.finalizeToolSpan(reqInfo.callId);
             continue;
           }
 
           if (finalPermission === 'deny') {
             // Hard deny: security violation or PM explicit deny
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PERMISSION_DENIED,
+              TOOL_SPAN_STATUS_PERMISSION_DENIED,
+            );
             this.setStatusInternal(
               reqInfo.callId,
               'error',
@@ -3868,11 +3873,6 @@ export class CoreToolScheduler {
                 ToolErrorType.EXECUTION_DENIED,
                 'not_started',
               ),
-            );
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PERMISSION_DENIED,
-              TOOL_SPAN_STATUS_PERMISSION_DENIED,
             );
             this.finalizeToolSpan(reqInfo.callId);
             continue;
@@ -3914,6 +3914,11 @@ export class CoreToolScheduler {
             continue;
           }
           const rejectPlanShell = (message: string) => {
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+            );
             this.setStatusInternal(reqInfo.callId, 'error', {
               ...createErrorResponse(
                 reqInfo,
@@ -3923,11 +3928,6 @@ export class CoreToolScheduler {
               ),
               resultDisplay: message,
             });
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
-              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
-            );
             this.finalizeToolSpan(reqInfo.callId);
           };
 
@@ -4102,6 +4102,11 @@ export class CoreToolScheduler {
                   `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
                     formatDenialStateLog(denialState),
                 );
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                  outcome.errorMessage,
+                );
                 this.setStatusInternal(
                   reqInfo.callId,
                   'error',
@@ -4111,11 +4116,6 @@ export class CoreToolScheduler {
                     ToolErrorType.EXECUTION_DENIED,
                     'not_started',
                   ),
-                );
-                setToolSpanFailure(
-                  toolSpan,
-                  TOOL_FAILURE_KIND_PERMISSION_DENIED,
-                  outcome.errorMessage,
                 );
                 this.finalizeToolSpan(reqInfo.callId);
                 continue;
@@ -4284,6 +4284,11 @@ export class CoreToolScheduler {
                     ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
                     : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
               );
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+                TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+              );
               this.setStatusInternal(reqInfo.callId, 'error', {
                 ...createErrorResponse(
                   reqInfo,
@@ -4293,11 +4298,6 @@ export class CoreToolScheduler {
                 ),
                 resultDisplay: 'Plan mode blocked a non-read-only tool call.',
               });
-              setToolSpanFailure(
-                toolSpan,
-                TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
-                TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
-              );
               this.finalizeToolSpan(reqInfo.callId);
               continue;
             }
@@ -4339,6 +4339,11 @@ export class CoreToolScheduler {
                 rejectPlanShell(errorMessage);
                 continue;
               }
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
+                TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED,
+              );
               this.setStatusInternal(reqInfo.callId, 'error', {
                 ...createErrorResponse(
                   reqInfo,
@@ -4348,11 +4353,6 @@ export class CoreToolScheduler {
                 ),
                 approvalRequired: true,
               });
-              setToolSpanFailure(
-                toolSpan,
-                TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
-                TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED,
-              );
               this.finalizeToolSpan(reqInfo.callId);
               continue;
             }
@@ -4552,6 +4552,11 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     ToolConfirmationOutcome.Cancel,
                   );
+                  setToolSpanFailure(
+                    toolSpan,
+                    TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED,
+                    TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED,
+                  );
                   this.setStatusInternal(
                     reqInfo.callId,
                     'error',
@@ -4564,11 +4569,6 @@ export class CoreToolScheduler {
                       ToolErrorType.EXECUTION_DENIED,
                       'not_started',
                     ),
-                  );
-                  setToolSpanFailure(
-                    toolSpan,
-                    TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED,
-                    TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED,
                   );
                   this.finalizeToolSpan(reqInfo.callId);
                 }
@@ -4587,6 +4587,11 @@ export class CoreToolScheduler {
                 rejectPlanShell(errorMessage);
                 continue;
               }
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED,
+                TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED,
+              );
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',
@@ -4596,11 +4601,6 @@ export class CoreToolScheduler {
                   ToolErrorType.EXECUTION_DENIED,
                   'not_started',
                 ),
-              );
-              setToolSpanFailure(
-                toolSpan,
-                TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED,
-                TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED,
               );
               this.finalizeToolSpan(reqInfo.callId);
               continue;

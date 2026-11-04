@@ -1750,6 +1750,7 @@ interface ChannelTaskResponseCapture {
 
 interface AgentResponseCapture {
   turnId?: string;
+  promptBlockedByHook?: boolean;
   channelTask?: ChannelTaskResponseCapture;
   backgroundResponse?: (text: string) => Promise<void>;
   goalProposalTurn?: {
@@ -5880,21 +5881,24 @@ export class Session implements SessionContext {
       // suggestion generated from a transcript missing that turn. Mirrors the
       // interactive path, which captures on every main turn in
       // `LlmClient.sendMessageStream`.
-      if (completedResult.stopReason === 'end_turn') {
+      if (
+        completedResult.stopReason === 'end_turn' &&
+        !responseCapture.promptBlockedByHook
+      ) {
         this.config.getLlmClient().captureCacheSafeParams();
-      }
-      this.#maybeEmitFollowupSuggestion(completedResult);
-      if (channelDelivery && completedResult.stopReason === 'end_turn') {
-        this.#scheduleChannelDelivery({
-          sessionId: this.sessionId,
-          deliveryId: channelDelivery.deliveryId,
-          source: 'prompt',
-          target: channelDelivery.target,
-          text: normalizeChannelDeliveryText(
-            responseCapture.channelDelivery?.finalText ?? '',
-          ),
-          promptId: channelDelivery.deliveryId,
-        });
+        this.#maybeEmitFollowupSuggestion(completedResult);
+        if (channelDelivery) {
+          this.#scheduleChannelDelivery({
+            sessionId: this.sessionId,
+            deliveryId: channelDelivery.deliveryId,
+            source: 'prompt',
+            target: channelDelivery.target,
+            text: normalizeChannelDeliveryText(
+              responseCapture.channelDelivery?.finalText ?? '',
+            ),
+            promptId: channelDelivery.deliveryId,
+          });
+        }
       }
       return completedResult;
     } catch (error) {
@@ -6643,38 +6647,102 @@ export class Session implements SessionContext {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
-            if (goalTurn?.origin === 'runtime') {
-              // The automatic Goal turn was recorded above with its runtime
-              // provenance and must not also appear as real user input.
-            } else if (isContinue || isRestoreAskUserQuestion) {
-              // The orphaned content is already persisted; recording a new user
-              // message would duplicate the turn in the transcript.
-            } else if (isRetry) {
-              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
-              // record user message for session management. Only `/advisor`
-              // defers its record to after command resolution below — a
-              // user-defined command shadowing the name must keep its record
-              // (R18-6) — while every other slash command records here,
-              // BEFORE its action runs: `/clear` swaps in a fresh recorder
-              // inside its action, so its record must land first (R20-9).
-              const attachmentReferences = readDaemonAttachmentReferences(
-                promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            const messageBus = this.config.getMessageBus?.();
+            const isRuntimeContinuation = goalTurn?.origin === 'runtime';
+            const isFreshUserTurn =
+              !isRetry &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRuntimeContinuation;
+            const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
+            let cachedUserPromptHookResult:
+              | {
+                  blocked: boolean;
+                  blockReason?: string;
+                  additionalContext?: string;
+                }
+              | undefined;
+            const evaluateUserPromptSubmitHook = async () => {
+              if (cachedUserPromptHookResult) {
+                return cachedUserPromptHookResult;
+              }
+              if (
+                isContinue ||
+                isRestoreAskUserQuestion ||
+                isRuntimeContinuation ||
+                !hooksEnabled ||
+                !messageBus ||
+                !this.config.hasHooksForEvent?.('UserPromptSubmit')
+              ) {
+                cachedUserPromptHookResult = { blocked: false };
+                return cachedUserPromptHookResult;
+              }
+              const response = await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  owner: captureHookExecutionOwner(this.config),
+                  eventName: 'UserPromptSubmit',
+                  input: {
+                    prompt: promptText,
+                    ...(isUserSubmissionTurn &&
+                    submittedPrompt.trim().length > 0
+                      ? { submitted_prompt: submittedPrompt }
+                      : {}),
+                  },
+                  signal: pendingSend.signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
               );
-              const resourceLinks = params.prompt
-                .filter((block) => block.type === 'resource_link')
-                .map((block) => structuredClone(block));
+              const hookOutput = response.output
+                ? createHookOutput('UserPromptSubmit', response.output)
+                : undefined;
+
+              if (
+                hookOutput?.isBlockingDecision() ||
+                hookOutput?.shouldStopExecution()
+              ) {
+                cachedUserPromptHookResult = {
+                  blocked: true,
+                  blockReason:
+                    hookOutput?.getEffectiveReason() || 'No reason provided',
+                };
+                return cachedUserPromptHookResult;
+              }
+              cachedUserPromptHookResult = {
+                blocked: false,
+                additionalContext: hookOutput?.getAdditionalContext(),
+              };
+              return cachedUserPromptHookResult;
+            };
+
+            const attachmentReferences = readDaemonAttachmentReferences(
+              promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
+            );
+            const resourceLinks = params.prompt
+              .filter((block) => block.type === 'resource_link')
+              .map((block) => structuredClone(block));
+            let userTurnRecorded = false;
+            const recordUserTurn = (hookContext?: string) => {
+              if (userTurnRecorded) return;
+              userTurnRecorded = true;
               const recorder = this.config.getChatRecordingService();
+              const hasHookContext =
+                typeof hookContext === 'string' && hookContext.length > 0;
               recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
+                  hasHookContext ||
                   inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
-                      hookContext: '',
+                      hookContext: hookContext ?? '',
                       ...(inputAnnotations ? { inputAnnotations } : {}),
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
@@ -6683,6 +6751,25 @@ export class Session implements SessionContext {
                 promptId,
                 daemonPromptId,
               );
+            };
+
+            if (goalTurn?.origin === 'runtime') {
+              // The automatic Goal turn was recorded above with its runtime
+              // provenance and must not also appear as real user input.
+            } else if (isContinue || isRestoreAskUserQuestion) {
+              // The orphaned content is already persisted; recording a new user
+              // message would duplicate the turn in the transcript.
+            } else if (isRetry) {
+              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
+            } else if (
+              isSlashInput &&
+              (slashCommandName === 'clear' ||
+                slashCommandName === 'reset' ||
+                slashCommandName === 'new')
+            ) {
+              // `/clear` swaps in a fresh recorder inside its action, so its
+              // user-turn record must land BEFORE its action runs (R20-9).
+              recordUserTurn();
             }
 
             if (
@@ -6715,19 +6802,41 @@ export class Session implements SessionContext {
               parts = continuationParts!;
             } else if (isSlashInput) {
               // Handle slash command in ACP mode using capability-based filtering
-              const slashCommandResult = await handleSlashCommand(
-                inputText,
-                pendingSend,
-                this.config,
-                this.settings,
-                {
-                  // `/clear` swaps in a new Goal runtime under this
-                  // long-lived Session; without this the goal-state
-                  // subscription stays on the disposed instance.
-                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
-                },
-                this.slashCommandPolicy,
-              );
+              const hasUserPromptSubmitHook =
+                !isContinue &&
+                !isRestoreAskUserQuestion &&
+                !isRuntimeContinuation &&
+                hooksEnabled &&
+                !!messageBus &&
+                Boolean(this.config.hasHooksForEvent?.('UserPromptSubmit'));
+              const slashCommandResult = hasUserPromptSubmitHook
+                ? await handleSlashCommand(
+                    inputText,
+                    pendingSend,
+                    this.config,
+                    this.settings,
+                    {
+                      // `/clear` swaps in a new Goal runtime under this
+                      // long-lived Session; without this the goal-state
+                      // subscription stays on the disposed instance.
+                      startNewSession: () =>
+                        this.rebindGoalRuntimeForNewSession(),
+                    },
+                    this.slashCommandPolicy,
+                    undefined,
+                    async () => !(await evaluateUserPromptSubmitHook()).blocked,
+                  )
+                : await handleSlashCommand(
+                    inputText,
+                    pendingSend,
+                    this.config,
+                    this.settings,
+                    {
+                      startNewSession: () =>
+                        this.rebindGoalRuntimeForNewSession(),
+                    },
+                    this.slashCommandPolicy,
+                  );
 
               if (
                 slashCommandName === 'advisor' &&
@@ -6745,36 +6854,18 @@ export class Session implements SessionContext {
                 return { stopReason: 'cancelled' };
               }
 
-              // Classify by the RESOLVED command, not the raw token: a
-              // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
                 resolvedCommandInfo.name === 'advisor'
               );
               if (
-                slashCommandName === 'advisor' &&
                 shouldRecordSlashCommand &&
+                !cachedUserPromptHookResult?.blocked &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
-                const recorder = this.config.getChatRecordingService();
-                recorder?.recordUserMessage(
-                  promptText,
-                  goalTurn?.permit,
-                  promptDisplayText !== undefined || inputAnnotations
-                    ? {
-                        displayText: promptDisplayText ?? promptText,
-                        hookContext: '',
-                        ...(inputAnnotations ? { inputAnnotations } : {}),
-                      }
-                    : undefined,
-                  promptId,
-                  daemonPromptId,
-                );
+                recordUserTurn(cachedUserPromptHookResult?.additionalContext);
               }
 
               try {
@@ -6820,80 +6911,40 @@ export class Session implements SessionContext {
             }
 
             // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-            const hooksEnabled = !this.config.getDisableAllHooks?.();
-            const messageBus = this.config.getMessageBus?.();
-            // A runtime continuation is machine-generated, not a user
-            // submission — the same reason `isContinue` is exempt. Firing
-            // the hook on one is also unrecoverable: a block returns before
-            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
-            // branch, which re-queues the identical continuation. Nothing in
-            // that cycle can change the goal state, so it spins — no model
-            // call, one persisted transcript record per lap — until someone
-            // pauses or clears the goal.
-            const isRuntimeContinuation = goalTurn?.origin === 'runtime';
-            const isFreshUserTurn =
-              !isRetry &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation;
-            // Channel markers cover both automated and human messages. Keep
-            // that class excluded until its producers distinguish them; see
-            // docs/design/daemon-user-prompt-submit-provenance.md.
-            const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
-            if (
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation &&
-              hooksEnabled &&
-              messageBus &&
-              this.config.hasHooksForEvent?.('UserPromptSubmit')
-            ) {
-              const response = await messageBus.request<
-                HookExecutionRequest,
-                HookExecutionResponse
-              >(
-                {
-                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                  owner: captureHookExecutionOwner(this.config),
-                  eventName: 'UserPromptSubmit',
-                  input: {
-                    prompt: promptText,
-                    ...(isUserSubmissionTurn &&
-                    submittedPrompt.trim().length > 0
-                      ? { submitted_prompt: submittedPrompt }
-                      : {}),
-                  },
-                  signal: pendingSend.signal,
-                },
-                MessageBusType.HOOK_EXECUTION_RESPONSE,
+            const userPromptHookResult = await evaluateUserPromptSubmitHook();
+            if (userPromptHookResult.blocked) {
+              responseCapture.promptBlockedByHook = true;
+              const blockReason =
+                userPromptHookResult.blockReason || 'No reason provided';
+              await this.messageEmitter.emitAgentMessage(
+                `✗ **UserPromptSubmit blocked**: ${blockReason}`,
               );
-              const hookOutput = response.output
-                ? createHookOutput('UserPromptSubmit', response.output)
-                : undefined;
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(this.config.getApprovalMode(), 0),
+              );
+              return { stopReason: 'end_turn' };
+            }
 
-              if (
-                hookOutput?.isBlockingDecision() ||
-                hookOutput?.shouldStopExecution()
-              ) {
-                // Hook blocked the prompt - send notification to UI and return
-                const blockReason =
-                  hookOutput?.getEffectiveReason() || 'No reason provided';
-                await this.messageEmitter.emitAgentMessage(
-                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
-                );
-                return { stopReason: 'end_turn' };
-              }
+            // Add additional context from hooks to the request, wrapped in
+            // the reserved tag so it stays distinguishable from
+            // user-authored text (same shape as the interactive path).
+            const additionalContext = userPromptHookResult.additionalContext;
+            if (additionalContext) {
+              parts = [
+                ...parts,
+                { text: wrapUserPromptSubmitContext(additionalContext) },
+              ];
+            }
 
-              // Add additional context from hooks to the request, wrapped in
-              // the reserved tag so it stays distinguishable from
-              // user-authored text (same shape as the interactive path).
-              const additionalContext = hookOutput?.getAdditionalContext();
-              if (additionalContext) {
-                parts = [
-                  ...parts,
-                  { text: wrapUserPromptSubmitContext(additionalContext) },
-                ];
-              }
+            if (
+              !isSlashInput &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRetry &&
+              goalTurn?.origin !== 'runtime'
+            ) {
+              recordUserTurn(additionalContext);
             }
 
             if (isFreshUserTurn) {
@@ -9441,7 +9492,9 @@ export class Session implements SessionContext {
         );
         const currentChat = this.#getCurrentChat();
         const historyTail = (
-          currentChat.getHistoryShallow?.(true) ?? currentChat.getHistory?.() ?? []
+          currentChat.getHistoryShallow?.(true) ??
+          currentChat.getHistory?.() ??
+          []
         ).at(-1);
         const hasTrailingFunctionCall =
           historyTail?.role === 'model' &&
@@ -9452,11 +9505,7 @@ export class Session implements SessionContext {
                 trigger: 'auto',
                 pendingUserMessage: { role: 'user', parts: message },
               })
-            : await llmClient.tryCompressChat(
-                promptId,
-                false,
-                abortSignal,
-              );
+            : await llmClient.tryCompressChat(promptId, false, abortSignal);
         compressionInfo = compressed;
         compressionFailed = isCompressionFailureStatus(
           compressed.compressionStatus,
@@ -15113,12 +15162,6 @@ export class Session implements SessionContext {
       const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
       if (bridgeCancellation) return bridgeCancellation;
       if ('error' in resolution) {
-        if (
-          resolution.targetName &&
-          resolution.targetName !== ToolNames.TOOL_CALL
-        ) {
-          clearDaemonInvalidToolParams(toolLoopState, ToolNames.TOOL_CALL);
-        }
         return earlyErrorResponse(resolution.error, toolName, {
           status: 'error',
           errorType: resolution.errorType,

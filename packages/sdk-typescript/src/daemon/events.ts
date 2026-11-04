@@ -1930,8 +1930,14 @@ export function asKnownDaemonEvent(
 function isSessionRewoundData(
   value: unknown,
 ): value is DaemonSessionRewoundData {
+  if (!isRecord(value)) return false;
+  if (
+    isFiniteNumber(value['toTurn']) &&
+    isFiniteNumber(value['truncatedEventId'])
+  ) {
+    return true;
+  }
   return (
-    isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
     isFiniteNumber(value['targetTurnIndex']) &&

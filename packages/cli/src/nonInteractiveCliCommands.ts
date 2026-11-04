@@ -755,6 +755,39 @@ export const handleSlashCommand = async (
   }
 
   if (!result) {
+    if (outputHistoryItems.length > 0) {
+      const renderedParts: string[] = [];
+      let messageType: 'info' | 'warning' | 'error' = 'info';
+      for (const item of outputHistoryItems) {
+        if (item.type === 'error') {
+          messageType = 'error';
+        } else if (item.type === 'warning' && messageType !== 'error') {
+          messageType = 'warning';
+        }
+        const text =
+          'text' in item && typeof item.text === 'string' ? item.text : '';
+        const linkUrl =
+          'linkUrl' in item && typeof item.linkUrl === 'string'
+            ? item.linkUrl
+            : '';
+        if (text && linkUrl && !text.includes(linkUrl)) {
+          renderedParts.push(`${text}\n${linkUrl}`);
+        } else if (text) {
+          renderedParts.push(text);
+        } else if (linkUrl) {
+          renderedParts.push(linkUrl);
+        }
+      }
+      const content =
+        renderedParts.join('\n\n').trim() || 'Command executed successfully.';
+      return {
+        type: 'message',
+        messageType,
+        content,
+        outputHistoryItems,
+        resolvedCommand,
+      };
+    }
     // Command executed but returned no result (e.g., void return)
     return {
       type: 'message',

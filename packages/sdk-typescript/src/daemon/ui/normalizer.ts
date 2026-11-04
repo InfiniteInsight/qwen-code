@@ -570,8 +570,13 @@ function normalizeSessionRewound(
   base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const promptId = getString(event.data, 'promptId');
-  const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
-  if (!promptId || targetTurnIndex === undefined) {
+  const targetTurnIndex =
+    numberField(event.data, 'targetTurnIndex') ??
+    numberField(event.data, 'toTurn');
+  const isGatewayMarker =
+    numberField(event.data, 'toTurn') !== undefined &&
+    numberField(event.data, 'truncatedEventId') !== undefined;
+  if ((!promptId && !isGatewayMarker) || targetTurnIndex === undefined) {
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
@@ -579,7 +584,7 @@ function normalizeSessionRewound(
     {
       ...base,
       type: 'session.rewound',
-      promptId,
+      promptId: promptId ?? '',
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },

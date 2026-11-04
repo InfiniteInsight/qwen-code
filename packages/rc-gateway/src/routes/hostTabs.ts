@@ -535,7 +535,11 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
         if (tried.has(t.tabId) || !autoReopenEligible(t, now)) continue;
         tried.add(t.tabId);
         const out = await reopenTab(t.tabId, { auto: true });
-        if (out.status === 502 || out.status === 503) {
+        if (
+          out.status === 502 ||
+          out.status === 503 ||
+          'alreadyMirrored' in out.body
+        ) {
           tried.delete(t.tabId);
         }
       }
