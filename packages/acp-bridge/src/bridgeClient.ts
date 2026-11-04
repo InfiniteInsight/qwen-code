@@ -700,6 +700,7 @@ function sliceLineRange(
  */
 export interface BridgeClientSessionEntry {
   sessionId: string;
+  displayName?: string;
   workspaceCwd: string;
   effectiveCwd: string;
   parentSessionId?: string;
@@ -2845,8 +2846,10 @@ export class BridgeClient implements Client {
       const title = params['title'];
       if (typeof sessionId !== 'string' || typeof title !== 'string' || !title)
         return;
+      if (!this.ownsSession(sessionId)) return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      entry.displayName = title;
       // The child appends the automatic title as a `custom_title` record to
       // the session's JSONL — the same file the persisted catalog scan reads
       // — before notifying, so this is a daemon-observed catalog change. The

@@ -5833,6 +5833,9 @@ export class LlmChat {
   clearHistory(): void {
     this.history = [];
     this.completedToolCallIds = [];
+    this.tokenCountsByRouteKey.clear();
+    this.setLastPromptTokenCount(0);
+    this.telemetryService?.setLastPromptTokenCount(0);
     if (!this.isForkedChat) {
       this.config.getToolRegistry()?.clearReviewedDeclarations?.();
     }
@@ -6040,6 +6043,9 @@ export class LlmChat {
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
     if (this.history.length < prevLen && !this.isForkedChat) {
+      this.tokenCountsByRouteKey.clear();
+      this.setLastPromptTokenCount(0);
+      this.telemetryService?.setLastPromptTokenCount(0);
       // Truncation may have dropped a skill body; conservative clear
       // re-arms reload (see setHistory for the trade-off).
       clearLoadedSkillTracking(

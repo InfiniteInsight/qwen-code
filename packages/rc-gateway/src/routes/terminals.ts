@@ -108,7 +108,10 @@ export function createTerminalOpenRoute(
       if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
         needsResume = true;
       } else {
-        throw err;
+        res
+          .status(502)
+          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+        return;
       }
     }
     if (needsResume) {

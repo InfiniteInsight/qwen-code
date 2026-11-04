@@ -5009,6 +5009,11 @@ export class Session implements SessionContext {
 
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
+    if (apiTruncateIndex < apiHistory.length) {
+      this.lastPromptTokenCount = 0;
+      this.lastPromptTokenCountsByRouteKey.clear();
+      chat.setLastPromptTokenCount?.(0);
+    }
     this.clearActiveTodoPlanRevision();
     // Rewinding discards the timeline the active-todo reminder described:
     // clear the chain head so the next turn starts fresh instead of
@@ -5089,6 +5094,9 @@ export class Session implements SessionContext {
     }
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
+    this.lastPromptTokenCount = 0;
+    this.lastPromptTokenCountsByRouteKey.clear();
+    this.config.getLlmClient()?.getChat()?.setLastPromptTokenCount?.(0);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -11492,6 +11500,16 @@ export class Session implements SessionContext {
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
+                  if (
+                    await this.#endTurnAfterToolRun(
+                      toolRun,
+                      undefined,
+                      false,
+                      responseCapture.channelDelivery !== undefined,
+                    )
+                  ) {
+                    break;
+                  }
                   const nextAfterTools =
                     await this.#buildNextMessageAfterToolRun(
                       toolRun,
@@ -12783,6 +12801,16 @@ export class Session implements SessionContext {
                   true,
                 );
                 return;
+              }
+              if (
+                await this.#endTurnAfterToolRun(
+                  toolRun,
+                  undefined,
+                  false,
+                  false,
+                )
+              ) {
+                break;
               }
               const nextAfterTools = await this.#buildNextMessageAfterToolRun(
                 toolRun,

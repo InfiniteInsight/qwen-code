@@ -245,10 +245,14 @@ export function createInvokeCommandRoute(
     const clientGone = new Promise<'gone'>((resolve) => {
       departed = () => resolve('gone');
     });
-    res.on('close', () => {
+    const onResClose = () => {
       if (abortSource === '') abortSource = 'disconnect';
       departed();
-    });
+    };
+    res.on('close', onResClose);
+    if (res.closed) {
+      onResClose();
+    }
 
     const prompting = Promise.resolve().then(() =>
       daemon.prompt(

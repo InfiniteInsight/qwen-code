@@ -670,6 +670,10 @@ function processContent(
   // user message inline (after each tool message) would interleave and
   // break that contract when multiple parallel tool calls return media.
   const accumulatedSplitMedia: OpenAIContentPart[] = [];
+  const accumulatedSplitContributors: Array<{
+    toolCallId: string;
+    parts: OpenAIContentPart[];
+  }> = [];
 
   for (const part of parts) {
     if (typeof part === 'string') {
@@ -783,6 +787,10 @@ function processContent(
             toolMessage.content =
               textOnly || '[media attached in following user message]';
             accumulatedSplitMedia.push(...mediaParts);
+            accumulatedSplitContributors.push({
+              toolCallId: part.functionResponse.id || '',
+              parts: mediaParts,
+            });
           }
         }
         if (
@@ -808,7 +816,7 @@ function processContent(
   // tool messages in this group. Runs after the parts loop so all tool
   // messages remain contiguous (OpenAI requirement for parallel tool calls).
   if (accumulatedSplitMedia.length > 0) {
-    messages.push({
+    const splitUserMsg: OpenAI.Chat.ChatCompletionMessageParam = {
       role: 'user',
       content: [
         {
@@ -817,7 +825,9 @@ function processContent(
         },
         ...accumulatedSplitMedia,
       ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
-    });
+    };
+    splitMediaContributors.set(splitUserMsg, accumulatedSplitContributors);
+    messages.push(splitUserMsg);
   }
 
   if (role === 'assistant') {
@@ -2345,7 +2355,17 @@ function cleanOrphanedToolCalls(
         }
 
         if (isSplitToolMediaMessage(nextMessage)) {
-          if (lastToolResponseMatchesAssistant) {
+          const contributors = splitMediaContributors.get(nextMessage);
+          if (contributors) {
+            if (
+              contributors.some(
+                (c) =>
+                  c.toolCallId && adjacentToolResponseIds.has(c.toolCallId),
+              )
+            ) {
+              splitMediaIndexes.push(nextIndex);
+            }
+          } else if (lastToolResponseMatchesAssistant) {
             splitMediaIndexes.push(nextIndex);
           }
           continue;
@@ -2402,11 +2422,39 @@ function cleanOrphanedToolCalls(
           }
         }
 
+        const survivingIdsForAssistant = new Set(
+          validToolCalls.map((tc) => tc.id),
+        );
         for (const splitMediaIndex of splitMediaIndexesByAssistant.get(index) ??
           []) {
           const splitMediaMessage = messages[splitMediaIndex];
           if (splitMediaMessage) {
-            cleaned.push(splitMediaMessage);
+            const contributors = splitMediaContributors.get(splitMediaMessage);
+            if (
+              contributors &&
+              contributors.some(
+                (c) =>
+                  !c.toolCallId || !survivingIdsForAssistant.has(c.toolCallId),
+              )
+            ) {
+              const survivingMediaParts = contributors
+                .filter(
+                  (c) =>
+                    c.toolCallId && survivingIdsForAssistant.has(c.toolCallId),
+                )
+                .flatMap((c) => c.parts);
+              if (survivingMediaParts.length > 0) {
+                cleaned.push({
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: SPLIT_TOOL_MEDIA_TEXT },
+                    ...survivingMediaParts,
+                  ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
+                });
+              }
+            } else {
+              cleaned.push(splitMediaMessage);
+            }
             emittedWithAssistant.add(splitMediaIndex);
           }
         }
@@ -2421,6 +2469,9 @@ function cleanOrphanedToolCalls(
             tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
           }
         ).tool_calls;
+        if (cleanedMessage.content === null && reasoningContent) {
+          cleanedMessage.content = '';
+        }
         cleaned.push(cleanedMessage);
       } else {
         debugLogger.debug(
@@ -2443,6 +2494,11 @@ function cleanOrphanedToolCalls(
   return cleaned;
 }
 
+const splitMediaContributors = new WeakMap<
+  OpenAI.Chat.ChatCompletionMessageParam,
+  Array<{ toolCallId: string; parts: OpenAIContentPart[] }>
+>();
+
 /**
  * Merge consecutive assistant messages to combine split text and tool calls.
  */
@@ -2461,6 +2517,19 @@ function mergeConsecutiveAssistantMessages(
           'tool_calls' in lastMessage ? lastMessage.tool_calls || [] : [];
         const currentToolCalls =
           'tool_calls' in message ? message.tool_calls || [] : [];
+        // Combine reasoning_content first so reasoning-only merged assistant
+        // messages preserve content: '' instead of null (which Ollama/llama.cpp
+        // reject with HTTP 400 when reasoning_content is present).
+        const lastReasoning = (
+          lastMessage as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const currentReasoning = (
+          message as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const combinedReasoning = [lastReasoning, currentReasoning]
+          .filter(Boolean)
+          .join('');
+
         // Combine content
         const lastContent = lastMessage.content;
         const currentContent = message.content;
@@ -2498,7 +2567,7 @@ function mergeConsecutiveAssistantMessages(
           const currentText =
             typeof currentContent === 'string' ? currentContent : '';
           const mergedText = [lastText, currentText].filter(Boolean).join('');
-          combinedContent = mergedText || null;
+          combinedContent = mergedText || (combinedReasoning ? '' : null);
         }
 
         // Combine tool calls
@@ -2510,7 +2579,7 @@ function mergeConsecutiveAssistantMessages(
             content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
             tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
           }
-        ).content = combinedContent || null;
+        ).content = combinedContent;
         if (combinedToolCalls.length > 0) {
           (
             lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -2520,18 +2589,6 @@ function mergeConsecutiveAssistantMessages(
           ).tool_calls = combinedToolCalls;
         }
 
-        // Combine reasoning_content the same way content is combined. Otherwise
-        // the merged-away turn's reasoning is silently dropped, while
-        // cleanOrphanedToolCalls (which also merges assistant turns) keeps it.
-        const lastReasoning = (
-          lastMessage as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content;
-        const currentReasoning = (
-          message as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content;
-        const combinedReasoning = [lastReasoning, currentReasoning]
-          .filter(Boolean)
-          .join('');
         if (combinedReasoning) {
           (
             lastMessage as ExtendedChatCompletionAssistantMessageParam

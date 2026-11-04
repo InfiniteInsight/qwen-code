@@ -56,7 +56,13 @@ export function createSupportedCommandsRoute(
         ...status,
         invocableByYou: hasScope(req.rcClient?.scopes ?? [], WRITE),
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res
+          .status(404)
+          .json({ error: 'Session not found', code: 'session_not_found' });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
@@ -127,7 +133,14 @@ export function createSessionCommandInvokeRoute(
         ? status.availableCommands
         : [];
       advertised = commands.some((c) => c?.name === name);
-    } catch {
+    } catch (err) {
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(409).json({
+          error: 'Open this conversation before running commands',
+          code: 'session_not_loaded',
+        });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
@@ -208,10 +221,14 @@ export function createSessionCommandInvokeRoute(
     const clientGone = new Promise<'gone'>((resolve) => {
       departed = () => resolve('gone');
     });
-    res.on('close', () => {
+    const onResClose = () => {
       if (abortSource === '') abortSource = 'disconnect';
       departed();
-    });
+    };
+    res.on('close', onResClose);
+    if (res.closed) {
+      onResClose();
+    }
 
     const prompting = Promise.resolve().then(() =>
       daemon.prompt(

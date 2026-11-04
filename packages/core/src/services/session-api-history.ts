@@ -299,7 +299,6 @@ export class SessionApiHistoryAccumulator {
    * can never drift out of alignment.
    */
   private systemNotificationFlags: boolean[] = [];
-  private compressionCandidate: unknown;
   private completedToolCallIds = new Set<string>();
   private lastMaterialRecord?: ChatRecord;
 
@@ -367,7 +366,6 @@ export class SessionApiHistoryAccumulator {
       }
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
-      this.compressionCandidate = payload.compressedHistory;
       this.history = Array.isArray(payload.compressedHistory)
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
@@ -389,12 +387,6 @@ export class SessionApiHistoryAccumulator {
       return;
     }
 
-    if (
-      this.compressionCandidate !== undefined &&
-      !Array.isArray(this.compressionCandidate)
-    ) {
-      return;
-    }
     if (!record.message || record.subtype === 'realtime_message') return;
     for (const part of record.message.parts ?? []) {
       if (part.functionCall?.id) {
@@ -447,17 +439,6 @@ export class SessionApiHistoryAccumulator {
     apiHistory: Content[];
     trailingSystemNotifications: number;
   } {
-    if (
-      this.compressionCandidate !== undefined &&
-      !Array.isArray(this.compressionCandidate)
-    ) {
-      return {
-        apiHistory: (this.compressionCandidate as Content[]).map(
-          copyContentForApiHistory,
-        ),
-        trailingSystemNotifications: 0,
-      };
-    }
     let apiHistory = this.history;
     let flags = this.systemNotificationFlags;
     if (options.stripThoughtsFromHistory) {
@@ -487,7 +468,7 @@ export function isApiHistoryCompressionCandidate(record: ChatRecord): boolean {
   const payload = record.systemPayload as
     | ChatCompressionRecordPayload
     | undefined;
-  return Boolean(payload?.compressedHistory);
+  return Array.isArray(payload?.compressedHistory);
 }
 
 export function buildApiHistoryFromConversation(

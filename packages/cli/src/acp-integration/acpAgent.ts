@@ -14555,7 +14555,9 @@ class QwenAgent implements Agent {
           );
         }
 
-        session.restoreHistory(history as Content[]);
+        await this.runExclusiveHistoryMutation(sessionId, async () => {
+          session.restoreHistory(history as Content[]);
+        });
         return { success: true };
       }
       case 'getAccountInfo': {

@@ -1202,8 +1202,11 @@ export class ChatCompressionService {
       // auto-compaction keeps it because the pending functionResponse pairs
       // with it (trailingFunctionCallContent).
       const lastCurated = curatedHistory[curatedHistory.length - 1];
+      const shouldStripTrailingFc =
+        compactTrigger === 'manual' ||
+        (opts.pendingUserMessage !== undefined && !pendingToolResult);
       const historyForCompose =
-        compactTrigger === 'manual' &&
+        shouldStripTrailingFc &&
         lastCurated?.role === 'model' &&
         lastCurated.parts?.some((p) => !!p.functionCall)
           ? curatedHistory.slice(0, -1)

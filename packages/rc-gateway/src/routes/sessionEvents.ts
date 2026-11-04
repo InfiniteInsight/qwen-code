@@ -606,7 +606,7 @@ class SessionEventsHub {
       attach = await firstFrameOrIdle(iterator.next(), idleAttachMs);
     } catch (err) {
       if (this.upstream !== upstream) {
-        resolveReady();
+        this.ready.then(resolveReady, rejectReady);
         return;
       }
       rejectReady(err);
@@ -746,7 +746,12 @@ class SessionEventsHub {
       _rc: { gap: true },
     };
     wal.append(frame);
-    this.broadcast(serializeFrame(frame), frame.id, true);
+    this.broadcast(
+      serializeFrame(frame),
+      frame.id,
+      true,
+      this.upgradingCatchUp,
+    );
   }
 
   private finishCatchUp(): void {

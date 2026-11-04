@@ -5,7 +5,8 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
@@ -37,7 +38,13 @@ export function createSessionContextRoute(
     try {
       const status = await daemon.sessionContext(sessionId);
       res.status(200).json(status);
-    } catch {
+    } catch (err) {
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res
+          .status(404)
+          .json({ error: 'Session not found', code: 'session_not_found' });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
