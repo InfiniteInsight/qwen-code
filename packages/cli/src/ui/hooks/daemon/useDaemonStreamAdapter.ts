@@ -18,12 +18,60 @@
  * display + the permission prompt binding are a following slice.
  */
 import { useContext } from 'react';
+import { isSlashCommand } from '../../utils/commandUtils.js';
 import { useDaemonStream } from './useDaemonStream.js';
 import {
   DaemonLossContext,
   DaemonStreamContext,
   type DaemonAwareStreamHook,
 } from './DaemonStreamContext.js';
+
+/**
+ * Slash commands that execute locally in an attached daemon TUI tab (either
+ * because they drive `context.services.daemon` directly, such as `/model` and
+ * `/approval-mode`, or because they are interactive-only UI dialogs/actions).
+ * Daemon-session commands (such as `/compress`, `/goal`, `/btw`, `/context`,
+ * `/diff`, skills, etc.) are forwarded to `driver.prompt()` so they execute
+ * against the daemon's live session.
+ */
+const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
+  'model',
+  'approval-mode',
+  'quit',
+  'exit',
+  'help',
+  'theme',
+  'vim',
+  'copy',
+  'about',
+  'settings',
+  'terminal-setup',
+  'editor',
+  'statusline',
+  'permissions',
+  'trust',
+  'voice',
+  'bug',
+  'ide',
+  'clear',
+  'rewind',
+  'restore',
+  'resume',
+  'rename',
+  'fork',
+  'branch',
+  'delete',
+  'peers',
+  'arena',
+  'hooks',
+  'mcp',
+  'agents',
+  'memory',
+  'plan',
+  'setup-github',
+  'commit',
+  'language',
+]);
 
 /** Flatten a `submitQuery` argument (string | Part | Part[]) to plain text. */
 function toText(query: unknown): string {
@@ -49,6 +97,11 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   _geminiClient,
   _history,
   addItem,
+  _config,
+  _isConfigInitialized,
+  _settings,
+  _onDebugMessage,
+  handleSlashCommand,
 ) => {
   const driver = useContext(DaemonStreamContext);
   if (!driver) {
@@ -61,7 +114,32 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
 
   return {
     streamingState: ds.streamingState,
-    submitQuery: (query) => ds.submitQuery(toText(query)),
+    submitQuery: async (query, _submitType, promptId) => {
+      const text = toText(query);
+      const trimmed = text.trim();
+      if (handleSlashCommand && isSlashCommand(trimmed)) {
+        const firstToken = trimmed
+          .replace(/^[/?]/, '')
+          .trim()
+          .split(/\s+/u)[0]
+          ?.toLowerCase();
+        if (firstToken && LOCAL_DAEMON_TUI_SLASH_COMMANDS.has(firstToken)) {
+          const slashResult = await handleSlashCommand(
+            trimmed,
+            undefined,
+            undefined,
+            undefined,
+            promptId,
+          );
+          if (!slashResult || slashResult.type !== 'submit_prompt') {
+            return;
+          }
+          await ds.submitQuery(toText(slashResult.content));
+          return;
+        }
+      }
+      await ds.submitQuery(text);
+    },
     initError: ds.initError,
     pendingHistoryItems: ds.pendingHistoryItems,
     // No local pending state to clear: the in-flight turn lives in the daemon.

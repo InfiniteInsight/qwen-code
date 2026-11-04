@@ -1828,8 +1828,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
-      const callId = payload['callId'];
-      if (!this.pendingToolCalls.has(callId)) {
+      const rawCallId = payload['callId'];
+      let matchedPending = this.pendingToolCalls.get(rawCallId);
+      if (!matchedPending) {
+        const candidates = [...this.pendingToolCalls.values()].filter(
+          (pending) => (pending.rawCallId ?? pending.callId) === rawCallId,
+        );
+        matchedPending = candidates[candidates.length - 1];
+      }
+      if (!matchedPending) {
         this.report(
           'orphan_agent_session_ready',
           'Skipped subagent readiness without a matching pending tool call.',
@@ -1840,7 +1847,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       }
       yield emit({
         sessionUpdate: 'tool_call_update',
-        toolCallId: callId,
+        toolCallId: matchedPending.callId,
         _meta: buildUpdateMeta({
           ...meta,
           extra: {

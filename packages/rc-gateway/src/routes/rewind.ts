@@ -6,7 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
-import { WorkspacePoolFullError } from '../daemonPool.js';
+import { UnknownSessionError, WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
   resolveChatsDir,
@@ -612,6 +612,7 @@ function appendMarkerWithRetry(
  * (thrown by `DaemonPool` for a session id it has no record of) both mean
  * the session is unknown to the daemon — distinct from transport death. */
 function isSessionNotFoundError(err: unknown): boolean {
+  if (err instanceof UnknownSessionError) return true;
   const status = (err as { status?: unknown } | undefined)?.status;
   if (status === 404) return true;
   const message = err instanceof Error ? err.message : String(err);

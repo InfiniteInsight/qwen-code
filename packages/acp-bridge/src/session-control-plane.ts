@@ -9487,7 +9487,7 @@ export function createSessionControlPlane(
       // `coalesceState.count`; later coalescers will hit the byId
       // early-return path instead and increment `entry.attachCount`
       // directly.
-      entry.attachCount = coalesceState.count;
+      entry.attachCount += coalesceState.count;
       registeredEntry = entry;
       let restorePromptAdmitted = false;
       if (options.deferRestorePrompt !== true) {
@@ -9512,7 +9512,11 @@ export function createSessionControlPlane(
             clientId,
           );
         }
-        await rollbackAttachRegistration(entry, clientId);
+        await rollbackAttachRegistration(
+          entry,
+          clientId,
+          1 + coalesceState.count,
+        );
         throw error;
       }
       if (options.deferRestorePrompt === true) {

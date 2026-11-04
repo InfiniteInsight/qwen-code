@@ -132,11 +132,12 @@ export class StreamingToolCallParser {
         this.idToIndexMap.set(id, actualIndex);
       } else {
         // New tool call ID
-        // Check if the requested index is already occupied by a different complete tool call
-        if (this.buffers.has(index)) {
-          const existingBuffer = this.buffers.get(index)!;
-          const existingDepth = this.depths.get(index)!;
-          const existingMeta = this.toolCallMeta.get(index);
+        // Check if the requested (or currently remapped) index is already occupied by a different tool call
+        const checkIndex = this.buffers.has(targetIndex) ? targetIndex : index;
+        if (this.buffers.has(checkIndex)) {
+          const existingBuffer = this.buffers.get(checkIndex)!;
+          const existingDepth = this.depths.get(checkIndex)!;
+          const existingMeta = this.toolCallMeta.get(checkIndex);
 
           if (existingMeta?.id && existingMeta.id !== id) {
             let existingComplete = existingDepth === 0;

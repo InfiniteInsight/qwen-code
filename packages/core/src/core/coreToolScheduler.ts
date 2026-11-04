@@ -2348,6 +2348,19 @@ export class CoreToolScheduler {
         ),
       );
       if (invocationOrError instanceof Error) {
+        if (call.invocation?.release) {
+          this.invocationReleases.set(
+            targetCallId,
+            Promise.resolve()
+              .then(() => call.invocation.release!())
+              .catch((error: unknown) => {
+                debugLogger.warn(
+                  'Tool invocation resource cleanup failed:',
+                  error,
+                );
+              }),
+          );
+        }
         invocationError = invocationOrError;
         const response = createErrorResponse(
           call.request,
