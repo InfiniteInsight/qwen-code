@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { WRITE, hasScope } from '../scopes.js';
 
@@ -70,6 +71,7 @@ export function createSessionTasksRoute(
       // same as sessionStatus.ts.
       const notFound =
         err instanceof UnknownSessionError ||
+        isSessionLevelGone(err) ||
         (err as { status?: unknown } | undefined)?.status === 404;
       if (notFound) {
         res

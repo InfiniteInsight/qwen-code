@@ -1792,6 +1792,13 @@ export class ChatRecordingService {
       this.topologyFence.buffered.push({ record, options });
       return;
     }
+    if (record.type === 'user' && record.subtype === undefined) {
+      const payload = record.systemPayload as
+        | UserPromptRecordPayload
+        | undefined;
+      this.trackUserDisplayTextForTitle(payload?.displayText);
+      this.turnParentUuids.push(record.parentUuid);
+    }
     const legacyConversationFile = this.writerLeaseRequired
       ? undefined
       : this.ensureConversationFile();
@@ -2416,8 +2423,6 @@ export class ChatRecordingService {
     daemonPromptId?: string,
   ): void {
     try {
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
-      this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         executionContext: this.getExecutionContext(),

@@ -590,6 +590,11 @@ export function convertGeminiContentsToResponsesInput(
     // turn, so tool-returned images aren't silently dropped. Mirrors the Chat
     // converter's split-tool-media follow-up.
     const pendingToolMediaParts: ResponsesApiContentPart[] = [];
+    const pendingToolMediaContributors: Array<{
+      callType: 'function_call' | 'custom_tool_call';
+      callId: string;
+      parts: ResponsesApiContentPart[];
+    }> = [];
     const flushPendingMessage = () => {
       if (pendingContentParts.length === 0) return;
       const content: string | ResponsesApiContentPart[] =
@@ -719,6 +724,11 @@ export function convertGeminiContentsToResponsesInput(
         // (createToolMessage/splitToolMedia) instead of dropping it: append
         // any text entries (e.g. compaction-slimmer placeholders) to the
         // output, and stage image entries for a follow-up user message.
+        const callId = fr.id || `call_${Date.now()}_${callIdCounter++}`;
+        const isCustomOutput =
+          freeformExec &&
+          (fr.name === ToolNames.EXEC || customCallIds.has(fr.id ?? ''));
+        const itemMediaParts: ResponsesApiContentPart[] = [];
         for (const frPart of fr.parts ?? []) {
           if (
             'text' in frPart &&
@@ -730,19 +740,23 @@ export function convertGeminiContentsToResponsesInput(
           } else if (frPart.inlineData) {
             const mimeType = frPart.inlineData.mimeType;
             if (isSupportedResponseImageMime(mimeType)) {
-              pendingToolMediaParts.push({
+              const mediaPart: ResponsesApiContentPart = {
                 type: 'input_image',
                 image_url: `data:${mimeType};base64,${frPart.inlineData.data}`,
-              });
+              };
+              pendingToolMediaParts.push(mediaPart);
+              itemMediaParts.push(mediaPart);
             } else {
               const placeholderMime = placeholderMimeType(mimeType);
               debugLogger.warn(
                 `Dropping unsupported tool-result inline media type: ${placeholderMime}`,
               );
-              pendingToolMediaParts.push({
+              const mediaPart: ResponsesApiContentPart = {
                 type: 'input_text',
                 text: `[Unsupported tool-result media type: ${placeholderMime}]`,
-              });
+              };
+              pendingToolMediaParts.push(mediaPart);
+              itemMediaParts.push(mediaPart);
             }
           } else if (frPart.fileData) {
             const placeholderMime = placeholderMimeType(
@@ -751,19 +765,26 @@ export function convertGeminiContentsToResponsesInput(
             debugLogger.warn(
               `Dropping unsupported tool-result file reference: ${placeholderMime}`,
             );
-            pendingToolMediaParts.push({
+            const mediaPart: ResponsesApiContentPart = {
               type: 'input_text',
               text: `[Unsupported tool-result file reference: ${placeholderMime}]`,
-            });
+            };
+            pendingToolMediaParts.push(mediaPart);
+            itemMediaParts.push(mediaPart);
           }
         }
+        if (itemMediaParts.length > 0) {
+          pendingToolMediaContributors.push({
+            callType: isCustomOutput ? 'custom_tool_call' : 'function_call',
+            callId,
+            parts: itemMediaParts,
+          });
+        }
         items.push({
-          type:
-            freeformExec &&
-            (fr.name === ToolNames.EXEC || customCallIds.has(fr.id ?? ''))
-              ? 'custom_tool_call_output'
-              : 'function_call_output',
-          call_id: fr.id || `call_${Date.now()}_${callIdCounter++}`,
+          type: isCustomOutput
+            ? 'custom_tool_call_output'
+            : 'function_call_output',
+          call_id: callId,
           output,
         });
       }
@@ -800,7 +821,7 @@ export function convertGeminiContentsToResponsesInput(
     if (pendingToolMediaParts.length > 0) {
       // Emitted after all function_call_output items in this turn so tool
       // outputs stay grouped; the model still sees tool-returned images.
-      items.push({
+      const mediaMessage = {
         type: 'message',
         role: 'user',
         content: [
@@ -810,12 +831,26 @@ export function convertGeminiContentsToResponsesInput(
           },
           ...pendingToolMediaParts,
         ],
-      } as ResponsesApiMessageItem);
+      } as ResponsesApiMessageItem;
+      responsesSplitMediaContributors.set(
+        mediaMessage,
+        pendingToolMediaContributors,
+      );
+      items.push(mediaMessage);
     }
   }
 
   return { instructions, input: items };
 }
+
+const responsesSplitMediaContributors = new WeakMap<
+  ResponsesApiInputItem,
+  Array<{
+    callType: 'function_call' | 'custom_tool_call';
+    callId: string;
+    parts: ResponsesApiContentPart[];
+  }>
+>();
 
 /**
  * Remove any function/custom tool call or output whose `call_id` has
@@ -831,36 +866,83 @@ export function convertGeminiContentsToResponsesInput(
 export function cleanOrphanedFunctionCalls(
   items: ResponsesApiInputItem[],
 ): ResponsesApiInputItem[] {
-  const callIds = new Set<string>();
-  const outputCallIds = new Set<string>();
-  for (const item of items) {
+  const seenCalls = new Set<string>();
+  const pairedCalls = new Set<string>();
+  const keptIndices = new Set<number>();
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     if (typeof item !== 'object' || item === null || !('type' in item)) {
       continue;
     }
     if (item.type === 'function_call' || item.type === 'custom_tool_call') {
-      callIds.add(`${item.type}:${item.call_id}`);
+      const key = `${item.type}:${item.call_id}`;
+      if (!seenCalls.has(key)) {
+        seenCalls.add(key);
+        keptIndices.add(i);
+      }
     } else if (
       item.type === 'function_call_output' ||
       item.type === 'custom_tool_call_output'
     ) {
-      outputCallIds.add(`${item.type}:${item.call_id}`);
+      const callType =
+        item.type === 'custom_tool_call_output'
+          ? 'custom_tool_call'
+          : 'function_call';
+      const key = `${callType}:${item.call_id}`;
+      if (seenCalls.has(key) && !pairedCalls.has(key)) {
+        pairedCalls.add(key);
+        keptIndices.add(i);
+      }
     }
   }
-  return items.filter((item) => {
+
+  const cleaned: ResponsesApiInputItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
     if (typeof item !== 'object' || item === null || !('type' in item)) {
-      return true;
+      cleaned.push(item);
+      continue;
     }
     if (item.type === 'function_call' || item.type === 'custom_tool_call') {
-      return outputCallIds.has(`${item.type}_output:${item.call_id}`);
+      const key = `${item.type}:${item.call_id}`;
+      if (keptIndices.has(i) && pairedCalls.has(key)) {
+        cleaned.push(item);
+      }
+      continue;
     }
-    if (item.type === 'function_call_output') {
-      return callIds.has(`function_call:${item.call_id}`);
+    if (
+      item.type === 'function_call_output' ||
+      item.type === 'custom_tool_call_output'
+    ) {
+      if (keptIndices.has(i)) {
+        cleaned.push(item);
+      }
+      continue;
     }
-    if (item.type === 'custom_tool_call_output') {
-      return callIds.has(`custom_tool_call:${item.call_id}`);
+    const contributors = responsesSplitMediaContributors.get(item);
+    if (contributors) {
+      const validParts = contributors
+        .filter((c) => pairedCalls.has(`${c.callType}:${c.callId}`))
+        .flatMap((c) => c.parts);
+      if (validParts.length > 0) {
+        cleaned.push({
+          type: 'message',
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: '(attached media from previous tool call)',
+            },
+            ...validParts,
+          ],
+        } as ResponsesApiMessageItem);
+      }
+      continue;
     }
-    return true;
-  });
+    cleaned.push(item);
+  }
+  return cleaned;
 }
 
 export function convertGeminiToolsToResponsesTools(

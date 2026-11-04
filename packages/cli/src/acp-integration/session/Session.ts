@@ -8715,6 +8715,9 @@ export class Session implements SessionContext {
 
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
+        if (this.messageRewriter) {
+          this.messageRewriter.flushTurn(pendingSend.signal);
+        }
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
           usageMetadata,

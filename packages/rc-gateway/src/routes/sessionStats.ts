@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
@@ -70,7 +71,7 @@ export function createSessionStatsRoute(
       res.status(200).json(status);
     } catch (err) {
       const daemonStatus = (err as { status?: unknown } | undefined)?.status;
-      if (daemonStatus === 404) {
+      if (daemonStatus === 404 || isSessionLevelGone(err)) {
         res
           .status(404)
           .json({ error: 'Session not found', code: 'session_not_found' });

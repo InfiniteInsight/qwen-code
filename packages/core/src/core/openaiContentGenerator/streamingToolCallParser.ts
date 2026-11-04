@@ -93,22 +93,23 @@ export class StreamingToolCallParser {
         error: new Error(`Invalid tool call index: ${index}`),
       };
     }
+    const targetIndex = this.pendingIndexRemaps.get(index) ?? index;
     if (!id && !validName && !chunk.trim()) {
-      const depth = this.depths.get(index) ?? 0;
-      const inString = this.inStrings.get(index) ?? false;
-      if (!this.buffers.has(index) || (depth === 0 && !inString)) {
+      const depth = this.depths.get(targetIndex) ?? 0;
+      const inString = this.inStrings.get(targetIndex) ?? false;
+      if (!this.buffers.has(targetIndex) || (depth === 0 && !inString)) {
         return { complete: false };
       }
     }
 
-    let actualIndex = index;
     const isKnownId = Boolean(id && this.idToIndexMap.has(id));
-    const existingName = this.toolCallMeta.get(index)?.name;
+    const existingName = this.toolCallMeta.get(targetIndex)?.name;
     const isNameOnlyDelta = Boolean(
       validName &&
         chunk.length === 0 &&
         (!existingName || existingName === validName),
     );
+    let actualIndex = !id && isNameOnlyDelta ? targetIndex : index;
 
     // Handle tool call ID mapping for collision detection
     if (id) {

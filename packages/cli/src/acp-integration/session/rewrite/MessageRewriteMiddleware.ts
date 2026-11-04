@@ -101,12 +101,18 @@ export class MessageRewriteMiddleware {
     // Accumulate for turn-end rewriting
     let didAccumulate = false;
     if (updateType === 'agent_thought_chunk') {
-      if (this.target === 'thought' || this.target === 'all') {
+      if (
+        text.length > 0 &&
+        (this.target === 'thought' || this.target === 'all')
+      ) {
         this.turnBuffer.appendThought(text);
         didAccumulate = true;
       }
     } else if (updateType === 'agent_message_chunk') {
-      if (this.target === 'message' || this.target === 'all') {
+      if (
+        text.length > 0 &&
+        (this.target === 'message' || this.target === 'all')
+      ) {
         this.turnBuffer.appendMessage(text);
         didAccumulate = true;
       }

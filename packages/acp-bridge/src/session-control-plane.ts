@@ -7462,7 +7462,11 @@ export function createSessionControlPlane(
         sessionId,
         workspaceCwd,
         runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
-        persistence: createSessionArtifactPersistence(ci.connection, sessionId),
+        persistence: createSessionArtifactPersistence(
+          ci.connection,
+          ci.channel,
+          sessionId,
+        ),
       }),
       artifactWorkspaceCwd: workspaceCwd,
       artifactWorkspaceReady: !isReservedStandaloneSessionSourceType(
@@ -7745,27 +7749,42 @@ export function createSessionControlPlane(
 
   function createSessionArtifactPersistence(
     connection: ClientSideConnection,
+    channel: Parameters<typeof channelUnavailableReject>[0],
     sessionId: string,
   ) {
     return {
       recordEvent: async (payload: unknown): Promise<void> => {
-        await connection.extMethod(
-          SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
-          {
-            sessionId,
-            kind: 'event',
-            payload,
-          },
+        await withTimeout(
+          Promise.race([
+            connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+              {
+                sessionId,
+                kind: 'event',
+                payload,
+              },
+            ),
+            channelUnavailableReject(channel, 'sessionArtifactsPersist'),
+          ]),
+          initTimeoutMs,
+          'sessionArtifactsPersist',
         );
       },
       recordSnapshot: async (payload: unknown): Promise<void> => {
-        await connection.extMethod(
-          SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
-          {
-            sessionId,
-            kind: 'snapshot',
-            payload,
-          },
+        await withTimeout(
+          Promise.race([
+            connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+              {
+                sessionId,
+                kind: 'snapshot',
+                payload,
+              },
+            ),
+            channelUnavailableReject(channel, 'sessionArtifactsPersist'),
+          ]),
+          initTimeoutMs,
+          'sessionArtifactsPersist',
         );
       },
     };
@@ -12588,20 +12607,23 @@ export function createSessionControlPlane(
           let sourcePersisted: boolean | undefined;
           if (newEntry?.sourceType) {
             try {
-              const sourceResult = await withTimeout(
-                newEntry.connection.extMethod(
-                  SERVE_CONTROL_EXT_METHODS.sessionSource,
-                  {
-                    sessionId: newEntry.sessionId,
-                    sourceType: newEntry.sourceType,
-                    ...(newEntry.sourceId !== undefined
-                      ? { sourceId: newEntry.sourceId }
-                      : {}),
-                  },
+              const sourceResult = await Promise.race([
+                withTimeout(
+                  newEntry.connection.extMethod(
+                    SERVE_CONTROL_EXT_METHODS.sessionSource,
+                    {
+                      sessionId: newEntry.sessionId,
+                      sourceType: newEntry.sourceType,
+                      ...(newEntry.sourceId !== undefined
+                        ? { sourceId: newEntry.sourceId }
+                        : {}),
+                    },
+                  ),
+                  initTimeoutMs,
+                  'sessionSource',
                 ),
-                initTimeoutMs,
-                'sessionSource',
-              );
+                getTransportClosedReject(newEntry),
+              ]);
               sourcePersisted =
                 (sourceResult as { persisted?: boolean } | undefined)
                   ?.persisted === true;
@@ -12845,6 +12867,7 @@ export function createSessionControlPlane(
           runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
           persistence: createSessionArtifactPersistence(
             entry.connection,
+            entry.channel,
             sessionId,
           ),
         });
