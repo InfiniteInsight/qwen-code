@@ -18,6 +18,7 @@ import {
 import type { CommandLoader, CommandScope } from '../commands/loader.js';
 import { substitute } from '../commands/parse.js';
 import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
+import { type PromptQueue, QueueTimeoutError } from './promptQueue.js';
 
 /**
  * True when an `If-None-Match` request header matches `revision` (a hex digest).
@@ -111,6 +112,8 @@ export function createInvokeCommandRoute(
   loader: CommandLoader,
   audit?: AuditRecorder,
   promptTimeoutMs = DEFAULT_PROMPT_TIMEOUT_MS,
+  queue?: PromptQueue,
+  queueWaitMs = 120_000,
 ): RequestHandler {
   return async (req, res) => {
     const cmds = await loader.load();
@@ -205,6 +208,24 @@ export function createInvokeCommandRoute(
       file: fileContext,
     });
 
+    let release: (() => void) | undefined;
+    if (queue) {
+      try {
+        release = await queue.acquire(req.params.id, queueWaitMs);
+      } catch (err) {
+        if (err instanceof QueueTimeoutError) {
+          res
+            .status(503)
+            .json({ error: 'queue_timeout', code: 'queue_timeout' });
+          return;
+        }
+        res
+          .status(502)
+          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+        return;
+      }
+    }
+
     // Bounded the same way as the session-command route: a disconnect stops the
     // wait and leaves the turn running (#38), while the timer stops a turn that
     // never settles from holding a daemon admission slot, and so the session's
@@ -228,17 +249,31 @@ export function createInvokeCommandRoute(
       departed();
     });
 
-    const prompting = daemon.prompt(
-      req.params.id,
-      { prompt: [{ type: 'text', text }] },
-      timerAbort.signal,
-    );
-    // The timer outlives the handler after a disconnect, so it is cleared when
-    // the prompt settles, not when this handler returns. The rejection handler
-    // also keeps a late failure of an abandoned prompt from going unhandled.
+    let prompting: ReturnType<SessionDaemon['prompt']>;
+    try {
+      prompting = daemon.prompt(
+        req.params.id,
+        { prompt: [{ type: 'text', text }] },
+        timerAbort.signal,
+      );
+    } catch (err) {
+      clearTimeout(timer);
+      release?.();
+      throw err;
+    }
+    // The timer and queue slot outlive the handler after a disconnect, so both
+    // are cleared when the prompt settles, not when this handler returns. The
+    // rejection handler also keeps a late failure of an abandoned prompt from
+    // going unhandled.
     void prompting.then(
-      () => clearTimeout(timer),
-      () => clearTimeout(timer),
+      () => {
+        clearTimeout(timer);
+        release?.();
+      },
+      () => {
+        clearTimeout(timer);
+        release?.();
+      },
     );
 
     let result;

@@ -10,6 +10,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { WRITE, hasScope } from '../scopes.js';
 import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
+import { type PromptQueue, QueueTimeoutError } from './promptQueue.js';
 
 /**
  * GET /session/:id/supported-commands — relay the daemon's per-session slash
@@ -99,6 +100,8 @@ export function createSessionCommandInvokeRoute(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
   promptTimeoutMs = DEFAULT_PROMPT_TIMEOUT_MS,
+  queue?: PromptQueue,
+  queueWaitMs = 120_000,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -148,6 +151,24 @@ export function createSessionCommandInvokeRoute(
         ? `/${name} ${body.args}`
         : `/${name}`;
 
+    let release: (() => void) | undefined;
+    if (queue) {
+      try {
+        release = await queue.acquire(sessionId, queueWaitMs);
+      } catch (err) {
+        if (err instanceof QueueTimeoutError) {
+          res
+            .status(503)
+            .json({ error: 'queue_timeout', code: 'queue_timeout' });
+          return;
+        }
+        res
+          .status(502)
+          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+        return;
+      }
+    }
+
     // Two ways this await can end without a finished turn, and the code below
     // has to tell them apart.
     //
@@ -191,17 +212,31 @@ export function createSessionCommandInvokeRoute(
       departed();
     });
 
-    const prompting = daemon.prompt(
-      sessionId,
-      { prompt: [{ type: 'text', text }] },
-      timerAbort.signal,
-    );
-    // The timer outlives the handler after a disconnect, so it is cleared when
-    // the prompt settles, not when this handler returns. The catch also keeps a
-    // late rejection of an abandoned prompt from becoming unhandled.
+    let prompting: ReturnType<SessionDaemon['prompt']>;
+    try {
+      prompting = daemon.prompt(
+        sessionId,
+        { prompt: [{ type: 'text', text }] },
+        timerAbort.signal,
+      );
+    } catch (err) {
+      clearTimeout(timer);
+      release?.();
+      throw err;
+    }
+    // The timer and queue slot outlive the handler after a disconnect, so both
+    // are cleared when the prompt settles, not when this handler returns. The
+    // catch also keeps a late rejection of an abandoned prompt from becoming
+    // unhandled.
     void prompting.then(
-      () => clearTimeout(timer),
-      () => clearTimeout(timer),
+      () => {
+        clearTimeout(timer);
+        release?.();
+      },
+      () => {
+        clearTimeout(timer);
+        release?.();
+      },
     );
 
     let result;

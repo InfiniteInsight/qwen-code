@@ -8,7 +8,10 @@ import type { RequestHandler } from 'express';
 import type { PromptContentBlock } from '@qwen-code/sdk';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { daemonUnavailableBody } from '../daemonHttpError.js';
+import {
+  daemonUnavailableBody,
+  isSessionLevelGone,
+} from '../daemonHttpError.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
 import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
@@ -159,8 +162,12 @@ export function createPromptRoute(
       } catch (err) {
         if (timeoutAbort.signal.aborted) {
           timedOut = true;
-        } else if (err instanceof UnknownSessionError) {
-          // The pool holds no binding for this session, so no turn started:
+        } else if (
+          err instanceof UnknownSessionError ||
+          isSessionLevelGone(err)
+        ) {
+          // The pool holds no binding for this session (or the daemon reaped
+          // the idle session in memory), so no turn started:
           // 409 like the sibling session routes (resume restores the
           // binding), and no `prompt_failed` push for a turn that never ran.
           if (!res.closed) {

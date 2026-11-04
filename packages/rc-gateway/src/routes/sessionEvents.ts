@@ -210,6 +210,7 @@ export class HubWatcher {
   awaitingCatchUp = false;
   private ended: WatcherEnd | undefined;
   private finished = false;
+  private readonly onDrain = () => this.pump();
   private resolveDone!: () => void;
   /** Settles when the hub ends this watcher or the client goes away. */
   readonly done = new Promise<void>((resolve) => {
@@ -231,8 +232,9 @@ export class HubWatcher {
    * `gap` marks a resync marker, which is never skipped: it is about the
    * hole, not about frames the client already has.
    */
-  deliver(chunk: string, id?: number, gap = false): void {
+  deliver(chunk: string, id?: number, gap = false, isCatchUp = false): void {
     if (this.finished) return;
+    if (isCatchUp && !this.wantsReplay) return;
     if (
       !gap &&
       id !== undefined &&
@@ -269,7 +271,7 @@ export class HubWatcher {
       );
       this.queue = chunks.concat(this.queue);
     }
-    res.on('drain', () => this.pump());
+    res.on('drain', this.onDrain);
     this.pump();
     if (!this.awaitingCatchUp) this.queueReplayComplete();
     if (this.ended !== undefined) this.finish();
@@ -367,6 +369,11 @@ export class HubWatcher {
     if (this.finished || this.res === undefined) return;
     this.finished = true;
     const res = this.res;
+    (
+      res as unknown as {
+        off?: (event: string, listener: () => void) => void;
+      }
+    ).off?.('drain', this.onDrain);
     // Close is the one place that writes past push-back. A client that stopped
     // draining still gets the frames already promised to it: `res.end()` over a
     // non-empty queue truncates the transcript mid-answer with nothing on screen
@@ -438,18 +445,20 @@ interface HubDeps {
  */
 class SessionEventsHub {
   private readonly watchers = new Set<HubWatcher>();
-  private readonly upstream = new AbortController();
+  private upstream = new AbortController();
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly state: EpochState;
   /** The bus epoch token this subscription's daemon reported, if any. */
   private liveEpoch: string | undefined;
   /** The daemon said its replay restarts at its epoch's start (no token). */
   private epochResetSeen = false;
+  private subscribedWithCursor: boolean;
+  private upgradingCatchUp = false;
   closed = false;
   /** Subscribed with a cursor and the daemon's `replay_complete` not yet seen. */
   catchingUp: boolean;
   /** Settles once the upstream answered (a frame, an idle grace) or failed. */
-  readonly ready: Promise<void>;
+  ready: Promise<void>;
 
   constructor(
     private readonly deps: HubDeps,
@@ -460,6 +469,7 @@ class SessionEventsHub {
     const key = relayKey(deps.walDir, deps.sessionId);
     liveRelays.set(key, (liveRelays.get(key) ?? 0) + 1);
     const cursor = this.upstreamCursor(firstCursor);
+    this.subscribedWithCursor = cursor !== undefined;
     this.catchingUp = cursor !== undefined;
     let resolveReady!: () => void;
     let rejectReady!: (err: unknown) => void;
@@ -470,7 +480,42 @@ class SessionEventsHub {
     // Every waiting watcher handles the rejection; a hub whose watchers all
     // left before it failed must not surface it as an unhandled rejection.
     this.ready.catch(() => {});
-    void this.pump(cursor, resolveReady, rejectReady);
+    void this.pump(cursor, resolveReady, rejectReady, this.upstream);
+  }
+
+  /**
+   * When a first watcher connected without a cursor on an empty WAL (live-only)
+   * and a subsequent watcher connects with a cursor before any frame has been
+   * relayed into the WAL, upgrade the upstream subscription so the daemon's
+   * ring buffer is replayed into the WAL for the cursor-bearing watcher.
+   */
+  ensureCatchUp(firstCursor: number | undefined): void {
+    if (
+      firstCursor === undefined ||
+      this.subscribedWithCursor ||
+      this.closed ||
+      this.state.cursorVoid ||
+      this.state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId
+    ) {
+      return;
+    }
+    const cursor = this.upstreamCursor(firstCursor);
+    if (cursor === undefined) return;
+    this.subscribedWithCursor = true;
+    this.catchingUp = true;
+    this.upgradingCatchUp = true;
+    const prevUpstream = this.upstream;
+    this.upstream = new AbortController();
+    prevUpstream.abort();
+    let resolveReady!: () => void;
+    let rejectReady!: (err: unknown) => void;
+    const nextReady = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    nextReady.catch(() => {});
+    this.ready = nextReady;
+    void this.pump(cursor, resolveReady, rejectReady, this.upstream);
   }
 
   join(watcher: HubWatcher): void {
@@ -537,6 +582,7 @@ class SessionEventsHub {
     cursor: number | undefined,
     resolveReady: () => void,
     rejectReady: (err: unknown) => void,
+    upstream: AbortController,
   ): Promise<void> {
     const { daemon, sessionId, idleAttachMs } = this.deps;
     let iterator: AsyncGenerator<RelayFrame>;
@@ -553,29 +599,37 @@ class SessionEventsHub {
         onEpoch: (learned: string) => {
           this.liveEpoch = learned;
         },
-        signal: this.upstream.signal,
+        signal: upstream.signal,
       });
       // Confirm reachability without hanging on an idle session (see
       // firstFrameOrIdle); a real error rejects and the waiting watchers 502.
       attach = await firstFrameOrIdle(iterator.next(), idleAttachMs);
     } catch (err) {
+      if (this.upstream !== upstream) {
+        resolveReady();
+        return;
+      }
       rejectReady(err);
       this.close('error');
       return;
     }
     resolveReady();
+    if (this.upstream !== upstream) return;
     try {
       const first = 'first' in attach ? attach.first : await attach.pending;
+      if (this.upstream !== upstream) return;
       if (!first.done) {
         this.relay(first.value);
         for await (const ev of iterator) {
-          if (this.closed) break;
+          if (this.closed || this.upstream !== upstream) break;
           this.relay(ev);
         }
       }
-      this.close('graceful');
+      if (this.upstream === upstream) this.close('graceful');
     } catch {
-      this.close(this.upstream.signal.aborted ? 'graceful' : 'error');
+      if (this.upstream === upstream) {
+        this.close(upstream.signal.aborted ? 'graceful' : 'error');
+      }
     }
   }
 
@@ -649,7 +703,12 @@ class SessionEventsHub {
     // Persist per frame. The WAL's own stamps are authoritative (see
     // resolveEpochState); this is the fallback for a log that holds none.
     saveEpochState(walDir, sessionId, state);
-    this.broadcast(serializeFrame({ ...ev, id: outId }), outId);
+    this.broadcast(
+      serializeFrame({ ...ev, id: outId }),
+      outId,
+      false,
+      this.upgradingCatchUp,
+    );
   }
 
   /**
@@ -693,11 +752,17 @@ class SessionEventsHub {
   private finishCatchUp(): void {
     if (!this.catchingUp) return;
     this.catchingUp = false;
+    this.upgradingCatchUp = false;
     for (const w of this.watchers) w.catchUpDone();
   }
 
-  private broadcast(chunk: string, id?: number, gap = false): void {
-    for (const w of this.watchers) w.deliver(chunk, id, gap);
+  private broadcast(
+    chunk: string,
+    id?: number,
+    gap = false,
+    isCatchUp = false,
+  ): void {
+    for (const w of this.watchers) w.deliver(chunk, id, gap, isCatchUp);
   }
 }
 
@@ -738,7 +803,10 @@ export function createSessionEventsRoute(
     firstCursor: number | undefined,
   ): SessionEventsHub => {
     const live = hubs.get(sessionId);
-    if (live !== undefined && !live.closed) return live;
+    if (live !== undefined && !live.closed) {
+      live.ensureCatchUp(firstCursor);
+      return live;
+    }
     const hub = new SessionEventsHub(
       {
         daemon,

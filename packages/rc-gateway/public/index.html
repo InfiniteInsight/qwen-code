@@ -17943,11 +17943,30 @@
           // The deep link's read comes before any watch, and the watch it
           // then opens reports a gone conversation itself.
           if (early && sessionId !== watchedSessionId) return;
+          const failBody = await res.json().catch(() => null);
+          if (superseded()) return;
+          if (
+            failBody &&
+            failBody.code === 'session_not_found' &&
+            watchedSessionCwd &&
+            tokenCanResume() &&
+            !goneResumed.has(sessionId) &&
+            watchedSessionId === sessionId
+          ) {
+            goneResumed.add(sessionId);
+            const ok = await resumeConversation(
+              sessionId,
+              watchedSessionCwd,
+              watchedSessionTitle,
+            );
+            if (ok || watchedSessionId !== sessionId) return;
+          }
           // Gone, not busy: nothing to redraw now or later (#59).
           forgetGoneSession('session ended on the host — start or resume one');
           return;
         }
         if (res.status !== 200) return; // 502 — nothing to draw, keep polling
+        goneResumed.delete(sessionId);
         const body = await res.json().catch(() => null);
         if (superseded()) return; // #172: the body is a second await
         if (!body || !Array.isArray(body.pendingInteractions)) return;
@@ -18136,6 +18155,7 @@
       // per conversation per page load: a resumed watch that 412s again takes
       // the retry, so the two cannot loop.
       const walReloaded = new Set();
+      const goneResumed = new Set();
       function tokenCanResume() {
         return !!(
           caps &&
@@ -21270,15 +21290,29 @@
         // (#114). A frame that matches nothing here is someone else's turn -
         // another window, another device - and now gets drawn.
         noteSelfSend(prompt);
-        const echoed = addUser(prompt, Date.now());
+        let echoed = addUser(prompt, Date.now());
         showProcessing(); // visible feedback until the turn's first frame
         // Set only when the daemon refused before the turn began, so the echo
         // can say so. A dropped socket is NOT in this set: #38, the turn keeps
         // running when a backgrounded client's socket dies, so its outcome is
         // unknown rather than failed.
         let refused = null;
+        const promptBody = JSON.stringify(
+          // With a file picked the prompt goes as content blocks, so the
+          // references the daemon handed back travel unchanged; the
+          // gateway forwards this array as-is (routes/prompt.ts:92-93).
+          // Without one it keeps the {prompt} shape it has always sent.
+          sentAttachments.length
+            ? {
+                blocks: [
+                  { type: 'text', text: prompt },
+                  ...sentAttachments,
+                ],
+              }
+            : { prompt },
+        );
         try {
-          const res = await fetch(
+          let res = await fetch(
             '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
             {
               method: 'POST',
@@ -21287,22 +21321,40 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
-              body: JSON.stringify(
-                // With a file picked the prompt goes as content blocks, so the
-                // references the daemon handed back travel unchanged; the
-                // gateway forwards this array as-is (routes/prompt.ts:92-93).
-                // Without one it keeps the {prompt} shape it has always sent.
-                sentAttachments.length
-                  ? {
-                      blocks: [
-                        { type: 'text', text: prompt },
-                        ...sentAttachments,
-                      ],
-                    }
-                  : { prompt },
-              ),
+              body: promptBody,
             },
           );
+          if (res.status === 409 && watchedSessionCwd && tokenCanResume()) {
+            const failBody409 = await res
+              .clone()
+              .json()
+              .catch(() => null);
+            if (failBody409 && failBody409.code === 'session_not_loaded') {
+              const targetSessionId = watchedSessionId;
+              const resumedOk = await resumeConversation(
+                targetSessionId,
+                watchedSessionCwd,
+                watchedSessionTitle,
+              );
+              if (resumedOk && watchedSessionId === targetSessionId) {
+                noteSelfSend(prompt);
+                echoed = addUser(prompt, Date.now());
+                showProcessing();
+                res = await fetch(
+                  '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
+                  {
+                    method: 'POST',
+                    signal: sendAbort.signal,
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: 'Bearer ' + token(),
+                    },
+                    body: promptBody,
+                  },
+                );
+              }
+            }
+          }
           if (res.status === 200) {
             const json = await res.json().catch(() => ({}));
             setStatus('sent: ' + (json.stopReason || 'ok'));
@@ -24162,6 +24214,23 @@
               .clone()
               .json()
               .catch(() => null);
+            if (
+              res.status === 404 &&
+              failBody &&
+              failBody.code === 'session_not_found' &&
+              watchedSessionCwd &&
+              tokenCanResume() &&
+              !goneResumed.has(id) &&
+              watchedSessionId === id
+            ) {
+              goneResumed.add(id);
+              const ok = await resumeConversation(
+                id,
+                watchedSessionCwd,
+                title,
+              );
+              if (ok || watchedSessionId !== id) return;
+            }
             const failLine = describeFailure(
               res,
               failBody,

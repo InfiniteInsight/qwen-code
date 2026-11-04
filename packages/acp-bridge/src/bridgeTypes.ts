@@ -573,7 +573,7 @@ export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
 export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
-export const LOAD_REPLAY_MAX_UPDATES = 10_000;
+export const LOAD_REPLAY_MAX_UPDATES = 100_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 export const MANAGED_SESSION_STORE_META_KEY = 'qwen.managedSessionStore.v1';

@@ -566,16 +566,32 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     ? `/rc/host/attach/${encodeURIComponent(args.sessionId)}`
     : '/rc/host/attach';
 
-  let res: HostAttachResponse;
-  try {
-    // #212: the pid lets the gateway open a tab record and watch it.
-    res = await request(target, token, path, {
-      cwd: args.cwd,
-      pid: deps.pid ?? process.pid,
-    });
-  } catch (err) {
-    stderr(describeTransportError(err, target));
-    return 1;
+  const initialBackoffMs = [1_000, 2_000, 4_000, 8_000, 10_000];
+  const initialSleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let res!: HostAttachResponse;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // #212: the pid lets the gateway open a tab record and watch it.
+      res = await request(target, token, path, {
+        cwd: args.cwd,
+        pid: deps.pid ?? process.pid,
+      });
+    } catch (err) {
+      stderr(describeTransportError(err, target));
+      return 1;
+    }
+    if (
+      (res.status === 502 || res.status === 503) &&
+      attempt < initialBackoffMs.length
+    ) {
+      await initialSleep(
+        initialBackoffMs[attempt]!,
+        new AbortController().signal,
+      );
+      continue;
+    }
+    break;
   }
   if (res.status !== 200) {
     stderr(describeRefusal(res, args));

@@ -97,7 +97,7 @@ export function isTransportError(error: unknown): boolean {
   });
 }
 
-const ALREADY_ACTIVE = /already active|subscription active/i;
+const ALREADY_ACTIVE = /already active|subscription active|SSE stream ended/i;
 
 export function classifyDaemonFailure(
   input: DaemonFailureInput,
@@ -110,8 +110,11 @@ export function classifyDaemonFailure(
   if (status !== undefined) {
     // 401/403 is a bad token, which a new daemon would not fix. 404 is the
     // daemon answering "I do not have this session": a different daemon (or
-    // none) holds it now. Any other answer keeps today's behaviour.
-    return status === 404 ? 'daemon_gone' : 'fatal';
+    // none) holds it now. 502/503/504 indicate the daemon/child or upstream
+    // gateway is unavailable or restarting, so re-attach should take over.
+    return status === 404 || status === 502 || status === 503 || status === 504
+      ? 'daemon_gone'
+      : 'fatal';
   }
   if (isTransportError(error)) return 'daemon_gone';
   const message = String((error as { message?: unknown })?.message ?? error);

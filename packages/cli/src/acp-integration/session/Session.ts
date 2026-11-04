@@ -277,6 +277,7 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { hasBoundedJsonStructure } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
@@ -8898,8 +8899,54 @@ export class Session implements SessionContext {
         _meta: { ...update._meta, backgroundTurn: { ...execution.turn } },
       };
     }
-    const projectedUpdate = projectAcpToolResultUpdate(update);
+    let projectedUpdate = projectAcpToolResultUpdate(update);
     observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
+    if (
+      (projectedUpdate.sessionUpdate === 'tool_call' ||
+        projectedUpdate.sessionUpdate === 'tool_call_update') &&
+      !hasBoundedJsonStructure({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: this.sessionId, update: projectedUpdate },
+      })
+    ) {
+      projectedUpdate = {
+        ...projectedUpdate,
+        ...('rawInput' in projectedUpdate &&
+        projectedUpdate.rawInput !== undefined
+          ? { rawInput: { _truncated: true } }
+          : {}),
+        ...('rawOutput' in projectedUpdate &&
+        projectedUpdate.rawOutput !== undefined
+          ? { rawOutput: '[truncated oversized tool output structure]' }
+          : {}),
+      };
+      if (
+        !hasBoundedJsonStructure({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: this.sessionId, update: projectedUpdate },
+        })
+      ) {
+        const safeMeta = isRecord(projectedUpdate._meta)
+          ? {
+              ...(typeof projectedUpdate._meta['toolName'] === 'string'
+                ? { toolName: projectedUpdate._meta['toolName'] }
+                : {}),
+              ...(typeof projectedUpdate._meta['provenance'] === 'string'
+                ? { provenance: projectedUpdate._meta['provenance'] }
+                : {}),
+            }
+          : undefined;
+        projectedUpdate = {
+          ...projectedUpdate,
+          ...(Array.isArray(projectedUpdate.content)
+            ? { content: projectedUpdate.content.slice(0, 32) }
+            : {}),
+          ...(safeMeta ? { _meta: safeMeta } : { _meta: undefined }),
+        };
+      }
+    }
     const params: SessionNotification = {
       sessionId: this.sessionId,
       update: projectedUpdate,
@@ -12920,7 +12967,7 @@ export class Session implements SessionContext {
     if (this.#isAutomaticWorkHeld()) return;
     const { availableCommands, availableSkills, availableSkillDetails } =
       await this.buildAvailableCommandsSnapshot();
-    const update: SessionUpdate = {
+    let update: SessionUpdate = {
       sessionUpdate: 'available_commands_update',
       availableCommands,
       ...(availableSkills !== undefined
@@ -12932,6 +12979,40 @@ export class Session implements SessionContext {
           }
         : {}),
     };
+    if (
+      !hasBoundedJsonStructure({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: this.sessionId, update },
+      })
+    ) {
+      update = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        ...(availableSkills !== undefined
+          ? { _meta: { availableSkills } }
+          : {}),
+      };
+      if (
+        !hasBoundedJsonStructure({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: this.sessionId, update },
+        })
+      ) {
+        update = {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: availableCommands.slice(0, 500).map((cmd) => ({
+            name: cmd.name,
+            description: cmd.description,
+            input: cmd.input,
+          })),
+          ...(availableSkills !== undefined
+            ? { _meta: { availableSkills: availableSkills.slice(0, 1000) } }
+            : {}),
+        };
+      }
+    }
     await this.sendUpdate(update);
   }
 

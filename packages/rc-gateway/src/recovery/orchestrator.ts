@@ -37,7 +37,7 @@
  */
 
 import type { AuditRecorder } from '../auditLog.js';
-import { isSessionLevelGone } from '../daemonHttpError.js';
+import { asDaemonHttpError, isSessionLevelGone } from '../daemonHttpError.js';
 import type { DaemonExitInfo, RecoveryState } from '../daemonPool.js';
 import type { OwnerEventBus } from '../ownerEvents.js';
 import type { PromptQueue } from '../routes/promptQueue.js';
@@ -166,8 +166,11 @@ export class RecoveryOrchestrator {
 
   /** The pool reports the session live again (created/resumed out-of-band —
    * e.g. a manual `POST /session/:id/resume` after a failed recovery), so a
-   * stale outcome stops short-circuiting the events route. */
+   * stale outcome stops short-circuiting the events route. Ignore during an
+   * active recovery saga so `pool.resumeSession` does not clear `'recovering'`
+   * before `report()` appends the WAL recovery markers and sets `'recovered'`. */
   sessionLive(sessionId: string): void {
+    if (this.state.get(sessionId) === 'recovering') return;
     this.state.set(sessionId, 'idle');
     this.outcomes.delete(sessionId);
   }
@@ -274,8 +277,14 @@ export class RecoveryOrchestrator {
         await this.pool.resumeSession(id, { workspaceCwd: workspaceKey });
         report(id, true, startedAt);
       } catch (err) {
-        if (isSessionLevelGone(err)) {
-          // The transcript is gone — unrecoverable, no retry; the other
+        const http = asDaemonHttpError(err);
+        if (
+          isSessionLevelGone(err) ||
+          (http !== undefined && http.status < 502)
+        ) {
+          // The transcript is gone or this individual session failed to
+          // restore (e.g. 400/409/422/500 on that session) while the daemon
+          // HTTP server itself answered - unrecoverable, no retry; the other
           // sessions are still tried.
           report(id, false, startedAt);
         } else {

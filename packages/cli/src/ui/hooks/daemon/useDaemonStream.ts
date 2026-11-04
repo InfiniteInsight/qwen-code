@@ -367,6 +367,7 @@ export function useDaemonStream(
           for await (const frame of driver.events({ signal: ac.signal })) {
             if (disposed) break;
             transportFailures = 0;
+            attempt = 0;
             applyFrame(frame);
             if (
               lossRef.current &&

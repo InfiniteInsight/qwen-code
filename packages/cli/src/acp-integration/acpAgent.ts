@@ -1241,12 +1241,36 @@ function mapSessionRestoreRequestError(
   return error;
 }
 
+function trimUnpagedReplayEnvelope(envelope: BridgeLoadReplayEnvelope): void {
+  if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
+    envelope.updates = envelope.updates.slice(-LOAD_REPLAY_MAX_UPDATES);
+    envelope.hasMore = true;
+  }
+  let pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  if (pageBytes <= LOAD_REPLAY_MAX_BYTES) return;
+  degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+  pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  while (pageBytes > LOAD_REPLAY_MAX_BYTES && envelope.updates.length > 1) {
+    const dropCount = Math.max(
+      1,
+      Math.min(
+        envelope.updates.length - 1,
+        Math.ceil(
+          envelope.updates.length * (1 - LOAD_REPLAY_MAX_BYTES / pageBytes),
+        ),
+      ),
+    );
+    envelope.updates = envelope.updates.slice(dropCount);
+    envelope.hasMore = true;
+    pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  }
+}
+
 function validateLoadReplayEnvelope(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
   enforceLimits: boolean,
 ): void {
-  if (!enforceLimits) return;
   if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
     throw new HistoryReplayLimitError(
       sessionId,
@@ -1255,6 +1279,7 @@ function validateLoadReplayEnvelope(
       LOAD_REPLAY_MAX_UPDATES,
     );
   }
+  if (!enforceLimits) return;
   const pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
   if (pageBytes > LOAD_REPLAY_MAX_BYTES) {
     throw new HistoryReplayLimitError(
@@ -6170,6 +6195,8 @@ class QwenAgent implements Agent {
             };
             if (enforceLimits) {
               degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+            } else {
+              trimUnpagedReplayEnvelope(envelope);
             }
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
             // The card is presentation: a full page simply goes without it.
@@ -6354,6 +6381,8 @@ class QwenAgent implements Agent {
                     replayEnvelope,
                     LOAD_REPLAY_MAX_BYTES,
                   );
+                } else {
+                  trimUnpagedReplayEnvelope(replayEnvelope);
                 }
                 validateLoadReplayEnvelope(
                   sessionId,

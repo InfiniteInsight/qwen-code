@@ -52,7 +52,12 @@ export class PromptQueue {
     // `release` will be called by the caller when their turn is done.
     let release!: () => void;
     const next = new Promise<void>((resolve) => {
-      release = resolve;
+      release = () => {
+        if (this.sessions.get(sessionId) === next) {
+          this.sessions.delete(sessionId);
+        }
+        resolve();
+      };
     });
 
     // Register this waiter as the new tail immediately — before any await — so

@@ -22,13 +22,15 @@ import {
   type TerminalPlanOptions,
 } from '../terminals.js';
 import { isSessionNotFoundError } from './sessionResume.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidTabId } from '../hostTabs.js';
 
 /** The slice of the pool these routes call. */
 export type HostAttachDaemon = Pick<
   SessionDaemon,
   'createOrAttachSession' | 'resumeSession' | 'daemonEndpointForSession'
->;
+> &
+  Partial<Pick<SessionDaemon, 'sessionStatus' | 'sessionWorkspaceCwd'>>;
 
 export interface HostAttachDeps {
   daemon: HostAttachDaemon;
@@ -419,14 +421,38 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       }
       tracked = false;
     }
+    if (tracked && daemon.sessionStatus) {
+      try {
+        await daemon.sessionStatus(sessionId);
+      } catch (err) {
+        if (isSessionLevelGone(err) || err instanceof UnknownSessionError) {
+          tracked = false;
+        } else {
+          fail(
+            res,
+            'attach',
+            502,
+            'daemon_unavailable',
+            'Daemon unavailable',
+            sessionId,
+          );
+          return;
+        }
+      }
+    }
     if (tracked) {
       await answer(req, res, 'attach', 'pooled', sessionId, pooled);
       return;
     }
 
-    // Case 2: nothing in memory owns it. Restore it in the caller's cwd.
-    const { cwd, error } = await readCwd(req);
-    if (error || cwd === undefined) {
+    // Case 2: nothing in memory owns it. Restore it in the caller's cwd (or
+    // the workspace the pool had recorded before the daemon reaped the session).
+    const { cwd: bodyCwd, error } = await readCwd(req);
+    const knownCwd =
+      pooled?.workspaceCwd ?? daemon.sessionWorkspaceCwd?.(sessionId);
+    const cwd =
+      bodyCwd ?? (error === 'cwd_required' && knownCwd ? knownCwd : undefined);
+    if ((error && cwd === undefined) || cwd === undefined) {
       cwdError(res, 'resume', error ?? 'invalid_workspace', sessionId);
       return;
     }

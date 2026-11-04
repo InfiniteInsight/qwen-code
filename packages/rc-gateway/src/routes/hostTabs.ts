@@ -115,7 +115,8 @@ export type TabEndpointAnswer =
  * right after a restart, so it cannot ask for a daemon that is already up.
  */
 export function sessionEndpointResolver(
-  daemon: Pick<SessionDaemon, 'daemonEndpointForSession' | 'resumeSession'>,
+  daemon: Pick<SessionDaemon, 'daemonEndpointForSession' | 'resumeSession'> &
+    Partial<Pick<SessionDaemon, 'sessionStatus'>>,
 ): (sessionId: string, cwd: string) => Promise<TabEndpointAnswer> {
   const down: TabEndpointAnswer = {
     ok: false,
@@ -134,10 +135,20 @@ export function sessionEndpointResolver(
       };
     }
     let endpoint: DaemonEndpoint | undefined;
+    let needsResume = false;
     try {
       endpoint = lookup(sessionId);
+      if (daemon.sessionStatus) {
+        await daemon.sessionStatus(sessionId);
+      }
     } catch (err) {
-      if (!(err instanceof UnknownSessionError)) return down;
+      if (err instanceof UnknownSessionError || isSessionNotFoundError(err)) {
+        needsResume = true;
+      } else {
+        return down;
+      }
+    }
+    if (needsResume) {
       try {
         await daemon.resumeSession(sessionId, { workspaceCwd: cwd });
       } catch (e) {

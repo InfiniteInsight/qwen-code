@@ -1115,7 +1115,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     rec: ReviewRecord,
   ): Promise<{ reportPath: string | null; summary: ReviewRecord['summary'] }> {
     try {
-      const caps = await handle.daemon.capabilities();
+      const caps = await daemonPool.capabilities();
       const cwd = caps.workspaceCwd;
       if (!cwd) return { reportPath: null, summary: null };
 
@@ -1430,7 +1430,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     usageFeeder = new UsageFeeder({
       cache: new SessionModelCache({
         fromContext: async (sid) =>
-          modelIdFromContext(await handle.daemon.sessionContext(sid)),
+          modelIdFromContext(await daemonPool.sessionContext(sid)),
         fromTranscript: createTranscriptModelResolver(),
         now: () => Date.now(),
       }),
@@ -1552,7 +1552,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // sees the final value.
   const enforcer = notifier
     ? new PolicyEnforcer(
-        handle.daemon,
+        daemonPool,
         policy,
         audit,
         quota,
@@ -1954,7 +1954,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // is on (cost ingestion must see every session_update, independent of push).
   let pump: SessionEventPump | undefined;
   if (notifier || usageIngester || agentLifecycle || reviewLifecycle) {
-    pump = new SessionEventPump(handle.daemon, notifier, {
+    pump = new SessionEventPump(daemonPool, notifier, {
       sessionName: (s) => s.displayName,
       enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
       // Idle suggestions previously rode on the push pump (they only ran when a

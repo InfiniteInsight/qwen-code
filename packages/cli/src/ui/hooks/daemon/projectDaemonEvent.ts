@@ -790,6 +790,24 @@ function projectFrame(
       return { state: { ...state, approvalMode: next }, committed: [] };
     }
 
+    case 'state_resync_required': {
+      if (data['reason'] === 'epoch_reset') {
+        return {
+          state: {
+            ...state,
+            streamingState: StreamingState.Idle,
+            pendingText: '',
+            pendingThought: '',
+            tools: [],
+            pendingPermission: undefined,
+            lastEventId: undefined,
+          },
+          committed: [],
+        };
+      }
+      return { state, committed: [] };
+    }
+
     // `replay_complete` and unknown frame types are inert for this slice.
     default:
       return { state, committed: [] };

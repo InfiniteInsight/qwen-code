@@ -385,6 +385,7 @@ export class SessionWal {
    * Used to recover the relay's renumbering state from the log itself.
    */
   findLast(pred: (frame: WalFrame) => boolean): WalFrame | undefined {
+    this.resyncIfEvicted();
     const segments = this.segmentsOldestToNewest();
     for (let i = segments.length - 1; i >= 0; i--) {
       const frames = [...decodeSegment(segments[i]!)];

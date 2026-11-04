@@ -440,6 +440,32 @@ describe('runHostAttach', () => {
     expect(code).toBe(2);
     expect(lines.join('\n')).toContain('qwen-rc attach [cwd] [--session <id>]');
   });
+
+  it('retries transient 502/503 on initial attach before succeeding', async () => {
+    await loadOrCreateLocalToken(hostAttachTokenPath(rcDir));
+    const answers: HostAttachResponse[] = [
+      { status: 503, body: { error: 'daemon starting' } },
+      { status: 502, body: { error: 'bad gateway' } },
+      {
+        status: 200,
+        body: {
+          sessionId: SESSION,
+          workspaceCwd: '/srv/w',
+          linuxArgv: ['fake-qwen', '--ok'],
+        },
+      },
+    ];
+    const slept: number[] = [];
+    const { code, lines } = await run(['/srv/w'], {
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+      request: async () => answers.shift()!,
+    });
+    expect(code).toBe(0);
+    expect(slept).toEqual([1000, 2000]);
+    expect(lines).toEqual([`attached ${SESSION} in /srv/w`]);
+  });
 });
 
 describe('classifyReattach', () => {

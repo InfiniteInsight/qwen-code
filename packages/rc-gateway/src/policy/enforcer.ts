@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { Policy, PolicyAction } from './loader.js';
 import {
@@ -90,7 +90,7 @@ export interface PermissionOutcome {
  */
 export class PolicyEnforcer {
   constructor(
-    private readonly daemon: DaemonClient,
+    private readonly daemon: Pick<SessionDaemon, 'respondToSessionPermission'>,
     private policy: Policy,
     private readonly audit?: AuditRecorder,
     /**

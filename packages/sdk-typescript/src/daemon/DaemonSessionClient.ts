@@ -1466,6 +1466,12 @@ export class DaemonSessionClient {
         },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
+          if (
+            this.lastSeenEpoch !== undefined &&
+            this.lastSeenEpoch !== learned
+          ) {
+            this.lastSeenEventId = undefined;
+          }
           this.lastSeenEpoch = learned;
           callerOnEpoch?.(learned);
         },
@@ -1473,7 +1479,13 @@ export class DaemonSessionClient {
         const hydratedEvent = await this.hydrateEvent(event);
         this._dispatchTurnEvent(hydratedEvent);
         yield hydratedEvent;
-        if (event.id !== undefined) {
+        if (
+          event.type === 'state_resync_required' &&
+          (event.data as { reason?: unknown } | null | undefined)?.reason ===
+            'epoch_reset'
+        ) {
+          this.lastSeenEventId = undefined;
+        } else if (event.id !== undefined) {
           this.lastSeenEventId = Math.max(
             this.lastSeenEventId ?? 0,
             validateLastEventId(event.id),
@@ -1616,6 +1628,33 @@ export class DaemonSessionClient {
   }
 
   private _dispatchTurnEvent(event: DaemonEvent): void {
+    if (event.type === 'session_died' || event.type === 'session_closed') {
+      const reason =
+        (event.data as { reason?: string } | null | undefined)?.reason ??
+        event.type;
+      this._rejectAllPending(
+        new DaemonHttpError(
+          event.type === 'session_died' ? 502 : 404,
+          event.type,
+          `Session terminated during prompt (${reason})`,
+        ),
+      );
+      return;
+    }
+    if (
+      event.type === 'state_resync_required' &&
+      (event.data as { reason?: unknown } | null | undefined)?.reason ===
+        'epoch_reset'
+    ) {
+      this._rejectAllPending(
+        new DaemonHttpError(
+          503,
+          'epoch_reset',
+          'Daemon restarted during prompt (epoch_reset)',
+        ),
+      );
+      return;
+    }
     if (event.type !== 'turn_complete' && event.type !== 'turn_error') return;
     const promptId = (event.data as { promptId?: string } | null | undefined)
       ?.promptId;

@@ -333,27 +333,27 @@ export function spawnTui(
       if (done || ending || pid === undefined) return;
       ending = true;
       const tree = [pid, ...listDescendants(pid)];
-      signalAll(tree, 'SIGTERM');
+      signalAll([...tree].reverse(), 'SIGTERM');
       const startedAt = Date.now();
       let killed = false;
       const tick = (): void => {
         if (done) return;
         const elapsed = Date.now() - startedAt;
-        // Anything the TUI started after the first look counts too.
-        const everyone = [
-          ...new Set([
-            ...tree,
-            ...(isRunning(pid) ? listDescendants(pid) : []),
-          ]),
-        ];
-        const live = everyone.filter((p) => isRunning(p));
+        // Anything the TUI or its children started after the first look counts too.
+        for (const p of [...tree]) {
+          if (!isRunning(p)) continue;
+          for (const d of listDescendants(p)) {
+            if (!tree.includes(d)) tree.push(d);
+          }
+        }
+        const live = tree.filter((p) => isRunning(p));
         if (live.length === 0) {
           finish(childResult ?? { status: null, signal: 'SIGTERM' });
           return;
         }
         if (!killed && elapsed >= grace) {
           killed = true;
-          signalAll(live, 'SIGKILL');
+          signalAll([...live].reverse(), 'SIGKILL');
         }
         // SIGKILL cannot be caught, but a process stuck in the kernel may not
         // go for a while; the wrapper must not wait on it forever.

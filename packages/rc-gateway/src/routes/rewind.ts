@@ -36,7 +36,12 @@ import { activeBranch } from './activeBranch.js';
 export type RewindDaemon = Pick<
   DaemonClient,
   'rewindSession' | 'getRewindSnapshots' | 'resumeSession'
->;
+> & {
+  sessionWorkspaceCwd?(sessionId: string): string | undefined;
+  daemonEndpointForSession?(
+    sessionId: string,
+  ): { workspaceCwd: string } | undefined;
+};
 
 /** Fallback queue when a route set is wired without an explicit queue. */
 const defaultQueue = new PromptQueue();
@@ -259,9 +264,17 @@ export function createRewindRoute(
         typeof body.cwd === 'string' && body.cwd.length > 0
           ? body.cwd
           : undefined;
+      let pooledCwd = daemon.sessionWorkspaceCwd?.(sessionId);
+      if (!pooledCwd && daemon.daemonEndpointForSession) {
+        try {
+          pooledCwd = daemon.daemonEndpointForSession(sessionId)?.workspaceCwd;
+        } catch {
+          // Ignore UnknownSessionError on unrecorded session.
+        }
+      }
       const trustedCwd = await resolveWorkspaceCwd();
       const candidateCwds: string[] = [];
-      for (const c of [requestedCwd, trustedCwd]) {
+      for (const c of [requestedCwd, pooledCwd, trustedCwd]) {
         if (c && !candidateCwds.includes(c)) candidateCwds.push(c);
       }
       let workspaceCwd: string | undefined;

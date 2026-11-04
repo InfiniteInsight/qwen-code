@@ -6564,6 +6564,27 @@ export class DaemonClient {
         }
         const result = matchTurnEvent(event, promptId);
         if (result !== undefined) return result;
+        if (event.type === 'session_died' || event.type === 'session_closed') {
+          const reason =
+            (event.data as { reason?: string } | null | undefined)?.reason ??
+            event.type;
+          throw new DaemonHttpError(
+            event.type === 'session_died' ? 502 : 404,
+            event.type,
+            `Session terminated during prompt (${reason})`,
+          );
+        }
+        if (
+          event.type === 'state_resync_required' &&
+          (event.data as { reason?: unknown } | null | undefined)?.reason ===
+            'epoch_reset'
+        ) {
+          throw new DaemonHttpError(
+            503,
+            'epoch_reset',
+            'Daemon restarted during prompt (epoch_reset)',
+          );
+        }
       }
       signal?.throwIfAborted();
       throw new Error('SSE stream ended');

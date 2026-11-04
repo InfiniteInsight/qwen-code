@@ -4,13 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  DaemonClient,
-  DaemonEvent,
-  DaemonSessionSummary,
-} from '@qwen-code/sdk';
+import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 import type { PolicyEnforcer } from '../policy/enforcer.js';
-import { isGoneSessionError } from '../daemonPool.js';
+import { isGoneSessionError, type SessionDaemon } from '../daemonPool.js';
 import {
   routingContextFromPolicy,
   type RoutingEventContext,
@@ -157,7 +153,10 @@ export class SessionEventPump {
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
-    private readonly daemon: DaemonClient,
+    private readonly daemon: Pick<
+      SessionDaemon,
+      'capabilities' | 'listWorkspaceSessions' | 'subscribeEvents'
+    >,
     // Optional: the pump also runs for cost tracking with no push notifier
     // (push gated on VAPID; cost tracking is not). notify is guarded below.
     private readonly notifier: PumpNotifier | undefined,

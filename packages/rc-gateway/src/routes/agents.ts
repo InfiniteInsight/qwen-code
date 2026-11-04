@@ -72,9 +72,13 @@ function sendSerializedPrompt(
   return (async () => {
     const release = await queue.acquire(sessionId, PROMPT_QUEUE_WAIT_MS);
     try {
-      return await deps.daemon.prompt(sessionId, {
-        prompt: [{ type: 'text', text }],
-      });
+      return await deps.daemon.prompt(
+        sessionId,
+        {
+          prompt: [{ type: 'text', text }],
+        },
+        AbortSignal.timeout(PROMPT_QUEUE_WAIT_MS),
+      );
     } finally {
       release();
     }

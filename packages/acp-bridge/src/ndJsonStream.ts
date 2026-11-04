@@ -267,6 +267,7 @@ function createBoundedReadable(
   // One onQueueSaturated warning per uninterrupted saturation episode; reset
   // once the queue fully drains.
   let saturationWarned = false;
+  let saturationDeadline: number | undefined;
   // Single waiter: only the pump loop ever waits for queue space.
   let wakeQueueWaiter: (() => void) | undefined;
   const waitForQueueSpace = (timeoutMs: number): Promise<void> =>
@@ -308,8 +309,14 @@ function createBoundedReadable(
     if (availableBytes === null) throw queueLimitError(0);
     // The queue fully drained: the previous saturation episode is over and a
     // new one may warn again.
-    if (availableBytes === limits.maxQueuedBytes) saturationWarned = false;
-    if (queueCharge <= availableBytes) return;
+    if (availableBytes === limits.maxQueuedBytes) {
+      saturationWarned = false;
+      saturationDeadline = undefined;
+    }
+    if (queueCharge <= availableBytes) {
+      saturationDeadline = undefined;
+      return;
+    }
     // A frame that would not fit even in a fully drained queue can never be
     // rescued by waiting.
     if (queueCharge > limits.maxQueuedBytes) {
@@ -328,7 +335,7 @@ function createBoundedReadable(
     }
 
     // Monotonic: wall-clock steps must not extend or shorten the grace window.
-    const deadline = performance.now() + graceMs;
+    const deadline = (saturationDeadline ??= performance.now() + graceMs);
     while (queueCharge > availableBytes) {
       if (canceled) return;
       const remainingMs = deadline - performance.now();

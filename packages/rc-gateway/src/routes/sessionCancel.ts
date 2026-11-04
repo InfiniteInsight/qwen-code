@@ -5,7 +5,8 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
@@ -33,7 +34,14 @@ export function createSessionCancelRoute(
 
     try {
       await daemon.cancel(sessionId);
-    } catch {
+    } catch (err) {
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(404).json({
+          error: 'Session not found',
+          code: 'session_not_found',
+        });
+        return;
+      }
       res.status(502).json({
         error: 'Daemon unavailable',
         code: 'daemon_unavailable',

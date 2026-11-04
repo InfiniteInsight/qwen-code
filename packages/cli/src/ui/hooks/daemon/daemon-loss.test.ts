@@ -82,9 +82,15 @@ describe('classifyDaemonFailure', () => {
     it('404 is definitive, not a transport error', () => {
       expect(isTransportError(httpError(404))).toBe(false);
     });
-    it.each([400, 409, 429, 500, 502, 503])('%i stays fatal as today', (s) => {
+    it.each([400, 409, 429, 500])('%i stays fatal as today', (s) => {
       expect(classifyDaemonFailure(err(httpError(s)))).toBe('fatal');
     });
+    it.each([502, 503, 504])(
+      '%i indicates daemon/gateway unavailable: daemon_gone',
+      (s) => {
+        expect(classifyDaemonFailure(err(httpError(s)))).toBe('daemon_gone');
+      },
+    );
     it('reads status from a duplicate-bundled class (shape, not instanceof)', () => {
       const other = Object.assign(new Error('x'), { status: 404 });
       expect(classifyDaemonFailure(err(other))).toBe('daemon_gone');

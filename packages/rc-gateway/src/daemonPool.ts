@@ -957,6 +957,10 @@ export interface SessionDaemon {
    * #28). Optional — a plain `DaemonClient` has no pool behind it, so the
    * workspace listing route treats a missing implementation as `[]`. */
   workspaces?(): string[];
+  /** Last known workspace cwd for a session id, even after the session or
+   * its pooled daemon was idle-reaped. Optional - only `DaemonPool` tracks
+   * multi-workspace session ownership. */
+  sessionWorkspaceCwd?(sessionId: string): string | undefined;
 }
 
 export interface DaemonPoolOptions {
@@ -1163,6 +1167,11 @@ export class DaemonPool implements SessionDaemon {
   /** sessionId -> owning workspace key (`defaultWorkspaceCwd` for sessions
    * created on the default daemon). */
   private readonly ownerOf = new Map<string, string>();
+  /** Remembers the workspace key a session belonged to even after the daemon
+   * or session was idle-reaped (`forgetSession` / `discardEntry` / `markDead`),
+   * so later re-attaches, forks, or rewinds without an explicit `cwd` can
+   * still locate the session's workspace. Cleared only on explicit close/stop. */
+  private readonly lastKnownWorkspaceOf = new Map<string, string>();
   /**
    * Count of in-flight calls holding each workspace key (see `hold`;
    * never touched for the default workspace): `createOrAttachSession`,
@@ -1550,6 +1559,7 @@ export class DaemonPool implements SessionDaemon {
   private discardEntry(key: string, entry: Entry): void {
     for (const id of entry.sessions) {
       this.ownerOf.delete(id);
+      this.boundClients.delete(id);
     }
     entry.stop().catch(() => {});
     this.byWorkspace.delete(key);
@@ -1698,6 +1708,7 @@ export class DaemonPool implements SessionDaemon {
    * already gone unused for longer than `idleReapMs`. */
   private forgetSession(key: string, entry: Entry, id: string): void {
     entry.sessions.delete(id);
+    this.boundClients.delete(id);
     if (this.ownerOf.get(id) === key) this.ownerOf.delete(id);
   }
 
@@ -1781,7 +1792,10 @@ export class DaemonPool implements SessionDaemon {
     for (const [sid, k] of this.ownerOf) {
       if (k === key) affected.add(sid);
     }
-    for (const sid of affected) this.ownerOf.delete(sid);
+    for (const sid of affected) {
+      this.ownerOf.delete(sid);
+      this.boundClients.delete(sid);
+    }
     this.audit
       ?.record({
         action: 'daemon_died',
@@ -1870,13 +1884,25 @@ export class DaemonPool implements SessionDaemon {
   /** Run a session-keyed pool call against the session's owning daemon (see
    * `callOn`). The owner resolves BEFORE the call so an
    * `UnknownSessionError` (the 404 mapping) never touches the death
-   * trigger. */
+   * trigger. If the daemon answers 404 `session_not_found`, forget the
+   * stale session mapping so subsequent attaches know to resume it. */
   private async withSessionDeathTrigger<T>(
     sessionId: string,
     call: (client: DaemonClient) => Promise<T>,
   ): Promise<T> {
     const { key, entry } = this.ownerEntry(sessionId);
-    return this.callOn(key, entry, call);
+    try {
+      return await this.callOn(key, entry, call);
+    } catch (err) {
+      if (isSessionLevelGone(err)) {
+        this.forgetSession(key, entry, sessionId);
+      }
+      throw err;
+    } finally {
+      if (key !== this.defaultWorkspaceCwd && !entry.dead) {
+        this.touch(entry);
+      }
+    }
   }
 
   /** Run a call against the default workspace's daemon, respawning it first
@@ -1961,8 +1987,19 @@ export class DaemonPool implements SessionDaemon {
       : undefined;
   }
 
+  /**
+   * Return the workspace cwd associated with `sessionId`, whether currently
+   * active in `ownerOf` or remembered from before an idle reap / daemon exit.
+   */
+  sessionWorkspaceCwd(sessionId: string): string | undefined {
+    return (
+      this.ownerOf.get(sessionId) ?? this.lastKnownWorkspaceOf.get(sessionId)
+    );
+  }
+
   private removeSession(id: string): void {
     this.boundClients.delete(id); // #110
+    this.lastKnownWorkspaceOf.delete(id);
     const key = this.ownerOf.get(id);
     if (key === undefined) return;
     this.ownerOf.delete(id);
@@ -1980,6 +2017,7 @@ export class DaemonPool implements SessionDaemon {
    * registration landed cannot drop it on a stale answer. */
   private trackSession(key: string, id: string): void {
     this.ownerOf.set(id, key);
+    this.lastKnownWorkspaceOf.set(id, key);
     const entry = this.byWorkspace.get(key);
     if (entry) {
       entry.sessions.add(id);
@@ -2120,6 +2158,9 @@ export class DaemonPool implements SessionDaemon {
     let evicted = false;
     try {
       for await (const event of client.subscribeEvents(sessionId, opts)) {
+        if (key !== this.defaultWorkspaceCwd && !entry.dead) {
+          this.touch(entry);
+        }
         if (event.type === 'session_died' || event.type === 'session_closed') {
           this.removeSession(sessionId);
         }
@@ -2127,6 +2168,9 @@ export class DaemonPool implements SessionDaemon {
         yield event;
       }
     } catch (err) {
+      if (isSessionLevelGone(err)) {
+        this.forgetSession(key, entry, sessionId);
+      }
       // The same confirmation as every other call (#203): a refused
       // connection is a death, any other transport error waits for a
       // `/health` probe.
@@ -2134,6 +2178,10 @@ export class DaemonPool implements SessionDaemon {
         await this.noteTransportDeath(key, entry, err);
       }
       throw err;
+    } finally {
+      if (key !== this.defaultWorkspaceCwd && !entry.dead) {
+        this.touch(entry);
+      }
     }
   }
 
@@ -2372,7 +2420,9 @@ export class DaemonPool implements SessionDaemon {
       // daemon against idle reaping (#154). The SDK's own closeSession
       // already resolves on that 404; this keeps the pool's answer the same
       // for a client that surfaces it.
-      if (!isSessionLevelGone(err)) throw err;
+      if (!isSessionLevelGone(err) && !(err instanceof UnknownSessionError)) {
+        throw err;
+      }
     }
     this.removeSession(sessionId);
   }
@@ -3487,6 +3537,8 @@ export class DaemonPool implements SessionDaemon {
     }
     this.byWorkspace.clear();
     this.ownerOf.clear();
+    this.lastKnownWorkspaceOf.clear();
+    this.boundClients.clear();
     this.pendingUses.clear();
   }
 }

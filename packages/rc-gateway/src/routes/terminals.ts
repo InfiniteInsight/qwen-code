@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isSessionMirrored } from '../hostMirrors.js';
 import {
@@ -97,14 +98,39 @@ export function createTerminalOpenRoute(
     }
 
     let endpoint;
+    let needsResume = false;
     try {
       endpoint = daemon.daemonEndpointForSession(sessionId);
+      if (typeof daemon.sessionStatus === 'function') {
+        await daemon.sessionStatus(sessionId);
+      }
     } catch (err) {
-      if (err instanceof UnknownSessionError) {
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        needsResume = true;
+      } else {
+        throw err;
+      }
+    }
+    if (needsResume) {
+      const knownCwd =
+        endpoint?.workspaceCwd ?? daemon.sessionWorkspaceCwd?.(sessionId);
+      if (!knownCwd || typeof daemon.resumeSession !== 'function') {
         res.status(404).json({ error: 'Unknown session', code: 'not_found' });
         return;
       }
-      throw err;
+      try {
+        await daemon.resumeSession(sessionId, { workspaceCwd: knownCwd });
+        endpoint = daemon.daemonEndpointForSession(sessionId);
+      } catch (err) {
+        if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+          res.status(404).json({ error: 'Unknown session', code: 'not_found' });
+          return;
+        }
+        res
+          .status(502)
+          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+        return;
+      }
     }
     if (!endpoint?.token) {
       // Reachable in attach mode (the gateway did not mint the daemon's token)

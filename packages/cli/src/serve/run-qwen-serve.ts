@@ -10200,8 +10200,18 @@ async function runQwenServeImpl(
 
       // Forward declaration so handle.close can detach the listener after
       // drain completes. The handler is registered just before `resolve()`.
+      let firstSignalAt = 0;
       const onSignal = async (signal: NodeJS.Signals) => {
         if (shuttingDown) {
+          // Ignore duplicate SIGTERM delivered within 500ms of the first signal
+          // (e.g. systemd cgroup broadcast racing parent gateway stop()).
+          if (
+            signal === 'SIGTERM' &&
+            firstSignalAt > 0 &&
+            Date.now() - firstSignalAt < 500
+          ) {
+            return;
+          }
           // Second signal forces exit. During drain (up to
           // ~15s for a stuck child + the 5s force-close timer) an
           // operator's reflexive `^C^C` would otherwise be dropped.
@@ -10233,6 +10243,7 @@ async function runQwenServeImpl(
           process.exit(1);
           return;
         }
+        firstSignalAt = Date.now();
         if (!loggerPublished) {
           loggerSignalOwned = true;
           loggerLifecycle.signalOwned();

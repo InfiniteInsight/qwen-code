@@ -2079,6 +2079,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       commandLoader,
       audit,
       deps.promptTimeoutMs,
+      promptQueue,
+      deps.queueWaitMs,
     ),
   );
   // POST /session/:id/supported-commands/:name — write-scope; runs one of the
@@ -2094,7 +2096,13 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap command invocations per chat user
-    createSessionCommandInvokeRoute(deps.daemon, audit, deps.promptTimeoutMs),
+    createSessionCommandInvokeRoute(
+      deps.daemon,
+      audit,
+      deps.promptTimeoutMs,
+      promptQueue,
+      deps.queueWaitMs,
+    ),
   );
   app.get(
     '/rc/commands',

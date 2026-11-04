@@ -15636,7 +15636,7 @@ export function createSessionControlPlane(
         return result;
       };
       const endSideRequest = beginSideRequest(entry);
-      return entry.promptQueue.then(async () => {
+      const run = entry.promptQueue.then(async () => {
         try {
           // A quarantine that began while this waited still refuses it.
           assertChannelAdmitsPrompts(entry);
@@ -15645,6 +15645,11 @@ export function createSessionControlPlane(
           endSideRequest();
         }
       });
+      entry.promptQueue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
     },
 
     async executeShellCommand(

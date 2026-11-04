@@ -37,7 +37,12 @@ import { activeBranch } from './activeBranch.js';
  * written fork as a live session) plus `resumeSession` — the pool-ownership
  * ensure, so under `DaemonPool` the new fork id is routed to the workspace
  * daemon that owns the parent before the restore call. */
-type ForkDaemon = Pick<DaemonClient, 'loadSession' | 'resumeSession'>;
+type ForkDaemon = Pick<DaemonClient, 'loadSession' | 'resumeSession'> & {
+  sessionWorkspaceCwd?(sessionId: string): string | undefined;
+  daemonEndpointForSession?(
+    sessionId: string,
+  ): { workspaceCwd: string } | undefined;
+};
 
 export interface ForkRouteDeps {
   audit?: AuditRecorder;
@@ -199,9 +204,17 @@ export function createForkRoute(
       typeof body.cwd === 'string' && body.cwd.length > 0
         ? body.cwd
         : undefined;
+    let pooledCwd = daemon.sessionWorkspaceCwd?.(parentId);
+    if (!pooledCwd && daemon.daemonEndpointForSession) {
+      try {
+        pooledCwd = daemon.daemonEndpointForSession(parentId)?.workspaceCwd;
+      } catch {
+        // Ignore UnknownSessionError on unrecorded session.
+      }
+    }
     const trustedCwd = await resolveWorkspaceCwd();
     const candidateCwds: string[] = [];
-    for (const c of [requestedCwd, trustedCwd]) {
+    for (const c of [requestedCwd, pooledCwd, trustedCwd]) {
       if (c && !candidateCwds.includes(c)) candidateCwds.push(c);
     }
     let workspaceCwd: string | undefined;

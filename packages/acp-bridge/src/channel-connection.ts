@@ -245,8 +245,9 @@ function createLogSafeAcpClient(
       () =>
         admission.run(params, async () => {
           const result = await operation();
-          transportGuard.reservePreparedResponse(result ?? null);
-          return result;
+          const normalizedResult = (result ?? null) as T;
+          transportGuard.reservePreparedResponse(normalizedResult);
+          return normalizedResult;
         }),
       transportGuard.reservePreparedResponse,
     );
