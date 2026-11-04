@@ -155,7 +155,10 @@ export class SessionEventPump {
   constructor(
     private readonly daemon: Pick<
       SessionDaemon,
-      'capabilities' | 'listWorkspaceSessions' | 'subscribeEvents'
+      | 'capabilities'
+      | 'listWorkspaceSessions'
+      | 'subscribeEvents'
+      | 'workspaces'
     >,
     // Optional: the pump also runs for cost tracking with no push notifier
     // (push gated on VAPID; cost tracking is not). notify is guarded below.
@@ -204,14 +207,36 @@ export class SessionEventPump {
 
   /** Diff the listed session set against tracked loops. Never throws. */
   private async reconcile(): Promise<void> {
-    if (this.stopped || !this.workspaceCwd) return;
-    let list: DaemonSessionSummary[];
-    try {
-      list = await this.daemon.listWorkspaceSessions(this.workspaceCwd);
-    } catch {
-      // Transient daemon error → try again next tick.
-      return;
+    if (this.stopped) return;
+    if (!this.workspaceCwd) {
+      try {
+        const caps = await this.daemon.capabilities();
+        this.workspaceCwd = caps.workspaceCwd ?? '';
+      } catch {
+        return;
+      }
+      if (this.stopped || !this.workspaceCwd) return;
     }
+    const list: DaemonSessionSummary[] = [];
+    const seenIds = new Set<string>();
+    const cwds = [this.workspaceCwd, ...(this.daemon.workspaces?.() ?? [])];
+    let anySucceeded = false;
+    for (const cwd of cwds) {
+      if (!cwd) continue;
+      try {
+        const sub = await this.daemon.listWorkspaceSessions(cwd);
+        anySucceeded = true;
+        for (const s of sub) {
+          if (!seenIds.has(s.sessionId)) {
+            seenIds.add(s.sessionId);
+            list.push(s);
+          }
+        }
+      } catch {
+        // Ignore transient workspace error; keep sessions from reachable workspaces.
+      }
+    }
+    if (!anySucceeded) return;
     // stop() may have landed during the await — don't spawn loops post-stop.
     if (this.stopped) return;
     const ids = new Set(list.map((s) => s.sessionId));

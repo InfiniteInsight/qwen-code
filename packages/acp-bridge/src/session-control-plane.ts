@@ -15685,140 +15685,148 @@ export function createSessionControlPlane(
         return { exitCode: null, output: '', aborted: true };
       }
 
-      // Race the cwd queue against the caller's abort signal so a shell
-      // command cannot park forever on a changeSessionCwd extMethod that
-      // never settles (agent crash / deadlock / partitioned ACP channel).
-      let abortResolve: (() => void) | undefined;
-      const onAbort = () => abortResolve?.();
+      const endSideRequest = beginSideRequest(entry);
       try {
-        await Promise.race([
-          entry.cwdChangeQueue,
-          new Promise<void>((resolve) => {
-            abortResolve = resolve;
-            if (signal?.aborted) return resolve();
-            signal?.addEventListener('abort', onAbort, { once: true });
-          }),
-        ]);
-      } finally {
-        signal?.removeEventListener('abort', onAbort);
-      }
-      if (signal?.aborted) {
-        return { exitCode: null, output: '', aborted: true };
-      }
-      const cwd = entry.effectiveCwd;
-
-      entry.events.publish({
-        type: 'user_shell_command',
-        data: { sessionId, command, cwd },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-
-      const outputChunks: string[] = [];
-      const abort = new AbortController();
-      const onSignalAbort = () => abort.abort();
-      signal?.addEventListener('abort', onSignalAbort, { once: true });
-
-      try {
-        const handle = await harness.executeShell(
-          command,
-          cwd,
-          (event: ShellOutputEvent) => {
-            if (event.type === 'data') {
-              const chunk =
-                typeof event.chunk === 'string'
-                  ? event.chunk
-                  : event.chunk
-                      .map((line: Array<{ text: string }>) =>
-                        line.map((t) => t.text).join(''),
-                      )
-                      .join('\n');
-              outputChunks.push(chunk);
-              entry.events.publish({
-                type: 'session_update',
-                data: {
-                  sessionId,
-                  update: {
-                    sessionUpdate: 'shell_output',
-                    output: chunk,
-                    _meta: {
-                      serverTimestamp: Date.now(),
-                      source: 'user-shell',
-                    },
-                  },
-                },
-                ...(originatorClientId ? { originatorClientId } : {}),
-              });
-            }
-          },
-          abort.signal,
-        );
-
-        const timeoutId = setTimeout(
-          () => abort.abort(),
-          SHELL_COMMAND_TIMEOUT_MS,
-        );
-        timeoutId.unref();
-
-        const result = await handle.result;
-        clearTimeout(timeoutId);
-
-        const exitCode = result.exitCode;
-        const aborted = result.aborted;
-        const output = outputChunks.join('') || result.output;
+        // Race the cwd queue against the caller's abort signal so a shell
+        // command cannot park forever on a changeSessionCwd extMethod that
+        // never settles (agent crash / deadlock / partitioned ACP channel).
+        let abortResolve: (() => void) | undefined;
+        const onAbort = () => abortResolve?.();
+        try {
+          await Promise.race([
+            entry.cwdChangeQueue,
+            new Promise<void>((resolve) => {
+              abortResolve = resolve;
+              if (signal?.aborted) return resolve();
+              signal?.addEventListener('abort', onAbort, { once: true });
+            }),
+          ]);
+        } finally {
+          signal?.removeEventListener('abort', onAbort);
+        }
+        if (signal?.aborted) {
+          return { exitCode: null, output: '', aborted: true };
+        }
+        assertLivePromptEntry(sessionId, entry);
+        assertSessionResetNotPending(sessionId);
+        assertChannelAdmitsPrompts(entry);
+        const cwd = entry.effectiveCwd;
 
         entry.events.publish({
-          type: 'user_shell_result',
-          data: {
-            sessionId,
-            exitCode,
-            signal: result.signal,
-            aborted,
-            _meta: { serverTimestamp: Date.now() },
-          },
+          type: 'user_shell_command',
+          data: { sessionId, command, cwd },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
 
-        const historyOutput =
-          output.length > MAX_SHELL_OUTPUT_FOR_HISTORY
-            ? output.substring(0, MAX_SHELL_OUTPUT_FOR_HISTORY) +
-              '\n... (truncated)'
-            : output;
+        const outputChunks: string[] = [];
+        const abort = new AbortController();
+        const onSignalAbort = () => abort.abort();
+        signal?.addEventListener('abort', onSignalAbort, { once: true });
 
         try {
-          await withTimeout(
-            Promise.race([
-              entry.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
-                { sessionId, command, output: historyOutput, exitCode },
-              ),
-              getTransportClosedReject(entry),
-            ]),
-            initTimeoutMs,
-            'sessionShellHistory',
+          const handle = await harness.executeShell(
+            command,
+            cwd,
+            (event: ShellOutputEvent) => {
+              if (event.type === 'data') {
+                const chunk =
+                  typeof event.chunk === 'string'
+                    ? event.chunk
+                    : event.chunk
+                        .map((line: Array<{ text: string }>) =>
+                          line.map((t) => t.text).join(''),
+                        )
+                        .join('\n');
+                outputChunks.push(chunk);
+                entry.events.publish({
+                  type: 'session_update',
+                  data: {
+                    sessionId,
+                    update: {
+                      sessionUpdate: 'shell_output',
+                      output: chunk,
+                      _meta: {
+                        serverTimestamp: Date.now(),
+                        source: 'user-shell',
+                      },
+                    },
+                  },
+                  ...(originatorClientId ? { originatorClientId } : {}),
+                });
+              }
+            },
+            abort.signal,
           );
-        } catch (err) {
-          writeServeDebugLine(
-            `shell history injection failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
 
-        return { exitCode, output, aborted };
-      } catch (err) {
-        entry.events.publish({
-          type: 'user_shell_result',
-          data: {
-            sessionId,
-            exitCode: null,
-            signal: null,
-            aborted: false,
-            error: err instanceof Error ? err.message : String(err),
-            _meta: { serverTimestamp: Date.now() },
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        throw err;
+          const timeoutId = setTimeout(
+            () => abort.abort(),
+            SHELL_COMMAND_TIMEOUT_MS,
+          );
+          timeoutId.unref();
+
+          const result = await handle.result;
+          clearTimeout(timeoutId);
+
+          const exitCode = result.exitCode;
+          const aborted = result.aborted;
+          const output = outputChunks.join('') || result.output;
+
+          entry.events.publish({
+            type: 'user_shell_result',
+            data: {
+              sessionId,
+              exitCode,
+              signal: result.signal,
+              aborted,
+              _meta: { serverTimestamp: Date.now() },
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+
+          const historyOutput =
+            output.length > MAX_SHELL_OUTPUT_FOR_HISTORY
+              ? output.substring(0, MAX_SHELL_OUTPUT_FOR_HISTORY) +
+                '\n... (truncated)'
+              : output;
+
+          try {
+            await withTimeout(
+              Promise.race([
+                entry.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
+                  { sessionId, command, output: historyOutput, exitCode },
+                ),
+                getTransportClosedReject(entry),
+              ]),
+              initTimeoutMs,
+              'sessionShellHistory',
+            );
+          } catch (err) {
+            writeServeDebugLine(
+              `shell history injection failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+
+          return { exitCode, output, aborted };
+        } catch (err) {
+          entry.events.publish({
+            type: 'user_shell_result',
+            data: {
+              sessionId,
+              exitCode: null,
+              signal: null,
+              aborted: false,
+              error: err instanceof Error ? err.message : String(err),
+              _meta: { serverTimestamp: Date.now() },
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+          throw err;
+        } finally {
+          signal?.removeEventListener('abort', onSignalAbort);
+        }
       } finally {
-        signal?.removeEventListener('abort', onSignalAbort);
+        endSideRequest();
       }
     },
 

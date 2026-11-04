@@ -8,6 +8,7 @@ import {
   isSessionLevelNotFound,
   isSubagentSessionNotFound,
 } from '@qwen-code/sdk/daemon';
+import { UnknownSessionError } from '../daemonPool.js';
 import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
 
 /**
@@ -58,6 +59,7 @@ export function classifySubagentFailure(
   err: unknown,
   subagentRef: string,
 ): SubagentFailure {
+  if (err instanceof UnknownSessionError) return 'session_unreachable';
   const http = asDaemonHttpError(err);
   if (http !== undefined && http.status === 404) {
     const body = daemonErrorBody(err);

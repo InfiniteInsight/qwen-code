@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
@@ -104,6 +105,13 @@ export function createSessionRecapRoute(
       result = await daemon.recapSession(sessionId);
     } catch (err) {
       if (relayDaemonAuthFailure(res, err, 'recap')) return;
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(409).json({
+          error: 'Open this conversation before asking for its recap',
+          code: 'session_not_loaded',
+        });
+        return;
+      }
       const status = (err as { status?: unknown }).status;
       if (typeof status === 'number' && status >= 400 && status < 500) {
         // A 404 with nothing behind it is a daemon with no recap route at all;
@@ -118,13 +126,6 @@ export function createSessionRecapRoute(
         res.status(status).json({
           error: 'Daemon rejected the recap request',
           code: 'daemon_rejected',
-        });
-        return;
-      }
-      if (err instanceof UnknownSessionError) {
-        res.status(409).json({
-          error: 'Open this conversation before asking for its recap',
-          code: 'session_not_loaded',
         });
         return;
       }

@@ -7,7 +7,7 @@
 import type { ErrorRequestHandler, RequestHandler, Response } from 'express';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
@@ -201,6 +201,7 @@ export function createAttachmentLimitResolver(
 
 interface FsErrorBody {
   errorKind?: unknown;
+  code?: unknown;
   error?: unknown;
   hint?: unknown;
 }
@@ -215,7 +216,12 @@ function readFsError(err: unknown): {
   const body = (err as { body?: unknown }).body as FsErrorBody | undefined;
   return {
     status: typeof status === 'number' ? status : undefined,
-    kind: typeof body?.errorKind === 'string' ? body.errorKind : undefined,
+    kind:
+      typeof body?.errorKind === 'string'
+        ? body.errorKind
+        : typeof body?.code === 'string'
+          ? body.code
+          : undefined,
     message: typeof body?.error === 'string' ? body.error : undefined,
     hint: typeof body?.hint === 'string' ? body.hint : undefined,
   };
@@ -237,6 +243,13 @@ export function sendAttachmentError(res: Response, err: unknown): void {
     return;
   }
   if (relayDaemonAuthFailure(res, err, 'attachments')) return;
+  if (err instanceof UnknownSessionError) {
+    res.status(404).json({
+      error: 'Session not found',
+      code: 'session_not_found',
+    });
+    return;
+  }
   const { status, kind, message, hint } = readFsError(err);
   if (typeof status === 'number' && status >= 400 && status < 500) {
     // A 404 with no fs envelope is not "that attachment is not here" - it is a
@@ -283,7 +296,8 @@ export function gateJsonBody(json: RequestHandler): RequestHandler {
     (req.method === 'POST' && req.path.endsWith('/attachments')) ||
     // #130: one chunk of a resumable upload is a slice of the file, whatever
     // media type the file has.
-    (req.method === 'PUT' && /\/attachment-uploads\/[^/]+\/chunks\/[^/]+$/.test(req.path)) ||
+    (req.method === 'PUT' &&
+      /\/attachment-uploads\/[^/]+\/chunks\/[^/]+$/.test(req.path)) ||
     // #123: a workspace file write, edit or upload reads its own body after
     // the scope check, under the #196 limit rather than this parser's 100 KB
     // (routes/workspaceFileWrites.ts, createWorkspaceFileBody).
@@ -627,7 +641,8 @@ export function createResumableAttachmentUploads(deps: {
 
   const missingOf = (up: StagedUpload): number[] => {
     const missing: number[] = [];
-    for (let i = 0; i < up.chunkCount; i++) if (!up.chunks.has(i)) missing.push(i);
+    for (let i = 0; i < up.chunkCount; i++)
+      if (!up.chunks.has(i)) missing.push(i);
     return missing;
   };
 
@@ -711,7 +726,11 @@ export function createResumableAttachmentUploads(deps: {
         : index === up.chunkCount - 1
           ? up.size - index * ATTACHMENT_UPLOAD_CHUNK_BYTES
           : ATTACHMENT_UPLOAD_CHUNK_BYTES;
-    if (expected < 0 || !Buffer.isBuffer(req.body) || req.body.length !== expected) {
+    if (
+      expected < 0 ||
+      !Buffer.isBuffer(req.body) ||
+      req.body.length !== expected
+    ) {
       res.status(400).json({
         error:
           expected < 0

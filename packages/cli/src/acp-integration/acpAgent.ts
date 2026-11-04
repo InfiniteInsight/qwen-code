@@ -1241,13 +1241,34 @@ function mapSessionRestoreRequestError(
   return error;
 }
 
+function firstReplayUpdateRecordId(
+  updates: readonly SessionUpdate[],
+): string | undefined {
+  for (const update of updates) {
+    const meta = (update as { _meta?: Record<string, unknown> })._meta;
+    const recordId = meta?.['qwen.session.recordId'];
+    if (typeof recordId === 'string' && recordId.length > 0) {
+      return recordId;
+    }
+  }
+  return undefined;
+}
+
 function trimUnpagedReplayEnvelope(envelope: BridgeLoadReplayEnvelope): void {
+  let trimmed = false;
   if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
     envelope.updates = envelope.updates.slice(-LOAD_REPLAY_MAX_UPDATES);
     envelope.hasMore = true;
+    trimmed = true;
   }
   let pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
-  if (pageBytes <= LOAD_REPLAY_MAX_BYTES) return;
+  if (pageBytes <= LOAD_REPLAY_MAX_BYTES) {
+    if (trimmed) {
+      const anchorRecordId = firstReplayUpdateRecordId(envelope.updates);
+      if (anchorRecordId) envelope.anchorRecordId = anchorRecordId;
+    }
+    return;
+  }
   degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
   pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
   while (pageBytes > LOAD_REPLAY_MAX_BYTES && envelope.updates.length > 1) {
@@ -1262,7 +1283,12 @@ function trimUnpagedReplayEnvelope(envelope: BridgeLoadReplayEnvelope): void {
     );
     envelope.updates = envelope.updates.slice(dropCount);
     envelope.hasMore = true;
+    trimmed = true;
     pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  }
+  if (trimmed) {
+    const anchorRecordId = firstReplayUpdateRecordId(envelope.updates);
+    if (anchorRecordId) envelope.anchorRecordId = anchorRecordId;
   }
 }
 

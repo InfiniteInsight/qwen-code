@@ -2991,10 +2991,34 @@ export class DaemonPool implements SessionDaemon {
     return this.withDefaultDeathTrigger((client) => client.capabilities());
   }
 
-  listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]> {
-    return this.withDefaultDeathTrigger((client) =>
+  async listWorkspaceSessions(
+    workspaceCwd: string,
+  ): Promise<DaemonSessionSummary[]> {
+    const key = this.keyFor(workspaceCwd);
+    const pooled =
+      key !== this.defaultWorkspaceCwd ? this.byWorkspace.get(key) : undefined;
+    if (pooled && !pooled.dead) {
+      const list = await pooled.client.listWorkspaceSessions(key);
+      for (const s of list) {
+        if (typeof s?.sessionId === 'string' && s.sessionId.length > 0) {
+          this.trackSession(key, s.sessionId);
+        }
+      }
+      return list;
+    }
+    const list = await this.withDefaultDeathTrigger((client) =>
       client.listWorkspaceSessions(workspaceCwd),
     );
+    for (const s of list) {
+      if (
+        typeof s?.sessionId === 'string' &&
+        s.sessionId.length > 0 &&
+        !this.ownerOf.has(s.sessionId)
+      ) {
+        this.trackSession(this.defaultWorkspaceCwd, s.sessionId);
+      }
+    }
+    return list;
   }
 
   getSessionLiveState(workspaceCwd?: string): Promise<unknown> {

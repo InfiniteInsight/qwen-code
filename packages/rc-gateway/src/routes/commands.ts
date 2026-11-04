@@ -6,7 +6,8 @@
 
 import { createHash } from 'node:crypto';
 import type { RequestHandler } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
   SESSION_READ,
@@ -249,18 +250,13 @@ export function createInvokeCommandRoute(
       departed();
     });
 
-    let prompting: ReturnType<SessionDaemon['prompt']>;
-    try {
-      prompting = daemon.prompt(
+    const prompting = Promise.resolve().then(() =>
+      daemon.prompt(
         req.params.id,
         { prompt: [{ type: 'text', text }] },
         timerAbort.signal,
-      );
-    } catch (err) {
-      clearTimeout(timer);
-      release?.();
-      throw err;
-    }
+      ),
+    );
     // The timer and queue slot outlive the handler after a disconnect, so both
     // are cleared when the prompt settles, not when this handler returns. The
     // rejection handler also keeps a late failure of an abandoned prompt from
@@ -281,7 +277,7 @@ export function createInvokeCommandRoute(
       const winner = await Promise.race([prompting, clientGone]);
       if (winner === 'gone') return;
       result = winner;
-    } catch {
+    } catch (err) {
       if (abortSource === 'timer') {
         void audit?.record({
           action: 'slash_command_invoked',
@@ -297,6 +293,13 @@ export function createInvokeCommandRoute(
         return;
       }
       if (abortSource === 'disconnect') return;
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(409).json({
+          error: 'Open this conversation before running commands',
+          code: 'session_not_loaded',
+        });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });

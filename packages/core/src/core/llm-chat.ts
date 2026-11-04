@@ -3672,6 +3672,10 @@ export class LlmChat {
             type: StreamEventType.COMPRESSED,
             info: compressionInfo,
           };
+          requestContents = self.getRequestHistoryForRoute(
+            currentUserContent,
+            requestModalities,
+          );
         }
 
         let lastError: unknown = new Error('Request failed after all retries.');
@@ -4499,6 +4503,38 @@ export class LlmChat {
                       currentUserContent,
                       requestModalities,
                     );
+                    const reactiveImageTokenEstimate = resolveSlimmingConfig(
+                      self.config.getChatCompression(),
+                    ).imageTokenEstimate;
+                    promptTokensForClamp =
+                      self.lastPromptTokenCount > 0
+                        ? self.lastPromptTokenCount
+                        : estimateContentTokens(
+                            requestContents,
+                            reactiveImageTokenEstimate,
+                          );
+                    if (self.promptCountIsEstimateDerived()) {
+                      promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
+                    }
+                    const effectiveWindowForClamp =
+                      contextOverflow.limitTokens !== undefined &&
+                      contextOverflow.limitKind !== 'input'
+                        ? Math.min(
+                            contextWindowForClamp,
+                            contextOverflow.limitTokens,
+                          )
+                        : contextWindowForClamp;
+                    params = {
+                      ...params,
+                      config: {
+                        ...params.config,
+                        maxOutputTokens: clampOutputTokensToWindow(
+                          outputCeiling,
+                          effectiveWindowForClamp,
+                          promptTokensForClamp,
+                        ),
+                      },
+                    };
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -4508,6 +4544,10 @@ export class LlmChat {
                       type: StreamEventType.COMPRESSED,
                       info: reactiveInfo,
                     };
+                    requestContents = self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    );
                     // Drop the stale continuation before telling the UI to
                     // clear it: the consumer may cancel at the RETRY yield.
                     resetTransportContinuation();

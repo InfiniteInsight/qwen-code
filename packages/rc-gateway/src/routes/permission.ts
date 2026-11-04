@@ -10,7 +10,8 @@ import type {
   PermissionOutcomeCancelled,
   PermissionOutcomeSelected,
 } from '@qwen-code/sdk';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
@@ -90,7 +91,14 @@ export function createPermissionVoteRoute(
         requestId,
         response,
       );
-    } catch {
+    } catch (err) {
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(404).json({
+          error: 'No pending permission request',
+          code: 'no_pending_permission',
+        });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });

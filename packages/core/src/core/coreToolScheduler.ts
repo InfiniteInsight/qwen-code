@@ -7884,7 +7884,8 @@ export class CoreToolScheduler {
         ) {
           continue;
         }
-        // Re-run L3→L4 to see if the tool can now be auto-approved
+        // Re-run L3->L4 to see if the tool can now be auto-approved
+        const canonicalName = canonicalToolName(pendingTool.request.name);
         const toolParams = pendingTool.invocation.params as Record<
           string,
           unknown
@@ -7895,7 +7896,7 @@ export class CoreToolScheduler {
             evaluatePermissionFlow(
               this.config,
               pendingTool.invocation,
-              pendingTool.request.name,
+              canonicalName,
               toolParams,
               signal,
             ),
@@ -7915,17 +7916,14 @@ export class CoreToolScheduler {
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
           (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-            shouldClassifyAllShellForAutoMode(
-              pendingTool.request.name,
-              this.config,
-            ));
+            shouldClassifyAllShellForAutoMode(canonicalName, this.config));
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
             `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
           );
           const actionFingerprint = getAutoModeActionFingerprint(
-            pendingTool.request.name,
+            canonicalName,
             toolParams,
             this.config.getCwd(),
           );
@@ -7977,7 +7975,7 @@ export class CoreToolScheduler {
                     this.config
                       .getHookSystem?.()
                       ?.firePermissionDeniedEvent(
-                        pendingTool.request.name,
+                        canonicalName,
                         toolParams,
                         pendingTool.request.callId,
                         getAutoModePermissionDeniedReason(decision),
@@ -8091,7 +8089,26 @@ export class CoreToolScheduler {
           }
         }
 
-        if (finalPermission === 'allow') {
+        const approvalMode = this.config.getApprovalMode();
+        const confirmationPermission = getEffectivePermissionForConfirmation(
+          finalPermission,
+          forceAutoReviewForAllow,
+        );
+        if (
+          finalPermission === 'allow' ||
+          (finalPermission !== 'deny' &&
+            !pmForcedAsk &&
+            (!needsConfirmation(
+              confirmationPermission,
+              approvalMode,
+              canonicalName,
+              requiresUserInteraction,
+            ) ||
+              isAutoEditApproved(
+                approvalMode,
+                pendingTool.confirmationDetails,
+              )))
+        ) {
           this.setToolCallOutcome(
             pendingTool.request.callId,
             ToolConfirmationOutcome.ProceedAlways,

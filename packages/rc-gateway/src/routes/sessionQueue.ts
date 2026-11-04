@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler, Response } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
@@ -61,6 +61,7 @@ import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 interface FsErrorBody {
   errorKind?: unknown;
+  code?: unknown;
   error?: unknown;
   hint?: unknown;
 }
@@ -74,9 +75,21 @@ interface FsErrorBody {
 function sendQueueError(res: Response, err: unknown): void {
   if (res.headersSent) return;
   if (relayDaemonAuthFailure(res, err, 'queue')) return;
+  if (err instanceof UnknownSessionError) {
+    res.status(404).json({
+      error: 'Session not found',
+      code: 'session_not_found',
+    });
+    return;
+  }
   const status = (err as { status?: unknown }).status;
   const body = (err as { body?: unknown }).body as FsErrorBody | undefined;
-  const kind = typeof body?.errorKind === 'string' ? body.errorKind : undefined;
+  const kind =
+    typeof body?.errorKind === 'string'
+      ? body.errorKind
+      : typeof body?.code === 'string'
+        ? body.code
+        : undefined;
   const message = typeof body?.error === 'string' ? body.error : undefined;
   const hint = typeof body?.hint === 'string' ? body.hint : undefined;
   if (typeof status === 'number' && status >= 400 && status < 500) {

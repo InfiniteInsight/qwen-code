@@ -112,7 +112,11 @@ export class SessionModelCache {
     this.bump(sessionId);
     this.known.delete(sessionId);
     this.failedAt.delete(sessionId);
-    this.generation.delete(sessionId);
+    if (!this.inFlight.has(sessionId)) {
+      this.generation.delete(sessionId);
+    } else {
+      this.inFlight.delete(sessionId);
+    }
   }
 
   /**
@@ -146,7 +150,12 @@ export class SessionModelCache {
         return id;
       })
       .finally(() => {
-        this.inFlight.delete(sessionId);
+        if (this.inFlight.get(sessionId) === p) {
+          this.inFlight.delete(sessionId);
+        }
+        if (!this.known.has(sessionId) && !this.inFlight.has(sessionId)) {
+          this.generation.delete(sessionId);
+        }
       });
     this.inFlight.set(sessionId, p);
     return p;

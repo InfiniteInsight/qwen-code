@@ -5,7 +5,8 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { WRITE, hasScope } from '../scopes.js';
@@ -212,18 +213,13 @@ export function createSessionCommandInvokeRoute(
       departed();
     });
 
-    let prompting: ReturnType<SessionDaemon['prompt']>;
-    try {
-      prompting = daemon.prompt(
+    const prompting = Promise.resolve().then(() =>
+      daemon.prompt(
         sessionId,
         { prompt: [{ type: 'text', text }] },
         timerAbort.signal,
-      );
-    } catch (err) {
-      clearTimeout(timer);
-      release?.();
-      throw err;
-    }
+      ),
+    );
     // The timer and queue slot outlive the handler after a disconnect, so both
     // are cleared when the prompt settles, not when this handler returns. The
     // catch also keeps a late rejection of an abandoned prompt from becoming
@@ -244,7 +240,7 @@ export function createSessionCommandInvokeRoute(
       const winner = await Promise.race([prompting, clientGone]);
       if (winner === 'gone') return;
       result = winner;
-    } catch {
+    } catch (err) {
       if (abortSource === 'timer') {
         // The command WAS invoked, then this route cancelled its turn. No
         // stopReason, because there isn't one.
@@ -263,6 +259,13 @@ export function createSessionCommandInvokeRoute(
         return;
       }
       if (abortSource === 'disconnect') return;
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(409).json({
+          error: 'Open this conversation before running commands',
+          code: 'session_not_loaded',
+        });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });

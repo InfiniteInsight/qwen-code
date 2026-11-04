@@ -274,6 +274,7 @@ export interface SessionRestoreReplayPage {
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
   completedToolCallIds?: string[];
+  trailingSystemNotifications?: number;
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -401,8 +402,10 @@ function buildManagedSessionRestoreProjection(
   const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
   const restoredTokenCounts = resumeTokenCounts.finish();
   const restoredFileHistory = fileHistory.finish();
+  const finishedHistory = apiHistory.finishSession();
   const runtime: SessionRuntimeResumeState = {
-    apiHistory: apiHistory.finish(),
+    apiHistory: finishedHistory.apiHistory,
+    trailingSystemNotifications: finishedHistory.trailingSystemNotifications,
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -3509,8 +3512,10 @@ export class SessionTranscriptReader {
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
     const completedToolCallIds = apiHistory.getCompletedToolCallIds();
+    const finishedHistory = apiHistory.finishSession();
     const runtime: SessionRuntimeResumeState = {
-      apiHistory: apiHistory.finish(),
+      apiHistory: finishedHistory.apiHistory,
+      trailingSystemNotifications: finishedHistory.trailingSystemNotifications,
       ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }

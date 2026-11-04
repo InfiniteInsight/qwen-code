@@ -2512,6 +2512,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private restoredTrailingSystemNotifications?: number;
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -2550,6 +2551,8 @@ export class Session implements SessionContext {
     this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
+    this.restoredTrailingSystemNotifications =
+      config.getSessionRestoreRuntime?.()?.trailingSystemNotifications;
     this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
@@ -6007,6 +6010,12 @@ export class Session implements SessionContext {
       this.sessionId
         ? this.restoredHistoryGaps
         : undefined);
+    const trailingSystemNotifications =
+      this.config.getSessionRestoreRuntime?.()?.trailingSystemNotifications ??
+      (normalizeSessionIdForLookup(this.config.getSessionId()) ===
+      this.sessionId
+        ? this.restoredTrailingSystemNotifications
+        : undefined);
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
@@ -6014,6 +6023,9 @@ export class Session implements SessionContext {
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
+      ...(trailingSystemNotifications !== undefined
+        ? { trailingSystemNotifications }
+        : {}),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
         : this.config.getResumedSessionData?.()?.historyGaps,
@@ -7189,6 +7201,21 @@ export class Session implements SessionContext {
                     parts: insertAfterFunctionResponses(nextMessage.parts, [
                       noticePart,
                     ]),
+                  };
+                  restorePostAnswerNoticesAttached = true;
+                }
+                if (
+                  nextMessage?.parts &&
+                  this.pendingExternalAgentContext.length > 0
+                ) {
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(
+                      nextMessage.parts,
+                      this.pendingExternalAgentContext.map((text) => ({
+                        text,
+                      })),
+                    ),
                   };
                   restorePostAnswerNoticesAttached = true;
                 }
@@ -8901,14 +8928,16 @@ export class Session implements SessionContext {
     }
     let projectedUpdate = projectAcpToolResultUpdate(update);
     observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
+    const isBoundedUpdate = (candidate: SessionUpdate): boolean =>
+      hasBoundedJsonStructure({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: this.sessionId, update: candidate },
+      });
     if (
       (projectedUpdate.sessionUpdate === 'tool_call' ||
         projectedUpdate.sessionUpdate === 'tool_call_update') &&
-      !hasBoundedJsonStructure({
-        jsonrpc: '2.0',
-        method: 'session/update',
-        params: { sessionId: this.sessionId, update: projectedUpdate },
-      })
+      !isBoundedUpdate(projectedUpdate)
     ) {
       projectedUpdate = {
         ...projectedUpdate,
@@ -8921,13 +8950,7 @@ export class Session implements SessionContext {
           ? { rawOutput: '[truncated oversized tool output structure]' }
           : {}),
       };
-      if (
-        !hasBoundedJsonStructure({
-          jsonrpc: '2.0',
-          method: 'session/update',
-          params: { sessionId: this.sessionId, update: projectedUpdate },
-        })
-      ) {
+      if (!isBoundedUpdate(projectedUpdate)) {
         const safeMeta = isRecord(projectedUpdate._meta)
           ? {
               ...(typeof projectedUpdate._meta['toolName'] === 'string'
@@ -8943,9 +8966,101 @@ export class Session implements SessionContext {
           ...(Array.isArray(projectedUpdate.content)
             ? { content: projectedUpdate.content.slice(0, 32) }
             : {}),
+          ...('locations' in projectedUpdate &&
+          Array.isArray(projectedUpdate.locations)
+            ? { locations: projectedUpdate.locations.slice(0, 64) }
+            : {}),
           ...(safeMeta ? { _meta: safeMeta } : { _meta: undefined }),
         };
+        if (!isBoundedUpdate(projectedUpdate)) {
+          projectedUpdate = {
+            ...projectedUpdate,
+            ...(Array.isArray(projectedUpdate.content) ? { content: [] } : {}),
+            ...('locations' in projectedUpdate ? { locations: undefined } : {}),
+            ...(safeMeta ? { _meta: safeMeta } : { _meta: undefined }),
+          };
+        }
       }
+    } else if (
+      projectedUpdate.sessionUpdate === 'plan' &&
+      !isBoundedUpdate(projectedUpdate)
+    ) {
+      const boundedEntries = Array.isArray(projectedUpdate.entries)
+        ? projectedUpdate.entries.slice(0, 512).map((entry) => ({
+            ...entry,
+            _meta: undefined,
+          }))
+        : [];
+      projectedUpdate = {
+        ...projectedUpdate,
+        entries: boundedEntries,
+      };
+      if (!isBoundedUpdate(projectedUpdate)) {
+        projectedUpdate = {
+          ...projectedUpdate,
+          entries: boundedEntries.slice(0, 64).map((entry) => ({
+            content: entry.content,
+            priority: entry.priority,
+            status: entry.status,
+          })),
+          _meta: undefined,
+        };
+      }
+    } else if (
+      (projectedUpdate.sessionUpdate === 'agent_message_chunk' ||
+        projectedUpdate.sessionUpdate === 'user_message_chunk' ||
+        projectedUpdate.sessionUpdate === 'agent_thought_chunk') &&
+      !isBoundedUpdate(projectedUpdate)
+    ) {
+      const safeChunkMeta = isRecord(projectedUpdate._meta)
+        ? {
+            ...(typeof projectedUpdate._meta['source'] === 'string'
+              ? { source: projectedUpdate._meta['source'] }
+              : {}),
+            ...(typeof projectedUpdate._meta['qwenDiscreteMessage'] ===
+            'boolean'
+              ? {
+                  qwenDiscreteMessage:
+                    projectedUpdate._meta['qwenDiscreteMessage'],
+                }
+              : {}),
+            ...(typeof projectedUpdate._meta['qwen.session.recordId'] ===
+            'string'
+              ? {
+                  'qwen.session.recordId':
+                    projectedUpdate._meta['qwen.session.recordId'],
+                }
+              : {}),
+            ...(typeof projectedUpdate._meta['qwen.session.timestamp'] ===
+            'string'
+              ? {
+                  'qwen.session.timestamp':
+                    projectedUpdate._meta['qwen.session.timestamp'],
+                }
+              : {}),
+          }
+        : undefined;
+      projectedUpdate = {
+        ...projectedUpdate,
+        ...(isRecord(projectedUpdate.content) &&
+        'annotations' in projectedUpdate.content
+          ? {
+              content: {
+                ...projectedUpdate.content,
+                annotations: undefined,
+                _meta: undefined,
+              },
+            }
+          : {}),
+        ...(safeChunkMeta && Object.keys(safeChunkMeta).length > 0
+          ? { _meta: safeChunkMeta }
+          : { _meta: undefined }),
+      };
+    } else if (!isBoundedUpdate(projectedUpdate)) {
+      projectedUpdate = {
+        ...projectedUpdate,
+        _meta: undefined,
+      };
     }
     const params: SessionNotification = {
       sessionId: this.sessionId,
@@ -9476,6 +9591,9 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       return { responseStream: null, stopReason: 'end_turn' };
     }
+    this.restoredTrailingSystemNotifications = undefined;
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const sessionSelf = this;
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
@@ -9492,8 +9610,16 @@ export class Session implements SessionContext {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
           } else if (event.type === StreamEventType.COMPRESSED) {
+            sessionSelf.loopTickResolver?.resetCache();
             llmClient.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
+            try {
+              await llmClient.restoreStartupContextAfterCompaction?.();
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to restore startup context after in-send compaction: ${sessionSelf.#formatError(error)}`,
+              );
+            }
           } else if (
             event.type === StreamEventType.RETRY ||
             event.type === StreamEventType.MODEL_FALLBACK
@@ -9520,6 +9646,7 @@ export class Session implements SessionContext {
   #clearPendingRestoreNotices(): void {
     this.pendingWorktreeNotice = null;
     this.pendingRecoveredAgentsNotice = null;
+    this.pendingExternalAgentContext = [];
   }
 
   #markUnattendedRestoredAskUserQuestion(): void {

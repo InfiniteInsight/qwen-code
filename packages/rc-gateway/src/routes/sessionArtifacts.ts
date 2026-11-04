@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
@@ -164,6 +165,13 @@ export function createSessionArtifactContentRoute(
       const body = (err as { body?: unknown } | undefined)?.body as
         | { error?: unknown; message?: unknown }
         | undefined;
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(409).json({
+          error: 'Open this conversation before reading its artifacts',
+          code: 'session_not_loaded',
+        });
+        return;
+      }
       if (daemonStatus === 404) {
         // Relay the daemon's own pair when it sent one; a bare 404 with
         // nothing behind it is a daemon with no artifact routes, which is a
@@ -181,13 +189,6 @@ export function createSessionArtifactContentRoute(
         res.status(502).json({
           error: 'This daemon cannot read artifact snapshots',
           code: 'artifact_snapshot_unsupported',
-        });
-        return;
-      }
-      if (err instanceof UnknownSessionError) {
-        res.status(409).json({
-          error: 'Open this conversation before reading its artifacts',
-          code: 'session_not_loaded',
         });
         return;
       }

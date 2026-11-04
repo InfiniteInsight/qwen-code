@@ -765,7 +765,8 @@ function isLatestWinsSnapshotNotification(
   return (
     sessionUpdate === 'available_commands_update' ||
     sessionUpdate === 'current_mode_update' ||
-    sessionUpdate === 'session_info_update'
+    sessionUpdate === 'session_info_update' ||
+    sessionUpdate === 'config_option_update'
   );
 }
 

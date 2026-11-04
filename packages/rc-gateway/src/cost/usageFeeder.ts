@@ -80,7 +80,13 @@ export class UsageFeeder {
     const { cache } = this.deps;
     if (ev.type === 'model_switched') {
       const id = (ev.data as { modelId?: unknown } | null)?.modelId;
-      if (typeof id === 'string' && id.trim()) cache.set(sessionId, id.trim());
+      if (typeof id === 'string' && id.trim()) {
+        const trimmed = id.trim();
+        cache.set(sessionId, trimmed);
+        if (this.pending.has(sessionId)) {
+          this.drain(sessionId, trimmed);
+        }
+      }
       return;
     }
     if (ev.type === 'session_closed') {
