@@ -3940,4 +3940,59 @@ describe('task_changed (background task lifecycle frame)', () => {
       ),
     ).toBe(false);
   });
+
+  it('preserves lastTurnComplete/lastTurnError in createDaemonSessionViewState and clears stale turn outcomes across turn_complete, turn_error, and session_rewound', () => {
+    const seeded = createDaemonSessionViewState({
+      lastTurnComplete: { sessionId: 's1', stopReason: 'end_turn' },
+      lastTurnError: { sessionId: 's1', message: 'boom' },
+    });
+    expect(seeded.lastTurnComplete).toEqual({
+      sessionId: 's1',
+      stopReason: 'end_turn',
+    });
+    expect(seeded.lastTurnError).toEqual({ sessionId: 's1', message: 'boom' });
+
+    const afterError = reduceDaemonSessionEvent(
+      createDaemonSessionViewState({
+        lastTurnComplete: { sessionId: 's1', stopReason: 'end_turn' },
+      }),
+      {
+        id: 1,
+        v: 1,
+        type: 'turn_error',
+        data: { sessionId: 's1', message: 'rate limit' },
+      },
+    );
+    expect(afterError.lastTurnError).toEqual({
+      sessionId: 's1',
+      message: 'rate limit',
+    });
+    expect(afterError.lastTurnComplete).toBeUndefined();
+
+    const afterComplete = reduceDaemonSessionEvent(afterError, {
+      id: 2,
+      v: 1,
+      type: 'turn_complete',
+      data: { sessionId: 's1', stopReason: 'end_turn' },
+    });
+    expect(afterComplete.lastTurnComplete).toEqual({
+      sessionId: 's1',
+      stopReason: 'end_turn',
+    });
+    expect(afterComplete.lastTurnError).toBeUndefined();
+
+    const afterRewind = reduceDaemonSessionEvent(afterComplete, {
+      id: 3,
+      v: 1,
+      type: 'session_rewound',
+      data: {
+        toTurn: 0,
+        targetTurnIndex: 0,
+        truncatedEventId: 1,
+        files: { changed: 0, failed: 0 },
+      },
+    });
+    expect(afterRewind.lastTurnComplete).toBeUndefined();
+    expect(afterRewind.lastTurnError).toBeUndefined();
+  });
 });

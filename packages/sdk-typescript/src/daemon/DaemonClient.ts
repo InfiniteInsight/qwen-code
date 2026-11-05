@@ -8503,7 +8503,7 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  updateSessionMetadata(
+  async updateSessionMetadata(
     sessionId: string,
     metadata: {
       displayName?: string;
@@ -8511,12 +8511,26 @@ export class WorkspaceDaemonClient {
     },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
-    return this.client.workspaceJsonRequest<SessionMetadataResult>(
+    const body = await this.client.workspaceJsonRequest<{
+      displayName?: unknown;
+      prs?: unknown;
+    }>(
       this.workspaceSelector,
       `/session/${urlEncode(sessionId)}/metadata`,
       'PATCH /workspaces/:workspace/session/:id/metadata',
       { method: 'PATCH', body: metadata, clientId, mode: 'rest' },
     );
+    const result: SessionMetadataResult = {};
+    if (body && typeof body === 'object') {
+      if (typeof body.displayName === 'string') {
+        result.displayName = body.displayName;
+      }
+      if (Array.isArray(body.prs)) {
+        const valid = body.prs.filter(isDaemonSessionPrInfo);
+        if (valid.length > 0) result.prs = valid;
+      }
+    }
+    return result;
   }
 
   listSessionGroups(): Promise<DaemonSessionGroupCatalog> {

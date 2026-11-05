@@ -172,6 +172,7 @@ export class StreamingToolCallParser {
         actualIndex = this.pendingIndexRemaps.get(index)!;
         const existingBuffer = this.buffers.get(actualIndex)!;
         const existingDepth = this.depths.get(actualIndex)!;
+        const existingMeta = this.toolCallMeta.get(actualIndex);
         if (existingDepth === 0 && existingBuffer.trim()) {
           try {
             JSON.parse(existingBuffer);
@@ -179,18 +180,37 @@ export class StreamingToolCallParser {
           } catch {
             // The remapped buffer is still incomplete; append below.
           }
+        } else if (
+          existingDepth === 0 &&
+          !existingBuffer.trim() &&
+          validName &&
+          existingMeta?.name &&
+          existingMeta.name !== validName
+        ) {
+          actualIndex = this.findMostRecentIncompleteIndex();
         }
       } else if (this.buffers.has(index)) {
         const existingBuffer = this.buffers.get(index)!;
         const existingDepth = this.depths.get(index)!;
+        const existingMeta = this.toolCallMeta.get(index);
 
         // If there's an incomplete tool call at this index, continue with it
-        if (existingDepth > 0 || !existingBuffer.trim()) {
+        if (
+          existingDepth > 0 ||
+          (!existingBuffer.trim() &&
+            !(
+              validName &&
+              existingMeta?.name &&
+              existingMeta.name !== validName
+            ))
+        ) {
           actualIndex = index;
         } else {
           // Check if the buffer at this index is complete
           try {
-            JSON.parse(existingBuffer);
+            if (existingBuffer.trim()) {
+              JSON.parse(existingBuffer);
+            }
             // Buffer is complete, this chunk might belong to a different tool call
             // Find the most recent incomplete tool call
             actualIndex = this.findMostRecentIncompleteIndex();
@@ -471,7 +491,7 @@ export class StreamingToolCallParser {
       // (depth > 0), this index is available. An empty buffer alone does
       // not mean available: with name metadata it is a complete
       // no-argument call.
-      if (!meta?.name || depth > 0 || !meta?.id) {
+      if (!meta?.name || depth > 0) {
         return this.nextAvailableIndex;
       }
 

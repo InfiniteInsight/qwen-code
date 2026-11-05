@@ -1307,6 +1307,47 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('falls through to inline-media placeholder degradation when required-thinking retry fails with HTTP 400 on a media-bearing request', async () => {
+      pipelineWith({
+        baseUrl: TOKEN_PLAN_URL,
+        model: 'qwen3.8-max-preview',
+        extra_body: { enable_thinking: true },
+        modalities: { image: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockImplementation(
+        (_req, ctx) =>
+          ctx?.modalities && Object.keys(ctx.modalities).length === 0
+            ? [{ role: 'user', content: '[image omitted]' }]
+            : [
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'image_url',
+                      image_url: { url: 'data:image/png;base64,AAAA' },
+                    },
+                  ],
+                },
+              ],
+      );
+      createMock()
+        .mockRejectedValueOnce(requiredThinkingError())
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Invalid image data URL'), { status: 400 }),
+        );
+
+      await pipeline.execute(sideQuery('qwen3.8-max-preview'), 'forked_query');
+
+      const calls = createMock().mock.calls;
+      expect(calls).toHaveLength(3);
+      expect(calls[2][0].messages).toEqual([
+        { role: 'user', content: '[image omitted]' },
+      ]);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
     it('does not retry required-thinking errors after abort', async () => {
       await expectRejectsAfter(
         userRequest('qwen3.8-max-preview', {

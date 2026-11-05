@@ -6784,6 +6784,7 @@ export class Session implements SessionContext {
             }
 
             let parts: Part[] | null;
+            let deferredSlashUserTurn = false;
             let fullTurnModelOverride: string | undefined;
             const onFullTurnModel = (model: string) => {
               if (fullTurnModelOverride === model) {
@@ -6873,16 +6874,17 @@ export class Session implements SessionContext {
                 !cachedUserPromptHookResult?.blocked &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry;
+              const isModelBoundSlashResult =
+                slashCommandResult.type === 'submit_prompt' ||
+                slashCommandResult.type === 'no_command';
               if (
                 canRecordSlashUserTurn &&
-                slashCommandResult.type !== 'stream_messages'
+                slashCommandResult.type !== 'stream_messages' &&
+                !isModelBoundSlashResult
               ) {
-                recordUserTurn(
-                  slashCommandResult.type === 'submit_prompt' ||
-                    slashCommandResult.type === 'no_command'
-                    ? cachedUserPromptHookResult?.additionalContext
-                    : undefined,
-                );
+                recordUserTurn();
+              } else if (canRecordSlashUserTurn && isModelBoundSlashResult) {
+                deferredSlashUserTurn = true;
               }
 
               try {
@@ -6957,7 +6959,7 @@ export class Session implements SessionContext {
             }
 
             if (
-              !isSlashInput &&
+              (!isSlashInput || deferredSlashUserTurn) &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRetry &&
@@ -11397,6 +11399,9 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (ac.signal.aborted) {
                   this.todoStopGuard.suspend();
+                  if (turnCount > 1) {
+                    this.#preserveUnsentMessageHistory(nextMessage, true);
+                  }
                   return;
                 }
 

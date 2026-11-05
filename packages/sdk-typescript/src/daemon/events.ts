@@ -1672,6 +1672,8 @@ export function createDaemonSessionViewState(
     historyTruncatedCount: seed.historyTruncatedCount ?? 0,
     lastHistoryTruncated: seed.lastHistoryTruncated,
     lastFollowupSuggestion: seed.lastFollowupSuggestion,
+    lastTurnComplete: seed.lastTurnComplete,
+    lastTurnError: seed.lastTurnError,
     rewindCount: seed.rewindCount ?? 0,
     lastRewind: seed.lastRewind,
     lastBranch: seed.lastBranch,
@@ -2362,11 +2364,13 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         lastTurnComplete: event.data,
+        lastTurnError: undefined,
       };
     case 'turn_error':
       return {
         ...base,
         lastTurnError: event.data,
+        lastTurnComplete: undefined,
       };
     // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
     // its own pending queue); like these mcp/settings notices it carries no
@@ -2396,6 +2400,8 @@ export function reduceDaemonSessionEvent(
         ...base,
         rewindCount: base.rewindCount + 1,
         lastRewind: mergeOriginator(event.data, event),
+        lastTurnComplete: undefined,
+        lastTurnError: undefined,
       };
     case 'session_snapshot':
       return {

@@ -849,4 +849,16 @@ describe('StreamingToolCallParser', () => {
       expect(parser.hasInvalidToolCallArguments()).toBe(invalid);
     });
   });
+
+  it('relocates an id-less tool call with a new name when it reuses a completed no-argument tool call index', () => {
+    parser.addChunk(0, '', 'call_1', 'no_arg_tool');
+    const second = parser.addChunk(0, '{"x":1}', undefined, 'second_tool');
+    expect(second.actualIndex).toBe(1);
+    expect(second.complete).toBe(true);
+    expect(parser.hasConflictingToolCallIdentity()).toBe(false);
+    expectCalls(
+      toolCall('call_1', 'no_arg_tool', {}, 0),
+      toolCall(undefined, 'second_tool', { x: 1 }, 1),
+    );
+  });
 });

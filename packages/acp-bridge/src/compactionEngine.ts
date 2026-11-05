@@ -143,6 +143,14 @@ function replayRecordId(event: BridgeEvent): string | undefined {
   return typeof recordId === 'string' ? recordId : undefined;
 }
 
+function firstRecordIdIn(events: BridgeEvent[]): string | undefined {
+  for (let i = 0; i < events.length; i++) {
+    const id = replayRecordId(events[i]!);
+    if (id !== undefined) return id;
+  }
+  return undefined;
+}
+
 function lastRecordIdIn(events: BridgeEvent[]): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const id = replayRecordId(events[i]!);
@@ -1194,7 +1202,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   private firstRetainedReplayRecordId(): string | undefined {
     for (let i = this.replaySegmentStart; i < this.replaySegments.length; i++) {
-      const recordId = lastRecordIdIn(this.replaySegments[i]!.events);
+      const recordId = firstRecordIdIn(this.replaySegments[i]!.events);
       if (recordId !== undefined) return recordId;
     }
     return undefined;

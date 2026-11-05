@@ -3867,4 +3867,40 @@ describe('turn attribution preservation (DAEMON-007)', () => {
       '@agent mention',
     ]);
   });
+
+  it('anchors history_truncated on the first recordId of a multi-record retained turn segment', () => {
+    const withRecordId = (ev: BridgeEvent, recordId: string): BridgeEvent => ({
+      ...ev,
+      data: {
+        ...(ev.data as Record<string, unknown>),
+        update: {
+          ...((ev.data as { update: Record<string, unknown> }).update ?? {}),
+          _meta: { recordId },
+        },
+      },
+    });
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    // Turn 1 (will be evicted)
+    engine.ingest(
+      withRecordId(makeUserMessage(1, 'u1-' + 'a'.repeat(250)), 'rec-u1'),
+    );
+    engine.ingest(
+      withRecordId(makeTextChunk(2, 'a1-' + 'b'.repeat(250)), 'rec-a1'),
+    );
+    engine.ingest(makeTurnComplete(3));
+    // Turn 2 (oldest retained turn, has both user and assistant recordIds)
+    engine.ingest(
+      withRecordId(makeUserMessage(4, 'u2-' + 'c'.repeat(150)), 'rec-u2-first'),
+    );
+    engine.ingest(
+      withRecordId(makeTextChunk(5, 'a2-' + 'd'.repeat(150)), 'rec-a2-last'),
+    );
+    engine.ingest(makeTurnComplete(6));
+
+    const snap = engine.snapshot();
+    expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snap.compactedTurns[0]?.data).toMatchObject({
+      recordId: 'rec-u2-first',
+    });
+  });
 });

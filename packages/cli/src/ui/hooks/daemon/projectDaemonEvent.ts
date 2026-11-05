@@ -738,6 +738,7 @@ function projectFrame(
       };
     }
 
+    case 'prompt_cancelled':
     case 'turn_complete': {
       // Commit this turn (tool group, then assistant message) and go Idle.
       const flushed = flushPendingTurn(state);
@@ -788,6 +789,20 @@ function projectFrame(
         return { state, committed: [] };
       }
       return { state: { ...state, approvalMode: next }, committed: [] };
+    }
+
+    case 'session_rewound': {
+      return {
+        state: {
+          ...state,
+          streamingState: StreamingState.Idle,
+          pendingText: '',
+          pendingThought: '',
+          tools: [],
+          pendingPermission: undefined,
+        },
+        committed: [],
+      };
     }
 
     case 'state_resync_required': {

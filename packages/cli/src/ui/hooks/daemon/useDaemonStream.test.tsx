@@ -1282,4 +1282,51 @@ describe('useDaemonStream', () => {
       await firstTurn;
     });
   });
+
+  it('useDaemonStreamAdapter surfaces an error item and calls onDeliveryFailed when submitQuery rejects', async () => {
+    const driver = makeFakeDriver({ clientId: 'me' });
+    driver.prompt = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ACP prompt rejected'));
+    const addItem = vi.fn();
+    const onDeliveryFailed = vi.fn();
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          addItem,
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          undefined,
+        ),
+      { wrapper },
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('hello', undefined, undefined, {
+        onDeliveryFailed,
+      });
+    });
+
+    expect(onDeliveryFailed).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('ACP prompt rejected'),
+      }),
+      expect.any(Number),
+    );
+  });
 });

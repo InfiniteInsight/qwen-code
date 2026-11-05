@@ -1670,4 +1670,41 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     expect(streamSignal?.aborted).toBe(true);
     await expect(nextPromise).rejects.toThrow();
   });
+
+  it('dispose() during in-flight initialize() aborts initialization and keeps connected false', async () => {
+    let initSignal: AbortSignal | null | undefined;
+    let resolveInit!: (res: Response) => void;
+    const fetchImpl = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        initSignal = init?.signal;
+        return new Promise<Response>((resolve) => {
+          resolveInit = resolve;
+        });
+      },
+    );
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const p = t.fetch('http://d/session', {
+      method: 'POST',
+      body: JSON.stringify({ cwd: '/tmp' }),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(initSignal).toBeDefined();
+    expect(initSignal?.aborted).toBe(false);
+
+    t.dispose();
+    expect(initSignal?.aborted).toBe(true);
+    expect(t.connected).toBe(false);
+
+    resolveInit(
+      jsonResponse(
+        200,
+        { jsonrpc: '2.0', id: 1, result: { protocolVersion: 1 } },
+        { 'acp-connection-id': 'conn-late' },
+      ),
+    );
+    await expect(p).rejects.toThrow();
+    expect(t.connected).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });

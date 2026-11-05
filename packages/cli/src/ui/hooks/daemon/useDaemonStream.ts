@@ -380,9 +380,12 @@ export function useDaemonStream(
           dbg('stream ended');
           if (disposed || ac.signal.aborted) break;
           // The daemon may close the SSE when idle (0.17.x closes per-turn/idle).
-          // Finalize any in-flight turn, then re-subscribe so the session keeps
-          // working across reconnects (resume picks up after the last event id).
-          finalizeTurn();
+          // Finalize any in-flight turn (unless waiting on user permission),
+          // then re-subscribe so the session keeps working across reconnects
+          // (resume picks up after the last event id).
+          if (!stateRef.current.pendingPermission) {
+            finalizeTurn();
+          }
           await new Promise((r) => setTimeout(r, 500));
           continue;
         } catch (err) {

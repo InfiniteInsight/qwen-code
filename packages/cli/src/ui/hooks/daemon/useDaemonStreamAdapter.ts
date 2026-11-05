@@ -138,38 +138,52 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
       }
       const text = toText(query);
       const trimmed = text.trim();
-      if (handleSlashCommand && (isSlashCommand(trimmed) || trimmed === '?')) {
-        const body = trimmed.replace(/^[/?]/, '').trim();
-        const firstToken = (
-          body ? body.split(/\s+/u)[0] : trimmed[0]
-        )?.toLowerCase();
-        if (firstToken && LOCAL_DAEMON_TUI_SLASH_COMMANDS.has(firstToken)) {
-          const slashResult = await handleSlashCommand(
-            trimmed,
-            undefined,
-            undefined,
-            undefined,
-            promptId,
-          );
-          if (
-            (!slashResult || slashResult.type === 'handled') &&
-            (firstToken === 'clear' ||
-              firstToken === 'reset' ||
-              firstToken === 'new')
-          ) {
-            await driver.prompt({
-              prompt: [{ type: 'text', text: '/clear' }],
-            });
+      try {
+        if (
+          handleSlashCommand &&
+          (isSlashCommand(trimmed) || trimmed === '?')
+        ) {
+          const body = trimmed.replace(/^[/?]/, '').trim();
+          const firstToken = (
+            body ? body.split(/\s+/u)[0] : trimmed[0]
+          )?.toLowerCase();
+          if (firstToken && LOCAL_DAEMON_TUI_SLASH_COMMANDS.has(firstToken)) {
+            const slashResult = await handleSlashCommand(
+              trimmed,
+              undefined,
+              undefined,
+              undefined,
+              promptId,
+            );
+            if (
+              (!slashResult || slashResult.type === 'handled') &&
+              (firstToken === 'clear' ||
+                firstToken === 'reset' ||
+                firstToken === 'new')
+            ) {
+              await driver.prompt({
+                prompt: [{ type: 'text', text: '/clear' }],
+              });
+              return;
+            }
+            if (!slashResult || slashResult.type !== 'submit_prompt') {
+              return;
+            }
+            await ds.submitQuery(toText(slashResult.content));
             return;
           }
-          if (!slashResult || slashResult.type !== 'submit_prompt') {
-            return;
-          }
-          await ds.submitQuery(toText(slashResult.content));
-          return;
         }
+        await ds.submitQuery(text);
+      } catch (err) {
+        metadata?.onDeliveryFailed?.();
+        addItem(
+          {
+            type: 'error',
+            text: err instanceof Error ? err.message : String(err),
+          },
+          Date.now(),
+        );
       }
-      await ds.submitQuery(text);
     },
     initError: ds.initError,
     pendingHistoryItems: ds.pendingHistoryItems,

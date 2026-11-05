@@ -11927,7 +11927,7 @@ export function createSessionControlPlane(
             // (and thus had an `added` event). The first prompt on an idle
             // session starts immediately without `added`, so publishing
             // `completed` would produce an unpaired event.
-            if (isQueued && !pendingEntry.removed) {
+            if ((isQueued || isPromotedMidTurn) && !pendingEntry.removed) {
               try {
                 entry.events.publish({
                   type: 'pending_prompt_completed',

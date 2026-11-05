@@ -174,6 +174,8 @@ export class AcpHttpTransport implements DaemonTransport {
 
   /** Pending requests awaiting their JSON-RPC response on the SSE stream. */
   private readonly pending = new Map<number, PendingRequest>();
+  /** Abort controller for the in-flight initialize() handshake. */
+  private initAbortController: AbortController | undefined;
   /** Abort controller for the connection-scoped SSE stream. */
   private connStreamAbort: AbortController | undefined;
   /**
@@ -225,6 +227,7 @@ export class AcpHttpTransport implements DaemonTransport {
     if (this._disposed) throw new DaemonTransportClosedError();
 
     await this.ensureInitialized();
+    if (this._disposed) throw new DaemonTransportClosedError();
 
     const parsedUrl = new URL(url);
     const path = parsedUrl.pathname;
@@ -372,6 +375,7 @@ export class AcpHttpTransport implements DaemonTransport {
     opts: DaemonTransportSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     await this.ensureInitialized();
+    if (this._disposed) throw new DaemonTransportClosedError();
 
     // Open the SESSION-scoped `/acp` stream (GET /acp + Acp-Session-Id), NOT
     // REST `/session/:id/events`. This is the resumable §1.8 stream and — the
@@ -671,6 +675,10 @@ export class AcpHttpTransport implements DaemonTransport {
     this._disposed = true;
     this._initialized = false;
 
+    // Tear down any in-flight initialize() request.
+    this.initAbortController?.abort(new DaemonTransportClosedError());
+    this.initAbortController = undefined;
+
     // Tear down the connection-scoped SSE stream.
     this.connStreamAbort?.abort();
     this.connStreamAbort = undefined;
@@ -697,86 +705,103 @@ export class AcpHttpTransport implements DaemonTransport {
   // -- Internal ----------------------------------------------------------
 
   private async ensureInitialized(): Promise<void> {
+    if (this._disposed) throw new DaemonTransportClosedError();
     if (this._initialized) return;
-    if (this.initPromise) {
-      await this.initPromise;
-      return;
+    if (!this.initPromise) {
+      // Reset on failure so the next call retries instead of parking
+      // on a permanently rejected promise.
+      this.initPromise = this.initialize().catch((err) => {
+        this.initPromise = undefined;
+        throw err;
+      });
     }
-    // Reset on failure so the next call retries instead of parking
-    // on a permanently rejected promise.
-    this.initPromise = this.initialize().catch((err) => {
-      this.initPromise = undefined;
-      throw err;
-    });
     await this.initPromise;
+    if (this._disposed) throw new DaemonTransportClosedError();
   }
 
   private async initialize(): Promise<void> {
-    const initReq: JsonRpcRequest = {
-      jsonrpc: '2.0',
-      id: this.nextId++,
-      method: 'initialize',
-      params: {
-        clientInfo: { name: 'qwen-code-sdk', version: '1.0.0' },
-      },
-    };
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
-    }
-
-    const res = await this._fetch(`${this.baseUrl}/acp`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(initReq),
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`ACP initialize failed: HTTP ${res.status} ${text}`);
-    }
-
-    const response = (await res.json()) as JsonRpcResponse;
-    if (response.error) {
-      throw new Error(`ACP initialize error: ${response.error.message}`);
-    }
-
-    // Extract connectionId: try the response header first (canonical),
-    // then the JSON body at agentCapabilities._meta.qwen.connectionId,
-    // then the legacy path _meta.qwen.connectionId.
-    const result = response.result;
-    const headerConnId = res.headers.get('acp-connection-id');
-    this.connectionId =
-      (headerConnId || undefined) ??
-      extractConnectionId(result, [
-        'agentCapabilities',
-        '_meta',
-        'qwen',
-        'connectionId',
-      ]) ??
-      extractConnectionId(result, ['_meta', 'qwen', 'connectionId']);
-
-    this.initResult = result;
-    this._initialized = true;
-
-    // Fetch REST /capabilities separately so capabilities() returns the
-    // right shape (the ACP initialize result has a different schema).
+    if (this._disposed) throw new DaemonTransportClosedError();
+    const initCtrl = new AbortController();
+    this.initAbortController = initCtrl;
     try {
-      const capHeaders: Record<string, string> = {};
+      const initReq: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: this.nextId++,
+        method: 'initialize',
+        params: {
+          clientInfo: { name: 'qwen-code-sdk', version: '1.0.0' },
+        },
+      };
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
       if (this.token) {
-        capHeaders['Authorization'] = `Bearer ${this.token}`;
+        headers['Authorization'] = `Bearer ${this.token}`;
       }
-      const capRes = await this._fetch(`${this.baseUrl}/capabilities`, {
-        headers: capHeaders,
+
+      const res = await this._fetch(`${this.baseUrl}/acp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(initReq),
+        signal: initCtrl.signal,
       });
-      if (capRes.ok) {
-        this.initResult = await capRes.json();
+      if (this._disposed) throw new DaemonTransportClosedError();
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`ACP initialize failed: HTTP ${res.status} ${text}`);
       }
-    } catch {
-      // Non-fatal — initResult stays as the ACP initialize result.
+
+      const response = (await res.json()) as JsonRpcResponse;
+      if (this._disposed) throw new DaemonTransportClosedError();
+      if (response.error) {
+        throw new Error(`ACP initialize error: ${response.error.message}`);
+      }
+
+      // Extract connectionId: try the response header first (canonical),
+      // then the JSON body at agentCapabilities._meta.qwen.connectionId,
+      // then the legacy path _meta.qwen.connectionId.
+      const result = response.result;
+      const headerConnId = res.headers.get('acp-connection-id');
+      this.connectionId =
+        (headerConnId || undefined) ??
+        extractConnectionId(result, [
+          'agentCapabilities',
+          '_meta',
+          'qwen',
+          'connectionId',
+        ]) ??
+        extractConnectionId(result, ['_meta', 'qwen', 'connectionId']);
+
+      this.initResult = result;
+      this._initialized = true;
+
+      // Fetch REST /capabilities separately so capabilities() returns the
+      // right shape (the ACP initialize result has a different schema).
+      try {
+        const capHeaders: Record<string, string> = {};
+        if (this.token) {
+          capHeaders['Authorization'] = `Bearer ${this.token}`;
+        }
+        const capRes = await this._fetch(`${this.baseUrl}/capabilities`, {
+          headers: capHeaders,
+          signal: initCtrl.signal,
+        });
+        if (!this._disposed && capRes.ok) {
+          this.initResult = await capRes.json();
+        }
+      } catch {
+        // Non-fatal -- initResult stays as the ACP initialize result.
+      }
+      if (this._disposed) {
+        this._initialized = false;
+        throw new DaemonTransportClosedError();
+      }
+    } finally {
+      if (this.initAbortController === initCtrl) {
+        this.initAbortController = undefined;
+      }
     }
   }
 
@@ -1017,6 +1042,7 @@ export class AcpHttpTransport implements DaemonTransport {
     signal?: AbortSignal,
     callerHeaders?: HeadersInit,
   ): Promise<JsonRpcResponse> {
+    if (this._disposed) throw new DaemonTransportClosedError();
     const req: JsonRpcRequest = {
       jsonrpc: '2.0',
       id: this.nextId++,

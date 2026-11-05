@@ -1876,6 +1876,7 @@ export class ContentGenerationPipeline {
       const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
         | Record<string, unknown>
         | undefined;
+      let currentError: unknown = error;
       if (
         (wireRequest?.['enable_thinking'] === false ||
           chatTemplateKwargs?.['enable_thinking'] === false ||
@@ -1884,17 +1885,24 @@ export class ContentGenerationPipeline {
           // it so runtime learning still fires there.
           wireRequest?.['reasoning_effort'] === 'none') &&
         request.config?.abortSignal?.aborted !== true &&
-        isRequiredThinkingError(error)
+        isRequiredThinkingError(currentError)
       ) {
         this.requiredThinkingModels.add(model);
         debugLogger.warn('Retrying with required thinking enabled', {
           model,
-          originalError: getErrorMessage(error),
+          originalError: getErrorMessage(currentError),
         });
         try {
           return await executeAttempt();
         } catch (retryError) {
-          return await this.handleError(retryError, context, request);
+          if (
+            getErrorStatus(retryError) === 400 &&
+            wireRequestHasMediaContent(wireRequest)
+          ) {
+            currentError = retryError;
+          } else {
+            return await this.handleError(retryError, context, request);
+          }
         }
       }
       // A 400 on a request that actually carries inline media can be the
@@ -1908,12 +1916,12 @@ export class ContentGenerationPipeline {
       // surfaces as before.
       if (
         request.config?.abortSignal?.aborted !== true &&
-        getErrorStatus(error) === 400 &&
+        getErrorStatus(currentError) === 400 &&
         wireRequestHasMediaContent(wireRequest)
       ) {
         debugLogger.warn(
           'Media-bearing request rejected with 400; retrying once with media degraded to placeholders',
-          { model, originalError: getErrorMessage(error) },
+          { model, originalError: getErrorMessage(currentError) },
         );
         try {
           return await executeAttempt({ ...context, modalities: {} });
@@ -1922,7 +1930,7 @@ export class ContentGenerationPipeline {
         }
       }
       // Use shared error handling logic
-      return await this.handleError(error, context, request);
+      return await this.handleError(currentError, context, request);
     }
   }
 

@@ -60524,5 +60524,35 @@ describe('Session', () => {
       expect(newRecordUserMessage).not.toHaveBeenCalled();
       expect(newRecordSlashCommand).not.toHaveBeenCalled();
     });
+
+    it('does not record user message when a no_command slash-prefixed prompt is blocked by UserPromptSubmit hook', async () => {
+      const recordUserMessage = vi.fn();
+      const recorder = {
+        ...mockConfig.getChatRecordingService(),
+        recordUserMessage,
+        flush: vi.fn(),
+      };
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue(recorder);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'Path prompt blocked' },
+        }),
+      });
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'no_command',
+      });
+
+      const res = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/etc/hosts check this file' }],
+      });
+
+      expect(res.stopReason).toBe('end_turn');
+      expect(recordUserMessage).not.toHaveBeenCalled();
+    });
   });
 });
