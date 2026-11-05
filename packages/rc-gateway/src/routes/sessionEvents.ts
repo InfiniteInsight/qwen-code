@@ -452,7 +452,7 @@ class SessionEventsHub {
   private liveEpoch: string | undefined;
   /** The daemon said its replay restarts at its epoch's start (no token). */
   private epochResetSeen = false;
-  private subscribedWithCursor: boolean;
+  private subscribedCursor: number | undefined;
   private upgradingCatchUp = false;
   closed = false;
   /** Subscribed with a cursor and the daemon's `replay_complete` not yet seen. */
@@ -469,7 +469,7 @@ class SessionEventsHub {
     const key = relayKey(deps.walDir, deps.sessionId);
     liveRelays.set(key, (liveRelays.get(key) ?? 0) + 1);
     const cursor = this.upstreamCursor(firstCursor);
-    this.subscribedWithCursor = cursor !== undefined;
+    this.subscribedCursor = cursor;
     this.catchingUp = cursor !== undefined;
     let resolveReady!: () => void;
     let rejectReady!: (err: unknown) => void;
@@ -484,15 +484,15 @@ class SessionEventsHub {
   }
 
   /**
-   * When a first watcher connected without a cursor on an empty WAL (live-only)
-   * and a subsequent watcher connects with a cursor before any frame has been
-   * relayed into the WAL, upgrade the upstream subscription so the daemon's
-   * ring buffer is replayed into the WAL for the cursor-bearing watcher.
+   * When a first watcher connected without a cursor (or with a higher cursor)
+   * on an empty WAL and a subsequent watcher connects with an earlier cursor
+   * before any frame has been relayed into the WAL, upgrade the upstream
+   * subscription so the daemon's ring buffer is replayed into the WAL for the
+   * cursor-bearing watcher.
    */
   ensureCatchUp(firstCursor: number | undefined): void {
     if (
       firstCursor === undefined ||
-      this.subscribedWithCursor ||
       this.closed ||
       this.state.cursorVoid ||
       this.state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId
@@ -501,7 +501,13 @@ class SessionEventsHub {
     }
     const cursor = this.upstreamCursor(firstCursor);
     if (cursor === undefined) return;
-    this.subscribedWithCursor = true;
+    if (
+      this.subscribedCursor !== undefined &&
+      cursor >= this.subscribedCursor
+    ) {
+      return;
+    }
+    this.subscribedCursor = cursor;
     this.catchingUp = true;
     this.upgradingCatchUp = true;
     const prevUpstream = this.upstream;

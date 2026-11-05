@@ -2282,13 +2282,21 @@ export class AgentCore {
       } as AgentToolCallEvent);
 
       if (invokePreToolUse) {
-        void this.hooks?.preToolUse?.({
-          subagentId: this.subagentId,
-          name: this.name,
-          toolName,
-          args,
-          timestamp: Date.now(),
-        });
+        void Promise.resolve()
+          .then(() =>
+            this.hooks?.preToolUse?.({
+              subagentId: this.subagentId,
+              name: this.name,
+              toolName,
+              args,
+              timestamp: Date.now(),
+            }),
+          )
+          .catch((error) => {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.warn(`preToolUse hook failed for ${toolName}:`, error);
+          });
       }
     };
     const deliverApproval = (state: ApprovalDeliveryState) => {
@@ -2387,82 +2395,91 @@ export class AgentCore {
         } as AgentToolOutputUpdateEvent);
       },
       onAllToolCallsComplete: async (completedCalls) => {
-        clearApprovalDeliveries();
-        for (const call of completedCalls) {
-          if (emittedCallIds.has(call.request.callId)) continue;
-          emittedCallIds.add(call.request.callId);
+        try {
+          clearApprovalDeliveries();
+          for (const call of completedCalls) {
+            if (emittedCallIds.has(call.request.callId)) continue;
+            emittedCallIds.add(call.request.callId);
 
-          const toolName = call.request.name;
-          const duration = call.durationMs ?? 0;
-          const success = call.status === 'success';
-          const errorMessage =
-            call.status === 'error' || call.status === 'cancelled'
-              ? call.response.error?.message
-              : undefined;
+            const toolName = call.request.name;
+            const duration = call.durationMs ?? 0;
+            const success = call.status === 'success';
+            const errorMessage =
+              call.status === 'error' || call.status === 'cancelled'
+                ? call.response.error?.message
+                : undefined;
 
-          // Record stats
-          this.recordToolCallStats(toolName, success, duration, errorMessage);
+            // Record stats
+            this.recordToolCallStats(toolName, success, duration, errorMessage);
 
-          const execution = executionResults.get(call.request.callId);
-          const lifecycle =
-            startedLifecycles.has(call.request.callId) && !execution
-              ? undefined
-              : toolLifecycles
-                  .get(call.request.callId)
-                  ?.finish(
-                    call.status === 'cancelled'
-                      ? 'cancelled'
-                      : success
-                        ? 'success'
-                        : 'error',
-                    execution?.status ?? 'not_started',
-                    execution?.durationMs,
-                  );
-          // Emit tool result event
-          this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
-            subagentId: this.subagentId,
-            round: currentRound,
-            callId: call.request.callId,
-            name: toolName,
-            lifecycle,
-            success,
-            error: errorMessage,
-            responseParts: call.response.responseParts,
-            resultDisplay: call.response.resultDisplay,
-            ...(isToolResultBoundaryDiagnosticsEnabled()
-              ? {
-                  boundaryArtifact: toolResultBoundaryArtifact(
-                    call.response.persistedOutputFiles,
-                    call.response.artifacts,
-                  ),
-                }
-              : {}),
-            durationMs: duration,
-            timestamp: Date.now(),
-          } as AgentToolResultEvent);
+            const execution = executionResults.get(call.request.callId);
+            const lifecycle =
+              startedLifecycles.has(call.request.callId) && !execution
+                ? undefined
+                : toolLifecycles
+                    .get(call.request.callId)
+                    ?.finish(
+                      call.status === 'cancelled'
+                        ? 'cancelled'
+                        : success
+                          ? 'success'
+                          : 'error',
+                      execution?.status ?? 'not_started',
+                      execution?.durationMs,
+                    );
+            // Emit tool result event
+            this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: this.subagentId,
+              round: currentRound,
+              callId: call.request.callId,
+              name: toolName,
+              lifecycle,
+              success,
+              error: errorMessage,
+              responseParts: call.response.responseParts,
+              resultDisplay: call.response.resultDisplay,
+              ...(isToolResultBoundaryDiagnosticsEnabled()
+                ? {
+                    boundaryArtifact: toolResultBoundaryArtifact(
+                      call.response.persistedOutputFiles,
+                      call.response.artifacts,
+                    ),
+                  }
+                : {}),
+              durationMs: duration,
+              timestamp: Date.now(),
+            } as AgentToolResultEvent);
 
-          // post-tool hook
-          await this.hooks?.postToolUse?.({
-            subagentId: this.subagentId,
-            name: this.name,
-            toolName,
-            args: call.request.args,
-            success,
-            durationMs: duration,
-            errorMessage,
-            timestamp: Date.now(),
-          });
+            responseByCallId.set(call.request.callId, {
+              toolName,
+              responseParts: call.response.responseParts,
+              persistedOutputFiles: call.response.persistedOutputFiles,
+              artifacts: call.response.artifacts,
+              durationMs: duration,
+            });
 
-          responseByCallId.set(call.request.callId, {
-            toolName,
-            responseParts: call.response.responseParts,
-            persistedOutputFiles: call.response.persistedOutputFiles,
-            artifacts: call.response.artifacts,
-            durationMs: duration,
-          });
+            // post-tool hook
+            try {
+              await this.hooks?.postToolUse?.({
+                subagentId: this.subagentId,
+                name: this.name,
+                toolName,
+                args: call.request.args,
+                success,
+                durationMs: duration,
+                errorMessage,
+                timestamp: Date.now(),
+              });
+            } catch (error) {
+              this.runtimeContext
+                .getDebugLogger()
+                ?.warn(`postToolUse hook failed for ${toolName}:`, error);
+            }
+          }
+        } finally {
+          // Signal that this batch is complete (all tools terminal)
+          resolveBatch?.();
         }
-        // Signal that this batch is complete (all tools terminal)
-        resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
         for (const call of calls) {

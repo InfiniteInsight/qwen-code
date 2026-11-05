@@ -18,7 +18,10 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
-import { getToolCallRuntime } from './tool-call-runtime.js';
+import {
+  getToolCallRuntime,
+  runWithToolCallRuntime,
+} from './tool-call-runtime.js';
 import {
   Kind,
   ToolConfirmationOutcome,
@@ -938,5 +941,47 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(fnResponse()?.response?.['output']).toContain(
       'Unknown or unavailable code mode tool: write_probe',
     );
+  }, 10_000);
+
+  it('drains unawaited nested tool calls before exec completes', async () => {
+    let nestedSettled = false;
+    const dispatch = vi.fn().mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      nestedSettled = true;
+      return {
+        output: 'background done',
+        isError: false,
+      };
+    });
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      chatRecording: false,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const execTool = new ExecTool(config);
+    registry.registerTool(execTool);
+    registry.registerTool(
+      new MockTool({
+        name: 'slow_probe',
+        kind: Kind.Read,
+        params: { type: 'object', additionalProperties: false },
+      }),
+    );
+
+    const invocation = execTool.build({
+      source: 'void tools.slow_probe({}); text("returned early");',
+    });
+    const result = await runWithToolCallRuntime(
+      { dispatch, parentCallId: 'exec-call-1' },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(nestedSettled).toBe(true);
+    expect(result.llmContent).toEqual([{ text: 'returned early' }]);
   }, 10_000);
 });

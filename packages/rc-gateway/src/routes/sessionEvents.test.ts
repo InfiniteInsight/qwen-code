@@ -1564,6 +1564,30 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
     expect(stale.status).toBe(412);
   });
 
+  it('upgrades the upstream subscription when a cursor-less watcher connects before a cursor-bearing watcher on an empty WAL', async () => {
+    const sid = 'b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8';
+    const bus = new FakeBusDaemon();
+    for (const w of ['one', 'two', 'three']) bus.publish(w);
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+
+    // Watcher 1 connects without Last-Event-ID while the WAL is empty.
+    const w1 = await watch(url);
+    await w1.waitFor(joined);
+    expect(bus.subscriptions).toHaveLength(1);
+    expect(bus.subscriptions[0]?.lastEventId).toBeUndefined();
+
+    // Watcher 2 connects with Last-Event-ID: 1 while the WAL is still empty.
+    // The hub must upgrade the upstream subscription with lastEventId: 1 so
+    // frames 2 and 3 are replayed into the WAL and delivered to Watcher 2.
+    const w2 = await watch(url, { 'Last-Event-ID': '1' });
+    await w2.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+    expect(bus.subscriptions).toHaveLength(2);
+    expect(bus.subscriptions[1]?.lastEventId).toBe(1);
+    expect(w2.ids()).toEqual([2, 3]);
+    expect(texts(w2)).toEqual(['two', 'three']);
+  });
+
   it('hands a resume response its watermark in the gateway numbering', async () => {
     const sid = 'b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7';
     const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));

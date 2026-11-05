@@ -762,4 +762,45 @@ describe('AcpWsTransport – route mapping used by fetch()', () => {
       });
     }
   });
+
+  it('rejects in-flight connect() when dispose() or pre-open onclose fires before WebSocket onopen', async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    const sockets: HangingWebSocket[] = [];
+    class HangingWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: ((ev: { code?: number; reason?: string }) => void) | null = null;
+      constructor(_url: string) {
+        // Deliberately never fires onopen automatically
+        sockets.push(this);
+      }
+      send(_payload: string) {}
+      close() {}
+    }
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      value: HangingWebSocket,
+    });
+    const transport1 = new AcpWsTransport('ws://daemon/acp');
+    const transport2 = new AcpWsTransport('ws://daemon/acp');
+    try {
+      const fetch1 = transport1.fetch('/health');
+      expect(sockets).toHaveLength(1);
+      transport1.dispose();
+      await expect(fetch1).rejects.toThrow(DaemonTransportClosedError);
+
+      const fetch2 = transport2.fetch('/health');
+      expect(sockets).toHaveLength(2);
+      sockets[1].onclose?.({ code: 1006, reason: 'handshake refused' });
+      await expect(fetch2).rejects.toThrow(/WebSocket closed/);
+    } finally {
+      transport1.dispose();
+      transport2.dispose();
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: originalWebSocket,
+      });
+    }
+  });
 });

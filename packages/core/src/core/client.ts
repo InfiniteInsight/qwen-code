@@ -3951,14 +3951,13 @@ export class LlmClient {
         ? partToString(request)
         : undefined;
     if (startsInteraction) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
-      // must not move the running turn's starting point or drop its target —
-      // nor take over (or clear) the running turn's exploration phase, which
-      // the ownership check below every budget entrypoint enforces for the
-      // side turn's tool results too.
+      // must not move the running turn's starting point or drop its target -
+      // nor take over (or clear) the running turn's exploration phase, loop
+      // detector, or interaction start type map.
       if (!options?.isConcurrentSideQuery) {
+        this.loopDetector.reset(prompt_id);
+        this.lastPromptId = prompt_id;
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
@@ -3972,7 +3971,9 @@ export class LlmClient {
         messageType,
       });
       interactionOwner = getActiveInteractionSpan(prompt_id);
-      this.interactionStartTypes.clear();
+      if (!options?.isConcurrentSideQuery) {
+        this.interactionStartTypes.clear();
+      }
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
@@ -4255,7 +4256,10 @@ export class LlmClient {
     // Notifications start a fresh Turn with a new prompt_id, so the loop
     // detector must reset — otherwise a prior turn's count can trip
     // LoopDetected early on the notification turn.
-    if (messageType === SendMessageType.UserQuery) {
+    if (
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery
+    ) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
       // A registered reminder means the previous chain's plan still has
       // unfinished items (todo_write deletes it on completion): continue
@@ -4363,14 +4367,16 @@ export class LlmClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (messageType === SendMessageType.UserQuery) {
-          await this.activatePreparedMemoryRecallTransition();
+        if (!options?.isConcurrentSideQuery) {
+          if (messageType === SendMessageType.UserQuery) {
+            await this.activatePreparedMemoryRecallTransition();
+          }
+          this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+          this.beginManagedAutoMemoryRecall(
+            preHookUserPromptText ?? partToString(request),
+            signal,
+          );
         }
-        this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
-        this.beginManagedAutoMemoryRecall(
-          preHookUserPromptText ?? partToString(request),
-          signal,
-        );
 
         // Track prompt count for commit attribution. Only the user typing a
         // fresh prompt should bump the counter — `ToolResult` (tool-call
@@ -5781,7 +5787,7 @@ export class LlmClient {
       // to consume the prefetch, so close it out now. When tool calls ARE
       // pending, preserve the handle so the next ToolResult turn can
       // consume it (the fire-and-forget design).
-      if (!hasToolCalls) {
+      if (!hasToolCalls && !options?.isConcurrentSideQuery) {
         this.finishManagedAutoMemoryRecall();
       }
       await this.settlePendingGoalProposal(
@@ -5866,9 +5872,11 @@ export class LlmClient {
         // the caller for a ToolResult re-entry; any other exit ends it.
         this.clearStopHookChain(prompt_id);
         this.config.takePendingGoalProposal?.(prompt_id);
-        this.cancelPendingMemoryPrefetch(
-          signal?.aborted ? 'abort' : 'no_safe_delivery_point',
-        );
+        if (!options?.isConcurrentSideQuery) {
+          this.cancelPendingMemoryPrefetch(
+            signal?.aborted ? 'abort' : 'no_safe_delivery_point',
+          );
+        }
       }
       if (!normalCompletion) {
         endCurrentInteraction(

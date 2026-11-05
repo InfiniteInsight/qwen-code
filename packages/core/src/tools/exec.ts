@@ -169,6 +169,10 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       result =
         error instanceof CodeModeExecutionError ? error.result : { output: '' };
       failure = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (active.size > 0) {
+        await Promise.allSettled([...active]);
+      }
     }
     const sections: string[] = [];
     if (result.output) sections.push(result.output);

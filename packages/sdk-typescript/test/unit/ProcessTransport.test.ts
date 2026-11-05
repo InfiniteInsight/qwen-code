@@ -2304,5 +2304,34 @@ describe('ProcessTransport', () => {
         }),
       );
     });
+
+    it('waitForExit does not resolve prematurely when childProcess.killed is true but process has not exited', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockChildProcess.killed = true;
+      mockChildProcess.exitCode = null;
+      mockChildProcess.signalCode = null;
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const transport = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+
+      let settled = false;
+      const waitPromise = transport.waitForExit().then(() => {
+        settled = true;
+      });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(settled).toBe(false);
+
+      mockChildProcess.emit('close', 0, null);
+      await waitPromise;
+      expect(settled).toBe(true);
+    });
   });
 });

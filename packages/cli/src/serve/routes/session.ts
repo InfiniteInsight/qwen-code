@@ -99,6 +99,10 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+
+function isResponseDisconnected(res: Response): boolean {
+  return !res.writable || res.destroyed || res.socket?.writable === false;
+}
 import {
   isValidSessionId,
   normalizeSessionIdForLookup,
@@ -3525,7 +3529,7 @@ export function registerSessionRoutes(
           { sessionId: session.sessionId, clientId: session.clientId },
         );
       }
-      if (!res.writable) {
+      if (isResponseDisconnected(res)) {
         if (daemonLog) {
           daemonLog.warn(
             'session reaped (client disconnected before response)',
@@ -3998,7 +4002,7 @@ export function registerSessionRoutes(
               sessionId: session.sessionId,
               clientId: session.clientId,
             });
-            if (!res.writable) {
+            if (isResponseDisconnected(res)) {
               if (session.attached) {
                 runtime.bridge
                   .detachClient(session.sessionId, session.clientId)
@@ -4389,7 +4393,7 @@ export function registerSessionRoutes(
         // same cleanup because a client that disconnects during a
         // multi-second `session/load` would otherwise leave a freshly
         // restored session in `byId` with no client holding its id.
-        if (!res.writable) {
+        if (isResponseDisconnected(res)) {
           void cleanupRestoredSession();
           return;
         }
@@ -4696,7 +4700,7 @@ export function registerSessionRoutes(
             }
           }
         }
-        if (!res.writable) {
+        if (isResponseDisconnected(res)) {
           await cleanupRestoredSession();
           return;
         }
@@ -5928,7 +5932,7 @@ export function registerSessionRoutes(
                 runtime.bridge.setSessionWorktree(targetSessionId, worktree);
                 restored.currentCwd = changed.newCwd;
                 restored.worktree = worktree;
-                if (!res.writable) {
+                if (isResponseDisconnected(res)) {
                   await releaseRestored();
                   return;
                 }
@@ -5939,7 +5943,7 @@ export function registerSessionRoutes(
               } catch (error) {
                 if (published) {
                   await releaseRestored();
-                  if (res.writable) {
+                  if (!isResponseDisconnected(res)) {
                     res.status(500).json({
                       error: 'Branch created but failed to open its worktree',
                       code: 'branch_worktree_activation_failed',
@@ -5972,7 +5976,7 @@ export function registerSessionRoutes(
                           ? cleanupError.message
                           : String(cleanupError),
                     });
-                    if (res.writable) {
+                    if (!isResponseDisconnected(res)) {
                       res.status(500).json({
                         error: 'Failed to prepare worktree branch',
                         code: 'worktree_create_failed',
@@ -5993,7 +5997,7 @@ export function registerSessionRoutes(
                     typeof fileSystemError.path === 'string' ||
                     typeof fileSystemError.syscall === 'string'
                   ) {
-                    if (res.writable) {
+                    if (!isResponseDisconnected(res)) {
                       res.status(500).json({
                         error: 'Failed to prepare worktree branch',
                         code: 'worktree_create_failed',
@@ -6003,7 +6007,7 @@ export function registerSessionRoutes(
                   }
                   throw error;
                 }
-                if (res.writable) {
+                if (!isResponseDisconnected(res)) {
                   res.status(500).json({
                     error:
                       'Branch outcome is unknown; prepared resources were preserved',
@@ -6040,12 +6044,12 @@ export function registerSessionRoutes(
               .killSession(restored.sessionId, { requireZeroAttaches: true })
               .catch(() => false);
           };
-          if (!res.writable) {
+          if (isResponseDisconnected(res)) {
             void releaseLiveBranch();
             return;
           }
         }
-        if (!res.writable) return;
+        if (isResponseDisconnected(res)) return;
         // Branch/side-task responses carry the same replay snapshot shape as
         // load; apply the same redaction (#9234). The helper returns its
         // input unchanged when no replay arrays are present (checkpoint
@@ -6108,7 +6112,7 @@ export function registerSessionRoutes(
           }
           throw error;
         }
-        if (!res.writable) {
+        if (isResponseDisconnected(res)) {
           if (!result.attached) {
             runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })

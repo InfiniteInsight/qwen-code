@@ -852,6 +852,106 @@ describe('AgentCore approval response deduplication', () => {
     }
   });
 
+  it('settles processFunctionCalls and preserves tool responses when preToolUse or postToolUse hooks throw', async () => {
+    const warnSpy = vi.fn();
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn(), warn: warnSpy }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('hook-throw-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'hook-throw-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      { tools: ['*'] },
+      undefined,
+      {
+        preToolUse: vi.fn().mockRejectedValue(new Error('preToolUse exploded')),
+        postToolUse: vi
+          .fn()
+          .mockRejectedValue(new Error('postToolUse exploded')),
+      },
+    );
+    const schedule = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const schedulerInstance = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+          onAllToolCallsComplete?: (calls: ToolCall[]) => Promise<void>;
+        };
+        const req = {
+          callId: 'hook-call-1',
+          name: 'read_file',
+          args: { path: 'a.txt' },
+          isClientInitiated: false,
+          prompt_id: 'hook-prompt',
+        };
+        schedulerInstance.onToolCallsUpdate?.([
+          {
+            status: 'scheduled',
+            request: req,
+          } as unknown as ToolCall,
+        ]);
+        await schedulerInstance.onAllToolCallsComplete?.([
+          {
+            status: 'success',
+            request: req,
+            response: {
+              callId: 'hook-call-1',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'hook-call-1',
+                    name: 'read_file',
+                    response: { output: 'file contents' },
+                  },
+                },
+              ],
+              resultDisplay: 'file contents',
+              error: undefined,
+              errorType: undefined,
+            },
+            durationMs: 5,
+          } as unknown as ToolCall,
+        ]);
+      });
+    try {
+      const outcome = await core.processFunctionCalls(
+        [{ id: 'hook-call-1', name: 'read_file', args: { path: 'a.txt' } }],
+        new AbortController(),
+        'hook-prompt',
+        1,
+        [{ name: 'read_file' }],
+      );
+      expect(outcome.results).toHaveLength(1);
+      expect(outcome.results[0]).toMatchObject({
+        toolName: 'read_file',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'hook-call-1',
+              name: 'read_file',
+              response: { output: 'file contents' },
+            },
+          },
+        ],
+      });
+      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(2));
+    } finally {
+      schedule.mockRestore();
+    }
+  });
+
   it('keeps output and PID intact for lifecycle-only updates and ignores late terminal output', () => {
     const { core } = buildCore('output');
     const emitter = core.getEventEmitter();

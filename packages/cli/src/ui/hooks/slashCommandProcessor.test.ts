@@ -2653,6 +2653,70 @@ describe('useSlashCommandProcessor', () => {
         );
       });
     });
+
+    it('closes shellConfirmationRequest and settles handleSlashCommand when cancelSlashCommand is called during confirmation', async () => {
+      const result = setupProcessorHook([shellCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let commandOutcome: unknown;
+      let pending!: Promise<void>;
+      act(() => {
+        pending = result.current.handleSlashCommand('/shellcmd').then((res) => {
+          commandOutcome = res;
+        });
+      });
+
+      await waitFor(() => {
+        expect(result.current.shellConfirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.cancelSlashCommand();
+        await pending;
+      });
+
+      expect(result.current.shellConfirmationRequest).toBeNull();
+      expect(commandOutcome).toEqual({ type: 'handled' });
+      expect(mockCommandAction).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes confirmationRequest and settles handleSlashCommand when cancelSlashCommand is called during confirm_action', async () => {
+      const action = vi.fn().mockResolvedValue({
+        type: 'confirm_action',
+        prompt: 'Continue?',
+        originalInvocation: { raw: '/actioncmd' },
+      } as ConfirmActionReturn);
+      const command = createTestCommand({
+        name: 'actioncmd',
+        action,
+      });
+
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let commandOutcome: unknown;
+      let pending!: Promise<void>;
+      act(() => {
+        pending = result.current
+          .handleSlashCommand('/actioncmd')
+          .then((res) => {
+            commandOutcome = res;
+          });
+      });
+
+      await waitFor(() => {
+        expect(result.current.confirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.cancelSlashCommand();
+        await pending;
+      });
+
+      expect(result.current.confirmationRequest).toBeNull();
+      expect(commandOutcome).toEqual({ type: 'handled' });
+      expect(action).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('Command Parsing and Matching', () => {

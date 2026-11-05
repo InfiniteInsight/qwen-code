@@ -481,6 +481,7 @@ export function createCancelReviewRoute(
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
     }
+    deps.bridge.close(rec.sessionId);
     // Atomic terminal transition: two concurrent cancels can both pass the
     // pre-check above and both reach here. setStatus is the single source of
     // truth for "who won" — only the caller whose transition actually landed

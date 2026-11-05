@@ -16954,6 +16954,65 @@ describe('createServeApp', () => {
         mockBranchOps.createBranch = undefined;
       }
     });
+
+    it('reaps a newly spawned session when res.socket.writable becomes false while res.writable is still true', async () => {
+      let spawnEntered!: () => void;
+      const spawnGate = new Promise<void>((r) => {
+        spawnEntered = r;
+      });
+      let releaseSpawn!: () => void;
+      const spawnContinue = new Promise<void>((r) => {
+        releaseSpawn = r;
+      });
+      const killSession = vi.fn().mockResolvedValue(true);
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => {
+          spawnEntered();
+          await spawnContinue;
+          return {
+            sessionId: 'spawned-half-closed',
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-half-closed',
+          };
+        },
+      });
+      bridge.killSession = killSession;
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      let capturedRes: ServerResponse | undefined;
+      const server = createServer((req, res) => {
+        capturedRes = res;
+        app(req, res);
+      });
+
+      const reqPromise = new Promise<request.Response>((resolve, reject) => {
+        request(server)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({})
+          .end((err, res) => (err ? reject(err) : resolve(res)));
+      }).catch(() => undefined);
+
+      await spawnGate;
+      if (capturedRes?.socket) {
+        Object.defineProperty(capturedRes.socket, 'writable', {
+          value: false,
+          configurable: true,
+        });
+      }
+      releaseSpawn();
+      await vi.waitFor(() => {
+        expect(killSession).toHaveBeenCalledWith('spawned-half-closed', {
+          requireZeroAttaches: true,
+        });
+      });
+      capturedRes?.socket?.destroy();
+      await reqPromise;
+    });
   });
 
   describe('POST /session/:id/load and /resume', () => {

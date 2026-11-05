@@ -653,7 +653,7 @@ describe('POST /rc/reviews/:id/cancel', () => {
     // is still 'running' when cancel is called — deterministic, no race
     // against prompt-settle (see D.3 report for why this avoids the flake
     // shape noted in agents.integration.test.ts).
-    const { url, tokens, registry, frames } = await setup();
+    const { url, tokens, registry, bridge, frames } = await setup();
     const trigger = await post(url, tokens.owner, { target: { local: true } });
     expect(trigger.status).toBe(202);
     const { reviewId, sessionId } = (await trigger.json()) as {
@@ -672,6 +672,7 @@ describe('POST /rc/reviews/:id/cancel', () => {
     ).toEqual({ reviewId, status: 'cancelled' });
 
     expect(stub!.lastEndedSessionId).toBe(sessionId);
+    expect(bridge.close).toHaveBeenCalledWith(sessionId);
     expect(registry.get(reviewId)?.status).toBe('cancelled');
 
     const cancelled = frames.find((f) => f.type === 'review_cancelled');

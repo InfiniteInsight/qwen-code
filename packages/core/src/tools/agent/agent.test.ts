@@ -3711,6 +3711,23 @@ describe('AgentTool', () => {
       expect(stopSpy).toHaveBeenCalledTimes(1);
     });
 
+    it(
+      'cleans up provisioned worktree isolation after an interactive framed fork finishes',
+      () =>
+        inRealRepo('qwen-fork-wt-', async (repo) => {
+          await runFork(forkParams('fork task', { isolation: 'worktree' }));
+          await vi.waitFor(() => {
+            expect(
+              execFileSync('git', ['worktree', 'list', '--porcelain'], {
+                cwd: repo,
+                encoding: 'utf8',
+              }).match(/^worktree /gm),
+            ).toHaveLength(1);
+          });
+        }),
+      20000,
+    );
+
     it('routes owned monitor notifications and cleanup for forks', async () => {
       const releaseExecute = holdExecute(mockAgent);
       withMessaging(null);

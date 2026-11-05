@@ -1524,12 +1524,30 @@ export const useSlashCommandProcessor = (
                     outcome: ToolConfirmationOutcome;
                     approvedCommands?: string[];
                   }>((resolve) => {
+                    const onAbort = () => {
+                      setShellConfirmationRequest(null);
+                      resolve({
+                        outcome: ToolConfirmationOutcome.Cancel,
+                        approvedCommands: [],
+                      });
+                    };
+                    if (abortController.signal.aborted) {
+                      onAbort();
+                      return;
+                    }
+                    abortController.signal.addEventListener('abort', onAbort, {
+                      once: true,
+                    });
                     setShellConfirmationRequest({
                       commands: result.commandsToConfirm,
                       onConfirm: (
                         resolvedOutcome,
                         resolvedApprovedCommands,
                       ) => {
+                        abortController.signal.removeEventListener(
+                          'abort',
+                          onAbort,
+                        );
                         setShellConfirmationRequest(null); // Close the dialog
                         resolve({
                           outcome: resolvedOutcome,
@@ -1540,6 +1558,7 @@ export const useSlashCommandProcessor = (
                   });
 
                   if (
+                    abortController.signal.aborted ||
                     outcome === ToolConfirmationOutcome.Cancel ||
                     !approvedCommands ||
                     approvedCommands.length === 0
@@ -1567,14 +1586,33 @@ export const useSlashCommandProcessor = (
                   const { confirmed } = await new Promise<{
                     confirmed: boolean;
                   }>((resolve) => {
+                    const onAbort = () => {
+                      setConfirmationRequest(null);
+                      resolve({ confirmed: false });
+                    };
+                    if (abortController.signal.aborted) {
+                      onAbort();
+                      return;
+                    }
+                    abortController.signal.addEventListener('abort', onAbort, {
+                      once: true,
+                    });
                     setConfirmationRequest({
                       prompt: result.prompt,
                       onConfirm: (resolvedConfirmed) => {
+                        abortController.signal.removeEventListener(
+                          'abort',
+                          onAbort,
+                        );
                         setConfirmationRequest(null);
                         resolve({ confirmed: resolvedConfirmed });
                       },
                     });
                   });
+
+                  if (abortController.signal.aborted) {
+                    return { type: 'handled' };
+                  }
 
                   if (!confirmed) {
                     addItemWithRecording(

@@ -14265,6 +14265,53 @@ Other open files:
       );
     });
   });
+
+  describe('isConcurrentSideQuery (/btw isolation)', () => {
+    it('does not reset loopDetector, overwrite lastPromptId, clear interactionStartTypes, or reset activeTodoWorkChainPromptId when isConcurrentSideQuery is true', async () => {
+      const loopResetSpy = vi.spyOn(client['loopDetector'], 'reset');
+      const cancelPrefetchSpy = vi.spyOn(
+        client as unknown as { cancelPendingMemoryPrefetch: () => void },
+        'cancelPendingMemoryPrefetch',
+      );
+      client['lastPromptId'] = 'active-main-prompt';
+      client['activeTodoWorkChainPromptId'] = 'active-main-prompt';
+      client['interactionStartTypes'].set(
+        'active-main-prompt',
+        SendMessageType.UserQuery,
+      );
+
+      mockTurnRunFn.mockImplementation(async function* () {
+        yield {
+          type: LlmEventType.Content,
+          value: 'side answer',
+        };
+      });
+
+      const events: ServerLlmStreamEvent[] = [];
+      for await (const event of client.sendMessageStream(
+        [{ text: 'side question' }],
+        new AbortController().signal,
+        'btw-side-prompt',
+        {
+          type: SendMessageType.UserQuery,
+          isConcurrentSideQuery: true,
+        },
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: LlmEventType.Content, value: 'side answer' },
+      ]);
+      expect(loopResetSpy).not.toHaveBeenCalled();
+      expect(cancelPrefetchSpy).not.toHaveBeenCalled();
+      expect(client['lastPromptId']).toBe('active-main-prompt');
+      expect(client['activeTodoWorkChainPromptId']).toBe('active-main-prompt');
+      expect(client['interactionStartTypes'].get('active-main-prompt')).toBe(
+        SendMessageType.UserQuery,
+      );
+    });
+  });
 });
 
 function makeMockConfigForShutdown(

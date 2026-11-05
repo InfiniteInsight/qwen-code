@@ -5635,6 +5635,62 @@ describe('DaemonSessionProvider', () => {
     expect(session.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
+  it('aborts an in-flight sendPrompt HTTP request on session switch and does not append deferred local user message into the new session', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const submitStarted = createDeferred<void>();
+    let capturedSignal: AbortSignal | undefined;
+    const sessionA = createMockSession({
+      sessionId: 'session-a',
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        capturedSignal = signal;
+        submitStarted.resolve();
+        return accepted.promise;
+      }),
+      events: createIdleEvents(),
+    });
+    const sessionB = createMockSession({
+      sessionId: 'session-b',
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(sessionA, sessionB);
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    let promptPromise: Promise<unknown> | undefined;
+    await act(async () => {
+      promptPromise = providerActions.sendPrompt('deferred message for A', {
+        images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }],
+      });
+      await submitStarted.promise;
+      await flushPromises();
+    });
+    expect(capturedSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      void providerActions.loadSession('session-b').catch(() => undefined);
+      await flushPromises();
+    });
+
+    expect(capturedSignal?.aborted).toBe(true);
+
+    accepted.resolve({ promptId: 'prompt-a', lastEventId: 10 });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    await expect(promptPromise).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(blocks).toEqual([]);
+  });
+
   it('returns the prompt id from submitPrompt', async () => {
     const session = createMockSession({
       submitPrompt: vi.fn(async () => ({

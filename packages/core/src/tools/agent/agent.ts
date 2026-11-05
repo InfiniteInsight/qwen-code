@@ -4552,6 +4552,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     recordSpanOutcome,
                   });
                 } finally {
+                  try {
+                    await cleanupWorktreeIsolation();
+                  } catch {
+                    // cleanupWorktreeIsolation logs its own warnings
+                  }
                   cleanupOwnedMonitorNotifications();
                   void agentConfig
                     .getToolRegistry()

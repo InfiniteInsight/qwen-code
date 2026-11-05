@@ -3023,4 +3023,81 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     // Config overlay should have been rolled back
     expect(removeSpy).toHaveBeenCalledWith('fail-srv');
   });
+
+  it('attaches failed-event eviction listener and reports filtered toolCount for pooled addRuntimeMcpServer, and preserves shadowed settings budget slot on failed replacement', async () => {
+    let failedListener: ((e: { kind: string }) => void) | undefined;
+    const conn = mkConn('pooled-runtime', {
+      id: 'pooled-runtime::1',
+      toolsSnapshot: [{ name: 't1' }, { name: 't2' }, { name: 't3' }],
+      promptsSnapshot: [],
+      on: vi.fn((event: string, cb: (e: { kind: string }) => void) => {
+        if (event === 'event') failedListener = cb;
+      }),
+      off: vi.fn(),
+    });
+    const config = mkRuntimeConfig({
+      settingsServers: { 'shadow-fail': { command: 'settings-bin' } },
+    });
+    const toolRegistry = {
+      removeMcpToolsByServer: vi.fn(),
+      getToolsByServer: vi.fn().mockReturnValue([{ name: 't1' }]),
+    } as unknown as ToolRegistry;
+    const fakeBudget = {
+      getMode: () => 'enforce' as const,
+      tryReserve: vi.fn().mockReturnValue('already-reserved'),
+      getBudget: () => 5,
+      getReservedCount: () => 1,
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      release: vi.fn(),
+    };
+    const acquireSpy = vi
+      .fn()
+      .mockResolvedValueOnce(conn)
+      .mockRejectedValueOnce(new Error('spawn failed'));
+    const pool = mkPool(acquireSpy, fakeBudget);
+    const manager = mkManager({
+      config,
+      toolRegistry,
+      options: { pool },
+    });
+
+    const added = await manager.addRuntimeMcpServer(
+      'pooled-runtime',
+      { command: 'echo', includeTools: ['t1'] } as MCPServerConfig,
+      'client-11',
+    );
+    expect(added).toMatchObject({
+      name: 'pooled-runtime',
+      toolCount: 1,
+    });
+    expect(failedListener).toBeDefined();
+
+    // Simulate pool eviction via failed event; pooledConnections should drop the stale handle.
+    failedListener?.({ kind: 'failed' });
+    expect(
+      (
+        manager as unknown as { pooledConnections: Map<string, unknown> }
+      ).pooledConnections.has('pooled-runtime'),
+    ).toBe(false);
+
+    // Seed an existing connection for shadow-fail so `replaced === true` and `shadowedSettings === true`
+    (
+      manager as unknown as { pooledConnections: Map<string, unknown> }
+    ).pooledConnections.set(
+      'shadow-fail',
+      mkConn('shadow-fail', { id: 'shadow-fail::0' }),
+    );
+    await expect(
+      manager.addRuntimeMcpServer(
+        'shadow-fail',
+        { command: 'bad-shadow-bin' } as MCPServerConfig,
+        'client-11',
+      ),
+    ).rejects.toThrow(McpServerSpawnFailedError);
+
+    // Because shadow-fail was shadowing a settings server and replacing an existing entry,
+    // its budget slot must NOT be released on failed replacement.
+    expect(fakeBudget.release).not.toHaveBeenCalledWith('shadow-fail');
+  });
 });

@@ -3176,8 +3176,19 @@ export class McpClientManager {
           promptRegistry,
           resourceRegistry,
         );
+        const onFailed = (e: import('./mcp-pool-events.js').PoolEvent) => {
+          if (e.kind !== 'failed') return;
+          if (this.pooledConnections.get(name) === conn) {
+            this.pooledConnections.delete(name);
+          }
+          conn.off('event', onFailed);
+        };
+        conn.on('event', onFailed);
         this.pooledConnections.set(name, conn);
-        toolCount = conn.toolsSnapshot.length;
+        toolCount =
+          typeof this.toolRegistry.getToolsByServer === 'function'
+            ? this.toolRegistry.getToolsByServer(name).length
+            : conn.toolsSnapshot.length;
       } else {
         // Standalone mode: create a per-session McpClient
         const sdkCallback = isSdkMcpServerConfig(config)
@@ -3200,16 +3211,21 @@ export class McpClientManager {
           name,
           this.singleSessionConnectedKeyOf(name, config),
         );
+        if (this.healthConfig.autoReconnect) {
+          this.startHealthCheck(name);
+        }
         this.eventEmitter?.emit('mcp-client-update', this.clients);
         toolCount = this.toolRegistry.getToolsByServer(name).length;
       }
     } catch (err) {
-      // Spawn failed — roll back Config overlay + budget reservation
+      // Spawn failed - roll back Config overlay + budget reservation
       this.cliConfig.removeRuntimeMcpServer(name);
-      if (budget) {
-        budget.release(name);
-      } else if (this.budgetMode !== 'off') {
-        this.releaseSlotName(name);
+      if (!shadowedSettings || !replaced) {
+        if (budget) {
+          budget.release(name);
+        } else if (this.budgetMode !== 'off') {
+          this.releaseSlotName(name);
+        }
       }
       // Clean up any partial state (including tools/prompts/resources from a
       // partial discover) so a failed runtime add leaves nothing behind.

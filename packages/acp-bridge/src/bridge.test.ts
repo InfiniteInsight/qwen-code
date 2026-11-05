@@ -43641,4 +43641,65 @@ describe('background handoff cancellation', () => {
       await bridge.shutdown();
     }
   });
+
+  it('folds concurrent restore attachCount when a second restore arrives while persistSessionSource is in flight', async () => {
+    const sourceStarted = deferred<void>();
+    const sourceGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      loadSessionImpl: async () => ({}),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+          sourceStarted.resolve();
+          return sourceGate.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sessionId = '44444444-4444-4444-8444-444444444444';
+      const restore1 = bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'telegram',
+        clientId: 'client-restore-1',
+      });
+      await sourceStarted.promise;
+
+      await expect(
+        bridge.resumeSession({
+          sessionId,
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toThrow(RestoreInProgressError);
+
+      let restore2Settled = false;
+      const restore2 = bridge
+        .loadSession({
+          sessionId,
+          workspaceCwd: WS_A,
+          sourceType: 'telegram',
+          clientId: 'client-restore-2',
+        })
+        .then((res) => {
+          restore2Settled = true;
+          return res;
+        });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(restore2Settled).toBe(false);
+
+      sourceGate.resolve({ persisted: true });
+      const [res1, res2] = await Promise.all([restore1, restore2]);
+      expect(res1.attached).toBe(false);
+      expect(res2.attached).toBe(true);
+      await expect(
+        bridge.killSession(sessionId, { requireZeroAttaches: true }),
+      ).resolves.toBe(false);
+    } finally {
+      sourceGate.resolve({ persisted: true });
+      await bridge.shutdown();
+    }
+  });
 });

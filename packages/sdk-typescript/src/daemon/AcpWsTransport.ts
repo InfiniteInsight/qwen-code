@@ -107,6 +107,7 @@ export class AcpWsTransport implements DaemonTransport {
   /** Cached `initialize` result for `GET /capabilities`. */
   private initResult: unknown = undefined;
   private initPromise: Promise<void> | undefined = undefined;
+  private rejectConnect: ((err: Error) => void) | undefined = undefined;
 
   readonly type = 'acp-ws' as const;
   readonly supportsReplay = false;
@@ -383,6 +384,13 @@ export class AcpWsTransport implements DaemonTransport {
     this._disposed = true;
     this._connected = false;
 
+    // Reject any in-flight pre-open or handshake connect promise.
+    if (this.rejectConnect) {
+      const reject = this.rejectConnect;
+      this.rejectConnect = undefined;
+      reject(new DaemonTransportClosedError());
+    }
+
     // Reject all pending requests.
     for (const [, pending] of this.pending) {
       pending.reject(new DaemonTransportClosedError());
@@ -424,7 +432,23 @@ export class AcpWsTransport implements DaemonTransport {
   }
 
   private async connect(): Promise<void> {
-    return new Promise<void>((resolveConnect, rejectConnect) => {
+    return new Promise<void>((rawResolveConnect, rawRejectConnect) => {
+      let settled = false;
+      const resolveConnect = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(initTimeout);
+        this.rejectConnect = undefined;
+        rawResolveConnect();
+      };
+      const rejectConnect = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(initTimeout);
+        this.rejectConnect = undefined;
+        rawRejectConnect(err);
+      };
+      this.rejectConnect = rejectConnect;
       // Pass token via Authorization header on the upgrade request.
       // Node >=22 supports an options object as the second argument:
       //   new WebSocket(url, { headers: { ... } })
@@ -572,9 +596,9 @@ export class AcpWsTransport implements DaemonTransport {
         }
 
         // If we never connected, reject the connect promise.
-        if (!this._disposed) {
-          rejectConnect(closeError);
-        }
+        rejectConnect(
+          this._disposed ? new DaemonTransportClosedError() : closeError,
+        );
       };
     });
   }

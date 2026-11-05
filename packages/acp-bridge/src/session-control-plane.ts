@@ -9501,8 +9501,6 @@ export function createSessionControlPlane(
       // `coalesceState.count`; later coalescers will hit the byId
       // early-return path instead and increment `entry.attachCount`
       // directly.
-      entry.attachCount += coalesceState.count;
-      coalesceState.folded = true;
       const sourcePersisted = entry.sourceType
         ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
         : undefined;
@@ -9516,13 +9514,11 @@ export function createSessionControlPlane(
             clientId,
           );
         }
-        await rollbackAttachRegistration(
-          entry,
-          clientId,
-          1 + coalesceState.count,
-        );
+        await rollbackAttachRegistration(entry, clientId, 1);
         throw error;
       }
+      entry.attachCount += coalesceState.count;
+      coalesceState.folded = true;
       registeredEntry = entry;
       const restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
         entry,
