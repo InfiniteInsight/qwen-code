@@ -1948,4 +1948,68 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
     expect(host.updates).toEqual([]);
     expect(host.items.filter((item) => item.type === 'error')).toHaveLength(2);
   });
+
+  it('runs UserPromptExpansion hooks for stacked skills and blocks submission when a hook blocks', async () => {
+    const skillA = stub({
+      name: 'skill-a',
+      kind: CommandKind.SKILL,
+      action: () => ({
+        type: 'submit_prompt',
+        content: [{ text: 'skill A prompt' }],
+      }),
+    });
+    const skillB = stub({
+      name: 'skill-b',
+      kind: CommandKind.SKILL,
+      action: () => ({
+        type: 'submit_prompt',
+        content: [{ text: 'skill B prompt' }],
+      }),
+    });
+    const fireUserPromptExpansionEvent = vi.fn(async () => ({
+      getBlockingError: () => ({ blocked: true, reason: 'blocked by policy' }),
+      shouldStopExecution: () => false,
+      getEffectiveReason: () => 'blocked by policy',
+      getAdditionalContext: () => undefined,
+    }));
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      {
+        ...services,
+        config: {
+          getSessionId: () => 'test-session-id',
+          getUsageStatisticsEnabled: () => false,
+          getDisableAllHooks: () => false,
+          hasHooksForEvent: () => true,
+          getHookSystem: () => ({
+            hasHooksForEvent: () => true,
+            fireUserPromptExpansionEvent,
+          }),
+          getInteractiveSubcommandMod: () => undefined,
+          getChatRecordingService: () => undefined,
+        } as unknown as Config,
+      },
+      [skillA, skillB],
+    );
+
+    const outcome = await dispatcher.handle('/skill-a /skill-b extra args');
+
+    expect(fireUserPromptExpansionEvent).toHaveBeenCalledTimes(1);
+    expect(fireUserPromptExpansionEvent).toHaveBeenCalledWith(
+      'skill-a skill-b',
+      'extra args',
+      expect.stringContaining('skill A prompt'),
+      expect.any(AbortSignal),
+    );
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(
+      host.items.some(
+        (item: HistoryItem) =>
+          item.type === 'error' &&
+          'text' in item &&
+          String(item.text).includes('blocked by policy'),
+      ),
+    ).toBe(true);
+  });
 });

@@ -1887,5 +1887,69 @@ describe('Query', () => {
       const messages = await iterationPromise;
       expect(messages.length).toBeGreaterThanOrEqual(2);
     });
+
+    it('should cancel a pending inbound can_use_tool request when control_cancel_request arrives without head-of-line blocking', async () => {
+      let capturedSignal: AbortSignal | undefined;
+      let resolveCanUseTool!: (res: {
+        behavior: 'allow';
+        updatedInput: Record<string, unknown>;
+      }) => void;
+      const canUseTool = vi.fn(
+        (
+          _toolName: string,
+          input: Record<string, unknown>,
+          options: { signal: AbortSignal },
+        ) => {
+          capturedSignal = options.signal;
+          return new Promise<{
+            behavior: 'allow';
+            updatedInput: Record<string, unknown>;
+          }>((resolve) => {
+            resolveCanUseTool = () =>
+              resolve({ behavior: 'allow', updatedInput: input });
+          });
+        },
+      );
+      const query = new Query(transport, {
+        cwd: '/test',
+        canUseTool,
+      });
+
+      await respondToInitialize(transport, query);
+
+      transport.simulateMessage({
+        type: 'control_request',
+        request_id: 'inbound-perm-1',
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          input: { command: 'ls' },
+          permission_suggestions: null,
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(canUseTool).toHaveBeenCalledTimes(1);
+      });
+      expect(capturedSignal?.aborted).toBe(false);
+
+      // While canUseTool is still pending, send control_cancel_request
+      transport.simulateMessage({
+        type: 'control_cancel_request',
+        request_id: 'inbound-perm-1',
+      });
+
+      await vi.waitFor(() => {
+        expect(capturedSignal?.aborted).toBe(true);
+      });
+
+      const writtenBefore = transport.getAllWrittenMessages().length;
+      resolveCanUseTool({ behavior: 'allow', updatedInput: { command: 'ls' } });
+      await new Promise((r) => setTimeout(r, 20));
+      // Cancelled inbound request must not emit a control_response
+      expect(transport.getAllWrittenMessages().length).toBe(writtenBefore);
+
+      await query.close();
+    });
   });
 });

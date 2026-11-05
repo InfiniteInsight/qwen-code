@@ -2935,6 +2935,7 @@ export function createSessionControlPlane(
       (entry.mcpAppCalls?.size ?? 0) > 0 ||
       entry.pendingPromptCount > 0 ||
       entry.pendingAgentNotificationCount > 0 ||
+      entry.sideRequestCount > 0 ||
       !!entry.backgroundTurn
     );
   }
@@ -3934,6 +3935,9 @@ export function createSessionControlPlane(
       ended = true;
       entry.sideRequestCount = Math.max(0, entry.sideRequestCount - 1);
       drainQuarantinedChannelFor(entry);
+      if (entry.sideRequestCount === 0) {
+        void maybeCloseIdleSession(entry, 'side_request_settled');
+      }
     };
   }
 
@@ -15795,8 +15799,12 @@ export function createSessionControlPlane(
           );
           timeoutId.unref();
 
-          const result = await handle.result;
-          clearTimeout(timeoutId);
+          let result: Awaited<typeof handle.result>;
+          try {
+            result = await handle.result;
+          } finally {
+            clearTimeout(timeoutId);
+          }
 
           const exitCode = result.exitCode;
           const aborted = result.aborted;

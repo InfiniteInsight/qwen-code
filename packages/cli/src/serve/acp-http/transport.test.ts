@@ -13449,4 +13449,114 @@ describe('ACP WebSocket transport security', () => {
       },
     });
   });
+
+  it('closes the bound session stream and revokes session ownership on _qwen/session/detach without double-detaching', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    try {
+      await sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {},
+      });
+      const newRes = (await sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { cwd: TEST_WORKSPACE },
+      })) as { result?: { sessionId?: string } };
+      const sessionId = newRes.result?.sessionId ?? 'sess-1';
+      await vi.waitFor(() => {
+        expect(bridge.subscribeSignals.length).toBeGreaterThan(0);
+      });
+      const streamSignal = bridge.subscribeSignals.at(-1)!;
+      expect(streamSignal.aborted).toBe(false);
+
+      const detachRes = await sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: '_qwen/session/detach',
+        params: { sessionId },
+      });
+      expect(detachRes).toMatchObject({ id: 3, result: { ok: true } });
+      expect(streamSignal.aborted).toBe(true);
+      expect(bridge.detached).toHaveLength(1);
+
+      // Subsequent session-owned call on the same connection must fail ownership check
+      const afterDetach = (await sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 4,
+        method: '_qwen/session/recap',
+        params: { sessionId },
+      })) as { error?: { code: number } };
+      expect(afterDetach.error?.code).toBe(-32602);
+    } finally {
+      ws.close();
+      await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    }
+  });
+
+  it('does not head-of-line block session/cancel behind an in-flight _qwen/session/btw request over WebSocket', async () => {
+    let btwStartedResolve!: () => void;
+    const btwStarted = new Promise<void>((resolve) => {
+      btwStartedResolve = resolve;
+    });
+    let btwFinishResolve!: () => void;
+    const btwFinish = new Promise<void>((resolve) => {
+      btwFinishResolve = resolve;
+    });
+    await startServer();
+    bridge.generateSessionBtw = vi.fn(async (sessionId: string) => {
+      btwStartedResolve();
+      await btwFinish;
+      return { sessionId, answer: 'done' };
+    }) as never;
+
+    const ws = await wsConnect();
+    try {
+      await sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {},
+      });
+      const newRes = (await sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { cwd: TEST_WORKSPACE },
+      })) as { result?: { sessionId?: string } };
+      const sessionId = newRes.result?.sessionId ?? 'sess-1';
+
+      // Fire long-running _qwen/session/btw without awaiting its response yet
+      const btwReplyPromise = sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: '_qwen/session/btw',
+        params: { sessionId, question: 'what is happening?' },
+      });
+      await btwStarted;
+
+      // Send session/cancel while _qwen/session/btw is still running
+      ws.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'session/cancel',
+          params: { sessionId },
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.cancelled).toContain(sessionId);
+      });
+
+      btwFinishResolve();
+      await btwReplyPromise;
+    } finally {
+      btwFinishResolve();
+      ws.close();
+      await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    }
+  });
 });

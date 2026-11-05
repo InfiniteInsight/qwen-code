@@ -679,4 +679,87 @@ describe('AcpWsTransport – route mapping used by fetch()', () => {
     expect(params.sessionId).toBe('s5');
     expect(params.title).toBe('new');
   });
+
+  it('subscribeEvents throws DaemonTransportClosedError when WebSocket closes while consumer is processing a yielded event', async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    let activeSocket: {
+      onmessage: ((event: { data: string }) => void) | null;
+      onclose: ((event?: { code?: number; reason?: string }) => void) | null;
+    } | null = null;
+    class FakeWebSocket {
+      static readonly OPEN = 1;
+      readonly readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event?: { code?: number; reason?: string }) => void) | null =
+        null;
+      onerror: (() => void) | null = null;
+      constructor() {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        activeSocket = this;
+        queueMicrotask(() => this.onopen?.());
+      }
+      send(payload: string) {
+        const frame = JSON.parse(payload) as Record<string, unknown>;
+        if (frame['method'] === 'initialize') {
+          queueMicrotask(() =>
+            this.onmessage?.({
+              data: JSON.stringify({
+                jsonrpc: '2.0',
+                id: frame['id'],
+                result: { protocolVersion: 1, agentCapabilities: {} },
+              }),
+            }),
+          );
+        }
+      }
+      close() {
+        this.onclose?.({ code: 1000, reason: 'closed' });
+      }
+    }
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      value: FakeWebSocket,
+    });
+    const transport = new AcpWsTransport('ws://daemon/acp');
+    try {
+      const iter = transport.subscribeEvents('sess-1')[Symbol.asyncIterator]();
+      // Start subscription so it connects and registers the listener
+      const firstNext = iter.next();
+      await vi.waitFor(() => {
+        expect(activeSocket).not.toBeNull();
+        expect(transport.connected).toBe(true);
+      });
+      // Flush microtasks so subscribeEvents resumes past `await ensureConnected()`
+      // and registers its notification listener.
+      await new Promise((r) => setTimeout(r, 0));
+      activeSocket!.onmessage?.({
+        data: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: 'sess-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'chunk-1' },
+            },
+          },
+        }),
+      });
+      const firstResult = await firstNext;
+      expect(firstResult.done).toBe(false);
+
+      // Now close the WebSocket while the generator is suspended at `yield`
+      // (before the consumer calls iter.next() again).
+      activeSocket!.onclose?.({ code: 1006, reason: 'connection lost' });
+
+      await expect(iter.next()).rejects.toThrow(DaemonTransportClosedError);
+    } finally {
+      transport.dispose();
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: originalWebSocket,
+      });
+    }
+  });
 });

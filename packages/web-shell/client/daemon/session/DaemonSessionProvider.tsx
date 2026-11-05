@@ -3862,7 +3862,28 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   restoredPromptSettled = true;
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   if (!cancellingRestoredPrompt) {
+                    const active = activePromptsRef.current.get(
+                      activeSession.sessionId,
+                    );
                     activePromptsRef.current.delete(activeSession.sessionId);
+                    if (active?.resolve) {
+                      active.resolve({ stopReason: 'cancelled' });
+                    } else {
+                      const cancelledPromptId =
+                        eventPromptId(event) ?? active?.promptId;
+                      if (cancelledPromptId) {
+                        settledPromptsRef.current.set(
+                          getPromptSettledKey(
+                            activeSession.sessionId,
+                            cancelledPromptId,
+                          ),
+                          {
+                            status: 'resolved',
+                            result: { stopReason: 'cancelled' },
+                          },
+                        );
+                      }
+                    }
                   }
                   if (!hasSessionActivePrompt()) {
                     setPromptStatus('idle');

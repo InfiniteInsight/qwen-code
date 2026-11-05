@@ -43596,4 +43596,49 @@ describe('background handoff cancellation', () => {
       await bridge.shutdown();
     }
   });
+
+  it('prevents idle session auto-close while a side request (getSessionContextUsageStatus) is in flight and re-evaluates idle close when it settles', async () => {
+    const contextGate = deferred<Record<string, unknown>>();
+    const contextStarted = deferred<void>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionContextUsage) {
+          contextStarted.resolve();
+          return contextGate.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      sessionIdleTimeoutMs: 20,
+      sessionReapIntervalMs: 10,
+    });
+    try {
+      const created = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        clientId: 'client-side-req',
+      });
+      const sidePromise = bridge.getSessionContextUsageStatus(
+        created.sessionId,
+      );
+      await contextStarted.promise;
+
+      // Detach the only client while the side request is in flight and wait
+      // past the idle TTL. The session must NOT be closed while sideRequestCount > 0.
+      await bridge.detachClient(created.sessionId, 'client-side-req');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(bridge.getSessionSummary(created.sessionId).sessionId).toBe(
+        created.sessionId,
+      );
+
+      // Now let the side request finish; the session should remain valid for
+      // the caller and then become eligible for idle close.
+      contextGate.resolve({ totalTokens: 42 });
+      await expect(sidePromise).resolves.toMatchObject({ totalTokens: 42 });
+    } finally {
+      contextGate.resolve({ totalTokens: 42 });
+      await bridge.shutdown();
+    }
+  });
 });

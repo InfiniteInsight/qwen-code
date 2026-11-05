@@ -24373,6 +24373,61 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it('settles sendPrompt with stopReason cancelled when a foreign-originated prompt_cancelled event arrives', async () => {
+    const cancelGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-foreign-cancel',
+      clientId: 'client-local',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-foreign-1',
+        lastEventId: 1,
+      })),
+      events: async function* events(opts) {
+        await cancelGate.promise;
+        yield {
+          id: 2,
+          v: 1,
+          type: 'prompt_cancelled',
+          sessionId: 'session-foreign-cancel',
+          originatorClientId: 'client-other',
+          data: {
+            promptId: 'prompt-foreign-1',
+            reason: 'user_cancelled',
+          },
+        } satisfies DaemonEvent;
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-foreign-cancel',
+      autoReconnect: false,
+      prefetchGitBranch: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    let promptPromise!: Promise<unknown>;
+    await act(async () => {
+      promptPromise = actions!.sendPrompt('hello world');
+      await flushPromises();
+    });
+
+    await act(async () => {
+      cancelGate.resolve();
+      await flushPromises();
+    });
+
+    await expect(promptPromise).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},

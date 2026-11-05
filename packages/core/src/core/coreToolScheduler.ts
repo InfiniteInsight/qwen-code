@@ -1861,6 +1861,7 @@ export class CoreToolScheduler {
       resolve: (result: CodeModeToolResult) => void;
       reject: (reason: unknown) => void;
       onResult?: (response: ToolCallResponseInfo) => void;
+      cleanupAbort?: () => void;
     }
   >();
 
@@ -1889,6 +1890,7 @@ export class CoreToolScheduler {
           const resolver = this.nestedResolvers.get(call.request.callId);
           if (!resolver) continue;
           this.nestedResolvers.delete(call.request.callId);
+          resolver.cleanupAbort?.();
           try {
             resolver.onResult?.(call.response);
           } catch (error) {
@@ -1998,6 +2000,8 @@ export class CoreToolScheduler {
         resolve: entry.resolve,
         reject: entry.reject,
         onResult: entry.onResult,
+        cleanupAbort: () =>
+          entry.signal.removeEventListener('abort', abortBatch),
       });
     }
     void runWithoutToolCallRuntime(() =>
@@ -2005,18 +2009,13 @@ export class CoreToolScheduler {
         active.map((entry) => entry.request),
         batchController.signal,
       ),
-    )
-      .catch((error) => {
-        for (const entry of active) {
-          this.nestedResolvers.delete(entry.request.callId);
-          entry.reject(error);
-        }
-      })
-      .finally(() => {
-        for (const entry of active) {
-          entry.signal.removeEventListener('abort', abortBatch);
-        }
-      });
+    ).catch((error) => {
+      for (const entry of active) {
+        entry.signal.removeEventListener('abort', abortBatch);
+        this.nestedResolvers.delete(entry.request.callId);
+        entry.reject(error);
+      }
+    });
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -2091,6 +2090,21 @@ export class CoreToolScheduler {
     };
   }
 
+  private recordInvocationRelease(
+    callId: string,
+    release: () => void | Promise<void>,
+  ): void {
+    const previous = this.invocationReleases.get(callId) ?? Promise.resolve();
+    this.invocationReleases.set(
+      callId,
+      previous
+        .then(() => release())
+        .catch((error: unknown) => {
+          debugLogger.warn('Tool invocation resource cleanup failed:', error);
+        }),
+    );
+  }
+
   private setStatusInternal(
     targetCallId: string,
     status: 'success',
@@ -2148,17 +2162,7 @@ export class CoreToolScheduler {
           newStatus === 'error' ||
           newStatus === 'cancelled')
       ) {
-        this.invocationReleases.set(
-          targetCallId,
-          Promise.resolve()
-            .then(() => invocation.release!())
-            .catch((error: unknown) => {
-              debugLogger.warn(
-                'Tool invocation resource cleanup failed:',
-                error,
-              );
-            }),
-        );
+        this.recordInvocationRelease(targetCallId, () => invocation.release!());
       }
 
       const outcome = currentCall.outcome;
@@ -2349,16 +2353,8 @@ export class CoreToolScheduler {
       );
       if (invocationOrError instanceof Error) {
         if (call.invocation?.release) {
-          this.invocationReleases.set(
-            targetCallId,
-            Promise.resolve()
-              .then(() => call.invocation.release!())
-              .catch((error: unknown) => {
-                debugLogger.warn(
-                  'Tool invocation resource cleanup failed:',
-                  error,
-                );
-              }),
+          this.recordInvocationRelease(targetCallId, () =>
+            call.invocation.release!(),
           );
         }
         invocationError = invocationOrError;
@@ -2374,6 +2370,12 @@ export class CoreToolScheduler {
           tool: call.tool,
           response,
         } as ErroredToolCall;
+      }
+
+      if (call.invocation?.release && call.invocation !== invocationOrError) {
+        this.recordInvocationRelease(targetCallId, () =>
+          call.invocation.release!(),
+        );
       }
 
       argsUpdated = true;
@@ -7919,6 +7921,51 @@ export class CoreToolScheduler {
         ) {
           continue;
         }
+        const modToolCheck = this.schedulerOptions.modToolCheck;
+        if (modToolCheck) {
+          const decision = await runInRequestGoalContext(
+            pendingTool.request,
+            () =>
+              modToolCheck(
+                {
+                  tool: canonicalName,
+                  input: structuredClone(toolParams),
+                  tool_use_id: pendingTool.request.callId,
+                },
+                {
+                  decision:
+                    flowResult.finalPermission === 'default'
+                      ? 'ask'
+                      : flowResult.finalPermission,
+                  ...(flowResult.denyMessage
+                    ? { reason: flowResult.denyMessage }
+                    : {}),
+                },
+                signal,
+              ),
+          );
+          if (
+            this.cancelPreExecutionIfAborted(pendingTool.request.callId, signal)
+          ) {
+            continue;
+          }
+          if (!['allow', 'ask', 'deny'].includes(decision.decision)) {
+            throw new Error('Invalid Mod tool.check decision.');
+          }
+          if (flowResult.finalPermission !== 'deny') {
+            if (decision.decision === 'deny') {
+              flowResult.finalPermission = 'deny';
+              flowResult.denyMessage =
+                decision.reason?.trim() ||
+                `Tool "${pendingTool.request.name}" is denied by a Mod.`;
+            } else if (
+              decision.decision === 'ask' &&
+              flowResult.finalPermission === 'allow'
+            ) {
+              flowResult.finalPermission = 'ask';
+            }
+          }
+        }
         const { finalPermission, pmForcedAsk, pmCtx, requiresUserInteraction } =
           flowResult;
 
@@ -8107,8 +8154,19 @@ export class CoreToolScheduler {
           finalPermission,
           forceAutoReviewForAllow,
         );
+        const isPlanBlockedOrShell =
+          isPlanModeBlocked(
+            approvalMode === ApprovalMode.PLAN,
+            canonicalName === ToolNames.EXIT_PLAN_MODE,
+            canonicalName === ToolNames.ASK_USER_QUESTION,
+            pendingTool.confirmationDetails,
+            canonicalName === ToolNames.ENTER_PLAN_MODE,
+          ) ||
+          (approvalMode === ApprovalMode.PLAN &&
+            (canonicalName === ToolNames.SHELL ||
+              canonicalName === ToolNames.MONITOR));
         if (
-          finalPermission === 'allow' ||
+          (finalPermission === 'allow' && !isPlanBlockedOrShell) ||
           (finalPermission !== 'deny' &&
             !pmForcedAsk &&
             (!needsConfirmation(

@@ -886,7 +886,7 @@ export class AcpConnection {
     binding.graceTimer.unref?.();
   }
 
-  closeSessionStream(sessionId: string): void {
+  closeSessionStream(sessionId: string, notifyDetach = true): void {
     const binding = this.sessions.get(sessionId);
     this.sessions.delete(sessionId);
     this.ownedSessions.delete(sessionId);
@@ -898,7 +898,7 @@ export class AcpConnection {
       }
     }
     if (!binding) return;
-    this.teardownBinding(binding);
+    this.teardownBinding(binding, notifyDetach);
   }
 
   destroy(reason?: TransportCloseReason): void {
@@ -932,7 +932,7 @@ export class AcpConnection {
     this.pending.clear();
   }
 
-  private teardownBinding(binding: SessionBinding): void {
+  private teardownBinding(binding: SessionBinding, notifyDetach = true): void {
     if (binding.graceTimer) {
       clearTimeout(binding.graceTimer);
       binding.graceTimer = undefined;
@@ -953,7 +953,9 @@ export class AcpConnection {
       binding.stream.close();
     }
     this.abandonPendingForSession(binding.sessionId, binding.clientId);
-    this.onDetachSession?.(binding.sessionId, binding.clientId);
+    if (notifyDetach) {
+      this.onDetachSession?.(binding.sessionId, binding.clientId);
+    }
   }
 
   private sendLive(

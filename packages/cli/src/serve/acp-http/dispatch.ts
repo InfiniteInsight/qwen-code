@@ -4099,6 +4099,7 @@ export class AcpDispatcher {
             const ctx = this.sessionCtx(conn, sessionId, loopback);
             await this.bridge.detachClient(sessionId, ctx.clientId);
             this.replyConn(conn, id, { ok: true });
+            conn.closeSessionStream(sessionId, false);
           });
           return;
         }

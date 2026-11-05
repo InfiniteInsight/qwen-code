@@ -2129,8 +2129,14 @@ export async function connectToMcpServer(
     };
   });
 
-  let unlistenDirectories: Unsubscribe | undefined =
-    workspaceContext.onDirectoriesChanged(async () => {
+  let unlistenDirectories: Unsubscribe | undefined;
+  const clearDirectoriesListener = () => {
+    unlistenDirectories?.();
+    unlistenDirectories = undefined;
+  };
+  const registerDirectoriesListener = () => {
+    clearDirectoriesListener();
+    unlistenDirectories = workspaceContext.onDirectoriesChanged(async () => {
       try {
         await mcpClient.notification({
           method: 'notifications/roots/list_changed',
@@ -2138,10 +2144,11 @@ export async function connectToMcpServer(
       } catch (_) {
         // If this fails, its almost certainly because the connection was closed
         // and we should just stop listening for future directory changes.
-        unlistenDirectories?.();
-        unlistenDirectories = undefined;
+        clearDirectoriesListener();
       }
     });
+  };
+  registerDirectoriesListener();
 
   // Attempt to pro-actively unsubscribe if the mcp client closes. This API is
   // very brittle though so we don't have any guarantees, hence the try/catch
@@ -2151,8 +2158,7 @@ export async function connectToMcpServer(
   const oldOnClose = mcpClient.onclose;
   mcpClient.onclose = () => {
     oldOnClose?.();
-    unlistenDirectories?.();
-    unlistenDirectories = undefined;
+    clearDirectoriesListener();
   };
 
   // Snapshot credentials before createTransport. Its internal getValidToken
@@ -2193,14 +2199,12 @@ export async function connectToMcpServer(
       clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
       return mcpClient;
     } catch (error) {
-      unlistenDirectories?.();
-      unlistenDirectories = undefined;
+      clearDirectoriesListener();
       await transport.close();
       throw error;
     }
   } catch (error) {
-    unlistenDirectories?.();
-    unlistenDirectories = undefined;
+    clearDirectoriesListener();
     const requiresOAuth = await probeMcpServerForOAuth(
       mcpServerName,
       mcpServerConfig,
@@ -2296,10 +2300,14 @@ export async function connectToMcpServer(
                     timeout:
                       mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                   });
+                  bindInvocationContextPolicy(mcpClient, oauthTransport);
+                  registerDirectoriesListener();
                   // Connection successful with OAuth
                   clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
                   return mcpClient;
                 } catch (retryError) {
+                  clearDirectoriesListener();
+                  await oauthTransport.close().catch(() => {});
                   debugLogger.error(
                     `Failed to connect with OAuth token: ${getErrorMessage(
                       retryError,
@@ -2427,10 +2435,14 @@ export async function connectToMcpServer(
                       timeout:
                         mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                     });
+                    bindInvocationContextPolicy(mcpClient, oauthTransport);
+                    registerDirectoriesListener();
                     // Connection successful with OAuth
                     clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
                     return mcpClient;
                   } catch (retryError) {
+                    clearDirectoriesListener();
+                    await oauthTransport.close().catch(() => {});
                     debugLogger.error(
                       `Failed to connect with OAuth token: ${getErrorMessage(
                         retryError,

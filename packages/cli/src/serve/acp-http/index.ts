@@ -2524,13 +2524,17 @@ export function mountAcpHttp(
             }
           }
 
-          // Prompt is long-running (minutes); awaiting it would block
-          // permission votes and cancel requests queued behind it → deadlock.
-          // Fire-and-forget so the message queue stays unblocked.
-          const isPrompt =
+          // Prompt and long-running side requests (shell, btw, recap) can run
+          // for minutes; awaiting them would block permission votes and cancel
+          // requests queued behind them -> deadlock. Fire-and-forget so the
+          // message queue stays unblocked.
+          const isLongRunningRpc =
             isRequest(message) &&
             (message.method === 'session/prompt' ||
-              message.method === '_qwen/session/prompt');
+              message.method === '_qwen/session/prompt' ||
+              message.method === '_qwen/session/shell' ||
+              message.method === '_qwen/session/btw' ||
+              message.method === '_qwen/session/recap');
           const dispatchP = activeMount.dispatcher
             .handle(conn, message, undefined, fromLoopback)
             .catch((err: unknown) => {
@@ -2538,7 +2542,7 @@ export function mountAcpHttp(
                 `qwen serve: ${activeMount.routeLabel} WS handle error: ${err instanceof Error ? err.message : String(err)}`,
               );
             });
-          if (!isPrompt) await dispatchP;
+          if (!isLongRunningRpc) await dispatchP;
         }
       });
     };

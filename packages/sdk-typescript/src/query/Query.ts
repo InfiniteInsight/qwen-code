@@ -100,6 +100,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private abortController: AbortController;
   private pendingControlRequests: Map<string, PendingControlRequest> =
     new Map();
+  private inboundControlRequests: Map<string, AbortController> = new Map();
   private pendingMcpResponses: Map<string, PendingMcpResponse> = new Map();
   private sdkMcpTransports: Map<string, SdkControlServerTransport> = new Map();
   private sdkMcpServers: Map<string, McpServer> = new Map();
@@ -393,7 +394,10 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   private async routeMessage(message: unknown): Promise<void> {
     if (isControlRequest(message)) {
-      await this.handleControlRequest(message);
+      // Do not await inbound control requests on the message-router loop:
+      // a pending can_use_tool or mcp_message handler must not head-of-line
+      // block subsequent control_cancel_request or control_response frames.
+      void this.handleControlRequest(message);
       return;
     }
 
@@ -476,6 +480,11 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
     this.pendingControlRequests.clear();
 
+    for (const inbound of this.inboundControlRequests.values()) {
+      inbound.abort();
+    }
+    this.inboundControlRequests.clear();
+
     for (const pending of this.pendingMcpResponses.values()) {
       pending.reject(rejectionError);
     }
@@ -500,6 +509,7 @@ export class Query implements AsyncIterable<SDKMessage> {
 
     logger.debug(`Handling control request: ${payload.subtype}`);
     const requestAbortController = new AbortController();
+    this.inboundControlRequests.set(request_id, requestAbortController);
 
     try {
       let response: Record<string, unknown> | null = null;
@@ -527,12 +537,20 @@ export class Query implements AsyncIterable<SDKMessage> {
           );
       }
 
+      if (requestAbortController.signal.aborted) {
+        return;
+      }
       await this.sendControlResponse(request_id, true, response);
     } catch (error) {
+      if (requestAbortController.signal.aborted) {
+        return;
+      }
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       logger.error(`Control request error (${payload.subtype}):`, errorMessage);
       await this.sendControlResponse(request_id, false, errorMessage);
+    } finally {
+      this.inboundControlRequests.delete(request_id);
     }
   }
 
@@ -727,6 +745,13 @@ export class Query implements AsyncIterable<SDKMessage> {
       return;
     }
 
+    const inbound = this.inboundControlRequests.get(request_id);
+    if (inbound) {
+      logger.debug(`Cancelling inbound control request: ${request_id}`);
+      inbound.abort();
+      this.inboundControlRequests.delete(request_id);
+    }
+
     const pending = this.pendingControlRequests.get(request_id);
     if (pending) {
       logger.debug(`Cancelling control request: ${request_id}`);
@@ -861,6 +886,11 @@ export class Query implements AsyncIterable<SDKMessage> {
       pending.reject(rejectionError);
     }
     this.pendingControlRequests.clear();
+
+    for (const inbound of this.inboundControlRequests.values()) {
+      inbound.abort();
+    }
+    this.inboundControlRequests.clear();
 
     // Clean up pending MCP responses
     for (const pending of this.pendingMcpResponses.values()) {

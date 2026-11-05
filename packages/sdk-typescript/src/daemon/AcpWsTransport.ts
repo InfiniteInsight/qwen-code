@@ -317,9 +317,17 @@ export class AcpWsTransport implements DaemonTransport {
 
     this.notificationListeners.add(listener);
 
-    // Wire abort to cleanup.
-    const onAbort = () => {
+    // Wire caller abort to clean exit, and transport close (genAbort) to wake
+    // the loop without setting done=true so it throws DaemonTransportClosedError.
+    const onCallerAbort = () => {
       done = true;
+      this.notificationListeners.delete(listener);
+      if (resolve) {
+        resolve();
+        resolve = null;
+      }
+    };
+    const onTransportClose = () => {
       this.notificationListeners.delete(listener);
       if (resolve) {
         resolve();
@@ -328,14 +336,14 @@ export class AcpWsTransport implements DaemonTransport {
     };
     if (opts.signal) {
       if (opts.signal.aborted) {
-        onAbort();
+        onCallerAbort();
         this._activeGenerators.delete(genAbort);
         return;
       }
-      opts.signal.addEventListener('abort', onAbort, { once: true });
+      opts.signal.addEventListener('abort', onCallerAbort, { once: true });
     }
     // Also wire the generator-level abort (fired on WS close).
-    genAbort.signal.addEventListener('abort', onAbort, { once: true });
+    genAbort.signal.addEventListener('abort', onTransportClose, { once: true });
 
     try {
       while (!done && !this._disposed) {
@@ -364,9 +372,9 @@ export class AcpWsTransport implements DaemonTransport {
       this._activeGenerators.delete(genAbort);
       this.notificationListeners.delete(listener);
       if (opts.signal) {
-        opts.signal.removeEventListener('abort', onAbort);
+        opts.signal.removeEventListener('abort', onCallerAbort);
       }
-      genAbort.signal.removeEventListener('abort', onAbort);
+      genAbort.signal.removeEventListener('abort', onTransportClose);
     }
   }
 

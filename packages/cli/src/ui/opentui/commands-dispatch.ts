@@ -591,9 +591,23 @@ export class OpenTuiSlashDispatcher {
         let firstModelOverride: string | undefined;
         const onCompleteCallbacks: Array<() => Promise<void>> = [];
         let refreshContextFilesOnWrite = false;
+        const skillOutcomes: Array<{
+          skill: SlashCommand;
+          succeeded: boolean;
+        }> = [];
+        const abortPromise = new Promise<undefined>((resolve) => {
+          abortController.signal.addEventListener(
+            'abort',
+            () => resolve(undefined),
+            { once: true },
+          );
+        });
 
         for (const skill of stackedResult.skills) {
           if (!skill.action) continue;
+          if (abortController.signal.aborted) {
+            return { kind: 'handled' };
+          }
           const skillContext: CommandContext = {
             invocation: {
               raw: `/${skill.name}`,
@@ -607,7 +621,13 @@ export class OpenTuiSlashDispatcher {
             },
           } as unknown as CommandContext;
 
-          const skillResult = await skill.action(skillContext, '');
+          const skillResult = await Promise.race([
+            skill.action(skillContext, ''),
+            abortPromise,
+          ]);
+          if (abortController.signal.aborted) {
+            return { kind: 'handled' };
+          }
           if (skillResult?.type === 'submit_prompt') {
             combinedContent.push(skillResult.content);
             firstModelOverride ??= skillResult.modelOverride;
@@ -628,20 +648,22 @@ export class OpenTuiSlashDispatcher {
             });
           }
 
-          if (this.services.config) {
-            const succeeded = skillResult?.type === 'submit_prompt';
-            recordSkillInvocation(this.services.config, {
-              skillName: skill.skillDetail?.name ?? skill.name,
-              success: succeeded,
-            });
-            if (succeeded) {
-              void recordAutoSkillCommandUsage(this.services.config, skill);
-            }
-          }
+          skillOutcomes.push({
+            skill,
+            succeeded: skillResult?.type === 'submit_prompt',
+          });
         }
 
         if (combinedContent.length === 0) {
           hasError = true;
+          if (this.services.config) {
+            for (const { skill, succeeded } of skillOutcomes) {
+              recordSkillInvocation(this.services.config, {
+                skillName: skill.skillDetail?.name ?? skill.name,
+                success: succeeded,
+              });
+            }
+          }
           return { kind: 'handled' };
         }
 
@@ -657,12 +679,65 @@ export class OpenTuiSlashDispatcher {
           });
         }
 
+        let mergedContent: PartListUnion = combinedContent.flat();
+        const output = hasUserPromptExpansionHooks(this.services)
+          ? await this.services.config
+              ?.getHookSystem()
+              ?.fireUserPromptExpansionEvent(
+                stackedResult.skills.map((s) => s.name).join(' '),
+                stackedResult.remainingText,
+                serializeUserPromptExpansionPrompt(mergedContent),
+                abortController.signal,
+              )
+          : undefined;
+        if (abortController.signal.aborted) {
+          hasError = true;
+          return { kind: 'handled' };
+        }
+        if (output) {
+          const blockingError = output.getBlockingError();
+          if (blockingError.blocked || output.shouldStopExecution()) {
+            hasError = true;
+            if (this.services.config) {
+              for (const { skill } of skillOutcomes) {
+                recordSkillInvocation(this.services.config, {
+                  skillName: skill.skillDetail?.name ?? skill.name,
+                  success: false,
+                });
+              }
+            }
+            this.addMessage({
+              type: MessageType.ERROR,
+              content: formatUserPromptExpansionBlockedMessage(
+                blockingError.reason || output.getEffectiveReason(),
+              ),
+              timestamp: new Date(),
+            });
+            return { kind: 'handled' };
+          }
+          mergedContent = appendUserPromptExpansionAdditionalContext(
+            mergedContent,
+            output.getAdditionalContext(),
+          );
+        }
+
+        if (this.services.config) {
+          for (const { skill, succeeded } of skillOutcomes) {
+            recordSkillInvocation(this.services.config, {
+              skillName: skill.skillDetail?.name ?? skill.name,
+              success: succeeded,
+            });
+            if (succeeded) {
+              void recordAutoSkillCommandUsage(this.services.config, skill);
+            }
+          }
+        }
+
         invocationSentToModel = true;
         if (invocationItemId !== undefined) {
           this.host.updateItem(invocationItemId, { sentToModel: true });
         }
 
-        const mergedContent: PartListUnion = combinedContent.flat();
         return {
           kind: 'submit_prompt',
           content: mergedContent,

@@ -674,6 +674,47 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       });
     });
 
+    it('re-subscribes workspace directory change listener and closes oauthTransport if OAuth retry connect fails', async () => {
+      const unlistenInitial = vi.fn();
+      const unlistenRetry = vi.fn();
+      let dirCallback: (() => Promise<void>) | undefined;
+      const ws = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi
+          .fn()
+          .mockImplementationOnce((cb: () => Promise<void>) => {
+            dirCallback = cb;
+            return unlistenInitial;
+          })
+          .mockImplementationOnce((cb: () => Promise<void>) => {
+            dirCallback = cb;
+            return unlistenRetry;
+          }),
+      } as unknown as WorkspaceContext;
+
+      const { connect } = setupHttpOAuthRetry(
+        new Error(
+          'Streamable HTTP error: Error POSTing to endpoint: {"error":"unauthorized"}',
+        ),
+      );
+      stubGlobalFetch(401);
+
+      const client = await connectToMcpServer(
+        'http-server',
+        { httpUrl: 'http://test-server/mcp' },
+        false,
+        ws,
+      );
+      expect(client).toBeDefined();
+      expect(unlistenInitial).toHaveBeenCalledTimes(1);
+      expect(ws.onDirectoriesChanged).toHaveBeenCalledTimes(2);
+      await dirCallback?.();
+      expect(client.notification).toHaveBeenCalledWith({
+        method: 'notifications/roots/list_changed',
+      });
+      expect(connect).toHaveBeenCalledTimes(2);
+    });
+
     it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {
       const { authenticate, connect, discoverOAuthConfig } =
         setupHttpOAuthRetry(

@@ -15211,4 +15211,187 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       'non_interactive_denied',
     );
   });
+
+  it('keeps the abort listener attached for a nested Code Mode tool while it is awaiting_approval so parent abort cancels the nested tool', async () => {
+    const nestedTool = new MockTool({
+      name: 'nested_ask_tool',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const { scheduler } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(nestedTool), {
+        ...INTERACTIVE_CLI,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      }),
+    );
+
+    const parentSignalController = new AbortController();
+    const parentRequest = toolRequest(
+      'parent-exec-1',
+      'exec',
+      {},
+      'prompt-nested-abort',
+    );
+    parentRequest.codeModeAllowedToolNames = ['nested_ask_tool'];
+
+    const dispatchPromise = (
+      scheduler as unknown as {
+        dispatchCodeModeTool: (
+          name: string,
+          args: Record<string, unknown>,
+          parent: ToolCallRequestInfo,
+          signal: AbortSignal,
+        ) => Promise<unknown>;
+      }
+    ).dispatchCodeModeTool(
+      'nested_ask_tool',
+      { x: 1 },
+      parentRequest,
+      parentSignalController.signal,
+    );
+
+    // Wait for flushNestedQueue to schedule the nested call into awaiting_approval
+    await vi.waitFor(() => {
+      const nestedCalls = (
+        scheduler as unknown as { nestedToolCalls: ToolCall[] }
+      ).nestedToolCalls;
+      expect(nestedCalls.some((c) => c.status === 'awaiting_approval')).toBe(
+        true,
+      );
+    });
+
+    // Abort the parent signal while the nested tool is still awaiting_approval
+    parentSignalController.abort(new Error('parent exec cancelled'));
+
+    await expect(dispatchPromise).rejects.toThrow();
+  });
+
+  it('respects modToolCheck when autoApproveCompatiblePendingTools re-evaluates sibling pending tools', async () => {
+    const toolA = new MockTool({
+      name: 'sibling_tool_a',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const toolB = new MockTool({
+      name: 'sibling_tool_b',
+      getDefaultPermission: async () => 'allow',
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const modToolCheck = vi.fn(async (input: { tool: string }) => {
+      if (input.tool === 'sibling_tool_b') {
+        return { decision: 'ask' as const };
+      }
+      return { decision: 'allow' as const };
+    });
+
+    const toolsByName = toolMap(toolA, toolB);
+    const config = makeSchedulerConfig(
+      makeToolRegistry(undefined, {
+        getTool: (name: string) => toolsByName.get(name),
+        ensureTool: async (name: string) => toolsByName.get(name),
+        getToolByName: (name: string) => toolsByName.get(name),
+      }),
+      {
+        ...INTERACTIVE_CLI,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      },
+    );
+    const onToolCallsUpdate = vi.fn();
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onToolCallsUpdate,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+      modToolCheck,
+    });
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('call-a', 'sibling_tool_a', {}, 'p1'),
+      toolRequest('call-b', 'sibling_tool_b', {}, 'p1'),
+    );
+
+    await vi.waitFor(() => {
+      const waiting = (
+        onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[] | undefined
+      )?.filter((c) => c.status === 'awaiting_approval');
+      expect(waiting).toHaveLength(2);
+    });
+
+    const callA = (
+      onToolCallsUpdate.mock.calls.at(-1)?.[0] as WaitingToolCall[]
+    ).find((c) => c.request.callId === 'call-a')!;
+    await callA.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlways,
+    );
+
+    // call-b was escalated to 'ask' by modToolCheck, so autoApproveCompatiblePendingTools
+    // must keep it in awaiting_approval rather than auto-approving it.
+    const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
+    const callB = latestCalls.find((c) => c.request.callId === 'call-b');
+    expect(callB?.status).toBe('awaiting_approval');
+  });
+
+  it('releases the replaced invocation when setArgsInternal rebuilds an invocation', async () => {
+    const released: string[] = [];
+    let buildCount = 0;
+    class ReleasableTool extends MockTool {
+      override build(params: Record<string, unknown>) {
+        const id = `inv-${++buildCount}`;
+        const base = super.build(params);
+        return Object.assign(base, {
+          release: vi.fn(async () => {
+            released.push(id);
+          }),
+        });
+      }
+    }
+    const tool = new ReleasableTool({
+      name: 'releasable_tool',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+      schedulerWithCallbacks(
+        makeSchedulerConfig(makeToolRegistry(tool), {
+          ...INTERACTIVE_CLI,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+        }),
+      );
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('call-rel', 'releasable_tool', { v: 1 }, 'p-rel'),
+    );
+
+    await vi.waitFor(() => {
+      const calls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      expect(calls?.[0]?.status).toBe('awaiting_approval');
+    });
+
+    // Replace args via setArgsInternal before confirming
+    const updated = (
+      scheduler as unknown as {
+        setArgsInternal: (callId: string, args: unknown) => boolean;
+      }
+    ).setArgsInternal('call-rel', { v: 2 });
+    expect(updated).toBe(true);
+
+    const waiting = (
+      onToolCallsUpdate.mock.calls.at(-1)?.[0] as WaitingToolCall[]
+    )[0];
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(released).toEqual(['inv-1', 'inv-2']);
+  });
 });
