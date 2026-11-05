@@ -247,7 +247,7 @@ export function useDaemonStream(
   const lossRef = useRef(loss);
   lossRef.current = loss;
   const goneRef = useRef(false);
-  const pendingClearTurnsRef = useRef(0);
+  const pendingClearTokensRef = useRef(new Set<symbol>());
   // The driver whose replay snapshot has been committed. A ref (not state) so
   // StrictMode's effect re-run on the same instance sees it and never seeds a
   // second copy of the transcript.
@@ -273,21 +273,18 @@ export function useDaemonStream(
   // event loop and the prompt()-resolution finalizer.
   const applyFrame = useCallback(
     (frame: DaemonFrame) => {
-      if (pendingClearTurnsRef.current > 0) {
+      if (pendingClearTokensRef.current.size > 0) {
         const update = (
           frame.data as {
             update?: {
               sessionUpdate?: string;
-              content?: { text?: unknown };
             };
           }
         )?.update;
         const suKind = update?.sessionUpdate;
         if (
           frame.type === 'session_update' &&
-          (suKind === 'user_message_chunk' ||
-            (suKind === 'agent_message_chunk' &&
-              update?.content?.text === 'Conversation cleared.'))
+          (suKind === 'user_message_chunk' || suKind === 'agent_message_chunk')
         ) {
           if (typeof frame.id === 'number') {
             stateRef.current = {
@@ -301,10 +298,12 @@ export function useDaemonStream(
           return;
         }
         if (frame.type === 'turn_complete' || frame.type === 'turn_error') {
-          pendingClearTurnsRef.current = Math.max(
-            0,
-            pendingClearTurnsRef.current - 1,
-          );
+          const oldestToken = pendingClearTokensRef.current
+            .values()
+            .next().value;
+          if (oldestToken !== undefined) {
+            pendingClearTokensRef.current.delete(oldestToken);
+          }
           if (typeof frame.id === 'number') {
             stateRef.current = {
               ...stateRef.current,
@@ -345,18 +344,24 @@ export function useDaemonStream(
   );
 
   const clearRemoteSession = useCallback(async () => {
-    pendingClearTurnsRef.current += 1;
+    const clearToken = Symbol('clear');
+    pendingClearTokensRef.current.add(clearToken);
     try {
       await driver.prompt({
         prompt: [{ type: 'text', text: '/clear' }],
       });
-    } catch (err) {
-      pendingClearTurnsRef.current = Math.max(
-        0,
-        pendingClearTurnsRef.current - 1,
-      );
-      throw err;
+      // Allow queued SSE frames from the /clear turn to drain through the
+      // async generator before cleaning up the token for 0.17.x daemons that
+      // omit `turn_complete` SSE frames.
+      for (
+        let i = 0;
+        i < 4 && pendingClearTokensRef.current.has(clearToken);
+        i++
+      ) {
+        await Promise.resolve();
+      }
     } finally {
+      pendingClearTokensRef.current.delete(clearToken);
       clearPendingState();
     }
   }, [driver, clearPendingState]);
@@ -518,7 +523,7 @@ export function useDaemonStream(
 
   const submitQuery = useCallback(
     async (query: string) => {
-      pendingClearTurnsRef.current = 0;
+      pendingClearTokensRef.current.clear();
       if (
         stateRef.current.pendingText.length > 0 ||
         stateRef.current.tools.length > 0

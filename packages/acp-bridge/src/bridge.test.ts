@@ -43560,4 +43560,40 @@ describe('background handoff cancellation', () => {
       await bridge.shutdown();
     }
   });
+
+  it('cleans up the session entry if the channel closes while persistSessionSource is awaiting during loadSession', async () => {
+    const sourcePersistGate = deferred<Record<string, unknown>>();
+    const sourcePersistStarted = deferred<void>();
+    const handle = makeChannel({
+      loadSessionImpl: async () => ({
+        models: { currentModelId: 'qwen3-coder-plus', availableModels: [] },
+        modes: { currentModeId: 'default', availableModes: [] },
+      }),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+          sourcePersistStarted.resolve();
+          return sourcePersistGate.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const loadPromise = bridge.loadSession({
+        sessionId: 'sess-close-during-source-persist',
+        workspaceCwd: WS_A,
+        sourceType: 'telegram',
+      });
+      await sourcePersistStarted.promise;
+      await bridge.closeSession('sess-close-during-source-persist');
+      sourcePersistGate.resolve({ persisted: true });
+      await expect(loadPromise).rejects.toThrow();
+      expect(() =>
+        bridge.getSessionSummary('sess-close-during-source-persist'),
+      ).toThrow();
+    } finally {
+      sourcePersistGate.resolve({ persisted: true });
+      await bridge.shutdown();
+    }
+  });
 });

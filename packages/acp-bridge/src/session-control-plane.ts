@@ -9311,16 +9311,6 @@ export function createSessionControlPlane(
             throw error;
           }
         }
-        let restorePromptAdmitted = false;
-        if (options.deferRestorePrompt !== true) {
-          restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
-            racedEntry,
-            restoreAskUserQuestionHint,
-            req.clientId,
-            clientId,
-            options,
-          );
-        }
         const sourcePersisted = await applyRestoreSourceIfMissing(
           racedEntry,
           req,
@@ -9342,15 +9332,13 @@ export function createSessionControlPlane(
           );
           throw error;
         }
-        if (options.deferRestorePrompt === true) {
-          restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
-            racedEntry,
-            restoreAskUserQuestionHint,
-            req.clientId,
-            clientId,
-            options,
-          );
-        }
+        const restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+          racedEntry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -9511,17 +9499,6 @@ export function createSessionControlPlane(
       // directly.
       entry.attachCount += coalesceState.count;
       coalesceState.folded = true;
-      registeredEntry = entry;
-      let restorePromptAdmitted = false;
-      if (options.deferRestorePrompt !== true) {
-        restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
-          entry,
-          restoreAskUserQuestionHint,
-          req.clientId,
-          clientId,
-          options,
-        );
-      }
       const sourcePersisted = entry.sourceType
         ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
         : undefined;
@@ -9542,15 +9519,14 @@ export function createSessionControlPlane(
         );
         throw error;
       }
-      if (options.deferRestorePrompt === true) {
-        restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
-          entry,
-          restoreAskUserQuestionHint,
-          req.clientId,
-          clientId,
-          options,
-        );
-      }
+      registeredEntry = entry;
+      const restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+        entry,
+        restoreAskUserQuestionHint,
+        req.clientId,
+        clientId,
+        options,
+      );
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`

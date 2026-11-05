@@ -1391,6 +1391,7 @@ export class AcpDispatcher {
       }
       conn.ownSession(sessionId);
       releaseIdentity();
+      this.attachWsSessionStreamIfNeeded(conn, sessionId);
     };
     const rollback = () => {
       if (settled) return;
@@ -2169,7 +2170,7 @@ export class AcpDispatcher {
               // the standard also expects top-level models/modes objects.
               const models = this.extractModelState(configOptions);
               const modes = this.extractModeState(configOptions);
-              this.replyOwnership(
+              await this.replyOwnership(
                 conn,
                 id,
                 {
@@ -2521,7 +2522,7 @@ export class AcpDispatcher {
                 }
                 return;
               }
-              this.replyOwnership(
+              await this.replyOwnership(
                 conn,
                 id,
                 {
@@ -2822,7 +2823,7 @@ export class AcpDispatcher {
               assertGenerationOpen?.();
               const models = this.extractModelState(configOptions);
               const modes = this.extractModeState(configOptions);
-              this.replyOwnership(
+              await this.replyOwnership(
                 conn,
                 id,
                 {
@@ -6290,13 +6291,57 @@ export class AcpDispatcher {
     return delivery;
   }
 
-  private replyOwnership(
+  private attachWsSessionStreamIfNeeded(
+    conn: AcpConnection,
+    sessionId: string,
+  ): void {
+    if (
+      !conn.ownsSession(sessionId) ||
+      !conn.connStream ||
+      conn.connStream.isClosed ||
+      conn.connStream.kind !== 'ws'
+    ) {
+      return;
+    }
+    const binding = conn.sessions.get(sessionId);
+    if (!binding) return;
+    if (binding.stream && !binding.initialReplayPending) {
+      return;
+    }
+    const ac = new AbortController();
+    conn.attachSessionStream(sessionId, conn.connStream, ac);
+    const myAbort = ac;
+    const cleanupSession = () => {
+      const b = conn.sessions.get(sessionId);
+      if (b?.stream === conn.connStream && b?.abort === myAbort) {
+        conn.closeSessionStream(sessionId);
+      }
+    };
+    void this.pumpSessionEvents(conn, sessionId, ac.signal).then(
+      cleanupSession,
+      (err: unknown) => {
+        writeStderrLine(
+          `qwen serve: /acp WS pump error (${logSafe(sessionId)}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        cleanupSession();
+      },
+    );
+  }
+
+  private async replyOwnership(
     conn: AcpConnection,
     id: JsonRpcId,
     result: unknown,
     receipt: DeliveryReceipt,
-  ): void {
-    void this.replyConn(conn, id, result, receipt);
+  ): Promise<void> {
+    const delivery = this.replyConn(conn, id, result, receipt);
+    if (
+      conn.connStream &&
+      !conn.connStream.isClosed &&
+      conn.connStream.kind === 'ws'
+    ) {
+      await delivery;
+    }
   }
 
   private replySession(

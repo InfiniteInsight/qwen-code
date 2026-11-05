@@ -1263,11 +1263,35 @@ export const useLlmStream = (
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
-  const onExec = useCallback(async (done: Promise<void>) => {
-    setIsResponding(true);
-    await done;
-    setIsResponding(false);
-  }, []);
+  const activeShellExecCountRef = useRef(0);
+  const onExec = useCallback(
+    async (done: Promise<void>) => {
+      activeShellExecCountRef.current += 1;
+      const releaseExecActivity = retainSubmissionActivity(
+        submissionLeaseGenerationRef.current,
+      );
+      setSubmissionInFlight(true);
+      setIsResponding(true);
+      const execAbortController = abortControllerRef.current;
+      try {
+        await done;
+      } finally {
+        activeShellExecCountRef.current = Math.max(
+          0,
+          activeShellExecCountRef.current - 1,
+        );
+        if (
+          execAbortController &&
+          abortControllerRef.current === execAbortController &&
+          activeShellExecCountRef.current === 0
+        ) {
+          abortControllerRef.current = null;
+        }
+        releaseExecActivity();
+      }
+    },
+    [retainSubmissionActivity, setSubmissionInFlight],
+  );
   const { handleShellCommand, activeShellPtyId } = useShellCommandProcessor(
     addItem,
     setPendingHistoryItem,
@@ -3896,6 +3920,11 @@ export const useLlmStream = (
 
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          if (activeShellExecCountRef.current > 0) {
+            keepToolContinuationAbortController = true;
+            metadata?.onDelivered?.();
+            return;
+          }
           releaseSubmissionLease();
           metadata?.onDeliveryFailed?.();
           return;

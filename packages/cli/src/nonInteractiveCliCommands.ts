@@ -552,7 +552,11 @@ export const handleSlashCommand = async (
     let firstModelOverride: string | undefined;
     let refreshContextFilesOnWrite = false;
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
-    const successfulSkillCommands: SlashCommand[] = [];
+    const skillOutcomes: Array<{
+      skill: SlashCommand;
+      succeeded: boolean;
+    }> = [];
+    const skillErrors: string[] = [];
 
     for (const skill of stackedResult.skills) {
       if (!skill.action) continue;
@@ -577,16 +581,33 @@ export const handleSlashCommand = async (
         if (skillResult.onComplete) {
           onCompleteCallbacks.push(skillResult.onComplete);
         }
+      } else if (
+        skillResult?.type === 'message' &&
+        skillResult.messageType === 'error'
+      ) {
+        skillErrors.push(
+          `Skill "/${skill.name}" error: ${skillResult.content}`,
+        );
       }
 
-      const succeeded = skillResult?.type === 'submit_prompt';
-      recordSkillInvocation(config, {
-        skillName: getSkillCommandName(skill),
-        success: succeeded,
+      skillOutcomes.push({
+        skill,
+        succeeded: skillResult?.type === 'submit_prompt',
       });
-      if (succeeded) {
-        successfulSkillCommands.push(skill);
+    }
+
+    if (combinedContent.length === 0) {
+      for (const { skill, succeeded } of skillOutcomes) {
+        recordSkillInvocation(config, {
+          skillName: getSkillCommandName(skill),
+          success: succeeded,
+        });
       }
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: skillErrors.join('\n') || 'Failed to invoke skills.',
+      };
     }
 
     if (stackedResult.remainingText) {
@@ -595,18 +616,41 @@ export const handleSlashCommand = async (
 
     const mergedContent: PartListUnion = combinedContent.flat();
 
-    const hookResult = await fireUserPromptExpansionHook(
-      config,
-      stackedResult.skills.map((s) => s.name).join(' '),
-      stackedResult.remainingText,
-      mergedContent,
-      abortController.signal,
-    );
+    let hookResult: Awaited<ReturnType<typeof fireUserPromptExpansionHook>>;
+    try {
+      hookResult = await fireUserPromptExpansionHook(
+        config,
+        stackedResult.skills.map((s) => s.name).join(' '),
+        stackedResult.remainingText,
+        mergedContent,
+        abortController.signal,
+      );
+    } catch (error) {
+      for (const { skill } of skillOutcomes) {
+        recordSkillInvocation(config, {
+          skillName: getSkillCommandName(skill),
+          success: false,
+        });
+      }
+      throw error;
+    }
     if (hookResult.blockedResult) {
+      for (const { skill } of skillOutcomes) {
+        recordSkillInvocation(config, {
+          skillName: getSkillCommandName(skill),
+          success: false,
+        });
+      }
       return hookResult.blockedResult;
     }
-    for (const skill of successfulSkillCommands) {
-      void recordAutoSkillCommandUsage(config, skill);
+    for (const { skill, succeeded } of skillOutcomes) {
+      recordSkillInvocation(config, {
+        skillName: getSkillCommandName(skill),
+        success: succeeded,
+      });
+      if (succeeded) {
+        void recordAutoSkillCommandUsage(config, skill);
+      }
     }
 
     return {

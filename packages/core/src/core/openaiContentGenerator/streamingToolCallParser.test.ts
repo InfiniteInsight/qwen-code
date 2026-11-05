@@ -897,4 +897,28 @@ describe('StreamingToolCallParser', () => {
       toolCall('call_3', 'function3', { third: true }, 2),
     );
   });
+
+  it('relocates an ID-bearing tool call whose initial chunk has empty arguments when it collides with a completed ID-less tool call of the same name', () => {
+    const first = parser.addChunk(
+      0,
+      '{"cmd":"echo 1"}',
+      undefined,
+      'run_shell_command',
+    );
+    expect(first.actualIndex).toBe(0);
+    expect(first.complete).toBe(true);
+
+    // OpenAI-compatible streams commonly send { index: 0, id: 'call_2', name: 'run_shell_command', arguments: '' }
+    // followed by the argument chunks on subsequent deltas.
+    const secondInit = parser.addChunk(0, '', 'call_2', 'run_shell_command');
+    expect(secondInit.actualIndex).toBe(1);
+    const secondArgs = parser.addChunk(0, '{"cmd":"echo 2"}', 'call_2');
+    expect(secondArgs.actualIndex).toBe(1);
+    expect(secondArgs.complete).toBe(true);
+    expect(parser.hasConflictingToolCallIdentity()).toBe(false);
+    expectCalls(
+      toolCall(undefined, 'run_shell_command', { cmd: 'echo 1' }, 0),
+      toolCall('call_2', 'run_shell_command', { cmd: 'echo 2' }, 1),
+    );
+  });
 });

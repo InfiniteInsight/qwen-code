@@ -437,6 +437,63 @@ describe('AcpWsTransport', () => {
       const gen = transport.subscribeEvents('s1');
       await expect(gen.next()).rejects.toThrow(DaemonTransportClosedError);
     });
+
+    it('rejects connect and keeps connected false when initialize returns a JSON-RPC error or ws.onerror fires during handshake', async () => {
+      const originalWebSocket = globalThis.WebSocket;
+      class ErrorInitWebSocket {
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: ((event: { code: number; reason: string }) => void) | null =
+          null;
+        onerror: (() => void) | null = null;
+        closedWith: { code?: number; reason?: string } | null = null;
+
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+
+        send(payload: string) {
+          const request = JSON.parse(payload) as { id: number };
+          queueMicrotask(() =>
+            this.onmessage?.({
+              data: JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                error: { code: -32600, message: 'Handshake rejected' },
+              }),
+            }),
+          );
+        }
+
+        close(code?: number, reason?: string) {
+          this.closedWith = { code, reason };
+          this.onclose?.({ code: code ?? 1000, reason: reason ?? '' });
+        }
+      }
+
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: ErrorInitWebSocket,
+      });
+      const transport = new AcpWsTransport('ws://daemon/acp');
+      try {
+        await expect(
+          transport.fetch('http://daemon/session', {
+            method: 'POST',
+            body: '{}',
+          }),
+        ).rejects.toThrow(
+          /WebSocket initialize failed \(-32600\): Handshake rejected/,
+        );
+        expect(transport.connected).toBe(false);
+      } finally {
+        transport.dispose();
+        Object.defineProperty(globalThis, 'WebSocket', {
+          configurable: true,
+          value: originalWebSocket,
+        });
+      }
+    });
   });
 });
 

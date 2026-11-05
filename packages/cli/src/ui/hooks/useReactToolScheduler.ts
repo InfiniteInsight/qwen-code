@@ -289,6 +289,46 @@ export function useReactToolScheduler(
         await allToolCallsCompleteHandler(cancelledCalls);
       };
 
+      const completeAsSchedulingError = async (
+        error: unknown,
+        label = 'Tool scheduling failed',
+      ) => {
+        debugLogger.error(
+          `${label}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        const message = `${label}. The tool was not executed.`;
+        const completedCalls: CompletedToolCall[] = requests.map(
+          (toolRequest) => {
+            const toolError = new Error(message);
+            const modelFacingMessage =
+              toolRequest.name === ToolNames.TOOL_CALL
+                ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`
+                : message;
+            const responseParts = convertToFunctionErrorResponse(
+              toolRequest.name,
+              toolRequest.callId,
+              modelFacingMessage,
+              modelFacingMessage,
+            );
+            return {
+              status: 'error',
+              request: toolRequest,
+              response: {
+                callId: toolRequest.callId,
+                responseParts,
+                resultDisplay: message,
+                error: toolError,
+                errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                executionStatus: 'not_started',
+                contentLength: modelFacingMessage.length,
+              },
+            };
+          },
+        );
+        setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
+        await allToolCallsCompleteHandler(completedCalls);
+      };
+
       if (!modelOverride?.endsWith('\0')) {
         void scheduler.schedule(request, signal).catch((error: unknown) => {
           if (isQueuedCancellation(error)) {
@@ -300,11 +340,13 @@ export function useReactToolScheduler(
             });
             return;
           }
-          if (signal.aborted) return;
-          debugLogger.error(
-            `Tool scheduling failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          void completeAsSchedulingError(error).catch(
+            (completionError: unknown) => {
+              debugLogger.error(
+                'Tool scheduling error completion failed:',
+                completionError,
+              );
+            },
           );
         });
         return;
@@ -312,46 +354,6 @@ export function useReactToolScheduler(
       // Declared outside the detached task so the terminal handler below can
       // name the batch it failed to complete.
       void (async () => {
-        const completeAsSchedulingError = async (error: unknown) => {
-          debugLogger.error(
-            `Full-turn tool scheduling failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-          const message =
-            'Full-turn tool scheduling failed. The tool was not executed.';
-          const completedCalls: CompletedToolCall[] = requests.map(
-            (toolRequest) => {
-              const toolError = new Error(message);
-              const modelFacingMessage =
-                toolRequest.name === ToolNames.TOOL_CALL
-                  ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`
-                  : message;
-              const responseParts = convertToFunctionErrorResponse(
-                toolRequest.name,
-                toolRequest.callId,
-                modelFacingMessage,
-                modelFacingMessage,
-              );
-              return {
-                status: 'error',
-                request: toolRequest,
-                response: {
-                  callId: toolRequest.callId,
-                  responseParts,
-                  resultDisplay: message,
-                  error: toolError,
-                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
-                  executionStatus: 'not_started',
-                  contentLength: modelFacingMessage.length,
-                },
-              };
-            },
-          );
-          setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
-          await allToolCallsCompleteHandler(completedCalls);
-        };
-
         // A fail-closed runtime-model resolution is a scheduling failure,
         // never a user cancellation, so it gets its own `try`: even when the
         // signal aborts in the same window it must still land on the error
@@ -365,7 +367,10 @@ export function useReactToolScheduler(
               failClosed: true,
             });
         } catch (error) {
-          await completeAsSchedulingError(error);
+          await completeAsSchedulingError(
+            error,
+            'Full-turn tool scheduling failed',
+          );
           return;
         }
 
@@ -374,7 +379,7 @@ export function useReactToolScheduler(
         } catch (error) {
           // The busy scheduler rejects a queued request once its signal
           // aborts, which is a cancellation rather than a scheduling failure.
-          // Completing it as `cancelled` — instead of returning early — still
+          // Completing it as `cancelled` -- instead of returning early -- still
           // runs the caller's completion path, the only place that releases
           // the batch and continuation ownership registered for these
           // callIds. An aborted signal alone is not enough: any other
@@ -385,7 +390,10 @@ export function useReactToolScheduler(
             await completeAsCancelled();
             return;
           }
-          await completeAsSchedulingError(error);
+          await completeAsSchedulingError(
+            error,
+            'Full-turn tool scheduling failed',
+          );
         }
       })().catch((error: unknown) => {
         // Terminal handler for the detached task: the completion callbacks

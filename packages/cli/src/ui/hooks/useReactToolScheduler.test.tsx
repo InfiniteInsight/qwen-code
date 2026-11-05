@@ -465,4 +465,58 @@ describe('useReactToolScheduler', () => {
     const completedCalls = onComplete.mock.calls[0]?.[0];
     expect(completedCalls?.[0]?.status).toBe('success');
   });
+
+  it('completes the batch with status error when CoreToolScheduler.schedule rejects with a non-cancellation error on the standard path', async () => {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('Unexpected scheduler failure'));
+    const onComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
+
+    const { result } = renderHook(() =>
+      useReactToolScheduler(
+        onComplete,
+        {
+          getToolRegistry: () => ({}),
+          getDebugLogger: () => ({
+            debug: vi.fn(),
+            info: vi.fn(),
+            warn: vi.fn(),
+            error: vi.fn(),
+          }),
+        } as unknown as Config,
+        () => undefined,
+        vi.fn(),
+      ),
+    );
+
+    act(() => {
+      result.current[1](
+        {
+          callId: 'failed-schedule-call',
+          name: 'read_file',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'failed-schedule-prompt',
+        },
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(scheduleSpy).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request: expect.objectContaining({ callId: 'failed-schedule-call' }),
+        response: expect.objectContaining({
+          resultDisplay: 'Tool scheduling failed. The tool was not executed.',
+          executionStatus: 'not_started',
+        }),
+      }),
+    ]);
+    scheduleSpy.mockRestore();
+  });
 });

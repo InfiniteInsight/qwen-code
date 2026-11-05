@@ -163,26 +163,31 @@ export class StreamingToolCallParser {
             const isDifferentId = Boolean(
               existingMeta?.id && existingMeta.id !== id,
             );
+            let existingBufferIsCompleteJson = false;
+            if (existingDepth === 0 && existingBuffer.trim()) {
+              try {
+                JSON.parse(existingBuffer);
+                existingBufferIsCompleteJson = true;
+              } catch {
+                existingBufferIsCompleteJson = false;
+              }
+            }
             const isConflictingIdlessSlot =
               !existingMeta?.id &&
               Boolean(
                 (existingMeta?.name &&
                   validName &&
                   existingMeta.name !== validName) ||
+                  existingBufferIsCompleteJson ||
                   (existingDepth === 0 &&
                     existingBuffer.trim() &&
-                    chunk.trim()),
+                    (chunk.trim() || Boolean(validName))),
               );
 
             if (isDifferentId || isConflictingIdlessSlot) {
-              let existingComplete = existingDepth === 0;
-              if (existingComplete && existingBuffer.trim()) {
-                try {
-                  JSON.parse(existingBuffer);
-                } catch {
-                  existingComplete = false;
-                }
-              }
+              const existingComplete =
+                existingDepth === 0 &&
+                (!existingBuffer.trim() || existingBufferIsCompleteJson);
               if (existingComplete) {
                 actualIndex = 0;
                 while (this.buffers.has(actualIndex)) actualIndex += 1;

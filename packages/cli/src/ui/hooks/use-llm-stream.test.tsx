@@ -17013,6 +17013,56 @@ describe('useLlmStream', () => {
       );
       expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
+
+    it('retains Responding state and active abort signal while an onExec shell command is running and calls onDelivered', async () => {
+      let resolveShellDone!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        resolveShellDone = resolve;
+      });
+      let capturedSignal: AbortSignal | undefined;
+      let capturedOnExec: ((done: Promise<void>) => Promise<void>) | undefined;
+      vi.mocked(useShellCommandProcessor).mockImplementation(
+        (_addItem, _setPendingItem, onExec) => {
+          capturedOnExec = onExec;
+          return {
+            handleShellCommand: vi.fn((_cmd: unknown, signal: AbortSignal) => {
+              capturedSignal = signal;
+              void capturedOnExec?.(shellDone);
+              return true;
+            }),
+            activeShellPtyId: null,
+          } as unknown as ReturnType<typeof useShellCommandProcessor>;
+        },
+      );
+
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderWithShellMode(true);
+      await act(async () => {
+        await result.current.submitQuery(
+          'sleep 10',
+          SendMessageType.UserQuery,
+          undefined,
+          { onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onDelivered).toHaveBeenCalledTimes(1);
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(capturedSignal?.aborted).toBe(false);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+      expect(capturedSignal?.aborted).toBe(true);
+
+      await act(async () => {
+        resolveShellDone();
+        await shellDone;
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
   });
 
   describe('Thought Reset', () => {

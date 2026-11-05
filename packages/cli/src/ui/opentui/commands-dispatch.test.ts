@@ -1918,4 +1918,34 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
     expect(linkedHost.isStreaming()).toBe(true);
     expect(host.items.some((item) => item.type === 'goal_state')).toBe(false);
   });
+
+  it('returns kind handled instead of submitting an empty prompt when all stacked skills fail', async () => {
+    const skillA = stub({
+      name: 'skill-a',
+      kind: CommandKind.SKILL,
+      action: () => ({
+        type: 'message',
+        messageType: 'error',
+        content: 'broken skill A',
+      }),
+    });
+    const skillB = stub({
+      name: 'skill-b',
+      kind: CommandKind.SKILL,
+      action: () => ({
+        type: 'message',
+        messageType: 'error',
+        content: 'broken skill B',
+      }),
+    });
+
+    const { outcome, host } = await dispatch('/skill-a /skill-b', [
+      skillA,
+      skillB,
+    ]);
+
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(host.updates).toEqual([]);
+    expect(host.items.filter((item) => item.type === 'error')).toHaveLength(2);
+  });
 });

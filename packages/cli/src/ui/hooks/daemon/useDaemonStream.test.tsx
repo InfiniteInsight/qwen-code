@@ -1391,4 +1391,97 @@ describe('useDaemonStream', () => {
       expect.any(Number),
     );
   });
+
+  it('suppresses ACP clearCommand output ("Context cleared...") and does not leak pending clear state into the next turn when turn_complete is omitted', async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const handleSlashCommand = vi.fn().mockResolvedValue({ type: 'handled' });
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          addItem,
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+        ),
+      { wrapper },
+    );
+
+    let clearPromise!: Promise<void>;
+    act(() => {
+      clearPromise = result.current.submitQuery('/clear');
+    });
+    await waitFor(() => expect(driver.stats().prompts).toHaveLength(1));
+
+    // Daemon streams actual clearCommand output without a separate turn_complete SSE frame (0.17.x).
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context cleared. Previous messages are no longer in context.',
+            },
+          },
+          'me',
+        ),
+      );
+    });
+
+    await act(async () => {
+      driver.finishPrompt({ stopReason: 'end_turn' });
+      await clearPromise;
+    });
+
+    expect(result.current.pendingHistoryItems).toEqual([]);
+    expect(added).toEqual([]);
+
+    // Next user turn must NOT have its response chunks suppressed.
+    let nextTurn!: Promise<void>;
+    act(() => {
+      nextTurn = result.current.submitQuery('hello after clear');
+    });
+    await waitFor(() => expect(driver.stats().prompts).toHaveLength(2));
+
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Real assistant reply' },
+          },
+          'me',
+        ),
+      );
+      driver.push({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
+    });
+
+    await act(async () => {
+      driver.finishPrompt({ stopReason: 'end_turn' });
+      await nextTurn;
+    });
+
+    expect(added).toContainEqual({
+      type: 'gemini',
+      text: 'Real assistant reply',
+    });
+  });
 });

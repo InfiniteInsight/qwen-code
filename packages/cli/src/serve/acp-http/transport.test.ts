@@ -13386,4 +13386,67 @@ describe('ACP WebSocket transport security', () => {
     expect(tiers).toEqual(['mutation']);
     ws.close();
   });
+
+  it('attaches the WebSocket session stream on session/new so out-of-band session/update frames arrive before any session/prompt', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    const newRes = (await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    })) as { result?: { sessionId?: string } };
+    const sessionId = newRes.result?.sessionId;
+    expect(sessionId).toBe('sess-1');
+
+    const notificationPromise = new Promise<Record<string, unknown>>(
+      (resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('Timed out waiting for WS session/update')),
+          2000,
+        );
+        const onMessage = (raw: WebSocket.RawData) => {
+          const parsed = JSON.parse(String(raw)) as Record<string, unknown>;
+          if (parsed['method'] === 'session/update') {
+            clearTimeout(timer);
+            ws.off('message', onMessage);
+            resolve(parsed);
+          }
+        };
+        ws.on('message', onMessage);
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(bridge.queues.has('sess-1')).toBe(true);
+    });
+    bridge.queues.get('sess-1')!.push({
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'proactive update after session/new' },
+      },
+    });
+
+    const notification = await notificationPromise;
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    expect(notification).toMatchObject({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'proactive update after session/new',
+        },
+      },
+    });
+  });
 });

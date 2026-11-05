@@ -640,6 +640,11 @@ export class OpenTuiSlashDispatcher {
           }
         }
 
+        if (combinedContent.length === 0) {
+          hasError = true;
+          return { kind: 'handled' };
+        }
+
         if (stackedResult.remainingText) {
           combinedContent.push([{ text: stackedResult.remainingText }]);
         }

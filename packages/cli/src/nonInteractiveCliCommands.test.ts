@@ -2140,4 +2140,48 @@ describe('getAvailableCommands', () => {
     );
     expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
   });
+
+  it('returns an error message instead of submitting an empty or remaining-text-only prompt when all stacked skills fail', async () => {
+    const skillA = {
+      name: 'skill-a',
+      description: 'Skill A',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'error',
+        content: 'Skill A body is empty',
+      }),
+    };
+    const skillB = {
+      name: 'skill-b',
+      description: 'Skill B',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'error',
+        content: 'Skill B body is empty',
+      }),
+    };
+    mockGetCommands.mockReturnValue([skillA, skillB]);
+
+    const result = await handleSlashCommand(
+      '/skill-a /skill-b trailing instructions',
+      new AbortController(),
+      mockConfig,
+      {
+        system: { path: '', settings: {} },
+        systemDefaults: { path: '', settings: {} },
+        user: { path: '', settings: {} },
+        workspace: { path: '', settings: {} },
+      } as LoadedSettings,
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Skill "/skill-a" error: Skill A body is empty\nSkill "/skill-b" error: Skill B body is empty',
+    });
+    expect(fireUserPromptExpansionEvent).not.toHaveBeenCalled();
+  });
 });
