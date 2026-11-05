@@ -117,51 +117,87 @@ export class StreamingToolCallParser {
       if (this.idToIndexMap.has(id)) {
         // We've seen this ID before, use the existing mapped index
         actualIndex = this.idToIndexMap.get(id)!;
-      } else if (
-        this.pendingIndexRemaps.has(index) &&
-        !this.toolCallMeta.get(this.pendingIndexRemaps.get(index)!)?.id
-      ) {
-        // Some providers stream name or arguments before the stable ID. Only
-        // adopt the remapped slot while it has not yet been claimed by an id:
-        // once it has one, the remap only exists to route later id-less
-        // continuation chunks, so a brand-new id must not hijack that slot.
-        // The remap is deliberately left in place — the re-registration on the
-        // common path below keeps `index -> actualIndex` alive so subsequent
-        // id-less continuation chunks at this provider index still resolve here.
-        actualIndex = this.pendingIndexRemaps.get(index)!;
-        this.idToIndexMap.set(id, actualIndex);
       } else {
-        // New tool call ID
-        // Check if the requested (or currently remapped) index is already occupied by a different tool call
-        const checkIndex = this.buffers.has(targetIndex) ? targetIndex : index;
-        if (this.buffers.has(checkIndex)) {
-          const existingBuffer = this.buffers.get(checkIndex)!;
-          const existingDepth = this.depths.get(checkIndex)!;
-          const existingMeta = this.toolCallMeta.get(checkIndex);
-
-          if (existingMeta?.id && existingMeta.id !== id) {
-            let existingComplete = existingDepth === 0;
-            if (existingComplete && existingBuffer.trim()) {
-              try {
-                JSON.parse(existingBuffer);
-              } catch {
-                existingComplete = false;
-              }
-            }
-            if (existingComplete) {
-              actualIndex = 0;
-              while (this.buffers.has(actualIndex)) actualIndex += 1;
-              if (!existingMeta.name) {
-                this.conflictingToolCallIdentity = true;
-              }
-            } else {
-              this.conflictingToolCallIdentity = true;
+        const remapped = this.pendingIndexRemaps.get(index);
+        const remappedMeta =
+          remapped !== undefined ? this.toolCallMeta.get(remapped) : undefined;
+        let canAdoptRemapped = remapped !== undefined && !remappedMeta?.id;
+        if (canAdoptRemapped && remapped !== undefined) {
+          if (
+            remappedMeta?.name &&
+            validName &&
+            remappedMeta.name !== validName
+          ) {
+            canAdoptRemapped = false;
+          } else if (
+            (this.depths.get(remapped) ?? 0) === 0 &&
+            this.buffers.get(remapped)?.trim() &&
+            chunk.trim()
+          ) {
+            try {
+              JSON.parse(this.buffers.get(remapped)!);
+              canAdoptRemapped = false;
+            } catch {
+              // Incomplete buffer; allow late ID adoption.
             }
           }
         }
+        if (canAdoptRemapped && remapped !== undefined) {
+          // Some providers stream name or arguments before the stable ID. Only
+          // adopt the remapped slot while it has not yet been claimed by an id
+          // or completed as a separate tool call: once it has one, the remap
+          // only exists to route later id-less continuation chunks, so a
+          // brand-new id must not hijack that slot.
+          actualIndex = remapped;
+          this.idToIndexMap.set(id, actualIndex);
+        } else {
+          // New tool call ID
+          // Check if the requested (or currently remapped) index is already occupied by a different tool call
+          const checkIndex = this.buffers.has(targetIndex)
+            ? targetIndex
+            : index;
+          if (this.buffers.has(checkIndex)) {
+            const existingBuffer = this.buffers.get(checkIndex)!;
+            const existingDepth = this.depths.get(checkIndex)!;
+            const existingMeta = this.toolCallMeta.get(checkIndex);
+            const isDifferentId = Boolean(
+              existingMeta?.id && existingMeta.id !== id,
+            );
+            const isConflictingIdlessSlot =
+              !existingMeta?.id &&
+              Boolean(
+                (existingMeta?.name &&
+                  validName &&
+                  existingMeta.name !== validName) ||
+                  (existingDepth === 0 &&
+                    existingBuffer.trim() &&
+                    chunk.trim()),
+              );
 
-        // Map this ID to the actual index we're using
-        this.idToIndexMap.set(id, actualIndex);
+            if (isDifferentId || isConflictingIdlessSlot) {
+              let existingComplete = existingDepth === 0;
+              if (existingComplete && existingBuffer.trim()) {
+                try {
+                  JSON.parse(existingBuffer);
+                } catch {
+                  existingComplete = false;
+                }
+              }
+              if (existingComplete) {
+                actualIndex = 0;
+                while (this.buffers.has(actualIndex)) actualIndex += 1;
+                if (!existingMeta?.name) {
+                  this.conflictingToolCallIdentity = true;
+                }
+              } else {
+                this.conflictingToolCallIdentity = true;
+              }
+            }
+          }
+
+          // Map this ID to the actual index we're using
+          this.idToIndexMap.set(id, actualIndex);
+        }
       }
     } else if (!isNameOnlyDelta) {
       // No ID provided - this is a continuation chunk

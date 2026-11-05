@@ -861,4 +861,40 @@ describe('StreamingToolCallParser', () => {
       toolCall(undefined, 'second_tool', { x: 1 }, 1),
     );
   });
+
+  it('relocates an ID-bearing tool call when it collides with a completed ID-less tool call at the same index', () => {
+    const first = parser.addChunk(0, '{"a":1}', undefined, 'tool_a');
+    expect(first.actualIndex).toBe(0);
+    expect(first.complete).toBe(true);
+
+    const second = parser.addChunk(0, '{"b":2}', 'call_2', 'tool_b');
+    expect(second.actualIndex).toBe(1);
+    expect(second.complete).toBe(true);
+    expect(parser.hasConflictingToolCallIdentity()).toBe(false);
+    expectCalls(
+      toolCall(undefined, 'tool_a', { a: 1 }, 0),
+      toolCall('call_2', 'tool_b', { b: 2 }, 1),
+    );
+  });
+
+  it('relocates a brand-new ID-bearing tool call when it collides with a completed remapped ID-less tool call', () => {
+    parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+    const remapped = parser.addChunk(
+      0,
+      '{"second":true}',
+      undefined,
+      'function2',
+    );
+    expect(remapped.actualIndex).toBe(1);
+
+    const third = parser.addChunk(0, '{"third":true}', 'call_3', 'function3');
+    expect(third.actualIndex).toBe(2);
+    expect(third.complete).toBe(true);
+    expect(parser.hasConflictingToolCallIdentity()).toBe(false);
+    expectCalls(
+      toolCall('call_1', 'function1', { first: true }, 0),
+      toolCall(undefined, 'function2', { second: true }, 1),
+      toolCall('call_3', 'function3', { third: true }, 2),
+    );
+  });
 });

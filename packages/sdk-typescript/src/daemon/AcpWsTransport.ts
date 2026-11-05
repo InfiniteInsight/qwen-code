@@ -487,8 +487,12 @@ export class AcpWsTransport implements DaemonTransport {
           return; // ignore non-JSON messages
         }
 
-        // JSON-RPC response (has `id` field).
-        if ('id' in msg && typeof msg['id'] === 'number') {
+        // JSON-RPC response (has `id` field, no `method` field).
+        if (
+          'id' in msg &&
+          typeof msg['id'] === 'number' &&
+          typeof msg['method'] !== 'string'
+        ) {
           const pending = this.pending.get(msg['id'] as number);
           if (pending) {
             this.pending.delete(msg['id'] as number);

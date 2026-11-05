@@ -1024,6 +1024,10 @@ export const useSlashCommandProcessor = (
           let firstModelOverride: string | undefined;
           const onCompleteCallbacks: Array<() => Promise<void>> = [];
           let refreshContextFilesOnWrite = false;
+          const skillOutcomes: Array<{
+            skill: SlashCommand;
+            succeeded: boolean;
+          }> = [];
 
           for (const skill of stackedResult.skills) {
             if (!skill.action) continue;
@@ -1057,16 +1061,23 @@ export const useSlashCommandProcessor = (
               });
             }
 
+            skillOutcomes.push({
+              skill,
+              succeeded: skillResult?.type === 'submit_prompt',
+            });
+          }
+
+          if (combinedContent.length === 0) {
+            hasError = true;
             if (config) {
-              const succeeded = skillResult?.type === 'submit_prompt';
-              recordSkillInvocation(config, {
-                skillName: getSkillCommandName(skill),
-                success: succeeded,
-              });
-              if (succeeded) {
-                void recordAutoSkillCommandUsage(config, skill);
+              for (const { skill, succeeded } of skillOutcomes) {
+                recordSkillInvocation(config, {
+                  skillName: getSkillCommandName(skill),
+                  success: succeeded,
+                });
               }
             }
+            return { type: 'handled' };
           }
 
           // Append user's remaining text after skill tokens
@@ -1082,6 +1093,61 @@ export const useSlashCommandProcessor = (
             });
           }
 
+          // Combine all content into a single submit_prompt
+          let mergedContent: PartListUnion = combinedContent.flat();
+          const output = hasUserPromptExpansionHooks(config)
+            ? await config
+                .getHookSystem()
+                ?.fireUserPromptExpansionEvent(
+                  stackedResult.skills.map((s) => s.name).join(' '),
+                  stackedResult.remainingText,
+                  serializeUserPromptExpansionPrompt(mergedContent),
+                  abortController.signal,
+                )
+            : undefined;
+          if (abortController.signal.aborted) {
+            hasError = true;
+            return { type: 'handled' };
+          }
+          if (output) {
+            const blockingError = output.getBlockingError();
+            if (blockingError.blocked || output.shouldStopExecution()) {
+              hasError = true;
+              if (config) {
+                for (const { skill } of skillOutcomes) {
+                  recordSkillInvocation(config, {
+                    skillName: getSkillCommandName(skill),
+                    success: false,
+                  });
+                }
+              }
+              addMessage({
+                type: MessageType.ERROR,
+                content: formatUserPromptExpansionBlockedMessage(
+                  blockingError.reason || output.getEffectiveReason(),
+                ),
+                timestamp: new Date(),
+              });
+              return { type: 'handled' };
+            }
+            mergedContent = appendUserPromptExpansionAdditionalContext(
+              mergedContent,
+              output.getAdditionalContext(),
+            );
+          }
+
+          if (config) {
+            for (const { skill, succeeded } of skillOutcomes) {
+              recordSkillInvocation(config, {
+                skillName: getSkillCommandName(skill),
+                success: succeeded,
+              });
+              if (succeeded) {
+                void recordAutoSkillCommandUsage(config, skill);
+              }
+            }
+          }
+
           // Mark as sent to model so chat recording and telemetry work correctly
           invocationSentToModel = true;
           if (invocationItemId !== undefined) {
@@ -1091,8 +1157,6 @@ export const useSlashCommandProcessor = (
             });
           }
 
-          // Combine all content into a single submit_prompt
-          const mergedContent: PartListUnion = combinedContent.flat();
           return {
             type: 'submit_prompt',
             content: mergedContent,

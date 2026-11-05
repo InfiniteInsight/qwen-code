@@ -1312,7 +1312,7 @@ export class BridgeClient implements Client {
   async seedSessionUpdates(
     entry: BridgeClientSessionEntry,
     updates: SessionUpdate[],
-    options: { ingestArtifacts?: boolean } = {},
+    options: { seedEvents?: boolean; ingestArtifacts?: boolean } = {},
   ): Promise<void> {
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     const artifactBatches: Array<{
@@ -1325,7 +1325,9 @@ export class BridgeClient implements Client {
         { sessionId: entry.sessionId, update },
         entry,
       );
-      frames.push(...prepared.frames);
+      if (options.seedEvents !== false) {
+        frames.push(...prepared.frames);
+      }
       if (options.ingestArtifacts !== false && prepared.artifacts.length > 0) {
         artifactBatches.push({
           artifacts: prepared.artifacts,
@@ -1334,7 +1336,9 @@ export class BridgeClient implements Client {
         });
       }
     }
-    entry.events.seedReplayEvents(frames);
+    if (options.seedEvents !== false) {
+      entry.events.seedReplayEvents(frames);
+    }
     for (const batch of artifactBatches) {
       await this.upsertAndPublishArtifacts(
         entry,

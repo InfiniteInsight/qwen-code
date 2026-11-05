@@ -161,9 +161,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
                 firstToken === 'reset' ||
                 firstToken === 'new')
             ) {
-              await driver.prompt({
-                prompt: [{ type: 'text', text: '/clear' }],
-              });
+              await ds.clearRemoteSession();
               return;
             }
             if (!slashResult || slashResult.type !== 'submit_prompt') {
@@ -187,8 +185,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     },
     initError: ds.initError,
     pendingHistoryItems: ds.pendingHistoryItems,
-    // No local pending state to clear: the in-flight turn lives in the daemon.
-    clearPendingState: () => {},
+    clearPendingState: ds.clearPendingState,
     thought: ds.thought,
     cancelOngoingRequest: ds.cancelOngoingRequest,
     // Goal-turn preemption is an in-process admission concern; the daemon

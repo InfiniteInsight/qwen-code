@@ -165,6 +165,10 @@ export interface UseDaemonStreamResult {
   streamingState: StreamingState;
   /** Submit a user turn: echo locally (responsive) + send to the daemon. */
   submitQuery: (query: string) => Promise<void>;
+  /** Reset local pending turn state to Idle (used by local slash commands). */
+  clearPendingState: () => void;
+  /** Forward `/clear` to the daemon while suppressing echo/output and resetting state. */
+  clearRemoteSession: () => Promise<void>;
   initError: string | null;
   pendingHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
@@ -243,37 +247,119 @@ export function useDaemonStream(
   const lossRef = useRef(loss);
   lossRef.current = loss;
   const goneRef = useRef(false);
+  const pendingClearTurnsRef = useRef(0);
   // The driver whose replay snapshot has been committed. A ref (not state) so
   // StrictMode's effect re-run on the same instance sees it and never seeds a
   // second copy of the transcript.
   const seededDriverRef = useRef<DaemonSessionDriver | null>(null);
 
-  // Fold one frame into the projection and reflect it in the UI. Shared by the
-  // event loop and the prompt()-resolution finalizer.
-  const applyFrame = useCallback((frame: DaemonFrame) => {
-    const { state, committed } = projectDaemonEvent(stateRef.current, frame);
-    const su = (frame.data as { update?: { sessionUpdate?: string } })?.update
-      ?.sessionUpdate;
-    dbg(
-      `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} tools=${state.tools.length} pending=${pendingHistoryItemsOf(state).length} committed=${committed.length}`,
-    );
-    if (frame.type === 'permission_request') {
-      const tc = (frame.data as { toolCall?: Record<string, unknown> })
-        ?.toolCall;
-      const opts =
-        (frame.data as { options?: Array<Record<string, unknown>> })?.options ??
-        [];
-      dbg(
-        `  perm toolCall keys=[${Object.keys(tc ?? {}).join(',')}] toolCallId=${String(tc?.['toolCallId'])} options=${opts.map((o) => `${o['kind']}:${o['optionId']}`).join('|')}`,
-      );
-    }
-    stateRef.current = state;
-    for (const item of committed) addItemRef.current(item, now());
-    streamingResponseLengthRef.current = state.pendingText.length;
+  const clearPendingState = useCallback(() => {
+    const cleared = {
+      ...stateRef.current,
+      streamingState: StreamingState.Idle,
+      pendingText: '',
+      pendingThought: '',
+      tools: [],
+      pendingPermission: undefined,
+    };
+    stateRef.current = cleared;
+    streamingResponseLengthRef.current = 0;
     setSnapshot((prev) =>
-      hasRenderableStateChange(prev, state) ? state : prev,
+      hasRenderableStateChange(prev, cleared) ? cleared : prev,
     );
   }, []);
+
+  // Fold one frame into the projection and reflect it in the UI. Shared by the
+  // event loop and the prompt()-resolution finalizer.
+  const applyFrame = useCallback(
+    (frame: DaemonFrame) => {
+      if (pendingClearTurnsRef.current > 0) {
+        const update = (
+          frame.data as {
+            update?: {
+              sessionUpdate?: string;
+              content?: { text?: unknown };
+            };
+          }
+        )?.update;
+        const suKind = update?.sessionUpdate;
+        if (
+          frame.type === 'session_update' &&
+          (suKind === 'user_message_chunk' ||
+            (suKind === 'agent_message_chunk' &&
+              update?.content?.text === 'Conversation cleared.'))
+        ) {
+          if (typeof frame.id === 'number') {
+            stateRef.current = {
+              ...stateRef.current,
+              lastEventId: Math.max(
+                stateRef.current.lastEventId ?? 0,
+                frame.id,
+              ),
+            };
+          }
+          return;
+        }
+        if (frame.type === 'turn_complete' || frame.type === 'turn_error') {
+          pendingClearTurnsRef.current = Math.max(
+            0,
+            pendingClearTurnsRef.current - 1,
+          );
+          if (typeof frame.id === 'number') {
+            stateRef.current = {
+              ...stateRef.current,
+              lastEventId: Math.max(
+                stateRef.current.lastEventId ?? 0,
+                frame.id,
+              ),
+            };
+          }
+          clearPendingState();
+          return;
+        }
+      }
+      const { state, committed } = projectDaemonEvent(stateRef.current, frame);
+      const su = (frame.data as { update?: { sessionUpdate?: string } })?.update
+        ?.sessionUpdate;
+      dbg(
+        `frame type=${frame.type}${su ? `/${su}` : ''} oc=${frame.originatorClientId ?? '∅'} -> state=${state.streamingState} tools=${state.tools.length} pending=${pendingHistoryItemsOf(state).length} committed=${committed.length}`,
+      );
+      if (frame.type === 'permission_request') {
+        const tc = (frame.data as { toolCall?: Record<string, unknown> })
+          ?.toolCall;
+        const opts =
+          (frame.data as { options?: Array<Record<string, unknown>> })
+            ?.options ?? [];
+        dbg(
+          `  perm toolCall keys=[${Object.keys(tc ?? {}).join(',')}] toolCallId=${String(tc?.['toolCallId'])} options=${opts.map((o) => `${o['kind']}:${o['optionId']}`).join('|')}`,
+        );
+      }
+      stateRef.current = state;
+      for (const item of committed) addItemRef.current(item, now());
+      streamingResponseLengthRef.current = state.pendingText.length;
+      setSnapshot((prev) =>
+        hasRenderableStateChange(prev, state) ? state : prev,
+      );
+    },
+    [clearPendingState],
+  );
+
+  const clearRemoteSession = useCallback(async () => {
+    pendingClearTurnsRef.current += 1;
+    try {
+      await driver.prompt({
+        prompt: [{ type: 'text', text: '/clear' }],
+      });
+    } catch (err) {
+      pendingClearTurnsRef.current = Math.max(
+        0,
+        pendingClearTurnsRef.current - 1,
+      );
+      throw err;
+    } finally {
+      clearPendingState();
+    }
+  }, [driver, clearPendingState]);
 
   // Finalize the in-flight turn (commit pending text, return to Idle).
   //
@@ -432,6 +518,7 @@ export function useDaemonStream(
 
   const submitQuery = useCallback(
     async (query: string) => {
+      pendingClearTurnsRef.current = 0;
       if (
         stateRef.current.pendingText.length > 0 ||
         stateRef.current.tools.length > 0
@@ -555,6 +642,8 @@ export function useDaemonStream(
   return {
     streamingState: snapshot.streamingState,
     submitQuery,
+    clearPendingState,
+    clearRemoteSession,
     initError,
     pendingHistoryItems,
     thought,

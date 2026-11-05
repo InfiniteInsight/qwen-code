@@ -4068,5 +4068,76 @@ describe('useSlashCommandProcessor', () => {
         modelOverride: 'gemini-2.5-pro',
       });
     });
+
+    it('returns handled without submitting an empty prompt when all stacked skills fail', async () => {
+      const skillA: SlashCommand = createTestCommand(
+        {
+          name: 'err-a',
+          description: 'Error skill A',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'error',
+            content: 'Failed A',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillB: SlashCommand = createTestCommand(
+        {
+          name: 'err-b',
+          description: 'Error skill B',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'error',
+            content: 'Failed B',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/err-a /err-b');
+      });
+
+      expect(actionResult).toEqual({ type: 'handled' });
+      expect(mockUpdateItem).not.toHaveBeenCalledWith(1, {
+        sentToModel: true,
+      });
+    });
+
+    it('runs UserPromptExpansion hooks for stacked skills and blocks when policy blocks', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked stacked skills',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('review', 'b');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /review implement X',
+        );
+      });
+
+      expect(mockFireUserPromptExpansionEvent).toHaveBeenCalledWith(
+        'feat-dev review',
+        'implement X',
+        expect.stringContaining('SKILL_BODY:feat-dev:a'),
+        expect.any(AbortSignal),
+      );
+      expect(actionResult).toEqual({ type: 'handled' });
+      expect(mockUpdateItem).not.toHaveBeenCalledWith(1, {
+        sentToModel: true,
+      });
+    });
   });
 });

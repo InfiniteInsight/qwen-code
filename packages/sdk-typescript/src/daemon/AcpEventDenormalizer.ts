@@ -144,6 +144,37 @@ export function denormalizeAcpNotification(
     };
   }
 
+  if (notification.method === 'session/request_permission') {
+    const meta = isRecord(params['_meta']) ? params['_meta'] : undefined;
+    const qwenMeta = meta && isRecord(meta['qwen']) ? meta['qwen'] : undefined;
+    const requestId =
+      qwenMeta && typeof qwenMeta['requestId'] === 'string'
+        ? qwenMeta['requestId']
+        : typeof params['requestId'] === 'string'
+          ? params['requestId']
+          : undefined;
+    if (!requestId) return undefined;
+    return {
+      id: nextSyntheticId++,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId,
+        sessionId:
+          typeof params['sessionId'] === 'string'
+            ? params['sessionId']
+            : undefined,
+        toolCall: params['toolCall'],
+        options: params['options'],
+      },
+      _meta: meta,
+      originatorClientId:
+        typeof params['originatorClientId'] === 'string'
+          ? params['originatorClientId']
+          : undefined,
+    };
+  }
+
   // Workspace events arrive as top-level methods matching the event
   // type name directly (e.g. `memory_changed`, `agent_changed`,
   // `auth_device_flow_started`).

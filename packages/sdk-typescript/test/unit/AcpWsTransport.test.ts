@@ -325,6 +325,87 @@ describe('AcpWsTransport', () => {
         );
       },
     );
+
+    it('routes server-to-client session/request_permission with numeric id to notification listeners instead of resolving pending client RPCs', async () => {
+      let wsInstance: {
+        onmessage: ((event: { data: string }) => void) | null;
+      } | null = null;
+      const OrigWS = globalThis.WebSocket;
+      class CapturingWS extends OrigWS {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols);
+          wsInstance = this as unknown as {
+            onmessage: ((event: { data: string }) => void) | null;
+          };
+        }
+      }
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: CapturingWS,
+      });
+
+      const eventsIter = transport.subscribeEvents('s1');
+      const nextEventPromise = eventsIter.next();
+
+      let promptResolved = false;
+      const promptReq = transport
+        .fetch('http://daemon/session/s1/prompt', {
+          method: 'POST',
+          body: '{}',
+        })
+        .then((res) => {
+          promptResolved = true;
+          return res;
+        });
+
+      await vi.waitFor(() =>
+        expect(
+          frames.some((frame) => frame['method'] === 'session/prompt'),
+        ).toBe(true),
+      );
+      const promptFrame = frames.find(
+        (frame) => frame['method'] === 'session/prompt',
+      )!;
+
+      // Server sends session/request_permission carrying the same numeric id as
+      // the in-flight client prompt RPC.
+      wsInstance!.onmessage?.({
+        data: JSON.stringify({
+          jsonrpc: '2.0',
+          id: promptFrame['id'],
+          method: 'session/request_permission',
+          params: {
+            sessionId: 's1',
+            toolCall: { toolCallId: 'tc-1' },
+            options: [{ optionId: 'proceed_once', kind: 'allow_once' }],
+            _meta: { qwen: { requestId: 'perm-1' } },
+          },
+        }),
+      });
+
+      const yielded = await nextEventPromise;
+      expect(yielded.done).toBe(false);
+      expect(yielded.value).toMatchObject({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-1',
+          sessionId: 's1',
+        },
+      });
+      expect(promptResolved).toBe(false);
+
+      // Now send the actual JSON-RPC response for the prompt.
+      wsInstance!.onmessage?.({
+        data: JSON.stringify({
+          jsonrpc: '2.0',
+          id: promptFrame['id'],
+          result: { stopReason: 'end_turn' },
+        }),
+      });
+      const promptRes = await promptReq;
+      expect(promptRes.status).toBe(200);
+      await eventsIter.return?.(undefined);
+    });
   });
 
   // ---- dispose() --------------------------------------------------------

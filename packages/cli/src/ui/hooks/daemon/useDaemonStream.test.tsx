@@ -1230,6 +1230,68 @@ describe('useDaemonStream', () => {
     ]);
   });
 
+  it('useDaemonStreamAdapter clears pending state and suppresses "Conversation cleared." after /clear', async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const handleSlashCommand = vi.fn().mockResolvedValue({ type: 'handled' });
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          addItem,
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+        ),
+      { wrapper },
+    );
+
+    let clearPromise!: Promise<void>;
+    act(() => {
+      clearPromise = result.current.submitQuery('/clear');
+    });
+    await waitFor(() => expect(driver.stats().prompts).toHaveLength(1));
+
+    // Daemon streams "Conversation cleared." and turn_complete during /clear
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Conversation cleared.' },
+          },
+          'me',
+        ),
+      );
+      driver.push({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
+    });
+
+    await act(async () => {
+      driver.finishPrompt({ stopReason: 'end_turn' });
+      await clearPromise;
+    });
+
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+    expect(result.current.pendingHistoryItems).toEqual([]);
+    expect(added).toEqual([]);
+  });
+
   it('useDaemonStreamAdapter invokes onAdmissionFailed instead of aborting the active daemon turn when submitQuery is called while Responding', async () => {
     const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
     const handleSlashCommand = vi.fn().mockResolvedValue(false);

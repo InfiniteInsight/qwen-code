@@ -4605,7 +4605,7 @@ export function createSessionControlPlane(
      * `entry.attachCount` when it calls `createSessionEntry`. BQ9tV
      * race-guard equivalent for coalesced restore waiters.
      */
-    coalesceState: { count: number };
+    coalesceState: { count: number; folded?: boolean };
   }
 
   // Coalesces concurrent explicit restore calls for the same session id.
@@ -8505,7 +8505,11 @@ export function createSessionControlPlane(
     const hideInheritedHistory =
       action === 'load' && req.hideInheritedHistory === true;
 
-    const existing = byId.get(req.sessionId);
+    const inFlightEntry = inFlightRestores.get(req.sessionId);
+    const existing =
+      inFlightEntry && !inFlightEntry.coalesceState.folded
+        ? undefined
+        : byId.get(req.sessionId);
     if (existing) {
       assertExpectedEngine(
         channelInfoForEntry(existing)?.harness.executionEngine,
@@ -8796,7 +8800,10 @@ export function createSessionControlPlane(
     // Live counter shared with coalesced waiters (see InFlightRestore
     // doc comment). Mutated synchronously by the coalesce branch above
     // and read once by the IIFE when seeding `entry.attachCount`.
-    const coalesceState = { count: 0 };
+    const coalesceState: InFlightRestore['coalesceState'] = {
+      count: 0,
+      folded: false,
+    };
     const admission =
       options.skipFreshSessionAdmission === true
         ? undefined
@@ -9267,6 +9274,7 @@ export function createSessionControlPlane(
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
         racedEntry.attachCount += 1 + coalesceState.count;
+        coalesceState.folded = true;
         const clientId = registerClient(racedEntry, req.clientId);
         recordAttachRef(racedEntry, clientId);
         let previousApprovalMode: ApprovalMode | undefined;
@@ -9414,6 +9422,26 @@ export function createSessionControlPlane(
         entry.restoreHistoryAnchorRecordId = replayAnchorRecordId;
       }
       seedSnapshotCaches(entry, publicState);
+      if (replayUpdates.length > 0) {
+        // Seed replay frames and drain early events synchronously right after
+        // `createSessionEntry` registers `entry` in `byId`, before awaiting
+        // artifact restoration. Otherwise any live `sessionUpdate` arriving
+        // during `await entry.artifacts.restore(...)` would publish directly
+        // to `entry.events` ahead of the replay history and be wiped out or
+        // reordered when `seedReplayEvents` and `drainEarlyEvents` run later.
+        void ci.client.seedSessionUpdates(entry, replayUpdates, {
+          ingestArtifacts: false,
+        });
+        if (
+          historyPageSize !== undefined &&
+          entry.events
+            .snapshotReplay()
+            ?.compactedTurns.some((event) => event.type === 'history_truncated')
+        ) {
+          entry.restoreHistoryHasMore = true;
+        }
+        ci.client.drainEarlyEvents(entry.sessionId, entry);
+      }
       const deferArtifactWorkspace = isReservedStandaloneSessionSourceType(
         entry.sourceType,
       );
@@ -9454,21 +9482,15 @@ export function createSessionControlPlane(
           warnings: artifactRestoreWarnings,
         };
       }
-      if (replayUpdates.length > 0) {
+      if (
+        replayUpdates.length > 0 &&
+        !deferArtifactWorkspace &&
+        (restoredArtifactSnapshot === undefined || artifactRestoreFailed)
+      ) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
-          ingestArtifacts:
-            !deferArtifactWorkspace &&
-            (restoredArtifactSnapshot === undefined || artifactRestoreFailed),
+          seedEvents: false,
+          ingestArtifacts: true,
         });
-        if (
-          historyPageSize !== undefined &&
-          entry.events
-            .snapshotReplay()
-            ?.compactedTurns.some((event) => event.type === 'history_truncated')
-        ) {
-          entry.restoreHistoryHasMore = true;
-        }
-        ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
       assertAttachableSessionEntry(req.sessionId, entry);
       const clientId = registerClient(entry, req.clientId);
@@ -9488,6 +9510,7 @@ export function createSessionControlPlane(
       // early-return path instead and increment `entry.attachCount`
       // directly.
       entry.attachCount += coalesceState.count;
+      coalesceState.folded = true;
       registeredEntry = entry;
       let restorePromptAdmitted = false;
       if (options.deferRestorePrompt !== true) {

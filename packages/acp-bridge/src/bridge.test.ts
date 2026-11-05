@@ -43486,4 +43486,78 @@ describe('background handoff cancellation', () => {
       await bridge.shutdown();
     }
   });
+
+  it('coalesces concurrent loadSession callers and seeds replay before post-createSessionEntry awaits resolve', async () => {
+    const modeGate = deferred<{
+      previous: string;
+      current: string;
+    }>();
+    const modeStarted = deferred<void>();
+    const handle = makeChannel({
+      loadSessionImpl: async () => ({
+        models: { currentModelId: 'qwen3-coder-plus', availableModels: [] },
+        modes: { currentModeId: 'default', availableModes: [] },
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'restored prompt' },
+              },
+              {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'restored answer' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+          modeStarted.resolve();
+          return modeGate.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const ownerPromise = bridge.loadSession({
+        sessionId: 'sess-coalesce-post-create',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        approvalMode: ApprovalMode.YOLO,
+      });
+      await modeStarted.promise;
+      // While the owner is suspended in `applyApprovalModeForAttach` (after
+      // `createSessionEntry` already placed the entry in `byId`), a concurrent
+      // same-shape caller must coalesce onto `inFlightRestores` rather than
+      // hitting the `existing` fast-path early, and an incompatible caller
+      // (`resumeSession`) must still be fenced with `RestoreInProgressError`.
+      await expect(
+        bridge.resumeSession({
+          sessionId: 'sess-coalesce-post-create',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toThrow(RestoreInProgressError);
+      const waiterPromise = bridge.loadSession({
+        sessionId: 'sess-coalesce-post-create',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      modeGate.resolve({ previous: 'default', current: 'yolo' });
+      const [ownerResult, waiterResult] = await Promise.all([
+        ownerPromise,
+        waiterPromise,
+      ]);
+      expect(ownerResult.attached).toBe(false);
+      expect(waiterResult.attached).toBe(true);
+      expect(ownerResult.compactedReplay?.length ?? 0).toBeGreaterThan(0);
+      expect(waiterResult.compactedReplay).toEqual(ownerResult.compactedReplay);
+    } finally {
+      modeGate.resolve({ previous: 'default', current: 'yolo' });
+      await bridge.shutdown();
+    }
+  });
 });

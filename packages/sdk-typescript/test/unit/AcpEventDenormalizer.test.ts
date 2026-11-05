@@ -230,6 +230,28 @@ describe('denormalizeAcpNotification', () => {
     expect(event!.type).toBe('memory_changed');
     expect(event!.data).toEqual({});
   });
+
+  it('converts session/request_permission to permission_request with requestId from _meta.qwen', () => {
+    const notification: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: 'session/request_permission',
+      params: {
+        sessionId: 's1',
+        toolCall: { toolCallId: 'tc-1', title: 'Run shell' },
+        options: [{ optionId: 'proceed_once', kind: 'allow_once' }],
+        _meta: { qwen: { requestId: 'perm-req-1' } },
+      },
+    };
+    const event = denormalizeAcpNotification(notification);
+    expect(event).toBeDefined();
+    expect(event!.type).toBe('permission_request');
+    expect(event!.data).toEqual({
+      requestId: 'perm-req-1',
+      sessionId: 's1',
+      toolCall: { toolCallId: 'tc-1', title: 'Run shell' },
+      options: [{ optionId: 'proceed_once', kind: 'allow_once' }],
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
