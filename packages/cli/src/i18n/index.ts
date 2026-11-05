@@ -43,8 +43,18 @@ type TranslationLoadResult =
 // `resolveBundleDir` for the rationale behind stripping a trailing
 // `chunks/` segment when this module is hoisted into a shared esbuild
 // chunk.
-const getBuiltinLocalesDir = (): string =>
-  path.join(resolveBundleDir(import.meta.url), 'locales');
+const getBuiltinLocalesDir = (): string => {
+  const bundleDir = resolveBundleDir(import.meta.url);
+  const direct = path.join(bundleDir, 'locales');
+  if (fs.existsSync(direct)) {
+    return direct;
+  }
+  const sourceFallback = path.resolve(bundleDir, '../../../src/i18n/locales');
+  if (fs.existsSync(sourceFallback)) {
+    return sourceFallback;
+  }
+  return direct;
+};
 
 const getUserLocalesDir = (): string =>
   path.join(Storage.getGlobalQwenDir(), 'locales');

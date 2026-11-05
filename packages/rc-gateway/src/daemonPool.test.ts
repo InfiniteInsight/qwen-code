@@ -2836,7 +2836,9 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
       }),
     });
 
-    const created = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    const created = await pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
     expect(created.sessionId).toBe('sess-proj-a');
 
     // Advance clock; background subscribeEvents and listWorkspaceSessions must not reset lastUsedAt.
@@ -2856,5 +2858,56 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
     await expect(pool.sessionContext('sess-proj-a')).rejects.toBeInstanceOf(
       UnknownSessionError,
     );
+  });
+
+  it('does not track persisted-only historical disk sessions in pooled.sessions or ownerOf during listWorkspaceSessions', async () => {
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, 'sess-live'),
+          async listWorkspaceSessions() {
+            return [
+              {
+                sessionId: 'sess-historical',
+                workspaceCwd: cwd,
+                clientCount: 0,
+                hasActivePrompt: false,
+                activeWorkState: null,
+                pendingInteractionCount: 0,
+                hasRunningBackgroundTasks: false,
+              },
+              {
+                sessionId: 'sess-live',
+                workspaceCwd: cwd,
+                clientCount: 1,
+                hasActivePrompt: false,
+              },
+            ] as never;
+          },
+          async sessionContext(id: string) {
+            return { calledOn: cwd, id } as never;
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    await pool.listWorkspaceSessions('/proj/a');
+
+    // Live session is owned directly, while historical session is not in ownerOf
+    // (only in lastKnownWorkspaceOf).
+    expect(await pool.sessionContext('sess-live')).toEqual({
+      calledOn: '/proj/a',
+      id: 'sess-live',
+    });
+    expect(
+      (pool as unknown as { ownerOf: Map<string, string> }).ownerOf.has(
+        'sess-historical',
+      ),
+    ).toBe(false);
   });
 });

@@ -1954,10 +1954,7 @@ export class DaemonPool implements SessionDaemon {
    * false (e.g. background event pump subscriptions). Throws
    * `UnknownSessionError` for an unrecorded id, or one whose owning
    * daemon has since been reaped or has died. */
-  private ownerEntry(
-    id: string,
-    touch = true,
-  ): { key: string; entry: Entry } {
+  private ownerEntry(id: string, touch = true): { key: string; entry: Entry } {
     const key = this.ownerOf.get(id);
     if (key === undefined) throw new UnknownSessionError(id);
     if (key === this.defaultWorkspaceCwd) {
@@ -3009,8 +3006,11 @@ export class DaemonPool implements SessionDaemon {
       const list = await pooled.client.listWorkspaceSessions(key);
       for (const s of list) {
         if (typeof s?.sessionId === 'string' && s.sessionId.length > 0) {
-          const alreadyTracked = pooled.sessions.has(s.sessionId);
-          this.trackSession(key, s.sessionId, !alreadyTracked);
+          if (isLiveWorkspaceSessionSummary(s)) {
+            this.trackSession(key, s.sessionId, false);
+          } else if (!this.lastKnownWorkspaceOf.has(s.sessionId)) {
+            this.lastKnownWorkspaceOf.set(s.sessionId, key);
+          }
         }
       }
       return list;
@@ -3023,6 +3023,7 @@ export class DaemonPool implements SessionDaemon {
         typeof s?.sessionId === 'string' &&
         s.sessionId.length > 0 &&
         !this.ownerOf.has(s.sessionId) &&
+        isLiveWorkspaceSessionSummary(s) &&
         (key === this.defaultWorkspaceCwd ||
           (typeof s.workspaceCwd === 'string' &&
             s.workspaceCwd.length > 0 &&
@@ -3031,7 +3032,7 @@ export class DaemonPool implements SessionDaemon {
           this.lastKnownWorkspaceOf.get(s.sessionId) ===
             this.defaultWorkspaceCwd)
       ) {
-        this.trackSession(this.defaultWorkspaceCwd, s.sessionId);
+        this.trackSession(this.defaultWorkspaceCwd, s.sessionId, false);
       }
     }
     return list;
@@ -3670,4 +3671,33 @@ function transportDeathCode(err: unknown): string | undefined {
     cur = (cur as { cause?: unknown }).cause;
   }
   return undefined;
+}
+
+/**
+ * True when a `DaemonSessionSummary` from `GET /workspace/:cwd/sessions`
+ * represents a live in-memory session in the daemon rather than an unattached
+ * historical transcript on disk (`toSummary` in `session-list.ts`, which emits
+ * `clientCount: 0, hasActivePrompt: false` with no live runtime fields such as
+ * `activeWorkState`, `pendingInteractionCount`, or `hasRunningBackgroundTasks`).
+ */
+export function isLiveWorkspaceSessionSummary(
+  s: DaemonSessionSummary,
+): boolean {
+  const attached = (s as { attached?: unknown }).attached;
+  if (attached === false) return false;
+  if (attached === true) return true;
+  if (
+    typeof s.activeWorkState === 'string' ||
+    (typeof s.pendingInteractionCount === 'number' &&
+      s.pendingInteractionCount > 0) ||
+    s.hasRunningBackgroundTasks === true ||
+    s.hasActivePrompt === true ||
+    (typeof s.clientCount === 'number' && s.clientCount > 0)
+  ) {
+    return true;
+  }
+  if (s.clientCount === 0 && !s.hasActivePrompt) {
+    return false;
+  }
+  return true;
 }

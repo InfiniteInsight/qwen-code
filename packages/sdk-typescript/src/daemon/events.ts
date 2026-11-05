@@ -1248,6 +1248,30 @@ export type DaemonSessionBranchedEvent = DaemonEventEnvelope<
   'session_branched',
   DaemonSessionBranchedData
 >;
+export type DaemonPromptCancelledEvent = DaemonEventEnvelope<
+  'prompt_cancelled',
+  Record<string, unknown>
+>;
+export type DaemonReplayCompleteEvent = DaemonEventEnvelope<
+  'replay_complete',
+  Record<string, unknown>
+>;
+export type DaemonUserShellCommandEvent = DaemonEventEnvelope<
+  'user_shell_command',
+  Record<string, unknown>
+>;
+export type DaemonUserShellResultEvent = DaemonEventEnvelope<
+  'user_shell_result',
+  Record<string, unknown>
+>;
+export type DaemonGitBranchChangedEvent = DaemonEventEnvelope<
+  'git_branch_changed',
+  Record<string, unknown>
+>;
+export type DaemonGitStatusChangedEvent = DaemonEventEnvelope<
+  'git_status_changed',
+  Record<string, unknown>
+>;
 
 export type DaemonAuthEvent =
   | DaemonAuthDeviceFlowStartedEvent
@@ -1342,7 +1366,13 @@ export type KnownDaemonEvent =
   | DaemonAuthEvent
   | DaemonAssistEvent
   | DaemonTurnEvent
-  | DaemonSessionSnapshotEvent;
+  | DaemonSessionSnapshotEvent
+  | DaemonPromptCancelledEvent
+  | DaemonReplayCompleteEvent
+  | DaemonUserShellCommandEvent
+  | DaemonUserShellResultEvent
+  | DaemonGitBranchChangedEvent
+  | DaemonGitStatusChangedEvent;
 
 export interface DaemonSessionViewState {
   lastEventId?: number;
@@ -1657,9 +1687,18 @@ export function isKnownDaemonEvent(
 export function isDaemonEventType<TType extends KnownDaemonEvent['type']>(
   event: DaemonEvent,
   type: TType,
-): event is Extract<KnownDaemonEvent, { type: TType }> {
-  const known = asKnownDaemonEvent(event);
-  return known?.type === type;
+): event is Extract<KnownDaemonEvent, { type: TType }>;
+export function isDaemonEventType(type: unknown): type is DaemonKnownEventType;
+export function isDaemonEventType<TType extends KnownDaemonEvent['type']>(
+  eventOrType: DaemonEvent | unknown,
+  type?: TType,
+): boolean {
+  if (typeof eventOrType === 'string' && type === undefined) {
+    return isKnownDaemonEventTypeName(eventOrType);
+  }
+  if (!isRecord(eventOrType)) return false;
+  const known = asKnownDaemonEvent(eventOrType as unknown as DaemonEvent);
+  return type !== undefined && known !== undefined && known.type === type;
 }
 
 /**
@@ -1921,6 +1960,30 @@ export function asKnownDaemonEvent(
     case 'session_branched':
       return isSessionBranchedData(event.data)
         ? (event as DaemonSessionBranchedEvent)
+        : undefined;
+    case 'prompt_cancelled':
+      return isRecord(event.data)
+        ? (event as DaemonPromptCancelledEvent)
+        : undefined;
+    case 'replay_complete':
+      return isRecord(event.data)
+        ? (event as DaemonReplayCompleteEvent)
+        : undefined;
+    case 'user_shell_command':
+      return isRecord(event.data)
+        ? (event as DaemonUserShellCommandEvent)
+        : undefined;
+    case 'user_shell_result':
+      return isRecord(event.data)
+        ? (event as DaemonUserShellResultEvent)
+        : undefined;
+    case 'git_branch_changed':
+      return isRecord(event.data)
+        ? (event as DaemonGitBranchChangedEvent)
+        : undefined;
+    case 'git_status_changed':
+      return isRecord(event.data)
+        ? (event as DaemonGitStatusChangedEvent)
         : undefined;
     default:
       return undefined;
@@ -2321,6 +2384,12 @@ export function reduceDaemonSessionEvent(
     case PENDING_PROMPT_STARTED_EVENT:
     case PENDING_PROMPT_COMPLETED_EVENT:
     case 'channel_delivery_result':
+    case 'prompt_cancelled':
+    case 'replay_complete':
+    case 'user_shell_command':
+    case 'user_shell_result':
+    case 'git_branch_changed':
+    case 'git_status_changed':
       return base;
     case 'session_rewound':
       return {

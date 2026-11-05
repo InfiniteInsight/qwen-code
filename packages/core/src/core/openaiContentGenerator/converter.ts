@@ -815,7 +815,12 @@ function processContent(
   // Emit one combined user message containing all media stripped from the
   // tool messages in this group. Runs after the parts loop so all tool
   // messages remain contiguous (OpenAI requirement for parallel tool calls).
+  // When `role === 'user'` also has top-level `contentParts` (e.g.
+  // `<system-reminder>`, `appendAutoMemoryContext`, or `reattachParts`), fold
+  // them into this same `role: 'user'` message so a single `Content` never
+  // emits two consecutive `role: 'user'` messages.
   if (accumulatedSplitMedia.length > 0) {
+    const extraUserParts = role === 'user' ? contentParts : [];
     const splitUserMsg: OpenAI.Chat.ChatCompletionMessageParam = {
       role: 'user',
       content: [
@@ -824,10 +829,17 @@ function processContent(
           text: SPLIT_TOOL_MEDIA_TEXT,
         },
         ...accumulatedSplitMedia,
+        ...extraUserParts,
       ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
     };
     splitMediaContributors.set(splitUserMsg, accumulatedSplitContributors);
+    if (extraUserParts.length > 0) {
+      splitMediaExtraUserParts.set(splitUserMsg, extraUserParts);
+    }
     messages.push(splitUserMsg);
+    if (role === 'user') {
+      return;
+    }
   }
 
   if (role === 'assistant') {
@@ -2430,6 +2442,8 @@ function cleanOrphanedToolCalls(
           const splitMediaMessage = messages[splitMediaIndex];
           if (splitMediaMessage) {
             const contributors = splitMediaContributors.get(splitMediaMessage);
+            const extraUserParts =
+              splitMediaExtraUserParts.get(splitMediaMessage) ?? [];
             if (
               contributors &&
               contributors.some(
@@ -2449,7 +2463,14 @@ function cleanOrphanedToolCalls(
                   content: [
                     { type: 'text', text: SPLIT_TOOL_MEDIA_TEXT },
                     ...survivingMediaParts,
+                    ...extraUserParts,
                   ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
+                });
+              } else if (extraUserParts.length > 0) {
+                cleaned.push({
+                  role: 'user',
+                  content:
+                    extraUserParts as unknown as OpenAI.Chat.ChatCompletionContentPart[],
                 });
               }
             } else {
@@ -2483,9 +2504,18 @@ function cleanOrphanedToolCalls(
         `cleanOrphanedToolCalls: dropping orphaned tool response ${message.tool_call_id || '<empty>'}`,
       );
     } else if (isSplitToolMediaMessage(message)) {
-      debugLogger.debug(
-        'cleanOrphanedToolCalls: dropping orphaned split tool media message',
-      );
+      const extraUserParts = splitMediaExtraUserParts.get(message) ?? [];
+      if (extraUserParts.length > 0) {
+        cleaned.push({
+          role: 'user',
+          content:
+            extraUserParts as unknown as OpenAI.Chat.ChatCompletionContentPart[],
+        });
+      } else {
+        debugLogger.debug(
+          'cleanOrphanedToolCalls: dropping orphaned split tool media message',
+        );
+      }
     } else {
       cleaned.push(message);
     }
@@ -2497,6 +2527,11 @@ function cleanOrphanedToolCalls(
 const splitMediaContributors = new WeakMap<
   OpenAI.Chat.ChatCompletionMessageParam,
   Array<{ toolCallId: string; parts: OpenAIContentPart[] }>
+>();
+
+const splitMediaExtraUserParts = new WeakMap<
+  OpenAI.Chat.ChatCompletionMessageParam,
+  OpenAIContentPart[]
 >();
 
 /**

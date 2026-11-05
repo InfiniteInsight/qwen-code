@@ -1218,5 +1218,68 @@ describe('useDaemonStream', () => {
     expect(driver.stats().prompts).toEqual([
       { prompt: [{ type: 'text', text: '/clear' }] },
     ]);
+
+    // Real useSlashCommandProcessor returns { type: 'handled' } for /clear
+    handleSlashCommand.mockResolvedValueOnce({ type: 'handled' });
+    await act(async () => {
+      await result.current.submitQuery('/clear');
+    });
+    expect(driver.stats().prompts).toEqual([
+      { prompt: [{ type: 'text', text: '/clear' }] },
+      { prompt: [{ type: 'text', text: '/clear' }] },
+    ]);
+  });
+
+  it('useDaemonStreamAdapter invokes onAdmissionFailed instead of aborting the active daemon turn when submitQuery is called while Responding', async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const handleSlashCommand = vi.fn().mockResolvedValue(false);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          vi.fn(),
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+        ),
+      { wrapper },
+    );
+
+    let firstTurn!: Promise<void>;
+    act(() => {
+      firstTurn = result.current.submitQuery('first turn');
+    });
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+    const onAdmissionFailed = vi.fn();
+    const onDeliveryFailed = vi.fn();
+    await act(async () => {
+      await result.current.submitQuery(
+        '/btw side question',
+        undefined,
+        undefined,
+        { onAdmissionFailed, onDeliveryFailed },
+      );
+    });
+    expect(onAdmissionFailed).toHaveBeenCalledTimes(1);
+    expect(onDeliveryFailed).toHaveBeenCalledTimes(1);
+    expect(driver.stats().prompts).toHaveLength(1);
+
+    await act(async () => {
+      driver.finishPrompt({ stopReason: 'end_turn' });
+      await firstTurn;
+    });
   });
 });

@@ -613,8 +613,14 @@ class SessionEventsHub {
       this.close('error');
       return;
     }
+    if (this.upstream !== upstream) {
+      this.ready.then(resolveReady, rejectReady);
+      return;
+    }
     resolveReady();
-    if (this.upstream !== upstream) return;
+    if ('pending' in attach && this.catchingUp) {
+      this.finishCatchUp();
+    }
     try {
       const first = 'first' in attach ? attach.first : await attach.pending;
       if (this.upstream !== upstream) return;

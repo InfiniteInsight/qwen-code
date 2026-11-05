@@ -16010,11 +16010,6 @@ export function createSessionControlPlane(
           );
         }
         const afterArtifacts = (await entry.artifacts.list()).artifacts;
-        publishArtifactChanges(
-          entry,
-          artifactReseedChanges(beforeArtifacts, afterArtifacts),
-          originatorClientId,
-        );
         try {
           entry.events.publish({
             type: 'session_rewound',
@@ -16033,6 +16028,11 @@ export function createSessionControlPlane(
         } catch {
           /* bus closed */
         }
+        publishArtifactChanges(
+          entry,
+          artifactReseedChanges(beforeArtifacts, afterArtifacts),
+          originatorClientId,
+        );
 
         return {
           rewound: filesFailed.length === 0,

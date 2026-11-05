@@ -984,6 +984,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       ) {
         const seg = this.replaySegments[i]!;
         let segHasUserChunk = false;
+        let segHasNonUserTurnMarker = false;
         for (let j = 0; j < seg.events.length; j++) {
           const ev = seg.events[j]!;
           const evData =
@@ -991,13 +992,29 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
               ? (ev.data as SessionUpdateData)
               : undefined;
           const update = evData?.update;
+          const meta =
+            update?._meta && typeof update._meta === 'object'
+              ? (update._meta as Record<string, unknown>)
+              : undefined;
+          const metaSource = meta?.['source'];
+          if (
+            metaSource === 'background_notification' ||
+            metaSource === 'background_notification_turn_started' ||
+            metaSource === 'agent_mention' ||
+            meta?.['backgroundTurn'] !== undefined ||
+            (ev.data &&
+              typeof ev.data === 'object' &&
+              !Array.isArray(ev.data) &&
+              (ev.data as Record<string, unknown>)['backgroundTurn'] !==
+                undefined)
+          ) {
+            segHasNonUserTurnMarker = true;
+          }
           const isUserChunk =
             ev.type === 'session_update' &&
             update?.sessionUpdate === 'user_message_chunk' &&
-            (!update._meta ||
-              typeof update._meta !== 'object' ||
-              (update._meta as Record<string, unknown>)['source'] !==
-                'background_notification');
+            metaSource !== 'background_notification' &&
+            metaSource !== 'agent_mention';
           if (isUserChunk) {
             segHasUserChunk = true;
             if (!inUserChunkRun) {
@@ -1013,7 +1030,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
             inUserChunkRun = false;
           }
         }
-        if (!segHasUserChunk && seg.turnCount > 0) {
+        if (!segHasUserChunk && !segHasNonUserTurnMarker && seg.turnCount > 0) {
           inUserChunkRun = false;
           if (userTurnIndex === targetTurnIndex) {
             cutSegIdx = i;
@@ -1071,6 +1088,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     const retained = this.flattenReplaySegments();
     this.activeRecordId = lastRecordIdIn(retained);
     this.summaryRecordId = lastSummaryRecordIdIn(retained);
+    if (
+      this.truncatedEvents > 0 &&
+      this.replayAnchorRecordId !== undefined &&
+      !retained.some((ev) => replayRecordId(ev) === this.replayAnchorRecordId)
+    ) {
+      this.replayAnchorRecordId = this.firstRetainedReplayRecordId();
+    }
   }
 
   private recordLastEventId(event: BridgeEvent): void {

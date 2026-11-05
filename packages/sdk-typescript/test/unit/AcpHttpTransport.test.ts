@@ -1633,4 +1633,41 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     expect(pending.has(5)).toBe(true);
     t.dispose();
   });
+
+  it('dispose() aborts active subscribeEvents SSE streams', async () => {
+    let streamSignal: AbortSignal | null | undefined;
+    const { fetch } = initAwareFetch({
+      connectionIdHeader: 'conn-1',
+      subsequentReply: (req) => {
+        if (req.method === 'GET' && req.headers['acp-session-id']) {
+          streamSignal = req.signal;
+          const stream = new ReadableStream<Uint8Array>({
+            start() {
+              // stay open until aborted
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          });
+        }
+        return jsonResponse(200, {
+          jsonrpc: '2.0',
+          id: 1,
+          result: { ok: true },
+        });
+      },
+    });
+
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const gen = t.subscribeEvents('sess-dispose');
+    const nextPromise = gen.next();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(streamSignal).toBeDefined();
+    expect(streamSignal?.aborted).toBe(false);
+
+    t.dispose();
+    expect(streamSignal?.aborted).toBe(true);
+    await expect(nextPromise).rejects.toThrow();
+  });
 });

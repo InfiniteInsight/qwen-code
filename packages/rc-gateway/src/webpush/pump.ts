@@ -6,7 +6,11 @@
 
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 import type { PolicyEnforcer } from '../policy/enforcer.js';
-import { isGoneSessionError, type SessionDaemon } from '../daemonPool.js';
+import {
+  isGoneSessionError,
+  isLiveWorkspaceSessionSummary,
+  type SessionDaemon,
+} from '../daemonPool.js';
 import {
   routingContextFromPolicy,
   type RoutingEventContext,
@@ -227,7 +231,7 @@ export class SessionEventPump {
         const sub = await this.daemon.listWorkspaceSessions(cwd);
         anySucceeded = true;
         for (const s of sub) {
-          if (!seenIds.has(s.sessionId)) {
+          if (isLiveWorkspaceSessionSummary(s) && !seenIds.has(s.sessionId)) {
             seenIds.add(s.sessionId);
             list.push(s);
           }

@@ -60461,5 +60461,68 @@ describe('Session', () => {
         undefined,
       );
     });
+
+    it('records /clear slash_command on the pre-rotation recorder and skips recording failed local slash commands', async () => {
+      const existingRecorder = mockConfig.getChatRecordingService();
+      const oldRecordUserMessage = vi.fn();
+      const oldRecordSlashCommand = vi.fn();
+      const newRecordUserMessage = vi.fn();
+      const newRecordSlashCommand = vi.fn();
+      const oldRecorder = {
+        ...existingRecorder,
+        recordUserMessage: oldRecordUserMessage,
+        recordSlashCommand: oldRecordSlashCommand,
+        flush: vi.fn(),
+      };
+      const newRecorder = {
+        ...existingRecorder,
+        recordUserMessage: newRecordUserMessage,
+        recordSlashCommand: newRecordSlashCommand,
+        flush: vi.fn(),
+      };
+      let rotated = false;
+      mockConfig.getChatRecordingService = vi
+        .fn()
+        .mockImplementation(() => (rotated ? newRecorder : oldRecorder));
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockImplementation(async (rawPrompt: string) => {
+        if (rawPrompt === '/clear') {
+          rotated = true;
+          return {
+            type: 'message',
+            content: 'Conversation cleared.',
+            messageType: 'info',
+          };
+        }
+        return {
+          type: 'message',
+          content: 'Invalid argument',
+          messageType: 'error',
+        };
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/clear' }],
+      });
+
+      expect(oldRecordUserMessage).toHaveBeenCalledTimes(1);
+      expect(oldRecordSlashCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ rawCommand: '/clear', phase: 'result' }),
+      );
+      expect(newRecordUserMessage).not.toHaveBeenCalled();
+      expect(newRecordSlashCommand).not.toHaveBeenCalled();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/badcmd' }],
+        }),
+      ).rejects.toThrow('Invalid argument');
+
+      expect(newRecordUserMessage).not.toHaveBeenCalled();
+      expect(newRecordSlashCommand).not.toHaveBeenCalled();
+    });
   });
 });

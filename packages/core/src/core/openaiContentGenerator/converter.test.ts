@@ -4445,4 +4445,63 @@ describe('modality filtering', () => {
     expect(parts[2].type).toBe('text');
     expect(parts[2].text).toContain('video file');
   });
+
+  it('folds trailing user text parts (e.g. system-reminder / auto-memory) into the split media user message instead of emitting two consecutive user messages', () => {
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
+      {
+        model: 'gpt-4o',
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'Read screenshot' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_img_1',
+                  name: 'read_file',
+                  args: { path: 'screen.png' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_img_1',
+                  name: 'read_file',
+                  response: { output: 'Loaded image' },
+                  parts: [inline('image/png', 'img-data')],
+                },
+              },
+              {
+                text: '<system-reminder>\nAuto-memory context\n</system-reminder>',
+              },
+            ],
+          },
+        ],
+      },
+      { model: 'gpt-4o', modalities: { image: true }, startTime: 0 },
+    );
+
+    const userMessagesAfterTool = messages.slice(2);
+    expect(userMessagesAfterTool.map((m: { role: string }) => m.role)).toEqual([
+      'tool',
+      'user',
+    ]);
+    const splitUserMsg = userMessagesAfterTool[1] as {
+      role: 'user';
+      content: Array<{ type: string; text?: string }>;
+    };
+    expect(Array.isArray(splitUserMsg.content)).toBe(true);
+    expect(
+      splitUserMsg.content.some(
+        (p) => p.type === 'text' && p.text?.includes('Auto-memory context'),
+      ),
+    ).toBe(true);
+  });
 });

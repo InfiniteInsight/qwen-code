@@ -3812,4 +3812,59 @@ describe('turn attribution preservation (DAEMON-007)', () => {
       'reply 0 keep',
     ]);
   });
+
+  it('rewindReplayWindow by targetTurnIndex ignores background-notification turns and agent_mention user chunks', () => {
+    const stampMeta = (
+      ev: BridgeEvent,
+      meta: Record<string, unknown>,
+    ): BridgeEvent => ({
+      ...ev,
+      data: {
+        ...(ev.data as Record<string, unknown>),
+        update: {
+          ...((ev.data as { update: Record<string, unknown> }).update ?? {}),
+          _meta: meta,
+        },
+      },
+    });
+    const engine = new TurnBoundaryCompactionEngine();
+    // User turn 0
+    engine.ingest(makeUserMessage(1, 'user turn 0'));
+    engine.ingest(makeTextChunk(2, 'reply 0'));
+    engine.ingest(makeTurnComplete(3));
+
+    // Background notification turn (no user chunk, only agent chunk + turn_complete)
+    engine.ingest(
+      stampMeta(makeTextChunk(4, 'bg notification reply'), {
+        source: 'background_notification_turn_started',
+      }),
+    );
+    engine.ingest(makeTurnComplete(5));
+
+    // Agent mention chunk inside user turn 1
+    engine.ingest(
+      stampMeta(makeUserMessage(6, '@agent mention'), {
+        source: 'agent_mention',
+      }),
+    );
+    engine.ingest(makeUserMessage(7, 'user turn 1'));
+    engine.ingest(makeTextChunk(8, 'reply 1'));
+    engine.ingest(makeTurnComplete(9));
+
+    // Rewind at targetTurnIndex=1 (should cut at 'user turn 1', preserving turn 0 and bg reply)
+    engine.ingest({
+      id: 10,
+      v: 1,
+      type: 'session_rewound',
+      data: { targetTurnIndex: 1, removedTurnCount: 1 },
+    });
+
+    const snap = engine.snapshot();
+    expect(extractTexts(snap.compactedTurns)).toEqual([
+      'user turn 0',
+      'reply 0',
+      'bg notification reply',
+      '@agent mention',
+    ]);
+  });
 });

@@ -3913,4 +3913,31 @@ describe('task_changed (background task lifecycle frame)', () => {
     expect(state.unrecognizedKnownEventCount).toBe(0);
     expect(state.lastEventId).toBe(42);
   });
+
+  it('recognizes prompt_cancelled, replay_complete, user_shell_command, user_shell_result, git_branch_changed, and git_status_changed without incrementing unrecognizedKnownEventCount', () => {
+    let state = createDaemonSessionViewState();
+    const types = [
+      'prompt_cancelled',
+      'replay_complete',
+      'user_shell_command',
+      'user_shell_result',
+      'git_branch_changed',
+      'git_status_changed',
+    ] as const;
+    let id = 1;
+    for (const type of types) {
+      const ev: DaemonEvent = { id: id++, v: 1, type, data: {} };
+      expect(asKnownDaemonEvent(ev)).toBeDefined();
+      expect(isDaemonEventType(ev, type)).toBe(true);
+      state = reduceDaemonSessionEvent(state, ev);
+    }
+    expect(state.unrecognizedKnownEventCount).toBe(0);
+    expect(state.lastEventId).toBe(types.length);
+    expect(
+      isDaemonEventType(
+        { v: 1, type: 'totally_unknown', data: {} },
+        undefined as never,
+      ),
+    ).toBe(false);
+  });
 });

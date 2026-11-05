@@ -196,6 +196,7 @@ export class AcpHttpTransport implements DaemonTransport {
     string,
     { abort: AbortController; refs: number }
   >();
+  private readonly activeSseRequests = new Set<AbortController>();
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
@@ -411,6 +412,7 @@ export class AcpHttpTransport implements DaemonTransport {
 
     // Connect-phase timeout.
     const connectCtrl = new AbortController();
+    this.activeSseRequests.add(connectCtrl);
     let connectTimer: ReturnType<typeof setTimeout> | undefined;
     if (opts.connectTimeoutMs && Number.isFinite(opts.connectTimeoutMs)) {
       connectTimer = setTimeout(
@@ -433,231 +435,234 @@ export class AcpHttpTransport implements DaemonTransport {
       ? composeAbortSignals([opts.signal, connectCtrl.signal])
       : connectCtrl.signal;
 
-    let res: Response;
     try {
-      res = await this._fetch(`${this.baseUrl}/acp`, {
-        headers,
-        signal: fetchSignal,
-      });
-    } finally {
-      if (connectTimer !== undefined) clearTimeout(connectTimer);
-    }
-
-    if (!res.ok) {
-      let body: unknown;
+      let res: Response;
       try {
-        const text = await res.text();
+        res = await this._fetch(`${this.baseUrl}/acp`, {
+          headers,
+          signal: fetchSignal,
+        });
+      } finally {
+        if (connectTimer !== undefined) clearTimeout(connectTimer);
+      }
+
+      if (!res.ok) {
+        let body: unknown;
         try {
-          body = JSON.parse(text);
+          const text = await res.text();
+          try {
+            body = JSON.parse(text);
+          } catch {
+            body = text;
+          }
         } catch {
-          body = text;
+          /* body unreadable */
         }
-      } catch {
-        /* body unreadable */
+        const detail =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : `HTTP ${res.status}`;
+        throw Object.assign(new Error(`GET /acp (session stream): ${detail}`), {
+          status: res.status,
+          body,
+        });
       }
-      const detail =
-        body && typeof body === 'object' && 'error' in body
-          ? String((body as { error: unknown }).error)
-          : `HTTP ${res.status}`;
-      throw Object.assign(new Error(`GET /acp (session stream): ${detail}`), {
-        status: res.status,
-        body,
-      });
-    }
 
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.toLowerCase().includes('text/event-stream')) {
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* body already consumed or no body */
+      const ct = res.headers.get('content-type') ?? '';
+      if (!ct.toLowerCase().includes('text/event-stream')) {
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* body already consumed or no body */
+        }
+        throw Object.assign(
+          new Error(
+            `GET /acp (session stream): expected content-type text/event-stream, got "${ct}"`,
+          ),
+          { status: res.status, body: ct },
+        );
       }
-      throw Object.assign(
-        new Error(
-          `GET /acp (session stream): expected content-type text/event-stream, got "${ct}"`,
-        ),
-        { status: res.status, body: ct },
-      );
-    }
 
-    if (!res.body) {
-      throw new Error('SSE response has no body');
-    }
-
-    // Learn the daemon's current bus epoch so the caller can pair it with
-    // its resume cursor on the next reconnect (DAEMON-001).
-    const responseEpoch = res.headers.get('x-qwen-event-epoch');
-    if (responseEpoch) {
-      opts.onEpoch?.(responseEpoch);
-    }
-
-    // The `/acp` session stream carries RAW JSON-RPC frames (not REST
-    // `BridgeEvent` envelopes), so parse them directly and dispatch by shape.
-    // Each SSE frame may carry an `id:` line — the EventBus cursor we stamp
-    // onto yielded events so the consumer resumes from the REAL daemon id
-    // (the denormalizer's synthetic id is not resume-compatible); frames with
-    // no `id:` (synthetic terminals) yield `id: undefined`, which the consumer
-    // ignores for Last-Event-ID tracking.
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    const signal = opts.signal;
-    // `reader.read()` doesn't observe `signal` on its own — race it against an
-    // abort rejection so dispose()/caller-abort can unblock a hanging read.
-    // Keep the listener in a named ref and remove it in the `finally`: a
-    // long-lived signal reused across reconnects (the scenario this resumable
-    // transport enables) would otherwise accumulate one listener per call.
-    let onAbort: (() => void) | undefined;
-    const abortPromise = new Promise<never>((_, reject) => {
-      if (signal?.aborted) {
-        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-        return;
+      if (!res.body) {
+        throw new Error('SSE response has no body');
       }
-      if (signal) {
+
+      // Learn the daemon's current bus epoch so the caller can pair it with
+      // its resume cursor on the next reconnect (DAEMON-001).
+      const responseEpoch = res.headers.get('x-qwen-event-epoch');
+      if (responseEpoch) {
+        opts.onEpoch?.(responseEpoch);
+      }
+
+      // The `/acp` session stream carries RAW JSON-RPC frames (not REST
+      // `BridgeEvent` envelopes), so parse them directly and dispatch by shape.
+      // Each SSE frame may carry an `id:` line — the EventBus cursor we stamp
+      // onto yielded events so the consumer resumes from the REAL daemon id
+      // (the denormalizer's synthetic id is not resume-compatible); frames with
+      // no `id:` (synthetic terminals) yield `id: undefined`, which the consumer
+      // ignores for Last-Event-ID tracking.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      const signal = fetchSignal;
+      // `reader.read()` doesn't observe `signal` on its own — race it against an
+      // abort rejection so dispose()/caller-abort can unblock a hanging read.
+      // Keep the listener in a named ref and remove it in the `finally`: a
+      // long-lived signal reused across reconnects (the scenario this resumable
+      // transport enables) would otherwise accumulate one listener per call.
+      let onAbort: (() => void) | undefined;
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+          return;
+        }
         onAbort = () =>
           reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
         signal.addEventListener('abort', onAbort, { once: true });
-      }
-    });
-    // If `signal` is already aborted at entry, the `while (!signal?.aborted)`
-    // loop below never runs, so `Promise.race` never consumes this rejection.
-    // Attach a no-op handler so that early-abort case can't surface as an
-    // unhandled rejection (Node `UnhandledPromiseRejectionWarning` / browser
-    // `unhandledrejection`). The race still settles on the same rejection.
-    abortPromise.catch(() => {});
+      });
+      // If `signal` is already aborted at entry, the `while (!signal.aborted)`
+      // loop below never runs, so `Promise.race` never consumes this rejection.
+      // Attach a no-op handler so that early-abort case can't surface as an
+      // unhandled rejection (Node `UnhandledPromiseRejectionWarning` / browser
+      // `unhandledrejection`). The race still settles on the same rejection.
+      abortPromise.catch(() => {});
 
-    try {
-      while (!signal?.aborted) {
-        const { value, done } = await Promise.race([
-          reader.read(),
-          abortPromise,
-        ]);
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        if (buf.length > MAX_SSE_BUF_CHARS) {
-          throw new Error(
-            `AcpHttpTransport: unread SSE buffer exceeded ${MAX_SSE_BUF_CHARS} ` +
-              `bytes without a frame boundary`,
-          );
-        }
-
-        // Reuse the shared CRLF-aware frame splitter (handles both `\n\n` and
-        // `\r\n\r\n`) instead of reimplementing it.
-        const { frames, tail } = consumeFrames(buf);
-        buf = tail;
-        for (const rawFrame of frames) {
-          let busId: number | undefined;
-          const dataParts: string[] = [];
-          for (const rawLine of rawFrame.split('\n')) {
-            // Strip a trailing CR so CRLF line endings don't corrupt JSON.parse.
-            const line = rawLine.endsWith('\r')
-              ? rawLine.slice(0, -1)
-              : rawLine;
-            if (line.startsWith('id:')) {
-              // Match the server's `parseLastEventId` strictness (pure decimal,
-              // within MAX_SAFE_INTEGER) so a proxy-mangled `id:` can't seed a
-              // cursor the daemon would later reject — `Number()` would wave
-              // through hex / `1e5` / `''`→0.
-              const raw = line.slice(3).trim();
-              // A later `id:` line in the same frame overrides an earlier one;
-              // an INVALID one resets the cursor to undefined rather than
-              // leaving a stale value from a prior line (so a proxy-mangled
-              // trailing `id:` can't carry a wrong cursor into the event).
-              if (/^\d+$/.test(raw)) {
-                const n = Number.parseInt(raw, 10);
-                busId =
-                  Number.isFinite(n) && n <= Number.MAX_SAFE_INTEGER
-                    ? n
-                    : undefined;
-              } else {
-                busId = undefined;
-              }
-            } else if (line.startsWith('data:')) {
-              // Per the SSE spec, multiple `data:` lines in one event join with
-              // a newline.
-              dataParts.push(line.slice('data:'.length).replace(/^ /, ''));
-            }
-          }
-          if (dataParts.length === 0) continue;
-          const dataLine = dataParts.join('\n');
-
-          let msg: unknown;
-          try {
-            msg = JSON.parse(dataLine);
-          } catch {
-            // Non-empty payload that failed to parse ⇒ a corrupt data frame
-            // (genuine heartbeats/comments carry no `data:` and were filtered
-            // by the `dataParts.length === 0` guard above). We drop it and move
-            // on: the SDK has no logger and the package's lint config forbids
-            // `console`, so there's no in-convention channel to trace it here.
-            // Surfacing dropped frames is left to a follow-up once the SDK
-            // grows a logging facility.
-            continue;
-          }
-          if (!isRecord(msg)) continue;
-
-          const hasId = 'id' in msg;
-          const method = (msg as { method?: unknown }).method;
-
-          // (1) JSON-RPC response (id, no method) → resolve the pending request.
-          // THIS is the W2 fix: a `session/prompt` reply routed here by the
-          // daemon's `replySession` now settles its promise instead of hanging.
-          if (hasId && typeof method !== 'string') {
-            const rid = (msg as { id: unknown }).id;
-            if (typeof rid === 'number') {
-              const pending = this.pending.get(rid);
-              if (pending) {
-                // Defense-in-depth: don't let a reply on this session's stream
-                // resolve a pending scoped to a different session (mirror of the
-                // reply-pump guard).
-                if (
-                  pending.sessionId !== undefined &&
-                  pending.sessionId !== sessionId
-                ) {
-                  continue;
-                }
-                this.pending.delete(rid);
-                pending.resolve(msg as unknown as JsonRpcResponse);
-              }
-            }
-            continue;
-          }
-
-          // (2) Agent→client permission request → surface as an event so the
-          // consumer can show it. Responding (POSTing the vote) is the §1.7
-          // permission-coordination follow-up; here we only deliver it.
-          if (method === 'session/request_permission') {
-            const ev = permissionRequestToEvent(msg, busId);
-            if (ev) yield ev;
-            continue;
-          }
-
-          // (3) Notification → DaemonEvent, stamped with the real bus cursor.
-          if (typeof method === 'string' && !hasId) {
-            const ev = denormalizeAcpNotification(
-              msg as unknown as JsonRpcNotification,
+      try {
+        while (!signal.aborted) {
+          const { value, done } = await Promise.race([
+            reader.read(),
+            abortPromise,
+          ]);
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          if (buf.length > MAX_SSE_BUF_CHARS) {
+            throw new Error(
+              `AcpHttpTransport: unread SSE buffer exceeded ${MAX_SSE_BUF_CHARS} ` +
+                `bytes without a frame boundary`,
             );
-            if (ev) {
-              ev.id = busId; // authoritative cursor (or undefined → ignored)
-              yield ev;
-            }
-            continue;
           }
-          // else: unrecognized frame → ignore
+
+          // Reuse the shared CRLF-aware frame splitter (handles both `\n\n` and
+          // `\r\n\r\n`) instead of reimplementing it.
+          const { frames, tail } = consumeFrames(buf);
+          buf = tail;
+          for (const rawFrame of frames) {
+            let busId: number | undefined;
+            const dataParts: string[] = [];
+            for (const rawLine of rawFrame.split('\n')) {
+              // Strip a trailing CR so CRLF line endings don't corrupt JSON.parse.
+              const line = rawLine.endsWith('\r')
+                ? rawLine.slice(0, -1)
+                : rawLine;
+              if (line.startsWith('id:')) {
+                // Match the server's `parseLastEventId` strictness (pure decimal,
+                // within MAX_SAFE_INTEGER) so a proxy-mangled `id:` can't seed a
+                // cursor the daemon would later reject — `Number()` would wave
+                // through hex / `1e5` / `''`→0.
+                const raw = line.slice(3).trim();
+                // A later `id:` line in the same frame overrides an earlier one;
+                // an INVALID one resets the cursor to undefined rather than
+                // leaving a stale value from a prior line (so a proxy-mangled
+                // trailing `id:` can't carry a wrong cursor into the event).
+                if (/^\d+$/.test(raw)) {
+                  const n = Number.parseInt(raw, 10);
+                  busId =
+                    Number.isFinite(n) && n <= Number.MAX_SAFE_INTEGER
+                      ? n
+                      : undefined;
+                } else {
+                  busId = undefined;
+                }
+              } else if (line.startsWith('data:')) {
+                // Per the SSE spec, multiple `data:` lines in one event join with
+                // a newline.
+                dataParts.push(line.slice('data:'.length).replace(/^ /, ''));
+              }
+            }
+            if (dataParts.length === 0) continue;
+            const dataLine = dataParts.join('\n');
+
+            let msg: unknown;
+            try {
+              msg = JSON.parse(dataLine);
+            } catch {
+              // Non-empty payload that failed to parse ⇒ a corrupt data frame
+              // (genuine heartbeats/comments carry no `data:` and were filtered
+              // by the `dataParts.length === 0` guard above). We drop it and move
+              // on: the SDK has no logger and the package's lint config forbids
+              // `console`, so there's no in-convention channel to trace it here.
+              // Surfacing dropped frames is left to a follow-up once the SDK
+              // grows a logging facility.
+              continue;
+            }
+            if (!isRecord(msg)) continue;
+
+            const hasId = 'id' in msg;
+            const method = (msg as { method?: unknown }).method;
+
+            // (1) JSON-RPC response (id, no method) → resolve the pending request.
+            // THIS is the W2 fix: a `session/prompt` reply routed here by the
+            // daemon's `replySession` now settles its promise instead of hanging.
+            if (hasId && typeof method !== 'string') {
+              const rid = (msg as { id: unknown }).id;
+              if (typeof rid === 'number') {
+                const pending = this.pending.get(rid);
+                if (pending) {
+                  // Defense-in-depth: don't let a reply on this session's stream
+                  // resolve a pending scoped to a different session (mirror of the
+                  // reply-pump guard).
+                  if (
+                    pending.sessionId !== undefined &&
+                    pending.sessionId !== sessionId
+                  ) {
+                    continue;
+                  }
+                  this.pending.delete(rid);
+                  pending.resolve(msg as unknown as JsonRpcResponse);
+                }
+              }
+              continue;
+            }
+
+            // (2) Agent→client permission request → surface as an event so the
+            // consumer can show it. Responding (POSTing the vote) is the §1.7
+            // permission-coordination follow-up; here we only deliver it.
+            if (method === 'session/request_permission') {
+              const ev = permissionRequestToEvent(msg, busId);
+              if (ev) yield ev;
+              continue;
+            }
+
+            // (3) Notification → DaemonEvent, stamped with the real bus cursor.
+            if (typeof method === 'string' && !hasId) {
+              const ev = denormalizeAcpNotification(
+                msg as unknown as JsonRpcNotification,
+              );
+              if (ev) {
+                ev.id = busId; // authoritative cursor (or undefined → ignored)
+                yield ev;
+              }
+              continue;
+            }
+            // else: unrecognized frame → ignore
+          }
         }
+      } finally {
+        if (onAbort) signal.removeEventListener('abort', onAbort);
+        try {
+          reader.cancel().catch(() => {});
+        } catch {
+          /* already closed */
+        }
+        // NOTE: the session-scoped pending sweep lives in the `subscribeEvents`
+        // WRAPPER's finally, not here. This read-loop finally only runs if the
+        // pump reached the read loop — a fast failure (fetch reject / non-OK /
+        // wrong content-type, all BEFORE this try) would skip it and strand the
+        // pending. The wrapper finally always runs, so the sweep belongs there.
       }
     } finally {
-      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
-      try {
-        reader.cancel().catch(() => {});
-      } catch {
-        /* already closed */
-      }
-      // NOTE: the session-scoped pending sweep lives in the `subscribeEvents`
-      // WRAPPER's finally, not here. This read-loop finally only runs if the
-      // pump reached the read loop — a fast failure (fetch reject / non-OK /
-      // wrong content-type, all BEFORE this try) would skip it and strand the
-      // pending. The wrapper finally always runs, so the sweep belongs there.
+      connectCtrl.abort();
+      this.activeSseRequests.delete(connectCtrl);
     }
   }
 
@@ -669,6 +674,12 @@ export class AcpHttpTransport implements DaemonTransport {
     // Tear down the connection-scoped SSE stream.
     this.connStreamAbort?.abort();
     this.connStreamAbort = undefined;
+
+    // Tear down any active subscribeEvents SSE streams.
+    for (const ctrl of this.activeSseRequests) {
+      ctrl.abort();
+    }
+    this.activeSseRequests.clear();
 
     // Tear down any background session-reply pumps.
     for (const [sid, entry] of this.sessionReplyPumps) {
@@ -1026,14 +1037,46 @@ export class AcpHttpTransport implements DaemonTransport {
     // Merge caller headers with transport headers.
     const headers = mergeHeaders(transportHeaders, callerHeaders);
 
-    const res = await this._fetch(`${this.baseUrl}/acp`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(req),
-      signal,
+    const sessionId =
+      typeof params['sessionId'] === 'string'
+        ? (params['sessionId'] as string)
+        : undefined;
+    // This reply rides the SESSION stream iff it's one of the session-routed
+    // methods (regardless of whether the reply pump or an active subscription
+    // ultimately delivers it). Tag the pending entry with that scope so a
+    // connection-stream failure can't sweep it (§W2 cross-stream race).
+    const replyScopeSessionId =
+      sessionId && SESSION_STREAM_REPLY_METHODS.has(method)
+        ? sessionId
+        : undefined;
+
+    // Register in `this.pending` BEFORE `await this._fetch(...)` so a fast SSE
+    // reply arriving on an already-open connection or session stream before the
+    // POST `fetch` promise resumes can still resolve this request.
+    const responsePromise = new Promise<JsonRpcResponse>((resolve, reject) => {
+      this.pending.set(req.id, {
+        resolve,
+        reject,
+        sessionId: replyScopeSessionId,
+      });
     });
+    responsePromise.catch(() => {});
+
+    let res: Response;
+    try {
+      res = await this._fetch(`${this.baseUrl}/acp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(req),
+        signal,
+      });
+    } catch (err) {
+      this.pending.delete(req.id);
+      throw err;
+    }
 
     if (!res.ok) {
+      this.pending.delete(req.id);
       // POST itself failed — return a synthetic error response.
       const text = await res.text().catch(() => '');
       return {
@@ -1051,7 +1094,14 @@ export class AcpHttpTransport implements DaemonTransport {
     // that doesn't use 202+SSE), consume it directly.
     const ct = res.headers.get('content-type') ?? '';
     if (res.status === 200 && ct.includes('application/json')) {
+      this.pending.delete(req.id);
       return (await res.json()) as JsonRpcResponse;
+    }
+
+    // If an already-open SSE stream delivered the reply while `this._fetch` was
+    // settling, `responsePromise` is already resolved.
+    if (!this.pending.has(req.id)) {
+      return responsePromise;
     }
 
     // 202 (ack) — the real response rides an SSE stream. Ensure the
@@ -1063,31 +1113,11 @@ export class AcpHttpTransport implements DaemonTransport {
     // isn't already iterating `subscribeEvents` for that session (which would
     // route the reply itself), open a background reply pump so the request can
     // resolve — otherwise `DaemonClient.prompt()` and friends hang forever.
-    const sessionId =
-      typeof params['sessionId'] === 'string'
-        ? (params['sessionId'] as string)
-        : undefined;
-    // This reply rides the SESSION stream iff it's one of the session-routed
-    // methods (regardless of whether the reply pump or an active subscription
-    // ultimately delivers it). Tag the pending entry with that scope so a
-    // connection-stream failure can't sweep it (§W2 cross-stream race).
-    const replyScopeSessionId =
-      sessionId && SESSION_STREAM_REPLY_METHODS.has(method)
-        ? sessionId
-        : undefined;
     const releaseSessionPump =
       replyScopeSessionId &&
       !this.activeSessionSubscriptions.has(replyScopeSessionId)
         ? this.ensureSessionReplyPump(replyScopeSessionId)
         : undefined;
-
-    const responsePromise = new Promise<JsonRpcResponse>((resolve, reject) => {
-      this.pending.set(req.id, {
-        resolve,
-        reject,
-        sessionId: replyScopeSessionId,
-      });
-    });
 
     // Handle abort signal: if the caller aborts, reject the pending
     // request and clean up.
@@ -1102,13 +1132,17 @@ export class AcpHttpTransport implements DaemonTransport {
           );
         }
       };
-      signal.addEventListener('abort', abortHandler, { once: true });
-      // `{ once: true }` self-removes only when the signal FIRES. On the happy
-      // path (request resolves normally) the listener would otherwise stay
-      // attached, so a long-lived caller signal reused across many requests
-      // accumulates one closure per call. Remove it explicitly on settle.
-      removeAbortHandler = () =>
-        signal.removeEventListener('abort', abortHandler);
+      if (signal.aborted) {
+        abortHandler();
+      } else {
+        signal.addEventListener('abort', abortHandler, { once: true });
+        // `{ once: true }` self-removes only when the signal FIRES. On the happy
+        // path (request resolves normally) the listener would otherwise stay
+        // attached, so a long-lived caller signal reused across many requests
+        // accumulates one closure per call. Remove it explicitly on settle.
+        removeAbortHandler = () =>
+          signal.removeEventListener('abort', abortHandler);
+      }
     }
 
     // Release the background reply pump AND drop the abort listener once the

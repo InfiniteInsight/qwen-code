@@ -6753,6 +6753,7 @@ export class Session implements SessionContext {
               );
             };
 
+            const preSlashRecorder = this.config.getChatRecordingService();
             if (goalTurn?.origin === 'runtime') {
               // The automatic Goal turn was recorded above with its runtime
               // provenance and must not also appear as real user input.
@@ -6763,6 +6764,7 @@ export class Session implements SessionContext {
               this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
             } else if (
               isSlashInput &&
+              this.slashCommandPolicy?.allowSessionReset !== false &&
               (slashCommandName === 'clear' ||
                 slashCommandName === 'reset' ||
                 slashCommandName === 'new')
@@ -6855,17 +6857,32 @@ export class Session implements SessionContext {
               }
 
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
-              const shouldRecordSlashCommand = !(
-                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
-                resolvedCommandInfo.name === 'advisor'
-              );
-              if (
+              const shouldRecordSlashCommand =
+                !(
+                  resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                  resolvedCommandInfo.name === 'advisor'
+                ) &&
+                slashCommandResult.type !== 'unsupported' &&
+                slashCommandResult.type !== 'goal_control' &&
+                !(
+                  slashCommandResult.type === 'message' &&
+                  slashCommandResult.messageType === 'error'
+                );
+              const canRecordSlashUserTurn =
                 shouldRecordSlashCommand &&
                 !cachedUserPromptHookResult?.blocked &&
                 goalTurn?.origin !== 'runtime' &&
-                !isRetry
+                !isRetry;
+              if (
+                canRecordSlashUserTurn &&
+                slashCommandResult.type !== 'stream_messages'
               ) {
-                recordUserTurn(cachedUserPromptHookResult?.additionalContext);
+                recordUserTurn(
+                  slashCommandResult.type === 'submit_prompt' ||
+                    slashCommandResult.type === 'no_command'
+                    ? cachedUserPromptHookResult?.additionalContext
+                    : undefined,
+                );
               }
 
               try {
@@ -6875,6 +6892,8 @@ export class Session implements SessionContext {
                   pendingSend.signal,
                   onFullTurnModel,
                   shouldRecordSlashCommand,
+                  preSlashRecorder,
+                  canRecordSlashUserTurn ? () => recordUserTurn() : undefined,
                 );
               } catch (error) {
                 logConversationFinishedEvent(
@@ -17833,12 +17852,14 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel: (model: string) => boolean,
     shouldRecordResult: boolean,
+    preSlashRecorder?: ReturnType<Config['getChatRecordingService']>,
+    onRecordUserTurn?: () => void,
   ): Promise<Part[] | null> {
     this.refreshContextFilesOnWrite =
       result.type === 'submit_prompt' &&
       Boolean(result.refreshContextFilesOnWrite);
     const recorder = shouldRecordResult
-      ? this.config.getChatRecordingService()
+      ? (preSlashRecorder ?? this.config.getChatRecordingService())
       : undefined;
 
     switch (result.type) {
@@ -17972,6 +17993,7 @@ export class Session implements SessionContext {
             : []),
         ];
         if (outputHistoryItems.length > 0) {
+          onRecordUserTurn?.();
           recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt

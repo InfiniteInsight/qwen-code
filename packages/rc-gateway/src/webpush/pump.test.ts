@@ -832,4 +832,57 @@ describe('SessionEventPump routing context and session name (issue #166)', () =>
     sessions[0].displayName = 'my-session';
     expect(await waitFor(() => names.includes('my-session'), 4000)).toBe(true);
   });
+
+  it('skips persisted-only historical disk sessions (clientCount=0, hasActivePrompt=false) when reconciling SSE loops', async () => {
+    const subscribed: string[] = [];
+    const daemon = {
+      capabilities: async () => ({ workspaceCwd: '/w' }),
+      listWorkspaceSessions: async () => [
+        {
+          sessionId: 'historical-disk-only',
+          workspaceCwd: '/w',
+          clientCount: 0,
+          hasActivePrompt: false,
+          activeWorkState: null,
+          pendingInteractionCount: 0,
+          hasRunningBackgroundTasks: false,
+        },
+        {
+          sessionId: 'live-attached',
+          workspaceCwd: '/w',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ],
+      subscribeEvents: (sessionId: string, sub?: { signal?: AbortSignal }) => {
+        subscribed.push(sessionId);
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next(): Promise<IteratorResult<DaemonEvent>> {
+                await new Promise<void>((resolve) => {
+                  if (sub?.signal?.aborted) resolve();
+                  else
+                    sub?.signal?.addEventListener('abort', () => resolve(), {
+                      once: true,
+                    });
+                });
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as DaemonClient;
+
+    pump = new SessionEventPump(
+      daemon,
+      { notify: async () => {} },
+      { pollMs: 20, reconnectMs: 0, sleep: async () => {} },
+    );
+    await pump.start();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(subscribed).toEqual(['live-attached']);
+    await pump.stop();
+  });
 });

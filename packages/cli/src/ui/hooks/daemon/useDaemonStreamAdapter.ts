@@ -18,6 +18,7 @@
  * display + the permission prompt binding are a following slice.
  */
 import { useContext } from 'react';
+import { StreamingState } from '../../types.js';
 import { isSlashCommand } from '../../utils/commandUtils.js';
 import { useDaemonStream } from './useDaemonStream.js';
 import {
@@ -129,7 +130,12 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
 
   return {
     streamingState: ds.streamingState,
-    submitQuery: async (query, _submitType, promptId) => {
+    submitQuery: async (query, _submitType, promptId, metadata) => {
+      if (ds.streamingState !== StreamingState.Idle) {
+        metadata?.onAdmissionFailed?.();
+        metadata?.onDeliveryFailed?.();
+        return;
+      }
       const text = toText(query);
       const trimmed = text.trim();
       if (handleSlashCommand && (isSlashCommand(trimmed) || trimmed === '?')) {
@@ -146,7 +152,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
             promptId,
           );
           if (
-            !slashResult &&
+            (!slashResult || slashResult.type === 'handled') &&
             (firstToken === 'clear' ||
               firstToken === 'reset' ||
               firstToken === 'new')
