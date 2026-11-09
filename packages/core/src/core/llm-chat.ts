@@ -1516,29 +1516,34 @@ function delay(
   // Every settle path ends the announced retry wait synchronously — a skip or
   // abort must not keep shielding the request until the generator resumes.
   let endWait = () => {};
+  let settled = false;
 
   const promise = new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      endWait();
+      reject(signal?.reason);
+    };
+
     resolveRef = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
       endWait();
       resolve();
     };
 
     if (signal?.aborted) {
+      settled = true;
       reject(signal.reason);
       return;
     }
 
     timeoutId = setTimeout(resolveRef, delayMs);
 
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timeoutId);
-        endWait();
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    signal?.addEventListener('abort', onAbort, { once: true });
     endWait = beginRetryWait(delayMs);
   });
 
@@ -4062,18 +4067,23 @@ export class LlmChat {
                   delayMs,
                   params.config?.abortSignal,
                 );
+                delayPromise.catch(() => {});
                 resetTransportContinuation();
-                yield {
-                  type: StreamEventType.RETRY,
-                  retryInfo: {
-                    message,
-                    attempt: rateLimitRetryCount,
-                    maxRetries: maxRateLimitRetries,
-                    delayMs,
-                    skipDelay: skip,
-                  },
-                };
-                await delayPromise;
+                try {
+                  yield {
+                    type: StreamEventType.RETRY,
+                    retryInfo: {
+                      message,
+                      attempt: rateLimitRetryCount,
+                      maxRetries: maxRateLimitRetries,
+                      delayMs,
+                      skipDelay: skip,
+                    },
+                  };
+                  await delayPromise;
+                } finally {
+                  skip();
+                }
                 rearmQuietAcceptanceIfBudgetSpent();
                 continue;
               }
@@ -4458,8 +4468,7 @@ export class LlmChat {
                 // If reactive compression does not succeed, restore the
                 // partial turn so unretryable error handling sees it intact.
                 const savedPendingIdx = self.pendingPartialAssistantTurnIndex;
-                const savedPendingRecord =
-                  self.pendingPartialAssistantRecord;
+                const savedPendingRecord = self.pendingPartialAssistantRecord;
                 const savedPendingTurn =
                   savedPendingIdx !== null &&
                   self.history.length > savedPendingIdx &&

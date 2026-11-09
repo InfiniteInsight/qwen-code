@@ -14733,7 +14733,7 @@ describe('useLlmStream', () => {
           ).toHaveLength(1);
         });
 
-        it('does not claim a cron-only summary was delivered to the model', async () => {
+        it('displays a cron-only overflow summary without claiming it was delivered to the model', async () => {
           const { goalQueueRef, release } = blockedDrain();
           let schedulerCallback:
             | ((job: {
@@ -14796,10 +14796,91 @@ describe('useLlmStream', () => {
             ),
           );
 
-          expect(notificationTexts()).not.toContainEqual(
-            expect.stringContaining('Dropped'),
+          expect(notificationTexts()).toContainEqual(
+            expect.stringContaining('Dropped 1 background notification'),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
+        });
+
+        it('restores a notification batch and dropped summary when delivery fails before the model request starts', async () => {
+          const { goalQueueRef, release } = blockedDrain();
+          const { rerender, client } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+          await waitFor(() =>
+            expect(
+              mockBackgroundShellRegistry.setNotificationCallback,
+            ).toHaveBeenCalled(),
+          );
+          const shellCallback = mockBackgroundShellRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { shellId: string; status: string },
+          ) => void;
+          // Force submitQuery to abort before starting the stream on the
+          // first drain attempt via Mod startup admission failure.
+          const ready = Promise.reject(new Error('Mod startup failed'));
+          void ready.catch(() => {});
+          const modSpy = vi
+            .spyOn(interactiveMods, 'getInteractiveModSession')
+            .mockReturnValueOnce({
+              ready,
+            } as interactiveMods.InteractiveModSession);
+          mockSendMessageStream.mockClear();
+          mockAddItem.mockClear();
+
+          try {
+            act(() => {
+              for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+                shellCallback(`shell ${i}`, `<shell-${i} />`, {
+                  shellId: `bg_${i}`,
+                  status: 'completed',
+                });
+              }
+              shellCallback('overflow shell', '<shell-overflow />', {
+                shellId: 'bg_overflow',
+                status: 'completed',
+              });
+            });
+
+            release();
+            rerender(rerenderProps(client));
+            await waitFor(() =>
+              expect(mockAddItem).toHaveBeenCalledWith(
+                expect.objectContaining({
+                  type: MessageType.ERROR,
+                  text: expect.stringContaining('Mods failed to initialize'),
+                }),
+                expect.any(Number),
+              ),
+            );
+            expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+            // A subsequent notification trigger should drain the restored batch
+            // and still include the overflow summary.
+            act(() => {
+              shellCallback('trigger shell', '<shell-trigger />', {
+                shellId: 'bg_trigger',
+                status: 'completed',
+              });
+            });
+            await waitFor(() =>
+              expect(mockSendMessageStream).toHaveBeenCalled(),
+            );
+            const submitted = JSON.stringify(
+              mockSendMessageStream.mock.calls[0][0],
+            );
+            expect(submitted).toContain('<kind>queue</kind>');
+            expect(submitted).toContain('<shell-2 />');
+          } finally {
+            modSpy.mockRestore();
+          }
         });
 
         it('drops an incoming notification rather than evict a protected one', async () => {

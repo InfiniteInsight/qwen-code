@@ -191,6 +191,7 @@ function isSessionAttachmentReference(
 
 const MAX_ATTACHMENT_CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
+const MAX_EARLY_TERMINAL_EVENTS = 64;
 
 function createStandaloneRestoredClient(
   client: DaemonClient,
@@ -311,6 +312,10 @@ export class DaemonSessionClient {
       resolve: (r: PromptResult) => void;
       reject: (e: unknown) => void;
     }
+  >();
+  private readonly _earlyTerminalEvents = new Map<
+    string,
+    { ok: true; result: PromptResult } | { ok: false; error: unknown }
   >();
 
   constructor(opts: DaemonSessionClientOptions) {
@@ -667,6 +672,16 @@ export class DaemonSessionClient {
     } catch (err) {
       releaseAdmission();
       throw err;
+    }
+
+    const earlyTerminal = this._earlyTerminalEvents.get(accepted.promptId);
+    if (earlyTerminal) {
+      this._earlyTerminalEvents.delete(accepted.promptId);
+      releaseAdmission();
+      if (earlyTerminal.ok) {
+        return earlyTerminal.result;
+      }
+      throw earlyTerminal.error;
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
@@ -1661,7 +1676,17 @@ export class DaemonSessionClient {
       ?.promptId;
     if (!promptId) return;
     const pending = this._pendingPrompts.get(promptId);
-    if (!pending) return;
+    if (!pending) {
+      try {
+        const result = matchTurnEvent(event, promptId);
+        if (result !== undefined) {
+          this._recordEarlyTerminalEvent(promptId, { ok: true, result });
+        }
+      } catch (err) {
+        this._recordEarlyTerminalEvent(promptId, { ok: false, error: err });
+      }
+      return;
+    }
     this._pendingPrompts.delete(promptId);
     try {
       const result = matchTurnEvent(event, promptId);
@@ -1671,11 +1696,27 @@ export class DaemonSessionClient {
     }
   }
 
+  private _recordEarlyTerminalEvent(
+    promptId: string,
+    outcome: { ok: true; result: PromptResult } | { ok: false; error: unknown },
+  ): void {
+    if (this._earlyTerminalEvents.has(promptId)) {
+      this._earlyTerminalEvents.delete(promptId);
+    }
+    this._earlyTerminalEvents.set(promptId, outcome);
+    while (this._earlyTerminalEvents.size > MAX_EARLY_TERMINAL_EVENTS) {
+      const oldestKey = this._earlyTerminalEvents.keys().next().value;
+      if (oldestKey === undefined) break;
+      this._earlyTerminalEvents.delete(oldestKey);
+    }
+  }
+
   private _rejectAllPending(err: unknown): void {
     for (const [, pending] of this._pendingPrompts) {
       pending.reject(err);
     }
     this._pendingPrompts.clear();
+    this._earlyTerminalEvents.clear();
   }
 }
 

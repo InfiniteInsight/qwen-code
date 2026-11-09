@@ -33,6 +33,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  truncateSync,
   writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -451,7 +452,15 @@ export class SessionWal {
       const suffix = this.suffixOfPath(seg);
       let last: number | null = null;
       let decoded = 0;
-      for (const { frame, frameBytes } of decodeSegmentWithSizes(seg)) {
+      let tornTailOffset: number | null = null;
+      for (const { frame, frameBytes } of decodeSegmentWithSizes(
+        seg,
+        suffix === 0
+          ? (validBytes) => {
+              tornTailOffset = validBytes;
+            }
+          : undefined,
+      )) {
         last = frame.id;
         decoded += 1;
         this.frames.push({ id: frame.id, appendedAtMs: mtimeMs, frameBytes });
@@ -464,6 +473,10 @@ export class SessionWal {
         if (this._latest === null || frame.id > this._latest) {
           this._latest = frame.id;
         }
+      }
+      if (suffix === 0 && tornTailOffset !== null) {
+        this.close();
+        truncateSync(seg, tornTailOffset);
       }
       this.segLastId.set(suffix, last);
       if (suffix === 0) {
@@ -1018,6 +1031,7 @@ export function encodeFrame(frame: WalFrame): Buffer {
  */
 function* decodeBuffer(
   buf: Buffer,
+  onTornTail?: (validBytes: number) => void,
 ): Generator<{ frame: WalFrame; frameBytes: number }> {
   let offset = 0;
   while (offset + LENGTH_PREFIX_BYTES <= buf.length) {
@@ -1026,6 +1040,7 @@ function* decodeBuffer(
     const end = start + len;
     if (end > buf.length) {
       // Torn/partial frame: stop; this is the truncated tail.
+      onTornTail?.(offset);
       return;
     }
     const slice = buf.subarray(start, end);
@@ -1038,6 +1053,9 @@ function* decodeBuffer(
     }
     yield { frame, frameBytes: LENGTH_PREFIX_BYTES + len };
     offset = end;
+  }
+  if (offset < buf.length) {
+    onTornTail?.(offset);
   }
 }
 
@@ -1055,10 +1073,11 @@ export function* decodeSegment(path: string): Generator<WalFrame> {
 /** Like decodeSegment but also yields each frame's on-disk byte size. */
 function* decodeSegmentWithSizes(
   path: string,
+  onTornTail?: (validBytes: number) => void,
 ): Generator<{ frame: WalFrame; frameBytes: number }> {
   if (!existsSync(path)) {
     return;
   }
   const buf = readFileSync(path);
-  yield* decodeBuffer(buf);
+  yield* decodeBuffer(buf, onTornTail);
 }

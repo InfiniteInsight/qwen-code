@@ -13559,6 +13559,98 @@ describe('LlmChat', async () => {
         expect(caught?.message).toMatch(/reduce the current request/i);
       });
     });
+
+    describe('issue #420: rate-limit RETRY delay cleanup and abort listener lifecycle', () => {
+      function makeRateLimitError(): Error {
+        return Object.assign(new Error('429 Too Many Requests: rate limit'), {
+          status: 429,
+        });
+      }
+
+      it('cleans up the retry timer, abort listener, and retry-wait state when the consumer exits early at RETRY yield', async () => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+        const waitEvents: RetryWaitEvent[] = [];
+
+        streamMock().mockImplementationOnce(async () =>
+          streamThenThrow(
+            [textChunk('thinking', undefined)],
+            makeRateLimitError(),
+          ),
+        );
+
+        await runWithRetryWaitObserver(
+          (event) => waitEvents.push(event),
+          async () => {
+            const stream = await chat.sendMessageStream(
+              'test-model',
+              {
+                message: 'hello',
+                config: { abortSignal: controller.signal },
+              },
+              'prompt-retry-early-return',
+            );
+
+            for await (const event of stream) {
+              if (event.type === StreamEventType.RETRY) {
+                break;
+              }
+            }
+          },
+        );
+
+        expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+        expect(waitEvents.map((e) => e.phase)).toEqual(['start', 'end']);
+      });
+
+      it('does not trigger an unhandled rejection when abortSignal fires while paused at the RETRY yield', async () => {
+        const controller = new AbortController();
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+
+        try {
+          streamMock().mockImplementationOnce(async () =>
+            streamThenThrow(
+              [textChunk('thinking', undefined)],
+              makeRateLimitError(),
+            ),
+          );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            {
+              message: 'hello',
+              config: { abortSignal: controller.signal },
+            },
+            'prompt-retry-abort-during-yield',
+          );
+
+          const iter = stream[Symbol.asyncIterator]();
+          // Advance until RETRY event is yielded
+          let sawRetry = false;
+          for (let i = 0; i < 5; i++) {
+            const res = await iter.next();
+            if (res.done) break;
+            if (res.value.type === StreamEventType.RETRY) {
+              sawRetry = true;
+              // Abort while consumer is paused at the RETRY yield
+              controller.abort(new Error('aborted during retry yield'));
+              await new Promise((r) => setTimeout(r, 20));
+              break;
+            }
+          }
+          expect(sawRetry).toBe(true);
+          await expect(iter.next()).rejects.toThrow(
+            'aborted during retry yield',
+          );
+          expect(unhandled).toEqual([]);
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+        }
+      });
+    });
   });
 });
 

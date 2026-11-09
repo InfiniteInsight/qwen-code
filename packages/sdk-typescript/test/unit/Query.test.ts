@@ -1951,5 +1951,148 @@ describe('Query', () => {
 
       await query.close();
     });
+
+    it('should resolve streamInput immediately without calling endInput when query closes before first result', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: { streamClose: 60_000 },
+      });
+
+      await respondToInitialize(transport, query);
+
+      async function* messageGenerator() {
+        yield createUserMessage('Hello before close');
+      }
+
+      const streamPromise = query.streamInput(messageGenerator());
+      // Give streamInput time to reach firstResultReceivedPromise wait
+      await new Promise((r) => setTimeout(r, 10));
+      await query.close();
+
+      await expect(streamPromise).resolves.toBeUndefined();
+      expect(transport.endInputCalled).toBe(false);
+    });
+
+    it('should resolve streamInput immediately when transport ends before first result', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: { streamClose: 60_000 },
+      });
+
+      await respondToInitialize(transport, query);
+
+      async function* messageGenerator() {
+        yield createUserMessage('Hello before EOF');
+      }
+
+      const streamPromise = query.streamInput(messageGenerator());
+      await new Promise((r) => setTimeout(r, 10));
+      transport.simulateClose();
+
+      await expect(streamPromise).resolves.toBeUndefined();
+      await query.close();
+    });
+
+    it('should abort handlePermissionRequest immediately when control_cancel_request arrives even if canUseTool ignores signal', async () => {
+      // canUseTool never settles and ignores options.signal
+      const canUseTool = vi.fn(() => new Promise<never>(() => {}));
+      const query = new Query(transport, {
+        cwd: '/test',
+        canUseTool,
+        timeout: { canUseTool: 60_000 },
+      });
+
+      await respondToInitialize(transport, query);
+
+      transport.simulateMessage({
+        type: 'control_request',
+        request_id: 'inbound-perm-ignore-signal',
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          input: { command: 'ls' },
+          permission_suggestions: null,
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(canUseTool).toHaveBeenCalledTimes(1);
+      });
+
+      const writtenBefore = transport.getAllWrittenMessages().length;
+      transport.simulateMessage({
+        type: 'control_cancel_request',
+        request_id: 'inbound-perm-ignore-signal',
+      });
+
+      await vi.waitFor(() => {
+        const inbound = (
+          query as unknown as {
+            inboundControlRequests: Map<string, AbortController>;
+          }
+        ).inboundControlRequests;
+        expect(inbound.has('inbound-perm-ignore-signal')).toBe(false);
+      });
+      expect(transport.getAllWrittenMessages().length).toBe(writtenBefore);
+
+      await query.close();
+    });
+
+    it('should abort a pending MCP request and remove it from pendingMcpResponses on control_cancel_request', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: { mcpRequest: 60_000 },
+      });
+
+      await respondToInitialize(transport, query);
+
+      const fakeMcpTransport = {
+        handleMessage: vi.fn(),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      (
+        query as unknown as {
+          sdkMcpTransports: Map<string, unknown>;
+        }
+      ).sdkMcpTransports.set('test-mcp', fakeMcpTransport);
+
+      transport.simulateMessage({
+        type: 'control_request',
+        request_id: 'inbound-mcp-1',
+        request: {
+          subtype: 'mcp_message',
+          server_name: 'test-mcp',
+          message: {
+            jsonrpc: '2.0',
+            id: 42,
+            method: 'tools/call',
+            params: { name: 'slow_tool' },
+          },
+        },
+      });
+
+      const pendingMcp = (
+        query as unknown as {
+          pendingMcpResponses: Map<string, unknown>;
+        }
+      ).pendingMcpResponses;
+
+      await vi.waitFor(() => {
+        expect(pendingMcp.has('test-mcp:42')).toBe(true);
+      });
+
+      const writtenBefore = transport.getAllWrittenMessages().length;
+      transport.simulateMessage({
+        type: 'control_cancel_request',
+        request_id: 'inbound-mcp-1',
+      });
+
+      await vi.waitFor(() => {
+        expect(pendingMcp.has('test-mcp:42')).toBe(false);
+      });
+      expect(transport.getAllWrittenMessages().length).toBe(writtenBefore);
+
+      await query.close();
+    });
   });
 });

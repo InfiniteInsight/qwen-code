@@ -6641,14 +6641,7 @@ export const useLlmStream = (
         if (targetType === SendMessageType.Cron) {
           const item = queue.shift()!;
           const cronAt = Date.now();
-          if (
-            queue.some(
-              (queued) =>
-                queued.sendMessageType === SendMessageType.Notification,
-            )
-          ) {
-            displayDroppedSummary(cronAt);
-          }
+          displayDroppedSummary(cronAt);
           if (!item.displayed) {
             addItem(
               { type: 'notification' as const, text: item.displayText },
@@ -6697,6 +6690,14 @@ export const useLlmStream = (
         const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
         const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
         releaseDroppedSummary();
+        let requestStarted = false;
+        let restored = false;
+        const restoreOnFailure = () => {
+          if (restored || requestStarted) return;
+          restored = true;
+          restoreBatch(batch);
+          restoreDroppedSummary();
+        };
         void submitQuery(
           withDroppedSummary(combinedModelText),
           targetType,
@@ -6704,10 +6705,8 @@ export const useLlmStream = (
           {
             notificationDisplayText: combinedDisplayText,
             todoWorkChainId: batch[0]?.todoWorkChainId,
-            onAdmissionFailed: () => {
-              restoreBatch(batch);
-              restoreDroppedSummary();
-            },
+            onDeliveryFailed: restoreOnFailure,
+            onAdmissionFailed: restoreOnFailure,
             claimGoalTurn: admission.claimGoalTurn,
             onGoalClaimDeferred: () => {
               restoreBatch(batch);
@@ -6715,6 +6714,7 @@ export const useLlmStream = (
               setNotificationTrigger((n) => n + 1);
             },
             onRequestStarted: () => {
+              requestStarted = true;
               const now = Date.now();
               displayDroppedSummary(now);
               for (const item of batch) {

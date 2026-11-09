@@ -145,6 +145,33 @@ describe('ReviewPermissionBridge — baseline vote / escalate', () => {
     expect(votes).toEqual([]);
     expect(resumed).toEqual(['s']);
   });
+
+  it('ignores replay_complete and state_resync_required and terminates on session_died/session_closed without calling onResume (#428)', async () => {
+    const { daemon, votes } = fakeDaemon([
+      permFrame('q-edit', { kind: 'edit', rawInput: {} }),
+      { type: 'replay_complete', data: {} },
+      { type: 'state_resync_required', data: {} },
+      { type: 'session_died', data: {} },
+      { type: 'session_update', data: {} },
+    ]);
+    const escalated: string[] = [];
+    const resumed: string[] = [];
+    const bridge = new ReviewPermissionBridge({
+      daemon,
+      onEscalate: (sid) => escalated.push(sid),
+      onResume: (sid) => resumed.push(sid),
+    });
+    await bridge.open('s', {
+      autoApprove: true,
+      autofix: false,
+      comment: false,
+      worktreeRoot: null,
+    });
+    await bridge.drain('s');
+    expect(votes).toEqual([]);
+    expect(escalated).toEqual(['s']);
+    expect(resumed).toEqual([]);
+  });
 });
 
 describe('ReviewPermissionBridge — reliability (error isolation + reconnect)', () => {

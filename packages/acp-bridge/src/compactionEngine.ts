@@ -274,6 +274,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private closed = false;
   private truncatedEvents = 0;
   private truncatedTurns = 0;
+  private evictedUserTurns = 0;
+  private evictedInUserChunkRun = false;
   // Most recent `qwen.session.recordId` observed on an ingested or seeded
   // `session_update`. Surfaced on the `history_truncated` marker emitted by
   // `snapshot()` so clients that lost every turn-boundary event from their
@@ -978,74 +980,79 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       }
     }
 
-    if (
-      cutSegIdx === undefined &&
-      targetTurnIndex !== undefined &&
-      this.truncatedEvents === 0
-    ) {
-      let userTurnIndex = 0;
-      let inUserChunkRun = false;
-      outerTurn: for (
-        let i = this.replaySegmentStart;
-        i < this.replaySegments.length;
-        i++
-      ) {
-        const seg = this.replaySegments[i]!;
-        let segHasUserChunk = false;
-        let segHasNonUserTurnMarker = false;
-        for (let j = 0; j < seg.events.length; j++) {
-          const ev = seg.events[j]!;
-          const evData =
-            ev.data && typeof ev.data === 'object' && !Array.isArray(ev.data)
-              ? (ev.data as SessionUpdateData)
-              : undefined;
-          const update = evData?.update;
-          const meta =
-            update?._meta && typeof update._meta === 'object'
-              ? (update._meta as Record<string, unknown>)
-              : undefined;
-          const metaSource = meta?.['source'];
-          if (
-            metaSource === 'background_notification' ||
-            metaSource === 'background_notification_turn_started' ||
-            metaSource === 'agent_mention' ||
-            meta?.['backgroundTurn'] !== undefined ||
-            (ev.data &&
-              typeof ev.data === 'object' &&
-              !Array.isArray(ev.data) &&
-              (ev.data as Record<string, unknown>)['backgroundTurn'] !==
-                undefined)
-          ) {
-            segHasNonUserTurnMarker = true;
-          }
-          const isUserChunk =
-            ev.type === 'session_update' &&
-            update?.sessionUpdate === 'user_message_chunk' &&
-            metaSource !== 'background_notification' &&
-            metaSource !== 'agent_mention';
-          if (isUserChunk) {
-            segHasUserChunk = true;
-            if (!inUserChunkRun) {
-              if (userTurnIndex === targetTurnIndex) {
-                cutSegIdx = i;
-                cutEventIdx = j;
-                break outerTurn;
-              }
-              userTurnIndex += 1;
-              inUserChunkRun = true;
+    if (cutSegIdx === undefined && targetTurnIndex !== undefined) {
+      if (targetTurnIndex < this.evictedUserTurns) {
+        cutSegIdx = this.replaySegmentStart;
+        cutEventIdx = 0;
+      } else {
+        let userTurnIndex = this.evictedUserTurns;
+        let inUserChunkRun = this.evictedInUserChunkRun;
+        outerTurn: for (
+          let i = this.replaySegmentStart;
+          i < this.replaySegments.length;
+          i++
+        ) {
+          const seg = this.replaySegments[i]!;
+          let segHasUserChunk = false;
+          let segHasNonUserTurnMarker = false;
+          for (let j = 0; j < seg.events.length; j++) {
+            const ev = seg.events[j]!;
+            const evData =
+              ev.data && typeof ev.data === 'object' && !Array.isArray(ev.data)
+                ? (ev.data as SessionUpdateData)
+                : undefined;
+            const update = evData?.update;
+            const meta =
+              update?._meta && typeof update._meta === 'object'
+                ? (update._meta as Record<string, unknown>)
+                : undefined;
+            const metaSource = meta?.['source'];
+            if (
+              metaSource === 'background_notification' ||
+              metaSource === 'background_notification_turn_started' ||
+              metaSource === 'agent_mention' ||
+              meta?.['backgroundTurn'] !== undefined ||
+              (ev.data &&
+                typeof ev.data === 'object' &&
+                !Array.isArray(ev.data) &&
+                (ev.data as Record<string, unknown>)['backgroundTurn'] !==
+                  undefined)
+            ) {
+              segHasNonUserTurnMarker = true;
             }
-          } else {
+            const isUserChunk =
+              ev.type === 'session_update' &&
+              update?.sessionUpdate === 'user_message_chunk' &&
+              metaSource !== 'background_notification' &&
+              metaSource !== 'agent_mention';
+            if (isUserChunk) {
+              segHasUserChunk = true;
+              if (!inUserChunkRun) {
+                if (userTurnIndex === targetTurnIndex) {
+                  cutSegIdx = i;
+                  cutEventIdx = j;
+                  break outerTurn;
+                }
+                userTurnIndex += 1;
+                inUserChunkRun = true;
+              }
+            } else {
+              inUserChunkRun = false;
+            }
+          }
+          if (
+            !segHasUserChunk &&
+            !segHasNonUserTurnMarker &&
+            seg.turnCount > 0
+          ) {
             inUserChunkRun = false;
+            if (userTurnIndex === targetTurnIndex) {
+              cutSegIdx = i;
+              cutEventIdx = 0;
+              break;
+            }
+            userTurnIndex += 1;
           }
-        }
-        if (!segHasUserChunk && !segHasNonUserTurnMarker && seg.turnCount > 0) {
-          inUserChunkRun = false;
-          if (userTurnIndex === targetTurnIndex) {
-            cutSegIdx = i;
-            cutEventIdx = 0;
-            break;
-          }
-          userTurnIndex += 1;
         }
       }
     }
@@ -1163,6 +1170,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       this.replayBytes -= dropped.bytes;
       this.truncatedEvents += dropped.events.length;
       this.truncatedTurns += dropped.turnCount;
+      this.advanceEvictedUserTurnState(dropped);
       const droppedRecordId = lastRecordIdIn(dropped.events);
       if (droppedRecordId !== undefined) {
         lastDroppedRecordId = droppedRecordId;
@@ -1305,7 +1313,57 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.replayBytes = 0;
     this.truncatedEvents = 0;
     this.truncatedTurns = 0;
+    this.evictedUserTurns = 0;
+    this.evictedInUserChunkRun = false;
     this.replayAnchorRecordId = undefined;
+  }
+
+  private advanceEvictedUserTurnState(seg: ReplaySegment): void {
+    let segHasUserChunk = false;
+    let segHasNonUserTurnMarker = false;
+    for (let j = 0; j < seg.events.length; j++) {
+      const ev = seg.events[j]!;
+      const evData =
+        ev.data && typeof ev.data === 'object' && !Array.isArray(ev.data)
+          ? (ev.data as SessionUpdateData)
+          : undefined;
+      const update = evData?.update;
+      const meta =
+        update?._meta && typeof update._meta === 'object'
+          ? (update._meta as Record<string, unknown>)
+          : undefined;
+      const metaSource = meta?.['source'];
+      if (
+        metaSource === 'background_notification' ||
+        metaSource === 'background_notification_turn_started' ||
+        metaSource === 'agent_mention' ||
+        meta?.['backgroundTurn'] !== undefined ||
+        (ev.data &&
+          typeof ev.data === 'object' &&
+          !Array.isArray(ev.data) &&
+          (ev.data as Record<string, unknown>)['backgroundTurn'] !== undefined)
+      ) {
+        segHasNonUserTurnMarker = true;
+      }
+      const isUserChunk =
+        ev.type === 'session_update' &&
+        update?.sessionUpdate === 'user_message_chunk' &&
+        metaSource !== 'background_notification' &&
+        metaSource !== 'agent_mention';
+      if (isUserChunk) {
+        segHasUserChunk = true;
+        if (!this.evictedInUserChunkRun) {
+          this.evictedUserTurns += 1;
+          this.evictedInUserChunkRun = true;
+        }
+      } else {
+        this.evictedInUserChunkRun = false;
+      }
+    }
+    if (!segHasUserChunk && !segHasNonUserTurnMarker && seg.turnCount > 0) {
+      this.evictedInUserChunkRun = false;
+      this.evictedUserTurns += 1;
+    }
   }
 
   private clearTextSlotIndex(): void {

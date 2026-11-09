@@ -121,6 +121,11 @@ export class ClientMcpSenderRegistry {
     return this.senders.get(serverName)?.owner === owner;
   }
 
+  /** Whether any connection currently owns a workspace sender route for `serverName`. */
+  has(serverName: string): boolean {
+    return this.senders.has(serverName);
+  }
+
   setSession(
     serverName: string,
     sessionId: string,
@@ -512,12 +517,22 @@ export function createClientMcpServerProvider(
         // that server's discovery and tool calls back through this WS client.
         // Roll back the child-side add (the catch below drops the sender route).
         if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
-          await bridge
-            .removeRuntimeMcpServer(serverName, originatorClientId)
-            .catch(() => {});
+          if (registry.owns(serverName, originatorClientId)) {
+            await bridge
+              .removeRuntimeMcpServer(serverName, originatorClientId)
+              .catch(() => {});
+          }
           throw new Error(
             `client MCP server '${serverName}' conflicts with a configured MCP server`,
           );
+        }
+        if (!registry.owns(serverName, originatorClientId)) {
+          if (!registry.has(serverName)) {
+            await bridge
+              .removeRuntimeMcpServer(serverName, originatorClientId)
+              .catch(() => {});
+          }
+          throw new Error('client disconnected during registration');
         }
         return { toolCount: (result as { toolCount: number }).toolCount };
       } catch (err) {

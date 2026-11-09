@@ -350,6 +350,33 @@ describe('createClientMcpServerProvider', () => {
     expect(registry.serverNames()).toEqual(['srv']);
     expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
   });
+
+  it('removes the workspace runtime server when the sender route is deleted while bridge add is in flight', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    let resolveAdd: ((value: { toolCount: number }) => void) | undefined;
+    bridge.addRuntimeMcpServer = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveAdd = resolve;
+        }),
+    ) as unknown as typeof bridge.addRuntimeMcpServer;
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    const pending = provider.registerClientMcpServer(
+      'srv',
+      vi.fn(async () => msg(1)),
+    );
+    await Promise.resolve();
+    registry.delete('srv', 'connA');
+    resolveAdd!({ toolCount: 1 });
+
+    await expect(pending).rejects.toThrow(
+      'client disconnected during registration',
+    );
+    expect(bridge.removeRuntimeMcpServer).toHaveBeenCalledWith('srv', 'connA');
+    expect(registry.serverNames()).toEqual([]);
+  });
 });
 
 describe('createClientMcpServerProvider (session scope)', () => {

@@ -1320,4 +1320,37 @@ describe('LiveHostCoordinator', () => {
     const value = coordinator();
     expect(value.setConfiguredShortcut('Command+K').shortcut).toBe('Command+K');
   });
+
+  it('queues a resume start when start("resume") or Host toggle arrives while a call is stopping', async () => {
+    let finishStop!: () => void;
+    const onStart = vi.fn();
+    const onStop = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStop = resolve;
+        }),
+    );
+    const value = coordinator({ handlers: { onStart, onStop } });
+    const socket = connectReady(value);
+    const first = value.start('resume');
+
+    value.stop();
+    expect(value.getStatus()).toMatchObject({
+      state: 'stopping',
+      callId: first.callId,
+    });
+
+    socket.receive({ type: 'host.action', action: 'toggle' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onStart).toHaveBeenCalledTimes(1);
+
+    finishStop();
+    await vi.waitFor(() => {
+      expect(onStart).toHaveBeenCalledTimes(2);
+    });
+    expect(onStart).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: 'resume' }),
+    );
+    expect(value.getStatus().callId).not.toBe(first.callId);
+  });
 });

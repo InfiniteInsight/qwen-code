@@ -1110,35 +1110,54 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     vi.useRealTimers();
   });
 
-  it('new content during send re-scheduled by .then() after onResponseComplete', async () => {
+  it('new content during send is flushed immediately by .then() after onResponseComplete and clears flushedSessions', async () => {
     const ch = makeChannel();
-    let resolveSend: (v: MockResponse) => void;
-    const sendPromise = new Promise<MockResponse>((r) => {
-      resolveSend = r;
+    let resolveFirstSend: (v: MockResponse) => void;
+    let resolveSecondSend: (v: MockResponse) => void;
+    const firstSendPromise = new Promise<MockResponse>((r) => {
+      resolveFirstSend = r;
     });
-    mockSendQQMessage.mockReturnValue(sendPromise);
+    const secondSendPromise = new Promise<MockResponse>((r) => {
+      resolveSecondSend = r;
+    });
+    mockSendQQMessage
+      .mockReturnValueOnce(firstSendPromise)
+      .mockReturnValueOnce(secondSendPromise)
+      .mockResolvedValue(mockResponse(true));
 
     onResponseChunk(ch, 'test-chat', 'part1', 'sess-1');
     vi.advanceTimersByTime(2000);
     await drain();
 
-    // First send in-flight. New content arrives.
+    // First send in-flight. New content arrives and response completes.
     onResponseChunk(ch, 'test-chat', ' part2', 'sess-1');
+    await onResponseComplete(ch, 'test-chat', 'part1 part2', 'sess-1');
 
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
-    pendingStreamDelete.add('sess-1');
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
 
-    // Resolve the send
-    resolveSend!(mockResponse(true));
+    // Resolve the first send -- .then() must flush ' part2' immediately
+    // without waiting 2000ms for the idle timer.
+    resolveFirstSend!(mockResponse(true));
     await drain();
 
-    // .then() should: delete pendingStreamDelete, see non-empty buffer,
-    // and schedule a new idleFlush timer
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(flushingSessions.has('sess-1')).toBe(true);
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
-    expect(streamState(ch).has('sess-1')).toBe(true);
-    expect(streamState(ch).get('sess-1')!.buffer).toBe(' part2');
-    expect(streamState(ch).get('sess-1')!.timer).not.toBeNull();
+
+    // Resolve the trailing send -- streamState and flushedSessions must be
+    // cleaned up so the next non-chunked turn is not suppressed.
+    resolveSecondSend!(mockResponse(true));
+    await drain();
+
+    expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(flushedSessions.has('sess-1')).toBe(false);
+
+    await onResponseComplete(ch, 'test-chat', 'turn 2 full text', 'sess-1');
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(3);
   });
 });
 

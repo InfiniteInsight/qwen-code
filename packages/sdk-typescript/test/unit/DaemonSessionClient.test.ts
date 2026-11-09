@@ -4329,6 +4329,73 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(resumeCalls).toBe(1);
     expect(session.clientId).toBe('client-2');
   });
+
+  it('resolves prompt() when turn_complete arrives on SSE while promptNonBlocking is still in flight', async () => {
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    let releasePromptResponse!: (res: Response) => void;
+    const encoder = new TextEncoder();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
+        return pendingSseResponse(
+          () => {},
+          (controller) => {
+            eventsController = controller;
+          },
+        );
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return new Promise<Response>((resolve) => {
+          releasePromptResponse = resolve;
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      maxPendingPromptsPerSession: 1,
+    });
+    const session = newSession(client);
+    const eventsAbort = new AbortController();
+    const eventPump = (async () => {
+      for await (const _event of session.events({
+        signal: eventsAbort.signal,
+      })) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
+    await vi.waitFor(() => {
+      expect(
+        calls.filter((c) => requestPathEndsWith(c, '/events')),
+      ).toHaveLength(1);
+    });
+
+    const promptPromise = session.prompt({
+      prompt: [{ type: 'text', text: 'fast turn' }],
+    });
+    await vi.waitFor(() => {
+      expect(
+        calls.filter((c) => c.url.endsWith('/session/s-1/prompt')),
+      ).toHaveLength(1);
+    });
+
+    // Deliver turn_complete over SSE BEFORE the HTTP 202 response for promptNonBlocking resolves.
+    eventsController?.enqueue(encoder.encode(turnCompleteFrame('p-early')));
+    await new Promise((r) => setTimeout(r, 20));
+
+    releasePromptResponse(
+      jsonResponse(202, { promptId: 'p-early', lastEventId: 1 }),
+    );
+
+    await expect(promptPromise).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(pendingPromptIds(session)).toEqual([]);
+
+    eventsController?.close();
+    eventsAbort.abort();
+    await eventPump;
+  });
 });
 
 describe('DaemonSessionClient.setApprovalMode', () => {

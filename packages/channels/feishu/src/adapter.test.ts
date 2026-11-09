@@ -5742,8 +5742,80 @@ describe('FeishuChannel', () => {
 
       expect(updateCard).toHaveBeenCalledTimes(2);
       const stoppedCard = updateCard.mock.calls[1]![1] as string;
-      expect(stoppedCard).toContain('已停止生成');
-      expect(stoppedCard).not.toContain('已完成');
+      expect(stoppedCard).toBe('@sender\n\npartial answer');
+      expect(updateCard.mock.calls[1]![4]).toBe('已停止生成');
+    });
+
+    it('preserves boundaryText and empty-body stop status in finalizeStoppedCardUpdate', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const updateCard = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard,
+        deleteCard: vi.fn().mockResolvedValue(true),
+      });
+
+      const finalize = getPrivateMethod<
+        (
+          inboundMsgId: string,
+          state: Record<string, unknown>,
+          chatId: string,
+        ) => Promise<boolean>
+      >(channel, 'finalizeStoppedCardUpdate');
+
+      // 1. Uses boundaryText when accumulatedText was cleared by onResponseBoundary
+      await finalize.call(
+        channel,
+        'inbound_1',
+        {
+          messageId: 'om_valid_message_id',
+          created: true,
+          creating: false,
+          stopped: true,
+          accumulatedText: '',
+          boundaryText: 'pre-boundary answer',
+          atPrefix: '@sender',
+          lastUpdateAt: Date.now(),
+        },
+        'oc_chat_id',
+      );
+      expect(updateCard).toHaveBeenCalledWith(
+        'om_valid_message_id',
+        '@sender\n\npre-boundary answer',
+        true,
+        'inbound_1',
+        '已停止生成',
+      );
+
+      // 2. Fallback card when bodyText is empty still includes stop label
+      await finalize.call(
+        channel,
+        'inbound_2',
+        {
+          messageId: 'om_valid_message_id_2',
+          created: true,
+          creating: false,
+          stopped: true,
+          accumulatedText: '',
+          lastUpdateAt: Date.now(),
+        },
+        'oc_chat_id',
+      );
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      const card = JSON.parse(body.content) as {
+        body: { elements: Array<{ content?: string }> };
+      };
+      expect(card.body.elements[0]?.content).toBe('---\n*已停止生成*');
     });
 
     it('keeps the sender mention before attribution in stopped-card fallback', async () => {
@@ -6678,7 +6750,8 @@ describe('FeishuChannel', () => {
       await ending;
 
       expect(updateCard).toHaveBeenCalledTimes(1);
-      expect(updateCard.mock.calls[0]?.[1]).toContain('已停止生成');
+      expect(updateCard.mock.calls[0]?.[1]).toBe('@sender\n\nstreamed');
+      expect(updateCard.mock.calls[0]?.[4]).toBe('已停止生成');
       expect(sendMessage).not.toHaveBeenCalled();
       expect(cardSessions.has('inbound_1')).toBe(false);
     });
@@ -6710,7 +6783,8 @@ describe('FeishuChannel', () => {
         created: true,
         creating: false,
         stopped: false,
-        accumulatedText: 'streamed',
+        accumulatedText: '',
+        boundaryText: 'pre-boundary text',
         lastUpdateAt: Date.now(),
       });
       getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
@@ -6764,7 +6838,10 @@ describe('FeishuChannel', () => {
       await ending;
 
       expect(updateCard).toHaveBeenCalledTimes(2);
-      expect(updateCard.mock.calls[1]?.[1]).toContain('已停止生成');
+      expect(updateCard.mock.calls[1]?.[1]).toBe(
+        '@sender\n\npre-boundary text',
+      );
+      expect(updateCard.mock.calls[1]?.[4]).toBe('已停止生成');
       expect(sendMessage).not.toHaveBeenCalled();
       expect(cardSessions.has('inbound_1')).toBe(false);
     });

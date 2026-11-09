@@ -3875,7 +3875,7 @@ describe('turn attribution preservation (DAEMON-007)', () => {
         ...(ev.data as Record<string, unknown>),
         update: {
           ...((ev.data as { update: Record<string, unknown> }).update ?? {}),
-          _meta: { recordId },
+          _meta: { 'qwen.session.recordId': recordId },
         },
       },
     });
@@ -3902,5 +3902,39 @@ describe('turn attribution preservation (DAEMON-007)', () => {
     expect(snap.compactedTurns[0]?.data).toMatchObject({
       recordId: 'rec-u2-first',
     });
+  });
+
+  it('rewinds by targetTurnIndex even when older turns were truncated (#429)', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    // Turn 0 (evicted by maxReplayBytes)
+    engine.seedReplayEvents([
+      makeUserMessage(1, 'turn 0 user ' + 'x'.repeat(250)),
+      makeTextChunk(2, 'turn 0 reply ' + 'y'.repeat(250)),
+      makeTurnComplete(3),
+      // Turn 1 (retained, turn index 1)
+      makeUserMessage(4, 'turn 1 keep'),
+      makeTextChunk(5, 'reply 1 keep'),
+      makeTurnComplete(6),
+      // Turn 2 (retained, turn index 2 -- to be rewound without promptId)
+      makeUserMessage(7, 'turn 2 drop'),
+      makeTextChunk(8, 'reply 2 drop'),
+      makeTurnComplete(9),
+    ]);
+
+    expect(engine.snapshot().compactedTurns[0]?.type).toBe('history_truncated');
+
+    engine.ingest({
+      id: 10,
+      v: 1,
+      type: 'session_rewound',
+      data: { targetTurnIndex: 2, removedTurnCount: 1 },
+    });
+
+    const snap = engine.snapshot();
+    expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(extractTexts(snap.compactedTurns)).toEqual([
+      'turn 1 keep',
+      'reply 1 keep',
+    ]);
   });
 });

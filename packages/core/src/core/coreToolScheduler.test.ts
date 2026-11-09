@@ -15394,4 +15394,46 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 
     expect(released).toEqual(['inv-1', 'inv-2']);
   });
+
+  it('applies an empty-string inline modification ({ newContent: "" }) via _applyInlineModify (#421)', async () => {
+    const executedParams: Array<Record<string, unknown>> = [];
+    const tool = new MockModifiableTool('modifiable_edit_tool');
+    tool.executeFn = (params) => {
+      executedParams.push(params);
+      return textResult('edited');
+    };
+
+    const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+      schedulerWithCallbacks(
+        makeSchedulerConfig(makeToolRegistry(tool), {
+          ...INTERACTIVE_CLI,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+        }),
+      );
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest(
+        'call-empty-modify',
+        'modifiable_edit_tool',
+        { param: 'non-empty' },
+        'p-empty-modify',
+      ),
+    );
+
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    await scheduler.handleConfirmationResponse(
+      'call-empty-modify',
+      waiting.confirmationDetails.onConfirm,
+      ToolConfirmationOutcome.ProceedOnce,
+      new AbortController().signal,
+      { newContent: '' },
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    expect(executedParams).toEqual([{ newContent: '' }]);
+  });
 });

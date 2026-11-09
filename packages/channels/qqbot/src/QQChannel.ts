@@ -106,6 +106,7 @@ interface QQStreamState {
   buffer: string;
   timer: ReturnType<typeof setTimeout> | null;
   retryCount: number;
+  completed?: boolean;
   replyContext?: QQReplyContext;
   sourceLabel?: string;
 }
@@ -1185,6 +1186,8 @@ export class QQChannel extends ChannelBase {
     _messageId?: string,
   ): void {
     this.activePromptSessions.add(sessionId);
+    this.flushedSessions.delete(sessionId);
+    this.pendingStreamDelete.delete(sessionId);
   }
 
   protected override onPromptEnd(
@@ -1273,7 +1276,10 @@ export class QQChannel extends ChannelBase {
     }
     const buffer = state.buffer;
     state.buffer = '';
-    state.timer = null; // Clear expired one-shot timer reference
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null; // Clear expired/active one-shot timer reference
+    }
     this.flushAndTrack(sessionId, buffer, state, 'idleFlush');
   }
 
@@ -1289,6 +1295,7 @@ export class QQChannel extends ChannelBase {
     logLabel: string,
   ): void {
     this.flushingSessions.add(sessionId);
+    let handedOffFlush = false;
     // sendMessage throws DeliveryError for delivery failures.
     // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
     // permanent. RATE_LIMITED is transient and falls through to re-buffer/retry.
@@ -1307,20 +1314,26 @@ export class QQChannel extends ChannelBase {
 
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
+          state.completed = true;
           // #2: Flush immediately — idle timer would add unnecessary delay
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
+            this.flushingSessions.delete(sessionId);
+            handedOffFlush = true;
             // Don't clear buffer or retryCount — idleFlush will pick them up.
             this.idleFlush(sessionId, this._reconnectId);
-            // Don't return — let .finally() clear flushingSessions
-            // so deferred idleFlush can proceed.
+            return;
           }
+          this.flushedSessions.delete(sessionId);
         }
 
         // #8: Clean up streamState only if no content arrived during send
         const s = this.streamState.get(sessionId);
         if (s === state && !s.buffer) {
           this.streamState.delete(sessionId);
+          if (state.completed) {
+            this.flushedSessions.delete(sessionId);
+          }
         }
       })
       .catch((e: unknown) => {
@@ -1339,7 +1352,7 @@ export class QQChannel extends ChannelBase {
           if (current === state) {
             this.streamState.delete(sessionId);
           }
-          if (this.pendingStreamDelete.has(sessionId)) {
+          if (this.pendingStreamDelete.has(sessionId) || state.completed) {
             this.pendingStreamDelete.delete(sessionId);
             this.flushedSessions.delete(sessionId);
           }
@@ -1351,9 +1364,10 @@ export class QQChannel extends ChannelBase {
         );
         // #1: Never undo previously-succeeded flush records on failure
 
-        if (this.pendingStreamDelete.has(sessionId)) {
+        if (this.pendingStreamDelete.has(sessionId) || state.completed) {
           // Session is ending - retry up to MAX_FLUSH_RETRIES
           this.pendingStreamDelete.delete(sessionId);
+          state.completed = true;
           const current = this.streamState.get(sessionId);
           if (current === state) {
             current.buffer = buffer;
@@ -1399,6 +1413,8 @@ export class QQChannel extends ChannelBase {
                   `[QQ:${this.name}] ${logLabel} retries exhausted (buffer exceeds limit) for ${sanitizeLogText(sessionId, 64)}\n`,
                 );
               } else {
+                this.flushingSessions.delete(sessionId);
+                handedOffFlush = true;
                 this.idleFlush(sessionId, this._reconnectId);
               }
             } else {
@@ -1431,6 +1447,7 @@ export class QQChannel extends ChannelBase {
         }
       })
       .finally(() => {
+        if (handedOffFlush) return;
         // #1: Identity guard — only delete if no new state replaced us
         const current = this.streamState.get(sessionId);
         if (!current || current === state) {

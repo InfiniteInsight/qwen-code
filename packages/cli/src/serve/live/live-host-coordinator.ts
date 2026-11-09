@@ -869,7 +869,7 @@ export class LiveHostCoordinator {
   } {
     const status = this.getStatus();
     if (!status.available) throw new LiveUnavailableError(status);
-    if (mode === 'resume' && this.call) {
+    if (mode === 'resume' && this.call && this.call.state !== 'stopping') {
       return {
         epoch: this.call.epoch,
         callId: this.call.callId,
@@ -878,7 +878,7 @@ export class LiveHostCoordinator {
     }
     if (this.call) {
       const replacedCall = this.call;
-      this.pendingStartMode = 'new';
+      this.pendingStartMode = mode;
       this.beginCallStop(replacedCall);
       const reportedCall = this.call ?? replacedCall;
       return {
@@ -1538,7 +1538,7 @@ export class LiveHostCoordinator {
     }
     switch (action.action) {
       case 'toggle':
-        if (this.call) this.stop();
+        if (this.call && this.call.state !== 'stopping') this.stop();
         else this.startFromHost('resume');
         return;
       case 'new':

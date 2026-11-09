@@ -177,6 +177,47 @@ describe('SessionWal', () => {
     wal2.close();
   });
 
+  it('torn-tail recovery: truncates torn tail so subsequent appends remain decodable (#427)', () => {
+    const wal = new SessionWal({ dir, sessionId: 'sess-1' });
+    wal.append(makeFrame(1));
+    wal.append(makeFrame(2));
+    wal.close();
+
+    const segPath = join(dir, 'wal', 'sess-1.log');
+    const existing = readFileSync(segPath);
+    // Simulate a torn frame whose 4-byte length prefix promises 50 bytes, but only 5 bytes landed
+    const tornHeader = Buffer.alloc(4);
+    tornHeader.writeUInt32BE(50, 0);
+    const torn = Buffer.concat([
+      existing,
+      tornHeader,
+      Buffer.from('{"id"', 'utf8'),
+    ]);
+    writeFileSync(segPath, torn);
+
+    const wal2 = new SessionWal({ dir, sessionId: 'sess-1' });
+    wal2.append(makeFrame(3));
+    wal2.append(makeFrame(4));
+
+    const replay = wal2.replayFrom(0);
+    expect(replay.truncated).toBe(false);
+    if (!replay.truncated) {
+      expect(replay.events.map((e) => e.id)).toEqual([1, 2, 3, 4]);
+    }
+    expect(wal2.findLast((f) => f.id === 4)?.id).toBe(4);
+    wal2.close();
+
+    // Re-opening again must see all 4 frames intact
+    const wal3 = new SessionWal({ dir, sessionId: 'sess-1' });
+    expect(wal3.latestId()).toBe(4);
+    const replay3 = wal3.replayFrom(0);
+    expect(replay3.truncated).toBe(false);
+    if (!replay3.truncated) {
+      expect(replay3.events.map((e) => e.id)).toEqual([1, 2, 3, 4]);
+    }
+    wal3.close();
+  });
+
   it('the default segment cap holds about one retention window, no more', () => {
     // The cap bounds how big a segment gets before it rotates and becomes
     // deletable, and compaction rewrites the active one only once half of it is

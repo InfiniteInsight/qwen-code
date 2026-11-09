@@ -1812,25 +1812,31 @@ export class FeishuChannel extends ChannelBase {
     if (cardState.created && cardState.messageId) {
       const prefix =
         cardState.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
-      const stopLabel = `*${this.stopLabelFor(
+      const stopLabel = this.stopLabelFor(
         cardState.terminalStatus,
         this.stoppedMessages.has(inboundMsgId),
-      )}*`;
-      const contentPart = cardState.accumulatedText.trim()
-        ? cardState.accumulatedText + '\n\n---\n' + stopLabel
-        : stopLabel;
-      const finalText = prefix ? `${prefix}\n\n${contentPart}` : contentPart;
+      );
+      const rawText = cardState.accumulatedText || cardState.boundaryText || '';
+      const bodyText = rawText.trim() ? rawText : '';
+      const finalText = prefix
+        ? bodyText
+          ? `${prefix}\n\n${bodyText}`
+          : prefix
+        : bodyText;
       const updated = await this.updateCard(
         cardState.messageId,
         finalText,
         true,
         inboundMsgId,
+        stopLabel,
       );
       if (!updated) {
         await this.deleteCard(cardState.messageId);
         await this.sendFallbackMessage(
           chatId,
-          contentPart,
+          bodyText
+            ? `${bodyText}\n\n---\n*${stopLabel}*`
+            : `---\n*${stopLabel}*`,
           cardState.sourceLabel,
           prefix,
         );

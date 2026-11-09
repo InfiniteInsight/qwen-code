@@ -159,6 +159,15 @@ export class ReviewPermissionBridge {
           // Advance the resume cursor BEFORE handling, so a reconnect mid-handle
           // never re-processes this frame.
           if (typeof ev.id === 'number') lastSeenId = ev.id;
+          if (ev.type === 'session_died' || ev.type === 'session_closed') {
+            return;
+          }
+          if (
+            ev.type === 'replay_complete' ||
+            ev.type === 'state_resync_required'
+          ) {
+            continue;
+          }
           if (ev.type === 'permission_request') {
             try {
               await this.handlePermission(

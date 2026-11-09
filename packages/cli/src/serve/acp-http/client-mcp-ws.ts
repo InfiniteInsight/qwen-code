@@ -272,6 +272,7 @@ export class ClientMcpWsConnection {
     // handshake (which the provider triggers synchronously) can route frames.
     this.registrar.registerServer(server);
     if (scope) this.serverScopes.set(server, scope);
+    else this.serverScopes.delete(server);
     const attempt = {};
     this.registerAttemptIds.set(server, attempt);
     try {
@@ -308,7 +309,15 @@ export class ClientMcpWsConnection {
           message: 'connection disposed during register',
         };
       }
-      if (!this.registrar.hasServer(server)) {
+      if (
+        this.registerAttemptIds.get(server) !== attempt ||
+        !this.registrar.hasServer(server)
+      ) {
+        if (!this.registrar.hasServer(server)) {
+          await this.provider
+            .unregisterClientMcpServer(server, scope)
+            .catch(() => {});
+        }
         throw new Error('session ended during registration');
       }
       this.registerAttemptIds.delete(server);
@@ -354,6 +363,7 @@ export class ClientMcpWsConnection {
     const scope = this.serverScopes.get(server);
     const existed = this.registrar.unregisterServer(server);
     this.serverScopes.delete(server);
+    this.registerAttemptIds.delete(server);
     if (existed && this.provider) {
       try {
         await this.provider.unregisterClientMcpServer(server, scope);

@@ -612,4 +612,59 @@ describe('client_mcp_over_ws connection-level register rollback', () => {
     expect(unregisterCalls).toEqual([['lf', { sessionId: 'S' }]]);
     expect(conn.registeredServers()).toEqual([]);
   });
+
+  it('rolls back the provider registration when unregistered while register is in flight and clears stale scope on un-scoped re-register', async () => {
+    const { provider, unregisterCalls, resolveFirstAdd } =
+      controllableProvider();
+    const { conn } = makeConnection(provider);
+
+    const first = conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    await Promise.resolve();
+    await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
+    resolveFirstAdd();
+    expect(await first).toMatchObject({
+      kind: 'error',
+      code: 'register_failed',
+    });
+    expect(unregisterCalls).toEqual([
+      ['lf', { sessionId: 'S' }],
+      ['lf', { sessionId: 'S' }],
+    ]);
+
+    // Re-registering without a sessionId must clear the previous session scope.
+    await conn.handleFrame({ type: 'mcp_register', server: 'lf' });
+    await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
+    expect(unregisterCalls.at(-1)).toEqual(['lf', undefined]);
+  });
+
+  it('a superseded in-flight register that resolves after re-register does not clobber the newer attempt', async () => {
+    const { provider, unregisterCalls, resolveFirstAdd } =
+      controllableProvider();
+    const { conn } = makeConnection(provider);
+
+    const first = conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    await Promise.resolve();
+    await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
+    const second = await conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+    });
+    expect(second).toMatchObject({ kind: 'registered' });
+
+    resolveFirstAdd();
+    expect(await first).toMatchObject({
+      kind: 'error',
+      code: 'register_failed',
+    });
+    expect(conn.registeredServers()).toEqual(['lf']);
+    expect(unregisterCalls).toEqual([['lf', { sessionId: 'S' }]]);
+  });
 });

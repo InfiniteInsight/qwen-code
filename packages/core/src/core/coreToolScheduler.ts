@@ -5142,7 +5142,7 @@ export class CoreToolScheduler {
           );
       }
       // If the client provided new content, apply it before scheduling.
-      if (payload?.newContent && toolCall) {
+      if (payload?.newContent !== undefined && toolCall) {
         if (
           !(await this._applyInlineModify(
             toolCall as WaitingToolCall,
@@ -5292,7 +5292,7 @@ export class CoreToolScheduler {
     if (
       confirmDetails.type !== 'edit' ||
       !isModifiableDeclarativeTool(toolCall.tool) ||
-      !payload.newContent
+      payload.newContent === undefined
     ) {
       return true;
     }

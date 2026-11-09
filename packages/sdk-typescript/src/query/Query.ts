@@ -454,6 +454,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       return;
     }
     this.transportReadFinalized = true;
+    this.firstResultReceivedResolve?.();
 
     const rejectionError =
       error ??
@@ -528,6 +529,7 @@ export class Query implements AsyncIterable<SDKMessage> {
           response = await this.handleMcpMessage(
             payload.server_name,
             payload.message as unknown as JSONRPCMessage,
+            requestAbortController.signal,
           );
           break;
 
@@ -551,6 +553,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       await this.sendControlResponse(request_id, false, errorMessage);
     } finally {
       this.inboundControlRequests.delete(request_id);
+      requestAbortController.abort();
     }
   }
 
@@ -569,25 +572,41 @@ export class Query implements AsyncIterable<SDKMessage> {
       const canUseToolTimeout =
         this.options.timeout?.canUseTool ?? DEFAULT_CAN_USE_TOOL_TIMEOUT;
       let timeoutId: NodeJS.Timeout | undefined;
+      let onAbort: (() => void) | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error('Permission callback timeout')),
           canUseToolTimeout,
         );
       });
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(new AbortError('Permission request cancelled'));
+          return;
+        }
+        onAbort = () => reject(new AbortError('Permission request cancelled'));
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
 
-      const result = await Promise.race([
-        Promise.resolve(
-          this.options.canUseTool(toolName, toolInput, {
-            signal,
-            suggestions: permissionSuggestions,
-          }),
-        ),
-        timeoutPromise,
-      ]);
-
-      if (timeoutId) {
-        clearTimeout(timeoutId);
+      let result: Awaited<ReturnType<NonNullable<QueryOptions['canUseTool']>>>;
+      try {
+        result = await Promise.race([
+          Promise.resolve(
+            this.options.canUseTool(toolName, toolInput, {
+              signal,
+              suggestions: permissionSuggestions,
+            }),
+          ),
+          timeoutPromise,
+          abortPromise,
+        ]);
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        if (onAbort) {
+          signal.removeEventListener('abort', onAbort);
+        }
       }
 
       if (result.behavior === 'allow') {
@@ -626,6 +645,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private async handleMcpMessage(
     serverName: string,
     message: JSONRPCMessage,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const transport = this.sdkMcpTransports.get(serverName);
     if (!transport) {
@@ -646,6 +666,7 @@ export class Query implements AsyncIterable<SDKMessage> {
         serverName,
         message,
         transport,
+        signal,
       );
       return { mcp_response: response };
     } else {
@@ -658,22 +679,36 @@ export class Query implements AsyncIterable<SDKMessage> {
     serverName: string,
     message: JSONRPCMessage,
     transport: SdkControlServerTransport,
+    signal?: AbortSignal,
   ): Promise<JSONRPCMessage> {
     const messageId = 'id' in message ? message.id : null;
     const key = `${serverName}:${messageId}`;
 
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new AbortError('MCP request cancelled'));
+        return;
+      }
+
       const mcpRequestTimeout =
         this.options.timeout?.mcpRequest ?? DEFAULT_MCP_REQUEST_TIMEOUT;
       const timeout = setTimeout(() => {
-        this.pendingMcpResponses.delete(key);
+        cleanup();
         reject(new Error('MCP request timeout'));
       }, mcpRequestTimeout);
 
+      const onAbort = () => {
+        cleanup();
+        reject(new AbortError('MCP request cancelled'));
+      };
+
       const cleanup = () => {
         clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
         this.pendingMcpResponses.delete(key);
       };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
 
       const resolveAndCleanup = (response: JSONRPCMessage) => {
         cleanup();
@@ -866,6 +901,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
 
     this.closed = true;
+    this.firstResultReceivedResolve?.();
 
     // Remove abort listener to prevent memory leak
     if (this.abortHandler) {
@@ -990,14 +1026,18 @@ export class Query implements AsyncIterable<SDKMessage> {
           }, streamCloseTimeout);
         });
 
-        await Promise.race([this.firstResultReceivedPromise, timeoutPromise]);
-
-        if (timeoutId) {
-          clearTimeout(timeoutId);
+        try {
+          await Promise.race([this.firstResultReceivedPromise, timeoutPromise]);
+        } finally {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
         }
       }
 
-      this.endInput();
+      if (!this.closed && !this.abortController.signal.aborted) {
+        this.endInput();
+      }
     } catch (error) {
       if (this.abortController.signal.aborted) {
         logger.info('Aborted during input streaming');
