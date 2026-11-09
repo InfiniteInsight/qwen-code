@@ -189,6 +189,7 @@ export class ChannelLoopScheduler {
     if (this.generation !== generation) return;
     let recoveryEpoch = this.recoveryEpoch;
 
+    const previousLastFiredAt = latestJob.lastFiredAt;
     const runningSince = now.toISOString();
     let resultPreview: string | undefined;
     try {
@@ -230,10 +231,13 @@ export class ChannelLoopScheduler {
         await this.clearRunningSince(latestJob.id, runningSince);
         return;
       }
+      if (currentJob.runningSince !== runningSince) {
+        return;
+      }
       if (recoveryEpoch !== this.recoveryEpoch) {
         try {
           await this.store.update(latestJob.id, {
-            lastFinishedAt: this.now().toISOString(),
+            lastFiredAt: previousLastFiredAt,
             lastStatus: 'error',
             lastError: truncateError(
               err instanceof Error ? err.message : String(err),
@@ -248,6 +252,7 @@ export class ChannelLoopScheduler {
       await this.recordFailure(
         currentJob,
         now,
+        runningSince,
         err instanceof Error ? err.message : String(err),
       );
       return;
@@ -313,10 +318,14 @@ export class ChannelLoopScheduler {
       if (!currentJob || currentJob.runningSince !== expectedRunningSince) {
         return;
       }
-      await this.store.update(id, {
+      const patch: ChannelLoopPatch = {
         lastFinishedAt: this.now().toISOString(),
         runningSince: undefined,
-      });
+      };
+      if (!currentJob.recurring) {
+        patch.enabled = false;
+      }
+      await this.store.update(id, patch);
     } catch (err) {
       process.stderr.write(
         `[scheduler] failed to record skipped loop ${id}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -327,8 +336,12 @@ export class ChannelLoopScheduler {
   private async recordFailure(
     job: ChannelLoop,
     now: Date,
+    expectedRunningSince: string,
     message: string,
   ): Promise<void> {
+    if (job.runningSince !== expectedRunningSince) {
+      return;
+    }
     const consecutiveFailures = job.consecutiveFailures + 1;
     const patch: ChannelLoopPatch = {
       lastFiredAt: now.toISOString(),
@@ -355,7 +368,7 @@ export class ChannelLoopScheduler {
       process.stderr.write(
         `[scheduler] loop ${job.id} failure persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
-      await this.clearRunningSince(job.id);
+      await this.clearRunningSince(job.id, expectedRunningSince);
     }
   }
 }

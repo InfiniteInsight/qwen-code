@@ -116,6 +116,7 @@ interface ActiveCell {
   result: Promise<NodeReplExecOutcome>;
   outcome?: NodeReplExecOutcome;
   error?: Error;
+  callerAborted?: boolean;
 }
 
 function activeCellResult(cell: ActiveCell): CallToolResult {
@@ -138,18 +139,32 @@ function cellError(message: string): CallToolResult {
 async function waitForCell(
   cell: ActiveCell,
   yieldTimeMs: number,
+  signal?: AbortSignal,
 ): Promise<NodeReplExecOutcome | null> {
   if (cell.outcome) return cell.outcome;
   if (cell.error) throw cell.error;
+  if (signal?.aborted) return null;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(null), yieldTimeMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onSignalAbort);
+    };
+    const onSignalAbort = () => {
+      cleanup();
+      resolve(null);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, yieldTimeMs);
+    signal?.addEventListener('abort', onSignalAbort, { once: true });
     void cell.result.then(
       (outcome) => {
-        clearTimeout(timer);
+        cleanup();
         resolve(outcome);
       },
       (error: unknown) => {
-        clearTimeout(timer);
+        cleanup();
         reject(error instanceof Error ? error : new Error(String(error)));
       },
     );
@@ -226,6 +241,11 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
       if (title) {
         debugLogger.debug(`exec cell: ${title}`);
       }
+      if (activeCell?.callerAborted) {
+        const stale = activeCell;
+        await stale.result.catch(() => {});
+        if (activeCell === stale) activeCell = null;
+      }
       if (activeCell) {
         return cellError(
           `node_repl already has active cell ${activeCell.id}; wait for or cancel it before starting another cell.`,
@@ -248,15 +268,28 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
       void cell.result.then(
         (outcome) => {
           cell.outcome = outcome;
+          if (cell.callerAborted && activeCell === cell) {
+            activeCell = null;
+          }
         },
         (error: unknown) => {
           cell.error =
             error instanceof Error ? error : new Error(String(error));
+          if (cell.callerAborted && activeCell === cell) {
+            activeCell = null;
+          }
         },
       );
       activeCell = cell;
-      const onAbort = () => cell.controller.abort();
-      extra?.signal?.addEventListener('abort', onAbort, { once: true });
+      const onAbort = () => {
+        cell.callerAborted = true;
+        cell.controller.abort();
+      };
+      if (extra?.signal?.aborted) {
+        onAbort();
+      } else {
+        extra?.signal?.addEventListener('abort', onAbort, { once: true });
+      }
       try {
         let outcome: NodeReplExecOutcome | null;
         try {
@@ -270,7 +303,21 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
             `node_repl cell ${cell.id} failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
-        if (!outcome) return activeCellResult(cell);
+        if (!outcome) {
+          if (cell.callerAborted) {
+            try {
+              const abortedOutcome = await cell.result;
+              return convertOutcomeToMcpResult(abortedOutcome);
+            } catch (error) {
+              return cellError(
+                `node_repl cell ${cell.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            } finally {
+              if (activeCell === cell) activeCell = null;
+            }
+          }
+          return activeCellResult(cell);
+        }
         if (activeCell === cell) activeCell = null;
         return convertOutcomeToMcpResult(outcome);
       } finally {
@@ -307,7 +354,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
           .optional(),
       },
     },
-    async ({ cell_id, yield_time_ms }): Promise<CallToolResult> => {
+    async ({ cell_id, yield_time_ms }, extra): Promise<CallToolResult> => {
       const cell = activeCell;
       if (!cell || cell.id !== cell_id) {
         return cellError(`node_repl has no active cell ${cell_id}.`);
@@ -317,6 +364,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
         outcome = await waitForCell(
           cell,
           yield_time_ms ?? DEFAULT_YIELD_TIME_MS,
+          extra?.signal,
         );
       } catch (error) {
         if (activeCell === cell) activeCell = null;
@@ -406,6 +454,9 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
       inputSchema: {},
     },
     async (): Promise<CallToolResult> => {
+      if (activeCell?.callerAborted) {
+        activeCell = null;
+      }
       if (activeCell) {
         return cellError(
           `node_repl cell ${activeCell.id} is active; cancel it before resetting the kernel.`,

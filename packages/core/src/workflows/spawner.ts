@@ -11,6 +11,7 @@ import {
   AgentHeadless,
   ContextState,
 } from '../agents/runtime/agent-headless.js';
+import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 
 /** Max schema-validation retries after the first attempt. */
 const SCHEMA_RETRIES = 2;
@@ -89,6 +90,8 @@ export class HeadlessSpawner implements AgentSpawner {
     const attempts = req.schema ? SCHEMA_RETRIES + 1 : 1;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
+      req.signal?.throwIfAborted();
+
       const systemPrompt = req.schema
         ? `${req.systemContext}\n\nReply with ONLY a JSON value conforming to this JSON Schema:\n${JSON.stringify(req.schema)}` +
           (lastError
@@ -106,6 +109,13 @@ export class HeadlessSpawner implements AgentSpawner {
       const ctx = new ContextState();
       ctx.set('task_prompt', req.prompt);
       await agent.execute(ctx, req.signal);
+      req.signal?.throwIfAborted();
+      if (agent.getTerminateMode?.() === AgentTerminateMode.CANCELLED) {
+        throw (
+          req.signal?.reason ??
+          new DOMException('The operation was aborted.', 'AbortError')
+        );
+      }
 
       tokens += agent.getStatistics().totalTokens ?? 0;
       const text = agent.getFinalText();

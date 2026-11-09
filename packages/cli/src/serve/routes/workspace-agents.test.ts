@@ -47,7 +47,13 @@ vi.mock('../session-agents/orchestrator.js', () => ({
 // has not made one yet (the state right after a restart).
 const ensuring = vi.hoisted(() => ({
   orchestrator: undefined as
-    | { liveRuns: () => Promise<SessionAgentLiveRunSummary[]> }
+    | {
+        liveRuns: () => Promise<SessionAgentLiveRunSummary[]>;
+        endRunsForRemovedHost?: (
+          hostId: string,
+          agentsMadeLocal: string[],
+        ) => Promise<number>;
+      }
     | undefined,
 }));
 
@@ -342,6 +348,48 @@ it('ends the runs a removed Host leaves stranded', async () => {
   expect(liveRuns.endRunsForRemovedHost).toHaveBeenCalledWith(host.id, [
     'ag_alice',
   ]);
+});
+
+it('ensures an orchestrator for GET /agents and DELETE /hosts/:hostId after a restart', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'restart-host-and-status');
+  const { token } = await issueAgentHostEnrollment(workspaceCwd);
+  const { host } = await enrollAgentHost(workspaceCwd, {
+    token,
+    name: 'gone',
+    workspaceCwd: '/remote/gone',
+    providers: ['Qwen Code ACP'],
+  });
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    {
+      id: 'ag_alice',
+      name: 'alice',
+      createdAt: 1,
+      execution: { mode: 'managed-host', hostIds: [host.id] },
+    },
+  ]);
+  const endRunsForRemovedHost = vi.fn(async () => 1);
+  ensuring.orchestrator = {
+    liveRuns: async () => [
+      {
+        sessionId: 's1',
+        runId: 'run_persisted_1',
+        agentId: 'ag_alice',
+        status: 'queued',
+      },
+    ],
+    endRunsForRemovedHost,
+  };
+  const app = appFor(runtimeAt(workspaceCwd));
+
+  const statusRes = await request(app)
+    .get('/workspaces/workspace/agent/agents')
+    .expect(200);
+  expect(statusRes.body.agents[0]?.waiting).toBe(1);
+
+  await request(app)
+    .delete(`/workspaces/workspace/agent/hosts/${host.id}`)
+    .expect(200, { agentsMadeLocal: ['ag_alice'] });
+  expect(endRunsForRemovedHost).toHaveBeenCalledWith(host.id, ['ag_alice']);
 });
 
 it('answers a committed host removal even when ending its runs fails', async () => {

@@ -298,6 +298,42 @@ describe('node_repl MCP server', () => {
     }
   });
 
+  it('clears activeCell when an in-flight node_repl call is aborted via signal after yield_time_ms (#440)', async () => {
+    const { client, close } = await connected();
+    try {
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), 20);
+      try {
+        await client.callTool(
+          {
+            name: 'node_repl',
+            arguments: {
+              code: 'await new Promise((resolve) => setTimeout(resolve, 60_000));',
+              yield_time_ms: 100,
+              timeout_ms: 60_000,
+            },
+          },
+          undefined,
+          { signal: controller.signal },
+        );
+      } catch {
+        // Expected: client aborts the MCP request.
+      } finally {
+        clearTimeout(abortTimer);
+      }
+
+      // A subsequent cell or reset must succeed without needing the discarded cell_id.
+      const next = await client.callTool({
+        name: 'node_repl',
+        arguments: { code: 'nodeRepl.write("recovered");' },
+      });
+      expect((next as { isError?: boolean }).isError).not.toBe(true);
+      expect(textOf(next)).toContain('recovered');
+    } finally {
+      await close();
+    }
+  });
+
   it('reports a runtime error as isError with the message', async () => {
     const { client, close } = await connected();
     try {

@@ -100,6 +100,7 @@ class WorkflowRunToolInvocation extends BaseToolInvocation<
     // Foreground task (isBackgrounded: false) → never consumes the
     // background-agent concurrency cap. agentId = runId keeps the pill stable.
     const runId = crypto.randomUUID();
+    const taskAbortController = new AbortController();
     registry.register({
       agentId: runId,
       subagentType: 'workflow',
@@ -115,9 +116,11 @@ class WorkflowRunToolInvocation extends BaseToolInvocation<
         'run.json',
       ),
       isBackgrounded: false,
-      abortController: new AbortController(),
+      abortController: taskAbortController,
       prompt: this.params.name ?? this.params.scriptPath ?? 'inline',
     } as never);
+
+    const runSignal = AbortSignal.any([signal, taskAbortController.signal]);
 
     // Outer finally guarantees the foreground registry entry is removed on
     // every termination shape (success, failure, unexpected throw) — matching
@@ -131,7 +134,7 @@ class WorkflowRunToolInvocation extends BaseToolInvocation<
           runId,
           args: this.params.args,
           resumeFromRunId: this.params.resumeFromRunId,
-          signal,
+          signal: runSignal,
           onPhase: (title, index) =>
             registry.appendActivity(runId, {
               name: 'phase',
@@ -145,6 +148,15 @@ class WorkflowRunToolInvocation extends BaseToolInvocation<
               at: Date.now(),
             }),
         });
+        if (result.status === 'cancelled') {
+          const message = 'Workflow cancelled';
+          registry.fail(runId, message);
+          return {
+            llmContent: `Workflow failed: ${message}`,
+            returnDisplay: `Error: ${message}`,
+            error: { message, type: ToolErrorType.EXECUTION_FAILED },
+          };
+        }
         registry.complete(
           runId,
           JSON.stringify({ runId, tokensSpent: result.tokensSpent }),

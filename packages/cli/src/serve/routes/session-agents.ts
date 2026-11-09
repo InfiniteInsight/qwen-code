@@ -317,8 +317,7 @@ export function registerSessionAgentRoutes(
       if (!runtime) return;
       const sessionId = sessionIdParam(req, res);
       if (!sessionId) return;
-      // A read never creates an orchestrator: no orchestrator, no runs.
-      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      const orchestrator = orchestratorFor(runtime);
       try {
         res.json({
           frames: orchestrator ? await orchestrator.snapshot(sessionId) : [],
@@ -394,7 +393,7 @@ export function registerSessionAgentRoutes(
       sessionId,
     );
     req.on('close', () => stop());
-    const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+    const orchestrator = orchestratorFor(runtime);
     if (!orchestrator) return;
     try {
       for (const frame of await orchestrator.snapshot(sessionId)) send(frame);
@@ -438,7 +437,7 @@ export function registerSessionAgentRoutes(
       if (!runtime) return;
       const sessionId = sessionIdParam(req, res);
       if (!sessionId) return;
-      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      const orchestrator = orchestratorFor(runtime);
       try {
         const cancelled = orchestrator
           ? await orchestrator.cancel(sessionId, req.params['runId'] ?? '')
@@ -489,7 +488,7 @@ export function registerSessionAgentRoutes(
       if (!runtime) return;
       const sessionId = sessionIdParam(req, res);
       if (!sessionId) return;
-      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      const orchestrator = orchestratorFor(runtime);
       try {
         const runIds = orchestrator
           ? await orchestrator.stopAll(sessionId)

@@ -501,7 +501,8 @@ export class ArenaManager {
     for (const agent of this.agents.values()) {
       if (!isTerminalStatus(agent.status)) {
         agent.abortController.abort();
-        agent.stats.durationMs = Date.now() - agent.startedAt;
+        agent.stats.durationMs =
+          agent.startedAt > 0 ? Date.now() - agent.startedAt : 0;
         this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
       }
     }
@@ -874,7 +875,20 @@ export class ArenaManager {
     // Spawn agents sequentially — each spawn completes before starting the next.
     // This creates a visual effect where panes appear one by one.
     for (const agent of this.agents.values()) {
+      if (this.masterAbortController?.signal.aborted) {
+        break;
+      }
       await this.spawnAgentPty(agent);
+      if (this.masterAbortController?.signal.aborted) {
+        await Promise.resolve(this.backend?.stopAgent(agent.agentId)).catch(
+          () => {},
+        );
+        break;
+      }
+    }
+
+    if (this.masterAbortController?.signal.aborted) {
+      return;
     }
 
     this.emitProgress('All agents are now live and working on the task.');
@@ -911,7 +925,8 @@ export class ArenaManager {
         if (!isTerminalStatus(agent.status)) {
           backend.stopAgent(agent.agentId);
           agent.abortController.abort();
-          agent.stats.durationMs = Date.now() - agent.startedAt;
+          agent.stats.durationMs =
+            agent.startedAt > 0 ? Date.now() - agent.startedAt : 0;
           this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
         }
       }
@@ -921,7 +936,11 @@ export class ArenaManager {
   }
 
   private async spawnAgentPty(agent: ArenaAgentState): Promise<void> {
-    if (!this.arenaConfig) {
+    if (
+      !this.arenaConfig ||
+      this.masterAbortController?.signal.aborted ||
+      isTerminalStatus(agent.status)
+    ) {
       return;
     }
 
@@ -1317,6 +1336,12 @@ export class ArenaManager {
    */
   private waitForAllAgentsSettled(timeoutMs?: number): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
+      const masterSignal = this.masterAbortController?.signal;
+      if (masterSignal?.aborted) {
+        resolve(false);
+        return;
+      }
+
       const checkSettled = () => {
         for (const agent of this.agents.values()) {
           if (!isSettledStatus(agent.status)) {
@@ -1331,22 +1356,32 @@ export class ArenaManager {
         return;
       }
 
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      if (timeoutMs !== undefined) {
-        timeoutHandle = setTimeout(() => {
-          clearInterval(pollHandle);
-          resolve(false);
-        }, timeoutMs);
-      }
+      const finish = (settled: boolean) => {
+        clearInterval(pollHandle);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        masterSignal?.removeEventListener('abort', onAbort);
+        resolve(settled);
+      };
+
+      const onAbort = () => {
+        finish(false);
+      };
+
+      const timeoutHandle =
+        timeoutMs !== undefined
+          ? setTimeout(() => {
+              finish(false);
+            }, timeoutMs)
+          : undefined;
 
       // Re-check periodically (piggybacks on the same polling interval)
       const pollHandle = setInterval(() => {
         if (checkSettled()) {
-          clearInterval(pollHandle);
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          resolve(true);
+          finish(true);
         }
       }, ARENA_POLL_INTERVAL_MS);
+
+      masterSignal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 

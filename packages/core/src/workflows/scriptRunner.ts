@@ -302,10 +302,13 @@ export class WorkflowEngine {
 
     // Wall-clock watchdog (distinct from the vm sync timeout — see sandbox.ts).
     const controller = new AbortController();
+    const onAbort = () => controller.abort();
     if (runOpts.signal) {
-      runOpts.signal.addEventListener('abort', () => controller.abort(), {
-        once: true,
-      });
+      if (runOpts.signal.aborted) {
+        controller.abort();
+      } else {
+        runOpts.signal.addEventListener('abort', onAbort, { once: true });
+      }
     }
     const wallMs = runOpts.wallClockMs ?? SYNC_CPU_TIMEOUT_MS;
     const deadline = Date.now() + wallMs;
@@ -346,6 +349,7 @@ export class WorkflowEngine {
           return;
         }
         if (controller.signal.aborted || Date.now() > deadline) {
+          if (!controller.signal.aborted) controller.abort();
           reject('workflow cancelled or wall-clock ceiling exceeded');
           return;
         }
@@ -359,6 +363,11 @@ export class WorkflowEngine {
           const release = await scheduler.acquire();
           let cwd: string | undefined;
           try {
+            if (controller.signal.aborted || Date.now() > deadline) {
+              if (!controller.signal.aborted) controller.abort();
+              reject('workflow cancelled or wall-clock ceiling exceeded');
+              return;
+            }
             if (opts.isolation === 'worktree') {
               // Fail loud, NEVER silently downgrade to the shared tree. If a
               // script asks for worktree isolation but no provider is wired,
@@ -403,6 +412,11 @@ export class WorkflowEngine {
             });
             resolve(JSON.stringify(env));
           } catch (e) {
+            if (controller.signal.aborted || Date.now() > deadline) {
+              if (!controller.signal.aborted) controller.abort();
+              reject('workflow cancelled or wall-clock ceiling exceeded');
+              return;
+            }
             // Spawn/exec/schema/worktree failure → agent() resolves null (design).
             const env = { kind: 'null' as const };
             // HARDENING: a SECOND failure here (e.g. journal.append ENOSPC) must
@@ -436,13 +450,18 @@ export class WorkflowEngine {
         syncTimeoutMs: wallMs,
         filename: `${parsed.meta.name}.js`,
       });
-      clearTimeout(timer);
+      if (controller.signal.aborted || Date.now() > deadline) {
+        if (!controller.signal.aborted) controller.abort();
+        throw new Error('workflow cancelled or wall-clock ceiling exceeded');
+      }
       await journal.setStatus('completed', tokensSpent);
       if (this.opts.worktree) await this.opts.worktree.cleanup(runId);
       return { runId, result, status: 'completed', tokensSpent };
     } catch (e) {
-      clearTimeout(timer);
-      const status = controller.signal.aborted ? 'cancelled' : 'failed';
+      const status =
+        controller.signal.aborted || Date.now() > deadline
+          ? 'cancelled'
+          : 'failed';
       await journal.setStatus(status, tokensSpent);
       if (this.opts.worktree) await this.opts.worktree.cleanup(runId);
       if (status === 'cancelled') {
@@ -451,6 +470,9 @@ export class WorkflowEngine {
       throw e instanceof WorkflowScriptError
         ? e
         : new WorkflowScriptError(String((e as Error)?.message ?? e));
+    } finally {
+      clearTimeout(timer);
+      runOpts.signal?.removeEventListener('abort', onAbort);
     }
   }
 }

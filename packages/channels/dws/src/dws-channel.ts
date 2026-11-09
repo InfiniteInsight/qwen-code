@@ -2665,6 +2665,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // checkpoint and watermark (both assigned after the loop) never
         // advance — so every 5s poll re-ran the same full agent turn,
         // forever, starving every newer notification behind it.
+        this.attemptedPendingMessages.add(key);
         if (
           this.recordInboundFailure(notificationKey, error, () => {
             // Stop retrying this message without deleting another sender's
@@ -2673,6 +2674,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
               notificationKey,
               message.senderId,
             );
+            this.removePendingMessage(key);
             this.markProcessedMessage(key);
           })
         ) {

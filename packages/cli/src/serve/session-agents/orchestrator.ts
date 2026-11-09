@@ -1484,6 +1484,14 @@ export class SessionAgentOrchestrator {
         const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
         const records = await this.loadRecords(live.sessionId);
         const squad = await this.squadBriefingFor(live, roster);
+        if (
+          this.stopped ||
+          run.status !== 'running' ||
+          this.live.get(run.id) !== live ||
+          run.lease?.leaseId !== lease.leaseId
+        ) {
+          continue;
+        }
         // A native session lives on one runtime. On a different Host the
         // agent starts a fresh one that has seen nothing, so it gets the
         // conversation from the start (bounded by the budget), not the delta
@@ -1522,6 +1530,14 @@ export class SessionAgentOrchestrator {
             : undefined;
         live.offeredFreshPrompt = freshPrompt !== undefined;
         await this.persist(state);
+        if (
+          this.stopped ||
+          run.status !== 'running' ||
+          this.live.get(run.id) !== live ||
+          run.lease?.leaseId !== lease.leaseId
+        ) {
+          continue;
+        }
         this.publish(live);
         return {
           protocol: HOST_PROTOCOL_VERSION,
@@ -1541,11 +1557,13 @@ export class SessionAgentOrchestrator {
           ...(nativeSessionId ? { nativeSessionId } : {}),
         };
       } catch (error) {
-        await this.finishRun(state, live, {
-          status: 'failed',
-          outputText: '',
-          error: getErrorMessage(error),
-        });
+        if (this.live.get(run.id) === live && run.status === 'running') {
+          await this.finishRun(state, live, {
+            status: 'failed',
+            outputText: '',
+            error: getErrorMessage(error),
+          });
+        }
       }
     }
     return undefined;
@@ -1608,7 +1626,46 @@ export class SessionAgentOrchestrator {
     delete live.frame.steps;
     live.steps.clear();
     const state = this.states.get(live.sessionId);
-    if (state) void this.persist(state).catch(() => {});
+    if (state) {
+      const laterQueued = state.file.runs.find(
+        (candidate) =>
+          candidate.id !== live.run.id &&
+          candidate.agentId === live.run.agentId &&
+          candidate.status === 'queued',
+      );
+      if (laterQueued) {
+        live.run.triggerRecordIds = [
+          ...new Set([
+            ...live.run.triggerRecordIds,
+            ...laterQueued.triggerRecordIds,
+          ]),
+        ];
+        live.run.chainDepth = Math.min(
+          live.run.chainDepth,
+          laterQueued.chainDepth,
+        );
+        const coalescedSquadId = laterQueued.squadId ?? live.run.squadId;
+        if (coalescedSquadId !== undefined) {
+          live.run.squadId = coalescedSquadId;
+        }
+        for (const engagement of Object.values(state.file.squads ?? {})) {
+          if (!engagement.outstandingRunIds.includes(laterQueued.id)) continue;
+          engagement.outstandingRunIds = [
+            ...new Set(
+              engagement.outstandingRunIds.map((id) =>
+                id === laterQueued.id ? live.run.id : id,
+              ),
+            ),
+          ];
+        }
+        state.file.runs = state.file.runs.filter(
+          (candidate) => candidate.id !== laterQueued.id,
+        );
+        this.live.delete(laterQueued.id);
+        this.hub.forgetRun(live.sessionId, laterQueued.id);
+      }
+      void this.persist(state).catch(() => {});
+    }
     // Wakes other Hosts' pickups and refreshes queue positions.
     this.publish(live);
     this.republishQueued(live.run.agentId);

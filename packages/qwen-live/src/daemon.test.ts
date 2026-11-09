@@ -1067,5 +1067,35 @@ describe('LiveDaemon', () => {
     await expect(readDiscoveryRecord(config.discoveryDir)).resolves.toEqual(
       planted,
     );
+    // And the failed daemon cleaned up its own server and resources (#443).
+    const server = (daemon as unknown as { server?: { listening: boolean } })
+      .server;
+    expect(server?.listening).toBe(false);
+  });
+
+  it('returns 500 JSON when installer fails in serveSetup instead of hanging (#443)', async () => {
+    const config = await testConfig();
+    const installer = {
+      refresh: vi.fn().mockRejectedValue(new Error('Refresh boom')),
+      ensureInstalled: vi.fn().mockRejectedValue(new Error('Install boom')),
+      launch: vi.fn().mockRejectedValue(new Error('Launch boom')),
+    } as unknown as import('./host/live-host-installer.js').LiveHostInstaller;
+    const daemon = new LiveDaemon(config, {
+      registry: new BackendRegistry([
+        { adaptor: fakeAdaptor(), isDefault: true },
+      ]),
+      installer,
+      logger: new LiveLogger('error'),
+    });
+    daemons.push(daemon);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+
+    const response = await fetch(`${url}/live/setup/install`, {
+      method: 'POST',
+      headers: hostHeaders(record),
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Install boom' });
   });
 });

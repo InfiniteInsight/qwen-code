@@ -182,6 +182,18 @@ describe('HistoryReplayer', () => {
         'agent_message_chunk',
       );
     });
+
+    it('should bypass messageRewriter during historical replay', async () => {
+      const interceptUpdate = vi.fn().mockResolvedValue(undefined);
+      mockContext.messageRewriter = {
+        interceptUpdate,
+      } as unknown as SessionContext['messageRewriter'];
+
+      await replayer.replay([createAssistantRecord('Historical answer')]);
+
+      expect(interceptUpdate).not.toHaveBeenCalled();
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('user message replay', () => {

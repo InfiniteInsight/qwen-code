@@ -8257,9 +8257,46 @@ describe('DwsChannel', () => {
     // it used to stand in front of. Unbounded before, and `doc-fresh` was
     // never reached at all.
     expect(channel.inboundAttempts).toBe(6);
+    expect(channel.pendingMessageIds()).not.toContain('poison-notification');
     expect(channel.inbound.map((envelope) => envelope.chatId)).toEqual([
       'doc-fresh',
     ]);
+  });
+
+  it('marks a failed live document notification as attempted and removes its pending message when dropped', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const commentKey = 'e'.repeat(45);
+    const poisonEvent = message(
+      'user_im_message_receive_o2o_all',
+      'live-doc-poison',
+      documentMentionCard('doc-live-poison', commentKey),
+    );
+    channel.inboundHandler = async (envelope) => {
+      if (envelope.chatId === 'doc-live-poison') {
+        throw new Error('agent unavailable');
+      }
+      channel.inbound.push(envelope);
+    };
+
+    await expect(client.emit(1, poisonEvent)).rejects.toThrow(
+      'agent unavailable',
+    );
+    expect(channel.pendingMessageIds()).toContain('live-doc-poison');
+
+    // A follow-up live message in the same conversation must not re-enqueue
+    // the already-attempted document notification in the same poll cycle.
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'live-followup', 'hello'),
+    );
+    expect(channel.inboundAttempts).toBe(2);
+
+    for (let round = 0; round < 4; round += 1) {
+      await expect(channel.poll()).resolves.toBeUndefined();
+    }
+    expect(channel.inboundAttempts).toBe(6);
+    expect(channel.pendingMessageIds()).not.toContain('live-doc-poison');
   });
 
   // R6-3: exhausting that budget takes five polls -- about 25s of transient

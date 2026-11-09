@@ -1,8 +1,10 @@
 export class Stream<T> implements AsyncIterable<T> {
   private returned: (() => void) | undefined;
   private queue: T[] = [];
-  private readResolve: ((result: IteratorResult<T>) => void) | undefined;
-  private readReject: ((error: Error) => void) | undefined;
+  private waiters: Array<{
+    resolve: (result: IteratorResult<T>) => void;
+    reject: (error: Error) => void;
+  }> = [];
   private isDone = false;
   hasError: Error | undefined;
   private started = false;
@@ -33,17 +35,17 @@ export class Stream<T> implements AsyncIterable<T> {
       return Promise.resolve({ done: true, value: undefined });
     }
     return new Promise<IteratorResult<T>>((resolve, reject) => {
-      this.readResolve = resolve;
-      this.readReject = reject;
+      this.waiters.push({ resolve, reject });
     });
   }
 
   enqueue(value: T): void {
-    if (this.readResolve) {
-      const resolve = this.readResolve;
-      this.readResolve = undefined;
-      this.readReject = undefined;
-      resolve({ done: false, value });
+    if (this.isDone || this.hasError) {
+      return;
+    }
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter.resolve({ done: false, value });
     } else {
       this.queue.push(value);
     }
@@ -51,32 +53,24 @@ export class Stream<T> implements AsyncIterable<T> {
 
   done(): void {
     this.isDone = true;
-    if (this.readResolve) {
-      const resolve = this.readResolve;
-      this.readResolve = undefined;
-      this.readReject = undefined;
-      resolve({ done: true, value: undefined });
+    while (this.waiters.length > 0) {
+      this.waiters.shift()!.resolve({ done: true, value: undefined });
     }
   }
 
   error(error: Error): void {
     this.hasError = error;
-    if (this.readReject) {
-      const reject = this.readReject;
-      this.readResolve = undefined;
-      this.readReject = undefined;
-      reject(error);
+    while (this.waiters.length > 0) {
+      this.waiters.shift()!.reject(error);
     }
   }
 
   return(): Promise<IteratorResult<T>> {
     this.isDone = true;
-    // Settle any pending next() promise so awaiters don't hang forever.
-    if (this.readResolve) {
-      const resolve = this.readResolve;
-      this.readResolve = undefined;
-      this.readReject = undefined;
-      resolve({ done: true, value: undefined });
+    this.queue = [];
+    // Settle any pending next() promises so awaiters don't hang forever.
+    while (this.waiters.length > 0) {
+      this.waiters.shift()!.resolve({ done: true, value: undefined });
     }
     if (this.returned) {
       this.returned();

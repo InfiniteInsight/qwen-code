@@ -481,6 +481,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       content = '';
       if (sniff.extension === 'pdf' && persistedPath) {
         const pdfText = await extractPDFText(persistedPath, { signal });
+        signal.throwIfAborted();
         if (pdfText.success && pdfText.text.trim()) {
           content = truncateText(pdfText.text);
         } else if (!pdfText.success) {
@@ -505,6 +506,8 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     } else {
       content = truncateText(response.body.toString('utf-8'));
     }
+
+    signal.throwIfAborted();
 
     this.debugLogger.debug(
       `[WebFetchTool] network_ms=${networkMs} extract_ms=${Date.now() - extractStart}`,

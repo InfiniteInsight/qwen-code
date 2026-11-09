@@ -561,6 +561,7 @@ export class DiffManager {
     if (diffInfo) {
       this.diffDocuments.delete(rightDocUri.toString());
       this.diffContentProvider.deleteContent(rightDocUri);
+      this.diffContentProvider.deleteContent(diffInfo.leftDocUri);
     }
 
     // Find and close the tab corresponding to the diff view
@@ -580,13 +581,11 @@ export class DiffManager {
 
   /** Close all open qwen-diff editors */
   async closeAll(): Promise<void> {
-    // Collect keys first to avoid iterator invalidation while closing
-    const uris = Array.from(this.diffDocuments.keys()).map((k) =>
-      vscode.Uri.parse(k),
-    );
-    for (const uri of uris) {
+    // Collect entries first to avoid iterator invalidation while closing
+    const entries = Array.from(this.diffDocuments.values());
+    for (const diffInfo of entries) {
       try {
-        await this.closeDiffEditor(uri);
+        await this.cancelDiff(diffInfo.rightDocUri);
       } catch (err) {
         this.log(`Failed to close diff editor: ${err}`);
       }

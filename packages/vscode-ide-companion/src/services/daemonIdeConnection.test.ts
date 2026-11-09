@@ -515,6 +515,59 @@ describe('DaemonIdeConnection', () => {
     ).resolves.toBe('disconnected');
     expect(session.respondToPermission).not.toHaveBeenCalled();
     expect(connection.isConnected).toBe(false);
+    expect(connection.lastEventId).toBeUndefined();
+  });
+
+  it('preserves prior lastEventId when disconnect aborts an in-flight permission request (#441)', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const connection = new DaemonIdeConnection();
+    const onPermissionRequest = vi.fn(
+      () => new Promise<{ optionId: string }>(() => {}),
+    );
+    connection.onPermissionRequest = onPermissionRequest;
+
+    await connection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    events.push({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'before permission' },
+        },
+      } as SessionNotification,
+    });
+    await waitFor(() => expect(connection.lastEventId).toBe(4));
+
+    const request: RequestPermissionRequest & { requestId: string } = {
+      requestId: 'request-hangs-after-4',
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        title: 'Edit file',
+        kind: 'edit',
+        rawInput: {},
+      },
+      options: [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+      ],
+    } as unknown as RequestPermissionRequest & { requestId: string };
+
+    // Simulate SDK advancing session.lastEventId before yielding event 5
+    session.lastEventId = 5;
+    events.push({ id: 5, v: 1, type: 'permission_request', data: request });
+    await waitFor(() => expect(onPermissionRequest).toHaveBeenCalledOnce());
+
+    await connection.disconnect();
+    expect(session.respondToPermission).not.toHaveBeenCalled();
+    expect(connection.lastEventId).toBe(4);
   });
 
   it('forwards ask-user-question answers and cancels invalid selections', async () => {

@@ -103,12 +103,10 @@ describe('Stream', () => {
       expect(result).toEqual({ done: true, value: undefined });
     });
 
-    it('should allow enqueuing to completed stream (no check in reference)', async () => {
+    it('should ignore enqueuing to completed stream', async () => {
       stream.done();
-      // Reference version doesn't check for done in enqueue
       stream.enqueue('value');
-      // Verify value was enqueued by reading it
-      expect(await stream.next()).toEqual({ value: 'value', done: false });
+      expect(await stream.next()).toEqual({ done: true, value: undefined });
     });
 
     it('should deliver buffered values before completion', async () => {
@@ -138,12 +136,10 @@ describe('Stream', () => {
       await expect(stream.next()).rejects.toThrow('Test error');
     });
 
-    it('should allow enqueuing to stream with error (no check in reference)', async () => {
+    it('should ignore enqueuing to stream with error', async () => {
       stream.error(new Error('Error'));
-      // Reference version doesn't check for error in enqueue
       stream.enqueue('value');
-      // Verify value was enqueued by reading it
-      expect(await stream.next()).toEqual({ value: 'value', done: false });
+      await expect(stream.next()).rejects.toThrow('Error');
     });
 
     it('should store last error (reference overwrites)', async () => {
@@ -251,6 +247,33 @@ describe('Stream', () => {
       });
       await s.return();
       expect(called).toBe(1);
+    });
+
+    it('resolves multiple concurrent next() waiters in FIFO order and drains on done/error/return', async () => {
+      const p1 = stream.next();
+      const p2 = stream.next();
+      const p3 = stream.next();
+
+      stream.enqueue('a');
+      stream.enqueue('b');
+      stream.done();
+
+      expect(await p1).toEqual({ value: 'a', done: false });
+      expect(await p2).toEqual({ value: 'b', done: false });
+      expect(await p3).toEqual({ value: undefined, done: true });
+
+      const errStream = new Stream<string>();
+      const e1 = errStream.next();
+      const e2 = errStream.next();
+      errStream.error(new Error('boom'));
+      await expect(e1).rejects.toThrow('boom');
+      await expect(e2).rejects.toThrow('boom');
+
+      const retStream = new Stream<string>();
+      retStream.enqueue('queued');
+      await retStream.return();
+      // Queue is cleared on return()
+      expect(await retStream.next()).toEqual({ value: undefined, done: true });
     });
   });
 

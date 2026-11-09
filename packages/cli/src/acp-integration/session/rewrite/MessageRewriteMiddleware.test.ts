@@ -230,6 +230,19 @@ describe('MessageRewriteMiddleware', () => {
 
       // pass-through msg + tool_call + rewrite
       expect(mockSendUpdate).toHaveBeenCalledTimes(3);
+
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      expect(rewriter.rewrite).toHaveBeenCalledWith(
+        {
+          thoughts: [],
+          messages: ['before tool'],
+          hasToolCalls: true,
+        },
+        expect.any(AbortSignal),
+      );
     });
   });
 

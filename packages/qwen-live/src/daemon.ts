@@ -272,7 +272,12 @@ export class LiveDaemon {
     const port = await this.listen();
     const url = `http://127.0.0.1:${port}`;
 
-    await this.publishDiscovery(url);
+    try {
+      await this.publishDiscovery(url);
+    } catch (error) {
+      await this.stop().catch(() => {});
+      throw error;
+    }
 
     // The single machine-readable stdout line; harnesses parse the port
     // from it (same pattern as `qwen serve`).
@@ -623,19 +628,31 @@ export class LiveDaemon {
     route: string,
     res: import('node:http').ServerResponse,
   ): Promise<void> {
-    const status =
-      route === 'GET /live/setup'
-        ? await this.installer.refresh()
-        : route === 'POST /live/setup/install'
-          ? // force=true is the recovery path: a corrupted-but-present
-            // installation (bad Info.plist, revoked notarization) would
-            // otherwise permanently fail inspection while the status still
-            // says retryable. Force re-downloads and re-verifies.
-            await this.installer.ensureInstalled(true)
-          : await this.installer.launch();
-    res.statusCode = 200;
-    res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify(status));
+    try {
+      const status =
+        route === 'GET /live/setup'
+          ? await this.installer.refresh()
+          : route === 'POST /live/setup/install'
+            ? // force=true is the recovery path: a corrupted-but-present
+              // installation (bad Info.plist, revoked notarization) would
+              // otherwise permanently fail inspection while the status still
+              // says retryable. Force re-downloads and re-verifies.
+              await this.installer.ensureInstalled(true)
+            : await this.installer.launch();
+      if (res.destroyed) return;
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(status));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Host setup failed.';
+      this.logger.warn(`Host setup failed (${route}): ${message}`);
+      if (!res.headersSent && !res.destroyed) {
+        res.statusCode = 500;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ error: message }));
+      }
+    }
   }
 
   private authorize(req: IncomingMessage): boolean {

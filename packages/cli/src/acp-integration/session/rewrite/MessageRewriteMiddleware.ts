@@ -67,8 +67,8 @@ export class MessageRewriteMiddleware {
 
     // tool_call signals turn boundary — flush before passing through
     if (updateType === 'tool_call') {
-      await this.flushTurn(signal);
       this.turnBuffer.markToolCall();
+      await this.flushTurn(signal);
       return this.sendUpdate(update);
     }
 

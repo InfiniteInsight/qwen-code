@@ -579,4 +579,31 @@ describe('DiffManager permission request id binding', () => {
 
     expect(manager.hasDiff(rightUri as never)).toBe(false);
   });
+
+  it('closeAll() fires ide/diffClosed and onDidClosePermissionDiff and deletes both left and right content (#442)', async () => {
+    const provider = new DiffContentProvider();
+    const manager = new DiffManager(() => {}, provider);
+    const closedNotifications: JSONRPCNotification[] = [];
+    const closedPermDiffs: Array<{ permissionRequestId: string }> = [];
+    manager.onDidChange((n) => closedNotifications.push(n));
+    manager.onDidClosePermissionDiff((e) => closedPermDiffs.push(e));
+
+    await manager.showDiff('/workspace/foo.ts', 'old-1', 'new-1', {
+      readOnly: true,
+      permissionRequestId: 'req-close-all',
+    });
+    const leftUri = lastOpenedLeftUri();
+    const rightUri = lastOpenedRightUri();
+    expect(provider.getContent(leftUri as never)).toBe('old-1');
+    expect(provider.getContent(rightUri as never)).toBe('new-1');
+
+    await manager.closeAll();
+
+    expect(manager.hasDiff(rightUri as never)).toBe(false);
+    expect(closedNotifications).toHaveLength(1);
+    expect(closedNotifications[0]?.method).toBe('ide/diffClosed');
+    expect(closedPermDiffs).toEqual([{ permissionRequestId: 'req-close-all' }]);
+    expect(provider.getContent(leftUri as never)).toBeUndefined();
+    expect(provider.getContent(rightUri as never)).toBeUndefined();
+  });
 });

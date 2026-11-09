@@ -106,7 +106,9 @@ async function localPrograms(): Promise<SessionAgentProgram[]> {
 async function liveRunsOf(
   runtime: WorkspaceRuntime,
 ): Promise<SessionAgentLiveRunSummary[]> {
-  const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+  const orchestrator =
+    getSessionAgentOrchestrator(runtime.workspaceCwd) ??
+    ensureSessionAgentOrchestratorForRuntime(runtime);
   return orchestrator ? orchestrator.liveRuns() : [];
 }
 
@@ -540,7 +542,10 @@ export function registerWorkspaceAgentRoutes(
         // must not turn this answer into a 5xx, which the caller would read
         // as "the Host is still enrolled", leaving the stranded runs live
         // with no signal.
-        await getSessionAgentOrchestrator(runtime.workspaceCwd)
+        await (
+          getSessionAgentOrchestrator(runtime.workspaceCwd) ??
+          ensureSessionAgentOrchestratorForRuntime(runtime)
+        )
           ?.endRunsForRemovedHost(
             String(req.params['hostId']),
             result.agentsMadeLocal,

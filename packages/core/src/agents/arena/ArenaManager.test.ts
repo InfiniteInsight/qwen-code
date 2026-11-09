@@ -607,6 +607,46 @@ index 111..222 100644
       expect(manager.getSessionStatus()).toBe(ArenaSessionStatus.CANCELLED);
     });
 
+    it('cancel during sequential agent spawn stops the in-flight spawn, skips remaining agents, and keeps durationMs at 0 for unspawned agents', async () => {
+      const manager = newManager();
+      mockBackend.setAutoExit(false);
+
+      let resolveFirstSpawn!: () => void;
+      mockBackend.spawnAgent.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveFirstSpawn = resolve;
+          }),
+      );
+
+      const startPromise = manager.start({
+        ...createValidStartOptions(),
+        timeoutSeconds: 30,
+      });
+
+      await waitForCondition(
+        () => mockBackend.spawnAgent.mock.calls.length === 1,
+      );
+
+      // Cancel while the first agent's spawnAgent() is still pending and the
+      // second agent has not started (startedAt === 0).
+      await manager.cancel();
+      resolveFirstSpawn();
+
+      const result = await startPromise;
+      expect(result.status).toBe(ArenaSessionStatus.CANCELLED);
+      // Second agent must never be spawned after cancel().
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(1);
+      // The first agent that finished spawning after cancel() must be stopped.
+      expect(mockBackend.stopAgent).toHaveBeenCalledWith('model-1');
+      // Unspawned second agent must have durationMs === 0, not a huge epoch delta.
+      const unspawnedState = manager
+        .getAgentStates()
+        .find((a) => a.agentId === 'model-2');
+      expect(unspawnedState?.status).toBe(AgentStatus.CANCELLED);
+      expect(unspawnedState?.stats.durationMs).toBe(0);
+    });
+
     it('cleanup should release backend and worktree resources after start', async () => {
       // auto-exit is on by default, so agents terminate quickly.
       const { manager } = await startWith();

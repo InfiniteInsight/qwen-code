@@ -700,6 +700,98 @@ describe('ChannelLoopScheduler', () => {
     );
   });
 
+  it('disables a one-shot job when its turn is skipped', async () => {
+    jobs = [{ ...baseJob, recurring: false }];
+    runLoopPrompt.mockRejectedValue(new ChannelLoopSkippedError('user steer'));
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        lastFinishedAt: '2026-06-30T01:05:30.000Z',
+        runningSince: undefined,
+        enabled: false,
+      });
+    });
+  });
+
+  it('reverts lastFiredAt on bridge recovery so the interrupted window retries on the next tick', async () => {
+    jobs = [
+      {
+        ...baseJob,
+        lastFiredAt: '2026-06-30T01:00:00.000Z',
+        lastFinishedAt: '2026-06-30T01:00:05.000Z',
+      },
+    ];
+    const nextFireTime = vi.fn(
+      (_, after: Date) => new Date(after.getTime() + 60_000),
+    );
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime,
+    });
+    runLoopPrompt
+      .mockImplementationOnce(async () => {
+        scheduler.markBridgeRecovery();
+        throw new Error('bridge replaced during prompt');
+      })
+      .mockResolvedValueOnce('recovered summary');
+
+    await scheduler.tick();
+    await vi.waitFor(() => {
+      expect(jobs[0]?.lastFiredAt).toBe('2026-06-30T01:00:00.000Z');
+      expect(jobs[0]?.lastFinishedAt).toBe('2026-06-30T01:00:05.000Z');
+      expect(jobs[0]?.runningSince).toBeUndefined();
+    });
+
+    await scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runLoopPrompt).toHaveBeenCalledTimes(2);
+      expect(jobs[0]?.lastStatus).toBe('ok');
+      expect(jobs[0]?.lastResultPreview).toBe('recovered summary');
+    });
+  });
+
+  it('does not overwrite a newer run when a stale failure finishes late', async () => {
+    let rejectFirst!: (err: Error) => void;
+    runLoopPrompt.mockImplementationOnce(
+      () =>
+        new Promise<string>((_, reject) => {
+          rejectFirst = reject;
+        }),
+    );
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    const firstTick = scheduler.tick();
+    await vi.waitFor(() => expect(runLoopPrompt).toHaveBeenCalledOnce());
+
+    // Simulate another run taking over runningSince before the first rejects.
+    jobs = [
+      {
+        ...jobs[0]!,
+        runningSince: '2026-06-30T01:06:00.000Z',
+      },
+    ];
+    rejectFirst(new Error('stale failure'));
+    await firstTick;
+
+    expect(jobs[0]?.runningSince).toBe('2026-06-30T01:06:00.000Z');
+    expect(jobs[0]?.lastStatus).toBeUndefined();
+  });
+
   it('rechecks that a job is still enabled before firing', async () => {
     store.list = vi
       .fn()

@@ -711,6 +711,79 @@ describe('SessionAgentOrchestrator', () => {
     expect(second).toMatchObject({ runId, attempt: 2 });
   });
 
+  it('skips returning a Host assignment if the run was cancelled while pickup awaited records, and coalesces a queued follow-up on releaseHostAssignment', async () => {
+    let releaseLoadRecords!: () => void;
+    let blockNextLoad = true;
+    const { orchestrator } = harness({
+      roster: [{ ...carol, agentType: undefined }],
+      extra: {
+        loadRecords: async () => {
+          if (blockNextLoad) {
+            blockNextLoad = false;
+            await new Promise<void>((resolve) => {
+              releaseLoadRecords = resolve;
+            });
+          }
+          return [];
+        },
+      },
+    });
+    const firstMention = await orchestrator.mention(SESSION, {
+      text: '@carol first',
+      clientMessageId: 'm1',
+    });
+    const cancelledRunId = firstMention.runs[0]!.runId;
+
+    const pickupPromise = orchestrator.pickupForHost('h1', ['claude']);
+    await vi.waitFor(() => expect(releaseLoadRecords).toBeTypeOf('function'));
+    await orchestrator.cancel(SESSION, cancelledRunId);
+    releaseLoadRecords();
+    expect(await pickupPromise).toBeUndefined();
+
+    // Now test releaseHostAssignment coalescing a later queued run created while running
+    const secondMention = await orchestrator.mention(SESSION, {
+      text: '@carol two',
+      clientMessageId: 'm2',
+    });
+    const activeRunId = secondMention.runs[0]!.runId;
+    const claimed = await orchestrator.pickupForHost('h1', ['claude']);
+    expect(claimed?.runId).toBe(activeRunId);
+
+    const thirdMention = await orchestrator.mention(SESSION, {
+      text: '@carol three',
+      clientMessageId: 'm3',
+    });
+    const laterQueuedId = thirdMention.runs[0]!.runId;
+    expect(laterQueuedId).not.toBe(activeRunId);
+
+    expect(
+      orchestrator.releaseHostAssignment('h1', {
+        sessionId: SESSION,
+        runId: activeRunId,
+        attempt: claimed!.attempt,
+        leaseId: claimed!.leaseId,
+      }),
+    ).toEqual({ ok: true });
+
+    const live = await orchestrator.liveRuns();
+    expect(live).toEqual([
+      {
+        sessionId: SESSION,
+        runId: activeRunId,
+        agentId: 'ag_carol',
+        status: 'queued',
+      },
+    ]);
+    await vi.waitFor(async () => {
+      const persisted = (await fileFor()).runs.filter(
+        (r) => r.status === 'queued',
+      );
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]!.id).toBe(activeRunId);
+      expect(persisted[0]!.triggerRecordIds).toHaveLength(2);
+    });
+  });
+
   it('ends the runs a removed Host held or alone could start', async () => {
     // h1 serves dave too, but h2 still does: dropping h1 does not make dave
     // local, so dave's queued run must survive.

@@ -156,4 +156,37 @@ describe('WorkflowRunTool', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('marks registry failed and returns EXECUTION_FAILED when cancelled via registry abortController or tool signal', async () => {
+    let registeredAbortController: AbortController | undefined;
+    const spawner: AgentSpawner = {
+      spawn: async (req) => {
+        // Trigger abort via the registry's task abortController to verify it is wired to engine.run
+        registeredAbortController?.abort();
+        req.signal?.throwIfAborted();
+        return { text: 'unreachable', tokens: 1 };
+      },
+    };
+    const { config, registry } = fakeConfig(spawner, '/tmp/wf-test-runs');
+    registry.register.mockImplementation(
+      (entry: { abortController: AbortController }) => {
+        registeredAbortController = entry.abortController;
+      },
+    );
+
+    const tool = new WorkflowRunTool(config);
+    const inv = tool.build({
+      script: `export const meta = { name: 'cancel_me', description: 'd' };\nreturn await agent('hi');`,
+    });
+    const res = await inv.execute(new AbortController().signal);
+
+    expect(res.error?.type).toBe('execution_failed');
+    expect(res.error?.message).toBe('Workflow cancelled');
+    expect(registry.fail).toHaveBeenCalledWith(
+      expect.any(String),
+      'Workflow cancelled',
+    );
+    expect(registry.complete).not.toHaveBeenCalled();
+    expect(registry.unregisterForeground).toHaveBeenCalledTimes(1);
+  });
 });

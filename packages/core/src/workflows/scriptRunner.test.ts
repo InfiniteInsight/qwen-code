@@ -178,4 +178,48 @@ describe('WorkflowEngine agent bridge — journal.append failure hardening', () 
     expect(res.status).toBe('completed');
     expect(res.result).toBeNull();
   });
+
+  it('propagates a pre-aborted signal immediately and marks run cancelled without spawning', async () => {
+    const spawner = new RecordingSpawner((p) => ({
+      text: `ok:${p}`,
+      tokens: 1,
+    }));
+    const engine = new WorkflowEngine(spawner, { runsDir: await runsDir() });
+    const ac = new AbortController();
+    ac.abort();
+    const script = `${META_HEADER}
+      const r = await agent('should not run');
+      return r;`;
+    const res = await engine.run(script, { signal: ac.signal });
+    expect(res.status).toBe('cancelled');
+    expect(spawner.prompts).toHaveLength(0);
+  });
+
+  it('rejects agent() and marks run cancelled without journaling null when aborted in flight or while queued', async () => {
+    const dir = await runsDir();
+    const ac = new AbortController();
+    const spawned: string[] = [];
+    const spawner: AgentSpawner = {
+      spawn: async (req: AgentSpawnRequest) => {
+        spawned.push(req.prompt);
+        // Abort while first agent is running and second agent is waiting on concurrency slot
+        ac.abort();
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      },
+    };
+    const engine = new WorkflowEngine(spawner, {
+      runsDir: dir,
+      concurrency: 1,
+    });
+    const script = `${META_HEADER}
+      try {
+        await Promise.all([agent('first'), agent('second')]);
+      } catch {
+        // Script swallows cancellation error; engine must still record cancelled status
+      }
+      return 'swallowed';`;
+    const res = await engine.run(script, { signal: ac.signal });
+    expect(res.status).toBe('cancelled');
+    expect(spawned).toEqual(['first']);
+  });
 });

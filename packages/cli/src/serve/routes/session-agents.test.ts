@@ -126,6 +126,7 @@ describe('session agent routes', () => {
     const res = await request(setup()).get(`${BASE}/runs`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ frames: [{ type: 'run', runId: 'r1' }] });
+    expect(ensureOrchestrator).toHaveBeenCalled();
     expect(orchestrator.snapshot).toHaveBeenCalledWith(SESSION);
   });
 
@@ -182,10 +183,12 @@ describe('session agent routes', () => {
 
   it('cancels, retries, stops and answers permissions', async () => {
     const app = setup();
+    ensureOrchestrator.mockClear();
     orchestrator.cancel.mockResolvedValueOnce(true);
     expect((await request(app).post(`${BASE}/runs/r1/cancel`)).body).toEqual({
       cancelled: true,
     });
+    expect(ensureOrchestrator).toHaveBeenCalledTimes(1);
     orchestrator.cancel.mockResolvedValueOnce(false);
     expect((await request(app).post(`${BASE}/runs/r2/cancel`)).status).toBe(
       404,

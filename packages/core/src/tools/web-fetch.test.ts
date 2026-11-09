@@ -772,6 +772,41 @@ describe('WebFetchTool', () => {
       );
     });
 
+    it('should not cache or succeed when aborted during PDF text extraction', async () => {
+      stubFetch(PDF);
+      const controller = new AbortController();
+      mockExtractPDFText.mockImplementationOnce(async () => {
+        controller.abort();
+        return { success: false, error: 'pdftotext aborted' };
+      });
+
+      const abortedResult = await run(
+        'https://example.com/doc.pdf',
+        'read it',
+        {
+          signal: controller.signal,
+        },
+      );
+      expect(abortedResult.error?.type).toBe(
+        ToolErrorType.WEB_FETCH_FALLBACK_FAILED,
+      );
+
+      // Subsequent non-aborted request must re-fetch and extract rather than hitting a poisoned cache entry.
+      mockExtractPDFText.mockResolvedValueOnce({
+        success: true,
+        text: 'Recovered PDF text',
+      });
+      mockGenerateContent.mockResolvedValueOnce({
+        text: 'Recovered PDF summary',
+      });
+
+      const retryResult = await run('https://example.com/doc.pdf', 'read it');
+      expect(fetchUtils.fetchWithPolicy).toHaveBeenCalledTimes(2);
+      expect(mockExtractPDFText).toHaveBeenCalledTimes(2);
+      expect(retryResult.error).toBeUndefined();
+      expect(retryResult.llmContent).toContain('Recovered PDF summary');
+    });
+
     it('should persist PDFs, extract their text, and summarize it', async () => {
       mockExtractPDFText.mockResolvedValue({
         success: true,

@@ -308,7 +308,7 @@ export class DaemonIdeConnection {
   }
 
   get lastEventId(): number | undefined {
-    return this.lastSeenEventId ?? this.session?.lastEventId;
+    return this.lastSeenEventId;
   }
 
   private ensureSession(): DaemonIdeSessionClient {
@@ -324,7 +324,7 @@ export class DaemonIdeConnection {
     generation: number,
   ): Promise<void> {
     try {
-      const resumeId = this.lastSeenEventId ?? session.lastEventId;
+      const resumeId = this.lastSeenEventId;
       for await (const event of session.events({
         signal,
         lastEventId: resumeId,
@@ -341,8 +341,13 @@ export class DaemonIdeConnection {
             error: toSafeErrorMessage(error),
           });
         } finally {
-          if (shouldAdvanceLastSeenEventId && event.id !== undefined) {
+          if (
+            this.pumpGeneration === generation &&
+            shouldAdvanceLastSeenEventId &&
+            event.id !== undefined
+          ) {
             this.lastSeenEventId = event.id;
+            session.setLastEventId?.(event.id);
           }
         }
       }
@@ -410,14 +415,14 @@ export class DaemonIdeConnection {
         '[DaemonIdeConnection] Dropping permission request: not connected',
         { requestId },
       );
-      return true;
+      return false;
     }
     const response = await this.resolvePermissionResponseUntilAbort(
       request,
       signal,
     );
     if (!response) {
-      return true;
+      return false;
     }
     if (this.session !== session) {
       logger.warn(
@@ -428,7 +433,7 @@ export class DaemonIdeConnection {
           currentSessionId: this.session?.sessionId,
         },
       );
-      return true;
+      return false;
     }
     try {
       const accepted = await session.respondToPermission(requestId, response);
