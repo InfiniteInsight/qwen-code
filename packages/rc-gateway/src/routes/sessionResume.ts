@@ -148,6 +148,12 @@ export function createSessionResumeRoute(
         ? { historyAnchorRecordId: restored.historyAnchorRecordId }
         : {}),
       ...(restored.replayError ? { replayError: restored.replayError } : {}),
+      ...(typeof restored.hasActivePrompt === 'boolean'
+        ? { hasActivePrompt: restored.hasActivePrompt }
+        : {}),
+      ...(typeof restored.hasRunningBackgroundTasks === 'boolean'
+        ? { hasRunningBackgroundTasks: restored.hasRunningBackgroundTasks }
+        : {}),
     });
   };
 }

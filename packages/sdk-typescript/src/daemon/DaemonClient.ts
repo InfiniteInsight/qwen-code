@@ -3709,6 +3709,29 @@ export class DaemonClient {
     );
   }
 
+  async messageSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message: string,
+    clientId?: string,
+  ): Promise<{
+    delivered: boolean;
+    action?: 'queued' | 'resumed' | 'continued' | 'revived';
+    status?: string;
+    reason?: string;
+  }> {
+    return await this.jsonRequest<{
+      delivered: boolean;
+      action?: 'queued' | 'resumed' | 'continued' | 'revived';
+      status?: string;
+      reason?: string;
+    }>(
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/message`,
+      'POST /session/:id/subagents/:subagentRef/message',
+      { clientId, mode: 'rest', method: 'POST', body: { message } },
+    );
+  }
+
   /** Admit an interrupted turn without adding a user message. */
   async continueSession(
     sessionId: string,

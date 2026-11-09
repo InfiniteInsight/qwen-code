@@ -1755,5 +1755,6 @@ export class LoopDetectionService {
     }
     this.contentStats.clear();
     this.lastContentIndex = 0;
+    this.inCodeBlock = false;
   }
 }

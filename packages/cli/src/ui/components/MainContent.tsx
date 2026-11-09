@@ -128,6 +128,7 @@ const virtualKeyExtractor = (item: VpItem) =>
       : `p-${-item.id - 1}`;
 const virtualIsStaticItem = (item: VpItem) =>
   item.type === 'vp-banner' || item.id > 0;
+const renderStaticItem = (item: React.ReactElement) => item;
 
 interface MainContentProps {
   footerRef?: RefObject<DOMElement | null>;
@@ -316,11 +317,14 @@ export const MainContent = ({
   // because it is gone from pendingHistoryItems but not yet in the Static
   // slice. Chunked replay is still used for large remount gaps (Ctrl+O on a
   // long session) where the gap is >> CHUNK_SIZE.
-  const visibleHistoryItemsWithSourceCopyOffsets =
-    historyItemsWithSourceCopyOffsets.length - replayCount <=
-    PROGRESSIVE_REPLAY_CHUNK_SIZE
-      ? historyItemsWithSourceCopyOffsets
-      : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
+  const visibleHistoryItemsWithSourceCopyOffsets = useMemo(
+    () =>
+      historyItemsWithSourceCopyOffsets.length - replayCount <=
+      PROGRESSIVE_REPLAY_CHUNK_SIZE
+        ? historyItemsWithSourceCopyOffsets
+        : historyItemsWithSourceCopyOffsets.slice(0, replayCount),
+    [historyItemsWithSourceCopyOffsets, replayCount],
+  );
 
   // Combine completed history + live pending items for the virtualized list.
   // The banner sentinel is prepended so it scrolls with content (not pinned).
@@ -524,6 +528,49 @@ export const MainContent = ({
     ],
   );
 
+  // Memoize <Static> items so unrelated UIState ticks (elapsedTime 1s timer,
+  // streaming thought/content tokens, status line updates) do not rebuild N
+  // <HistoryItemDisplay> ReactElements on every render or force <Static> to
+  // re-run its internal useMemo and React dev UserTiming prop-diff walk.
+  const staticItems = useMemo(
+    () =>
+      useVirtualScroll
+        ? []
+        : [
+            <AppHeader key="app-header" version={version} />,
+            <DebugModeNotification key="debug-notification" />,
+            <Notifications key="notifications" />,
+            ...visibleHistoryItemsWithSourceCopyOffsets.map(
+              ({ item: h, sourceCopyIndexOffsets }) => (
+                <HistoryItemDisplay
+                  terminalWidth={terminalWidth}
+                  mainAreaWidth={mainAreaWidth}
+                  availableTerminalHeight={staticAreaMaxItemHeight}
+                  availableTerminalHeightLlm={MAX_GEMINI_MESSAGE_LINES}
+                  key={h.id}
+                  item={h}
+                  isPending={false}
+                  commands={uiState.slashCommands}
+                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                  thoughtHeadId={thoughtHeadIdByItem.get(h)}
+                  fullDetail={fullDetail}
+                />
+              ),
+            ),
+          ],
+    [
+      useVirtualScroll,
+      version,
+      visibleHistoryItemsWithSourceCopyOffsets,
+      terminalWidth,
+      mainAreaWidth,
+      staticAreaMaxItemHeight,
+      uiState.slashCommands,
+      thoughtHeadIdByItem,
+      fullDetail,
+    ],
+  );
+
   if (useVirtualScroll) {
     const scrollContainerHeight = Math.max(
       0,
@@ -597,30 +644,9 @@ export const MainContent = ({
       */}
       <Static
         key={`${historyRemountKey}-${uiState.currentModel}`}
-        items={[
-          <AppHeader key="app-header" version={version} />,
-          <DebugModeNotification key="debug-notification" />,
-          <Notifications key="notifications" />,
-          ...visibleHistoryItemsWithSourceCopyOffsets.map(
-            ({ item: h, sourceCopyIndexOffsets }) => (
-              <HistoryItemDisplay
-                terminalWidth={terminalWidth}
-                mainAreaWidth={mainAreaWidth}
-                availableTerminalHeight={staticAreaMaxItemHeight}
-                availableTerminalHeightLlm={MAX_GEMINI_MESSAGE_LINES}
-                key={h.id}
-                item={h}
-                isPending={false}
-                commands={uiState.slashCommands}
-                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-                thoughtHeadId={thoughtHeadIdByItem.get(h)}
-                fullDetail={fullDetail}
-              />
-            ),
-          ),
-        ]}
+        items={staticItems}
       >
-        {(item) => item}
+        {renderStaticItem}
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">

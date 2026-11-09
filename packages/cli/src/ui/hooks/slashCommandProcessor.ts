@@ -813,7 +813,10 @@ export const useSlashCommandProcessor = (
           // Register executor so SkillTool can actually invoke model-invocable
           // commands (e.g. MCP prompts) that are not file-based skills.
           config.setModelInvocableCommandsExecutor(
-            async (name: string, args: string = '') => {
+            async (name: string, args: string = '', signal?: AbortSignal) => {
+              if (signal?.aborted) {
+                return { error: 'Skill execution cancelled by user.' };
+              }
               const commands = commandService.getModelInvocableCommands();
               const cmd = commands.find((c) => c.name === name);
               if (!cmd?.action) return null;
@@ -829,7 +832,11 @@ export const useSlashCommandProcessor = (
                 services: { config, settings, logger: null },
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
+              if (signal?.aborted) {
+                return { error: 'Skill execution cancelled by user.' };
+              }
               if (!result || result.type !== 'submit_prompt') return null;
+              const hookSignal = signal ?? new AbortController().signal;
               const output = hasUserPromptExpansionHooks(config)
                 ? await config
                     .getHookSystem()
@@ -837,10 +844,10 @@ export const useSlashCommandProcessor = (
                       name,
                       args,
                       serializeUserPromptExpansionPrompt(result.content),
-                      controller.signal,
+                      hookSignal,
                     )
                 : undefined;
-              if (controller.signal.aborted) {
+              if (hookSignal.aborted) {
                 return { error: 'Skill execution cancelled by user.' };
               }
               if (output) {

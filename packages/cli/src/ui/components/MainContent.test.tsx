@@ -1518,4 +1518,63 @@ describe('<MainContent />', () => {
       wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
     ).toBe(true);
   });
+
+  it('preserves <Static> items array reference across streaming/timer re-renders when committed history is unchanged', () => {
+    staticItemsSpy.mockClear();
+    const stableHistory: UIState['history'] = [
+      { id: 1, type: 'user', text: 'hello' },
+      { id: 2, type: 'gemini', text: 'world' },
+    ];
+    const stableSlashCommands: UIState['slashCommands'] = [];
+
+    const { rerender } = render(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              useTerminalBuffer: false,
+              history: stableHistory,
+              pendingHistoryItems: [
+                { type: 'gemini_content', text: 'chunk 1' },
+              ],
+              slashCommands: stableSlashCommands,
+              streamingState: StreamingState.Responding,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
+      </AppContext.Provider>,
+    );
+
+    const firstStaticItems = staticItemsSpy.mock.calls.at(-1)?.[0];
+    expect(firstStaticItems).toBeDefined();
+
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              useTerminalBuffer: false,
+              history: stableHistory,
+              pendingHistoryItems: [
+                { type: 'gemini_content', text: 'chunk 1 + chunk 2' },
+              ],
+              slashCommands: stableSlashCommands,
+              streamingState: StreamingState.Responding,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
+      </AppContext.Provider>,
+    );
+
+    const secondStaticItems = staticItemsSpy.mock.calls.at(-1)?.[0];
+    expect(secondStaticItems).toBe(firstStaticItems);
+  });
 });

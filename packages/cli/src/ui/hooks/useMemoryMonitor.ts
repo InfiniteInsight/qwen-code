@@ -7,9 +7,13 @@
 import { useEffect, useRef } from 'react';
 import process from 'node:process';
 import os from 'node:os';
+import { performance } from 'node:perf_hooks';
 import v8 from 'v8';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
+import { installReactDevMemoryGuard } from '../../utils/react-dev-memory-guard.js';
+
+installReactDevMemoryGuard();
 
 const debugLogger = createDebugLogger('MEMORY_MONITOR');
 
@@ -43,6 +47,11 @@ export const useMemoryMonitor = ({
     // warning interval self-destructs via clearInterval once RSS exceeds 7 GB,
     // which would also kill the compaction check.
     const debugIntervalId = setInterval(() => {
+      performance.clearMeasures();
+      performance.clearMarks();
+      globalThis.performance?.clearMeasures?.();
+      globalThis.performance?.clearMarks?.();
+
       const memUsage = process.memoryUsage();
       const heapUsed = memUsage.heapUsed / 1024 / 1024;
       const heapTotal = memUsage.heapTotal / 1024 / 1024;

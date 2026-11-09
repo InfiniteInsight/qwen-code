@@ -13553,6 +13553,115 @@ class QwenAgent implements Agent {
           }
         }
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskMessage: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const rawMessage = params['message'];
+        const message = typeof rawMessage === 'string' ? rawMessage.trim() : '';
+        if (!message) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing message',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid session ID: ${sessionId}`,
+          );
+        }
+        const config = session.getConfig();
+        const registry = config.getBackgroundTaskRegistry();
+        const task =
+          registry.get(taskId) ??
+          registry.getAll().find((t) => t.toolUseId === taskId);
+        if (!task) {
+          const revived = await config.reviveCompletedBackgroundAgent(
+            taskId,
+            message,
+          );
+          if (revived) {
+            return { delivered: true, action: 'continued', status: 'running' };
+          }
+          return { delivered: false, reason: 'not_found' };
+        }
+        if (task.resumeBlockedReason) {
+          return {
+            delivered: false,
+            reason: 'not_deliverable',
+            status: task.status,
+          };
+        }
+        if (task.status === 'running') {
+          if (
+            !registry.isFinishing(task.id) &&
+            registry.queueMessage(task.id, message)
+          ) {
+            return { delivered: true, action: 'queued', status: task.status };
+          }
+          await registry.waitForFinishing(task.id, AbortSignal.timeout(5000));
+        }
+        const currentTask = registry.get(task.id) ?? task;
+        if (currentTask.status === 'paused') {
+          const resumed = await config.resumeBackgroundAgent(
+            currentTask.id,
+            message,
+          );
+          return resumed
+            ? { delivered: true, action: 'resumed', status: 'running' }
+            : {
+                delivered: false,
+                reason: 'resume_failed',
+                status: currentTask.status,
+              };
+        }
+        if (currentTask.status === 'completed') {
+          const continuation = registry.continueResidentAgent(
+            currentTask.id,
+            message,
+          );
+          if (continuation === 'continued') {
+            return { delivered: true, action: 'continued', status: 'running' };
+          }
+          if (continuation === 'capacity_wait') {
+            return {
+              delivered: false,
+              reason: 'capacity_wait',
+              status: currentTask.status,
+            };
+          }
+          const revived = await config.reviveCompletedBackgroundAgent(
+            currentTask.id,
+            message,
+          );
+          if (revived) {
+            return { delivered: true, action: 'continued', status: 'running' };
+          }
+          return {
+            delivered: false,
+            reason: 'not_deliverable',
+            status: currentTask.status,
+          };
+        }
+        return {
+          delivered: false,
+          reason: 'not_running',
+          status: currentTask.status,
+        };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {

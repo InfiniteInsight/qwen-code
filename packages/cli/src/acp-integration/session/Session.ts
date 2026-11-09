@@ -2919,8 +2919,10 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.historyMutationActive) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.goalQueue.length === 0) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     await this.runExclusiveAutomaticHistoryMutation(() =>
       this.#drainGoalQueueExclusive(),
     );
@@ -2930,6 +2932,7 @@ export class Session implements SessionContext {
     if (
       this.disposed ||
       this.closing ||
+      this.historyMutationActive ||
       this.goalProcessing ||
       this.pendingPrompt ||
       this.pendingPromptCompletion ||
@@ -2941,6 +2944,7 @@ export class Session implements SessionContext {
     ) {
       return;
     }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     const next = this.goalQueue[0];
     if (
       this.heldGoalProposal &&
@@ -4693,6 +4697,7 @@ export class Session implements SessionContext {
       this.historyMutationActive = false;
       if (this.disposed) return;
       this.#activeWorkChanged();
+      void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     };
@@ -4782,6 +4787,7 @@ export class Session implements SessionContext {
       if (this.automaticDrainRetry !== retry) return;
       this.automaticDrainRetry = null;
       if (this.disposed) return;
+      void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     });
@@ -12140,6 +12146,7 @@ export class Session implements SessionContext {
   readonly #deferredExternalRecords: BridgeSessionExternalRecordRequest[] = [];
   #deferredExternalRecordTimer: ReturnType<typeof setInterval> | undefined;
   #drainingDeferredExternalRecords = false;
+  #deferredExternalRecordDrainPromise: Promise<void> | null = null;
 
   /**
    * Hold an external record until no main-model turn is running, then write
@@ -12173,21 +12180,52 @@ export class Session implements SessionContext {
       this.#deferredExternalRecordTimer = undefined;
       const pending = this.#deferredExternalRecords.splice(0);
       this.#drainingDeferredExternalRecords = true;
-      void (async () => {
+      const drainPromise = (async () => {
         try {
-          for (const request of pending) {
+          for (let i = 0; i < pending.length; i++) {
+            const item = pending[i]!;
+            if (this.closing || this.disposed) {
+              const remaining = pending
+                .slice(i)
+                .filter(
+                  (r) =>
+                    !this.#externalRecordIds.has(r.recordKey) &&
+                    !this.#deferredExternalRecords.some(
+                      (queued) => queued.recordKey === r.recordKey,
+                    ),
+                );
+              this.#deferredExternalRecords.unshift(...remaining);
+              break;
+            }
             try {
-              await this.appendExternalRecord(request, true);
+              await this.appendExternalRecord(item, true);
             } catch (error) {
+              if (this.closing || this.disposed) {
+                const remaining = pending
+                  .slice(i)
+                  .filter(
+                    (r) =>
+                      !this.#externalRecordIds.has(r.recordKey) &&
+                      !this.#deferredExternalRecords.some(
+                        (queued) => queued.recordKey === r.recordKey,
+                      ),
+                  );
+                this.#deferredExternalRecords.unshift(...remaining);
+                break;
+              }
               debugLogger.warn(
-                `Deferred external record failed [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+                `Deferred external record failed [session ${this.sessionId}, key ${item.recordKey}]: ${this.#formatError(error)}`,
               );
             }
           }
         } finally {
           this.#drainingDeferredExternalRecords = false;
+          if (this.#deferredExternalRecordDrainPromise === drainPromise) {
+            this.#deferredExternalRecordDrainPromise = null;
+          }
         }
       })();
+      this.#deferredExternalRecordDrainPromise = drainPromise;
     }, 500);
     this.#deferredExternalRecordTimer.unref?.();
   }
@@ -12205,6 +12243,9 @@ export class Session implements SessionContext {
     clearInterval(this.#deferredExternalRecordTimer);
     this.#deferredExternalRecordTimer = undefined;
     // Writes the timer already started run to completion first.
+    if (this.#deferredExternalRecordDrainPromise) {
+      await this.#deferredExternalRecordDrainPromise.catch(() => {});
+    }
     await Promise.allSettled([...this.#externalRecordWrites.values()]);
     const pending = this.#deferredExternalRecords.splice(0);
     for (const request of pending) {

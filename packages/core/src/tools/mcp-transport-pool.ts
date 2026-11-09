@@ -1215,13 +1215,10 @@ export class McpTransportPool {
         }
       },
       // aggregator
-      // delegates to McpClient.getStatus() instead of hardcoded
-      // CONNECTED. After `forceShutdown` flips client to
-      // DISCONNECTED, the global serverStatuses Map gets the
-      // correct value rather than a permanently-stale CONNECTED
-      // (which would mislead operators reading the global map
-      // for unpooled servers).
-      () => client.getStatus(),
+      // delegates to aggregateStatusByName so closing one unpooled
+      // session connection does not overwrite global status while
+      // another session connection for the same serverName remains live.
+      (name) => this.aggregateStatusByName(name),
     );
 
     try {

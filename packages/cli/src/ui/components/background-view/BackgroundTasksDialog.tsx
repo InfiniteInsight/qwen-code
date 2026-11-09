@@ -201,6 +201,130 @@ function isStoppableEntry(entry: DialogEntry): boolean {
   );
 }
 
+function isMessageableAgent(
+  entry: DialogEntry | null,
+): entry is AgentDialogEntry {
+  if (!entry || entry.kind !== 'agent' || entry.resumeBlockedReason) {
+    return false;
+  }
+  return (
+    entry.status === 'running' ||
+    entry.status === 'paused' ||
+    (entry.status === 'completed' && entry.isBackgrounded !== false)
+  );
+}
+
+function formatAgentActivitySummary(entry: AgentDialogEntry): string {
+  if (entry.status !== 'running') return '';
+  if (entry.activityPhase === 'waiting_approval') {
+    const tool = entry.activeTool ?? entry.recentActivities?.at(-1);
+    return tool
+      ? `Waiting approval: ${formatActivityLabel(tool.name, tool.description)}`
+      : t('Waiting for approval');
+  }
+  if (entry.activityPhase === 'responding') {
+    const speech = (entry.liveText || entry.latestText || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    const snippet =
+      speech.length > 60 ? `${speech.slice(0, 60)}\u2026` : speech;
+    return snippet ? `Saying: ${snippet}` : t('Responding\u2026');
+  }
+  if (entry.activityPhase === 'thinking') {
+    const thought = (entry.liveThought || entry.latestThought || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    const snippet =
+      thought.length > 60 ? `${thought.slice(0, 60)}\u2026` : thought;
+    return snippet ? `Thinking: ${snippet}` : t('Thinking\u2026');
+  }
+  if (entry.activityPhase === 'tool' && entry.activeTool) {
+    return formatActivityLabel(
+      entry.activeTool.name,
+      entry.activeTool.description,
+    );
+  }
+  return '';
+}
+
+function buildAgentConversationLines(entry: AgentDialogEntry): Array<{
+  prefix: string;
+  text: string;
+  isThought?: boolean;
+  isUser?: boolean;
+}> {
+  const lines: Array<{
+    prefix: string;
+    text: string;
+    isThought?: boolean;
+    isUser?: boolean;
+  }> = [];
+  const rawPrompt = (entry.prompt ?? '').trim();
+  let skippedInitialPrompt = false;
+  if (entry.messages && entry.messages.length > 0) {
+    for (const msg of entry.messages) {
+      if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+      const content = (msg.content ?? '').replace(/\s*\n\s*/g, ' ').trim();
+      if (!content) continue;
+      if (
+        msg.role === 'user' &&
+        !skippedInitialPrompt &&
+        rawPrompt &&
+        content === rawPrompt.replace(/\s*\n\s*/g, ' ').trim()
+      ) {
+        skippedInitialPrompt = true;
+        continue;
+      }
+      if (msg.role === 'user') {
+        lines.push({ prefix: 'You: ', text: content, isUser: true });
+      } else if (msg.thought) {
+        lines.push({ prefix: 'Thinking: ', text: content, isThought: true });
+      } else {
+        lines.push({ prefix: 'Agent: ', text: content });
+      }
+    }
+  }
+  const liveThought = (entry.liveThought ?? '')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim();
+  if (liveThought) {
+    const last = lines[lines.length - 1];
+    if (last?.isThought) {
+      last.text = liveThought;
+    } else {
+      lines.push({ prefix: 'Thinking: ', text: liveThought, isThought: true });
+    }
+  }
+  const liveText = (entry.liveText ?? '').replace(/\s*\n\s*/g, ' ').trim();
+  if (liveText) {
+    const last = lines[lines.length - 1];
+    if (last && !last.isThought && !last.isUser) {
+      last.text = liveText;
+    } else {
+      lines.push({ prefix: 'Agent: ', text: liveText });
+    }
+  }
+  if (lines.length === 0) {
+    const fallbackThought = (entry.latestThought ?? '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    if (fallbackThought) {
+      lines.push({
+        prefix: 'Thinking: ',
+        text: fallbackThought,
+        isThought: true,
+      });
+    }
+    const fallbackText = (entry.latestText || entry.result || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    if (fallbackText) {
+      lines.push({ prefix: 'Agent: ', text: fallbackText });
+    }
+  }
+  return lines.slice(-5);
+}
+
 function workflowPauseHint(entry: DialogEntry | null): string | undefined {
   if (entry?.kind !== 'workflow' || !entry.isBackgrounded) return undefined;
   // 'pausing' deliberately gets no footer hint: it is a status, not a
@@ -236,9 +360,11 @@ function rowLabel(entry: DialogEntry, userBlocking: boolean): string {
       const base = userBlocking ? `${FOREGROUND_ROW_PREFIX} ${label}` : label;
       // Flag agents with a parked approval so the user can spot which row to
       // open from the list without entering each detail view.
-      return entry.pendingApprovals?.length
-        ? `${base} ⚠ ${t('needs approval')}`
-        : base;
+      if (entry.pendingApprovals?.length) {
+        return `${base} ⚠ ${t('needs approval')}`;
+      }
+      const liveSummary = formatAgentActivitySummary(entry);
+      return liveSummary ? `${base} (${liveSummary})` : base;
     }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
@@ -708,6 +834,26 @@ const AgentDetailBody: React.FC<{
 
   const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.status === 'running' && entry.activityPhase) {
+    if (entry.activityPhase === 'waiting_approval') {
+      dimSubtitleParts.push(t('Waiting for approval'));
+    } else if (entry.activityPhase === 'responding') {
+      dimSubtitleParts.push(t('Responding\u2026'));
+    } else if (entry.activityPhase === 'thinking') {
+      dimSubtitleParts.push(t('Thinking\u2026'));
+    } else if (entry.activityPhase === 'tool') {
+      dimSubtitleParts.push(
+        entry.activeTool
+          ? sanitizeMultilineForDisplay(
+              formatActivityLabel(
+                entry.activeTool.name,
+                entry.activeTool.description,
+              ),
+            )
+          : t('Running tool\u2026'),
+      );
+    }
+  }
   if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
       t('{{count}} tokens', {
@@ -791,6 +937,20 @@ const AgentDetailBody: React.FC<{
     maxWidth > 0
       ? Math.max(1, Math.ceil(getCachedStringWidth(text) / maxWidth))
       : 1;
+  const conversationLines = buildAgentConversationLines(entry);
+  const liveConv =
+    conversationLines.length > 0
+      ? conversationLines[conversationLines.length - 1]
+      : undefined;
+  const historyConv = conversationLines.slice(0, -1);
+  const liveConvFullText = liveConv
+    ? sanitizeMultilineForDisplay(`${liveConv.prefix}${liveConv.text}`)
+    : '';
+  const liveConvLabel =
+    liveConvFullText.length > 500
+      ? `${liveConvFullText.slice(0, 500)}\u2026`
+      : liveConvFullText;
+
   // Reserve height for every section that is NOT a history row. Each
   // `<Box />` spacer is one line, each bold header is one line.
   let reservedLines = 2; // title + subtitle (no leading spacer)
@@ -798,6 +958,12 @@ const AgentDetailBody: React.FC<{
   if (visibleChildAgents.length > 0) {
     reservedLines +=
       2 + visibleChildAgents.length + (hiddenChildCount > 0 ? 1 : 0);
+  }
+  if (conversationLines.length > 0) {
+    reservedLines +=
+      2 +
+      historyConv.length +
+      (liveConv ? wrappedRows(`> ${liveConvLabel}`) : 0);
   }
   if (liveActivity) reservedLines += 2 + wrappedRows(`> ${liveLabel}`);
   if (entry.outputFile) {
@@ -877,6 +1043,52 @@ const AgentDetailBody: React.FC<{
             <Box>
               <Text color={theme.text.secondary}>
                 {`  \u2026 ${t('{{count}} more', { count: String(hiddenChildCount) })}`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {conversationLines.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Conversation')}
+            </Text>
+          </Box>
+          {historyConv.map((item, idx) => {
+            const prefix = '  ';
+            const fullText = sanitizeMultilineForDisplay(
+              `${item.prefix}${item.text}`,
+            );
+            const lineText = truncateToWidth(
+              fullText,
+              Math.max(0, maxWidth - getCachedStringWidth(prefix)),
+            );
+            return (
+              <Box key={`conv-${idx}`}>
+                <Text
+                  color={item.isUser ? theme.text.accent : theme.text.secondary}
+                >
+                  {prefix}
+                  {lineText}
+                </Text>
+              </Box>
+            );
+          })}
+          {liveConv && (
+            <Box key="conv-live">
+              <Text
+                color={
+                  liveConv.isUser
+                    ? theme.text.accent
+                    : liveConv.isThought
+                      ? theme.text.secondary
+                      : theme.text.primary
+                }
+              >
+                {`> ${liveConvLabel}`}
               </Text>
             </Box>
           )}
@@ -1417,6 +1629,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     exitDetail,
     cancelSelected,
     resumeSelected,
+    sendMessageToSelected,
     toggleSelectedWorkflowPause,
     setSelectedIndex,
   } = useBackgroundTaskViewActions();
@@ -1479,6 +1692,27 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     const timer = setTimeout(() => setPauseRejected(null), 3000);
     return () => clearTimeout(timer);
   }, [pauseRejected]);
+
+  const [composingEntryKey, setComposingEntryKey] = useState<string | null>(
+    null,
+  );
+  const [messageDraft, setMessageDraft] = useState('');
+  const [messageFlash, setMessageFlash] = useState<{
+    entryKey: string;
+    text: string;
+    ok: boolean;
+  } | null>(null);
+  useEffect(() => {
+    if (!messageFlash) return;
+    const timer = setTimeout(() => setMessageFlash(null), 3000);
+    return () => clearTimeout(timer);
+  }, [messageFlash]);
+  useEffect(() => {
+    if (!dialogOpen) {
+      setComposingEntryKey(null);
+      setMessageDraft('');
+    }
+  }, [dialogOpen]);
 
   const toggleWorkflowPauseWithFeedback = useCallback(() => {
     const target = entries[selectedIndex];
@@ -1700,8 +1934,22 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       selectedStatus === 'failed' ||
       selectedStatus === 'cancelled';
     if (seenWasActive && selectedIsTerminal) {
+      if (composingEntryKey && composingEntryKey === selectedEntryId) {
+        initialDetailStatusRef.current = {
+          entryId: selectedEntryId,
+          status: selectedStatus,
+        };
+        return;
+      }
       setPendingCancelEntryId(null);
       exitDetail();
+      return;
+    }
+    if (selectedStatus && seen.status !== selectedStatus) {
+      initialDetailStatusRef.current = {
+        entryId: selectedEntryId,
+        status: selectedStatus,
+      };
     }
   }, [
     dialogOpen,
@@ -1712,6 +1960,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     exitDetail,
     entries,
     setSelectedIndex,
+    composingEntryKey,
   ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
@@ -1773,6 +2022,65 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         return;
       }
       if (approvalActive && approvalUsesQuestionDialog) {
+        return;
+      }
+
+      const activeEntryKey = selectedEntry ? entryId(selectedEntry) : null;
+      const isComposing =
+        composingEntryKey !== null && composingEntryKey === activeEntryKey;
+      if (isComposing) {
+        if (key.name === 'escape') {
+          setComposingEntryKey(null);
+          setMessageDraft('');
+          return;
+        }
+        if (key.name === 'return') {
+          const text = messageDraft.trim();
+          setComposingEntryKey(null);
+          setMessageDraft('');
+          if (text && activeEntryKey) {
+            void sendMessageToSelected(text).then((ok) => {
+              setMessageFlash({
+                entryKey: activeEntryKey,
+                text: ok
+                  ? t('Message sent to agent.')
+                  : t('Could not send message to agent.'),
+                ok,
+              });
+              setActivityTick((n) => n + 1);
+            });
+          }
+          return;
+        }
+        if (key.name === 'backspace' || key.name === 'delete') {
+          setMessageDraft((prev) => Array.from(prev).slice(0, -1).join(''));
+          return;
+        }
+        if (
+          key.sequence &&
+          !key.ctrl &&
+          !key.meta &&
+          key.name !== 'tab' &&
+          key.name !== 'up' &&
+          key.name !== 'down' &&
+          key.name !== 'left' &&
+          key.name !== 'right'
+        ) {
+          setMessageDraft((prev) => prev + key.sequence);
+        }
+        return;
+      }
+
+      if (
+        key.sequence === 'm' &&
+        !key.ctrl &&
+        !key.meta &&
+        isMessageableAgent(selectedEntry) &&
+        activeEntryKey
+      ) {
+        setPendingCancelEntryId(null);
+        setComposingEntryKey(activeEntryKey);
+        setMessageDraft('');
         return;
       }
 
@@ -1892,6 +2200,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
   const selectedWorkflowPauseHint = workflowPauseHint(selectedEntry);
+  const selectedAllowsMessage = isMessageableAgent(selectedEntry);
+  const isComposingMessage =
+    composingEntryKey !== null && composingEntryKey === selectedEntryKey;
   const showCancelConfirmHint =
     pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
@@ -1915,6 +2226,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     );
   } else if (dialogMode === 'list') {
     hints.push('\u2191/\u2193 select', 'Enter view');
+    if (selectedAllowsMessage) hints.push('m message');
     if (selectedEntry && isStoppableEntry(selectedEntry)) {
       hints.push('x stop');
     }
@@ -1926,6 +2238,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 back', 'Esc close');
+    if (selectedAllowsMessage) hints.push('m message');
     if (selectedEntry && isStoppableEntry(selectedEntry)) {
       hints.push('x stop');
     }
@@ -2016,6 +2329,20 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           isActive={saveActive}
           onClose={() => setSaveActive(false)}
         />
+      ) : isComposingMessage ? (
+        <Box marginTop={1} paddingX={1} flexDirection="column">
+          <Box>
+            <Text bold color={theme.text.accent}>
+              {`${t('Message to agent')}: `}
+            </Text>
+            <Text>{`${escapeAnsiCtrlCodes(messageDraft)}\u2588`}</Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary}>
+              {'Enter send \u00B7 Esc cancel'}
+            </Text>
+          </Box>
+        </Box>
       ) : (
         <Box marginTop={1} paddingX={1}>
           {pauseRejected && pauseRejected.entryKey === selectedEntryKey ? (
@@ -2023,6 +2350,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
               {t(
                 'Pause/resume was rejected; the workflow state changed. Try again.',
               )}
+            </Text>
+          ) : messageFlash && messageFlash.entryKey === selectedEntryKey ? (
+            <Text
+              color={
+                messageFlash.ok ? theme.status.success : theme.status.warning
+              }
+            >
+              {messageFlash.text}
             </Text>
           ) : (
             <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>

@@ -8,6 +8,12 @@
 
 // --- Global Entry Point ---
 
+// Disable V8 inspector console.timeStamp / console.createTask before any React
+// or Ink module is loaded so React 19 dev mode does not accumulate unbounded
+// PerformanceMeasure entries in Node's global PerformanceEntry buffer.
+delete (console as { timeStamp?: unknown }).timeStamp;
+delete (console as { createTask?: unknown }).createTask;
+
 // Java's private stdio worker bypasses the normal CLI module graph.
 const startup =
   process.argv.length === 3 && process.argv[2] === 'managed-runtime-bootstrap'

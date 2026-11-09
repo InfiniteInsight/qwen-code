@@ -5566,6 +5566,108 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/subagents/:subagentRef/message',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /session/:id/subagents/:subagentRef/message';
+      const sessionId = requireSessionId(req, res);
+      if (!sessionId) return;
+      if (!virtualSubagentSessions) {
+        res.status(404).json({
+          error: `No session with id "${sessionId}"`,
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
+      const subagentRef = req.params['subagentRef'];
+      if (
+        !subagentRef ||
+        subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+      ) {
+        res.status(400).json({
+          error: '`subagentRef` must be a non-empty subagent reference',
+          code: 'invalid_subagent_ref',
+          sessionId,
+        });
+        return;
+      }
+      const body = safeBody(req);
+      const rawMessage = body['message'];
+      const message = typeof rawMessage === 'string' ? rawMessage.trim() : '';
+      if (!message) {
+        res.status(400).json({
+          error: '`message` must be a non-empty string',
+          code: 'invalid_message',
+          sessionId,
+          subagentRef,
+        });
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      const subagents = virtualSubagentSessions;
+      try {
+        await runOwnerRuntimeActivity(runtime, async () => {
+          const resolved = await subagents.resolve(
+            runtime,
+            sessionId,
+            subagentRef,
+          );
+          if (!runtime.bridge.messageSessionTask) {
+            if (!resolved) {
+              res.status(404).json({
+                error: 'Subagent session not found',
+                code: 'session_not_found',
+                sessionId,
+                subagentRef,
+              });
+              return;
+            }
+            res.status(200).json({
+              sessionId,
+              subagentRef,
+              taskId: resolved.taskId,
+              delivered: false,
+              reason: 'unsupported',
+            });
+            return;
+          }
+          const taskId = resolved?.taskId ?? subagentRef;
+          const result = await runtime.bridge.messageSessionTask(
+            sessionId,
+            taskId,
+            message,
+          );
+          if (!resolved && result.reason === 'not_found') {
+            res.status(404).json({
+              error: 'Subagent session not found',
+              code: 'session_not_found',
+              sessionId,
+              subagentRef,
+            });
+            return;
+          }
+          res.status(200).json({
+            sessionId,
+            subagentRef,
+            taskId,
+            ...result,
+          });
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    },
+  );
+
+  app.post(
     '/session/:id/branch',
     mutate(),
     withRestrictedMutableSession(

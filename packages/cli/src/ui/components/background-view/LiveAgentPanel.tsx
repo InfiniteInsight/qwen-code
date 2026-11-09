@@ -133,14 +133,58 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
   }
 }
 
-function activityLabel(entry: AgentDialogEntry): string {
-  const last = entry.recentActivities?.at(-1);
-  if (!last) return '';
+function formatToolActivity(tool: {
+  name: string;
+  description?: string;
+}): string {
   const display = localizeToolDisplayName(
-    TOOL_DISPLAY_BY_NAME[last.name] ?? last.name,
+    TOOL_DISPLAY_BY_NAME[tool.name] ?? tool.name,
   );
-  const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
+  const desc = tool.description?.replace(/\s*\n\s*/g, ' ').trim();
   return desc ? `${display} ${desc}` : display;
+}
+
+function activityLabel(entry: AgentDialogEntry): string {
+  if (
+    entry.status === 'running' &&
+    (entry.activityPhase === 'waiting_approval' ||
+      (entry.pendingApprovals && entry.pendingApprovals.length > 0))
+  ) {
+    const tool = entry.activeTool ?? entry.recentActivities?.at(-1);
+    return tool
+      ? `Waiting approval: ${formatToolActivity(tool)}`
+      : 'Waiting for approval';
+  }
+  if (entry.status === 'running' && entry.activityPhase === 'responding') {
+    const speech = (entry.liveText || entry.latestText || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    return speech ? `Saying: ${speech}` : 'Responding...';
+  }
+  if (entry.status === 'running' && entry.activityPhase === 'thinking') {
+    const thought = (entry.liveThought || entry.latestThought || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    return thought ? `Thinking: ${thought}` : 'Thinking...';
+  }
+  if (entry.status === 'running' && entry.activeTool) {
+    return formatToolActivity(entry.activeTool);
+  }
+  const last = entry.recentActivities?.at(-1);
+  if (last) {
+    return formatToolActivity(last);
+  }
+  if (entry.status === 'running') {
+    const speech = (entry.liveText || entry.latestText || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    if (speech) return `Saying: ${speech}`;
+    const thought = (entry.liveThought || entry.latestThought || '')
+      .replace(/\s*\n\s*/g, ' ')
+      .trim();
+    if (thought) return `Thinking: ${thought}`;
+  }
+  return '';
 }
 
 /**

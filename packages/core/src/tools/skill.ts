@@ -383,7 +383,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           });
         }
       },
-      this.config.getModelInvocableCommandsExecutor(),
+      null,
       (name: string) => this.loadedSkillNames.has(name),
       (name: string) => this.hiddenSkillNames.has(name),
     );
@@ -649,12 +649,25 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       | ((
           name: string,
           args?: string,
+          signal?: AbortSignal,
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
     private readonly isSkillHidden: (name: string) => boolean = () => false,
   ) {
     super(params);
+  }
+
+  private getCommandExecutor():
+    | ((
+        name: string,
+        args?: string,
+        signal?: AbortSignal,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
+    | null {
+    return (
+      this.config.getModelInvocableCommandsExecutor?.() ?? this.commandExecutor
+    );
   }
 
   setPromptId(promptId: string): void {
@@ -707,9 +720,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     }
   }
 
-  private async executeDisabledSkill(): Promise<ToolResult> {
+  private async executeDisabledSkill(
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     let disabledCommandFallbackAttempted = false;
-    if (this.commandExecutor) {
+    const commandExecutor = this.getCommandExecutor();
+    if (commandExecutor) {
       disabledCommandFallbackAttempted = true;
       // Wrap in try/catch matching the non-disabled path's graceful
       // degradation: if the MCP server throws
@@ -718,9 +734,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // rejection out of execute(). Without this, disabling a skill
       // makes the system MORE fragile to MCP failures, not less.
       try {
-        const content = await this.commandExecutor(
+        const content = await commandExecutor(
           this.params.skill,
           this.params.args ?? '',
+          ...(signal !== undefined ? [signal] : []),
         );
         if (content && typeof content === 'object' && 'error' in content) {
           return {
@@ -758,17 +775,19 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   async execute(
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    const commandExecutor = this.getCommandExecutor();
     if (this.isSkillHidden(this.params.skill)) {
       let hiddenCommandFallbackAttempted = false;
-      if (this.commandExecutor) {
+      if (commandExecutor) {
         hiddenCommandFallbackAttempted = true;
         try {
-          const content = await this.commandExecutor(
+          const content = await commandExecutor(
             this.params.skill,
             this.params.args ?? '',
+            ...(signal !== undefined ? [signal] : []),
           );
           if (content && typeof content === 'object' && 'error' in content) {
             return {
@@ -816,7 +835,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       .getDisabledSkillNames()
       .has(this.params.skill.toLowerCase());
     if (disabled) {
-      return this.executeDisabledSkill();
+      return this.executeDisabledSkill(signal);
     }
 
     let commandFallbackAttempted = false;
@@ -827,16 +846,17 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         this.params.skill,
       );
       if (skill && !this.config.isSkillEnabled(skill)) {
-        return this.executeDisabledSkill();
+        return this.executeDisabledSkill(signal);
       }
 
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
-        if (this.commandExecutor) {
+        if (commandExecutor) {
           commandFallbackAttempted = true;
-          const commandResult = await this.commandExecutor(
+          const commandResult = await commandExecutor(
             this.params.skill,
             this.params.args ?? '',
+            ...(signal !== undefined ? [signal] : []),
           );
           if (
             commandResult &&

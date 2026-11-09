@@ -36,9 +36,16 @@ import {
   AgentEventType,
   type AgentApprovalRequestEvent,
   type AgentEventEmitter,
+  type AgentRoundTextEvent,
+  type AgentStreamTextEvent,
+  type AgentToolCallEvent,
   type AgentToolResultEvent,
 } from './runtime/agent-events.js';
-import type { AgentExternalInput } from './runtime/agent-types.js';
+import type { AgentCore } from './runtime/agent-core.js';
+import type {
+  AgentExternalInput,
+  AgentMessage,
+} from './runtime/agent-types.js';
 import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
@@ -272,6 +279,70 @@ export interface BackgroundActivity {
 }
 
 /**
+ * Live activity phase of a sub-agent, surfaced in the subagent menu and
+ * detail views so users can see what the agent is currently doing.
+ */
+export type BackgroundAgentActivityPhase =
+  | 'thinking'
+  | 'responding'
+  | 'tool'
+  | 'waiting_approval'
+  | 'idle';
+
+/**
+ * Conversation message record for a sub-agent, suitable for live detail
+ * views and ACP / Serve / RC-Gateway serialization.
+ */
+export interface BackgroundAgentMessage {
+  role: 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'info';
+  content: string;
+  timestamp: number;
+  thought?: boolean;
+  streaming?: boolean;
+  toolName?: string;
+  callId?: string;
+  description?: string;
+  success?: boolean;
+}
+
+export const MAX_AGENT_TASK_MESSAGES = 120;
+
+function mapCoreAgentMessage(msg: AgentMessage): BackgroundAgentMessage {
+  const meta = msg.metadata;
+  const toolName =
+    typeof meta?.['toolName'] === 'string' ? meta['toolName'] : undefined;
+  const callId =
+    typeof meta?.['callId'] === 'string' ? meta['callId'] : undefined;
+  const description =
+    typeof meta?.['description'] === 'string' ? meta['description'] : undefined;
+  const success =
+    typeof meta?.['success'] === 'boolean' ? meta['success'] : undefined;
+  return {
+    role: msg.role,
+    content: msg.content,
+    timestamp: msg.timestamp,
+    ...(msg.thought ? { thought: true } : {}),
+    ...(toolName ? { toolName } : {}),
+    ...(callId ? { callId } : {}),
+    ...(description ? { description } : {}),
+    ...(success !== undefined ? { success } : {}),
+  };
+}
+
+function capAgentMessages(
+  messages: BackgroundAgentMessage[],
+): BackgroundAgentMessage[] {
+  if (messages.length <= MAX_AGENT_TASK_MESSAGES) {
+    return messages;
+  }
+  const first = messages[0];
+  if (first?.role === 'user') {
+    return [first, ...messages.slice(-(MAX_AGENT_TASK_MESSAGES - 1))];
+  }
+  return messages.slice(-MAX_AGENT_TASK_MESSAGES);
+}
+
+/**
  * Agent kind of `TaskState`. Tracks one running subagent — either a
  * synchronous foreground run (`isBackgrounded: false`, awaited by the
  * parent's tool-call) or an async background run (`isBackgrounded: true`,
@@ -375,6 +446,22 @@ export interface AgentTask extends TaskBase {
    * `running` so `/resume` can recover the work later.
    */
   persistedCancellationStatus?: Extract<TaskStatus, 'running' | 'cancelled'>;
+  /** Current live execution phase while the sub-agent is running. */
+  activityPhase?: BackgroundAgentActivityPhase;
+  /** In-flight assistant text streaming in the current round. */
+  liveText?: string;
+  /** In-flight reasoning/thinking text streaming in the current round. */
+  liveThought?: string;
+  /** Most recent non-thought assistant response text produced by the agent. */
+  latestText?: string;
+  /** Most recent reasoning/thinking text produced by the agent. */
+  latestThought?: string;
+  /** Currently executing or approval-parked tool call. */
+  activeTool?: { name: string; description: string; callId?: string };
+  /** Conversation messages (user prompts, thoughts, responses, tool calls). */
+  messages?: readonly BackgroundAgentMessage[];
+  /** Live AgentCore reference while the sub-agent runtime is active. */
+  core?: AgentCore;
 }
 
 /**
@@ -911,6 +998,10 @@ export class BackgroundTaskRegistry {
     entry.recentActivities = [];
     entry.pendingApprovals = [];
     entry.persistedCancellationStatus = undefined;
+    entry.activityPhase = 'thinking';
+    entry.liveText = undefined;
+    entry.liveThought = undefined;
+    entry.activeTool = undefined;
 
     return this.register(entry);
   }
@@ -992,6 +1083,13 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.result = result;
     entry.stats = stats;
+    entry.activityPhase = 'idle';
+    entry.liveText = undefined;
+    entry.liveThought = undefined;
+    entry.activeTool = undefined;
+    if (!entry.latestText && result) {
+      entry.latestText = result;
+    }
     this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent completed: ${agentId}`);
 
@@ -1048,6 +1146,10 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.error = error;
     entry.stats = stats;
+    entry.activityPhase = 'idle';
+    entry.liveText = undefined;
+    entry.liveThought = undefined;
+    entry.activeTool = undefined;
     this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent failed: ${agentId}`);
 
@@ -1091,6 +1193,10 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     entry.persistedCancellationStatus = persistedStatus;
+    entry.activityPhase = 'idle';
+    entry.liveText = undefined;
+    entry.liveThought = undefined;
+    entry.activeTool = undefined;
     this.releaseFinishingWaiters(agentId, true);
     this.disposeResidentAgent(agentId);
     if (entry.metaPath) {
@@ -1162,6 +1268,10 @@ export class BackgroundTaskRegistry {
     entry.endTime ??= Date.now();
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
+    entry.activityPhase = 'idle';
+    entry.liveText = undefined;
+    entry.liveThought = undefined;
+    entry.activeTool = undefined;
     this.releaseFinishingWaiters(agentId, true);
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
@@ -1412,6 +1522,288 @@ export class BackgroundTaskRegistry {
     return () => {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
       emitter.off(AgentEventType.TOOL_RESULT, onResult);
+    };
+  }
+
+  /**
+   * Bind a live AgentCore runtime to a registered entry so the registry tracks
+   * live activity phase (thinking, responding, tool, waiting_approval),
+   * streaming text/thought, and the full conversation message history.
+   * Returns an unsubscribe function to call when the runtime is disposed.
+   */
+  bindAgentRuntime(
+    agentId: string,
+    core:
+      | AgentCore
+      | {
+          getEventEmitter?: () => AgentEventEmitter | undefined;
+          getMessages?: () => readonly AgentMessage[];
+        }
+      | undefined,
+  ): () => void {
+    if (!core || typeof core.getEventEmitter !== 'function') {
+      return () => {};
+    }
+    const emitter = core.getEventEmitter();
+    if (!emitter) {
+      return () => {};
+    }
+    const resolvedCore =
+      typeof core.getMessages === 'function' ? (core as AgentCore) : undefined;
+    const readCoreMessages = (): readonly AgentMessage[] =>
+      typeof core.getMessages === 'function' ? core.getMessages() : [];
+    const initialEntry = this.agents.get(agentId);
+    const priorMessages: BackgroundAgentMessage[] =
+      readCoreMessages().length === 0 && initialEntry?.messages?.length
+        ? [...initialEntry.messages]
+        : [];
+    if (initialEntry) {
+      if (resolvedCore) {
+        initialEntry.core = resolvedCore;
+      }
+      if (initialEntry.status === 'running') {
+        initialEntry.activityPhase ??= 'thinking';
+      }
+      if (
+        priorMessages.length === 0 &&
+        readCoreMessages().length === 0 &&
+        initialEntry.prompt
+      ) {
+        initialEntry.messages = [
+          {
+            role: 'user',
+            content: initialEntry.prompt,
+            timestamp: initialEntry.startTime,
+          },
+        ];
+      }
+    }
+
+    let streamTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastStreamEmitAt = 0;
+    const STREAM_THROTTLE_MS = 80;
+
+    const clearStreamTimer = () => {
+      if (streamTimer !== null) {
+        clearTimeout(streamTimer);
+        streamTimer = null;
+      }
+    };
+
+    const syncMessages = (entry: AgentTask) => {
+      const liveMessages = readCoreMessages().map(mapCoreAgentMessage);
+      const combined =
+        priorMessages.length > 0
+          ? [...priorMessages, ...liveMessages]
+          : liveMessages;
+      if (combined.length > 0) {
+        entry.messages = capAgentMessages(combined);
+      } else if (!entry.messages?.length && entry.prompt) {
+        entry.messages = [
+          {
+            role: 'user',
+            content: entry.prompt,
+            timestamp: entry.startTime,
+          },
+        ];
+      }
+      if (entry.messages) {
+        for (let i = entry.messages.length - 1; i >= 0; i--) {
+          const msg = entry.messages[i]!;
+          if (msg.role === 'assistant' && msg.content.trim()) {
+            if (msg.thought) {
+              if (!entry.latestThought) {
+                entry.latestThought = msg.content;
+              }
+            } else {
+              entry.latestText = msg.content;
+              break;
+            }
+          }
+        }
+      }
+    };
+
+    const scheduleStreamActivityEmit = () => {
+      const now = Date.now();
+      const elapsed = now - lastStreamEmitAt;
+      if (elapsed >= STREAM_THROTTLE_MS) {
+        clearStreamTimer();
+        lastStreamEmitAt = now;
+        const entry = this.agents.get(agentId);
+        if (entry) {
+          this.emitActivityChange(entry);
+        }
+        return;
+      }
+      if (streamTimer === null) {
+        streamTimer = setTimeout(() => {
+          streamTimer = null;
+          lastStreamEmitAt = Date.now();
+          const entry = this.agents.get(agentId);
+          if (entry) {
+            this.emitActivityChange(entry);
+          }
+        }, STREAM_THROTTLE_MS - elapsed);
+        streamTimer.unref?.();
+      }
+    };
+
+    const onStartOrRoundStart = () => {
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.status !== 'running') return;
+      if (resolvedCore) entry.core = resolvedCore;
+      entry.activityPhase = 'thinking';
+      entry.liveText = undefined;
+      entry.liveThought = undefined;
+      entry.activeTool = undefined;
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    const onStreamText = (event: AgentStreamTextEvent) => {
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.status !== 'running') return;
+      if (resolvedCore) entry.core = resolvedCore;
+      if (event.thought) {
+        entry.activityPhase = 'thinking';
+        entry.liveThought = (entry.liveThought ?? '') + event.text;
+        entry.latestThought = entry.liveThought;
+      } else {
+        entry.activityPhase = 'responding';
+        entry.liveText = (entry.liveText ?? '') + event.text;
+        entry.latestText = entry.liveText;
+      }
+      if (!entry.messages?.length || readCoreMessages().length > 0) {
+        syncMessages(entry);
+      }
+      scheduleStreamActivityEmit();
+    };
+
+    const onRoundText = (event: AgentRoundTextEvent) => {
+      clearStreamTimer();
+      const entry = this.agents.get(agentId);
+      if (!entry) return;
+      if (resolvedCore) entry.core = resolvedCore;
+      if (event.thoughtText?.trim()) {
+        entry.latestThought = event.thoughtText;
+      }
+      if (event.text?.trim()) {
+        entry.latestText = event.text;
+      }
+      entry.liveText = undefined;
+      entry.liveThought = undefined;
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    const onToolCall = (event: AgentToolCallEvent) => {
+      clearStreamTimer();
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.status !== 'running') return;
+      if (resolvedCore) entry.core = resolvedCore;
+      entry.liveText = undefined;
+      entry.liveThought = undefined;
+      entry.activityPhase = 'tool';
+      entry.activeTool = {
+        name: event.name,
+        description: event.description,
+        callId: event.callId,
+      };
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    const onWaitingApproval = (event: AgentApprovalRequestEvent) => {
+      clearStreamTimer();
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.status !== 'running') return;
+      if (resolvedCore) entry.core = resolvedCore;
+      entry.activityPhase = 'waiting_approval';
+      entry.activeTool = {
+        name: event.name,
+        description: event.description,
+        callId: event.callId,
+      };
+      this.emitActivityChange(entry);
+    };
+
+    const onToolResult = (event: AgentToolResultEvent) => {
+      const entry = this.agents.get(agentId);
+      if (!entry) return;
+      if (entry.activeTool?.callId === event.callId) {
+        entry.activeTool = undefined;
+      }
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    const onToolResponsesFinalized = () => {
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.status !== 'running') return;
+      entry.activeTool = undefined;
+      entry.activityPhase = 'thinking';
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    const onExternalMessage = () => {
+      const entry = this.agents.get(agentId);
+      if (!entry) return;
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    const onFinishOrError = () => {
+      clearStreamTimer();
+      const entry = this.agents.get(agentId);
+      if (!entry) return;
+      entry.liveText = undefined;
+      entry.liveThought = undefined;
+      entry.activeTool = undefined;
+      entry.activityPhase = 'idle';
+      syncMessages(entry);
+      this.emitActivityChange(entry);
+    };
+
+    emitter.on(AgentEventType.START, onStartOrRoundStart);
+    emitter.on(AgentEventType.ROUND_START, onStartOrRoundStart);
+    emitter.on(AgentEventType.STREAM_TEXT, onStreamText);
+    emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
+    emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+    emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaitingApproval);
+    emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.on(
+      AgentEventType.TOOL_RESPONSES_FINALIZED,
+      onToolResponsesFinalized,
+    );
+    emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+    emitter.on(AgentEventType.FINISH, onFinishOrError);
+    emitter.on(AgentEventType.ERROR, onFinishOrError);
+
+    return () => {
+      clearStreamTimer();
+      emitter.off(AgentEventType.START, onStartOrRoundStart);
+      emitter.off(AgentEventType.ROUND_START, onStartOrRoundStart);
+      emitter.off(AgentEventType.STREAM_TEXT, onStreamText);
+      emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
+      emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+      emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaitingApproval);
+      emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+      emitter.off(
+        AgentEventType.TOOL_RESPONSES_FINALIZED,
+        onToolResponsesFinalized,
+      );
+      emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+      emitter.off(AgentEventType.FINISH, onFinishOrError);
+      emitter.off(AgentEventType.ERROR, onFinishOrError);
+      const entry = this.agents.get(agentId);
+      if (entry) {
+        syncMessages(entry);
+        if (entry.core === core) {
+          entry.core = undefined;
+        }
+      }
     };
   }
 

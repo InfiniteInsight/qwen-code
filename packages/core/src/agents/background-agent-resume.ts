@@ -20,6 +20,7 @@ import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
   buildAgentTranscriptAttach,
+  extractMessagesFromTranscriptRecords,
   getAgentJsonlPath,
   getAgentMetaPath,
   getSubagentSessionDir,
@@ -608,6 +609,21 @@ export class BackgroundAgentResumeService {
         const persistedSummary = meta.sessionWorkflow
           ? getAgentMetaTerminalSummary(meta.stats, meta.recentActivities)
           : {};
+        const transcriptMessages =
+          extractMessagesFromTranscriptRecords(records);
+        let latestText: string | undefined;
+        let latestThought: string | undefined;
+        for (let i = transcriptMessages.length - 1; i >= 0; i--) {
+          const msg = transcriptMessages[i]!;
+          if (msg.role === 'assistant' && msg.content.trim()) {
+            if (msg.thought) {
+              latestThought ??= msg.content;
+            } else {
+              latestText ??= msg.content;
+              if (latestThought) break;
+            }
+          }
+        }
 
         const registration: AgentTaskRegistration = {
           agentId: meta.agentId,
@@ -640,6 +656,11 @@ export class BackgroundAgentResumeService {
           parentAgentId: meta.parentAgentId,
           depth: meta.depth,
           model: meta.model ?? meta.persistedCliFlags?.model,
+          ...(transcriptMessages.length > 0
+            ? { messages: transcriptMessages }
+            : {}),
+          ...(latestText ? { latestText, result: latestText } : {}),
+          ...(latestThought ? { latestThought } : {}),
           ...persistedSummary,
         };
         if (meta.status === 'completed') {
@@ -1159,6 +1180,12 @@ export class BackgroundAgentResumeService {
       const pendingMessages = [
         ...(registry.get(meta.agentId)?.pendingMessages ?? []),
       ];
+      const priorTranscriptMessages =
+        records.length > 0
+          ? extractMessagesFromTranscriptRecords(records)
+          : existing.messages
+            ? [...existing.messages]
+            : undefined;
       const registration: AgentTaskRegistration = {
         ...existing,
         subagentType: target.agentName,
@@ -1173,6 +1200,9 @@ export class BackgroundAgentResumeService {
         prompt: recovery.initialPrompt ?? existing.prompt,
         recentActivities: [],
         pendingMessages,
+        ...(priorTranscriptMessages?.length
+          ? { messages: priorTranscriptMessages }
+          : {}),
       };
       const entry = registry.register(registration, {
         suppressRegisterCallback: true,
@@ -1254,6 +1284,15 @@ export class BackgroundAgentResumeService {
 
       bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
       bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+      const cleanupRuntimeBinding =
+        typeof registry.bindAgentRuntime === 'function'
+          ? registry.bindAgentRuntime(
+              meta.agentId,
+              typeof subagent.getCore === 'function'
+                ? subagent.getCore()
+                : { getEventEmitter: () => subagent.getEventEmitter() },
+            )
+          : () => {};
 
       // Bridge permission prompts to the parent's Background tasks UI when
       // bubbling is enabled — same wiring as the launch path in agent.ts.
@@ -1285,6 +1324,7 @@ export class BackgroundAgentResumeService {
         residentRegistered = false;
         bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        cleanupRuntimeBinding();
         cleanupApprovalBridge?.();
         cleanupOwnedMonitorNotifications?.();
         cleanupJsonl?.();
@@ -1381,6 +1421,7 @@ export class BackgroundAgentResumeService {
                 continue;
               }
 
+              registry.beginFinishing(meta.agentId);
               keepResident = residentRegistered && !needsAutoPermissionLease();
               if (!keepResident) {
                 registry.unregisterResidentAgent(
@@ -1430,6 +1471,7 @@ export class BackgroundAgentResumeService {
             break;
           }
         } catch (error) {
+          keepResident = false;
           const errorMessage =
             error instanceof Error ? error.message : String(error);
           debugLogger.error(
@@ -1511,7 +1553,7 @@ export class BackgroundAgentResumeService {
             return 'fallback';
           }
 
-          if (!registry.canStartBackgroundAgent(meta.model)) {
+          if (!registry.canStartBackgroundAgent(launchModel)) {
             return 'capacity_wait';
           }
 
@@ -1528,7 +1570,7 @@ export class BackgroundAgentResumeService {
                 meta.agentId
               }: ${error instanceof Error ? error.message : String(error)}`,
             );
-            return registry.canStartBackgroundAgent(meta.model)
+            return registry.canStartBackgroundAgent(launchModel)
               ? 'fallback'
               : 'capacity_wait';
           }

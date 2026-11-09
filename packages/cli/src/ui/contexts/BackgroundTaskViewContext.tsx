@@ -72,6 +72,8 @@ export interface BackgroundTaskViewActions {
   cancelSelected(): void;
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
+  /** Send an interactive message to the currently selected agent entry. */
+  sendMessageToSelected(message: string): Promise<boolean>;
   /**
    * Cooperatively pause or resume the selected workflow. Returns whether
    * the registry accepted the transition, or `null` when the keypress does
@@ -119,6 +121,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetailFromPanel: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
+  sendMessageToSelected: async () => false,
   toggleSelectedWorkflowPause: () => null,
   setPillFocused: noop,
   setLivePanelFocused: noop,
@@ -301,6 +304,57 @@ export function BackgroundTaskViewProvider({
     await config.resumeBackgroundAgent(target.agentId);
   }, [config, entries, selectedIndex]);
 
+  const sendMessageToSelected = useCallback(
+    async (message: string): Promise<boolean> => {
+      const trimmed = message.trim();
+      if (!config || !trimmed) return false;
+      const target = entries[selectedIndex];
+      if (!target || target.kind !== 'agent' || target.resumeBlockedReason) {
+        return false;
+      }
+      const registry = config.getBackgroundTaskRegistry();
+      let live = registry.get(target.agentId) ?? target;
+      if (live.status === 'running') {
+        if (
+          typeof registry.isFinishing === 'function' &&
+          registry.isFinishing(target.agentId) &&
+          typeof registry.waitForFinishing === 'function'
+        ) {
+          await registry.waitForFinishing(target.agentId);
+          live = registry.get(target.agentId) ?? live;
+        } else if (typeof registry.queueMessage === 'function') {
+          return registry.queueMessage(target.agentId, trimmed);
+        } else {
+          return false;
+        }
+      }
+      if (live.status === 'paused') {
+        await config.resumeBackgroundAgent(target.agentId, trimmed);
+        return true;
+      }
+      if (live.status === 'completed' && live.isBackgrounded !== false) {
+        if (typeof registry.continueResidentAgent === 'function') {
+          const continuation = registry.continueResidentAgent(
+            target.agentId,
+            trimmed,
+          );
+          if (continuation === 'continued') {
+            return true;
+          }
+        }
+        if (typeof config.reviveCompletedBackgroundAgent === 'function') {
+          const revived = await config.reviveCompletedBackgroundAgent(
+            target.agentId,
+            trimmed,
+          );
+          return !revived.blocked;
+        }
+      }
+      return false;
+    },
+    [config, entries, selectedIndex],
+  );
+
   const toggleSelectedWorkflowPause = useCallback((): boolean | null => {
     if (!config) return null;
     const target = entries[selectedIndex];
@@ -350,6 +404,7 @@ export function BackgroundTaskViewProvider({
       exitDetail,
       cancelSelected,
       resumeSelected,
+      sendMessageToSelected,
       toggleSelectedWorkflowPause,
       setPillFocused,
       setLivePanelFocused,
@@ -366,6 +421,7 @@ export function BackgroundTaskViewProvider({
       exitDetail,
       cancelSelected,
       resumeSelected,
+      sendMessageToSelected,
       toggleSelectedWorkflowPause,
       setPillFocused,
       setLivePanelFocused,

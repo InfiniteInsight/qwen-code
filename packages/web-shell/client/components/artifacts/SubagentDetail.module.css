@@ -133,3 +133,62 @@
 .retry:hover {
   background: var(--accent);
 }
+
+.composer {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 10px;
+}
+
+.composerRow {
+  align-items: flex-end;
+  display: flex;
+  gap: 8px;
+}
+
+.composerInput {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  flex: 1 1 auto;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  min-height: 32px;
+  max-height: 100px;
+  padding: 6px 10px;
+  resize: none;
+}
+
+.composerInput:focus {
+  border-color: var(--agent-blue-500, var(--foreground));
+  outline: none;
+}
+
+.sendButton {
+  appearance: none;
+  background: var(--foreground);
+  border: 1px solid var(--foreground);
+  border-radius: 6px;
+  color: var(--background);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  height: 32px;
+  padding: 0 12px;
+}
+
+.sendButton:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.sendFeedback {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}

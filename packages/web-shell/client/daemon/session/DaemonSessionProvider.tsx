@@ -1802,6 +1802,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
+        let attemptedLoad: PendingSessionLoad | undefined;
         let eventStream:
           | {
               sessionId: string;
@@ -2208,7 +2209,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }));
             }
             const currentPendingLoad = pendingSessionLoadRef.current;
-            const attemptedLoad =
+            attemptedLoad =
               currentPendingLoad !== undefined &&
               currentPendingLoad.sessionId === targetSessionId &&
               restoreSessionContextMatches(
@@ -4308,10 +4309,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           const pendingLoad = pendingSessionLoadRef.current;
+          const effectivePendingLoad = pendingLoad ?? attemptedLoad;
           const pendingLoadContextMatches =
-            pendingLoad === undefined ||
+            effectivePendingLoad === undefined ||
             restoreSessionContextMatches(
-              pendingLoad.sessionContext,
+              effectivePendingLoad.sessionContext,
               activeSessionContextRef.current,
             );
           const restoreRetryDelayMs = getRestoreInProgressRetryDelayMs(error);
@@ -4376,22 +4378,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setPromptStatus('idle');
           }
           if (
-            pendingLoad &&
+            effectivePendingLoad &&
             pendingLoadContextMatches &&
-            (pendingLoad.sessionId === restoreSessionId ||
-              pendingLoad.sessionId === reconnectSessionId)
+            (effectivePendingLoad.sessionId === restoreSessionId ||
+              effectivePendingLoad.sessionId === reconnectSessionId)
           ) {
             if (
               skipNextCleanupDetachSessionRef.current?.sessionId ===
-              pendingLoad.sessionId
+              effectivePendingLoad.sessionId
             ) {
               skipNextCleanupDetachSessionRef.current = undefined;
             }
-            pendingSessionLoadRef.current = undefined;
-            if (pendingLoad.timeout !== undefined) {
-              clearTimeout(pendingLoad.timeout);
+            if (pendingLoad) {
+              pendingSessionLoadRef.current = undefined;
+              if (pendingLoad.timeout !== undefined) {
+                clearTimeout(pendingLoad.timeout);
+              }
+              pendingLoad.reject(error);
             }
-            pendingLoad.reject(error);
           }
           if (
             capacityRejected ||
@@ -4506,7 +4510,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           } else if (
             preservingTranscriptDuringLoad &&
             session === undefined &&
-            pendingLoad?.sessionId === restoreSessionId &&
+            effectivePendingLoad?.sessionId === restoreSessionId &&
             sessionRef.current?.sessionId === restoreSessionId
           ) {
             // The refresh failed before replacing the old handle. Resume its

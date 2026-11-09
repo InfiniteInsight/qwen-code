@@ -2866,6 +2866,7 @@ export class Config {
     | ((
         name: string,
         args?: string,
+        signal?: AbortSignal,
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
   // Skill keys (e.g. "skill:foo") that coreToolScheduler announced inline on a
@@ -12280,6 +12281,7 @@ export class Config {
     executor: (
       name: string,
       args?: string,
+      signal?: AbortSignal,
     ) => Promise<ModelInvocableCommandExecutorResult | null>,
   ): void {
     this.modelInvocableCommandsExecutor = executor;
@@ -12293,6 +12295,7 @@ export class Config {
     | ((
         name: string,
         args?: string,
+        signal?: AbortSignal,
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;

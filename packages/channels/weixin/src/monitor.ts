@@ -87,7 +87,7 @@ export async function startPollLoop(params: {
         process.stderr.write(
           '[weixin] Session expired (errcode -14). Pausing 30s...\n',
         );
-        await new Promise((r) => setTimeout(r, 30000));
+        await sleepWithAbort(30000, abortSignal);
         continue;
       }
 
@@ -127,15 +127,30 @@ export async function startPollLoop(params: {
         process.stderr.write(
           '[weixin] Too many consecutive errors, backing off 30s...\n',
         );
-        await new Promise((r) => setTimeout(r, 30000));
+        await sleepWithAbort(30000, abortSignal);
         consecutiveErrors = 0;
       } else {
-        await new Promise((r) => setTimeout(r, 2000));
+        await sleepWithAbort(2000, abortSignal);
       }
     }
   }
 
   process.stderr.write('[weixin] Poll loop stopped.\n');
+}
+
+function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 async function processMessage(

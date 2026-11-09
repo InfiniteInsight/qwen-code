@@ -121,6 +121,7 @@ function SubagentDetailContent({
   rootTool,
   resolution,
   onStop,
+  onSendMessage,
   onRightPanelOpen,
   onArtifactsChange,
   onOpenSubagent,
@@ -129,6 +130,12 @@ function SubagentDetailContent({
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
   onStop?: () => Promise<{ cancelled: boolean }>;
+  onSendMessage?: (message: string) => Promise<{
+    delivered: boolean;
+    action?: 'queued' | 'resumed' | 'continued' | 'revived';
+    status?: string;
+    reason?: string;
+  }>;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onArtifactsChange?: (
     sessionId: string,
@@ -163,8 +170,20 @@ function SubagentDetailContent({
   );
   const isRunning =
     metrics.status === 'running' || metrics.status === 'in_progress';
+  const canMessage =
+    Boolean(onSendMessage) &&
+    (isRunning ||
+      metrics.status === 'paused' ||
+      metrics.status === 'completed' ||
+      metrics.status === 'success');
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState('');
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendFeedback, setSendFeedback] = useState<{
+    text: string;
+    error?: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const sessionId = connection.sessionId;
@@ -203,6 +222,35 @@ function SubagentDetailContent({
     } catch {
       setStopping(false);
       setStopError(t('tasks.cancelFailed'));
+    }
+  };
+
+  const handleSend = async () => {
+    const text = draft.trim();
+    if (!text || sending || !onSendMessage) return;
+    setSending(true);
+    setSendFeedback(null);
+    try {
+      const res = await onSendMessage(text);
+      if (res.delivered) {
+        setDraft('');
+        setSendFeedback(null);
+      } else {
+        setSendFeedback({
+          text: res.reason || 'Could not deliver message to subagent.',
+          error: true,
+        });
+      }
+    } catch (err) {
+      setSendFeedback({
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Could not deliver message to subagent.',
+        error: true,
+      });
+    } finally {
+      setSending(false);
     }
   };
 
@@ -264,6 +312,59 @@ function SubagentDetailContent({
           transcript
         )}
       </div>
+      {canMessage && (
+        <form
+          className={styles.composer}
+          data-testid="subagent-composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleSend();
+          }}
+        >
+          <div className={styles.composerRow}>
+            <textarea
+              className={styles.composerInput}
+              rows={1}
+              value={draft}
+              disabled={sending}
+              placeholder={
+                isRunning
+                  ? 'Message running subagent (Enter to send)...'
+                  : metrics.status === 'paused'
+                    ? 'Resume subagent with a message...'
+                    : 'Continue subagent with a follow-up message...'
+              }
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (
+                  e.key === 'Enter' &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing
+                ) {
+                  e.preventDefault();
+                  void handleSend();
+                }
+              }}
+            />
+            <button
+              type="submit"
+              className={styles.sendButton}
+              disabled={sending || !draft.trim()}
+            >
+              {sending ? t('common.loading') : 'Send'}
+            </button>
+          </div>
+          {sendFeedback && (
+            <div
+              className={
+                sendFeedback.error ? styles.stopError : styles.sendFeedback
+              }
+            >
+              {sendFeedback.text}
+            </div>
+          )}
+        </form>
+      )}
     </div>
   );
 }
@@ -412,6 +513,29 @@ export function SubagentDetail({
                   sessionId,
                   rootToolCallId,
                 )
+        }
+        onSendMessage={
+          initialRootTool.rawOutput &&
+          typeof initialRootTool.rawOutput === 'object' &&
+          'workflowRunId' in initialRootTool.rawOutput
+            ? undefined
+            : typeof workspace.client.messageSubagentSession === 'function'
+              ? async (message: string) => {
+                  const res = await workspace.client.messageSubagentSession(
+                    sessionId,
+                    rootToolCallId,
+                    message,
+                  );
+                  if (res.delivered) {
+                    setResolution((prev) =>
+                      prev
+                        ? { ...prev, status: res.status || 'running' }
+                        : prev,
+                    );
+                  }
+                  return res;
+                }
+              : undefined
         }
       />
     </DaemonSessionProvider>

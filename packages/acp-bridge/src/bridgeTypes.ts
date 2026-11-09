@@ -2613,6 +2613,19 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 
+  /** Send a message to a running, paused, or completed subagent task in a live session. */
+  messageSessionTask?(
+    sessionId: string,
+    taskId: string,
+    message: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    delivered: boolean;
+    action?: 'queued' | 'resumed' | 'continued' | 'revived';
+    status?: string;
+    reason?: string;
+  }>;
+
   /**
    * Control a run, delete history, or start a new one — from a saved
    * definition (`run-saved`, where `taskId` is the definition name) or from a

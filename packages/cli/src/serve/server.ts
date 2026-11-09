@@ -4099,7 +4099,16 @@ export function createServeApp(
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
         env: getRuntimeEffectiveEnv(runtime.env),
         isWorkspaceTrusted: () => runtime.trusted,
-        acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
+        acquireVoiceLease: () => {
+          const entry = workspaceRegistry.getEntryByWorkspaceId(
+            runtime.workspaceId,
+          );
+          return entry?.state === 'active' &&
+            entry.current?.runtime === runtime &&
+            !runtime.generationGuard?.closed
+            ? voiceCoordinator.acquire(runtime)
+            : ({ kind: 'rejected', reason: 'draining' } as const);
+        },
       })(ws, req),
   });
   if (acpHandleRef.current) {

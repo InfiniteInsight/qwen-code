@@ -2952,6 +2952,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // or `createAgentHeadless` throw). Assigned only after the override
     // is created; stays a no-op for any earlier failure.
     let restoreParentPM: () => void = () => {};
+    let hoistedAgentConfig: Config | undefined;
+    let hoistedSubagentDispose: (() => Promise<void>) | undefined;
+    let runtimeCleanupOwned = false;
     let backgroundSlotReservation: BackgroundSlotReservation | undefined;
     let backgroundSlotReservationConsumed = false;
     // Concrete model ID the sub-agent will run with, resolved from its model
@@ -3542,6 +3545,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         resolvedApprovalMode,
         { externalExecutor: subagentConfig.executor !== undefined },
       );
+      hoistedAgentConfig = agentConfig;
       restoreParentPM = cleanup;
 
       // Date.now() alone collides when two parallel background agents of the
@@ -3620,6 +3624,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         subagent = result.subagent;
         subagentDispose = result.dispose;
+        hoistedSubagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
       }
       const runtimeEventEmitter =
@@ -3744,6 +3749,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           sessionId,
           hookOpts.agentId,
         );
+        runtimeCleanupOwned = true;
         try {
           // Register before writing the meta sidecar — see the matching
           // foreground call below for the full rationale. Keeping the
@@ -3940,6 +3946,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        const cleanupRuntimeBinding =
+          typeof registry.bindAgentRuntime === 'function'
+            ? registry.bindAgentRuntime(
+                hookOpts.agentId,
+                typeof bgSubagent.getCore === 'function'
+                  ? bgSubagent.getCore()
+                  : { getEventEmitter: () => bgSubagent.getEventEmitter() },
+              )
+            : () => {};
 
         // Bridge permission prompts to the parent session's Background tasks
         // UI when bubbling is enabled. No-op subscription otherwise (the
@@ -4022,6 +4037,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           residentRegistered = false;
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          cleanupRuntimeBinding();
           cleanupApprovalBridge?.();
           cleanupOwnedMonitorNotifications();
           cleanupJsonl?.();
@@ -4571,6 +4587,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }),
           );
         // Defensive `.catch` — same reason as the bg path above.
+        runtimeCleanupOwned = true;
         runInForkContext(runFramedFork).catch((err) =>
           debugLogger.warn(
             `[Agent] fork subagent ${hookOpts.agentId} body raised unexpected rejection: ${err instanceof Error ? err.message : String(err)}`,
@@ -4583,6 +4600,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // ── Foreground (synchronous) execution path ────────────────
+      // Register in BackgroundTaskRegistry with isBackgrounded:false so the
+      // pill counts the run and the dialog can drill in. Foreground entries
+      // skip XML notification and headless-holdback (see the registry for
+      // the gating logic).
+      //
+      // Persistence wiring mirrors the background path so foreground
+      // subagents leave the same JSONL transcript + meta sidecar on disk
+      // as their backgrounded counterparts. Without this, post-mortem of a
+      // cancelled / crashed foreground subagent has no on-disk evidence
+      // beyond what made it into the parent's tool result.
+      const registry = this.config.getBackgroundTaskRegistry();
+      const fgProjectDir = this.config.storage.getProjectDir();
+      const fgSessionId = this.config.getSessionId();
+      const { jsonlPath: fgJsonlPath, options: fgTranscriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+          agentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          // Seed the JSONL with the launching prompt so the transcript
+          // is self-describing -- readers don't need the meta sidecar to
+          // know what the agent was asked to do.
+          initialUserPrompt: this.params.prompt,
+        });
+      const fgMetaPath = getAgentMetaPath(
+        fgProjectDir,
+        fgSessionId,
+        hookOpts.agentId,
+      );
       // Compose a child AbortController so the dialog's per-agent cancel
       // can abort just this subagent without aborting the parent turn.
       // Parent abort still propagates down (so ESC at the parent kills
@@ -4615,39 +4659,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }),
             ),
         );
-
-      // Register in BackgroundTaskRegistry with isBackgrounded:false so the
-      // pill counts the run and the dialog can drill in. Foreground entries
-      // skip XML notification and headless-holdback (see the registry for
-      // the gating logic).
-      //
-      // Persistence wiring mirrors the background path so foreground
-      // subagents leave the same JSONL transcript + meta sidecar on disk
-      // as their backgrounded counterparts. Without this, post-mortem of a
-      // cancelled / crashed foreground subagent has no on-disk evidence
-      // beyond what made it into the parent's tool result.
-      const registry = this.config.getBackgroundTaskRegistry();
-      const fgProjectDir = this.config.storage.getProjectDir();
-      const fgSessionId = this.config.getSessionId();
-      const { jsonlPath: fgJsonlPath, options: fgTranscriptAttachOptions } =
-        buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
-          agentName: subagentConfig.name,
-          agentColor: subagentConfig.color,
-          // Seed the JSONL with the launching prompt so the transcript
-          // is self-describing — readers don't need the meta sidecar to
-          // know what the agent was asked to do.
-          initialUserPrompt: this.params.prompt,
-        });
-      const fgMetaPath = getAgentMetaPath(
-        fgProjectDir,
-        fgSessionId,
-        hookOpts.agentId,
-      );
       // Declared `let` so the `finally` block can release the writer's
       // listeners + fd even if the attach itself throws partway through.
       // The attach happens inside the `try` below — keeping it outside
       // would leak listeners on any synchronous setup failure.
       let cleanupFgJsonl: (() => void) | undefined;
+      let cleanupFgRuntimeBinding: (() => void) | undefined;
 
       const cleanupOwnedMonitorNotifications =
         subagent.continuationBlockedReason
@@ -4740,6 +4757,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             )
           : undefined;
 
+      runtimeCleanupOwned = true;
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           runtimeEventEmitter,
@@ -4770,6 +4788,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           depth: launchDepth,
         });
+        cleanupFgRuntimeBinding =
+          typeof registry.bindAgentRuntime === 'function'
+            ? registry.bindAgentRuntime(
+                hookOpts.agentId,
+                typeof subagent.getCore === 'function'
+                  ? subagent.getCore()
+                  : { getEventEmitter: () => subagent.getEventEmitter() },
+              )
+            : undefined;
         writeAgentMeta(fgMetaPath, {
           agentId: hookOpts.agentId,
           agentType: hookOpts.agentType,
@@ -4972,6 +4999,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           AgentEventType.USAGE_METADATA,
           onFgUsageMetadata,
         );
+        cleanupFgRuntimeBinding?.();
         cleanupNestedApprovalBridge?.();
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
@@ -5062,6 +5090,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // createApprovalModeOverride and the inner fg/bg/fork finallys.
       // No-op when restoreParentPM is still the hoisted default (e.g.
       // when createApprovalModeOverride itself threw).
+      if (!runtimeCleanupOwned) {
+        if (hoistedAgentConfig) {
+          void hoistedAgentConfig
+            .getToolRegistry()
+            .stop()
+            .catch((stopError) => {
+              debugLogger.warn(
+                `[AgentTool] ToolRegistry stop after error failed: ${stopError}`,
+              );
+            });
+        }
+        if (hoistedSubagentDispose) {
+          await hoistedSubagentDispose().catch((disposeError) => {
+            debugLogger.warn(
+              `[AgentTool] subagentDispose after error failed: ${disposeError}`,
+            );
+          });
+        }
+      }
       try {
         restoreParentPM();
       } catch (restoreError) {

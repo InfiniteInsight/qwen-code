@@ -1363,7 +1363,14 @@ export class LiveSessionCoordinator {
         error: 'Live Voice could not persist the final transcript.',
       };
     }
-    if (!this.isActive(context)) return;
+    if (!this.isActive(context)) {
+      if (context.stopDrainTimer) clearTimeout(context.stopDrainTimer);
+      context.stopDrainTimer = undefined;
+      const finish = context.finishStop;
+      context.finishStop = undefined;
+      finish?.(outcome);
+      return;
+    }
     if (discardPendingInput) {
       this.invalidateRealtime(context);
       realtime?.close({ discardPendingInput: true });
@@ -2169,6 +2176,10 @@ export class LiveSessionCoordinator {
 
   private closeContextNow(context: LiveCallContext): void {
     for (const abort of context.turnAborts) abort.abort();
+    if (context.stopDrainTimer) {
+      clearTimeout(context.stopDrainTimer);
+      context.stopDrainTimer = undefined;
+    }
     if (context.coordinatorEstablished && context.coordinator) {
       this.closedCoordinatorSessionIds.add(context.coordinator.sessionId);
     }
@@ -2176,12 +2187,25 @@ export class LiveSessionCoordinator {
     closeLiveAudioCapture(context.diagnosticInputCapture, 'context_closed');
     context.diagnosticInputCapture = undefined;
     this.discardProvisionalCoordinator(context);
+    const runtime = context.runtime;
+    const lease = context.coordinatorLease;
+    context.coordinatorLease = undefined;
+    if (runtime && lease?.clientId) {
+      void runtime.bridge
+        .detachClient(lease.sessionId, lease.clientId)
+        .catch(() => undefined);
+    }
     if (this.active === context) this.active = undefined;
     context.observerAbort?.abort();
     context.callAbort.abort();
     const realtime = context.realtime;
     this.invalidateRealtime(context);
     realtime?.close();
+    if (!context.stopFinalizing && context.finishStop) {
+      const finish = context.finishStop;
+      context.finishStop = undefined;
+      finish();
+    }
   }
 
   private async closeContext(context: LiveCallContext): Promise<void> {

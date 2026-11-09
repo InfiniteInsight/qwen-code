@@ -624,7 +624,7 @@ class SessionEventsHub {
       return;
     }
     resolveReady();
-    if ('pending' in attach && this.catchingUp) {
+    if ('pending' in attach && this.catchingUp && !this.upgradingCatchUp) {
       this.finishCatchUp();
     }
     try {

@@ -1985,6 +1985,13 @@ export class McpClientManager {
         instructions.set(serverName, serverInstructions);
       }
     }
+    for (const [serverName, conn] of this.pooledConnections) {
+      if (instructions.has(serverName)) continue;
+      const serverInstructions = conn.client.getInstructions?.();
+      if (serverInstructions) {
+        instructions.set(serverName, serverInstructions);
+      }
+    }
     return instructions;
   }
 

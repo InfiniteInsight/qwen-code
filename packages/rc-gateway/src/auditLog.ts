@@ -180,6 +180,8 @@ export type AuditAction =
   | 'sessions_delete_failed'
   | 'subagent_cancelled'
   | 'subagent_cancel_failed'
+  | 'subagent_messaged'
+  | 'subagent_message_failed'
   | 'session_exported'
   | 'attachment_uploaded'
   | 'attachment_removed'

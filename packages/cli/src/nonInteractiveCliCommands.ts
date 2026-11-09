@@ -348,7 +348,10 @@ async function registerModelInvocableCommands(
   );
 
   config.setModelInvocableCommandsExecutor(
-    async (name: string, args: string = '') => {
+    async (name: string, args: string = '', signal?: AbortSignal) => {
+      if (signal?.aborted) {
+        return { error: 'Skill execution cancelled by user.' };
+      }
       const commands = commandService.getModelInvocableCommands();
       const cmd = commands.find(
         (candidate) =>
@@ -367,8 +370,11 @@ async function registerModelInvocableCommands(
         ...(executionPolicy ? { executionPolicy } : {}),
       } as unknown as CommandContext;
       const result = await cmd.action(minimalContext, args);
+      if (signal?.aborted) {
+        return { error: 'Skill execution cancelled by user.' };
+      }
       if (!result || result.type !== 'submit_prompt') return null;
-      const hookSignal = new AbortController().signal;
+      const hookSignal = signal ?? new AbortController().signal;
       const hookResult = await fireUserPromptExpansionHook(
         config,
         name,
@@ -376,6 +382,9 @@ async function registerModelInvocableCommands(
         result.content,
         hookSignal,
       );
+      if (hookSignal.aborted) {
+        return { error: 'Skill execution cancelled by user.' };
+      }
       if (hookResult.blockedResult) {
         return hookResult.blockedResult.type === 'message'
           ? { error: hookResult.blockedResult.content }

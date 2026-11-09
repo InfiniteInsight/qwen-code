@@ -11,10 +11,12 @@ import {
   MAX_AGENT_TRACE_NODES,
   MAX_RETAINED_TERMINAL_AGENTS,
   readAgentMetaAsync,
+  readTranscriptMessagesSync,
   sanitizeFilenameComponent,
   snapshotArgsUnavailable,
   type AgentMeta,
   type AgentTask,
+  type BackgroundAgentMessage,
   type Config,
   type MonitorTask,
   type ShellTask,
@@ -124,10 +126,79 @@ function persistedTerminalSummary(
   };
 }
 
+function findLatestAssistantContent(
+  messages: readonly BackgroundAgentMessage[],
+  thought: boolean,
+): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]!;
+    if (
+      msg.role === 'assistant' &&
+      Boolean(msg.thought) === thought &&
+      msg.content.trim().length > 0
+    ) {
+      return msg.content;
+    }
+  }
+  return undefined;
+}
+
 function serializeAgentTask(
   entry: AgentTask,
   now: number,
 ): ServeSessionAgentTaskStatus {
+  const diskTranscript =
+    !entry.messages?.length && entry.outputFile
+      ? readTranscriptMessagesSync(entry.outputFile, entry.status === 'running')
+      : undefined;
+  const baseMessages = entry.messages?.length
+    ? [...entry.messages]
+    : (diskTranscript?.messages ?? []);
+  const liveThought = entry.liveThought || diskTranscript?.liveThought;
+  const liveText = entry.liveText || diskTranscript?.liveText;
+  const messages: BackgroundAgentMessage[] = baseMessages.map((m) => ({
+    ...m,
+  }));
+  if (entry.status === 'running') {
+    if (liveThought && liveThought.trim().length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: liveThought,
+        timestamp: now,
+        thought: true,
+        streaming: true,
+      });
+    }
+    if (liveText && liveText.trim().length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: liveText,
+        timestamp: now,
+        streaming: true,
+      });
+    }
+  }
+  const latestText =
+    liveText ||
+    entry.latestText ||
+    entry.result ||
+    findLatestAssistantContent(baseMessages, false);
+  const latestThought =
+    liveThought ||
+    entry.latestThought ||
+    findLatestAssistantContent(baseMessages, true);
+  const activityPhase =
+    entry.activityPhase ??
+    (entry.status === 'running'
+      ? entry.pendingApprovals?.length
+        ? 'waiting_approval'
+        : liveText
+          ? 'responding'
+          : entry.activeTool
+            ? 'tool'
+            : undefined
+      : undefined);
+
   return {
     kind: 'agent',
     id: entry.id,
@@ -158,8 +229,22 @@ function serializeAgentTask(
           })),
         }
       : {}),
-    ...optionalField('prompt', entry.prompt),
+    ...optionalField(
+      'prompt',
+      entry.prompt ??
+        (baseMessages[0]?.role === 'user'
+          ? baseMessages[0].content
+          : undefined),
+    ),
     ...optionalField('toolUseId', entry.toolUseId),
+    ...optionalField('activityPhase', activityPhase),
+    ...optionalField('latestText', latestText),
+    ...optionalField('latestThought', latestThought),
+    ...optionalField(
+      'activeTool',
+      entry.activeTool ? { ...entry.activeTool } : undefined,
+    ),
+    ...(messages.length > 0 ? { messages } : {}),
   };
 }
 
@@ -484,6 +569,18 @@ export async function buildSessionAgentsStatus(
         const status = meta.status === 'running' ? 'paused' : meta.status;
         const endTime = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
         const subagentType = meta.subagentName ?? meta.agentType;
+        const outputFile = path.join(
+          dir,
+          `agent-${sanitizeFilenameComponent(meta.agentId)}.jsonl`,
+        );
+        const diskTranscript = readTranscriptMessagesSync(outputFile, false);
+        const diskMessages = diskTranscript.messages;
+        const latestText = findLatestAssistantContent(diskMessages, false);
+        const latestThought = findLatestAssistantContent(diskMessages, true);
+        const initialPrompt =
+          diskMessages[0]?.role === 'user'
+            ? diskMessages[0].content
+            : undefined;
         agents.set(meta.agentId, {
           kind: 'agent',
           id: meta.agentId,
@@ -499,10 +596,7 @@ export async function buildSessionAgentsStatus(
             0,
             (Number.isFinite(endTime) ? endTime : startTime) - startTime,
           ),
-          outputFile: path.join(
-            dir,
-            `agent-${sanitizeFilenameComponent(meta.agentId)}.jsonl`,
-          ),
+          outputFile,
           subagentType,
           ...optionalField(
             'model',
@@ -515,9 +609,13 @@ export async function buildSessionAgentsStatus(
           // The sidecar's terminal summary, same shape as the live fields;
           // absent on legacy sidecars and on agents that never finished.
           ...persistedTerminalSummary(meta),
+          ...optionalField('prompt', initialPrompt),
           ...optionalField('toolUseId', meta.toolUseId),
           ...optionalField('parentAgentId', meta.parentAgentId ?? undefined),
           ...optionalField('depth', meta.depth),
+          ...optionalField('latestText', latestText),
+          ...optionalField('latestThought', latestThought),
+          ...(diskMessages.length > 0 ? { messages: diskMessages } : {}),
         });
       }),
     ),

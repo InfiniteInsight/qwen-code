@@ -21,12 +21,14 @@ export * from './background-tasks.js';
 export * from './background-agent-resume.js';
 export {
   MAX_AGENT_TRACE_NODES,
+  extractMessagesFromTranscriptRecords,
   getAgentMetaTerminalSummary,
   getSubagentSessionDir,
   getSubagentsRootDir,
   readAgentMeta,
   readAgentMetaAsync,
   readAgentTrace,
+  readTranscriptMessagesSync,
   sanitizeFilenameComponent,
 } from './agent-transcript.js';
 export type {

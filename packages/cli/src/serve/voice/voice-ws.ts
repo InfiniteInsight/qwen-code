@@ -420,6 +420,7 @@ export function createVoiceWsConnectionHandler(
           operationController.signal,
         );
       }
+      if (isClosed()) return;
       sendJson({ type: 'final', text: transcript });
       writeStderrLine('qwen serve: voice websocket finalized successfully');
       cleanup();

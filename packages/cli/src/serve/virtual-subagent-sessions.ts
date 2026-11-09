@@ -328,7 +328,19 @@ class VirtualSubagentTarget {
   updateStatus(status: string): void {
     const wasRunning = this.task.status === 'running';
     this.task.status = status;
-    if (status !== 'running' && this.pollTimer) {
+    if (status === 'running') {
+      if (this.subscribers > 0 && !this.pollTimer) {
+        this.pollTimer = setInterval(() => {
+          void this.refreshLive().catch(() => undefined);
+        }, POLL_INTERVAL_MS);
+        this.pollTimer.unref();
+      }
+      if (!wasRunning) {
+        void this.refreshLive().catch(() => undefined);
+      }
+      return;
+    }
+    if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
     }
@@ -602,7 +614,10 @@ class VirtualSubagentTarget {
 
   private refreshAt(bounds?: TranscriptReadBounds): Promise<void> {
     return this.refreshOnce(bounds?.transcript).then(async () => {
-      if (this.task.status === 'running') {
+      if (
+        this.task.status === 'running' ||
+        (bounds?.stream !== undefined && bounds.stream > 0)
+      ) {
         await this.readStreamUpdates(bounds?.stream);
       }
     });

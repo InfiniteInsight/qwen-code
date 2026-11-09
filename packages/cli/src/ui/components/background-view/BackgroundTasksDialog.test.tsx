@@ -2103,5 +2103,73 @@ describe('BackgroundTasksDialog', () => {
       // The whole path is present (the tail is not clipped off).
       expect(frame).toContain('agent-general-purpose-call-9.jsonl');
     });
+
+    it('renders live activity phase and Conversation messages in detail view', () => {
+      const speaking = entry({
+        agentId: 'a-conv',
+        status: 'running',
+        activityPhase: 'responding',
+        prompt: 'Initial task prompt',
+        messages: [
+          {
+            role: 'user',
+            content: 'Initial task prompt',
+            timestamp: 1,
+          },
+          {
+            role: 'assistant',
+            content: 'Analyzing the module structure first.',
+            thought: true,
+            timestamp: 2,
+          },
+          {
+            role: 'user',
+            content: 'Also check the error handler',
+            timestamp: 3,
+          },
+        ],
+        liveText: 'Here is what I found in the error handler.',
+      });
+      const h = setup([speaking]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      const listFrame = h.lastFrame() ?? '';
+      expect(listFrame).toContain(
+        'Saying: Here is what I found in the error handler.',
+      );
+
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const detailFrame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(detailFrame).toContain('Responding\u2026');
+      expect(detailFrame).toContain('Conversation');
+      expect(detailFrame).toContain(
+        'Thinking: Analyzing the module structure first.',
+      );
+      expect(detailFrame).toContain('You: Also check the error handler');
+      expect(detailFrame).toContain(
+        '> Agent: Here is what I found in the error handler.',
+      );
+    });
+
+    it('allows interactive messaging to a subagent via the m key', () => {
+      const paused = entry({
+        agentId: 'a-msg',
+        status: 'paused',
+      });
+      const h = setup([paused]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      expect(h.lastFrame()).toContain('m message');
+
+      h.pressKey({ sequence: 'm' });
+      expect(h.lastFrame()).toContain('Message to agent:');
+      expect(h.lastFrame()).toContain('Enter send');
+
+      h.pressKey({ sequence: 'h' });
+      h.pressKey({ sequence: 'i' });
+      expect(h.lastFrame()).toContain('hi\u2588');
+
+      h.pressKey({ name: 'return' });
+      expect(h.resume).toHaveBeenCalledWith('a-msg', 'hi');
+    });
   });
 });

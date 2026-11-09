@@ -9391,135 +9391,156 @@ export function createSessionControlPlane(
         },
       );
       releaseAdmissionOnce();
-      const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
-      const publicState = publicRestoreState(state);
-      entry.restoreState = publicState;
-      entry.backgroundTurn = parseBackgroundNotificationTurn(
-        state._meta?.['backgroundTurn'],
-      );
-      if (typeof state._meta?.['hasRunningBackgroundTasks'] === 'boolean') {
-        entry.hasRunningBackgroundTasks =
-          state._meta['hasRunningBackgroundTasks'];
-      }
-      if (replayPartial === true) {
-        entry.restoreReplayPartial = true;
-      }
-      if (replayError !== undefined) {
-        entry.restoreReplayError = replayError;
-      }
-      if (replayHasMore === true) {
-        entry.restoreHistoryHasMore = true;
-      }
-      if (replayAnchorRecordId !== undefined) {
-        entry.restoreHistoryAnchorRecordId = replayAnchorRecordId;
-      }
-      seedSnapshotCaches(entry, publicState);
-      if (replayUpdates.length > 0) {
-        // Seed replay frames and drain early events synchronously right after
-        // `createSessionEntry` registers `entry` in `byId`, before awaiting
-        // artifact restoration. Otherwise any live `sessionUpdate` arriving
-        // during `await entry.artifacts.restore(...)` would publish directly
-        // to `entry.events` ahead of the replay history and be wiped out or
-        // reordered when `seedReplayEvents` and `drainEarlyEvents` run later.
-        void ci.client.seedSessionUpdates(entry, replayUpdates, {
-          ingestArtifacts: false,
-        });
-        if (
-          historyPageSize !== undefined &&
-          entry.events
-            .snapshotReplay()
-            ?.compactedTurns.some((event) => event.type === 'history_truncated')
-        ) {
+      let publicState!: BridgeSessionState;
+      let deferArtifactWorkspace = false;
+      const artifactRestoreWarnings: string[] = [];
+      let clientId!: string;
+      let sourcePersisted: boolean | undefined;
+      try {
+        const restoredArtifactSnapshot =
+          restoredArtifactSnapshotFromState(state);
+        publicState = publicRestoreState(state);
+        entry.restoreState = publicState;
+        entry.backgroundTurn = parseBackgroundNotificationTurn(
+          state._meta?.['backgroundTurn'],
+        );
+        if (typeof state._meta?.['hasRunningBackgroundTasks'] === 'boolean') {
+          entry.hasRunningBackgroundTasks =
+            state._meta['hasRunningBackgroundTasks'];
+        }
+        if (replayPartial === true) {
+          entry.restoreReplayPartial = true;
+        }
+        if (replayError !== undefined) {
+          entry.restoreReplayError = replayError;
+        }
+        if (replayHasMore === true) {
           entry.restoreHistoryHasMore = true;
         }
-        ci.client.drainEarlyEvents(entry.sessionId, entry);
-      }
-      const deferArtifactWorkspace = isReservedStandaloneSessionSourceType(
-        entry.sourceType,
-      );
-      const artifactRestoreWarnings: string[] = [];
-      if (deferArtifactWorkspace) {
-        artifactRestoreWarnings.push(
-          ...(await entry.artifacts.restore(restoredArtifactSnapshot, {
-            workspaceAccess: 'metadata-only',
-          })),
+        if (replayAnchorRecordId !== undefined) {
+          entry.restoreHistoryAnchorRecordId = replayAnchorRecordId;
+        }
+        seedSnapshotCaches(entry, publicState);
+        if (replayUpdates.length > 0) {
+          // Seed replay frames and drain early events synchronously right after
+          // `createSessionEntry` registers `entry` in `byId`, before awaiting
+          // artifact restoration. Otherwise any live `sessionUpdate` arriving
+          // during `await entry.artifacts.restore(...)` would publish directly
+          // to `entry.events` ahead of the replay history and be wiped out or
+          // reordered when `seedReplayEvents` and `drainEarlyEvents` run later.
+          void ci.client.seedSessionUpdates(entry, replayUpdates, {
+            ingestArtifacts: false,
+          });
+          if (
+            historyPageSize !== undefined &&
+            entry.events
+              .snapshotReplay()
+              ?.compactedTurns.some(
+                (event) => event.type === 'history_truncated',
+              )
+          ) {
+            entry.restoreHistoryHasMore = true;
+          }
+          ci.client.drainEarlyEvents(entry.sessionId, entry);
+        }
+        deferArtifactWorkspace = isReservedStandaloneSessionSourceType(
+          entry.sourceType,
         );
-      } else {
-        artifactRestoreWarnings.push(
-          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
-        );
-      }
-      const legacyOnlyDrop = entry.artifacts.consumeLegacyOnlyRestore();
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      const artifactRestoreFailed =
-        legacyOnlyDrop ||
-        artifactRestoreWarnings.some((warning) =>
-          isArtifactRestoreFailureWarning(warning),
-        );
-      if (deferArtifactWorkspace) {
-        entry.pendingArtifactRestore = {
-          ...(restoredArtifactSnapshot !== undefined
-            ? { snapshot: restoredArtifactSnapshot }
-            : {}),
-          replayUpdates:
-            restoredArtifactSnapshot === undefined || artifactRestoreFailed
-              ? replayUpdates
-              : [],
-          warnings: artifactRestoreWarnings,
-        };
-      }
-      if (
-        replayUpdates.length > 0 &&
-        !deferArtifactWorkspace &&
-        (restoredArtifactSnapshot === undefined || artifactRestoreFailed)
-      ) {
-        await ci.client.seedSessionUpdates(entry, replayUpdates, {
-          seedEvents: false,
-          ingestArtifacts: true,
-        });
-      }
-      assertAttachableSessionEntry(req.sessionId, entry);
-      const clientId = registerClient(entry, req.clientId);
-      let previousApprovalMode: ApprovalMode | undefined;
-      if (req.approvalMode) {
-        previousApprovalMode = await applyApprovalModeForAttach(
-          entry,
-          req.approvalMode,
-          clientId,
-        );
-        assertAttachableSessionEntry(req.sessionId, entry);
-      }
-      // Fold synchronous coalesce reservations into the new entry's
-      // `attachCount`. By this point all coalescers that beat us must
-      // have hit the inFlightRestores branch and bumped
-      // `coalesceState.count`; later coalescers will hit the byId
-      // early-return path instead and increment `entry.attachCount`
-      // directly.
-      const sourcePersisted = entry.sourceType
-        ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
-        : undefined;
-      try {
-        assertAttachableSessionEntry(req.sessionId, entry);
-      } catch (error) {
-        if (previousApprovalMode !== undefined) {
-          await rollbackApprovalModeForRejectedAttach(
-            entry,
-            previousApprovalMode,
-            clientId,
+        if (deferArtifactWorkspace) {
+          artifactRestoreWarnings.push(
+            ...(await entry.artifacts.restore(restoredArtifactSnapshot, {
+              workspaceAccess: 'metadata-only',
+            })),
+          );
+        } else {
+          artifactRestoreWarnings.push(
+            ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
           );
         }
-        await rollbackAttachRegistration(entry, clientId, 1);
-        throw error;
+        const legacyOnlyDrop = entry.artifacts.consumeLegacyOnlyRestore();
+        for (const warning of artifactRestoreWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        const artifactRestoreFailed =
+          legacyOnlyDrop ||
+          artifactRestoreWarnings.some((warning) =>
+            isArtifactRestoreFailureWarning(warning),
+          );
+        if (deferArtifactWorkspace) {
+          entry.pendingArtifactRestore = {
+            ...(restoredArtifactSnapshot !== undefined
+              ? { snapshot: restoredArtifactSnapshot }
+              : {}),
+            replayUpdates:
+              restoredArtifactSnapshot === undefined || artifactRestoreFailed
+                ? replayUpdates
+                : [],
+            warnings: artifactRestoreWarnings,
+          };
+        }
+        if (
+          replayUpdates.length > 0 &&
+          !deferArtifactWorkspace &&
+          (restoredArtifactSnapshot === undefined || artifactRestoreFailed)
+        ) {
+          await ci.client.seedSessionUpdates(entry, replayUpdates, {
+            seedEvents: false,
+            ingestArtifacts: true,
+          });
+        }
+        assertAttachableSessionEntry(req.sessionId, entry);
+        clientId = registerClient(entry, req.clientId);
+        let previousApprovalMode: ApprovalMode | undefined;
+        if (req.approvalMode) {
+          previousApprovalMode = await applyApprovalModeForAttach(
+            entry,
+            req.approvalMode,
+            clientId,
+          );
+          assertAttachableSessionEntry(req.sessionId, entry);
+        }
+        // Fold synchronous coalesce reservations into the new entry's
+        // `attachCount`. By this point all coalescers that beat us must
+        // have hit the inFlightRestores branch and bumped
+        // `coalesceState.count`; later coalescers will hit the byId
+        // early-return path instead and increment `entry.attachCount`
+        // directly.
+        sourcePersisted = entry.sourceType
+          ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
+          : undefined;
+        try {
+          assertAttachableSessionEntry(req.sessionId, entry);
+        } catch (error) {
+          if (previousApprovalMode !== undefined) {
+            await rollbackApprovalModeForRejectedAttach(
+              entry,
+              previousApprovalMode,
+              clientId,
+            );
+          }
+          await rollbackAttachRegistration(entry, clientId, 1);
+          throw error;
+        }
+        entry.attachCount += coalesceState.count;
+        coalesceState.folded = true;
+        registeredEntry = entry;
+      } catch (initErr) {
+        ci.pendingRestoreIds.delete(req.sessionId);
+        if (byId.get(entry.sessionId) === entry && !entry.closing) {
+          try {
+            await closeSessionImpl(entry.sessionId, undefined, {
+              reason: 'restore_failed',
+            });
+          } catch {
+            /* preserve the initialization failure; .finally() cleans up residual state */
+          }
+        }
+        throw initErr;
       }
-      entry.attachCount += coalesceState.count;
-      coalesceState.folded = true;
-      registeredEntry = entry;
       const restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
         entry,
         restoreAskUserQuestionHint,
@@ -14086,6 +14107,27 @@ export function createSessionControlPlane(
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
         { taskId, taskKind },
       );
+    },
+
+    async messageSessionTask(sessionId, taskId, message, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      assertSessionResetNotPending(sessionId);
+      const endSideRequest = beginSideRequest(entry);
+      try {
+        return await requestSessionStatus<{
+          delivered: boolean;
+          action?: 'queued' | 'resumed' | 'continued' | 'revived';
+          status?: string;
+          reason?: string;
+        }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
+          taskId,
+          message,
+        });
+      } finally {
+        endSideRequest();
+      }
     },
 
     async controlSessionWorkflowTask(

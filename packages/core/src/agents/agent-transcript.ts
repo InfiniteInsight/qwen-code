@@ -52,6 +52,7 @@ import type { SubagentExecutorSpec } from '../subagents/types.js';
 import type {
   AgentCompletionStats,
   BackgroundActivity,
+  BackgroundAgentMessage,
 } from './background-tasks.js';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
@@ -559,6 +560,221 @@ export function readLastTranscriptRecordUuidSync(
     }
   }
   return null;
+}
+
+function summarizeFunctionCallArgs(
+  args: Record<string, unknown> | undefined,
+): string {
+  if (!args || typeof args !== 'object') return '';
+  for (const key of [
+    'description',
+    'command',
+    'file_path',
+    'path',
+    'pattern',
+    'query',
+    'url',
+    'prompt',
+  ]) {
+    const val = args[key];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      const compact = val.replace(/\s+/g, ' ').trim();
+      return compact.length > 120 ? `${compact.slice(0, 117)}...` : compact;
+    }
+  }
+  return '';
+}
+
+/**
+ * Reconstructs UI-facing conversation messages from a subagent's JSONL
+ * transcript records so restored, paused, or completed subagents expose their
+ * full history (user prompts, thoughts, assistant responses, tool calls).
+ */
+export function extractMessagesFromTranscriptRecords(
+  records: readonly ChatRecord[],
+): BackgroundAgentMessage[] {
+  const messages: BackgroundAgentMessage[] = [];
+  const toolNamesByCallId = new Map<string, string>();
+
+  for (const record of records) {
+    if (!record || typeof record !== 'object') continue;
+    const parsedTs =
+      typeof record.timestamp === 'string'
+        ? Date.parse(record.timestamp)
+        : Number.NaN;
+    const timestamp = Number.isFinite(parsedTs) ? parsedTs : Date.now();
+
+    if (record.type === 'user') {
+      const parts = record.message?.parts;
+      if (!Array.isArray(parts)) continue;
+      const text = parts
+        .map((p) => ('text' in p && typeof p.text === 'string' ? p.text : ''))
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+      if (text) {
+        messages.push({
+          role: 'user',
+          content: text,
+          timestamp,
+        });
+      }
+      continue;
+    }
+
+    if (record.type === 'assistant') {
+      const parts = record.message?.parts;
+      if (!Array.isArray(parts)) continue;
+      for (const part of parts) {
+        if (
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.trim().length > 0
+        ) {
+          const isThought =
+            'thought' in part &&
+            (part as { thought?: unknown }).thought === true;
+          messages.push({
+            role: 'assistant',
+            content: part.text,
+            timestamp,
+            ...(isThought ? { thought: true } : {}),
+          });
+        }
+        if (part.functionCall) {
+          const fc = part.functionCall;
+          const toolName =
+            typeof fc.name === 'string' && fc.name.trim()
+              ? fc.name.trim()
+              : 'tool';
+          const callId =
+            typeof fc.id === 'string' && fc.id.trim()
+              ? fc.id.trim()
+              : undefined;
+          if (callId) {
+            toolNamesByCallId.set(callId, toolName);
+          }
+          const description = summarizeFunctionCallArgs(
+            fc.args as Record<string, unknown> | undefined,
+          );
+          messages.push({
+            role: 'tool_call',
+            content: description
+              ? `${toolName}: ${description}`
+              : `Tool call: ${toolName}`,
+            timestamp,
+            toolName,
+            ...(callId ? { callId } : {}),
+            ...(description ? { description } : {}),
+          });
+        }
+      }
+      continue;
+    }
+
+    if (record.type === 'tool_result') {
+      const callId = record.toolCallResult?.callId;
+      const parts = record.message?.parts;
+      const fnRespName = Array.isArray(parts)
+        ? parts.find((p) => typeof p.functionResponse?.name === 'string')
+            ?.functionResponse?.name
+        : undefined;
+      const toolName =
+        (callId ? toolNamesByCallId.get(callId) : undefined) ??
+        fnRespName ??
+        'tool';
+      const hasPartError =
+        Array.isArray(parts) &&
+        parts.some((p) => Boolean(p.functionResponse?.response?.['error']));
+      const isError = record.toolCallResult?.status === 'error' || hasPartError;
+      messages.push({
+        role: 'tool_result',
+        content: `Tool ${toolName} ${isError ? 'failed' : 'succeeded'}`,
+        timestamp,
+        toolName,
+        ...(callId ? { callId } : {}),
+        success: !isError,
+      });
+    }
+  }
+
+  if (messages.length > 120) {
+    const first = messages[0];
+    if (first?.role === 'user') {
+      return [first, ...messages.slice(-119)];
+    }
+    return messages.slice(-120);
+  }
+  return messages;
+}
+
+/**
+ * Synchronously reads a subagent's `.jsonl` (and optional `.jsonl.stream`
+ * when active) into `BackgroundAgentMessage[]`. Best-effort; returns `[]` on
+ * missing or unreadable files.
+ */
+export function readTranscriptMessagesSync(
+  jsonlPath: string,
+  includeLiveStream = false,
+): {
+  messages: BackgroundAgentMessage[];
+  liveText?: string;
+  liveThought?: string;
+} {
+  const records: ChatRecord[] = [];
+  try {
+    const raw = fs.readFileSync(jsonlPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        records.push(JSON.parse(trimmed) as ChatRecord);
+      } catch {
+        const recovered = _recoverObjectsFromLine<ChatRecord>(trimmed);
+        records.push(...recovered);
+      }
+    }
+  } catch {
+    // Missing or unreadable transcript is normal before first write.
+  }
+
+  const messages = extractMessagesFromTranscriptRecords(records);
+  if (!includeLiveStream) {
+    return { messages };
+  }
+
+  let liveText = '';
+  let liveThought = '';
+  try {
+    const rawStream = fs.readFileSync(`${jsonlPath}.stream`, 'utf8');
+    for (const line of rawStream.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const chunk = JSON.parse(trimmed) as {
+          text?: string;
+          thought?: boolean;
+        };
+        if (typeof chunk.text === 'string' && chunk.text.length > 0) {
+          if (chunk.thought) {
+            liveThought += chunk.text;
+          } else {
+            liveText += chunk.text;
+          }
+        }
+      } catch {
+        // Ignore partial trailing line in stream file.
+      }
+    }
+  } catch {
+    // No active stream file.
+  }
+
+  return {
+    messages,
+    ...(liveText ? { liveText } : {}),
+    ...(liveThought ? { liveThought } : {}),
+  };
 }
 
 export interface AttachJsonlOptions {

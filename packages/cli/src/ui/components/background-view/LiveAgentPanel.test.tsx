@@ -762,4 +762,51 @@ describe('<LiveAgentPanel />', () => {
       expect(frame).not.toContain('        ↳');
     });
   });
+
+  describe('live subagent speech and activity phase', () => {
+    it('surfaces what the subagent is currently saying in responding phase', () => {
+      const speaking = agentEntry({
+        agentId: 'speak-1',
+        subagentType: 'researcher',
+        description: 'researcher: inspect auth module',
+        activityPhase: 'responding',
+        liveText: 'I found the root cause in token validation.',
+      });
+      const { lastFrame } = renderPanel({ entries: [speaking] });
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain(
+        'Saying: I found the root cause in token validation.',
+      );
+    });
+
+    it('surfaces what the subagent is thinking in thinking phase', () => {
+      const thinking = agentEntry({
+        agentId: 'think-1',
+        subagentType: 'researcher',
+        description: 'researcher: inspect auth module',
+        activityPhase: 'thinking',
+        liveThought: 'Checking session expiry edge cases',
+      });
+      const { lastFrame } = renderPanel({ entries: [thinking] });
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Thinking: Checking session expiry edge cases');
+    });
+
+    it('surfaces waiting-for-approval status when parked on a tool', () => {
+      const waiting = agentEntry({
+        agentId: 'wait-1',
+        subagentType: 'researcher',
+        description: 'researcher: run migration',
+        activityPhase: 'waiting_approval',
+        activeTool: {
+          name: 'run_shell_command',
+          description: 'npm run migrate',
+          callId: 'c1',
+        },
+      });
+      const { lastFrame } = renderPanel({ entries: [waiting] });
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Waiting approval: Shell npm run migrate');
+    });
+  });
 });

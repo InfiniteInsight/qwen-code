@@ -5,6 +5,7 @@
  */
 // @vitest-environment jsdom
 
+import { performance as nodePerf } from 'node:perf_hooks';
 import { renderHook } from '@testing-library/react';
 import { vi } from 'vitest';
 
@@ -184,5 +185,35 @@ describe('useMemoryMonitor', () => {
     // Advance past cooldown + one more interval tick — compactOldItems is called again and succeeds
     vi.advanceTimersByTime(UI_COMPACT_COOLDOWN_MS + MEMORY_DEBUG_INTERVAL);
     expect(compactOldItems).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops React devtools UserTiming measures and clears performance buffers on debug ticks', () => {
+    nodePerf.clearMeasures();
+    nodePerf.measure('\u200bStatic', {
+      start: 0,
+      end: 1,
+      detail: {
+        devtools: {
+          track: 'Components ⚛',
+          properties: [['items', 'Array(154)']],
+        },
+      },
+    });
+    expect(nodePerf.getEntriesByType('measure')).toHaveLength(0);
+
+    nodePerf.measure('non-react-measure', {
+      start: 0,
+      end: 1,
+    });
+    expect(nodePerf.getEntriesByType('measure')).toHaveLength(1);
+
+    memoryUsageSpy.mockReturnValue({
+      rss: 1024,
+      heapUsed: 1024,
+      heapTotal: 2048,
+    } as NodeJS.MemoryUsage);
+    renderHook(() => useMemoryMonitor({ addItem }));
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(nodePerf.getEntriesByType('measure')).toHaveLength(0);
   });
 });

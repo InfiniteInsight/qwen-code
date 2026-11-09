@@ -237,7 +237,10 @@ export class WeixinChannel extends ChannelBase {
           process.stderr.write(
             `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
           );
-          envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+          const failureText = `(User sent a file "${file.fileName}" but download failed)`;
+          envelope.text = envelope.syntheticText
+            ? failureText
+            : `${envelope.text}\n\n${failureText}`;
         }
       }
     });

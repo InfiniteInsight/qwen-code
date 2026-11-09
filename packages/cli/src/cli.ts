@@ -27,6 +27,7 @@ import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
+import { installReactDevMemoryGuard } from './utils/react-dev-memory-guard.js';
 import {
   handleUncaughtException,
   isExpectedPtyRaceError,
@@ -34,6 +35,7 @@ import {
 
 // Preserve the old entrypoint's profiling baseline before route-specific
 // dynamic imports or command handling shift startup measurements.
+installReactDevMemoryGuard();
 initStartupProfiler();
 initCpuProfiler();
 

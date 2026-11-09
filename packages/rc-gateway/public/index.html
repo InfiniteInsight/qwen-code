@@ -986,6 +986,7 @@
       #h1-status {
         flex: 1 1 auto;
         min-width: 0;
+        overflow: hidden;
         height: 44px;
         display: flex;
         align-items: center;
@@ -1024,9 +1025,15 @@
         background: #f85149;
       }
       #h1-state {
-        flex: none;
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         color: var(--g1-ink-hi);
         white-space: nowrap;
+      }
+      #h1-status[data-state='bg'] .f {
+        flex: 0 100 auto;
       }
       #h1-status .f {
         min-width: 0;
@@ -3032,13 +3039,34 @@
       #agents-foot {
         flex: none;
         display: flex;
-        align-items: center;
-        gap: 12px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
         padding: 10px 16px;
         border-top: 1px solid var(--g1-line);
       }
       #agents-foot[hidden] {
         display: none;
+      }
+      #agent-msg-row,
+      #agent-foot-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #agent-msg-row[hidden],
+      #agent-foot-bar[hidden] {
+        display: none;
+      }
+      #agent-msg {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 44px;
+      }
+      #agent-send {
+        flex: none;
+        min-width: 64px;
+        min-height: 44px;
       }
       #agent-stop-note {
         flex: 1 1 auto;
@@ -3220,8 +3248,31 @@
         border-left: 2px solid #3a4a7a;
         color: var(--g1-ink);
       }
-      #agents-sheet .ag-step.msg .tx {
+      #agents-sheet .ag-step.msg .tx,
+      #agents-sheet .ag-step.thought .tx,
+      #agents-sheet .ag-step.user .tx {
         white-space: pre-wrap;
+      }
+      #agents-sheet .ag-step.thought {
+        padding-left: 10px;
+        border-left: 2px solid var(--g1-edge);
+        color: var(--g1-ink-mid);
+        font-style: italic;
+      }
+      #agents-sheet .ag-step.user {
+        padding-left: 10px;
+        border-left: 2px solid #3fb950;
+        color: var(--g1-ink-hi);
+      }
+      #agents-sheet .ag-live-say {
+        color: var(--g1-ink);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #agents-sheet .ag-live-now {
+        color: var(--g1-ink-hi);
+        font-weight: 500;
       }
       /* #110. On the laptop layout the sheet is the chat column's, as the
          Fork question's is: the panes beside it stay where they are. */
@@ -5056,8 +5107,14 @@
           </div>
           <div id="agents-body"></div>
           <div id="agents-foot" hidden>
-            <span id="agent-stop-note"></span>
-            <button id="agent-stop" type="button">Stop</button>
+            <div id="agent-msg-row" hidden>
+              <input id="agent-msg" class="cv-in" type="text" maxlength="4000" autocomplete="off" placeholder="Message this agent" aria-label="Message this agent" />
+              <button id="agent-send" class="cv-btn" type="button">Send</button>
+            </div>
+            <div id="agent-foot-bar" hidden>
+              <span id="agent-stop-note"></span>
+              <button id="agent-stop" type="button">Stop</button>
+            </div>
           </div>
         </div>
       </div>
@@ -8521,8 +8578,10 @@
       }
       // The turn boundary. Everything that ends a turn routes through here so
       // the indicator cannot be left claiming work that stopped.
+      let daemonTurnActive = false;
       function endTurn() {
         turnOpen = false;
+        daemonTurnActive = false;
         runningToolIds.clear();
         stopQuietWatch();
         setProcessing(false);
@@ -9674,7 +9733,12 @@
         for (const [id, f] of taskFrames) {
           if (f.at < rosterIssueAt) taskFrames.delete(id);
         }
-        for (const id of taskFrames.keys()) patchRosterRow(id);
+        for (const id of taskFrames.keys()) {
+          if (!patchRosterRow(id) && !taskFrameAsked.has(id)) {
+            taskFrameAsked.add(id);
+            rosterDebt.add(id);
+          }
+        }
       }
       function resetTaskFrames() {
         taskFrames.clear();
@@ -9701,6 +9765,22 @@
         const label = oldest.label || oldest.id || 'run';
         const secs = Math.round(rosterElapsed(oldest) / 1000);
         return run.length + ' background, ' + label + (secs > 0 ? ' ' + h1Clock(secs) : '');
+      }
+      function agentsBgWord() {
+        const run =
+          typeof agentViews === 'function'
+            ? agentViews().filter((v) => v.running)
+            : [];
+        if (!run.length) return '';
+        const oldest = run[0];
+        const label = oldest.desc || oldest.name || 'agent';
+        const secs = Math.floor(Math.max(0, oldest.ms) / 1000);
+        return (
+          run.length +
+          ' background, ' +
+          label +
+          (secs > 0 ? ' ' + h1Clock(secs) : '')
+        );
       }
       async function readRoster(id) {
         if (!id || !token()) return;
@@ -9835,6 +9915,14 @@
           // readable in the task list either way.
           state = 'bg';
           word = rosterWord();
+        } else if (
+          typeof agentsOn === 'function' &&
+          agentsOn() &&
+          typeof agentsRunningCount === 'function' &&
+          agentsRunningCount() > 0
+        ) {
+          state = 'bg';
+          word = agentsBgWord();
         }
         if (btn.dataset.state !== state) btn.dataset.state = state;
         h1Text($('h1-state'), word);
@@ -9857,7 +9945,13 @@
         // which is the only case the clock on its own would never cover: a
         // background run is by definition work with no turn open. So the
         // clock's lifetime is widened to the roster rather than duplicated.
-        const tickWanted = running || rosterPollWanted();
+        const tickWanted =
+          running ||
+          rosterPollWanted() ||
+          (typeof agentsOn === 'function' &&
+            agentsOn() &&
+            typeof agentsRunningCount === 'function' &&
+            agentsRunningCount() > 0);
         if (tickWanted && !runClock) {
           runClock = setInterval(statusTick, 1000);
         } else if (!tickWanted && runClock) {
@@ -14617,6 +14711,10 @@
         // ref -> { busy, note } for a Stop, kept per agent so a row redrawn
         // by the next read still shows that its stop is in flight.
         stops: new Map(),
+        // ref -> { busy, note } for a sent message, kept per agent across
+        // roster polls and trace redraws.
+        msgs: new Map(),
+        drafts: new Map(),
         // parent tool call id -> the tool row whose child frames the model
         // keeps, for every Agent row on the page, running or settled.
         stream: new Map(),
@@ -14637,6 +14735,7 @@
         usage: new Map(), // ref -> the inspect read's line, for a finished agent
         expanded: new Set(), // the messages and task shown whole
         followed: null, // the key the trace last scrolled to the end for
+        msgRef: null, // the agent ref currently bound to #agent-msg
         clock: null,
         renderTimer: null,
         // A finger or button held down in the sheet: a redraw then would
@@ -14894,6 +14993,7 @@
           agentsState.now = typeof b.now === 'number' ? b.now : 0;
         }
         renderAgents();
+        renderStatusLine();
         if (agentsLive()) {
           agentsSchedule(agentSheet.open ? AGENTS_POLL_OPEN_MS : AGENTS_POLL_MS);
         }
@@ -14914,6 +15014,8 @@
         agentsState.err = '';
         agentsState.reading = false;
         agentsState.stops.clear();
+        agentsState.msgs.clear();
+        agentsState.drafts.clear();
         agentsState.liveSubs.clear();
         agentsState.wasLive = false;
         agentSheet.usage.clear();
@@ -14960,6 +15062,7 @@
           const moved = sig !== agentsRunSig;
           agentsRunSig = sig;
           renderAgentsChrome();
+          if (moved) renderStatusLine();
           if (!agentSheet.open) return;
           if (moved || touched.has('*')) return renderAgentSheetSoon();
           if (agentSheet.view !== 'trace') return;
@@ -15053,8 +15156,50 @@
       // and whose child it is. Absent is not zero: a daemon that predates #208,
       // or a sidecar that never recorded stats, leaves the row saying nothing
       // rather than 0 tok.
+      function agentLiveNowText(v) {
+        if (!v || !v.row) return '';
+        if (v.running) {
+          const phase = strOr(v.row.activityPhase, '');
+          const tool = v.row.activeTool;
+          if (phase === 'waiting_approval') {
+            return tool && tool.name
+              ? 'waiting for approval: ' +
+                  tool.name +
+                  (tool.description ? ' (' + tool.description + ')' : '')
+              : 'waiting for approval';
+          }
+          if (phase === 'tool' && tool && tool.name) {
+            return (
+              'running ' +
+              tool.name +
+              (tool.description ? ': ' + tool.description : '')
+            );
+          }
+          if (phase === 'responding') return 'responding...';
+          if (phase === 'thinking') return 'thinking...';
+        }
+        return '';
+      }
+      function agentLatestPreview(v) {
+        if (!v || !v.row) return '';
+        const text = strOr(v.row.latestText, '').replace(/\s+/g, ' ').trim();
+        if (text) {
+          return text.length > 100 ? text.slice(0, 97) + '...' : text;
+        }
+        const thought = strOr(v.row.latestThought, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (thought) {
+          const short =
+            thought.length > 90 ? thought.slice(0, 87) + '...' : thought;
+          return 'thinking: ' + short;
+        }
+        return '';
+      }
       function agentFacts(v) {
         const bits = [];
+        const liveNow = agentLiveNowText(v);
+        if (liveNow) bits.push(liveNow);
         const st = v.row && v.row.stats;
         if (st && typeof st.totalTokens === 'number') {
           bits.push(fmtK(st.totalTokens) + ' tok');
@@ -15073,6 +15218,14 @@
       function agentStopBusy(ref) {
         const s = agentsState.stops.get(ref);
         return !!(s && s.busy);
+      }
+      function agentMsgNote(ref) {
+        const m = agentsState.msgs.get(ref);
+        return m ? m.note : '';
+      }
+      function agentMsgBusy(ref) {
+        const m = agentsState.msgs.get(ref);
+        return !!(m && m.busy);
       }
       function agentLine1(v) {
         const l1 = agentEl('span', 'ag-l1');
@@ -15133,7 +15286,11 @@
             open.setAttribute('aria-label', v.name + ', ' + agentStateWord(v) + ': open its trace');
             open.appendChild(agentLine1(v));
             open.appendChild(agentEl('span', 'ag-l2', v.desc));
-            const note = agentStopNote(v.ref);
+            const preview = agentLatestPreview(v);
+            if (preview) {
+              open.appendChild(agentEl('span', 'ag-l3 ag-live-say', preview));
+            }
+            const note = agentStopNote(v.ref) || agentMsgNote(v.ref);
             open.appendChild(
               agentEl('span', 'ag-l3', note ? note : agentFacts(v)),
             );
@@ -15176,6 +15333,59 @@
           words(at, text.length);
         }
         if (steps.length) return { steps, from: 'stream' };
+        const msgs =
+          v.row && Array.isArray(v.row.messages) ? v.row.messages : [];
+        if (msgs.length) {
+          const resultsByCallId = new Map();
+          for (const m of msgs) {
+            if (m && m.role === 'tool_result' && m.callId) {
+              resultsByCallId.set(
+                m.callId,
+                m.success === false ? 'failed' : 'completed',
+              );
+            }
+          }
+          const taskPrompt = v.row ? strOr(v.row.prompt, '').trim() : '';
+          let skippedInitialPrompt = false;
+          for (const m of msgs) {
+            if (!m || typeof m !== 'object') continue;
+            if (m.role === 'user') {
+              const txt = strOr(m.content, '').trim();
+              if (!txt) continue;
+              if (!skippedInitialPrompt && taskPrompt && txt === taskPrompt) {
+                skippedInitialPrompt = true;
+                continue;
+              }
+              skippedInitialPrompt = true;
+              steps.push({ kind: 'user', text: txt });
+            } else if (m.role === 'assistant') {
+              const txt = strOr(m.content, '').trim();
+              if (!txt) continue;
+              if (m.thought) {
+                steps.push({
+                  kind: 'thought',
+                  text: txt,
+                  streaming: !!m.streaming,
+                });
+              } else {
+                steps.push({
+                  kind: 'msg',
+                  text: txt,
+                  streaming: !!m.streaming,
+                });
+              }
+            } else if (m.role === 'tool_call') {
+              const name = strOr(m.toolName, 'tool');
+              const desc = strOr(m.description, '');
+              const label = desc ? name + ': ' + desc : name;
+              const status = m.callId
+                ? resultsByCallId.get(m.callId) || (v.running ? 'running' : '')
+                : '';
+              steps.push({ kind: 'tool', label, status });
+            }
+          }
+          if (steps.length) return { steps, from: 'transcript' };
+        }
         const acts = v.row && Array.isArray(v.row.recentActivities)
           ? v.row.recentActivities
           : [];
@@ -15225,6 +15435,12 @@
         const usage = agentSheet.usage.get(v.ref);
         if (usage && !(v.row && v.row.stats)) {
           sum.appendChild(agentEl('div', 'ag-l3', usage));
+        }
+        const liveNow = agentLiveNowText(v);
+        if (liveNow) {
+          sum.appendChild(
+            agentEl('div', 'ag-l3 ag-live-now', 'Currently: ' + liveNow),
+          );
         }
         const err = v.row && strOr(v.row.error, '');
         if (err) sum.appendChild(agentEl('div', 'ag-warn', 'error: ' + err));
@@ -15331,6 +15547,18 @@
           li.dataset.kind = st.kind;
           if (st.kind === 'msg') {
             li.appendChild(agentClipped(st.text, 'msg-' + i, AGENT_MSG_CLIP));
+          } else if (st.kind === 'thought') {
+            li.appendChild(
+              agentClipped(
+                'Thinking: ' + st.text,
+                'thought-' + i,
+                AGENT_MSG_CLIP,
+              ),
+            );
+          } else if (st.kind === 'user') {
+            li.appendChild(
+              agentClipped('You: ' + st.text, 'user-' + i, AGENT_MSG_CLIP),
+            );
           } else if (st.kind === 'tool') {
             li.appendChild(agentEl('span', null, '\u{1F527} ' + st.label));
             if (st.status) li.appendChild(agentEl('span', 'st', st.status));
@@ -15384,9 +15612,42 @@
           agentTraceBody(body, v);
         }
         const foot = $('agents-foot');
+        const msgRow = $('agent-msg-row');
+        const msgInput = $('agent-msg');
+        const msgSend = $('agent-send');
+        const footBar = $('agent-foot-bar');
         const stoppable = !!(v && v.running && v.ref && agentsWritable());
-        const note = v ? agentStopNote(v.ref) : '';
-        foot.hidden = !(trace && v && (stoppable || note));
+        const messageable = !!(
+          v &&
+          v.ref &&
+          !(v.row && !v.running && v.row.resumeBlockedReason) &&
+          (v.running ||
+            v.state === 'paused' ||
+            (v.state === 'completed' && v.row && v.row.isBackgrounded)) &&
+          agentsWritable()
+        );
+        const note = v ? agentStopNote(v.ref) || agentMsgNote(v.ref) : '';
+        foot.hidden = !(trace && v && (stoppable || messageable || note));
+        if (msgRow) msgRow.hidden = !(trace && v && messageable);
+        if (msgInput) {
+          const ref = v && v.ref ? v.ref : null;
+          if (agentSheet.msgRef !== ref) {
+            agentSheet.msgRef = ref;
+            msgInput.value = (ref && agentsState.drafts.get(ref)) || '';
+          }
+          const busy = !!(ref && agentMsgBusy(ref));
+          msgInput.disabled = busy;
+          const ph =
+            v && v.state === 'paused'
+              ? 'Message to resume ' + (v.name || 'this agent')
+              : v && v.state === 'completed'
+                ? 'Message to continue ' + (v.name || 'this agent')
+                : 'Message ' + ((v && v.name) || 'this agent');
+          msgInput.placeholder = ph;
+          msgInput.setAttribute('aria-label', ph);
+          if (msgSend) msgSend.disabled = busy;
+        }
+        if (footBar) footBar.hidden = !(trace && v && (stoppable || note));
         $('agent-stop').hidden = !stoppable;
         $('agent-stop').disabled = !!(v && agentStopBusy(v.ref));
         h1Text($('agent-stop-note'), note);
@@ -15562,6 +15823,61 @@
         agentsSchedule(600);
       }
 
+      function setAgentMsg(ref, busy, note) {
+        agentsState.msgs.set(ref, { busy, note });
+        renderAgents();
+      }
+      async function sendAgentMessage(ref) {
+        const sid = watchedSessionId;
+        const input = $('agent-msg');
+        const text = input ? input.value.trim() : '';
+        if (!sid || !ref || !text || agentMsgBusy(ref)) return;
+        setAgentMsg(ref, true, 'sending...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sid) +
+            '/subagents/' +
+            encodeURIComponent(ref) +
+            '/message',
+          { method: 'POST', body: JSON.stringify({ message: text }) },
+        );
+        if (sid !== watchedSessionId) return;
+        const delivered = !!(r.ok && r.body && r.body.delivered === true);
+        if (delivered) {
+          agentsState.drafts.delete(ref);
+          if (input && agentSheet.msgRef === ref) input.value = '';
+          const vNow = agentFind(ref);
+          if (vNow && vNow.row) {
+            if (!Array.isArray(vNow.row.messages)) vNow.row.messages = [];
+            vNow.row.messages.push({
+              role: 'user',
+              content: text,
+              timestamp: Date.now(),
+            });
+            if (r.body && r.body.status === 'running') {
+              vNow.row.status = 'running';
+              vNow.row.activityPhase = 'thinking';
+            }
+          }
+        }
+        const act = r.body && r.body.action;
+        setAgentMsg(
+          ref,
+          false,
+          !r.ok
+            ? 'message failed: ' + rcDetail(r)
+            : delivered
+              ? act === 'resumed'
+                ? 'resumed'
+                : act === 'continued'
+                  ? 'continued'
+                  : 'sent'
+              : 'the daemon did not deliver it' +
+                (r.body && r.body.reason ? ' (' + r.body.reason + ')' : ''),
+        );
+        agentsSchedule(400);
+      }
+
       $('agents-sheet').addEventListener('pointerdown', () => {
         agentSheet.holding = true;
       });
@@ -15589,6 +15905,22 @@
       $('agent-stop').addEventListener('click', () => {
         const v = agentFind(agentSheet.key);
         if (v) void stopAgent(v.ref, v.name);
+      });
+      $('agent-send').addEventListener('click', () => {
+        const v = agentFind(agentSheet.key);
+        if (v && v.ref) void sendAgentMessage(v.ref);
+      });
+      $('agent-msg').addEventListener('input', () => {
+        if (agentSheet.msgRef) {
+          agentsState.drafts.set(agentSheet.msgRef, $('agent-msg').value);
+        }
+      });
+      $('agent-msg').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+          e.preventDefault();
+          const v = agentFind(agentSheet.key);
+          if (v && v.ref) void sendAgentMessage(v.ref);
+        }
       });
       $('agents-sheet').addEventListener('click', (e) => {
         if (e.target === $('agents-sheet')) return closeAgentsSheet(true);
@@ -17969,7 +18301,43 @@
         goneResumed.delete(sessionId);
         const body = await res.json().catch(() => null);
         if (superseded()) return; // #172: the body is a second await
-        if (!body || !Array.isArray(body.pendingInteractions)) return;
+        if (!body || typeof body !== 'object') return;
+        if (sessionId === watchedSessionId) {
+          const hasPending =
+            Array.isArray(body.pendingInteractions) &&
+            body.pendingInteractions.length > 0;
+          if (
+            body.hasActivePrompt === true &&
+            (body.activeWorkState === 'active' ||
+              (body.activeWorkState === undefined && !hasPending))
+          ) {
+            daemonTurnActive = true;
+            if (!turnOpen) showProcessing();
+          } else if (
+            body.hasActivePrompt === false &&
+            (body.activeWorkState === 'idle' || daemonTurnActive)
+          ) {
+            daemonTurnActive = false;
+            if (
+              turnOpen &&
+              abandonPendingSend === null &&
+              runningToolIds.size === 0
+            ) {
+              endTurn();
+            }
+          }
+          if (
+            (body.hasRunningBackgroundTasks === true ||
+              body.activeWorkState === 'active') &&
+            roster.sessionId === sessionId &&
+            roster.listed &&
+            rosterRunning().length === 0 &&
+            !rosterReading
+          ) {
+            void readRoster(sessionId);
+          }
+        }
+        if (!Array.isArray(body.pendingInteractions)) return;
         // Older daemons omit pendingInteractions entirely — the absence
         // also skips the auto-resolve below (can't distinguish "none
         // pending" from "unknown").
@@ -23686,6 +24054,17 @@
             lastSeenEventId = from || null;
             watchedSessionCwd = cwd || null;
             startWatch(j.sessionId, lastSeenEventId, title);
+            if (j.hasActivePrompt === true) {
+              daemonTurnActive = true;
+              if (!turnOpen) showProcessing();
+            }
+            if (
+              j.hasRunningBackgroundTasks === true &&
+              roster.sessionId === j.sessionId &&
+              !rosterReading
+            ) {
+              void readRoster(j.sessionId);
+            }
             // Asked only once the resume has actually succeeded: the route
             // answers 404 for a session the daemon does not know, so a request
             // fired from the call site would queue a tab for a conversation this

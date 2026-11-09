@@ -265,6 +265,12 @@ export interface StubDaemon {
   taskCancels: Array<{ sessionId: string; taskId: string; body: unknown }>;
   /** #110: every POST .../tasks/:taskId/workflow-action, in order. */
   workflowActions: Array<{ sessionId: string; taskId: string; body: unknown }>;
+  /** Every POST .../subagents/:subagentRef/message, in order. */
+  subagentMessages: Array<{
+    sessionId: string;
+    subagentRef: string;
+    message: string;
+  }>;
   /** #132: every POST /sessions/catalog body, in order. */
   catalogRequests: unknown[];
   /**
@@ -916,6 +922,9 @@ export interface StubDaemonOptions {
    * answers `{changed: false}` for an untrusted workspace regardless.
    */
   workflowActionChanged?: boolean;
+  /** Status for POST /session/:id/subagents/:subagentRef/message (default 200). */
+  subagentMessageStatus?: number;
+  subagentMessageResult?: unknown;
   /**
    * #132: the workspaces this daemon has registered, each with what POST
    * /sessions/catalog answers for it: its rows (`DaemonSessionSummary`, any
@@ -1133,6 +1142,7 @@ export async function startStubDaemon(
     tasksQueries: [] as Array<Record<string, unknown>>,
     taskCancels: [] as StubDaemon['taskCancels'],
     workflowActions: [] as StubDaemon['workflowActions'],
+    subagentMessages: [] as StubDaemon['subagentMessages'],
     catalogRequests: [] as unknown[],
   };
   const app = express();
@@ -2095,9 +2105,9 @@ export async function startStubDaemon(
       typeof opts.currentTurn === 'function'
         ? (opts.currentTurn as () => unknown)()
         : opts.currentTurn;
-    res.status(200).json(
-      body ?? { sessionId: String(req.params.id), state: 'idle' },
-    );
+    res
+      .status(200)
+      .json(body ?? { sessionId: String(req.params.id), state: 'idle' });
   });
 
   app.post('/session/:id/recap', (req, res) => {
@@ -2490,10 +2500,7 @@ export async function startStubDaemon(
       nodes: [],
       rootAgentIds: [],
       warnings: [],
-    }) as { nodes?: Array<{ rootAgentId?: string }> } & Record<
-      string,
-      unknown
-    >;
+    }) as { nodes?: Array<{ rootAgentId?: string }> } & Record<string, unknown>;
     const root = req.query['rootAgentId'];
     if (typeof root !== 'string' || !Array.isArray(whole.nodes)) {
       res.status(200).json(whole);
@@ -2541,9 +2548,7 @@ export async function startStubDaemon(
   app.get('/session/:id/tasks', (req, res) => {
     const sessionId = String(req.params.id);
     state.tasksQueries.push(
-      Object.fromEntries(
-        Object.entries(req.query as Record<string, unknown>),
-      ),
+      Object.fromEntries(Object.entries(req.query as Record<string, unknown>)),
     );
     const withWorkflows =
       s110Trusted() && req.query['includeWorkflows'] === 'true';
@@ -2553,9 +2558,7 @@ export async function startStubDaemon(
       now: Date.now(),
       tasks: [
         ...s110Rows(opts.tasksResult, sessionId),
-        ...(withWorkflows
-          ? s110Rows(opts.workflowTasksResult, sessionId)
-          : []),
+        ...(withWorkflows ? s110Rows(opts.workflowTasksResult, sessionId) : []),
       ],
     });
   });
@@ -2582,7 +2585,33 @@ export async function startStubDaemon(
       return;
     }
     const changed = opts.workflowActionChanged !== false;
-    res.status(200).json(changed ? { changed: true, taskId } : { changed: false });
+    res
+      .status(200)
+      .json(changed ? { changed: true, taskId } : { changed: false });
+  });
+
+  app.post('/session/:id/subagents/:subagentRef/message', (req, res) => {
+    const sessionId = String(req.params.id);
+    const subagentRef = String(req.params.subagentRef);
+    const body = (req.body ?? {}) as { message?: unknown };
+    const message = typeof body.message === 'string' ? body.message.trim() : '';
+    state.subagentMessages.push({ sessionId, subagentRef, message });
+    const status = opts.subagentMessageStatus ?? 200;
+    if (status !== 200) {
+      res
+        .status(status)
+        .json(opts.subagentMessageResult ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      opts.subagentMessageResult ?? {
+        sessionId,
+        subagentRef,
+        delivered: true,
+        action: 'queued',
+        status: 'running',
+      },
+    );
   });
 
   // -- Workspace file reads (add-capability-parity #107) ----------------
@@ -2619,7 +2648,9 @@ export async function startStubDaemon(
     ].filter((e) => !stubRootGone.has(e.name));
     const rootExtras =
       !opts.listResult && (listPath === '.' || listPath === '')
-        ? stubChildren('.').filter((e) => !defaults.some((d) => d.name === e.name))
+        ? stubChildren('.').filter(
+            (e) => !defaults.some((d) => d.name === e.name),
+          )
         : [];
     res.status(200).json(
       opts.listResult ?? {
@@ -2715,12 +2746,20 @@ export async function startStubDaemon(
     dir: string,
   ): Array<{ name: string; kind: 'file' | 'directory'; ignored: boolean }> => {
     const prefix = dir === '.' ? '' : `${dir}/`;
-    const out: Array<{ name: string; kind: 'file' | 'directory'; ignored: boolean }> = [];
+    const out: Array<{
+      name: string;
+      kind: 'file' | 'directory';
+      ignored: boolean;
+    }> = [];
     for (const [p, v] of stubTree) {
       if (!p.startsWith(prefix)) continue;
       const rest = p.slice(prefix.length);
       if (!rest || rest.includes('/')) continue;
-      out.push({ name: rest, kind: v === 'dir' ? 'directory' : 'file', ignored: false });
+      out.push({
+        name: rest,
+        kind: v === 'dir' ? 'directory' : 'file',
+        ignored: false,
+      });
     }
     return out;
   };
@@ -2737,7 +2776,9 @@ export async function startStubDaemon(
     const target = String(req.query['path'] ?? 'README.md');
     const text = stubFileText(target);
     if (text === undefined && !opts.fileResult) {
-      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      res
+        .status(404)
+        .json(stubFsError('path_not_found', `no such file: ${target}`, 404));
       return;
     }
     const content = text ?? STUB_FILE_TEXT;
@@ -2780,7 +2821,11 @@ export async function startStubDaemon(
     }
     const target = req.query['path'];
     if (typeof target !== 'string' || target.length === 0) {
-      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError('parse_error', '`path` must be a non-empty string', 400),
+        );
       return;
     }
     const node = stubTree.get(target);
@@ -2796,7 +2841,9 @@ export async function startStubDaemon(
     }
     const text = stubFileText(target);
     if (text === undefined) {
-      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      res
+        .status(404)
+        .json(stubFsError('path_not_found', `no such file: ${target}`, 404));
       return;
     }
     res.status(200).json({
@@ -2825,26 +2872,49 @@ export async function startStubDaemon(
     }
     const scope = body['scope'];
     if (scope !== 'workspace' && scope !== 'global') {
-      res.status(400).json({ error: '`scope` must be "workspace" or "global"', code: 'invalid_scope' });
+      res
+        .status(400)
+        .json({
+          error: '`scope` must be "workspace" or "global"',
+          code: 'invalid_scope',
+        });
       return;
     }
     const modeRaw = body['mode'];
-    if (modeRaw !== undefined && modeRaw !== 'append' && modeRaw !== 'replace') {
-      res.status(400).json({ error: '`mode` must be "append", "replace", or omitted', code: 'invalid_mode' });
+    if (
+      modeRaw !== undefined &&
+      modeRaw !== 'append' &&
+      modeRaw !== 'replace'
+    ) {
+      res
+        .status(400)
+        .json({
+          error: '`mode` must be "append", "replace", or omitted',
+          code: 'invalid_mode',
+        });
       return;
     }
-    const mode: 'append' | 'replace' = modeRaw === 'replace' ? 'replace' : 'append';
+    const mode: 'append' | 'replace' =
+      modeRaw === 'replace' ? 'replace' : 'append';
     const content = body['content'];
     if (typeof content !== 'string') {
-      res.status(400).json({ error: '`content` must be a string', code: 'invalid_content' });
+      res
+        .status(400)
+        .json({ error: '`content` must be a string', code: 'invalid_content' });
       return;
     }
     if (Buffer.byteLength(content, 'utf8') > 1024 * 1024) {
-      res.status(400).json({ error: '`content` exceeds the 1048576-byte limit', code: 'content_too_large' });
+      res
+        .status(400)
+        .json({
+          error: '`content` exceeds the 1048576-byte limit',
+          code: 'content_too_large',
+        });
       return;
     }
     const cwd = opts.workspaceCwd ?? '/proj';
-    const filePath = scope === 'global' ? '/home/dev/.qwen/QWEN.md' : `${cwd}/QWEN.md`;
+    const filePath =
+      scope === 'global' ? '/home/dev/.qwen/QWEN.md' : `${cwd}/QWEN.md`;
     const key = 'QWEN.md';
     let changed = true;
     if (mode === 'append' && content.trim() === '') {
@@ -2854,7 +2924,9 @@ export async function startStubDaemon(
       const next =
         mode === 'replace'
           ? content
-          : current + (current === '' || current.endsWith('\n') ? '' : '\n') + content;
+          : current +
+            (current === '' || current.endsWith('\n') ? '' : '\n') +
+            content;
       stubFiles.written.set(key, next);
       stubFiles.deleted.delete(key);
     }
@@ -2875,7 +2947,9 @@ export async function startStubDaemon(
     state.reloadCount += 1;
     state.lastReloadBody = req.body;
     if (opts.reloadStatus !== undefined) {
-      res.status(opts.reloadStatus).json(opts.reloadErrorBody ?? { error: 'stub error' });
+      res
+        .status(opts.reloadStatus)
+        .json(opts.reloadErrorBody ?? { error: 'stub error' });
       return;
     }
     res.status(200).json(
@@ -2902,15 +2976,29 @@ export async function startStubDaemon(
     const content = body['content'];
     const mode = body['mode'];
     if (typeof target !== 'string' || target.length === 0) {
-      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError('parse_error', '`path` must be a non-empty string', 400),
+        );
       return;
     }
     if (typeof content !== 'string') {
-      res.status(400).json(stubFsError('parse_error', '`content` must be a string', 400));
+      res
+        .status(400)
+        .json(stubFsError('parse_error', '`content` must be a string', 400));
       return;
     }
     if (mode !== 'create' && mode !== 'replace') {
-      res.status(400).json(stubFsError('parse_error', '`mode` must be "create" or "replace"', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError(
+            'parse_error',
+            '`mode` must be "create" or "replace"',
+            400,
+          ),
+        );
       return;
     }
     const expected = body['expectedHash'];
@@ -2918,24 +3006,46 @@ export async function startStubDaemon(
       (mode === 'replace' || expected !== undefined) &&
       !(typeof expected === 'string' && /^sha256:[0-9a-f]{64}$/.test(expected))
     ) {
-      res.status(400).json(stubFsError('parse_error', '`expectedHash` must match sha256:<64 lowercase hex chars>', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError(
+            'parse_error',
+            '`expectedHash` must match sha256:<64 lowercase hex chars>',
+            400,
+          ),
+        );
       return;
     }
     if (mode === 'create') {
       if (stubFiles.written.has(target)) {
-        res.status(409).json(stubFsError('file_already_exists', `file already exists: ${target}`, 409));
+        res
+          .status(409)
+          .json(
+            stubFsError(
+              'file_already_exists',
+              `file already exists: ${target}`,
+              409,
+            ),
+          );
         return;
       }
     } else {
       const current = stubFileText(target);
       if (current === undefined) {
-        res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+        res
+          .status(404)
+          .json(stubFsError('path_not_found', `no such file: ${target}`, 404));
         return;
       }
       const found = stubContentHash(current);
       if (found !== expected) {
         res.status(409).json({
-          ...stubFsError('hash_mismatch', `expected ${String(expected)}, found ${found}`, 409),
+          ...stubFsError(
+            'hash_mismatch',
+            `expected ${String(expected)}, found ${found}`,
+            409,
+          ),
           hint: 're-read the file and retry with the latest hash',
         });
         return;
@@ -2971,37 +3081,69 @@ export async function startStubDaemon(
     const newText = body['newText'];
     const expected = body['expectedHash'];
     if (typeof target !== 'string' || target.length === 0) {
-      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError('parse_error', '`path` must be a non-empty string', 400),
+        );
       return;
     }
     if (typeof oldText !== 'string' || typeof newText !== 'string') {
-      res.status(400).json(stubFsError('parse_error', '`oldText` must be a string', 400));
+      res
+        .status(400)
+        .json(stubFsError('parse_error', '`oldText` must be a string', 400));
       return;
     }
-    if (!(typeof expected === 'string' && /^sha256:[0-9a-f]{64}$/.test(expected))) {
-      res.status(400).json(stubFsError('parse_error', '`expectedHash` must match sha256:<64 lowercase hex chars>', 400));
+    if (
+      !(typeof expected === 'string' && /^sha256:[0-9a-f]{64}$/.test(expected))
+    ) {
+      res
+        .status(400)
+        .json(
+          stubFsError(
+            'parse_error',
+            '`expectedHash` must match sha256:<64 lowercase hex chars>',
+            400,
+          ),
+        );
       return;
     }
     const current = stubFileText(target);
     if (current === undefined) {
-      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      res
+        .status(404)
+        .json(stubFsError('path_not_found', `no such file: ${target}`, 404));
       return;
     }
     const found = stubContentHash(current);
     if (found !== expected) {
       res.status(409).json({
-        ...stubFsError('hash_mismatch', `expected ${expected}, found ${found}`, 409),
+        ...stubFsError(
+          'hash_mismatch',
+          `expected ${expected}, found ${found}`,
+          409,
+        ),
         hint: 're-read the file and retry with the latest hash',
       });
       return;
     }
     const first = current.indexOf(oldText);
     if (oldText.length === 0 || first < 0) {
-      res.status(422).json(stubFsError('text_not_found', 'oldText was not found', 422));
+      res
+        .status(422)
+        .json(stubFsError('text_not_found', 'oldText was not found', 422));
       return;
     }
     if (current.indexOf(oldText, first + 1) >= 0) {
-      res.status(422).json(stubFsError('ambiguous_text_match', 'oldText matches more than once', 422));
+      res
+        .status(422)
+        .json(
+          stubFsError(
+            'ambiguous_text_match',
+            'oldText matches more than once',
+            422,
+          ),
+        );
       return;
     }
     const next =
@@ -3050,7 +3192,15 @@ export async function startStubDaemon(
       }
       const target = req.query['path'];
       if (typeof target !== 'string' || target.length === 0) {
-        res.status(400).json(stubFsError('parse_error', '`path` query parameter is required', 400));
+        res
+          .status(400)
+          .json(
+            stubFsError(
+              'parse_error',
+              '`path` query parameter is required',
+              400,
+            ),
+          );
         return;
       }
       // Never overwrite: an occupied name is numbered, as the daemon does.
@@ -3078,7 +3228,10 @@ export async function startStubDaemon(
 
   app.post('/workspaces/:workspace/file/delete', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    state.lastFileDelete = { workspace: req.params.workspace, path: body['path'] };
+    state.lastFileDelete = {
+      workspace: req.params.workspace,
+      path: body['path'],
+    };
     if (opts.fileDeleteStatus !== undefined) {
       res
         .status(opts.fileDeleteStatus)
@@ -3096,11 +3249,17 @@ export async function startStubDaemon(
     }
     const target = body['path'];
     if (typeof target !== 'string' || target.length === 0) {
-      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError('parse_error', '`path` must be a non-empty string', 400),
+        );
       return;
     }
     if (stubFileText(target) === undefined) {
-      res.status(404).json(stubFsError('path_not_found', `no such file: ${target}`, 404));
+      res
+        .status(404)
+        .json(stubFsError('path_not_found', `no such file: ${target}`, 404));
       return;
     }
     stubFiles.written.delete(target);
@@ -3126,11 +3285,17 @@ export async function startStubDaemon(
     }
     const target = (req.body ?? {})['path'];
     if (typeof target !== 'string' || target.length === 0) {
-      res.status(400).json(stubFsError('parse_error', '`path` must be a non-empty string', 400));
+      res
+        .status(400)
+        .json(
+          stubFsError('parse_error', '`path` must be a non-empty string', 400),
+        );
       return null;
     }
     if (target.endsWith('/') || target === '.' || target.endsWith('/..')) {
-      res.status(400).json(stubFsError('parse_error', 'path must name a directory', 400));
+      res
+        .status(400)
+        .json(stubFsError('parse_error', 'path must name a directory', 400));
       return null;
     }
     return target;
@@ -3138,7 +3303,10 @@ export async function startStubDaemon(
 
   app.post('/workspaces/:workspace/directory/create', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    state.lastDirectoryCreate = { workspace: req.params.workspace, path: body['path'] };
+    state.lastDirectoryCreate = {
+      workspace: req.params.workspace,
+      path: body['path'],
+    };
     if (opts.directoryCreateStatus !== undefined) {
       res
         .status(opts.directoryCreateStatus)
@@ -3150,17 +3318,24 @@ export async function startStubDaemon(
     const slash = target.lastIndexOf('/');
     const parent = slash < 0 ? '.' : target.slice(0, slash);
     if (parent !== '.' && !stubIsDir(parent)) {
-      res.status(404).json(stubFsError('path_not_found', `no such directory: ${parent}`, 404));
+      res
+        .status(404)
+        .json(
+          stubFsError('path_not_found', `no such directory: ${parent}`, 404),
+        );
       return;
     }
     const taken =
       stubTree.has(target) ||
       (parent === '.' &&
-        ((STUB_DEFAULT_ROOT_DIRS.includes(target) && !stubRootGone.has(target)) ||
+        ((STUB_DEFAULT_ROOT_DIRS.includes(target) &&
+          !stubRootGone.has(target)) ||
           (target === 'README.md' && stubFileText(target) !== undefined))) ||
       (stubFiles.written.has(target) && !stubFiles.deleted.has(target));
     if (taken) {
-      res.status(409).json(stubFsError('file_already_exists', 'path already exists', 409));
+      res
+        .status(409)
+        .json(stubFsError('file_already_exists', 'path already exists', 409));
       return;
     }
     stubTreeAdd(target, 'dir');
@@ -3169,7 +3344,10 @@ export async function startStubDaemon(
 
   app.post('/workspaces/:workspace/directory/delete', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    state.lastDirectoryDelete = { workspace: req.params.workspace, path: body['path'] };
+    state.lastDirectoryDelete = {
+      workspace: req.params.workspace,
+      path: body['path'],
+    };
     if (opts.directoryDeleteStatus !== undefined) {
       res
         .status(opts.directoryDeleteStatus)
@@ -3184,10 +3362,18 @@ export async function startStubDaemon(
         (stubFiles.written.has(target) && !stubFiles.deleted.has(target)) ||
         (target === 'README.md' && stubFileText(target) !== undefined);
       if (isFile) {
-        res.status(400).json(stubFsError('parse_error', 'Only directories can be deleted', 400));
+        res
+          .status(400)
+          .json(
+            stubFsError('parse_error', 'Only directories can be deleted', 400),
+          );
         return;
       }
-      res.status(404).json(stubFsError('path_not_found', `no such directory: ${target}`, 404));
+      res
+        .status(404)
+        .json(
+          stubFsError('path_not_found', `no such directory: ${target}`, 404),
+        );
       return;
     }
     for (const key of Array.from(stubTree.keys())) {
@@ -4103,7 +4289,8 @@ export async function startStubDaemon(
       id: `stub-group-${s110.groupCreates.length}`,
       name,
       color,
-      order: groups.reduce((m, g) => Math.max(m, Number(g['order']) || 0), -1) + 1,
+      order:
+        groups.reduce((m, g) => Math.max(m, Number(g['order']) || 0), -1) + 1,
       createdAt: now,
       updatedAt: now,
     };
@@ -4191,7 +4378,9 @@ export async function startStubDaemon(
     const workspaceCwd =
       checked.locator['type'] === 'workspace_file' ? s110Home : undefined;
     const id = createHash('sha256')
-      .update(JSON.stringify([sessionId, checked.locator, workspaceCwd ?? null]))
+      .update(
+        JSON.stringify([sessionId, checked.locator, workspaceCwd ?? null]),
+      )
       .digest('hex');
     const previous = held.sources.find((s) => s['id'] === id);
     const description =
@@ -4203,7 +4392,11 @@ export async function startStubDaemon(
     ) {
       res
         .status(200)
-        .json({ revision: held.revision, source: previous, change: 'unchanged' });
+        .json({
+          revision: held.revision,
+          source: previous,
+          change: 'unchanged',
+        });
       return;
     }
     if (!previous && held.sources.length >= 200) {
@@ -4225,10 +4418,7 @@ export async function startStubDaemon(
       updatedAt: now,
     };
     // The daemon's order: newest first, then by id (session-sources.ts).
-    held.sources = [
-      ...held.sources.filter((s) => s['id'] !== id),
-      source,
-    ].sort(
+    held.sources = [...held.sources.filter((s) => s['id'] !== id), source].sort(
       (a, b) =>
         String(b['createdAt']).localeCompare(String(a['createdAt'])) ||
         String(a['id']).localeCompare(String(b['id'])),
@@ -4339,9 +4529,7 @@ export async function startStubDaemon(
   };
   app.get('/session/:id/goal', (req, res) => {
     if (s135Refused(req, res)) return;
-    res
-      .status(200)
-      .json({ snapshot: s135Snapshot(s135Goal(req.params.id!)) });
+    res.status(200).json({ snapshot: s135Snapshot(s135Goal(req.params.id!)) });
   });
   app.post('/session/:id/goal', (req, res) => {
     if (s135Refused(req, res)) return;
@@ -4367,7 +4555,10 @@ export async function startStubDaemon(
     if (opts.goal?.untrusted) {
       res
         .status(403)
-        .json({ error: 'Workspace is not trusted.', code: 'untrusted_workspace' });
+        .json({
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        });
       return;
     }
     const current = s135Goal(sessionId);
@@ -4487,10 +4678,7 @@ export async function startStubDaemon(
       .artifacts;
     return {
       ...(body as Record<string, unknown>),
-      artifacts: [
-        ...rows.filter((a) => !gone?.has(String(a['id']))),
-        ...added,
-      ],
+      artifacts: [...rows.filter((a) => !gone?.has(String(a['id']))), ...added],
     };
   }
   const s128Refused = (
@@ -4525,7 +4713,11 @@ export async function startStubDaemon(
   ): void => {
     res.status(400).json({
       v: 1,
-      error: { code: 'VALIDATION_FAILED', message, ...(field ? { field } : {}) },
+      error: {
+        code: 'VALIDATION_FAILED',
+        message,
+        ...(field ? { field } : {}),
+      },
     });
   };
   app.post('/session/:id/artifacts', (req, res) => {
@@ -4574,9 +4766,7 @@ export async function startStubDaemon(
     const held = s128.artifacts.get(sessionId) ?? new Map();
     s128.artifacts.set(sessionId, held);
     const locator = String(body[locators[0]!]);
-    const existing = [...held.values()].find(
-      (a) => a['locator'] === locator,
-    );
+    const existing = [...held.values()].find((a) => a['locator'] === locator);
     if (existing && existing['clientId'] !== clientId) {
       res.status(403).json({
         error: `Session artifact ${String(existing['id'])} belongs to another client`,
@@ -4587,7 +4777,9 @@ export async function startStubDaemon(
       return;
     }
     const now = '2026-10-29T12:00:00.000Z';
-    const id = existing ? String(existing['id']) : `art-stub-${(s128.seq += 1)}`;
+    const id = existing
+      ? String(existing['id'])
+      : `art-stub-${(s128.seq += 1)}`;
     const artifact: Record<string, unknown> = {
       id,
       // The bridge's inferKind when none is sent: a url is a link, a
@@ -4607,7 +4799,9 @@ export async function startStubDaemon(
       status: 'available',
       title: String(body['title']).trim(),
       ...(body['description'] ? { description: body['description'] } : {}),
-      ...(body['workspacePath'] ? { workspacePath: body['workspacePath'] } : {}),
+      ...(body['workspacePath']
+        ? { workspacePath: body['workspacePath'] }
+        : {}),
       ...(body['managedId'] ? { managedId: body['managedId'] } : {}),
       ...(body['url'] ? { url: body['url'] } : {}),
       ...(body['mimeType'] ? { mimeType: body['mimeType'] } : {}),
@@ -4674,7 +4868,12 @@ export async function startStubDaemon(
           v: 1,
           sessionId,
           changes: [
-            { action: 'removed', artifactId, artifact: listed, reason: 'explicit' },
+            {
+              action: 'removed',
+              artifactId,
+              artifact: listed,
+              reason: 'explicit',
+            },
           ],
         });
         return;
@@ -4908,6 +5107,9 @@ export async function startStubDaemon(
     get workflowActions() {
       return state.workflowActions;
     },
+    get subagentMessages() {
+      return state.subagentMessages;
+    },
     get catalogRequests() {
       return state.catalogRequests;
     },
@@ -5026,7 +5228,13 @@ function stubValidateSource(value: unknown):
       if (!only(raw, ['type', 'attachmentId'])) return 'Unknown source field';
       locator = {
         type: 'attachment',
-        attachmentId: text(raw['attachmentId'], 'attachmentId', 200, false, false),
+        attachmentId: text(
+          raw['attachmentId'],
+          'attachmentId',
+          200,
+          false,
+          false,
+        ),
       };
     } else if (raw['type'] === 'url') {
       if (!only(raw, ['type', 'url'])) return 'Unknown source field';

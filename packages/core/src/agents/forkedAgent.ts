@@ -682,93 +682,95 @@ export async function runForkedAgent(
   // API symmetry with the other createApprovalModeOverride callers; if
   // this function ever switches away from YOLO the lifecycle stays
   // correct without further refactor.
-  const filesTouched = new Set<string>();
-  const pendingMutatingPaths = new Map<string, string[]>();
-  const filesWritten = new Set<string>();
-  let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-
-  const initialMessages =
-    params.extraHistory &&
-    (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
-      ? params.extraHistory
-      : undefined;
-  const promptConfig: PromptConfig = {
-    systemPrompt: params.systemPrompt,
-    initialMessages,
-  };
-  const modelSelector =
-    params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
-  const modelRuntime = await buildForkedModelRuntime(
-    params.config,
-    yoloConfig,
-    modelSelector,
-  );
-  const modelConfig: ModelConfig = {
-    model: modelRuntime.model,
-  };
-  const runConfig: RunConfig = {
-    max_turns: params.maxTurns,
-    max_time_minutes: params.maxTimeMinutes,
-  };
-  const toolConfig: ToolConfig | undefined =
-    params.tools !== undefined ? { tools: params.tools } : undefined;
   const executionController = createChildAbortController(params.abortSignal);
-  let completedAfterWrite = false;
-  // Identity marker for the run's own early-completion abort, so the
-  // execute catch below can tell it apart from an external cancel
-  // that races it — an external cancel must still reject the run.
-  const selfAbortReason = new DOMException(
-    'Early completion after successful write',
-    'AbortError',
-  );
-
-  const emitter = new AgentEventEmitter();
-  emitter.on(AgentEventType.TOOL_CALL, (event) => {
-    const filePaths = extractFilePathsFromArgs(event.args);
-    for (const filePath of filePaths) {
-      filesTouched.add(filePath);
-    }
-    if (isMutatingFileTool(event.name)) {
-      pendingMutatingPaths.set(event.callId, filePaths);
-    }
-  });
-  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
-    if (!event.success) {
-      pendingMutatingPaths.delete(event.callId);
-      return;
-    }
-    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
-    pendingMutatingPaths.delete(event.callId);
-    for (const filePath of filePaths) {
-      filesWritten.add(filePath);
-    }
-    const completesEarly =
-      params.completeAfterFirstSuccessfulWrite === true
-        ? filePaths.length > 0
-        : typeof params.completeAfterFirstSuccessfulWrite === 'function'
-          ? filePaths.some(params.completeAfterFirstSuccessfulWrite)
-          : false;
-    if (completesEarly && !executionController.signal.aborted) {
-      completedAfterWrite = true;
-      // Defer the abort out of this emitter handler: agent-core emits a
-      // parallel batch's TOOL_RESULT events one by one, and aborting
-      // synchronously re-enters its onAbort mid-emission, which replaces
-      // the still-unemitted real successes of the same batch with
-      // synthetic cancellation failures — truncating filesWritten below
-      // the writes that actually landed on disk.
-      setImmediate(() => executionController.abort(selfAbortReason));
-    }
-  });
-
-  emitter.on(AgentEventType.FINISH, (event) => {
-    usage = {
-      inputTokens: event.inputTokens ?? 0,
-      outputTokens: event.outputTokens ?? 0,
-      totalTokens: event.totalTokens ?? 0,
-    };
-  });
-
   try {
+    const filesTouched = new Set<string>();
+    const pendingMutatingPaths = new Map<string, string[]>();
+    const filesWritten = new Set<string>();
+    let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+
+    const initialMessages =
+      params.extraHistory &&
+      (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
+        ? params.extraHistory
+        : undefined;
+    const promptConfig: PromptConfig = {
+      systemPrompt: params.systemPrompt,
+      initialMessages,
+    };
+    const modelSelector =
+      params.model ??
+      params.config.getFastModel?.() ??
+      params.config.getModel();
+    const modelRuntime = await buildForkedModelRuntime(
+      params.config,
+      yoloConfig,
+      modelSelector,
+    );
+    const modelConfig: ModelConfig = {
+      model: modelRuntime.model,
+    };
+    const runConfig: RunConfig = {
+      max_turns: params.maxTurns,
+      max_time_minutes: params.maxTimeMinutes,
+    };
+    const toolConfig: ToolConfig | undefined =
+      params.tools !== undefined ? { tools: params.tools } : undefined;
+    let completedAfterWrite = false;
+    // Identity marker for the run's own early-completion abort, so the
+    // execute catch below can tell it apart from an external cancel
+    // that races it -- an external cancel must still reject the run.
+    const selfAbortReason = new DOMException(
+      'Early completion after successful write',
+      'AbortError',
+    );
+
+    const emitter = new AgentEventEmitter();
+    emitter.on(AgentEventType.TOOL_CALL, (event) => {
+      const filePaths = extractFilePathsFromArgs(event.args);
+      for (const filePath of filePaths) {
+        filesTouched.add(filePath);
+      }
+      if (isMutatingFileTool(event.name)) {
+        pendingMutatingPaths.set(event.callId, filePaths);
+      }
+    });
+    emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+      if (!event.success) {
+        pendingMutatingPaths.delete(event.callId);
+        return;
+      }
+      const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+      pendingMutatingPaths.delete(event.callId);
+      for (const filePath of filePaths) {
+        filesWritten.add(filePath);
+      }
+      const completesEarly =
+        params.completeAfterFirstSuccessfulWrite === true
+          ? filePaths.length > 0
+          : typeof params.completeAfterFirstSuccessfulWrite === 'function'
+            ? filePaths.some(params.completeAfterFirstSuccessfulWrite)
+            : false;
+      if (completesEarly && !executionController.signal.aborted) {
+        completedAfterWrite = true;
+        // Defer the abort out of this emitter handler: agent-core emits a
+        // parallel batch's TOOL_RESULT events one by one, and aborting
+        // synchronously re-enters its onAbort mid-emission, which replaces
+        // the still-unemitted real successes of the same batch with
+        // synthetic cancellation failures -- truncating filesWritten below
+        // the writes that actually landed on disk.
+        setImmediate(() => executionController.abort(selfAbortReason));
+      }
+    });
+
+    emitter.on(AgentEventType.FINISH, (event) => {
+      usage = {
+        inputTokens: event.inputTokens ?? 0,
+        outputTokens: event.outputTokens ?? 0,
+        totalTokens: event.totalTokens ?? 0,
+      };
+    });
+
     const headless = await AgentHeadless.create(
       params.name,
       yoloConfig,

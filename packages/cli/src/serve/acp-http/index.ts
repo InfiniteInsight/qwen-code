@@ -1832,6 +1832,20 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
+        const entry = wsRegistry?.getEntryByWorkspaceId(runtime.workspaceId);
+        if (
+          !entry ||
+          entry.state !== 'active' ||
+          entry.current?.runtime !== runtime ||
+          runtime.generationGuard?.closed
+        ) {
+          logReject(`workspace-unavailable ${runtime.workspaceId}`);
+          socket.write(
+            'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n',
+          );
+          socket.destroy();
+          return;
+        }
         if (!runtime.trusted) {
           logReject(`untrusted-workspace ${runtime.workspaceId}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');

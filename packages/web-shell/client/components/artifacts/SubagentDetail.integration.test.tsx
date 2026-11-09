@@ -40,6 +40,7 @@ const {
   workspaceClient: {
     resolveSubagentSession: vi.fn(),
     cancelSubagentSession: vi.fn(),
+    messageSubagentSession: vi.fn(),
   },
   latestMessageListProps: {
     current: undefined as Record<string, unknown> | undefined,
@@ -505,3 +506,63 @@ it.each([true, false])(
     }
   },
 );
+
+it('sends an interactive message to a standalone subagent session', async () => {
+  workspaceClient.resolveSubagentSession.mockResolvedValue({
+    sessionId: 'subagent-session',
+    status: 'running',
+  });
+  workspaceClient.messageSubagentSession.mockResolvedValue({
+    delivered: true,
+    action: 'queued',
+    status: 'running',
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={{
+            callId: 'agent-1',
+            toolName: 'agent',
+            status: 'in_progress',
+            rawOutput: {
+              type: 'task_execution',
+            },
+          }}
+        />
+      </I18nProvider>,
+    );
+  });
+  const textarea = container.querySelector(
+    'textarea',
+  ) as HTMLTextAreaElement | null;
+  expect(textarea).toBeTruthy();
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )?.set;
+    setter?.call(textarea, 'Check line 42 as well');
+    textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea!.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  const form = container.querySelector(
+    '[data-testid="subagent-composer"]',
+  ) as HTMLFormElement | null;
+  expect(form).toBeTruthy();
+  await act(async () => {
+    form!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+  });
+  expect(workspaceClient.messageSubagentSession).toHaveBeenCalledWith(
+    'parent-session',
+    'agent-1',
+    'Check line 42 as well',
+  );
+});

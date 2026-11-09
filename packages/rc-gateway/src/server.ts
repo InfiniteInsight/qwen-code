@@ -190,6 +190,7 @@ import { createSessionStatusRoute } from './routes/sessionStatus.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
+import { createSubagentMessageRoute } from './routes/subagentMessage.js';
 import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
 import { createSessionWorkflowActionRoute } from './routes/sessionWorkflowAction.js';
 import { createSessionRenameRoute } from './routes/sessionRename.js';
@@ -1303,6 +1304,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSubagentCancelRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/subagents/:subagentRef/message -- write-scope; sends ONE
+  // message to a running, paused, or completed subagent.
+  app.post(
+    '/session/:id/subagents/:subagentRef/message',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403
+    subActorRateLimit, // bridge fan-in: cap messages per chat user
+    createSubagentMessageRoute(deps.daemon, audit),
   );
   // POST /session/:id/tasks/:taskId/cancel — write-scope; stops ONE run (an
   // agent, shell, monitor or workflow task) and leaves the session and every

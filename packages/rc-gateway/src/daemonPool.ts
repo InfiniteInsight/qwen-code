@@ -608,6 +608,17 @@ export interface SessionDaemon {
     subagentRef: string,
     clientId?: string,
   ): Promise<{ cancelled: boolean }>;
+  messageSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message: string,
+    clientId?: string,
+  ): Promise<{
+    delivered: boolean;
+    action?: 'queued' | 'resumed' | 'continued' | 'revived';
+    status?: string;
+    reason?: string;
+  }>;
   cancelSessionTask(
     sessionId: string,
     taskId: string,
@@ -2632,6 +2643,22 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<{ cancelled: boolean }> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.cancelSubagentSession(sessionId, subagentRef, clientId),
+    );
+  }
+
+  async messageSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message: string,
+    clientId?: string,
+  ): Promise<{
+    delivered: boolean;
+    action?: 'queued' | 'resumed' | 'continued' | 'revived';
+    status?: string;
+    reason?: string;
+  }> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.messageSubagentSession(sessionId, subagentRef, message, clientId),
     );
   }
 

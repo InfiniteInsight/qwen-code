@@ -223,6 +223,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionTaskMessage: 'qwen/control/session/task/message',
   /**
    * Control a workflow run, delete its history, or start a new run from a
    * saved definition or a caller-supplied script. Params:
@@ -833,6 +834,25 @@ export type ServeSessionProcessTaskLifecycleStatus =
   | 'failed'
   | 'cancelled';
 
+export type ServeSessionAgentActivityPhase =
+  | 'thinking'
+  | 'responding'
+  | 'tool'
+  | 'waiting_approval'
+  | 'idle';
+
+export interface ServeSessionAgentMessage {
+  role: 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'info';
+  content: string;
+  timestamp: number;
+  thought?: boolean;
+  streaming?: boolean;
+  toolName?: string;
+  callId?: string;
+  description?: string;
+  success?: boolean;
+}
+
 export interface ServeSessionAgentTaskStatus {
   kind: 'agent';
   id: string;
@@ -871,6 +891,16 @@ export interface ServeSessionAgentTaskStatus {
   parentName?: string;
   /** Launch depth (0-based; 0 = spawned by the top-level session). */
   depth?: number;
+  /** Live execution phase while the sub-agent is running. */
+  activityPhase?: ServeSessionAgentActivityPhase;
+  /** Most recent or currently streaming assistant response text. */
+  latestText?: string;
+  /** Most recent or currently streaming reasoning/thinking text. */
+  latestThought?: string;
+  /** Currently executing or approval-parked tool call. */
+  activeTool?: { name: string; description: string; callId?: string };
+  /** Full conversation history (user prompts, thoughts, assistant responses, tool calls). */
+  messages?: ServeSessionAgentMessage[];
 }
 
 export interface ServeSessionShellTaskStatus {
