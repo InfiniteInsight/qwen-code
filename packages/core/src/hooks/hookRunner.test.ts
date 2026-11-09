@@ -2070,5 +2070,32 @@ describe('HookRunner', () => {
       expect(result.isAsync).toBe(true);
       expect(result.success).toBe(true);
     });
+
+    it('records stdout/stderr and descriptive error in asyncRegistry when a background command hook exits non-zero', async () => {
+      const mockProc = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProc);
+      const updateOutputSpy = vi.spyOn(
+        hookRunner['asyncRegistry'],
+        'updateOutput',
+      );
+      const failSpy = vi.spyOn(hookRunner['asyncRegistry'], 'fail');
+
+      await runAsyncHook();
+      mockProc.stdout.emitData(Buffer.from('partial out'));
+      mockProc.stderr.emitData(Buffer.from('detailed failure stderr\n'));
+      mockProc.emit('close', 2);
+
+      await vi.waitFor(() => {
+        expect(failSpy).toHaveBeenCalledTimes(1);
+      });
+      expect(updateOutputSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        'partial out',
+        'detailed failure stderr\n',
+      );
+      expect(failSpy.mock.calls[0]?.[1]?.message).toBe(
+        'detailed failure stderr',
+      );
+    });
   });
 });

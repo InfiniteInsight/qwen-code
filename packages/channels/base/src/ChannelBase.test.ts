@@ -21506,6 +21506,73 @@ describe('ChannelBase', () => {
 
         expect(bridge.prompt).toHaveBeenCalledTimes(1);
       });
+
+      it('forwards responseBoundary events during a webhook task', async () => {
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          async (sessionId: string) => {
+            bridge.emit('textChunk', sessionId, 'first segment');
+            bridge.emit('responseBoundary', sessionId);
+            bridge.emit('textChunk', sessionId, 'final segment');
+            return 'final segment';
+          },
+        );
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
+        ch.proactiveSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).resolves.toBe(
+          'final segment',
+        );
+
+        expect(ch.responseBoundaries).toEqual([
+          {
+            chatId: 'group-1',
+            sessionId: 's-1',
+            segment: undefined,
+            reason: undefined,
+          },
+        ]);
+      });
+    });
+
+    it('queues steer behind a turn whose response delivery has already started without cancelling or prepending the cancellation note', async () => {
+      let releaseDelivery!: () => void;
+      const ch = createChannel({ dispatchMode: 'steer' });
+      ch.responseCompleteGate = new Promise<void>((resolve) => {
+        releaseDelivery = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce('first reply')
+        .mockResolvedValueOnce('second reply');
+
+      const firstTurn = ch.handleInbound(
+        envelope({ text: 'first message', messageId: 'm1' }),
+      );
+      await vi.waitFor(() => expect(ch.responseCompletions).toHaveLength(1));
+
+      const secondTurn = ch.handleInbound(
+        envelope({ text: 'second message', messageId: 'm2' }),
+      );
+      await Promise.resolve();
+
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+      expect(ch.taskEvents.some((event) => event.type === 'cancelled')).toBe(
+        false,
+      );
+
+      ch.responseCompleteGate = undefined;
+      releaseDelivery();
+      await Promise.all([firstTurn, secondTurn]);
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        2,
+        's-1',
+        'second message',
+        expect.objectContaining({ displayText: 'second message' }),
+      );
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'completed'),
+      ).toHaveLength(2);
     });
 
     it('waits for bridge recovery before resolving an inbound session', async () => {

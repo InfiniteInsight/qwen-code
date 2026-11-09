@@ -279,4 +279,43 @@ describe('channel harness ownership', () => {
       await bridge.shutdown();
     }
   });
+
+  it('invokes onChannelTerminationStart when stopChannel or reclaimIdleChannel retires a channel (#454)', async () => {
+    const first = makeChannel();
+    const second = makeChannel();
+    const factory = vi
+      .fn<() => Promise<AcpChannel>>()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const terminationStarted: number[] = [];
+    let harness!: ReturnType<typeof createChannelHarness>;
+    const bridge = createSessionControlPlane(
+      {
+        boundWorkspace: WS_A,
+        channelFactory: factory,
+      },
+      (options) => {
+        harness = createChannelHarness({
+          ...options,
+          onChannelTerminationStart(info) {
+            terminationStarted.push(info.id);
+            options.onChannelTerminationStart?.(info);
+          },
+        });
+        return harness;
+      },
+    );
+
+    try {
+      const info1 = await harness.ensure();
+      await harness.reclaimIdleChannel(info1);
+      expect(terminationStarted).toEqual([info1.id]);
+
+      const info2 = await harness.ensure();
+      await harness.stopChannel(info2);
+      expect(terminationStarted).toEqual([info1.id, info2.id]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 });

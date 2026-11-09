@@ -632,6 +632,67 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
     });
+
+    it('gates unauthorized projects and senders before fetchDescription and without posting error notes', async () => {
+      const restricted = makeConfig({
+        groupPolicy: 'allowlist',
+        groups: {
+          'allowed/repo': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+        action_prompt_template: {
+          mentioned: 'Mentioned: %description%',
+        },
+      });
+      channel = new TestableGitlabChannel(
+        'test-gitlab',
+        restricted,
+        makeBridge(),
+      );
+      await initWithoutLoop();
+
+      mockApi.Issues.show.mockRejectedValue(new Error('should not fetch'));
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({
+          id: 101,
+          target_url: 'https://gitlab.com/unauthorized/repo/-/issues/42',
+          project: { id: 2, path_with_namespace: 'unauthorized/repo' },
+        }),
+        makeTodo({
+          id: 102,
+          target_url: 'https://gitlab.com/allowed/repo/-/issues/42',
+          project: { id: 1, path_with_namespace: 'allowed/repo' },
+          author: { id: 20, username: 'mallory', name: 'Mallory' },
+        }),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockApi.Issues.show).not.toHaveBeenCalled();
+      expect(mockApi.IssueNotes.create).not.toHaveBeenCalled();
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 101 });
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 102 });
+    });
+
+    it('falls back to todo body when fetchDescription fails for a non-note mention', async () => {
+      await initWithoutLoop();
+      mockApi.Issues.show.mockRejectedValueOnce(new Error('500 transient'));
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({
+          target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+          body: '@test-bot fallback body',
+        }),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('fallback body');
+      expect(mockApi.IssueNotes.create).not.toHaveBeenCalled();
+    });
   });
 
   describe('sendThreadMessage', () => {
@@ -1068,6 +1129,94 @@ describe('GitlabChannel', () => {
           42,
           1001,
           9001,
+        ),
+      );
+    });
+
+    it('preserves and awards eyes reaction for collect-buffered note mentions when their turn starts', async () => {
+      const firstPrompt = Promise.withResolvers<string>();
+      const secondPrompt = Promise.withResolvers<string>();
+      const bridge = makeBridge();
+      vi.mocked(bridge.prompt)
+        .mockReturnValueOnce(firstPrompt.promise)
+        .mockReturnValueOnce(secondPrompt.promise);
+
+      class RealPipelineGitlabChannel extends GitlabChannel {
+        protected override startPollLoop(): void {}
+      }
+
+      const collectChannel = new RealPipelineGitlabChannel(
+        'test-gitlab',
+        makeConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+      await collectChannel.connect();
+      collectChannel.disconnect();
+      (
+        collectChannel as unknown as {
+          cursor: { lastProcessedId: number; initialized: boolean };
+        }
+      ).cursor = {
+        lastProcessedId: 0,
+        initialized: true,
+      };
+
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({
+          id: 100,
+          target_url: 'https://gitlab.com/owner/repo/-/issues/42#note_1001',
+        }),
+      ]);
+      const firstPoll = (
+        collectChannel as unknown as { pollOnce: () => Promise<void> }
+      ).pollOnce();
+
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalledWith(
+          'owner/repo',
+          42,
+          1001,
+          'eyes',
+        ),
+      );
+
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({
+          id: 101,
+          target_url: 'https://gitlab.com/owner/repo/-/issues/42#note_1002',
+          body: '@test-bot follow-up note',
+        }),
+      ]);
+      await (
+        collectChannel as unknown as { pollOnce: () => Promise<void> }
+      ).pollOnce();
+
+      expect(mockApi.IssueNoteAwardEmojis.award).not.toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        1002,
+        'eyes',
+      );
+
+      firstPrompt.resolve('first reply');
+      await firstPoll;
+
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalledWith(
+          'owner/repo',
+          42,
+          1002,
+          'eyes',
+        ),
+      );
+
+      secondPrompt.resolve('second reply');
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.remove).toHaveBeenCalledWith(
+          'owner/repo',
+          42,
+          1002,
+          9000,
         ),
       );
     });

@@ -275,4 +275,34 @@ describe('StreamRouter — ordering', () => {
     await router.whenIdle();
     expect(order).toEqual(['first\n\n', 'second\n\n']);
   });
+
+  it('resets thread, fence, and buffer state on session rebind and drops detached idle flushes (#457)', async () => {
+    let activeSession = 'sess_a';
+    let boundChannels = ['chan_42'];
+    const h = harness((s) => (s === activeSession ? boundChannels : []));
+    for (let i = 1; i <= 7; i++) {
+      h.router.onChunk('sess_a', `msg ${i}\n\n`);
+      await h.router.whenIdle();
+    }
+    expect(h.threads).toHaveLength(1);
+    expect(h.posts.at(-1)?.dest).toBe('thread_1');
+
+    // Leave an unclosed code fence and buffered text on sess_a, then rebind chan_42 to sess_b.
+    h.router.onChunk('sess_a', '```ts\nunfinished');
+    activeSession = 'sess_b';
+    h.router.onChunk('sess_b', 'hello from b\n\n');
+    await h.router.whenIdle();
+    expect(h.posts.at(-1)).toEqual({
+      dest: 'chan_42',
+      content: 'hello from b\n\n',
+    });
+
+    // Arm an idle timer, then detach chan_42 before the timer fires.
+    const countBeforeDetach = h.posts.length;
+    h.router.onChunk('sess_b', 'buffered before detach');
+    boundChannels = [];
+    h.fireTimers();
+    await h.router.whenIdle();
+    expect(h.posts.length).toBe(countBeforeDetach);
+  });
 });

@@ -47,6 +47,8 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       award?: Promise<{ awardId: number }>;
     }
   >();
+  private readonly bufferedReactions = new Set<string>();
+  private readonly coalescedReactions = new Map<string, string[]>();
 
   constructor(
     name: string,
@@ -146,26 +148,69 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     );
   }
 
+  protected override onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId && this.reactions.has(messageId)) {
+      this.bufferedReactions.add(messageId);
+    }
+  }
+
+  protected override onPromptBufferDrained(
+    _chatId: string,
+    _sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const id of messageIds) {
+      this.bufferedReactions.delete(id);
+    }
+    const lastMessageId = messageIds.at(-1);
+    if (lastMessageId && messageIds.length > 1) {
+      this.coalescedReactions.set(lastMessageId, messageIds);
+    }
+  }
+
+  protected override onPromptBufferDropped(
+    _chatId: string,
+    _sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.bufferedReactions.delete(messageId);
+      const coalesced = this.coalescedReactions.get(messageId);
+      this.coalescedReactions.delete(messageId);
+      for (const id of coalesced ?? [messageId]) {
+        this.reactions.delete(id);
+      }
+    }
+  }
+
   protected override onPromptStart(
     chatId: string,
     _sessionId: string,
     messageId?: string,
   ): void {
     if (!messageId) return;
-    const entry = this.reactions.get(messageId);
-    if (!entry || entry.award) return;
-    const api = entry.target.isMr
-      ? this.api.MergeRequestNoteAwardEmojis
-      : this.api.IssueNoteAwardEmojis;
-    entry.award = api
-      .award(chatId, entry.target.iid, entry.noteId, 'eyes')
-      .then((r) => ({ awardId: r.id }));
-    void entry.award.catch((err) => {
-      entry.award = undefined;
-      process.stderr.write(
-        `[Channel:${this.name}] failed to acknowledge note ${entry.noteId}: ${err}\n`,
-      );
-    });
+    this.bufferedReactions.delete(messageId);
+    const ids = this.coalescedReactions.get(messageId) ?? [messageId];
+    for (const id of ids) {
+      const entry = this.reactions.get(id);
+      if (!entry || entry.award) continue;
+      const api = entry.target.isMr
+        ? this.api.MergeRequestNoteAwardEmojis
+        : this.api.IssueNoteAwardEmojis;
+      entry.award = api
+        .award(chatId, entry.target.iid, entry.noteId, 'eyes')
+        .then((r) => ({ awardId: r.id }));
+      void entry.award.catch((err) => {
+        entry.award = undefined;
+        process.stderr.write(
+          `[Channel:${this.name}] failed to acknowledge note ${entry.noteId}: ${err}\n`,
+        );
+      });
+    }
   }
 
   protected override onPromptEnd(
@@ -174,22 +219,27 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     messageId?: string,
   ): void {
     if (!messageId) return;
-    const entry = this.reactions.get(messageId);
-    if (!entry) return;
-    this.reactions.delete(messageId);
-    if (!entry.award) return;
-    const api = entry.target.isMr
-      ? this.api.MergeRequestNoteAwardEmojis
-      : this.api.IssueNoteAwardEmojis;
-    void entry.award
-      .then(({ awardId }) =>
-        api.remove(chatId, entry.target.iid, entry.noteId, awardId),
-      )
-      .catch((err) => {
-        process.stderr.write(
-          `[Channel:${this.name}] failed to remove acknowledgement from note ${entry.noteId}: ${err}\n`,
-        );
-      });
+    this.bufferedReactions.delete(messageId);
+    const ids = this.coalescedReactions.get(messageId) ?? [messageId];
+    this.coalescedReactions.delete(messageId);
+    for (const id of ids) {
+      const entry = this.reactions.get(id);
+      if (!entry) continue;
+      this.reactions.delete(id);
+      if (!entry.award) continue;
+      const api = entry.target.isMr
+        ? this.api.MergeRequestNoteAwardEmojis
+        : this.api.IssueNoteAwardEmojis;
+      void entry.award
+        .then(({ awardId }) =>
+          api.remove(chatId, entry.target.iid, entry.noteId, awardId),
+        )
+        .catch((err) => {
+          process.stderr.write(
+            `[Channel:${this.name}] failed to remove acknowledgement from note ${entry.noteId}: ${err}\n`,
+          );
+        });
+    }
   }
 
   protected async pollOnce(): Promise<void> {
@@ -259,16 +309,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         process.stderr.write(
           `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
         );
-        try {
-          await this.createNote(
-            chatId,
-            target.isMr ? 'mr' : 'issue',
-            target.iid,
-            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
-          );
-        } catch {
-          // best-effort error comment
-        }
       }
 
       this.cursor.lastProcessedId = todo.id;
@@ -311,40 +351,13 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     const threadId = `${targetType}:${target.iid}`;
     const noteMatch = todo.target_url.match(/#note_(\d+)$/);
     const isNoteMention = noteMatch !== null;
+    if (isNoteMention && !todo.body) return;
     const messageId = String(todo.id);
     const needsDescription =
       !isNoteMention || template.includes('%description%');
 
-    let description = '';
-    if (needsDescription) {
-      if (isNoteMention) {
-        try {
-          description = await this.fetchDescription(
-            chatId,
-            targetType,
-            target.iid,
-          );
-        } catch (err) {
-          process.stderr.write(
-            `[Channel:${this.name}] fetchDescription failed (metadata only): ${err}\n`,
-          );
-        }
-      } else {
-        description = await this.fetchDescription(
-          chatId,
-          targetType,
-          target.iid,
-        );
-      }
-    }
-
-    const text = isNoteMention
-      ? todo.body || ''
-      : description || todo.body || '';
-    if (!text) return;
-
     const envelope = this.buildEnvelope(
-      text,
+      todo.body || target.title || '',
       todo.author.username,
       chatId,
       threadId,
@@ -356,38 +369,80 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         chatId,
         todo.author.username,
         String(todo.id),
-        description,
+        '',
       ),
       true,
     );
 
-    if (isNoteMention) {
-      this.reactions.set(messageId, {
-        target,
-        noteId: Number(noteMatch![1]),
-      });
-    }
+    let preflightPassed = false;
     try {
-      await this.handleInbound(envelope);
+      await this.prepareThenHandleInbound(envelope, async () => {
+        preflightPassed = true;
+        let description = '';
+        if (needsDescription) {
+          try {
+            description = await this.fetchDescription(
+              chatId,
+              targetType,
+              target.iid,
+            );
+          } catch (err) {
+            process.stderr.write(
+              `[Channel:${this.name}] fetchDescription failed (metadata only): ${err}\n`,
+            );
+          }
+        }
+
+        const text = isNoteMention
+          ? todo.body || ''
+          : description || todo.body || '';
+        if (!text) return false;
+
+        envelope.text = stripBotMention(text, this.botUsername);
+        envelope.metadata = this.buildMetadata(
+          template,
+          todo,
+          target,
+          chatId,
+          todo.author.username,
+          String(todo.id),
+          description,
+        );
+
+        if (isNoteMention) {
+          this.reactions.set(messageId, {
+            target,
+            noteId: Number(noteMatch![1]),
+          });
+        }
+        return true;
+      });
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
       );
-      try {
-        await this.createNote(
-          chatId,
-          targetType,
-          target.iid,
-          this.formatMarkdownAttributedText(
-            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
-            this.getInboundErrorSourceLabel(envelope),
-          ),
-        );
-      } catch {
-        // best-effort error comment
+      if (preflightPassed) {
+        try {
+          await this.createNote(
+            chatId,
+            targetType,
+            target.iid,
+            this.formatMarkdownAttributedText(
+              '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+              this.getInboundErrorSourceLabel(envelope),
+            ),
+          );
+        } catch {
+          // best-effort error comment
+        }
       }
     } finally {
-      this.reactions.delete(messageId);
+      if (!this.bufferedReactions.has(messageId)) {
+        const entry = this.reactions.get(messageId);
+        if (entry && !entry.award) {
+          this.reactions.delete(messageId);
+        }
+      }
     }
   }
 

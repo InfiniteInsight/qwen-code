@@ -155,4 +155,31 @@ describe('MatrixStreamRouter', () => {
     await h.router.whenIdle();
     expect(h.sent.map((m) => m.roomId).sort()).toEqual(['!a:h', '!b:h']);
   });
+
+  it('resets thread relation, fence, and buffer state on session rebind and drops detached idle flushes (#457)', async () => {
+    let activeSession = 'sess_a';
+    let boundRooms = ['!r:h'];
+    const h = harness((s) => (s === activeSession ? boundRooms : []));
+    for (let i = 1; i <= 7; i++) {
+      h.router.onChunk('sess_a', `m${i}\n\n`);
+      await h.router.whenIdle();
+    }
+    expect(h.sent.at(-1)?.threadRootEventId).toBe('$evt_1');
+
+    h.router.onChunk('sess_a', '```py\nunfinished');
+    activeSession = 'sess_b';
+    h.router.onChunk('sess_b', 'fresh from b\n\n');
+    await h.router.whenIdle();
+    expect(h.sent.at(-1)).toEqual({
+      roomId: '!r:h',
+      text: 'fresh from b\n\n',
+    });
+
+    const countBeforeDetach = h.sent.length;
+    h.router.onChunk('sess_b', 'buffered before detach');
+    boundRooms = [];
+    h.fireTimers();
+    await h.router.whenIdle();
+    expect(h.sent.length).toBe(countBeforeDetach);
+  });
 });

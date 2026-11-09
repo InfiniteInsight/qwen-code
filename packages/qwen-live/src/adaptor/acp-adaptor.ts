@@ -651,17 +651,35 @@ export class AcpAdaptor implements BackendAdaptor {
     const client = this.buildClient();
     let conn: AcpConnectionLike;
     let exited: Promise<never> | undefined;
+    let childExitError: Error | undefined;
     if (this.options.connect) {
-      conn = await this.options.connect(client, (info) =>
-        this.onChildExit(info.code, info.signal),
-      );
+      let rejectConnectExit!: (error: Error) => void;
+      exited = new Promise<never>((_, reject) => {
+        rejectConnectExit = reject;
+      });
+      exited.catch(() => {});
+      conn = await this.options.connect(client, (info) => {
+        const exitErr = new Error(
+          `acp backend '${this.name}' exited before initializing (code ${String(info.code)}, signal ${String(info.signal)})`,
+        );
+        childExitError ??= exitErr;
+        rejectConnectExit(exitErr);
+        this.onChildExit(info.code, info.signal);
+      });
     } else {
       const spawned = this.spawnChild(client);
       conn = spawned.connection;
       this.child = spawned.child;
       exited = spawned.exitPromise;
+      exited.catch((err: unknown) => {
+        childExitError ??= err instanceof Error ? err : new Error(String(err));
+      });
     }
-    // Race the handshake against both a timeout and child exit — a
+    if (this.closing) {
+      this.killChild();
+      throw new Error(`acp backend '${this.name}' is closed`);
+    }
+    // Race the handshake against both a timeout and child exit - a
     // crash-on-boot must fail in milliseconds, not after the deadline.
     const initializeTimeoutMs = this.initializeTimeoutMs();
     if (initializeTimeoutMs > ACP_INIT_TIMEOUT_MS) {
@@ -689,6 +707,10 @@ export class AcpAdaptor implements BackendAdaptor {
       this.killChild();
       throw normalizeInitializeError(this.name, error);
     }
+    if (this.closing) {
+      this.killChild();
+      throw new Error(`acp backend '${this.name}' is closed`);
+    }
     const caps = isRecord(initialized['agentCapabilities'])
       ? initialized['agentCapabilities']
       : {};
@@ -709,6 +731,24 @@ export class AcpAdaptor implements BackendAdaptor {
       } catch {
         /* retried on demand */
       }
+    }
+    if (this.closing) {
+      this.killChild();
+      throw new Error(`acp backend '${this.name}' is closed`);
+    }
+    if (
+      childExitError !== undefined ||
+      (this.child &&
+        (this.child.exitCode !== null || this.child.signalCode !== null))
+    ) {
+      this.killChild();
+      throw normalizeInitializeError(
+        this.name,
+        childExitError ??
+          new Error(
+            `acp backend '${this.name}' exited before initialization completed`,
+          ),
+      );
     }
     this.connection = conn;
     // Attach the real exit handler only after the handshake succeeds, so a

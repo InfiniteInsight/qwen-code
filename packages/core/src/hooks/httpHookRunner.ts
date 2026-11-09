@@ -168,22 +168,21 @@ export class HttpHookRunner {
     }
 
     // Check once flag
-    if (hookConfig.once) {
-      const onceKey = `${hookConfig.url}:${eventName}`;
-      if (this.executedOnceHooks.has(onceKey)) {
-        debugLogger.debug(
-          `Skipping once hook ${hookId} - already executed for ${eventName}`,
-        );
-        return {
-          hookConfig,
-          eventName,
-          success: true,
-          outcome: 'success',
-          duration: 0,
-          output: { continue: true },
-        };
-      }
-      this.executedOnceHooks.add(onceKey);
+    const onceKey = hookConfig.once
+      ? `${hookConfig.url}:${eventName}`
+      : undefined;
+    if (onceKey && this.executedOnceHooks.has(onceKey)) {
+      debugLogger.debug(
+        `Skipping once hook ${hookId} - already executed for ${eventName}`,
+      );
+      return {
+        hookConfig,
+        eventName,
+        success: true,
+        outcome: 'success',
+        duration: 0,
+        output: { continue: true },
+      };
     }
 
     try {
@@ -252,6 +251,9 @@ export class HttpHookRunner {
 
         signal?.throwIfAborted();
         combinedSignal.throwIfAborted();
+        if (onceKey) {
+          this.executedOnceHooks.add(onceKey);
+        }
         onRequestState?.('outcome_unknown');
         const response = await fetch(url, {
           method: 'POST',
@@ -429,46 +431,58 @@ export class HttpHookRunner {
     return `${truncated}\n... [truncated, ${output.length - MAX_OUTPUT_LENGTH} more characters]`;
   }
 
+  private createDefaultOutput(): HookOutput {
+    return { continue: true };
+  }
+
   /**
    * Normalize response JSON into HookOutput format
    */
-  private normalizeOutput(
-    json: Record<string, unknown>,
-    eventName: HookEventName,
-  ): HookOutput {
+  private normalizeOutput(json: unknown, eventName: HookEventName): HookOutput {
+    if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+      return this.createDefaultOutput();
+    }
+    const record = json as Record<string, unknown>;
     const output: HookOutput = {};
 
     // Map standard fields
-    if ('continue' in json && typeof json['continue'] === 'boolean') {
-      output.continue = json['continue'];
+    if ('continue' in record && typeof record['continue'] === 'boolean') {
+      output.continue = record['continue'];
     }
-    if ('stopReason' in json && typeof json['stopReason'] === 'string') {
-      output.stopReason = this.truncateOutput(json['stopReason']);
+    if ('stopReason' in record && typeof record['stopReason'] === 'string') {
+      output.stopReason = this.truncateOutput(record['stopReason']);
     }
     if (
-      'suppressOutput' in json &&
-      typeof json['suppressOutput'] === 'boolean'
+      'suppressOutput' in record &&
+      typeof record['suppressOutput'] === 'boolean'
     ) {
-      output.suppressOutput = json['suppressOutput'];
+      output.suppressOutput = record['suppressOutput'];
     }
-    if ('systemMessage' in json && typeof json['systemMessage'] === 'string') {
+    if (
+      'systemMessage' in record &&
+      typeof record['systemMessage'] === 'string'
+    ) {
       // Apply output length limit per Qwen Code spec
-      output.systemMessage = this.truncateOutput(json['systemMessage']);
+      output.systemMessage = this.truncateOutput(record['systemMessage']);
     }
-    if ('decision' in json && typeof json['decision'] === 'string') {
-      output.decision = json['decision'] as HookOutput['decision'];
+    if ('decision' in record && typeof record['decision'] === 'string') {
+      output.decision = record['decision'] as HookOutput['decision'];
     }
-    if ('reason' in json && typeof json['reason'] === 'string') {
-      output.reason = this.truncateOutput(json['reason']);
+    if ('reason' in record && typeof record['reason'] === 'string') {
+      output.reason = this.truncateOutput(record['reason']);
     }
 
     // Handle hookSpecificOutput
     if (
-      'hookSpecificOutput' in json &&
-      typeof json['hookSpecificOutput'] === 'object' &&
-      json['hookSpecificOutput'] !== null
+      'hookSpecificOutput' in record &&
+      typeof record['hookSpecificOutput'] === 'object' &&
+      record['hookSpecificOutput'] !== null &&
+      !Array.isArray(record['hookSpecificOutput'])
     ) {
-      const hookOutput = json['hookSpecificOutput'] as Record<string, unknown>;
+      const hookOutput = record['hookSpecificOutput'] as Record<
+        string,
+        unknown
+      >;
       // Truncate additionalContext if present
       if (
         'additionalContext' in hookOutput &&

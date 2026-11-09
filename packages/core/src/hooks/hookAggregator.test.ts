@@ -303,16 +303,16 @@ describe('HookAggregator', () => {
   });
 
   describe('mergeSimple (default case)', () => {
-    it('should use later values for simple fields', () => {
+    it('should concatenate reasons and preserve continue=false', () => {
       const result = aggregate(HookEventName.Notification, [
         { reason: 'first', continue: true },
         { reason: 'second', continue: false },
       ]);
-      expect(result.finalOutput?.reason).toBe('second');
+      expect(result.finalOutput?.reason).toBe('first\nsecond');
       expect(result.finalOutput?.continue).toBe(false);
     });
 
-    it('should concatenate additionalContext from multiple hooks', () => {
+    it('should concatenate additionalContext and shallow-merge hookSpecificOutput from multiple hooks', () => {
       const result = aggregate(HookEventName.Notification, [
         {
           hookSpecificOutput: {
@@ -326,10 +326,57 @@ describe('HookAggregator', () => {
       expect(
         result.finalOutput?.hookSpecificOutput?.['additionalContext'],
       ).toBe('ctx1\nctx2');
-      // otherField is overwritten (later value wins since it's not special-cased)
-      expect(
-        result.finalOutput?.hookSpecificOutput?.['otherField'],
-      ).toBeUndefined();
+      // otherField is preserved via shallow merge when later hooks do not overwrite that key
+      expect(result.finalOutput?.hookSpecificOutput?.['otherField']).toBe(
+        'value1',
+      );
+    });
+
+    it('preserves continue=false, stopReason, blocking decision, reason, systemMessage, and custom hookSpecificOutput keys in SessionStart', () => {
+      const result = aggregate(HookEventName.SessionStart, [
+        {
+          continue: false,
+          stopReason: 'halt session',
+          decision: 'block',
+          reason: 'blocked by hook 1',
+          systemMessage: 'msg 1',
+          hookSpecificOutput: {
+            customKey1: 'val1',
+            additionalContext: 'ctx 1',
+          },
+        },
+        {
+          continue: true,
+          decision: 'allow',
+          reason: 'allowed by hook 2',
+          systemMessage: 'msg 2',
+          hookSpecificOutput: {
+            customKey2: 'val2',
+            additionalContext: 'ctx 2',
+          },
+        },
+      ]);
+
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.stopReason).toBe('halt session');
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe(
+        'blocked by hook 1\nallowed by hook 2',
+      );
+      expect(result.finalOutput?.systemMessage).toBe('msg 1\nmsg 2');
+      expect(result.finalOutput?.hookSpecificOutput).toEqual({
+        customKey1: 'val1',
+        customKey2: 'val2',
+        additionalContext: 'ctx 1\nctx 2',
+      });
+    });
+
+    it('joins systemMessage across hooks in mergeWithOrLogic', () => {
+      const result = aggregate(HookEventName.PreToolUse, [
+        { systemMessage: 'sys 1', decision: 'allow' },
+        { systemMessage: 'sys 2', decision: 'allow' },
+      ]);
+      expect(result.finalOutput?.systemMessage).toBe('sys 1\nsys 2');
     });
 
     it('falls through to mergeSimple/DefaultHookOutput for MessageDisplay (no control-effect merge logic)', () => {
@@ -562,8 +609,7 @@ describe('HookAggregator', () => {
         { reason: 'first', continue: true },
         { reason: 'second', continue: false },
       ]);
-      // mergeSimple uses later values for simple fields
-      expect(result.finalOutput?.reason).toBe('second');
+      expect(result.finalOutput?.reason).toBe('first\nsecond');
       expect(result.finalOutput?.continue).toBe(false);
     });
 

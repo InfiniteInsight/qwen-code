@@ -484,6 +484,14 @@ export class AcpWsTransport implements DaemonTransport {
       }, INIT_TIMEOUT_MS);
 
       ws.onopen = () => {
+        if (settled || this._disposed) {
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
         // Send initialize request before marking the transport connected.
         const initId = this.nextId++;
         const initReq: JsonRpcRequest = {
@@ -568,6 +576,11 @@ export class AcpWsTransport implements DaemonTransport {
         // promise so the caller doesn't hang forever.
         if (!this._connected) {
           clearTimeout(initTimeout);
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
           rejectConnect(
             new DaemonTransportClosedError('WebSocket connection failed'),
           );

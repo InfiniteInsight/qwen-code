@@ -212,6 +212,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
 
   function retireChannel(info: HarnessChannel, context: string) {
     info.isDying = true;
+    options.onChannelTerminationStart?.(info);
     cancelIdleTimer(info);
     if (info.executionEngine === defaultEngine) keepAliveUntil = 0;
     info.channelLiveness?.stop();

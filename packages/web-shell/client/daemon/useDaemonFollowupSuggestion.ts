@@ -269,6 +269,7 @@ export function useDaemonFollowupSuggestion(
     getSidechannelFollowupSuggestion,
   );
   const activeFollowupSuggestion =
+    sessionId !== undefined &&
     sidechannelFollowupSuggestion?.sessionId === sessionId
       ? sidechannelFollowupSuggestion
       : lastFollowupSuggestion;
@@ -285,47 +286,56 @@ export function useDaemonFollowupSuggestion(
   );
   const { setSuggestion } = controller;
 
+  // Push the store's latest suggestion into the controller. Tracking the
+  // last-pushed (promptId, suggestion) key prevents re-pushing the same
+  // suggestion after the user dismisses it locally.
+  const lastPushedKeyRef = useRef<string | undefined>(undefined);
+  const previousSessionIdRef = useRef<string | undefined>(sessionId);
+  const lastActiveSessionIdRef = useRef<string | undefined>(sessionId);
+
   useEffect(() => {
     if (!enabled) {
       controller.clear();
+      lastPushedKeyRef.current = undefined;
     }
     return () => controller.cleanup();
   }, [controller, enabled]);
 
-  // Push the store's latest suggestion into the controller exactly once
-  // per (promptId, suggestion) pair. Tracking the last-pushed promptId
-  // is what prevents the effect from re-pushing the same suggestion
-  // after the user dismisses it locally — `dismiss` clears the
-  // controller's React state, which would otherwise re-trigger this
-  // effect on the next render and re-show the suggestion.
-  const lastPushedPromptIdRef = useRef<string | undefined>(undefined);
-  const previousSessionIdRef = useRef<string | undefined>(sessionId);
   useEffect(() => {
     const previousSessionId = previousSessionIdRef.current;
+    const lastActiveSessionId = lastActiveSessionIdRef.current;
     previousSessionIdRef.current = sessionId;
-    const sessionChanged =
-      previousSessionId !== undefined &&
+    if (sessionId !== undefined) {
+      lastActiveSessionIdRef.current = sessionId;
+    }
+    const sessionCleared =
+      previousSessionId !== undefined && sessionId === undefined;
+    const sessionSwitched =
       sessionId !== undefined &&
-      previousSessionId !== sessionId;
-    if (!sessionChanged) return;
-    // Session switches should drop the old local display and global
-    // sidechannel value, but not the transcript store: the provider resets
-    // that store for the new session, and it may already contain the new
-    // session's own follow-up suggestion.
+      lastActiveSessionId !== undefined &&
+      lastActiveSessionId !== sessionId;
+    if (!sessionCleared && !sessionSwitched) return;
+    // Session switches and clearSession transitions drop the old local
+    // display and global sidechannel value, but not the transcript store:
+    // the provider resets that store for the new session, and it may
+    // already contain the new session's own follow-up suggestion.
     controller.clear();
     clearSidechannelFollowupSuggestion();
-    lastPushedPromptIdRef.current = undefined;
+    lastPushedKeyRef.current = undefined;
   }, [controller, sessionId]);
 
   useEffect(() => {
-    const nextPromptId = activeFollowupSuggestion?.promptId;
-    if (nextPromptId === lastPushedPromptIdRef.current) return;
-    lastPushedPromptIdRef.current = nextPromptId;
+    if (!enabled) return;
+    const nextKey = activeFollowupSuggestion?.suggestion
+      ? `${activeFollowupSuggestion.promptId ?? ''}\u0000${activeFollowupSuggestion.suggestion}`
+      : undefined;
+    if (nextKey === lastPushedKeyRef.current) return;
+    lastPushedKeyRef.current = nextKey;
     setSuggestion(activeFollowupSuggestion?.suggestion ?? null);
-  }, [activeFollowupSuggestion, setSuggestion]);
+  }, [activeFollowupSuggestion, enabled, setSuggestion]);
 
   const clear = useCallback(() => {
-    // Clear local controller state immediately (no debounce) — the
+    // Clear local controller state immediately (no debounce) - the
     // user is about to type, so a 300ms-delayed display would be
     // jarring.
     controller.clear();
@@ -334,7 +344,7 @@ export function useDaemonFollowupSuggestion(
     // suggestion in the SDK reducer's sidechannel.
     clearStoreFollowupSuggestion(store);
     clearSidechannelFollowupSuggestion();
-    lastPushedPromptIdRef.current = undefined;
+    lastPushedKeyRef.current = undefined;
   }, [controller, store]);
 
   const onAcceptFollowup = useCallback(
@@ -343,11 +353,11 @@ export function useDaemonFollowupSuggestion(
       options?: { skipOnAccept?: boolean },
     ) => {
       controller.accept(method, options);
-      // Same invalidation rationale as `clear` — once the suggestion is
+      // Same invalidation rationale as `clear` - once the suggestion is
       // consumed, the store should not redeliver it.
       clearStoreFollowupSuggestion(store);
       clearSidechannelFollowupSuggestion();
-      lastPushedPromptIdRef.current = undefined;
+      lastPushedKeyRef.current = undefined;
     },
     [controller, store],
   );
@@ -356,7 +366,7 @@ export function useDaemonFollowupSuggestion(
     controller.dismiss();
     clearStoreFollowupSuggestion(store);
     clearSidechannelFollowupSuggestion();
-    lastPushedPromptIdRef.current = undefined;
+    lastPushedKeyRef.current = undefined;
   }, [controller, store]);
 
   return useMemo(

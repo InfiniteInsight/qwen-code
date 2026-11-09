@@ -211,8 +211,19 @@ export class StreamRouter {
         fenceTurn: this.seq(sessionId),
       };
       this.channels.set(channelId, st);
-    } else {
+    } else if (st.sessionId !== sessionId) {
+      if (st.cancelTimer) {
+        st.cancelTimer();
+        st.cancelTimer = undefined;
+      }
+      st.buffer.take();
       st.sessionId = sessionId;
+      st.turnId = this.seq(sessionId);
+      st.posted = 0;
+      st.anchorId = null;
+      st.threadId = null;
+      st.fence = NO_FENCE;
+      st.fenceTurn = this.seq(sessionId);
     }
     return st;
   }
@@ -224,11 +235,17 @@ export class StreamRouter {
   private flush(channelId: string): void {
     const st = this.channels.get(channelId);
     if (!st || st.buffer.isEmpty()) return;
+    const flushSessionId = st.sessionId;
+    if (!this.cfg.channelsFor(flushSessionId).includes(channelId)) {
+      st.buffer.take();
+      st.fence = NO_FENCE;
+      return;
+    }
     const text = st.buffer.take();
     const start = st.fence;
     st.fence = fenceStateAfter(text, start);
     st.chain = st.chain
-      .then(() => this.doFlush(st, text, start))
+      .then(() => this.doFlush(st, text, start, flushSessionId))
       .catch(() => {});
   }
 
@@ -236,9 +253,16 @@ export class StreamRouter {
     st: ChannelState,
     text: string,
     start: FenceState,
+    flushSessionId: string,
   ): Promise<void> {
     const parts = splitForDiscord(text, 2000, start);
     for (const part of parts) {
+      if (
+        st.sessionId !== flushSessionId ||
+        !this.cfg.channelsFor(flushSessionId).includes(st.channelId)
+      ) {
+        return;
+      }
       this.resetTurnIfStale(st);
       st.posted += 1;
       if (st.posted <= MAX_CHANNEL_MESSAGES) {
@@ -246,7 +270,7 @@ export class StreamRouter {
         if (st.posted === 1) st.anchorId = id;
         continue;
       }
-      // 7th+ message of the turn → into a thread off the turn's first message.
+      // 7th+ message of the turn -> into a thread off the turn's first message.
       if (
         st.posted === MAX_CHANNEL_MESSAGES + 1 &&
         !st.threadId &&

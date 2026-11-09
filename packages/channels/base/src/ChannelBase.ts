@@ -2640,9 +2640,21 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      const onResponseBoundary = (sid: string) => {
+        if (
+          sid !== sessionId ||
+          promptState.cancelled ||
+          promptState.cancelPending
+        ) {
+          return;
+        }
+        heldChunks.length = 0;
+        this.onResponseBoundary(target.chatId, sessionId);
+      };
       await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
+      promptBridge.on('responseBoundary', onResponseBoundary);
 
       try {
         const response = await this.runLoopBridgePrompt(
@@ -2712,6 +2724,7 @@ export abstract class ChannelBase {
         throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
+        promptBridge.off('responseBoundary', onResponseBoundary);
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (!promptState.clearEvicted) {
           try {
@@ -7132,6 +7145,9 @@ export abstract class ChannelBase {
               process.stderr.write(
                 `[${this.name}] steer denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); queuing instead\n`,
               );
+              break;
+            }
+            if (active.deliveryStarted) {
               break;
             }
             // Best-effort cancel the running turn so it winds down sooner, then fall

@@ -831,4 +831,29 @@ describe('AcpAdaptor real child lifecycle', () => {
     // The handshake timeout must not be the failure path.
     expect(Date.now() - started).toBeLessThan(5_000);
   });
+
+  it('rejects startChild when the agent exits during authenticate or when closed mid-handshake (#458)', async () => {
+    const crashingDuringAuth = new FakeConnection();
+    vi.spyOn(crashingDuringAuth, 'authenticate').mockImplementation(
+      async () => {
+        crashingDuringAuth.onExit({ code: 1, signal: null });
+        throw new Error('pipe closed during auth');
+      },
+    );
+    const adaptor1 = makeAdaptor(crashingDuringAuth);
+    adaptors.push(adaptor1);
+    await expect(adaptor1.preflight()).rejects.toThrow(
+      'exited before initializing',
+    );
+
+    const closingDuringAuth = new FakeConnection();
+    const adaptor2 = makeAdaptor(closingDuringAuth);
+    vi.spyOn(closingDuringAuth, 'authenticate').mockImplementation(async () => {
+      await adaptor2.close();
+      return {};
+    });
+    adaptors.push(adaptor2);
+    await expect(adaptor2.preflight()).rejects.toThrow('closed');
+    await expect(adaptor2.createSession()).rejects.toThrow('closed');
+  });
 });

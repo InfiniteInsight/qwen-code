@@ -154,6 +154,20 @@ describe('AgentLifecycle', () => {
     expect(registry.get(b.agentId)?.status).toBe('running');
     await lifecycle.watchPrompt(b.agentId, Promise.reject(new Error('boom')));
     expect(registry.get(b.agentId)?.status).toBe('failed');
+
+    const c = await mk();
+    let resolveSpawn!: () => void;
+    const spawnPrompt = new Promise<void>((r) => (resolveSpawn = r));
+    let rejectSteer!: (err: unknown) => void;
+    const steerPrompt = new Promise<void>((_, rej) => (rejectSteer = rej));
+    const wc1 = lifecycle.watchPrompt(c.agentId, spawnPrompt);
+    const wc2 = lifecycle.watchPrompt(c.agentId, steerPrompt);
+    resolveSpawn();
+    await wc1;
+    expect(registry.get(c.agentId)?.status).toBe('running');
+    rejectSteer(Object.assign(new Error('q'), { code: 'queue_timeout' }));
+    await wc2;
+    expect(registry.get(c.agentId)?.status).toBe('completed');
   });
 
   it('ignores events for sessions that back no agent', async () => {

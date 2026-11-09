@@ -157,6 +157,7 @@ export class HookAggregator {
   ): HookOutput {
     const merged: HookOutput = {};
     const reasons: string[] = [];
+    const systemMessages: string[] = [];
     const additionalContexts: string[] = [];
     const artifacts: unknown[] = [];
     let hasBlock = false;
@@ -253,8 +254,16 @@ export class HookAggregator {
         merged.suppressOutput = output.suppressOutput;
       }
       if (output.systemMessage !== undefined) {
-        merged.systemMessage = output.systemMessage;
+        if (output.systemMessage.length > 0) {
+          systemMessages.push(output.systemMessage);
+        } else if (merged.systemMessage === undefined) {
+          merged.systemMessage = '';
+        }
       }
+    }
+
+    if (systemMessages.length > 0) {
+      merged.systemMessage = systemMessages.join('\n');
     }
 
     // Concatenate terminal sequences from all outputs
@@ -424,15 +433,77 @@ export class HookAggregator {
    */
   private mergeSimple(outputs: HookOutput[]): HookOutput {
     const additionalContexts: string[] = [];
+    const reasons: string[] = [];
+    const systemMessages: string[] = [];
     let merged: HookOutput = {};
+    let mergedHookSpecificOutput: Record<string, unknown> | undefined;
+    let hasContinueFalse = false;
+    let blockingStopReason: string | undefined;
+    let winningDecision: HookOutput['decision'] | undefined;
+    let winningDecisionRank = 0;
+    const decisionRank: Record<string, number> = {
+      allow: 1,
+      ask: 2,
+      deny: 3,
+      block: 3,
+    };
 
     for (const output of outputs) {
       // Collect additionalContext for concatenation
       this.extractAdditionalContext(output, additionalContexts);
-      // Exclude terminalSequence from spread — it is concatenated below
-      const { terminalSequence: _ts, ...rest } = output;
+      if (output.reason) {
+        reasons.push(output.reason);
+      }
+      if (output.systemMessage) {
+        systemMessages.push(output.systemMessage);
+      }
+      if (output.continue === false) {
+        hasContinueFalse = true;
+        if (output.stopReason) {
+          blockingStopReason = output.stopReason;
+        }
+      }
+      if (output.decision !== undefined) {
+        const rank = decisionRank[output.decision] ?? 0;
+        if (rank >= winningDecisionRank) {
+          winningDecisionRank = rank;
+          winningDecision = output.decision;
+        }
+      }
+      if (output.hookSpecificOutput) {
+        mergedHookSpecificOutput = {
+          ...mergedHookSpecificOutput,
+          ...output.hookSpecificOutput,
+        };
+      }
+      // Exclude terminalSequence and hookSpecificOutput from raw spread
+      const {
+        terminalSequence: _ts,
+        hookSpecificOutput: _hso,
+        ...rest
+      } = output;
       void _ts;
+      void _hso;
       merged = { ...merged, ...rest };
+    }
+
+    if (hasContinueFalse) {
+      merged.continue = false;
+      if (blockingStopReason !== undefined) {
+        merged.stopReason = blockingStopReason;
+      }
+    }
+    if (winningDecision !== undefined) {
+      merged.decision = winningDecision;
+    }
+    if (reasons.length > 0) {
+      merged.reason = reasons.join('\n');
+    }
+    if (systemMessages.length > 0) {
+      merged.systemMessage = systemMessages.join('\n');
+    }
+    if (mergedHookSpecificOutput) {
+      merged.hookSpecificOutput = mergedHookSpecificOutput;
     }
 
     // Merge additionalContext with concatenation

@@ -114,6 +114,11 @@ export class QuestionCardController {
       record.delivered = true;
     } catch (error) {
       this.options.onError?.('question card creation', error);
+      const finishTerminalProjection = record.finishTerminalProjection;
+      record.finishTerminalProjection = undefined;
+      if (finishTerminalProjection) {
+        await finishTerminalProjection(async () => {});
+      }
       if (record.state === 'terminal') {
         return { kind: 'presented' };
       }
@@ -132,7 +137,13 @@ export class QuestionCardController {
     }
 
     if (record.state !== 'reserved') {
-      await this.projectTerminal(record);
+      const finishTerminalProjection = record.finishTerminalProjection;
+      record.finishTerminalProjection = undefined;
+      if (finishTerminalProjection) {
+        await finishTerminalProjection(() => this.projectTerminal(record));
+      } else {
+        await this.projectTerminal(record);
+      }
       return { kind: 'presented' };
     }
     const latest = this.activeByScope.get(record.scopeKey);
@@ -283,18 +294,23 @@ export class QuestionCardController {
     const pending = this.pendingByRun.get(record.context.runId);
     pending?.delete(record.context.requestId);
     if (pending?.size === 0) this.pendingByRun.delete(record.context.runId);
-    if (record.delivered) {
-      const finishTerminalProjection = record.finishTerminalProjection;
-      record.finishTerminalProjection = undefined;
+    const finishTerminalProjection = record.finishTerminalProjection;
+    record.finishTerminalProjection = undefined;
+    if (!record.delivered) {
       if (finishTerminalProjection) {
-        await finishTerminalProjection(() => this.projectTerminal(record));
-      } else {
-        await this.projectTerminal(record);
+        await finishTerminalProjection(async () => {});
       }
+      return;
+    }
+    if (finishTerminalProjection) {
+      await finishTerminalProjection(() => this.projectTerminal(record));
+    } else {
+      await this.projectTerminal(record);
     }
   }
 
   private reserveTerminalProjection(record: QuestionRecord): void {
+    if (!record.delivered || record.state === 'terminal') return;
     record.finishTerminalProjection ??= this.options.reserveRunProjection?.(
       record.context.runId,
     );

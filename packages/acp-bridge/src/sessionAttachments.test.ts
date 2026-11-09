@@ -2758,5 +2758,48 @@ describe('SessionAttachmentStore', () => {
       await fs.rm(main, { recursive: true, force: true });
       await fs.rm(fallback, { recursive: true, force: true });
     });
+
+    it('rejects copyFrom when target or source starts closing while pending items drain (#454)', async () => {
+      const source = new SessionAttachmentStore();
+      const target = new SessionAttachmentStore();
+      const originalWrite = fs.writeFile.bind(fs);
+      let notifyWriteStarted!: () => void;
+      const writeStarted = new Promise<void>((resolve) => {
+        notifyWriteStarted = resolve;
+      });
+      let releaseWrite!: () => void;
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const writeSpy = vi
+        .spyOn(fs, 'writeFile')
+        .mockImplementationOnce(async (...args) => {
+          notifyWriteStarted();
+          await writeGate;
+          return originalWrite(...args);
+        });
+      try {
+        const putting = source.putAttachment(
+          Buffer.from('in-flight'),
+          'text/plain',
+          'pending.txt',
+        );
+        await writeStarted;
+        const copying = target.copyFrom(source);
+        const closingTarget = target.close();
+        releaseWrite();
+        await putting;
+        await expect(copying).rejects.toThrow(
+          'Session attachment store is closed',
+        );
+        await closingTarget;
+        await expect(target.list()).resolves.toEqual([]);
+      } finally {
+        writeSpy.mockRestore();
+        releaseWrite?.();
+        await source.close();
+        await target.close();
+      }
+    });
   });
 });

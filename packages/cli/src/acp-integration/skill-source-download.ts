@@ -195,12 +195,16 @@ export async function extractFilesFromTarGz(
   limits: {
     maxCompressedBytes?: number;
     maxDecompressedBytes?: number;
+    maxFileCount?: number;
+    maxDirDepth?: number;
   } = {},
 ): Promise<DownloadedSkillFile[]> {
   const maxCompressedBytes =
     limits.maxCompressedBytes ?? MAX_SKILL_DOWNLOAD_BYTES;
   const maxDecompressedBytes =
     limits.maxDecompressedBytes ?? MAX_SKILL_DECOMPRESSED_BYTES;
+  const maxFileCount = limits.maxFileCount ?? MAX_SKILL_API_FILE_COUNT;
+  const maxDirDepth = limits.maxDirDepth ?? MAX_SKILL_API_DIR_DEPTH;
 
   if (archiveBytes.length > maxCompressedBytes) {
     throw RequestError.invalidParams(
@@ -267,6 +271,16 @@ export async function extractFilesFromTarGz(
     const typeFlag = String.fromCharCode(archive[offset + 156] || 0);
     const size = readTarSize(archive, offset);
     const dataOffset = offset + 512;
+    if (
+      !Number.isFinite(size) ||
+      size < 0 ||
+      dataOffset + size > archive.length
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid or truncated skill archive',
+      );
+    }
     const nextOffset = dataOffset + Math.ceil(size / 512) * 512;
 
     if (typeFlag === '0' || typeFlag === '\0') {
@@ -274,6 +288,28 @@ export async function extractFilesFromTarGz(
       if (repoPath.startsWith(directoryPrefix)) {
         const relativePath = repoPath.slice(directoryPrefix.length);
         if (relativePath) {
+          const segments = relativePath.split('/').filter(Boolean);
+          if (
+            segments.length === 0 ||
+            segments.some((segment) => segment === '.' || segment === '..')
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              `Invalid skill file path: ${relativePath}`,
+            );
+          }
+          if (segments.length - 1 > maxDirDepth) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Skill directory nesting exceeds the maximum allowed depth',
+            );
+          }
+          if (files.length + 1 > maxFileCount) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Skill directory contains too many files',
+            );
+          }
           files.push({
             relativePath,
             content: archive.subarray(dataOffset, dataOffset + size),
@@ -477,26 +513,46 @@ async function downloadGitHubSkillDirectoryFromArchive(
   );
 }
 
+class GitHubContentsApiFetchError extends Error {}
+
 async function fetchGitHubDirectoryItems(
   githubUrl: GitHubBlobSkillUrl,
   directoryPath: string,
 ): Promise<unknown[]> {
   const encodedPath = encodeGitHubPath(directoryPath);
   const apiUrl = `https://api.github.com/repos/${githubUrl.owner}/${githubUrl.repo}/contents/${encodedPath}?ref=${encodeURIComponent(githubUrl.ref)}`;
-  const response = await fetchAllowedGitHub(apiUrl, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'qwen-code',
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetchAllowedGitHub(apiUrl, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'qwen-code',
+      },
+    });
+  } catch (error) {
+    if (error instanceof RequestError) {
+      throw error;
+    }
+    throw new GitHubContentsApiFetchError(
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
+  }
   if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
+    throw new GitHubContentsApiFetchError(
       `Failed to list GitHub skill files (${response.status})`,
     );
   }
 
-  const data = await response.json();
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch (error) {
+    throw new GitHubContentsApiFetchError(
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
+  }
   if (!Array.isArray(data)) {
     throw RequestError.invalidParams(
       undefined,
@@ -588,6 +644,9 @@ async function downloadGitHubSkillDirectory(
     githubUrl,
     directoryPath,
   ).catch((error) => {
+    if (!(error instanceof GitHubContentsApiFetchError)) {
+      throw error;
+    }
     debugLogger.warn(
       'GitHub API directory listing failed, falling back to archive download:',
       error,

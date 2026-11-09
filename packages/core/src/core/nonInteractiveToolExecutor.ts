@@ -82,10 +82,14 @@ export async function executeToolCall(
           : config.getChatRecordingService(),
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
-        if (options.onAllToolCallsComplete) {
-          await options.onAllToolCallsComplete(completedToolCalls);
+        try {
+          if (options.onAllToolCallsComplete) {
+            await options.onAllToolCallsComplete(completedToolCalls);
+          }
+          resolve(completedToolCalls[0].response);
+        } catch (error) {
+          reject(error);
         }
-        resolve(completedToolCalls[0].response);
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,

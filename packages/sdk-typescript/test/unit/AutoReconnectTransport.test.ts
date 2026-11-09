@@ -574,6 +574,65 @@ describe('AutoReconnectTransport', () => {
       expect(transport.supportsReplay).toBe(false);
       transport.dispose();
     });
+
+    it('dynamically reflects inner transport supportsReplay after fallback reconnect from WS to REST', async () => {
+      const wsInner = createMockTransport({
+        type: 'acp-ws',
+        supportsReplay: false,
+        fetch: vi.fn(async () => {
+          throw new DaemonTransportClosedError('ws closed');
+        }),
+      });
+      const mockFetch = vi.fn(
+        async () => new Response('{"ok":true}', { status: 200 }),
+      ) as unknown as typeof globalThis.fetch;
+
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial: wsInner,
+        fetch: mockFetch,
+      });
+      expect(transport.supportsReplay).toBe(false);
+
+      await transport.fetch('http://d/health', { method: 'GET' });
+      expect(transport.type).toBe('rest');
+      expect(transport.supportsReplay).toBe(true);
+      transport.dispose();
+    });
+
+    it('reconnects multiple times across repeated DaemonTransportClosedError drops in subscribeEvents', async () => {
+      let attempt = 0;
+      const makeDroppingTransport = (id: number) =>
+        createMockTransport({
+          subscribeEvents: vi.fn(async function* () {
+            yield { type: 'chunk', data: { id }, id, v: 1 } as DaemonEvent;
+            if (id < 3) {
+              throw new DaemonTransportClosedError(`drop-${id}`);
+            }
+          }),
+        });
+
+      const initial = makeDroppingTransport(1);
+      const factory = vi.fn(async () => {
+        attempt += 1;
+        return makeDroppingTransport(attempt + 1);
+      });
+
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial,
+        factory,
+      });
+
+      const received: number[] = [];
+      for await (const ev of transport.subscribeEvents('s1')) {
+        received.push((ev.data as { id: number }).id);
+      }
+
+      expect(received).toEqual([1, 2, 3]);
+      expect(factory).toHaveBeenCalledTimes(2);
+      transport.dispose();
+    });
   });
 
   // ---- Default behavior -------------------------------------------------

@@ -232,7 +232,7 @@ function resolveSkillInstallPath(
 ): string {
   const root = path.resolve(skillDir);
   const target = path.resolve(skillDir, relativePath);
-  if (target !== root && !target.startsWith(root + path.sep)) {
+  if (!target.startsWith(root + path.sep)) {
     throw RequestError.invalidParams(
       undefined,
       `Invalid skill file path: ${relativePath}`,

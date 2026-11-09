@@ -716,5 +716,47 @@ describe('HttpHookRunner', () => {
       await httpRunner.execute(config, HookEventName.PreToolUse, input);
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
+
+    it('does not mark once hook as executed when pre-flight validation or SSRF check fails', async () => {
+      const runner = new HttpHookRunner([ALLOWED_URL_PATTERN], false);
+      const config = createMockConfig({ once: true });
+      const input = createMockInput();
+
+      // First call fails DNS SSRF check (resolves to private IP while allowPrivateNetworkHosts is false)
+      resolveTo('10.0.0.1');
+      const first = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+      expect(first.success).toBe(false);
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // Second call with valid DNS resolution should still execute because the first call never reached in_flight
+      resolveTo('8.8.8.8');
+      mockFetch.mockResolvedValueOnce(okJson({ continue: true }));
+      const second = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+      expect(second.success).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('normalizes non-object JSON bodies and array hookSpecificOutput safely without throwing', async () => {
+      for (const body of [
+        null,
+        ['array'],
+        42,
+        'string',
+        { continue: true, hookSpecificOutput: ['not-an-object'] },
+      ]) {
+        mockFetch.mockResolvedValueOnce(okJson(body));
+        const res = await run();
+        expect(res.success).toBe(true);
+        expect(res.output?.hookSpecificOutput).toBeUndefined();
+      }
+    });
   });
 });

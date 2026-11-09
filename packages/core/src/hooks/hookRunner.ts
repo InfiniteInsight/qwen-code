@@ -992,14 +992,18 @@ export class HookRunner {
       );
 
       // Update registry with result
+      this.asyncRegistry.updateOutput(hookId, result.stdout, result.stderr);
       if (result.success) {
-        this.asyncRegistry.updateOutput(hookId, result.stdout, result.stderr);
         this.asyncRegistry.complete(hookId, result.output);
         debugLogger.debug(
           `Async hook completed successfully: ${hookId} (${hookName})`,
         );
       } else {
-        const error = result.error || new Error('Unknown error');
+        const fallbackMessage =
+          result.output?.reason ||
+          result.stderr?.trim() ||
+          `Hook exited with code ${result.exitCode ?? 1}`;
+        const error = result.error || new Error(fallbackMessage);
         this.asyncRegistry.fail(hookId, error);
         debugLogger.warn(
           `Async hook failed: ${hookId} (${hookName}): ${error.message}`,

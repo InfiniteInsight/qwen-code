@@ -548,9 +548,69 @@ export class SessionRouter {
     operation: SessionOperation,
   ): Promise<string> {
     const savedCwd = this.toCwd.get(savedSessionId) ?? input.cwd;
+    const managedMeta = this.toManagedMeta.get(savedSessionId);
+    const savedTarget = this.toTarget.get(savedSessionId) ?? {
+      channelName: input.channelName,
+      senderId: input.senderId,
+      chatId: input.chatId,
+      threadId: input.threadId,
+      isGroup: input.isGroup,
+      ...(input.messageRoute !== undefined
+        ? { messageRoute: input.messageRoute }
+        : {}),
+    };
     const loadWindow = this.beginSessionLoad();
     try {
       try {
+        if (managedMeta?.isolation === 'worktree') {
+          const turns = this.toTurns.get(savedSessionId);
+          const startedAt = this.toStartedAt.get(savedSessionId);
+          const managed = await this.loadManagedSession(
+            savedSessionId,
+            savedTarget,
+            managedMeta.workspaceCwd,
+            savedCwd,
+            'worktree',
+            true,
+            operation,
+          );
+          const loadedSessionId = managed.sessionId;
+          try {
+            this.assertOperationCurrent(operation);
+            const currentMapped = this.toSession.get(key);
+            if (
+              currentMapped !== savedSessionId &&
+              currentMapped !== loadedSessionId
+            ) {
+              this.invalidateOperation(operation);
+              this.assertOperationCurrent(operation);
+            }
+          } catch (error) {
+            if (![...this.toSession.values()].includes(loadedSessionId)) {
+              void this.bridge
+                .discardSession?.(loadedSessionId)
+                .catch(() => undefined);
+              this.toTarget.delete(loadedSessionId);
+              this.toCwd.delete(loadedSessionId);
+              this.toManagedMeta.delete(loadedSessionId);
+              this.liveSessionIds.delete(loadedSessionId);
+            }
+            throw error;
+          }
+          if (loadedSessionId !== savedSessionId) {
+            if (turns !== undefined) {
+              this.toTurns.set(loadedSessionId, turns);
+              this.toTurns.delete(savedSessionId);
+            }
+            if (startedAt !== undefined) {
+              this.toStartedAt.set(loadedSessionId, startedAt);
+              this.toStartedAt.delete(savedSessionId);
+            }
+          }
+          this.toManagedMeta.set(loadedSessionId, managedMeta);
+          this.persist();
+          return loadedSessionId;
+        }
         const loadedSessionId = await this.bridge.loadSession(
           savedSessionId,
           savedCwd,
@@ -585,6 +645,7 @@ export class SessionRouter {
           if (turns !== undefined) this.toTurns.set(loadedSessionId, turns);
           if (startedAt !== undefined)
             this.toStartedAt.set(loadedSessionId, startedAt);
+          if (managedMeta) this.toManagedMeta.set(loadedSessionId, managedMeta);
           this.persist();
         }
         this.liveSessionIds.add(loadedSessionId);
@@ -760,6 +821,7 @@ export class SessionRouter {
     expectedCwd: string = workspaceCwd,
     isolation: ManagedSessionIsolation = 'shared',
     allowSupersededRedirect = true,
+    activeOperation?: SessionOperation,
   ): Promise<{
     loaded: boolean;
     sessionId: string;
@@ -853,8 +915,13 @@ export class SessionRouter {
           expectedCwd,
           isolation,
           false,
+          activeOperation,
         );
-        this.healSupersededRoute(sessionId, redirected.sessionId);
+        this.healSupersededRoute(
+          sessionId,
+          redirected.sessionId,
+          activeOperation,
+        );
         return {
           loaded: redirected.loaded,
           sessionId: redirected.sessionId,
@@ -875,16 +942,34 @@ export class SessionRouter {
   private healSupersededRoute(
     oldSessionId: string,
     newSessionId: string,
+    activeOperation?: SessionOperation,
   ): void {
     let changed = false;
     for (const [key, mappedSessionId] of this.toSession) {
       if (mappedSessionId !== oldSessionId) continue;
-      this.invalidateRouteOperation(key);
+      if (
+        !activeOperation ||
+        this.creatingSessions.get(key) !== activeOperation
+      ) {
+        this.invalidateRouteOperation(key);
+      }
       this.toSession.set(key, newSessionId);
       changed = true;
     }
     changed = this.toTarget.delete(oldSessionId) || changed;
     changed = this.toCwd.delete(oldSessionId) || changed;
+    const turns = this.toTurns.get(oldSessionId);
+    if (turns !== undefined) {
+      this.toTurns.set(newSessionId, turns);
+      this.toTurns.delete(oldSessionId);
+      changed = true;
+    }
+    const startedAt = this.toStartedAt.get(oldSessionId);
+    if (startedAt !== undefined) {
+      this.toStartedAt.set(newSessionId, startedAt);
+      this.toStartedAt.delete(oldSessionId);
+      changed = true;
+    }
     const managedMeta = this.toManagedMeta.get(oldSessionId);
     if (managedMeta !== undefined) {
       // The replacement owns the same worktree, so the route's restore

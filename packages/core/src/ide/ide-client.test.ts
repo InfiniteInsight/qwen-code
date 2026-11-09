@@ -929,6 +929,107 @@ describe('IdeClient', () => {
       );
     });
   });
+
+  describe('openDiff, disconnect, and failed connect handling', () => {
+    it('resolves pending openDiff with rejected and releases diffMutex when disconnect() or onclose fires', async () => {
+      mockConfigFile({ port: '8080' });
+      readdir.mockResolvedValue([]);
+      mockClient.request.mockImplementation(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return { tools: [{ name: 'openDiff' }, { name: 'closeDiff' }] };
+        }
+        return { content: [] };
+      });
+
+      const ideClient = await connectClient();
+      expect(statusOf(ideClient)).toBe(IDEConnectionStatus.Connected);
+
+      const firstDiff = ideClient.openDiff('/test/workspace/a.ts', 'new-a');
+      await vi.waitFor(() =>
+        expect(mockClient.request).toHaveBeenCalledWith(
+          expect.objectContaining({ method: 'tools/call' }),
+          expect.anything(),
+          expect.anything(),
+        ),
+      );
+      // Disconnect while firstDiff is awaiting notification from IDE
+      await ideClient.disconnect();
+
+      await expect(firstDiff).resolves.toEqual({
+        status: 'rejected',
+        content: undefined,
+      });
+
+      // Subsequent openDiff must not hang on diffMutex; since client is now disconnected, it rejects immediately
+      await expect(
+        ideClient.openDiff('/test/workspace/b.ts', 'new-b'),
+      ).rejects.toThrow('IDE client is not connected.');
+    });
+
+    it('resolves pending openDiff with rejected when client.onclose fires unexpectedly', async () => {
+      mockConfigFile({ port: '8080' });
+      readdir.mockResolvedValue([]);
+      mockClient.request.mockImplementation(async (req: { method: string }) => {
+        if (req.method === 'tools/list') {
+          return { tools: [{ name: 'openDiff' }, { name: 'closeDiff' }] };
+        }
+        return { content: [] };
+      });
+
+      const ideClient = await connectClient();
+      const pendingDiff = ideClient.openDiff('/test/workspace/c.ts', 'new-c');
+      await vi.waitFor(() =>
+        expect(mockClient.request).toHaveBeenCalledWith(
+          expect.objectContaining({ method: 'tools/call' }),
+          expect.anything(),
+          expect.anything(),
+        ),
+      );
+
+      // Simulate unexpected transport close
+      mockClient.onclose?.();
+
+      await expect(pendingDiff).resolves.toEqual({
+        status: 'rejected',
+        content: undefined,
+      });
+    });
+
+    it('releases diffMutex on rejected openDiff without emitting unhandledRejection', async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const ideClient = await IdeClient.getInstance();
+        await expect(
+          ideClient.openDiff('/test/workspace/x.ts', 'content'),
+        ).rejects.toThrow('IDE client is not connected.');
+        // Let microtasks flush to verify no detached .finally() rejection occurs
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('preserves the detailed failure message when connect() fails and transport.close() triggers client.onclose', async () => {
+      mockConfigFile({ port: '8080' });
+      readdir.mockResolvedValue([]);
+      mockClient.connect.mockRejectedValue(new Error('ECONNREFUSED'));
+      mockHttpTransport.close.mockImplementation(async () => {
+        // Transport closing during failed connect must not trigger onclose handler
+        mockClient.onclose?.();
+      });
+
+      const ideClient = await connectClient();
+      expect(statusOf(ideClient)).toBe(IDEConnectionStatus.Disconnected);
+      expect(detailsOf(ideClient)).toContain(
+        'Failed to connect to IDE companion extension',
+      );
+    });
+  });
 });
 
 describe('getIdeServerHost', () => {

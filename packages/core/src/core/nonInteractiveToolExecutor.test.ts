@@ -754,4 +754,27 @@ describe('executeToolCall', () => {
       );
     },
   );
+
+  it('rejects executeToolCall when options.onAllToolCallsComplete throws or rejects', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'call-complete-err',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-err',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+
+    await expect(
+      executeToolCall(mockConfig, request, abortController.signal, {
+        onAllToolCallsComplete: async () => {
+          throw new Error('onAllToolCallsComplete boom');
+        },
+      }),
+    ).rejects.toThrow('onAllToolCallsComplete boom');
+  });
 });

@@ -51,7 +51,6 @@ export class AutoReconnectTransport implements DaemonTransport {
   /** Mutex: only one reconnect attempt at a time. */
   private reconnecting: Promise<void> | undefined;
 
-  readonly supportsReplay: boolean;
   readonly restFetch: typeof globalThis.fetch;
 
   constructor(opts: {
@@ -74,7 +73,10 @@ export class AutoReconnectTransport implements DaemonTransport {
     this.inner =
       opts.initial ??
       new RestSseTransport(this.baseUrl, this.token, this.fetchFn);
-    this.supportsReplay = this.inner.supportsReplay;
+  }
+
+  get supportsReplay(): boolean {
+    return this.inner.supportsReplay;
   }
 
   get type(): DaemonTransportType {
@@ -110,17 +112,24 @@ export class AutoReconnectTransport implements DaemonTransport {
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
 
-    try {
-      yield* this.inner.subscribeEvents(sessionId, opts);
-    } catch (err) {
-      if (err instanceof DaemonTransportClosedError && !this._disposed) {
-        await this.reconnect();
-        if (this._disposed) throw new DaemonTransportClosedError();
+    while (!this._disposed) {
+      try {
         yield* this.inner.subscribeEvents(sessionId, opts);
-      } else {
+        return;
+      } catch (err) {
+        if (
+          err instanceof DaemonTransportClosedError &&
+          !this._disposed &&
+          !opts.signal?.aborted
+        ) {
+          await this.reconnect();
+          if (this._disposed) throw new DaemonTransportClosedError();
+          continue;
+        }
         throw err;
       }
     }
+    throw new DaemonTransportClosedError();
   }
 
   dispose(): void {

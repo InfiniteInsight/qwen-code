@@ -803,4 +803,52 @@ describe('AcpWsTransport – route mapping used by fetch()', () => {
       });
     }
   });
+
+  it('closes the socket on pre-connect onerror and ignores late onopen after settle or dispose', async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    const sockets: ManualWebSocket[] = [];
+    class ManualWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: ((ev: { code?: number; reason?: string }) => void) | null = null;
+      closeCount = 0;
+      sendCount = 0;
+      constructor(_url: string) {
+        sockets.push(this);
+      }
+      send(_payload: string) {
+        this.sendCount += 1;
+      }
+      close() {
+        this.closeCount += 1;
+      }
+    }
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      value: ManualWebSocket,
+    });
+    const transport = new AcpWsTransport('ws://daemon/acp');
+    try {
+      const pending = transport.fetch('http://daemon/health', {
+        method: 'GET',
+      });
+      expect(sockets).toHaveLength(1);
+      // Fire onerror before connect completes
+      sockets[0].onerror?.();
+      await expect(pending).rejects.toThrow('WebSocket connection failed');
+      expect(sockets[0].closeCount).toBe(1);
+
+      // Firing a late onopen on the already-settled socket must close it and not send initialize
+      sockets[0].onopen?.();
+      expect(sockets[0].sendCount).toBe(0);
+      expect(sockets[0].closeCount).toBe(2);
+    } finally {
+      transport.dispose();
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: originalWebSocket,
+      });
+    }
+  });
 });

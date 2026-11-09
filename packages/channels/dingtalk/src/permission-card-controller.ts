@@ -119,13 +119,24 @@ export class PermissionCardController {
       record.delivered = true;
     } catch (error) {
       this.options.onError?.('permission card creation', error);
+      const finishTerminalProjection = record.finishTerminalProjection;
+      record.finishTerminalProjection = undefined;
+      if (finishTerminalProjection) {
+        await finishTerminalProjection(async () => {});
+      }
       if (record.state === 'terminal') return { kind: 'presented' };
       this.discard(record);
       return { kind: 'unsupported' };
     }
 
     if (record.state !== 'reserved') {
-      await this.projectTerminal(record);
+      const finishTerminalProjection = record.finishTerminalProjection;
+      record.finishTerminalProjection = undefined;
+      if (finishTerminalProjection) {
+        await finishTerminalProjection(() => this.projectTerminal(record));
+      } else {
+        await this.projectTerminal(record);
+      }
       return { kind: 'presented' };
     }
     record.state = 'pending';
@@ -231,9 +242,14 @@ export class PermissionCardController {
     record.state = 'terminal';
     record.terminalState = terminalState;
     this.removeRecord(record);
-    if (!record.delivered) return;
     const finishTerminalProjection = record.finishTerminalProjection;
     record.finishTerminalProjection = undefined;
+    if (!record.delivered) {
+      if (finishTerminalProjection) {
+        await finishTerminalProjection(async () => {});
+      }
+      return;
+    }
     if (finishTerminalProjection) {
       await finishTerminalProjection(() => this.projectTerminal(record));
     } else {
@@ -245,6 +261,11 @@ export class PermissionCardController {
     if (record.state === 'terminal') return;
     record.state = 'terminal';
     this.removeRecord(record);
+    const finishTerminalProjection = record.finishTerminalProjection;
+    record.finishTerminalProjection = undefined;
+    if (finishTerminalProjection) {
+      void finishTerminalProjection(async () => {});
+    }
   }
 
   private removeRecord(record: PermissionCardRecord): void {
@@ -260,6 +281,7 @@ export class PermissionCardController {
   }
 
   private reserveTerminalProjection(record: PermissionCardRecord): void {
+    if (!record.delivered || record.state === 'terminal') return;
     record.finishTerminalProjection ??= this.options.reserveRunProjection?.(
       record.context.runId,
     );

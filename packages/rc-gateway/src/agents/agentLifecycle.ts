@@ -140,6 +140,8 @@ export class AgentLifecycle {
 
   /** Daemon prompts still outstanding per agent (spawn prompt plus steers). */
   private readonly pendingPrompts = new Map<string, number>();
+  /** Agents that have completed at least one watched prompt in the active batch. */
+  private readonly completedPrompts = new Set<string>();
 
   /**
    * Drive the agent's status off one daemon prompt. An agent can have several
@@ -148,7 +150,8 @@ export class AgentLifecycle {
    * settle would end the agent while a steer turn is still running, and
    * `/message` and `/cancel` would then 409. A rejected turn fails the agent
    * at once. A prompt that only timed out waiting for the per-session slot
-   * (`queue_timeout`) never ran, so it says nothing about the agent.
+   * (`queue_timeout`) never ran, so it says nothing about the agent unless an
+   * earlier watched prompt in the batch already resolved.
    */
   watchPrompt(agentId: string, prompt: Promise<unknown>): Promise<void> {
     this.pendingPrompts.set(
@@ -164,13 +167,21 @@ export class AgentLifecycle {
     return prompt
       .then(
         async () => {
-          if (done() === 0) await this.onPromptSettled(agentId, 'completed');
+          this.completedPrompts.add(agentId);
+          if (done() === 0) {
+            this.completedPrompts.delete(agentId);
+            await this.onPromptSettled(agentId, 'completed');
+          }
         },
         async (err: unknown) => {
-          done();
+          const left = done();
           if ((err as { code?: unknown } | null)?.code === 'queue_timeout') {
+            if (left === 0 && this.completedPrompts.delete(agentId)) {
+              await this.onPromptSettled(agentId, 'completed');
+            }
             return;
           }
+          this.completedPrompts.delete(agentId);
           await this.onPromptSettled(agentId, 'failed');
         },
       )

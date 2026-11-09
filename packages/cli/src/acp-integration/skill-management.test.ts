@@ -12,6 +12,7 @@ import {
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const downloadSkillMock = vi.hoisted(() => vi.fn());
@@ -560,6 +561,221 @@ describe('managed Skill mutations', () => {
       }
     } finally {
       await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a downloaded file whose relativePath resolves to the skill directory root', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const manager = managerFor('pptx');
+    downloadSkillMock.mockResolvedValue({
+      skillContent: '---\nname: pptx\n---\nBody\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from('---\nname: pptx\n---\nBody\n'),
+        },
+        {
+          relativePath: '.',
+          content: Buffer.from('overwrite root'),
+        },
+      ],
+    });
+
+    try {
+      await expect(
+        installManagedSkill(configWith(manager), {
+          skill: {
+            slug: 'pptx',
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          },
+        }),
+      ).rejects.toThrow('Invalid skill file path: .');
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('validates tar entry bounds, path segments, depth, and file count in extractFilesFromTarGz', async () => {
+    const { extractFilesFromTarGz } = await vi.importActual<
+      typeof import('./skill-source-download.js')
+    >('./skill-source-download.js');
+
+    function rawTarEntry(
+      name: string,
+      content: string,
+      sizeField?: string,
+    ): Buffer {
+      const header = Buffer.alloc(512);
+      header.write(name, 0, 'utf8');
+      const size = Buffer.byteLength(content);
+      header.write(
+        sizeField ?? `${size.toString(8).padStart(11, '0')}\0`,
+        124,
+        'utf8',
+      );
+      header.write('0', 156, 'utf8');
+      const data = Buffer.alloc(Math.ceil(size / 512) * 512);
+      data.write(content, 0, 'utf8');
+      return Buffer.concat([header, data]);
+    }
+
+    // Truncated archive where declared size exceeds remaining buffer.
+    const truncatedHeader = Buffer.alloc(512);
+    truncatedHeader.write('repo-main/skills/SKILL.md', 0, 'utf8');
+    truncatedHeader.write(
+      `${(4096).toString(8).padStart(11, '0')}\0`,
+      124,
+      'utf8',
+    );
+    truncatedHeader.write('0', 156, 'utf8');
+    const truncatedArchive = new Uint8Array(gzipSync(truncatedHeader));
+    await expect(
+      extractFilesFromTarGz(truncatedArchive, 'skills'),
+    ).rejects.toThrow('Invalid or truncated skill archive');
+
+    // Non-octal / NaN size field.
+    const nanSizeArchive = new Uint8Array(
+      gzipSync(
+        Buffer.concat([
+          rawTarEntry('repo-main/skills/SKILL.md', 'hi', 'not-octal\0'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      extractFilesFromTarGz(nanSizeArchive, 'skills'),
+    ).rejects.toThrow('Invalid or truncated skill archive');
+
+    // Dot or dot-dot path segments.
+    const traversalArchive = new Uint8Array(
+      gzipSync(
+        Buffer.concat([
+          rawTarEntry('repo-main/skills/../evil.md', 'hi'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      extractFilesFromTarGz(traversalArchive, 'skills'),
+    ).rejects.toThrow('Invalid skill file path');
+
+    // Directory depth limit.
+    const deepArchive = new Uint8Array(
+      gzipSync(
+        Buffer.concat([
+          rawTarEntry('repo-main/skills/a/b/c/SKILL.md', 'hi'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      extractFilesFromTarGz(deepArchive, 'skills', { maxDirDepth: 2 }),
+    ).rejects.toThrow(
+      'Skill directory nesting exceeds the maximum allowed depth',
+    );
+
+    // File count limit.
+    const manyFilesArchive = new Uint8Array(
+      gzipSync(
+        Buffer.concat([
+          rawTarEntry('repo-main/skills/SKILL.md', 'one'),
+          rawTarEntry('repo-main/skills/two.md', 'two'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      extractFilesFromTarGz(manyFilesArchive, 'skills', { maxFileCount: 1 }),
+    ).rejects.toThrow('Skill directory contains too many files');
+  });
+
+  it('does not swallow validation RequestErrors from the GitHub Contents API and only falls back to archive on API fetch errors', async () => {
+    const { downloadSkill } = await vi.importActual<
+      typeof import('./skill-source-download.js')
+    >('./skill-source-download.js');
+
+    const directoryUrl =
+      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
+    const archiveUrl =
+      'https://codeload.github.com/anthropics/skills/tar.gz/main';
+
+    // 1. Disallowed download_url host in Contents API response must throw RequestError without calling archiveUrl.
+    const disallowedFetchMock = vi.fn(async (url: string) => {
+      if (url === directoryUrl) {
+        return {
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue([
+            {
+              name: 'SKILL.md',
+              path: 'skills/pptx/SKILL.md',
+              type: 'file',
+              download_url: 'https://evil.example.com/SKILL.md',
+            },
+          ]),
+        };
+      }
+      throw new Error(`Unexpected fetch to ${url}`);
+    });
+    vi.stubGlobal('fetch', disallowedFetchMock);
+
+    try {
+      await expect(
+        downloadSkill(
+          'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+        ),
+      ).rejects.toThrow('Skill sourceUrl host is not allowed');
+      expect(disallowedFetchMock).toHaveBeenCalledTimes(1);
+
+      // 2. HTTP 403 from Contents API falls back to archive download.
+      const header = Buffer.alloc(512);
+      const body = '---\nname: pptx\n---\nArchive body\n';
+      header.write('skills-main/skills/pptx/SKILL.md', 0, 'utf8');
+      header.write(
+        `${Buffer.byteLength(body).toString(8).padStart(11, '0')}\0`,
+        124,
+        'utf8',
+      );
+      header.write('0', 156, 'utf8');
+      const dataBlock = Buffer.alloc(512);
+      dataBlock.write(body, 0, 'utf8');
+      const gz = gzipSync(
+        Buffer.concat([header, dataBlock, Buffer.alloc(1024)]),
+      );
+
+      const fallbackFetchMock = vi.fn(async (url: string) => {
+        if (url === directoryUrl) {
+          return {
+            ok: false,
+            status: 403,
+            headers: { get: () => null },
+          };
+        }
+        if (url === archiveUrl) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            arrayBuffer: vi
+              .fn()
+              .mockResolvedValue(
+                gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength),
+              ),
+          };
+        }
+        throw new Error(`Unexpected fetch to ${url}`);
+      });
+      vi.stubGlobal('fetch', fallbackFetchMock);
+
+      const downloaded = await downloadSkill(
+        'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+      );
+      expect(downloaded.skillContent).toBe(body);
+      expect(fallbackFetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

@@ -176,8 +176,18 @@ export class MatrixStreamRouter {
         fenceTurn: this.seq(sessionId),
       };
       this.rooms.set(roomId, st);
-    } else {
+    } else if (st.sessionId !== sessionId) {
+      if (st.cancelTimer) {
+        st.cancelTimer();
+        st.cancelTimer = undefined;
+      }
+      st.buffer.take();
       st.sessionId = sessionId;
+      st.turnId = this.seq(sessionId);
+      st.posted = 0;
+      st.anchorEventId = null;
+      st.fence = NO_FENCE;
+      st.fenceTurn = this.seq(sessionId);
     }
     return st;
   }
@@ -185,18 +195,36 @@ export class MatrixStreamRouter {
   private flush(roomId: string): void {
     const st = this.rooms.get(roomId);
     if (!st || st.buffer.isEmpty()) return;
+    const flushSessionId = st.sessionId;
+    if (!this.cfg.roomsFor(flushSessionId).includes(roomId)) {
+      st.buffer.take();
+      st.fence = NO_FENCE;
+      return;
+    }
     const raw = st.buffer.take();
     // Advance the fence state at enqueue time so it follows the text order.
     const text = balanceFences(raw, st.fence);
     st.fence = fenceStateAfter(raw, st.fence);
     if (!text) return; // only the closing line of a block already closed
-    st.chain = st.chain.then(() => this.doFlush(st, text)).catch(() => {});
+    st.chain = st.chain
+      .then(() => this.doFlush(st, text, flushSessionId))
+      .catch(() => {});
   }
 
-  private async doFlush(st: RoomState, text: string): Promise<void> {
+  private async doFlush(
+    st: RoomState,
+    text: string,
+    flushSessionId: string,
+  ): Promise<void> {
+    if (
+      st.sessionId !== flushSessionId ||
+      !this.cfg.roomsFor(flushSessionId).includes(st.roomId)
+    ) {
+      return;
+    }
     this.resetTurnIfStale(st);
     st.posted += 1;
-    // 7th+ message of the turn → relate into the thread off the first message.
+    // 7th+ message of the turn -> relate into the thread off the first message.
     const useThread = st.posted > MX_MAX_ROOM_MESSAGES;
     const eventId = await this.cfg.poster.sendStream(st.roomId, {
       text,

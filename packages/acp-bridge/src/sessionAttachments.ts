@@ -913,13 +913,18 @@ export class SessionAttachmentStore {
           source.pendingDrainWaiters.push(resolve),
         );
       }
-      if (this.closed) throw new Error('Session attachment store is closed');
+      if (this.closed || this.closing || source.closed || source.closing) {
+        throw new Error('Session attachment store is closed');
+      }
       const sourceDirectories = [
         source.persistentDirectory ?? source.activeDirectory,
         source.persistentFallbackDirectory,
       ].filter((directory): directory is string => Boolean(directory));
       if (sourceDirectories.length === 0) return;
       const targetDirectory = await this.directory();
+      if (this.closed || this.closing || source.closed || source.closing) {
+        throw new Error('Session attachment store is closed');
+      }
       // Primary first so a name held by both roots resolves to the primary;
       // fallback entries copied later with the same name are skipped.
       const copiedNames = new Set<string>();

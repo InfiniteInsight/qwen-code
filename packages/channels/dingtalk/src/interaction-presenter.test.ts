@@ -2021,4 +2021,85 @@ describe('DingtalkInteractionPresenter', () => {
 
     expect(questionCreatesBeforeTerminalUpdate).toBe(2);
   });
+
+  it('does not deadlock run projection chain when an in-flight permission card is replaced before createAndDeliver resolves', async () => {
+    const { client, presenter } = createHarness();
+    presenter.startStatusCard('run-1');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledTimes(1),
+    );
+
+    const firstDelivery = deferred<void>();
+    let permissionCreates = 0;
+    vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
+      if (request.templateId === QUESTION_CARD_TEMPLATE_ID) {
+        permissionCreates += 1;
+        if (permissionCreates === 1) {
+          await firstDelivery.promise;
+        }
+      }
+    });
+
+    const firstPresent = presenter.presentPermission(permissionContext());
+    await vi.waitFor(() => expect(permissionCreates).toBe(1));
+
+    const secondPresent = presenter.presentPermission(permissionContext());
+    await secondPresent;
+
+    firstDelivery.resolve();
+    await firstPresent;
+
+    presenter.terminalizeRun('run-1', 'cancelled');
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            flowStatus: 3,
+          }),
+        }),
+      ),
+    );
+  });
+
+  it('does not deadlock run projection chain when an in-flight question card is cancelled or superseded before createAndDeliver resolves', async () => {
+    const { client, presenter } = createHarness();
+    presenter.startStatusCard('run-1');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledTimes(1),
+    );
+
+    const firstDelivery = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await firstDelivery.promise;
+    });
+
+    let settleFirst!: (reason: UserInputSettlementReason) => void;
+    const ctx = {
+      ...questionContext(),
+      onSettled(listener: (reason: UserInputSettlementReason) => void) {
+        settleFirst = listener;
+        return () => {};
+      },
+    };
+
+    const presentPromise = presenter.presentInput(ctx);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
+    );
+
+    settleFirst('cancelled');
+    firstDelivery.resolve();
+    await presentPromise;
+
+    presenter.terminalizeRun('run-1', 'cancelled');
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            flowStatus: 3,
+          }),
+        }),
+      ),
+    );
+  });
 });

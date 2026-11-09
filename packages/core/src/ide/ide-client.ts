@@ -263,7 +263,7 @@ export class IdeClient {
     const release = await this.acquireMutex();
 
     const promise = new Promise<DiffUpdateResult>((resolve, reject) => {
-      if (!this.client) {
+      if (!this.client || this.state.status !== IDEConnectionStatus.Connected) {
         // The promise will be rejected, and the finally block below will release the mutex.
         return reject(new Error('IDE client is not connected.'));
       }
@@ -306,9 +306,11 @@ export class IdeClient {
     });
 
     // Ensure the mutex is released only after the diff interaction is complete.
-    promise.finally(release);
-
-    return promise;
+    try {
+      return await promise;
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -422,19 +424,30 @@ export class IdeClient {
     }
   }
 
+  private rejectPendingDiffs(): void {
+    for (const resolver of this.diffResponses.values()) {
+      resolver({ status: 'rejected', content: undefined });
+    }
+    this.diffResponses.clear();
+  }
+
   async disconnect() {
     if (this.state.status === IDEConnectionStatus.Disconnected) {
       return;
     }
-    for (const filePath of this.diffResponses.keys()) {
-      await this.closeDiff(filePath);
+    try {
+      for (const filePath of this.diffResponses.keys()) {
+        await this.closeDiff(filePath);
+      }
+    } finally {
+      this.rejectPendingDiffs();
+      this.setState(
+        IDEConnectionStatus.Disconnected,
+        'IDE integration disabled. To enable it again, run /ide enable.',
+      );
+      this.client?.close();
+      this.client = undefined;
     }
-    this.diffResponses.clear();
-    this.setState(
-      IDEConnectionStatus.Disconnected,
-      'IDE integration disabled. To enable it again, run /ide enable.',
-    );
-    this.client?.close();
   }
 
   getCurrentIde(): IdeInfo | undefined {
@@ -950,6 +963,8 @@ export class IdeClient {
     );
     this.client.onerror = (_error) => {
       const errorMessage = _error instanceof Error ? _error.message : `_error`;
+      this.rejectPendingDiffs();
+      this.client = undefined;
       this.setState(
         IDEConnectionStatus.Disconnected,
         `IDE connection error. The connection was lost unexpectedly. Please try reconnecting by running /ide enable\n${errorMessage}`,
@@ -957,6 +972,8 @@ export class IdeClient {
       );
     };
     this.client.onclose = () => {
+      this.rejectPendingDiffs();
+      this.client = undefined;
       this.setState(
         IDEConnectionStatus.Disconnected,
         `IDE connection closed. To reconnect, run /ide enable.`,
@@ -1055,8 +1072,6 @@ export class IdeClient {
         },
       );
 
-      this.registerClientHandlers();
-
       await this.client.connect(transport);
       this.registerClientHandlers();
       await this.discoverTools();
@@ -1064,6 +1079,7 @@ export class IdeClient {
       return true;
     } catch (error) {
       debugLogger.debug(`HTTP connection to ${host}:${port} failed:`, error);
+      this.client = undefined;
       if (transport) {
         try {
           await transport.close();
@@ -1098,6 +1114,7 @@ export class IdeClient {
       this.setState(IDEConnectionStatus.Connected);
       return true;
     } catch (_error) {
+      this.client = undefined;
       if (transport) {
         try {
           await transport.close();

@@ -1923,6 +1923,114 @@ describe('SessionRouter', () => {
       expect(loadSession).toHaveBeenCalledTimes(1);
       expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
     });
+
+    it('re-attaches a lazy-restored worktree route via loadManagedSession using workspaceCwd and preserves toManagedMeta across superseded redirects', async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'qwen-sr-lazy-wt-'));
+      const persistPath = join(tempDir, 'sessions.json');
+      try {
+        const seedBridge = {
+          ...mockBridge(),
+          listSessions: vi.fn().mockReturnValue([
+            {
+              sessionId: 'old-session',
+              workspaceCwd: '/tmp',
+              hasActivePrompt: false,
+              worktree: {
+                slug: 'task',
+                path: worktreeTaskPath,
+                branch: 'task',
+              },
+              worktreeState: 'persisted-v1' as const,
+            },
+          ]),
+          newSession: vi.fn().mockResolvedValue('old-session'),
+        } satisfies ChannelAgentBridge;
+        const seedRouter = new SessionRouter(
+          seedBridge,
+          '/tmp',
+          'user',
+          persistPath,
+          { recoveryMode: 'lazy' },
+        );
+        await seedRouter.createManagedSession(target, '/tmp', 'worktree');
+        seedRouter.activateManagedSession(
+          'old-session',
+          target,
+          worktreeTaskPath,
+          { isolation: 'worktree', workspaceCwd: '/tmp' },
+        );
+
+        const loadSession = vi.fn(async (sessionId: string, cwd: string) => {
+          expect(cwd).toBe('/tmp');
+          if (sessionId === 'old-session') {
+            throw supersededError('replacement-session');
+          }
+          return sessionId;
+        });
+        const lazyBridge = {
+          ...mockBridge(),
+          listSessions: vi.fn().mockReturnValue([
+            {
+              sessionId: 'replacement-session',
+              workspaceCwd: '/tmp',
+              hasActivePrompt: false,
+              worktree: {
+                slug: 'task',
+                path: worktreeTaskPath,
+                branch: 'task',
+              },
+              worktreeState: 'persisted-v1' as const,
+            },
+          ]),
+          loadSession,
+        } satisfies ChannelAgentBridge;
+        const lazyRouter = new SessionRouter(
+          lazyBridge,
+          '/tmp',
+          'user',
+          persistPath,
+          { recoveryMode: 'lazy' },
+        );
+        expect(lazyRouter.restoreRoutes()).toEqual({
+          restored: 1,
+          dropped: 0,
+        });
+        expect(loadSession).not.toHaveBeenCalled();
+
+        await expect(
+          lazyRouter.resolve('ch', 'alice', 'chat1', undefined, '/tmp'),
+        ).resolves.toBe('replacement-session');
+
+        expect(loadSession.mock.calls.map(([id, cwd]) => [id, cwd])).toEqual([
+          ['old-session', '/tmp'],
+          ['replacement-session', '/tmp'],
+        ]);
+        expect(lazyRouter.getSessionCwd('replacement-session')).toBe(
+          worktreeTaskPath,
+        );
+        const persisted = JSON.parse(
+          readFileSync(persistPath, 'utf-8'),
+        ) as Record<
+          string,
+          {
+            sessionId: string;
+            isolation?: string;
+            workspaceCwd?: string;
+            cwd: string;
+          }
+        >;
+        expect(Object.values(persisted)).toEqual([
+          expect.objectContaining({
+            sessionId: 'replacement-session',
+            isolation: 'worktree',
+            workspaceCwd: '/tmp',
+            cwd: worktreeTaskPath,
+          }),
+        ]);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('removeSession', () => {
