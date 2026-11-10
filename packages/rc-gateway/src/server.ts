@@ -2641,7 +2641,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     recordActivity(workingDevice),
     subActorBan,
     subActorRateLimit,
-    createWorkspaceSettingsRoute(deps.daemon),
+    createWorkspaceSettingsRoute(deps.daemon, { audit }),
   );
   // GET /rc/workspace/env and /rc/workspace/preflight — the two diagnostics
   // reads (rc-workspace-diagnostics, #123). WRITE floor, like every other
@@ -2731,7 +2731,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     recordActivity(workingDevice),
     subActorBan,
     subActorRateLimit,
-    createWorkspaceToolsCatalogRoute(deps.daemon),
+    createWorkspaceToolsCatalogRoute(deps.daemon, { audit }),
   );
   app.post(
     '/rc/workspace/tools/:name/enable',

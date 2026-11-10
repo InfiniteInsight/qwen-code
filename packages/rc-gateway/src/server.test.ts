@@ -2466,8 +2466,18 @@ describe('resumable attachment uploads (#130) behind the gateway', () => {
     const reader = await tokenFor(url, pairing, [SESSION_READ]);
     const auth = { Authorization: `Bearer ${reader}` };
     const calls: Array<[string, string, BodyInit | undefined, string]> = [
-      ['POST', UP, JSON.stringify({ name: 'a.jpg', size: 4 }), 'application/json'],
-      ['PUT', `${UP}/u1/chunks/0`, new Uint8Array(4), 'application/octet-stream'],
+      [
+        'POST',
+        UP,
+        JSON.stringify({ name: 'a.jpg', size: 4 }),
+        'application/json',
+      ],
+      [
+        'PUT',
+        `${UP}/u1/chunks/0`,
+        new Uint8Array(4),
+        'application/octet-stream',
+      ],
       ['GET', `${UP}/u1`, undefined, 'application/json'],
       ['POST', `${UP}/u1/complete`, undefined, 'application/json'],
       ['DELETE', `${UP}/u1`, undefined, 'application/json'],
@@ -2489,7 +2499,9 @@ describe('resumable attachment uploads (#130) behind the gateway', () => {
   });
 
   it('holds begin to the configured size limit', async () => {
-    const { url, pairing } = await boot(undefined, { maxAttachmentBytes: 1000 });
+    const { url, pairing } = await boot(undefined, {
+      maxAttachmentBytes: 1000,
+    });
     const token = await tokenFor(url, pairing, [WRITE, SESSION_READ]);
     const begin = (size: number) =>
       fetch(url + UP, {
@@ -2519,7 +2531,11 @@ describe('resumable attachment uploads (#130) behind the gateway', () => {
       await fetch(url + UP, {
         method: 'POST',
         headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: 'IMG_7.jpg', mimeType: 'image/jpeg', size }),
+        body: JSON.stringify({
+          name: 'IMG_7.jpg',
+          mimeType: 'image/jpeg',
+          size,
+        }),
       })
     ).json()) as { uploadId: string; chunkSize: number; chunkCount: number };
     expect(begun.chunkSize).toBe(512 * 1024);
@@ -2553,7 +2569,9 @@ describe('resumable attachment uploads (#130) behind the gateway', () => {
     const rows = await pollAudit(auditPath, (r) =>
       r.some((x) => x.action === 'attachment_uploaded'),
     );
-    expect(rows.filter((x) => x.action === 'attachment_uploaded')).toHaveLength(1);
+    expect(rows.filter((x) => x.action === 'attachment_uploaded')).toHaveLength(
+      1,
+    );
   });
 });
 
@@ -2616,6 +2634,115 @@ describe('GET /session/:id/turns/current (#131) behind the gateway', () => {
     expect(other.status).toBe(403);
     expect(((await other.json()) as { code: string }).code).toBe(
       'session_locked',
+    );
+  });
+});
+
+describe('public/index.html regression checks (#469, #470, #471)', () => {
+  it('uses got.sessionCount and got.fileCount in #list-commands onclick (#469)', async () => {
+    const { url } = await boot();
+    const html = await (await fetch(`${url}/ui/index.html`)).text();
+    expect(html).not.toContain(
+      "sessionCmds.length +\n            ' session, '",
+    );
+    expect(html).toContain('got.sessionCount');
+    expect(html).toContain('got.fileCount');
+  });
+
+  it('prioritizes v.row.messages and running status over stale sub.done in agentView and agentSteps (#470)', async () => {
+    const { url } = await boot();
+    const html = await (await fetch(`${url}/ui/index.html`)).text();
+    const strOr = (v: unknown, fb: string) =>
+      typeof v === 'string' && v.trim() ? v : fb;
+    const agentsState = { readAt: 1000, liveSubs: new Set<string>() };
+    const agentStreamLive = (item: { toolCallId?: string } | null) =>
+      !!(item && item.toolCallId && agentsState.liveSubs.has(item.toolCallId));
+    const agentRef = (r: { toolUseId?: string; id?: string } | null) =>
+      (r && (r.toolUseId || r.id)) || '';
+
+    const viewMatch = html.match(
+      /function agentView\(row, item\) \{[\s\S]*?\n {6}\}/,
+    );
+    const stepsMatch = html.match(
+      /function agentSteps\(v\) \{[\s\S]*?\n {6}\}/,
+    );
+    expect(viewMatch).not.toBeNull();
+    expect(stepsMatch).not.toBeNull();
+
+    const evalView = new Function(
+      'agentsState',
+      'agentStreamLive',
+      'agentRef',
+      'strOr',
+      `return (${viewMatch![0]});`,
+    )(agentsState, agentStreamLive, agentRef, strOr);
+    const evalSteps = new Function('strOr', `return (${stepsMatch![0]});`)(
+      strOr,
+    );
+
+    // 1. A resumed subagent (row.status === 'running') with stale sub.done === true
+    //    must report state === 'running' and running === true.
+    const resumedView = evalView(
+      {
+        id: 'a1',
+        toolUseId: 'tu_1',
+        status: 'running',
+        prompt: 'initial task',
+        messages: [
+          { role: 'user', content: 'initial task' },
+          { role: 'assistant', content: 'thinking...', thought: true },
+          {
+            role: 'tool_call',
+            callId: 'c1',
+            toolName: 'read_file',
+            description: 'a.ts',
+          },
+          { role: 'tool_result', callId: 'c1', success: true },
+          { role: 'assistant', content: 'First answer' },
+          { role: 'user', content: 'Follow-up question' },
+        ],
+      },
+      {
+        toolCallId: 'tu_1',
+        sub: {
+          startedAt: 100,
+          endedAt: 500,
+          done: true,
+          failed: false,
+          type: 'explore',
+          text: 'First answer',
+          tools: [
+            { id: 'c1', label: 'read_file: a.ts', status: 'completed' },
+            { id: 'c2', label: 'grep: foo', status: 'running' },
+          ],
+        },
+      },
+    );
+    expect(resumedView.state).toBe('running');
+    expect(resumedView.running).toBe(true);
+
+    // 2. agentSteps(v) must return v.row.messages (including thought and follow-up
+    //    user messages) plus any unseen in-flight sub.tools (c2), rather than returning
+    //    early from v.item.sub and dropping follow-up user messages and thoughts.
+    const out = evalSteps(resumedView);
+    expect(out.from).toBe('transcript');
+    expect(out.steps).toEqual([
+      { kind: 'thought', text: 'thinking...', streaming: false },
+      { kind: 'tool', label: 'read_file: a.ts', status: 'completed' },
+      { kind: 'msg', text: 'First answer', streaming: false },
+      { kind: 'user', text: 'Follow-up question' },
+      { kind: 'tool', label: 'grep: foo', status: 'running' },
+    ]);
+  });
+
+  it('preserves numeric cursor 0 in resumeConversation when calling startWatch (#471)', async () => {
+    const { url } = await boot();
+    const html = await (await fetch(`${url}/ui/index.html`)).text();
+    expect(html).not.toContain(
+      'startWatch(j.sessionId, lastSeenEventId, title);',
+    );
+    expect(html).toContain(
+      "typeof from === 'number' && Number.isFinite(from) && from >= 0",
     );
   });
 });

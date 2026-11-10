@@ -623,6 +623,7 @@ const MAX_EARLY_EVENT_SESSIONS = 64;
 const MAX_EARLY_EVENTS_PER_SESSION = 32;
 const MAX_SUGGESTION_LENGTH = 500;
 const EARLY_EVENT_TTL_MS = 60_000;
+const DEFAULT_ARTIFACT_EXTRACTION_MAX_PER_BATCH = 400;
 
 // Known approval-mode ids accepted on the in-session `current_mode_update`
 // demux path. An id outside this set is dropped before it fans out to SSE
@@ -1286,6 +1287,8 @@ export class BridgeClient implements Client {
       typeof originalTs === 'number' && Number.isFinite(originalTs)
         ? originalTs
         : undefined;
+    const canExtractForPendingRestore =
+      !entry && this.inFlightRestoreIds.has(params.sessionId);
     const artifacts = entry?.artifacts
       ? extractSessionUpdateArtifacts(
           params,
@@ -1293,7 +1296,22 @@ export class BridgeClient implements Client {
           entry.artifacts.inputBatchLimit(),
           entry.sessionId,
         )
-      : [];
+      : canExtractForPendingRestore
+        ? extractSessionUpdateArtifacts(
+            params,
+            updateMeta,
+            DEFAULT_ARTIFACT_EXTRACTION_MAX_PER_BATCH,
+            params.sessionId,
+          )
+        : [];
+    const trustedPublisher = isTrustedArtifactToolUpdate(params, updateMeta);
+    if (canExtractForPendingRestore && artifacts.length > 0) {
+      this.bufferPendingRestoreArtifacts(params.sessionId, {
+        artifacts,
+        options: { trustedPublisher },
+        turn,
+      });
+    }
     const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
     frames.push({
       type: 'session_update',
@@ -1304,7 +1322,7 @@ export class BridgeClient implements Client {
     return {
       frames,
       artifacts,
-      trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+      trustedPublisher,
       turn,
     };
   }
@@ -1467,6 +1485,15 @@ export class BridgeClient implements Client {
 
   /** Restore ownership for `sessionUpdate` and artifact demultiplexing. */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Artifact batches arriving for a session while `markRestoreInFlight` is
+   * active and before `createSessionEntry` registers the session entry.
+   */
+  private readonly pendingRestoreArtifactBatches = new Map<
+    string,
+    BridgeClientDeferredArtifactBatch[]
+  >();
 
   /**
    * Registrations allowed to buffer early extended notifications through an
@@ -3024,6 +3051,9 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     if (
       !this.ownsSession(sessionId) &&
       !this.inFlightRestoreIds.has(sessionId)
@@ -3034,7 +3064,7 @@ export class BridgeClient implements Client {
       return;
     }
     const entry = this.resolveEntry(sessionId);
-    if (!entry) {
+    if (!entry && !this.inFlightRestoreIds.has(sessionId)) {
       writeStderrLine(
         `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_found`,
       );
@@ -3052,8 +3082,9 @@ export class BridgeClient implements Client {
         : undefined;
     const artifacts = extractCappedArtifactInputs(
       rawArtifacts,
-      entry.artifacts.inputBatchLimit(),
-      entry.sessionId,
+      entry?.artifacts.inputBatchLimit() ??
+        DEFAULT_ARTIFACT_EXTRACTION_MAX_PER_BATCH,
+      entry?.sessionId ?? sessionId,
       'hook',
       (artifact) => ({
         ...artifactPayloadFields(artifact),
@@ -3063,6 +3094,13 @@ export class BridgeClient implements Client {
         toolCallId,
       }),
     );
+    if (!entry) {
+      this.bufferPendingRestoreArtifacts(sessionId, {
+        artifacts,
+        turn: {},
+      });
+      return;
+    }
     const turn = currentTurnMetadata(entry);
     await this.upsertAndPublishArtifacts(entry, artifacts, undefined, turn);
   }
@@ -3471,6 +3509,7 @@ export class BridgeClient implements Client {
     // Purge any frames already buffered for this id — they're now
     // stale by definition (their session is dead).
     this.earlyEvents.delete(sessionId);
+    this.pendingRestoreArtifactBatches.delete(sessionId);
   }
 
   /**
@@ -3521,6 +3560,7 @@ export class BridgeClient implements Client {
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+    this.pendingRestoreArtifactBatches.delete(sessionId);
     this.clearSessionRegistrationInFlight(sessionId);
   }
 
@@ -3533,6 +3573,75 @@ export class BridgeClient implements Client {
     this.inFlightSessionRegistrationIds.delete(sessionId);
     this.abandonedRestoreIds.add(sessionId);
     this.earlyEvents.delete(sessionId);
+    this.pendingRestoreArtifactBatches.delete(sessionId);
+  }
+
+  private bufferPendingRestoreArtifacts(
+    sessionId: string,
+    batch: BridgeClientDeferredArtifactBatch,
+  ): void {
+    if (
+      batch.artifacts.length === 0 ||
+      this.abandonedRestoreIds.has(sessionId) ||
+      !this.inFlightRestoreIds.has(sessionId)
+    ) {
+      return;
+    }
+    let batches = this.pendingRestoreArtifactBatches.get(sessionId);
+    if (!batches) {
+      batches = [];
+      this.pendingRestoreArtifactBatches.set(sessionId, batches);
+    }
+    batches.push({
+      artifacts: [...batch.artifacts],
+      options: batch.options,
+      turn: batch.turn,
+    });
+    let totalInputs = batches.reduce(
+      (sum, item) => sum + item.artifacts.length,
+      0,
+    );
+    while (totalInputs > DEFAULT_ARTIFACT_EXTRACTION_MAX_PER_BATCH) {
+      const first = batches[0];
+      if (!first) break;
+      const overflow = totalInputs - DEFAULT_ARTIFACT_EXTRACTION_MAX_PER_BATCH;
+      if (first.artifacts.length <= overflow) {
+        batches.shift();
+        totalInputs -= first.artifacts.length;
+      } else {
+        first.artifacts = first.artifacts.slice(overflow);
+        totalInputs -= overflow;
+      }
+    }
+  }
+
+  takePendingRestoreArtifactInputs(sessionId: string): SessionArtifactInput[] {
+    const batches = this.pendingRestoreArtifactBatches.get(sessionId);
+    if (!batches) return [];
+    this.pendingRestoreArtifactBatches.delete(sessionId);
+    return batches.flatMap((batch) => batch.artifacts);
+  }
+
+  async drainPendingRestoreArtifacts(
+    entry: BridgeClientSessionEntry,
+    options: { includeToolUpdates?: boolean } = {},
+  ): Promise<void> {
+    const batches = this.pendingRestoreArtifactBatches.get(entry.sessionId);
+    if (!batches || batches.length === 0) return;
+    this.pendingRestoreArtifactBatches.delete(entry.sessionId);
+    const includeToolUpdates = options.includeToolUpdates ?? true;
+    for (const batch of batches) {
+      const artifacts = includeToolUpdates
+        ? batch.artifacts
+        : batch.artifacts.filter((artifact) => artifact.source !== 'tool');
+      if (artifacts.length === 0) continue;
+      await this.upsertAndPublishArtifacts(
+        entry,
+        artifacts,
+        batch.options,
+        batch.turn,
+      );
+    }
   }
 
   /**

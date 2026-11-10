@@ -3187,6 +3187,157 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('buffers artifact-event notifications and stream-mode tool-update artifacts during in-flight restore before entry exists and ingests them when drained', async () => {
+    const sessionId = 'sess:restore-pre-entry-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const pendingPublish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    let entryRegistered = false;
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) =>
+        entryRegistered && sid === sessionId ? fakeEntry : undefined) as never,
+      ((sid: string) =>
+        sid === sessionId
+          ? ({ publish: pendingPublish } as never)
+          : undefined) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+    client.markRestoreInFlight(sessionId);
+    try {
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        hookEventName: 'PostToolUse',
+        toolName: 'run_shell_command',
+        toolCallId: 'call-hook-1',
+        artifacts: [
+          {
+            title: 'Early restore hook artifact',
+            url: 'https://example.com/early-restore-hook',
+          },
+        ],
+      });
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-tool-1',
+          status: 'completed',
+          _meta: {
+            toolName: 'publish_artifact',
+            artifacts: [
+              {
+                title: 'Stream restore tool artifact',
+                url: 'https://example.com/stream-restore-tool',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(upsertMany).not.toHaveBeenCalled();
+      expect(pendingPublish).toHaveBeenCalledTimes(1);
+
+      entryRegistered = true;
+      await client.drainPendingRestoreArtifacts(fakeEntry as never);
+
+      expect(upsertMany).toHaveBeenCalledTimes(2);
+      expect(upsertMany).toHaveBeenNthCalledWith(
+        1,
+        [
+          expect.objectContaining({
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            toolName: 'run_shell_command',
+            toolCallId: 'call-hook-1',
+            title: 'Early restore hook artifact',
+            url: 'https://example.com/early-restore-hook',
+          }),
+        ],
+        undefined,
+      );
+      expect(upsertMany).toHaveBeenNthCalledWith(
+        2,
+        [
+          expect.objectContaining({
+            source: 'tool',
+            toolName: 'publish_artifact',
+            toolCallId: 'call-tool-1',
+            title: 'Stream restore tool artifact',
+            url: 'https://example.com/stream-restore-tool',
+          }),
+        ],
+        { trustedPublisher: false },
+      );
+      expect(client.takePendingRestoreArtifactInputs(sessionId)).toEqual([]);
+    } finally {
+      client.clearRestoreInFlight(sessionId);
+    }
+  });
+
+  it('clears buffered restore artifacts on clearRestoreInFlight and markRestoreAbandoned', async () => {
+    const sessionId = 'sess:restore-abandoned-artifacts';
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+
+    client.markRestoreInFlight(sessionId);
+    await client.extNotification('qwen/notify/session/artifact-event', {
+      sessionId,
+      artifacts: [
+        {
+          title: 'Cleared on settle',
+          url: 'https://example.com/cleared',
+        },
+      ],
+    });
+    client.clearRestoreInFlight(sessionId);
+    expect(client.takePendingRestoreArtifactInputs(sessionId)).toEqual([]);
+
+    client.markRestoreInFlight(sessionId);
+    await client.extNotification('qwen/notify/session/artifact-event', {
+      sessionId,
+      artifacts: [
+        {
+          title: 'Cleared on abandon',
+          url: 'https://example.com/abandoned',
+        },
+      ],
+    });
+    client.markRestoreAbandoned(sessionId);
+    expect(client.takePendingRestoreArtifactInputs(sessionId)).toEqual([]);
+  });
+
   it('logs and drops artifact events when store ingestion fails', async () => {
     const sessionId = 'sess:artifact-error';
     const publish = vi.fn().mockReturnValue(true);

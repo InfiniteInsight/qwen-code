@@ -9336,6 +9336,7 @@ export function createSessionControlPlane(
           );
           throw error;
         }
+        await ci.client.drainPendingRestoreArtifacts(racedEntry);
         const restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
           racedEntry,
           restoreAskUserQuestionHint,
@@ -9492,6 +9493,12 @@ export function createSessionControlPlane(
             ingestArtifacts: true,
           });
         }
+        await ci.client.drainPendingRestoreArtifacts(entry, {
+          includeToolUpdates:
+            action !== 'load' ||
+            restoredArtifactSnapshot === undefined ||
+            artifactRestoreFailed,
+        });
         assertAttachableSessionEntry(req.sessionId, entry);
         clientId = registerClient(entry, req.clientId);
         let previousApprovalMode: ApprovalMode | undefined;

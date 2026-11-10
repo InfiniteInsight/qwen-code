@@ -12,6 +12,7 @@ import type {
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface this route file needs. */
 export type WorkspaceToolsDaemon = Pick<
@@ -122,6 +123,7 @@ function sendMappedToolsError(
     });
     return;
   }
+  if (relayDaemonAuthFailure(res, err, 'workspace_tools')) return;
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -239,6 +241,9 @@ export function createWorkspaceToolToggleRoute(
 ): RequestHandler {
   return async (req, res) => {
     try {
+      if (deps.audit && res.app?.locals && !res.app.locals.audit) {
+        res.app.locals.audit = deps.audit;
+      }
       const body = (req.body ?? {}) as {
         enabled?: unknown;
         workspace?: unknown;
@@ -335,8 +340,12 @@ export function createWorkspaceToolToggleRoute(
  */
 export function createWorkspaceToolsCatalogRoute(
   daemon: Pick<SessionDaemon, 'workspaceToolsCatalog' | 'workspaceSettings'>,
+  deps: WorkspaceToolsRouteDeps = {},
 ): RequestHandler {
   return async (req: Request, res: Response) => {
+    if (deps.audit && res.app?.locals && !res.app.locals.audit) {
+      res.app.locals.audit = deps.audit;
+    }
     const target = parseWorkspaceTarget(req.query.workspace);
     if (!target.ok) {
       res.status(400).json({

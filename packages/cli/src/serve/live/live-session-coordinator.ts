@@ -949,6 +949,7 @@ export class LiveSessionCoordinator {
               ) {
                 context.delegateAdmissions.delete(trackedInputItemId);
               }
+              this.syncCallStateAfterDelegateSettlement(context);
               this.maybeFinishGracefulStop(context);
             });
           return;
@@ -1290,6 +1291,22 @@ export class LiveSessionCoordinator {
     }
   }
 
+  private syncCallStateAfterDelegateSettlement(context: LiveCallContext): void {
+    if (
+      !this.isActive(context) ||
+      context.stopping ||
+      context.delegatesInFlight > 0 ||
+      context.responseInFlight ||
+      context.speechInProgress ||
+      context.inputCommitPending ||
+      context.inputAwaitingResponse
+    ) {
+      return;
+    }
+    this.options.host.setStatusText(context.epoch);
+    this.options.host.setCallState(context.epoch, 'listening');
+  }
+
   private maybeFinishGracefulStop(context: LiveCallContext): void {
     if (
       !this.isActive(context) ||
@@ -1401,9 +1418,9 @@ export class LiveSessionCoordinator {
         .setSessionLiveConversationActive(context.coordinator.sessionId, false)
         .catch(() => undefined);
     }
-    this.closeContextNow(context);
     const finish = context.finishStop;
     context.finishStop = undefined;
+    this.closeContextNow(context);
     finish({ error });
   }
 
@@ -1470,8 +1487,16 @@ export class LiveSessionCoordinator {
       ) {
         return false;
       }
+      if (
+        !context.stopping &&
+        !context.responseInFlight &&
+        !context.speechInProgress
+      ) {
+        this.options.host.setStatusText(context.epoch);
+        this.options.host.setCallState(context.epoch, 'thinking');
+      }
       let admitted = false;
-      await this.runCoordinatorTurn(
+      const result = await this.runCoordinatorTurn(
         context,
         locator,
         event.request,
@@ -1481,15 +1506,29 @@ export class LiveSessionCoordinator {
           if (notifyAdmission) onPromptAdmitted();
         },
         (message) => {
-          if (this.isCurrentSocket(context, generation)) {
+          if (
+            this.isCurrentSocket(context, generation) &&
+            context.realtime === source
+          ) {
             source.sendBackendContext(message);
           }
         },
       );
+      if (
+        !result.text.trim() &&
+        this.isCurrentSocket(context, generation) &&
+        context.realtime === source
+      ) {
+        source.sendBackendContext(
+          result.stopReason === 'cancelled'
+            ? 'The Qwen Code turn was cancelled.'
+            : 'The Qwen Code turn completed with no visible reply.',
+        );
+      }
       return admitted;
     };
     // `queueOnly`: if the turn already settled, promotion would run this
-    // steering as a bare prompt no coordinator collector subscribes to — the
+    // steering as a bare prompt no coordinator collector subscribes to -- the
     // response would never reach the Realtime source, and no turn deadline
     // would apply. Rejecting the idle case keeps the `runCoordinatorTurn`
     // fallback in charge of the next turn.
@@ -1501,16 +1540,40 @@ export class LiveSessionCoordinator {
       {
         queueOnly: true,
         onSettledWithoutDrain: () => {
-          void runAsNextTurn(false).catch((error: unknown) => {
-            if (
-              this.isCurrentSocket(context, generation) &&
-              context.realtime === source
-            ) {
-              source.sendBackendContext(
-                `The Qwen Code agent could not complete the request: ${errorMessage(error)}`,
+          if (
+            !this.isCurrentSocket(context, generation) ||
+            context.realtime !== source
+          ) {
+            return;
+          }
+          context.delegatesInFlight += 1;
+          if (
+            !context.stopping &&
+            !context.responseInFlight &&
+            !context.speechInProgress
+          ) {
+            this.options.host.setStatusText(context.epoch);
+            this.options.host.setCallState(context.epoch, 'thinking');
+          }
+          void runAsNextTurn(false)
+            .catch((error: unknown) => {
+              if (
+                this.isCurrentSocket(context, generation) &&
+                context.realtime === source
+              ) {
+                source.sendBackendContext(
+                  `The Qwen Code agent could not complete the request: ${errorMessage(error)}`,
+                );
+              }
+            })
+            .finally(() => {
+              context.delegatesInFlight = Math.max(
+                0,
+                context.delegatesInFlight - 1,
               );
-            }
-          });
+              this.syncCallStateAfterDelegateSettlement(context);
+              this.maybeFinishGracefulStop(context);
+            });
         },
       },
     );
@@ -1520,7 +1583,19 @@ export class LiveSessionCoordinator {
     }
 
     await activeHandoff.turnComplete;
-    return runAsNextTurn(true);
+    try {
+      return await runAsNextTurn(true);
+    } catch (error) {
+      if (
+        this.isCurrentSocket(context, generation) &&
+        context.realtime === source
+      ) {
+        source.sendBackendContext(
+          `The Qwen Code agent could not complete the request: ${errorMessage(error)}`,
+        );
+      }
+      return false;
+    }
   }
 
   private async handleDelegate(

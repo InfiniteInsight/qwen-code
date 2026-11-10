@@ -1176,3 +1176,159 @@ it.each([
     });
   },
 );
+
+it('prefers parent transcript terminal status in resolve and does not duplicate committed stream chunks on second load', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
+  tempDirs.push(dir);
+  const workspaceCwd = path.join(dir, 'workspace');
+  const runtimeBaseDir = path.join(dir, 'runtime');
+  await fs.mkdir(workspaceCwd, { recursive: true });
+  const projectDir = Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
+    new Storage(workspaceCwd).getProjectDir(),
+  );
+  const chatsDir = path.join(projectDir, 'chats');
+  await fs.mkdir(chatsDir, { recursive: true });
+  const parentSessionId = 'parent-session';
+  const toolCallId = 'call-terminal';
+  const outputFile = path.join(dir, 'agent.jsonl');
+
+  await fs.writeFile(
+    path.join(chatsDir, `${parentSessionId}.jsonl`),
+    `${JSON.stringify({
+      uuid: 'parent-call',
+      parentUuid: null,
+      sessionId: parentSessionId,
+      timestamp: new Date(1_000).toISOString(),
+      type: 'assistant',
+      cwd: workspaceCwd,
+      version: 'test',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: toolCallId,
+              name: 'agent',
+              args: { description: 'subagent task' },
+            },
+          },
+        ],
+      },
+    })}\n${JSON.stringify({
+      uuid: 'parent-result',
+      parentUuid: 'parent-call',
+      sessionId: parentSessionId,
+      timestamp: new Date(2_000).toISOString(),
+      type: 'tool_result',
+      cwd: workspaceCwd,
+      version: 'test',
+      toolCallResult: {
+        callId: toolCallId,
+        status: 'error',
+        resultDisplay: {
+          type: 'task_execution',
+          status: 'cancelled',
+          executionSummary: {
+            totalDurationMs: 1_234,
+            totalTokens: 99,
+          },
+        },
+      },
+    })}\n`,
+  );
+
+  await fs.writeFile(
+    outputFile,
+    `${JSON.stringify(record('u1', null, 'user', 'start task'))}\n`,
+  );
+  await fs.writeFile(
+    `${outputFile}.stream`,
+    `${JSON.stringify({
+      v: 1,
+      runId: 'run-1',
+      round: 1,
+      text: 'round one stream delta',
+      thought: false,
+      timestamp: 5_000,
+    })}\n`,
+  );
+
+  let reportedStatus: 'running' | 'paused' = 'running';
+  const runtime = {
+    workspaceId: 'workspace-issue-465',
+    workspaceCwd,
+    sessionRuntimeBaseDir: runtimeBaseDir,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async () => ({
+        v: 1 as const,
+        sessionId: parentSessionId,
+        now: Date.now(),
+        tasks: [
+          {
+            kind: 'agent' as const,
+            id: 'agent-issue-465',
+            label: 'subagent task',
+            description: 'subagent task',
+            status: reportedStatus,
+            startTime: 1_000,
+            runtimeMs: 1,
+            outputFile,
+            isBackgrounded: false,
+            toolUseId: toolCallId,
+          },
+        ],
+      }),
+    },
+  } as unknown as WorkspaceRuntime;
+
+  const sessions = new VirtualSubagentSessions();
+  const initialResolved = await sessions.resolve(
+    runtime,
+    parentSessionId,
+    toolCallId,
+  );
+  expect(initialResolved?.status).toBe('running');
+
+  const firstLoad = await sessions.load(runtime, initialResolved!.sessionId);
+  expect(JSON.stringify(firstLoad?.compactedReplay)).toContain(
+    'round one stream delta',
+  );
+
+  await fs.appendFile(
+    outputFile,
+    `${JSON.stringify({
+      ...record('a1', 'u1', 'assistant', 'round one canonical reply'),
+      timestamp: new Date(2_000).toISOString(),
+    })}\n`,
+  );
+  await fs.appendFile(
+    `${outputFile}.stream`,
+    `${JSON.stringify({
+      v: 1,
+      runId: 'run-1',
+      round: 2,
+      text: 'round two live stream',
+      thought: false,
+      timestamp: 6_000,
+    })}\n`,
+  );
+
+  const secondLoad = await sessions.load(runtime, initialResolved!.sessionId);
+  const secondLoadJson = JSON.stringify(secondLoad?.compactedReplay);
+  expect(secondLoadJson).toContain('round one canonical reply');
+  expect(secondLoadJson).toContain('round two live stream');
+  expect(secondLoadJson).not.toContain('round one stream delta');
+
+  reportedStatus = 'paused';
+  const resolvedAfterFinish = await sessions.resolve(
+    runtime,
+    parentSessionId,
+    toolCallId,
+  );
+  expect(resolvedAfterFinish).toMatchObject({
+    status: 'cancelled',
+    durationMs: 1_234,
+    totalTokens: 99,
+  });
+});

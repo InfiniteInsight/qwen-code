@@ -14816,7 +14816,20 @@
         const sub = item && item.sub;
         const now = Date.now();
         let state;
-        if (sub && sub.done) {
+        const streamSettledSinceRead = !!(
+          sub &&
+          sub.done &&
+          typeof sub.endedAt === 'number' &&
+          agentsState.readAt > 0 &&
+          sub.endedAt > agentsState.readAt
+        );
+        if (
+          row &&
+          (row.status === 'running' || row.status === 'paused') &&
+          !streamSettledSinceRead
+        ) {
+          state = row.status;
+        } else if (sub && sub.done) {
           state =
             row && row.status !== 'running' && row.status !== 'paused'
               ? row.status
@@ -15316,27 +15329,33 @@
       function agentSteps(v) {
         const steps = [];
         const sub = v.item && v.item.sub;
+        const subSteps = [];
         if (sub) {
           const text = sub.text || '';
           let at = 0;
           const words = (from, to) => {
             const t = text.slice(from, to);
-            if (t.trim()) steps.push({ kind: 'msg', text: t.trim() });
+            if (t.trim()) subSteps.push({ kind: 'msg', text: t.trim() });
           };
           for (const t of sub.tools || []) {
             if (typeof t.textAt === 'number' && t.textAt > at) {
               words(at, Math.min(t.textAt, text.length));
               at = Math.min(t.textAt, text.length);
             }
-            steps.push({ kind: 'tool', label: t.label || 'tool', status: t.status || '' });
+            subSteps.push({
+              kind: 'tool',
+              label: t.label || 'tool',
+              status: t.status || '',
+            });
           }
           words(at, text.length);
         }
-        if (steps.length) return { steps, from: 'stream' };
         const msgs =
           v.row && Array.isArray(v.row.messages) ? v.row.messages : [];
         if (msgs.length) {
           const resultsByCallId = new Map();
+          const seenToolIds = new Set();
+          let hasAgentTurnInMsgs = false;
           for (const m of msgs) {
             if (m && m.role === 'tool_result' && m.callId) {
               resultsByCallId.set(
@@ -15361,6 +15380,7 @@
             } else if (m.role === 'assistant') {
               const txt = strOr(m.content, '').trim();
               if (!txt) continue;
+              hasAgentTurnInMsgs = true;
               if (m.thought) {
                 steps.push({
                   kind: 'thought',
@@ -15375,6 +15395,8 @@
                 });
               }
             } else if (m.role === 'tool_call') {
+              hasAgentTurnInMsgs = true;
+              if (m.callId) seenToolIds.add(m.callId);
               const name = strOr(m.toolName, 'tool');
               const desc = strOr(m.description, '');
               const label = desc ? name + ': ' + desc : name;
@@ -15384,8 +15406,24 @@
               steps.push({ kind: 'tool', label, status });
             }
           }
-          if (steps.length) return { steps, from: 'transcript' };
+          if (steps.length) {
+            if (!hasAgentTurnInMsgs && subSteps.length) {
+              return { steps: subSteps.concat(steps), from: 'transcript' };
+            }
+            if (sub && Array.isArray(sub.tools)) {
+              for (const t of sub.tools) {
+                if (!t || (t.id && seenToolIds.has(t.id))) continue;
+                steps.push({
+                  kind: 'tool',
+                  label: t.label || 'tool',
+                  status: t.status || '',
+                });
+              }
+            }
+            return { steps, from: 'transcript' };
+          }
         }
+        if (subSteps.length) return { steps: subSteps, from: 'stream' };
         const acts = v.row && Array.isArray(v.row.recentActivities)
           ? v.row.recentActivities
           : [];
@@ -15847,6 +15885,10 @@
           agentsState.drafts.delete(ref);
           if (input && agentSheet.msgRef === ref) input.value = '';
           const vNow = agentFind(ref);
+          if (vNow && vNow.item && vNow.item.sub) {
+            vNow.item.sub.done = false;
+            vNow.item.sub.endedAt = null;
+          }
           if (vNow && vNow.row) {
             if (!Array.isArray(vNow.row.messages)) vNow.row.messages = [];
             vNow.row.messages.push({
@@ -24043,6 +24085,8 @@
               // newest frame drawn, or no cursor when nothing was.
               if (typeof opts.walReloadFrom === 'number') {
                 from = opts.walReloadFrom;
+              } else if (from === 0) {
+                from = null;
               }
             } else if (
               replay.length === 0 &&
@@ -24050,10 +24094,18 @@
             ) {
               from = 0;
               noReplayFallbackSessionId = j.sessionId;
+            } else if (replay.length === 0 && from === 0 && typeof j.lastEventId !== 'number') {
+              from = null;
             }
-            lastSeenEventId = from || null;
+            lastSeenEventId = typeof from === 'number' && from > 0 ? from : null;
             watchedSessionCwd = cwd || null;
-            startWatch(j.sessionId, lastSeenEventId, title);
+            startWatch(
+              j.sessionId,
+              typeof from === 'number' && Number.isFinite(from) && from >= 0
+                ? from
+                : null,
+              title,
+            );
             if (j.hasActivePrompt === true) {
               daemonTurnActive = true;
               if (!turnOpen) showProcessing();
@@ -27173,9 +27225,9 @@
             ' ' +
             rows.length +
             ' rows, ' +
-            sessionCmds.length +
+            got.sessionCount +
             ' session, ' +
-            fileCmds.length +
+            got.fileCount +
             ' file';
         }
       };

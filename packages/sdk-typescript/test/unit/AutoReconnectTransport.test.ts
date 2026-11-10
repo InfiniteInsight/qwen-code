@@ -633,6 +633,112 @@ describe('AutoReconnectTransport', () => {
       expect(factory).toHaveBeenCalledTimes(2);
       transport.dispose();
     });
+
+    it('advances lastEventId and epoch across reconnects in subscribeEvents', async () => {
+      const capturedOpts: Array<{
+        lastEventId?: number;
+        epoch?: string;
+      }> = [];
+
+      const initial = createMockTransport({
+        subscribeEvents: vi.fn(async function* (_sid, opts) {
+          capturedOpts.push({
+            lastEventId: opts?.lastEventId,
+            epoch: opts?.epoch,
+          });
+          opts?.onEpoch?.('epoch-2');
+          yield {
+            type: 'chunk',
+            data: { step: 1 },
+            id: 10,
+            v: 1,
+          } as DaemonEvent;
+          yield {
+            type: 'chunk',
+            data: { step: 2 },
+            id: 11,
+            v: 1,
+          } as DaemonEvent;
+          throw new DaemonTransportClosedError('dropped after 11');
+        }),
+      });
+
+      const replacement = createMockTransport({
+        subscribeEvents: vi.fn(async function* (_sid, opts) {
+          capturedOpts.push({
+            lastEventId: opts?.lastEventId,
+            epoch: opts?.epoch,
+          });
+          yield {
+            type: 'chunk',
+            data: { step: 3 },
+            id: 12,
+            v: 1,
+          } as DaemonEvent;
+        }),
+      });
+
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial,
+        factory: vi.fn(async () => replacement),
+      });
+
+      const epochs: string[] = [];
+      const events: DaemonEvent[] = [];
+      for await (const ev of transport.subscribeEvents('s1', {
+        lastEventId: 5,
+        epoch: 'epoch-1',
+        onEpoch: (e) => epochs.push(e),
+      })) {
+        events.push(ev);
+      }
+
+      expect(events.map((e) => e.id)).toEqual([10, 11, 12]);
+      expect(epochs).toEqual(['epoch-2']);
+      expect(capturedOpts).toEqual([
+        { lastEventId: 5, epoch: 'epoch-1' },
+        { lastEventId: 11, epoch: 'epoch-2' },
+      ]);
+      transport.dispose();
+    });
+
+    it('does not start a new subscription if caller AbortSignal aborts during reconnect()', async () => {
+      const enteredFactory = deferred<void>();
+      const pendingFactory = deferred<DaemonTransport>();
+      const replacement = createMockTransport({
+        subscribeEvents: vi.fn(async function* () {
+          yield { type: 'chunk', data: {}, id: 1, v: 1 } as DaemonEvent;
+        }),
+      });
+      const initial = createMockTransport({
+        subscribeEvents: vi.fn(async function* () {
+          yield await Promise.reject(new DaemonTransportClosedError('dropped'));
+        }),
+      });
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial,
+        factory: () => {
+          enteredFactory.resolve();
+          return pendingFactory.promise;
+        },
+      });
+
+      const abortCtrl = new AbortController();
+      const iter = transport.subscribeEvents('s1', {
+        signal: abortCtrl.signal,
+      });
+      const nextPromise = iter.next();
+
+      await enteredFactory.promise;
+      abortCtrl.abort();
+      pendingFactory.resolve(replacement);
+
+      await expect(nextPromise).rejects.toThrow(DaemonTransportClosedError);
+      expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+      transport.dispose();
+    });
   });
 
   // ---- Default behavior -------------------------------------------------

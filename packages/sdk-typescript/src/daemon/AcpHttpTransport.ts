@@ -824,37 +824,43 @@ export class AcpHttpTransport implements DaemonTransport {
       headers['Acp-Connection-Id'] = this.connectionId;
     }
 
+    let streamError: unknown;
     // Fire-and-forget: pump the SSE stream in the background.
     void this.pumpConnStream(headers, abort.signal)
       .catch((err) => {
-        // Stream ended or errored — reject remaining CONNECTION-scoped pendings
+        streamError = err;
+      })
+      .finally(() => {
+        // The pump has settled (clean close, error, or abort). Clear the
+        // controller so the NEXT connection-scoped request reopens the stream
+        // via `ensureConnStream` -- without this, a stream that 500s, serves no
+        // body, or closes leaves `connStreamAbort` non-null forever and every
+        // later 202 request hangs with no pump to deliver its reply. Guard on
+        // identity so a newer `openConnStream` that already replaced the
+        // controller isn't clobbered.
+        if (this.connStreamAbort === abort) this.connStreamAbort = undefined;
+        // Stream ended or errored -- reject remaining CONNECTION-scoped pendings
         // only. Session-scoped replies ride the session stream / its reply pump,
         // which owns their lifecycle; sweeping them here would reject a
-        // `session/prompt` the session stream is about to resolve (§W2 race).
+        // `session/prompt` the session stream is about to resolve (W2 race).
         // Carry the pump's real error (HTTP 401/503, network drop) as the reject
-        // reason — mirroring `ensureSessionReplyPump` — so a caller can tell an
+        // reason -- mirroring `ensureSessionReplyPump` -- so a caller can tell an
         // auth failure from a generic close instead of a one-size-fits-all msg.
-        if (!this._disposed) {
+        if (!this._disposed && !abort.signal.aborted) {
           const reason =
-            err instanceof Error
-              ? err
-              : new Error('Connection SSE stream closed unexpectedly');
+            streamError instanceof Error
+              ? streamError
+              : streamError !== undefined
+                ? new DaemonTransportClosedError(String(streamError))
+                : new DaemonTransportClosedError(
+                    'ACP connection SSE stream closed unexpectedly',
+                  );
           for (const [id, entry] of this.pending) {
             if (entry.sessionId !== undefined) continue;
             entry.reject(reason);
             this.pending.delete(id);
           }
         }
-      })
-      .finally(() => {
-        // The pump has settled (clean close, error, or abort). Clear the
-        // controller so the NEXT connection-scoped request reopens the stream
-        // via `ensureConnStream` — without this, a stream that 500s, serves no
-        // body, or closes leaves `connStreamAbort` non-null forever and every
-        // later 202 request hangs with no pump to deliver its reply. Guard on
-        // identity so a newer `openConnStream` that already replaced the
-        // controller isn't clobbered.
-        if (this.connStreamAbort === abort) this.connStreamAbort = undefined;
       });
   }
 

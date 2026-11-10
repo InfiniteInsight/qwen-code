@@ -282,7 +282,7 @@ it('renders the subagent transcript with compact mode when the panel provides it
   expect(transcript?.getAttribute('data-compact-mode')).toBe('true');
 });
 
-it('opens a nested subagent within the parent session scope', async () => {
+it('opens a nested subagent within the resolved subagent session scope', async () => {
   workspaceClient.resolveSubagentSession.mockResolvedValue({
     sessionId: 'subagent-session',
     status: 'completed',
@@ -317,7 +317,7 @@ it('opens a nested subagent within the parent session scope', async () => {
   act(() => latestOpenSubagent.current?.(nestedTool));
   expect(onOpenSubagent).toHaveBeenCalledWith(
     nestedTool,
-    'parent-session',
+    'subagent-session',
     '/work/project',
   );
   act(() => latestOpenSubagent.current?.(nestedTool, 'original-chat-a'));
@@ -565,4 +565,98 @@ it('sends an interactive message to a standalone subagent session', async () => 
     'agent-1',
     'Check line 42 as well',
   );
+});
+
+it('resumes polling after a completed subagent is continued with a follow-up message', async () => {
+  vi.useFakeTimers();
+  workspaceClient.resolveSubagentSession
+    .mockResolvedValueOnce({
+      sessionId: 'subagent-session',
+      status: 'completed',
+    })
+    .mockResolvedValueOnce({
+      sessionId: 'subagent-session',
+      status: 'running',
+    })
+    .mockResolvedValueOnce({
+      sessionId: 'subagent-session',
+      status: 'completed',
+    });
+  workspaceClient.messageSubagentSession.mockResolvedValue({
+    delivered: true,
+    action: 'continued',
+    status: 'running',
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={{
+            callId: 'agent-1',
+            toolName: 'agent',
+            status: 'completed',
+            rawOutput: {
+              type: 'task_execution',
+            },
+          }}
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(1);
+  expect(
+    container.querySelector('[data-status="completed"]')?.textContent,
+  ).toBe('completed');
+
+  const textarea = container.querySelector(
+    'textarea',
+  ) as HTMLTextAreaElement | null;
+  expect(textarea).toBeTruthy();
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )?.set;
+    setter?.call(textarea, 'Follow up on the edge case');
+    textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea!.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  const form = container.querySelector(
+    '[data-testid="subagent-composer"]',
+  ) as HTMLFormElement | null;
+  expect(form).toBeTruthy();
+  await act(async () => {
+    form!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+  });
+
+  expect(workspaceClient.messageSubagentSession).toHaveBeenCalledWith(
+    'parent-session',
+    'agent-1',
+    'Follow up on the edge case',
+  );
+  expect(container.querySelector('[data-status="running"]')?.textContent).toBe(
+    'running',
+  );
+
+  await act(async () => vi.advanceTimersByTimeAsync(3_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(2);
+  expect(container.querySelector('[data-status="running"]')?.textContent).toBe(
+    'running',
+  );
+
+  await act(async () => vi.advanceTimersByTimeAsync(3_000));
+  expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(3);
+  expect(
+    container.querySelector('[data-status="completed"]')?.textContent,
+  ).toBe('completed');
 });

@@ -6658,6 +6658,76 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('ingests artifact-event notifications and stream-mode tool-update artifacts arriving during in-flight session restore', async () => {
+    const sessionId = 'persisted-inflight-restore-artifacts';
+    let handle!: ChannelHandle;
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        handle = makeChannel({
+          loadSessionImpl: async () => {
+            await handle.agentConnection.extNotification(
+              'qwen/notify/session/artifact-event',
+              {
+                sessionId,
+                hookEventName: 'PostToolUse',
+                toolName: 'run_shell_command',
+                toolCallId: 'call-hook-restore',
+                artifacts: [
+                  {
+                    title: 'Restore hook artifact',
+                    url: 'https://example.com/restore-hook',
+                  },
+                ],
+              },
+            );
+            await handle.agentConnection.sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-tool-restore',
+                status: 'completed',
+                _meta: {
+                  toolName: 'publish_artifact',
+                  artifacts: [
+                    {
+                      title: 'Restore stream tool artifact',
+                      url: 'https://example.com/restore-stream-tool',
+                    },
+                  ],
+                },
+              },
+            });
+            return {} as LoadSessionResponse;
+          },
+        });
+        return handle.channel;
+      },
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    const { artifacts } = await bridge.getSessionArtifacts(loaded.sessionId);
+    expect(artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'hook',
+          title: 'Restore hook artifact',
+          url: 'https://example.com/restore-hook',
+        }),
+        expect.objectContaining({
+          source: 'tool',
+          title: 'Restore stream tool artifact',
+          url: 'https://example.com/restore-stream-tool',
+        }),
+      ]),
+    );
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const bridge = makeBridge({

@@ -624,7 +624,7 @@ class SessionEventsHub {
       return;
     }
     resolveReady();
-    if ('pending' in attach && this.catchingUp && !this.upgradingCatchUp) {
+    if ('pending' in attach && this.catchingUp) {
       this.finishCatchUp();
     }
     try {
@@ -632,12 +632,23 @@ class SessionEventsHub {
       if (this.upstream !== upstream) return;
       if (!first.done) {
         this.relay(first.value);
-        for await (const ev of iterator) {
+        while (!this.closed && this.upstream === upstream) {
+          const next = this.catchingUp
+            ? await firstFrameOrIdle(iterator.next(), idleAttachMs)
+            : { first: await iterator.next() };
           if (this.closed || this.upstream !== upstream) break;
-          this.relay(ev);
+          if ('pending' in next && this.catchingUp) {
+            this.finishCatchUp();
+          }
+          const step = 'first' in next ? next.first : await next.pending;
+          if (this.closed || this.upstream !== upstream || step.done) break;
+          this.relay(step.value);
         }
       }
-      if (this.upstream === upstream) this.close('graceful');
+      if (this.upstream === upstream) {
+        this.finishCatchUp();
+        this.close('graceful');
+      }
     } catch {
       if (this.upstream === upstream) {
         this.close(upstream.signal.aborted ? 'graceful' : 'error');

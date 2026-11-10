@@ -4059,6 +4059,11 @@ class QwenAgent implements Agent {
     string,
     ApprovalMode
   >();
+  private readonly syncedPermissionRuleSets = new Map<
+    string,
+    PermissionRuleSet
+  >();
+  private lastSyncedBootstrapPermissionRuleSet: PermissionRuleSet;
   private managedShuttingDown = false;
   private workflowAncestorTrustConnected = true;
   private readonly workflowAncestorTrustCwdEpochs = new WeakMap<
@@ -5366,6 +5371,13 @@ class QwenAgent implements Agent {
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
     private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
   ) {
+    this.lastSyncedBootstrapPermissionRuleSet = readPermissionRuleSet(
+      this.settings.merged,
+    );
+    this.syncedPermissionRuleSets.set(
+      this.canonicalWorkspacePath(this.config.getTargetDir()),
+      this.lastSyncedBootstrapPermissionRuleSet,
+    );
     if (expectedPrivateParentCapability !== undefined) {
       const onClosed = () => {
         this.workflowAncestorTrustConnected = false;
@@ -7640,6 +7652,44 @@ class QwenAgent implements Agent {
           );
           if (strict) throw error;
         }
+      }
+    }
+    const canonicalCwd = this.canonicalWorkspacePath(settingsCwd);
+    this.syncedPermissionRuleSets.set(canonicalCwd, after);
+    if (
+      settingScope === SettingScope.User ||
+      canonicalCwd === this.canonicalWorkspacePath(this.config.getTargetDir())
+    ) {
+      this.lastSyncedBootstrapPermissionRuleSet = after;
+    }
+    if (settingScope === SettingScope.User) {
+      for (const [workspaceKey, cached] of this.syncedPermissionRuleSets) {
+        if (workspaceKey === canonicalCwd) continue;
+        const updated: PermissionRuleSet = {
+          allow: [...cached.allow],
+          ask: [...cached.ask],
+          deny: [...cached.deny],
+        };
+        for (const ruleType of PERMISSION_RULE_TYPES) {
+          const oldRules = new Set(before[ruleType]);
+          const newRules = new Set(after[ruleType]);
+          const removedSet = new Set(
+            before[ruleType].filter((rule) => !newRules.has(rule)),
+          );
+          const added = after[ruleType].filter((rule) => !oldRules.has(rule));
+          const kept = updated[ruleType].filter(
+            (rule) => !removedSet.has(rule),
+          );
+          const keptSet = new Set(kept);
+          for (const rule of added) {
+            if (!keptSet.has(rule)) {
+              kept.push(rule);
+              keptSet.add(rule);
+            }
+          }
+          updated[ruleType] = kept;
+        }
+        this.syncedPermissionRuleSets.set(workspaceKey, updated);
       }
     }
   }
@@ -10788,12 +10838,33 @@ class QwenAgent implements Agent {
               // provenance, so diff the effective set: a rule another scope
               // still provides must never be removed. The workspace filter
               // stays on the apply.
-              const before = readPermissionRuleSet(this.settings.merged);
+              const canonicalChangeCwd = this.canonicalWorkspacePath(changeCwd);
+              const canonicalBootstrapCwd = this.canonicalWorkspacePath(
+                this.config.getTargetDir(),
+              );
+              const before =
+                this.syncedPermissionRuleSets.get(canonicalChangeCwd) ??
+                this.lastSyncedBootstrapPermissionRuleSet ??
+                readPermissionRuleSet(this.settings.merged);
               if (
+                typeof this.settings.reloadScopesFromDiskAtomically ===
+                  'function' &&
                 !this.settings.reloadScopesFromDiskAtomically([
                   SettingScope.User,
                   SettingScope.Workspace,
                 ])
+              ) {
+                throw new Error(
+                  'The permission rules could not be reloaded for a workspace change.',
+                );
+              }
+              const targetSettings =
+                canonicalChangeCwd === canonicalBootstrapCwd
+                  ? this.settings
+                  : this.loadPermissionSettings(changeCwd);
+              if (
+                Array.isArray(targetSettings.errors) &&
+                targetSettings.errors.length > 0
               ) {
                 throw new Error(
                   'The permission rules could not be reloaded for a workspace change.',
@@ -10805,7 +10876,7 @@ class QwenAgent implements Agent {
                   : SettingScope.Workspace;
               this.syncLivePermissionManagers(
                 before,
-                readPermissionRuleSet(this.settings.merged),
+                readPermissionRuleSet(targetSettings.merged),
                 scope,
                 changeCwd,
                 true,
@@ -16932,6 +17003,10 @@ class QwenAgent implements Agent {
       this.sessionApprovalModeConverged.set(
         sessionId,
         options.fileDerivedApprovalMode ?? config.getApprovalMode(),
+      );
+      this.syncedPermissionRuleSets.set(
+        this.canonicalWorkspacePath(this.sessionWorkspaceRoot(config)),
+        readPermissionRuleSet(settings.merged),
       );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon

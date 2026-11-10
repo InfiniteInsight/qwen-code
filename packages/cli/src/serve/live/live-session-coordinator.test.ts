@@ -1041,6 +1041,74 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
+  it('tracks onSettledWithoutDrain fallback turns in delegatesInFlight and forwards turn outcomes to sendBackendContext', async () => {
+    const harness = makeHarness({ enqueueAccepted: true });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '第一步',
+      activeTranscript: [{ role: 'user', text: '第一步' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-2',
+      callId: 'handoff-steer',
+      request: '第二步',
+      activeTranscript: [{ role: 'user', text: '第二步' }],
+    });
+    await waitFor(() =>
+      expect(harness.bridge.enqueueMidTurnMessage).toHaveBeenCalledOnce(),
+    );
+
+    await harness.finishTurn(0, [{ type: 'message', text: '第一步完成。' }]);
+    await waitFor(() =>
+      expect(harness.realtime.completeHandoff).toHaveBeenCalledOnce(),
+    );
+
+    harness.host.setCallState.mockClear();
+    harness.settleQueuedMidTurn();
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(2));
+    expect(harness.host.setCallState).toHaveBeenCalledWith(1, 'thinking');
+
+    harness.callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'response-ack',
+      authority: 'server',
+    });
+    harness.host.setCallState.mockClear();
+    harness.callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'response-ack',
+      status: 'completed',
+    });
+    expect(harness.host.setCallState).not.toHaveBeenCalledWith(1, 'listening');
+
+    const fallbackTurn = harness.pendingTurns[1]!;
+    fallbackTurn.resolve();
+    harness.publish({
+      type: 'turn_complete',
+      promptId: fallbackTurn.promptId,
+      data: { stopReason: 'cancelled' },
+    });
+
+    await waitFor(() =>
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledWith(
+        'The Qwen Code turn was cancelled.',
+      ),
+    );
+    await waitFor(() =>
+      expect(harness.host.setCallState).toHaveBeenCalledWith(1, 'listening'),
+    );
+  });
+
   it('streams backend message deltas into silent context on the Codex cadence', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({

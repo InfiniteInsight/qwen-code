@@ -13,6 +13,7 @@ import type {
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * rc-workspace-scoping (#28): resolve the optional `workspace` target out
@@ -87,6 +88,7 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
     });
     return;
   }
+  if (relayDaemonAuthFailure(res, err, 'workspace_mcp')) return;
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -151,6 +153,12 @@ export function createWorkspaceMcpRoutes(
   daemon: WorkspaceMcpDaemon,
   deps: WorkspaceMcpRouteDeps = {},
 ): { get: RequestHandler; reload: RequestHandler; servers: RequestHandler } {
+  const onDaemonError = (err: unknown, res: Parameters<RequestHandler>[1]) => {
+    if (deps.audit && res.app?.locals && !res.app.locals.audit) {
+      res.app.locals.audit = deps.audit;
+    }
+    daemonError(err, res);
+  };
   const get: RequestHandler = async (req, res) => {
     try {
       const target = parseWorkspaceTarget(req.query.workspace);
@@ -165,7 +173,7 @@ export function createWorkspaceMcpRoutes(
         const result = await daemon.workspaceMcp(target.cwd);
         res.status(200).json({ ...result, version: mcpVersion(result) });
       } catch (err) {
-        daemonError(err, res);
+        onDaemonError(err, res);
       }
     } catch {
       if (!res.headersSent) {
@@ -193,7 +201,7 @@ export function createWorkspaceMcpRoutes(
       try {
         result = await daemon.reloadWorkspaceMcp(undefined, target.cwd);
       } catch (err) {
-        daemonError(err, res);
+        onDaemonError(err, res);
         return;
       }
 
@@ -291,7 +299,7 @@ export function createWorkspaceMcpRoutes(
           // workspace must not be checked against another's servers.
           current = await daemon.workspaceMcp(target.cwd);
         } catch (err) {
-          daemonError(err, res);
+          onDaemonError(err, res);
           return;
         }
         const currentVersion = mcpVersion(current);
@@ -315,7 +323,7 @@ export function createWorkspaceMcpRoutes(
           target.cwd,
         );
       } catch (err) {
-        daemonError(err, res);
+        onDaemonError(err, res);
         return;
       }
 

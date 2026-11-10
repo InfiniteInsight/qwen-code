@@ -657,4 +657,37 @@ describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
     });
     expect(ok.status).toBe(200);
   });
+
+  it('daemon 401 and request-wall 403 -> 502 daemon_auth_failed / daemon_request_denied and audited (#473)', async () => {
+    const authCtx = await setup({
+      workspaceToolsStatus: 401,
+      workspaceToolsErrorBody: { error: 'Unauthorized' },
+    });
+    const r401 = await fetch(`${authCtx.baseUrl}/rc/workspace/tools`, {
+      headers: authed(authCtx.writeToken),
+    });
+    expect(r401.status).toBe(502);
+    expect((await r401.json()).code).toBe('daemon_auth_failed');
+    const rows401 = await auditRows();
+    expect(rows401).toContainEqual(
+      expect.objectContaining({
+        action: 'daemon_auth_failed',
+        detail: { route: 'workspace_tools' },
+      }),
+    );
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+    await stub!.close();
+    stub = undefined;
+
+    const wallCtx = await setup({
+      workspaceToolsStatus: 403,
+      workspaceToolsErrorBody: { error: 'Invalid Host header' },
+    });
+    const r403 = await fetch(`${wallCtx.baseUrl}/rc/workspace/tools`, {
+      headers: authed(wallCtx.writeToken),
+    });
+    expect(r403.status).toBe(502);
+    expect((await r403.json()).code).toBe('daemon_request_denied');
+  });
 });

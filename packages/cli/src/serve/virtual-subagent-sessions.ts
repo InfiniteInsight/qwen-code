@@ -302,6 +302,7 @@ class VirtualSubagentTarget {
   private offset = 0;
   private transcriptIdentity: string | undefined;
   private streamOffset = 0;
+  private canonicalStreamOffset = 0;
   private streamIdentity: string | undefined;
   private streamReady = false;
   private canonicalThroughTimestamp = 0;
@@ -357,6 +358,7 @@ class VirtualSubagentTarget {
     this.offset = 0;
     this.replayState = undefined;
     this.canonicalThroughTimestamp = 0;
+    this.canonicalStreamOffset = 0;
     this.completedStreamRounds.clear();
     this.streamRunIds.clear();
     this.streamedRounds.clear();
@@ -365,6 +367,7 @@ class VirtualSubagentTarget {
 
   private resetStreamState(): void {
     this.streamOffset = 0;
+    this.canonicalStreamOffset = 0;
     this.completedStreamRounds.clear();
     this.streamRunIds.clear();
     this.streamedRounds.clear();
@@ -508,6 +511,7 @@ class VirtualSubagentTarget {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       this.streamIdentity = undefined;
       this.streamOffset = 0;
+      this.canonicalStreamOffset = 0;
       this.streamRunIds.clear();
       this.streamedRounds.clear();
       this.legacyStreamedSinceCanonical = false;
@@ -535,6 +539,8 @@ class VirtualSubagentTarget {
           this.completedStreamRounds.add(
             `${record.agentRunId}:${record.agentRound}`,
           );
+        } else {
+          this.canonicalStreamOffset = this.streamOffset;
         }
         const timestamp = Date.parse(record.timestamp);
         if (Number.isFinite(timestamp)) {
@@ -609,16 +615,22 @@ class VirtualSubagentTarget {
         })
       : this.bus.seedReplayEvents(inputs);
     if (!this.snapshotDelivered) this.events.push(...published);
+    if (!this.legacyStreamedSinceCanonical && this.streamedRounds.size === 0) {
+      this.canonicalStreamOffset = this.streamOffset;
+    }
     this.initialized = true;
   };
 
   private refreshAt(bounds?: TranscriptReadBounds): Promise<void> {
     return this.refreshOnce(bounds?.transcript).then(async () => {
-      if (
-        this.task.status === 'running' ||
-        (bounds?.stream !== undefined && bounds.stream > 0)
-      ) {
+      if (this.task.status === 'running') {
         await this.readStreamUpdates(bounds?.stream);
+      }
+      if (
+        !this.legacyStreamedSinceCanonical &&
+        this.streamedRounds.size === 0
+      ) {
+        this.canonicalStreamOffset = this.streamOffset;
       }
     });
   }
@@ -665,6 +677,7 @@ class VirtualSubagentTarget {
     }
     return this.enqueueRefresh(async () => {
       const bounds = await this.captureReadBounds();
+      await this.refreshAt(bounds);
       const target = new VirtualSubagentTarget(
         this.sessionId,
         this.parentSessionId,
@@ -672,8 +685,23 @@ class VirtualSubagentTarget {
         this.workspaceCwd,
         () => undefined,
       );
-      await target.refreshAt(bounds);
-      await this.refreshAt(bounds);
+      await target.refreshOnce(bounds.transcript);
+      if (this.task.status === 'running') {
+        for (const round of this.completedStreamRounds) {
+          target.completedStreamRounds.add(round);
+        }
+        target.canonicalThroughTimestamp = Math.max(
+          target.canonicalThroughTimestamp,
+          this.canonicalThroughTimestamp,
+        );
+        target.streamOffset = Math.min(
+          !this.legacyStreamedSinceCanonical && this.streamedRounds.size === 0
+            ? this.streamOffset
+            : this.canonicalStreamOffset,
+          bounds.stream,
+        );
+        await target.readStreamUpdates(bounds.stream);
+      }
       return {
         events: [...target.events],
         lastEventId: this.bus.lastEventId,
@@ -989,7 +1017,7 @@ export class VirtualSubagentSessions {
     );
     if (!task) return undefined;
     const sessionId = createVirtualSubagentSessionId(parentSessionId, task.id);
-    const status = task.status;
+    const status = preferTerminalTaskStatus(metrics?.status, task.status);
     this.targets
       .get(`${runtime.workspaceId}:${sessionId}`)
       ?.updateStatus(status);

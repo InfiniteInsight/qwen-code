@@ -273,6 +273,7 @@ export function createTerminalWsHandler(
         return false;
       };
       const onMessage = (data: unknown, isBinary = false) => {
+        if (cleaned) return;
         const text = toText(data);
         const control = isBinary ? null : parseControl(text);
         if (!isBinary && text.startsWith(CONTROL_FRAME_PREFIX) && !control) {
@@ -353,6 +354,7 @@ export function createTerminalWsHandler(
         return;
       }
       for (const message of pending) {
+        if (cleaned) break;
         onMessage(message.text, message.isBinary);
       }
     },

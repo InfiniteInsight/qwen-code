@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -222,6 +222,8 @@ function SubagentDetailContent({
     } catch {
       setStopping(false);
       setStopError(t('tasks.cancelFailed'));
+    } finally {
+      setStopping(false);
     }
   };
 
@@ -415,6 +417,9 @@ export function SubagentDetail({
   }));
   const [resolution, setResolution] = useState<SubagentResolution>();
   const [loadError, setLoadError] = useState(false);
+  const [pollTrigger, setPollTrigger] = useState(0);
+  const refreshRef = useRef<() => Promise<void>>(undefined);
+  const ensurePollingRef = useRef<() => void>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -424,7 +429,21 @@ export function SubagentDetail({
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
+    const clearRefreshTimer = () => {
+      if (refreshTimer !== undefined) {
+        clearTimeout(refreshTimer);
+        refreshTimer = undefined;
+      }
+    };
+    const scheduleRefresh = (delayMs: number) => {
+      clearRefreshTimer();
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        void refresh();
+      }, delayMs);
+    };
     const refresh = async () => {
+      clearRefreshTimer();
       try {
         const resolved = await workspace.client.resolveSubagentSession(
           sessionId,
@@ -436,26 +455,47 @@ export function SubagentDetail({
         lastResolvedRunning = resolved.status === 'running';
         setResolution(resolved);
         if (resolved.status === 'running') {
-          refreshTimer = setTimeout(() => void refresh(), 3_000);
+          scheduleRefresh(3_000);
         }
       } catch {
         if (cancelled) return;
         if (retryCount < 3) {
           retryCount += 1;
-          refreshTimer = setTimeout(() => void refresh(), 3_000);
+          scheduleRefresh(3_000);
         } else if (!hasResolved) {
           setLoadError(true);
         } else if (lastResolvedRunning) {
-          refreshTimer = setTimeout(() => void refresh(), 30_000);
+          scheduleRefresh(30_000);
         }
+      }
+    };
+    refreshRef.current = refresh;
+    ensurePollingRef.current = () => {
+      if (cancelled) return;
+      lastResolvedRunning = true;
+      retryCount = 0;
+      if (refreshTimer === undefined) {
+        scheduleRefresh(3_000);
       }
     };
     void refresh();
     return () => {
       cancelled = true;
-      if (refreshTimer) clearTimeout(refreshTimer);
+      clearRefreshTimer();
+      if (refreshRef.current === refresh) {
+        refreshRef.current = undefined;
+      }
+      if (ensurePollingRef.current !== undefined) {
+        ensurePollingRef.current = undefined;
+      }
     };
   }, [instance.key, rootToolCallId, sessionId, workspace.client]);
+
+  useEffect(() => {
+    if (resolution?.status === 'running') {
+      ensurePollingRef.current?.();
+    }
+  }, [pollTrigger, resolution?.status]);
 
   if (loadError) {
     return (
@@ -499,7 +539,11 @@ export function SubagentDetail({
         onOpenSubagent={
           onOpenSubagent
             ? (tool, parentSessionId) =>
-                onOpenSubagent(tool, parentSessionId ?? sessionId, workspaceCwd)
+                onOpenSubagent(
+                  tool,
+                  parentSessionId ?? resolution?.sessionId ?? sessionId,
+                  workspaceCwd,
+                )
             : undefined
         }
         onError={onError}
@@ -508,11 +552,14 @@ export function SubagentDetail({
           typeof initialRootTool.rawOutput === 'object' &&
           'workflowRunId' in initialRootTool.rawOutput
             ? undefined
-            : () =>
-                workspace.client.cancelSubagentSession(
+            : async () => {
+                const res = await workspace.client.cancelSubagentSession(
                   sessionId,
                   rootToolCallId,
-                )
+                );
+                await refreshRef.current?.();
+                return res;
+              }
         }
         onSendMessage={
           initialRootTool.rawOutput &&
@@ -532,6 +579,7 @@ export function SubagentDetail({
                         ? { ...prev, status: res.status || 'running' }
                         : prev,
                     );
+                    setPollTrigger((current) => current + 1);
                   }
                   return res;
                 }

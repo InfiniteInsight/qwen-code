@@ -7,9 +7,15 @@
 import type { RequestHandler } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import type { AuditRecorder } from '../auditLog.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface this route file needs. */
 export type WorkspaceSettingsDaemon = Pick<SessionDaemon, 'workspaceSettings'>;
+
+export interface WorkspaceSettingsRouteDeps {
+  audit?: AuditRecorder;
+}
 
 /**
  * rc-workspace-scoping (#28): resolve the optional `workspace` target out
@@ -44,8 +50,12 @@ function parseWorkspaceTarget(
  */
 export function createWorkspaceSettingsRoute(
   daemon: WorkspaceSettingsDaemon,
+  deps: WorkspaceSettingsRouteDeps = {},
 ): RequestHandler {
   return async (req, res) => {
+    if (deps.audit && res.app?.locals && !res.app.locals.audit) {
+      res.app.locals.audit = deps.audit;
+    }
     const target = parseWorkspaceTarget(req.query.workspace);
     if (!target.ok) {
       res.status(400).json({
@@ -68,6 +78,7 @@ export function createWorkspaceSettingsRoute(
         });
         return;
       }
+      if (relayDaemonAuthFailure(res, err, 'workspace_settings')) return;
       const status = (err as { status?: unknown }).status;
       if (status === 404) {
         res.status(502).json({

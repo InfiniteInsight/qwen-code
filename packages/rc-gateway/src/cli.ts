@@ -3424,6 +3424,10 @@ if (process.argv[2] === 'serve') {
         url: base,
         tokenStorageKey: key,
       });
+      if (existing && existing.tokenStorageKey !== key) {
+        await tokens.delete(existing.tokenStorageKey);
+        await deleteTokenMeta(tokensDir, existing.tokenStorageKey);
+      }
       if (pairedTokenId && pairedScopes) {
         await writeTokenMeta(tokensDir, key, {
           tokenId: pairedTokenId,
@@ -3431,6 +3435,11 @@ if (process.argv[2] === 'serve') {
           label: a.name!,
           addedAt: new Date().toISOString(),
         });
+      } else {
+        await deleteTokenMeta(tokensDir, key);
+        if (a.noPair) {
+          await tokens.delete(key);
+        }
       }
       if (updated.length === 1) {
         // eslint-disable-next-line no-console

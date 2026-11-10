@@ -793,4 +793,42 @@ describe('terminal WebSocket route', () => {
 
     expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal unavailable');
   });
+
+  it('stops replaying buffered messages once an earlier buffered message triggers cleanup', async () => {
+    let resolveCreate: ((value: { terminalId: string }) => void) | undefined;
+    const registry = registryWithSnapshot(undefined);
+    vi.mocked(registry.create).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    vi.mocked(registry.readSnapshot)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue({
+        output: 'prompt $ ',
+        exited: false,
+        workspaceCwd: '/workspace',
+      });
+    const ws = new FakeWebSocket();
+
+    const connection = createTerminalWsHandler(
+      registry,
+      resolveWorkspace,
+    ).onConnection(ws as unknown as WebSocket, request);
+
+    ws.emit('message', '\x00{"type":"release"}', false);
+    ws.emit('message', 'echo should-not-run\n', false);
+    ws.emit('message', '\x00{"type":"resize","cols":120,"rows":40}', false);
+
+    resolveCreate?.({ terminalId: 'terminal:manual-1' });
+    await connection;
+
+    ws.emit('message', 'echo after-cleanup\n', false);
+
+    expect(registry.release).toHaveBeenCalledTimes(1);
+    expect(registry.write).not.toHaveBeenCalled();
+    expect(registry.resize).not.toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalledTimes(1);
+    expect(ws.close).toHaveBeenCalledWith(4004, 'Terminal released');
+  });
 });

@@ -112,21 +112,38 @@ export class AutoReconnectTransport implements DaemonTransport {
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
 
+    let lastEventId = opts.lastEventId;
+    let currentEpoch = opts.epoch;
+
     while (!this._disposed) {
       try {
-        yield* this.inner.subscribeEvents(sessionId, opts);
+        for await (const ev of this.inner.subscribeEvents(sessionId, {
+          ...opts,
+          lastEventId,
+          epoch: currentEpoch,
+          onEpoch: (epoch: string) => {
+            currentEpoch = epoch;
+            opts.onEpoch?.(epoch);
+          },
+        })) {
+          if (typeof ev.id === 'number') {
+            lastEventId = ev.id;
+          }
+          yield ev;
+        }
         return;
       } catch (err) {
         if (
-          err instanceof DaemonTransportClosedError &&
-          !this._disposed &&
-          !opts.signal?.aborted
+          !(err instanceof DaemonTransportClosedError) ||
+          this._disposed ||
+          opts.signal?.aborted
         ) {
-          await this.reconnect();
-          if (this._disposed) throw new DaemonTransportClosedError();
-          continue;
+          throw err;
         }
-        throw err;
+        await this.reconnect();
+        if (this._disposed) throw new DaemonTransportClosedError();
+        if (opts.signal?.aborted) throw err;
+        continue;
       }
     }
     throw new DaemonTransportClosedError();

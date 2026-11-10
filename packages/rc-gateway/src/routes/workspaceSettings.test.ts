@@ -217,4 +217,43 @@ describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
     });
     expect(ok.status).toBe(200);
   });
+
+  it('daemon 401 and request-wall 403 -> 502 daemon_auth_failed / daemon_request_denied (#473)', async () => {
+    const authCtx = await setup({
+      workspaceSettingsStatus: 401,
+    });
+    const r401 = await fetch(`${authCtx.baseUrl}/rc/workspace/settings`, {
+      headers: authed(authCtx.writeToken),
+    });
+    expect(r401.status).toBe(502);
+    expect((await r401.json()).code).toBe('daemon_auth_failed');
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+
+    const store = await TokenStore.open(join(runtimeBase, 'tokens-wall.json'));
+    const { token: writeToken } = await store.issue(['write'], 'w');
+    const walledDaemon = {
+      workspaceSettings: async () => {
+        throw Object.assign(new Error('Invalid Host header'), {
+          status: 403,
+          body: { error: 'Invalid Host header' },
+        });
+      },
+    } as unknown as DaemonClient;
+    const gw = createGatewayApp({
+      daemon: walledDaemon,
+      store,
+      pairing: new PairingService(),
+      auditPath,
+    });
+    server = await new Promise((resolve) => {
+      const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const { port } = server.address() as AddressInfo;
+    const r403 = await fetch(`http://127.0.0.1:${port}/rc/workspace/settings`, {
+      headers: authed(writeToken),
+    });
+    expect(r403.status).toBe(502);
+    expect((await r403.json()).code).toBe('daemon_request_denied');
+  });
 });

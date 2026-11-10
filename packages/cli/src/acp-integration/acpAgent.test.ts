@@ -21534,6 +21534,119 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('syncs a worktree permission workspaceChange from the worktree settings and preserves bootstrap diffs after adoptRequestSettings', async () => {
+    const root = '/work/project';
+    const worktreeRoot = `${root}/.qwen/worktrees/slug-a`;
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue(root);
+
+    const bootstrapInitial = makeCoreSettings();
+    const bootstrapUpdated = makeCoreSettings();
+    bootstrapUpdated.setValue(SettingScope.Workspace, 'permissions.allow', [
+      'Bash(npm test:*)',
+    ]);
+    (
+      bootstrapUpdated as unknown as {
+        reloadScopesFromDiskAtomically: () => boolean;
+      }
+    ).reloadScopesFromDiskAtomically = vi.fn(() => true);
+    (
+      bootstrapInitial as unknown as {
+        reloadScopesFromDiskAtomically: () => boolean;
+      }
+    ).reloadScopesFromDiskAtomically = vi.fn(() => true);
+
+    const worktreeSettings = makeCoreSettings();
+    worktreeSettings.setValue(SettingScope.Workspace, 'permissions.deny', [
+      'Bash(git push --force:*)',
+    ]);
+    (
+      worktreeSettings as unknown as {
+        reloadScopesFromDiskAtomically: () => boolean;
+      }
+    ).reloadScopesFromDiskAtomically = vi.fn(() => true);
+
+    const { agent, agentPromise } =
+      await bootCoreSettingsAgent(bootstrapInitial);
+
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        (path.resolve(cwd ?? '') === path.resolve(worktreeRoot)
+          ? worktreeSettings
+          : bootstrapUpdated) as LoadedSettings,
+    );
+
+    const makeManager = () => ({
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    });
+    const rootManager = makeManager();
+    const worktreeManager = makeManager();
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    const liveSession = (
+      id: string,
+      admissionRoot: string,
+      manager: ReturnType<typeof makeManager>,
+    ) => ({
+      getId: () => id,
+      isIdle: () => true,
+      cancelPendingPrompt: vi.fn(),
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(admissionRoot),
+        storage: { getProjectRoot: () => admissionRoot },
+        getPermissionManager: () => manager,
+      }),
+    });
+    sessions.set(
+      'root-session',
+      liveSession('root-session', root, rootManager),
+    );
+    sessions.set(
+      'worktree-session',
+      liveSession('worktree-session', worktreeRoot, worktreeManager),
+    );
+
+    // 1. A worktree-scoped permission workspaceChange loads the worktree's settings
+    // rather than diffing only the bootstrap workspace settings.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+      v: 1,
+      revision: 1,
+      kind: 'permissions',
+      tightening: true,
+      cwd: worktreeRoot,
+      scope: 'workspace',
+    });
+    expect(worktreeManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(git push --force:*)',
+      'deny',
+    );
+    expect(rootManager.addPersistentRule).not.toHaveBeenCalled();
+
+    // 2. If qwen/permissions/getSettings (or another request) already replaced
+    // `this.settings` via adoptRequestSettings before workspaceChange arrived,
+    // workspaceChange still diffs against the last-synced rule set.
+    await agent.extMethod('qwen/permissions/getSettings', { cwd: root });
+    expect((agent as unknown as { settings: LoadedSettings }).settings).toBe(
+      bootstrapUpdated,
+    );
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+      v: 1,
+      revision: 2,
+      kind: 'permissions',
+      cwd: root,
+      scope: 'workspace',
+    });
+    expect(rootManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(npm test:*)',
+      'allow',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('fans out a workspace-scoped grant across a different path spelling of the same directory', async () => {
     // The admission root and the request's cwd can name one directory through
     // a symlink (macOS /tmp vs /private/tmp) or case; a string compare would

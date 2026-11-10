@@ -5,10 +5,18 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -43,6 +51,37 @@ function runIsolated(home: string, ...args: string[]) {
       env: { ...process.env, HOME: home },
     },
   );
+}
+
+function runIsolatedAsync(
+  home: string,
+  ...args: string[]
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ['--import', tsxImport as string, CLI, ...args],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, HOME: home },
+      },
+    );
+    child.stdin.end();
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      resolve({ status, stdout, stderr });
+    });
+  });
 }
 
 describe.skipIf(!tsxImport)(
@@ -115,6 +154,111 @@ describe.skipIf(!tsxImport)(
         expect(r.status).toBe(1);
         expect(r.stderr).toContain('no answer');
       } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('daemons add --force cleans up stale token and token metadata files', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'qwen-rc-home-'));
+      const server = createServer((req, res) => {
+        if (req.url === '/rc/capabilities') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+        if (req.url === '/rc/pair/redeem' && req.method === 'POST') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              id: 'tok-paired-1',
+              token: 'secret-paired-token',
+              scopes: ['read', 'write'],
+            }),
+          );
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', () => resolve()),
+      );
+      const port = (server.address() as AddressInfo).port;
+      const url = `http://127.0.0.1:${port}`;
+      const tokensDir = join(home, '.qwen', 'rc', 'tokens');
+
+      try {
+        // 1. Initial paired add creates both .tok and .meta.json under default key.
+        const first = await runIsolatedAsync(
+          home,
+          'daemons',
+          'add',
+          'work-a',
+          url,
+          '--code',
+          'PAIR123',
+          '--yes',
+        );
+        expect(first.status).toBe(0);
+        expect(existsSync(join(tokensDir, 'work-a.tok'))).toBe(true);
+        expect(existsSync(join(tokensDir, 'work-a.meta.json'))).toBe(true);
+
+        // 2. Replacing with --token under the same key removes stale .meta.json.
+        const withToken = await runIsolatedAsync(
+          home,
+          'daemons',
+          'add',
+          'work-a',
+          url,
+          '--force',
+          '--token',
+          'manual-token',
+          '--yes',
+        );
+        expect(withToken.status).toBe(0);
+        expect(readFileSync(join(tokensDir, 'work-a.tok'), 'utf8')).toBe(
+          'manual-token',
+        );
+        expect(existsSync(join(tokensDir, 'work-a.meta.json'))).toBe(false);
+
+        // 3. Re-pair with a custom --token-storage-key removes old key files.
+        const customKey = await runIsolatedAsync(
+          home,
+          'daemons',
+          'add',
+          'work-a',
+          url,
+          '--force',
+          '--token-storage-key',
+          'custom-key',
+          '--code',
+          'PAIR456',
+          '--yes',
+        );
+        expect(customKey.status).toBe(0);
+        expect(existsSync(join(tokensDir, 'work-a.tok'))).toBe(false);
+        expect(existsSync(join(tokensDir, 'work-a.meta.json'))).toBe(false);
+        expect(existsSync(join(tokensDir, 'custom-key.tok'))).toBe(true);
+        expect(existsSync(join(tokensDir, 'custom-key.meta.json'))).toBe(true);
+
+        // 4. Replacing under the same custom key with --no-pair removes both .tok and .meta.json.
+        const noPair = await runIsolatedAsync(
+          home,
+          'daemons',
+          'add',
+          'work-a',
+          url,
+          '--force',
+          '--token-storage-key',
+          'custom-key',
+          '--no-pair',
+          '--yes',
+        );
+        expect(noPair.status).toBe(0);
+        expect(existsSync(join(tokensDir, 'custom-key.tok'))).toBe(false);
+        expect(existsSync(join(tokensDir, 'custom-key.meta.json'))).toBe(false);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
         rmSync(home, { recursive: true, force: true });
       }
     });

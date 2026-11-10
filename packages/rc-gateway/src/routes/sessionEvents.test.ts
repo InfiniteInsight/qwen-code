@@ -1588,6 +1588,101 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
     expect(texts(w2)).toEqual(['two', 'three']);
   });
 
+  it('completes upgraded catch-up when upstream is idle at attach and delivers subsequent live frames to all watchers (#472)', async () => {
+    const sid = 'b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));
+    const subs: Array<{
+      lastEventId?: number;
+      push: (f: BusFrame | 'end') => void;
+    }> = [];
+    // An upstream daemon that does not emit replay_complete on an idle attach
+    // so firstFrameOrIdle times out into the { pending } branch.
+    const idleDaemon = {
+      subscribeEvents(
+        _sessionId: string,
+        opts: SubscribeOpts = {},
+      ): AsyncGenerator<BusFrame> {
+        return (async function* () {
+          const queue: Array<BusFrame | 'end'> = [];
+          let wake: (() => void) | undefined;
+          const sub = {
+            lastEventId: opts.lastEventId,
+            push(f: BusFrame | 'end') {
+              queue.push(f);
+              wake?.();
+            },
+          };
+          subs.push(sub);
+          const onAbort = () => sub.push('end');
+          opts.signal?.addEventListener('abort', onAbort);
+          try {
+            for (;;) {
+              while (queue.length === 0) {
+                await new Promise<void>((r) => (wake = r));
+                wake = undefined;
+              }
+              const next = queue.shift()!;
+              if (next === 'end') return;
+              yield next;
+            }
+          } finally {
+            opts.signal?.removeEventListener('abort', onAbort);
+          }
+        })();
+      },
+    };
+    const app = express();
+    app.get(
+      '/session/:id/events',
+      createSessionEventsRoute(
+        idleDaemon as unknown as DaemonClient,
+        new ConnectionRegistry(),
+        undefined,
+        undefined,
+        walDir,
+        undefined,
+        undefined,
+        40, // short idleAttachMs
+        undefined,
+        undefined,
+        50,
+      ),
+    );
+    const s: Server = await new Promise((r) => {
+      const sv = app.listen(0, '127.0.0.1', () => r(sv));
+    });
+    gateway = s;
+    const url = `http://127.0.0.1:${(s.address() as AddressInfo).port}/session/${sid}/events`;
+
+    // Watcher 1 attaches without Last-Event-ID on an idle session.
+    const w1 = await watch(url);
+    await w1.waitFor(joined);
+    expect(subs).toHaveLength(1);
+    expect(subs[0]?.lastEventId).toBeUndefined();
+
+    // Watcher 2 attaches with Last-Event-ID: 1 while the session is still idle.
+    // firstFrameOrIdle times out after idleAttachMs; finishCatchUp() must run
+    // even though upgradingCatchUp was true, delivering replay_complete to w2
+    // and clearing upgradingCatchUp so w1 receives subsequent live frames.
+    const w2 = await watch(url, { 'Last-Event-ID': '1' });
+    await w2.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+    expect(subs).toHaveLength(2);
+    expect(subs[1]?.lastEventId).toBe(1);
+
+    // Emit a live frame (id > 1) on the upgraded subscription.
+    subs[1]!.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: { text: 'live-after-idle-upgrade' },
+    });
+
+    await w1.waitFor(() => w1.ids().includes(2));
+    await w2.waitFor(() => w2.ids().includes(2));
+    expect(texts(w1)).toEqual(['live-after-idle-upgrade']);
+    expect(texts(w2)).toEqual(['live-after-idle-upgrade']);
+  });
+
   it('hands a resume response its watermark in the gateway numbering', async () => {
     const sid = 'b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7';
     const walDir = mkdtempSync(join(tmpdir(), 'rc-se-ep-'));

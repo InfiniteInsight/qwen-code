@@ -12,6 +12,7 @@ import type {
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * rc-workspace-scoping (#28): resolve the optional `workspace` target out
@@ -64,6 +65,7 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
     });
     return;
   }
+  if (relayDaemonAuthFailure(res, err, 'workspace_trust')) return;
   const status = (err as { status?: unknown }).status;
   const eBody = (err as { body?: unknown }).body as
     | { code?: unknown; error?: unknown; message?: unknown }
@@ -119,6 +121,12 @@ export function createWorkspaceTrustRoutes(
   daemon: WorkspaceTrustDaemon,
   deps: WorkspaceTrustRouteDeps = {},
 ): { get: RequestHandler; request: RequestHandler } {
+  const onDaemonError = (err: unknown, res: Parameters<RequestHandler>[1]) => {
+    if (deps.audit && res.app?.locals && !res.app.locals.audit) {
+      res.app.locals.audit = deps.audit;
+    }
+    daemonError(err, res);
+  };
   const get: RequestHandler = async (req, res) => {
     try {
       const target = parseWorkspaceTarget(req.query.workspace);
@@ -138,7 +146,7 @@ export function createWorkspaceTrustRoutes(
           );
           res.status(200).json(result);
         } catch (err) {
-          daemonError(err, res);
+          onDaemonError(err, res);
         }
         return;
       }
@@ -207,7 +215,7 @@ export function createWorkspaceTrustRoutes(
           target.cwd,
         );
       } catch (err) {
-        daemonError(err, res);
+        onDaemonError(err, res);
         return;
       }
 
